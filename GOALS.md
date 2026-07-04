@@ -28,13 +28,14 @@ Backwards compatibility with saltcorn v1 is not a goal. Users will have to resto
 
 General:
 
-- much more reliable, scalable and flexible than saltcorn v1. clean and simple code and types
-- polyglot. Everything can be written in many different languages. JavaScript, Python, Java, C#, Go
+- much more reliable, scalable and flexible than saltcorn v1. clean and simple code and types. Rewriting a core in clean Rust allows us to clean up and take into consideration everything we have learned and then expose a backwards-compatible interface with JavaScript bindings
+- polyglot. Everything can be written in many different languages. JavaScript, Rust, Python, Java, C#, Go
+- multiple applications per data layer. Each application can have access to a subset of tables, file stores etc. 
 
 Auth:
 
 - access control lists/language
-- can be an identity provider.
+- can be an identity provider. Option to enable oauth2 server 
 - auth at the level of google auth: notice new devices, email if new device
 
 Data:
@@ -52,19 +53,23 @@ API:
 
 Admin UI:
 
+- separate the admin ui for the user serving routes. Admin ui has its own URL (could be a different subdomain, or a url path)
 - much better file manager.
-- buidler is not built in to the admin ui. This comes with the saltcorn1 views
+- builder is not built in to the admin ui. This comes with the saltcorn1 views. but the builder 
+- much improved table editor. bring in as much functionality from airtable's admin ui as possible. this needs to be 
+- to comply with CSP we need a new html generating model that can split out onclick etc handlers into a script file. And also XSS needs to be built in, so html tags need to be represented symbolically with raw string values escaped. 
+- we will need to recreate a dynamic form framework. Again the client js for this in saltcorn got messy as it grew.
 
 Application UI:
 
-- apps can be written with modern front end frameworks like next.js and sveltekit and crossplatform mobile frameworks like react native. 
-- apps can also be built in the saltcorn1 experience which will continue to improve
-- it should be possible to mix salcorn1 views/pages with code pages
+- applications can be written with modern code front end frameworks like next.js and sveltekit and crossplatform mobile frameworks like react native. Code front ends live in a git repository that is equal to or a subdir in a selected file store, and can be edited in a in-browser editor - ideally VS Code for the web.
+- applications can also be built in the saltcorn1 experience which will continue to improve
+- MAYBE? it should be possible to mix salcorn1 views/pages with code pages. not sure. its tempting to say that each application should be built with either some framework or salcorn1 views. Perhaps the right thing is that each application has a primary UI handler but can also bring in others.
 - enable strict CSP
 
 ## Created Entities (created by applciation developer)
 
-Cache: all entities except users and files are cached in memory for performance. When a transaction has modified an entity it should signal to all other connected entities to reload the cache for the changed entities.
+Cache: all entities except users, workflow runs and files are cached in memory for performance. When a transaction has modified an entity it should signal to all other connected entities to reload the cache for the changed entities.
 
 Fields: cleaner than saltcorn 1. We confused DB fields and Form fields. BaseField, DataField and FormField
 
@@ -94,8 +99,14 @@ Types: Native types: types known to saltcorn, with attributes and fieldviews. Fo
 
 Actions: an elementary step in a workflow, or can be run alone.
 
-Fieldviews: similar to Saltcorn, but clean up code interface.
 
 Code adapters: a central facility for code entities to use Javascript or Python. These need to maintain an open interpreter that can be used to execute code. Within that interpreter, the entitites in the catalog need to be available. For javascript, this needs to be compatible with saltcorn v1. the code adapters are initialised as needed, no all instalations need all of them. Code in the guest language can provide any of the other code entitty types (except databse driver). 
 
 Importers and exporters: move table data to/from different formats. 
+
+Model providers:
+
+there are more for saltcorn1 views
+
+Fieldviews: similar to Saltcorn, but clean up code interface.
+Viewpatterns:
