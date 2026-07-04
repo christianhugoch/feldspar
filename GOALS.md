@@ -37,8 +37,9 @@ Auth:
 
 - access control lists/language
 - can be an identity provider. Option to enable oauth2 server 
-- auth at the level of google auth: notice new devices, email if new device
+- authentication at the level of google auth: notice new devices, email if new device
 - authorization backed by row level security if available in the database, or runtime checks
+- set permissions separately for reading, creating, updating and deleting
 
 Data:
 
@@ -47,11 +48,21 @@ Data:
 - can work with any database design, e.g. composite primary keys, foreign keys to non-primary key fields
 - multiple file stores. some file stores are recognized as git repositories.
 - lower level query language: enum-based representation of an sql query. inspired by seaquery but data (array of enum values) instead of fluent function calls.
+- key types especially JSON are built in.
+- do not create primary key fields when table is created. User must create primary key fields like other fields
+
+Workflows and triggers:
+
+- ensure that the workflow engine matches modern workflow engines for durability and error handling. Look at [DBOS](https://docs.dbos.dev/architecture), temporal ([1](https://medium.com/data-science-collective/system-design-series-a-step-by-step-breakdown-of-temporals-internal-architecture-52340cc36f30), [2](https://docs.temporal.io/evaluate/understanding-temporal)) and [restate](https://www.restate.dev/blog/building-a-modern-durable-execution-engine-from-first-principles)
+- workflow execution code is a mess in saltcorn v1. This needs to be much cleaner.
+- The number of built-in workflow actions should be minimal
 
 API:
 
-- high-quality API for applications
+- high-quality API for applications. Look at Hasura, postgrest, supabase api for this
 - enable REST, GraphQL, gRPC, tRPC, and MCP APIs per-application
+- each of these run by an API Provider
+
 
 Admin UI:
 
@@ -61,10 +72,10 @@ Admin UI:
 - much better file manager.
 - builder is not built in to the admin ui. This comes with the saltcorn1 views. but the builder 
 - much improved table editor. bring in as much functionality from airtable's admin ui as possible. this needs to be 
-- to comply with CSP we need a new html generating model that can split out onclick etc handlers into a script file. And also XSS needs to be built in, so html tags need to be represented symbolically with raw string values escaped. 
-- we will need to recreate a dynamic form framework. Again the client js for this in saltcorn got messy as it grew. Form framework needs to cover conditional fields (field shown depending on value of other fields), repeated forms (like orderlines on an order), selects where options are populated dynamically (from the server, or from client code) depending on other form values, dynamic attributes or contents depending on other form values.
+- to comply with CSP we need a new html generating model that can split out onclick etc handlers into a script file. And also XSS needs to be built in, so html tags need to be represented symbolically with raw string values escaped. Client JS must be extractable without applying a value, so the component cannot be a functions. All of the extracted JS will be bundled 
+- we will need to recreate a dynamic form framework. Again the client js for this in saltcorn got messy as it grew. Form framework needs to cover conditional fields (field shown depending on value of other fields), repeated forms (like orderlines on an order), selects where options are populated dynamically (from the server, or from client code) depending on other form values, dynamic attributes or contents depending on other form values, form validation
 
-Copilot:
+Agents and Copilot:
 
 - builtin copilot (chat) and appconstructor
 - generate a SKILL.md file if they want to use an external coding agent.
@@ -76,28 +87,6 @@ Application UI:
 - MAYBE? it should be possible to mix salcorn1 views/pages with code pages. not sure. its tempting to say that each application should be built with either some framework or salcorn1 views. Perhaps the right thing is that each application has a primary UI handler but can also bring in others.
 - enable strict CSP
 
-## Created Entities (created by applciation developer)
-
-Cache: all entities except users, workflow runs and files are cached in memory for performance. When a transaction has modified an entity it should signal to all other connected entities to reload the cache for the changed entities.
-
-Fields: cleaner than saltcorn 1. We confused DB fields and Form fields. There should be interfaces for BaseField (shared properties), DataField (a field in a database table) and FormField (a form field) with options to convert between them.
-
-Table: Every table had a table provider (may be a database driver). Each table has an array of fields, any number of rows, and settings for authorization: in saltcorn 1 we had roles (each user has a role), ownership fields and ownership formulae. 
-
-Workflows: similar to v1. Every workflow is a trigger. Each workflow consists of a number of steps, each of which can read and write to a context for that run.
-
-Workflow runs: similar to v1
-
-Agents: similar to v1. Each agent is a trigger, 
-
-Triggers: triggers can be actions, workflows or agents
-
-File stores: Connect 
-
-Files:
-
-Prdictive models: 
-
 ## Code entities (supplied by core or plugins)
 
 Database driver: is instantiated once for connecting to a specific database. must execute queries and database operations and manage tables.
@@ -106,9 +95,9 @@ Database driver must be written in Rust. The remaining code entities can be writ
 
 Table provider: can provide a virtual table. It will look to the user as if it is a database table with fields and rows. Examples: SQL query, RSS feed, IMAP, instant messaging search. This has to interpret the universal query language. and return the rows corresponding to the query. 
 
-Types: Rich types: types known to saltcorn, with attributes and fieldviews. Foreign types: other types not known. The database driver makes a correspondence between types in its database and rich types. 
+Types: Rich types: types known to saltcorn, with attributes and fieldviews. Basic types: other types not known. The database driver makes a correspondence between types in its database and rich types. 
 
-Fieldviews: can that can display and possibly edit data types in HTML. Each fieldview can display/edit multiple (at least one) types. some catch-all fieldviews can edit any type.
+Fieldviews: can that can display and possibly edit data types in HTML. Each fieldview can display/edit multiple (at least one) types. some catch-all fieldviews can edit any type. 
 
 Actions: an elementary step in a workflow, or can be run alone. Has configuration, as output can write to context
 
@@ -122,6 +111,30 @@ there are more for saltcorn1 views
 
 Viewpatterns:
 
+## Created Entities (created by applciation developer)
+
+Cache: all entities except users, workflow runs and files are cached in memory for performance. When a transaction has modified an entity it should signal to all other connected entities to reload the cache for the changed entities.
+
+all of the following can be seen and edited in the admin web UI
+
+Fields: cleaner than saltcorn 1 (we confused DB fields and Form fields). There should be interfaces for BaseField (shared properties), DataField (a field in a database table) and FormField (a form field) with options to convert between them.
+
+Table: Every table had a table provider (may be a database driver). Each table has an array of fields, any number of rows, and settings for authorization: in saltcorn 1 we had roles (each user has a role), ownership fields and ownership formulae. 
+
+Workflows: similar to v1. Every workflow is a trigger. Each workflow consists of a number of steps, each of which can read and write to a context for that run.
+
+Workflow runs: similar to v1. Each run has a context, and optionally can also be traced so the context is stored after each step.
+
+Agents: similar to v1. Each agent is a trigger, 
+
+Triggers: triggers can be actions, workflows or agents. A trigger is defined by: name, when (event that triggers it)
+
+File stores: Connect 
+
+Files:
+
+Prdictive models: 
+
 ## Code guidelines
 
 Principles:
@@ -130,6 +143,9 @@ Principles:
 2. minimise the number of lines of code in the project. Every line of code is a liability
 3. Use abstractions, but avoid making them overly complicated. 
 4. Testing. Everything must be covered by integration tests. Where possible also by unit tests. But do not complicate the design in order to increase testability.
+5. no silent failures. make it crash and display error message unless the error can be handled.
+6. monorepo. All code except plugins is in one mono repo
+7. Separation of concerns. try to split out functionality in to generic libraries that are separate crates. 
 
 ### build vs introduce dependency
 
@@ -139,8 +155,18 @@ Principles:
 
 ### 1
 
-Database drivers, tables, fields, users. admin UI for those.
+Database drivers, tables, fields, users. admin UI for those. Single database only (same as the primary data store).
+
+CLI that can run server for admin UI
+
+The user can: create table, create fields, edit rows, create users, 
+
+no table properties
 
 ### 2 - Add app 
 
-Pick something like NextJS and make sure an app can be built on this, completely served from our process and able to use database
+an app can be built on react, completely served from our process. the app has connection to database
+
+### 3 - MVP
+
+database, api and react app. authentication from react app.
