@@ -28,10 +28,10 @@ Backwards compatibility with saltcorn v1 is not a goal. Users will have to resto
 
 General:
 
-- much more reliable, scalable and flexible than saltcorn v1. clean and simple code and types. Rewriting a core in clean Rust allows us to clean up and take into consideration everything we have learned and then expose a backwards-compatible interface with JavaScript bindings
-- polyglot. Everything can be written in many different languages. JavaScript, Rust, Python, Java, C#, Go
-- multiple applications per data layer. Each application can have access to a subset of tables, file stores etc.
-- message bus which is backed by a driver, with an option to use postgres LISTEN/NOTIFY for a simple bus backed by the exisitng database (and another option built in, using a rust library such as apalis or zeromq) and other drivers for Redis, Kafka etc for scalability. real time chat, live collaboration, cache updates flow over the bus
+- much more reliable, scalable and flexible than saltcorn v1. clean and simple code and types. Rewriting a core in clean Rust allows us to clean up and take into consideration everything we have learned and then expose a backwards-compatible interface in the JavaScript bindings
+- polyglot. Everything can be written in many different languages. JavaScript, Rust, Python, Java, C#, Go. Plugin mechanisms need to be defined for each of those. Initial focus is on Javascript and Rust
+- multiple applications for a single data layer. Each application can have access to a subset of tables, file stores etc.
+- message bus which is backed by a message bus driver, with an option to use postgres LISTEN/NOTIFY for a simple bus backed by the exisitng database (and another option built in, using a rust library such as apalis or zeromq) and other drivers for Redis, Kafka etc for scalability. real time chat, real time collaboration, cache updates flow over the bus
 
 Auth:
 
@@ -105,11 +105,11 @@ Code adapters: a central facility for code entities to use Javascript or Python.
 
 Importers and exporters: move table data to/from different formats. 
 
-Model providers:
+Model providers: can be configured and applied to selected tables. When inference is run (i.e. to specific table) it provides a predictive model, i.e. an outcome can be predicted for a row. In some models we are more interested in the parameter values
 
 there are more for saltcorn1 views
 
-Viewpatterns:
+Viewpatterns: 
 
 ## Created Entities (created by applciation developer)
 
@@ -170,3 +170,11 @@ an app can be built on react, completely served from our process. the app has co
 ### 3 - MVP
 
 database, api and react app. authentication from react app.
+
+## UNRESOLVED
+
+- do users still have a numeric role?
+- can you mix react and saltcorn1 applications?
+- how are we creating emails. 
+- workflow durability features
+- auth features beyond device recognition
