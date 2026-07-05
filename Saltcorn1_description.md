@@ -131,7 +131,12 @@ but instead of one action it consists of a sequence of named steps.
 
 * Control flow: workflows support loops, conditionals and error handling, so multi-step
     logic with branching ("loops, ifs and buts") can be expressed without dropping down to
-    code, though individual steps can still run JavaScript.
+    code, though individual steps can still run JavaScript. Each step has a name and a 
+    next_step attribute: this is a JavaScript formula (evaluated against the context at the end of running that step), where the names of all of the other steps 
+    are in scope as their identifier. The formula value is the name of the next step. So if we have 
+    steps with names step1, step2 and step3, and an integer `age` in the context then step1's next_step can be
+    `age<18 ? step2 ? step3`. the step names are simply introduced as strings containing the step name - 
+    i.e. step2 = "step2" is in the evaluation scope for the next_step formula. loops are handled with a special ForLoop step type. 
 
 * Durable execution: a workflow run is persisted with its context and current step, so
     runs can pause — for example while waiting for user input — and resume later, surviving
