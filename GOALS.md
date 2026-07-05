@@ -109,7 +109,7 @@ Model providers: can be configured and applied to selected tables. When inferenc
 
 there are more for saltcorn1 views
 
-Viewpatterns: 
+Viewpatterns: as in saltcorn v1.
 
 ## Created Entities (created by applciation developer)
 
@@ -125,7 +125,7 @@ Workflows: similar to v1. Every workflow is a trigger. Each workflow consists of
 
 Workflow runs: similar to v1. Each run has a context, and optionally can also be traced so the context is stored after each step.
 
-Agents: similar to v1. Each agent is a trigger, 
+Agents: similar to v1. An agent is a type of action., 
 
 Triggers: triggers can be actions, workflows or agents. A trigger is defined by: name, when (event that triggers it)
 
