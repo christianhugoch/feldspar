@@ -37,7 +37,7 @@ Saltcorn applications contain the following entity types:
     fieldviews. Tables are managed through Saltcorn's schema layer, which alters the
     underlying SQL tables as fields are added, removed or changed, and can also import/export
     tables as CSV. Plugins can additionally supply external tables and table providers,
-    which expose data sources that are not managed by Saltcorn as if they were tables.
+    which expose data sources (that are not managed by Saltcorn) as if they were tables.
 
 * Views: Views are elementary user interfaces into a database table. A view is defined by
     applying a view template (also sometimes called a view pattern, the two are synonymous) to
@@ -164,6 +164,41 @@ table operations the view performs.
 
 Tables can have ownership by field (key to user) or formula. If this is satisfied, the user can access the row even if they do not meet the minimal
 role to read or write. But if they do meet the minimal role criteria for the table as a whole, they can access all rows. Therefore a user who has a role_id less than or equal to the minimum role to read (or write) can read (or write, respectively) all rows even if ownership is set. Ownership only determines access for users with a role_id greater than the minimum role to read (or write).
+
+## Agents
+
+Agents are implemented as actions in the [agents](https://github.com/saltcorn/agents) plugin. An agent action is defined by enabling a number of skills, which each have a configuration. A skill is an elementary capability of an agent system. Most skills enable a tool for the LLM inference loop, but other skill change the chat behaviour.
+
+Some examples of skills:
+
+* A tool to query a chosen database table by matching against any field
+* A Tool to making an HTTP request. 
+* Expose a Javascript function written by the 
+* A Tool for the AI to generate and then run Javascript code. The user chooses whether to give the code access to tables and HTTP requests.
+* Long term memory - enable tools for storage and retrival into momeries stored in a database table
+* MCP - connect the agent to an MCP server
+* Model picker - show a dropdown to the user where they can change the inference model
+* PreloadData - load data from the database into the system prompt
+* Use any Saltcorn action or workflow as a tool
+* Subagent - hand over to a different agent that has a different set of tools
+* Web search - tool to search the internet for relevant information
+* Plan approval - presents the user with a plan for solving the problem with an approval buttton in the chat. When approved, a user-defined system prompt is injected.
+
+
+The agents can be run either by attaching them to events (table inserts, inbound API calls etc; in chich case an initial prompt, based on the variables in the triggering row has to be specified) or by building a view based on the Agent chat viewpatterns which is configured by picking an agent action, giving the user an interactive chat interface similar to the chatgpt interface. Previous chats can be accessed on the left in this interface, and chats can be shared with other users
+
+Copilot (building Saltcorn apps with AI) is implemented as two different interfaces to a copilot agent, which is composed of basic copilot skills for building views, workflows. One interface to the copilot agent is a standard chat interface where the user can give type instructions for something to be built. The second interface is called the AppConstructor in which an app is developed in a number of stages:
+
+* Description phase: the user describes the app with as much detail as they want
+* Clarification phase: the AI agent asks the user questions about anything that needs clarification in the description
+* Research: The AI agent searches the internet for relevant information. For instance, if the application is in a regulated industry the agent looks up the relevant regulatory guidance.
+* Requirements: The AI generates the list of requirements. Each is ranked 1-5 by importance. The user can edit, delete, add and rescore requirements. 
+* Planning phase: The AI agent builds a plan for implementing the application. This is split into phases and each phase is split into tasks. The tasks in each phase are ordered both by their dependency on other tasks and what entity type they are building (tables need to be built before views for instance). 
+* Execution phase: The use can run a single task or all tasks for a phase. After the phase is complete, the user can test the app and give which is corrected. The tasks for the next phase is adjusted according to feedback and the AI's own progress report.
+* User feedback: the copilot can build a user interface for users to give feedback and suggestions. When these are approved by admin they become new tasks and are implmented. 
+* Self-healing: the AppConstructor can respond to any error in the system and automatically fix a build problem in the application. 
+
+This is aligned to the way software in traditionally built, with the humans collaborating closely with the AI.
 
 ## Architecture and code base
 
