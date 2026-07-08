@@ -337,6 +337,86 @@ On the device:
    render entry point → online: call server API │ offline: local SQLite + sync
 ```
 
+## Saltcorn Email
+
+### For users
+
+Saltcorn can send email from your application — both **system emails** (address
+verification, password resets) and **application emails** you design yourself and
+trigger from your app's logic.
+
+An administrator configures sending once under **Settings → Email**: the SMTP
+server details (host, port, username/password, TLS), or a modern OAuth2 / Microsoft
+365 (Graph) connection, plus the "from" address. A **test email** button confirms
+the settings work before you rely on them.
+
+Application emails are sent by the **Send email** action, which you attach to a
+trigger or a workflow step. You control:
+
+- **Recipients** — a fixed address, the current user, or an address taken from a
+  field on the row (including a link to the users table); plus cc and bcc.
+- **Subject** — static text or a formula, with `{{ }}` interpolation of row and
+  user data.
+- **Body** — the most powerful option is to render one of your **views** as the
+  email, so the message reuses the layout you already designed and comes out as a
+  responsive, email-client-friendly HTML message. Alternatively the body can come
+  straight from a text, HTML, or MJML field on the row.
+- **Attachments** — files from a File field on the row, or from related rows.
+- Extras such as a per-message **language override**, an "only if" condition, and a
+  field to record that sending succeeded.
+
+Because emails are built from your existing views, they automatically match your
+app's look and adapt to the recipient's screen without any HTML hand-coding.
+
+---
+
+### Technical implementation
+
+Email has two foundations: a **transport** and a **renderer**. The transport is
+built on demand from the site's configuration (`smtp_*` and `email_from`). In the
+common case this is a [**nodemailer**](https://nodemailer.com/) SMTP transport,
+honouring port, forced TLS, self-signed certificates, and either password or
+**OAuth2** authentication (tokens refreshed automatically when expired). If the site
+is configured for **Microsoft 365 / Graph**, a drop-in transport posts to the Graph
+`sendMail` API instead, exposing the same `sendMail(...)` interface plus
+throttling/back-off. Every part of Saltcorn obtains a transport this way and calls
+`sendMail`, so switching providers is purely a configuration change. Because
+ordinary web HTML renders poorly in email clients, message bodies are produced
+through [**MJML**](https://mjml.io/), which compiles to table-based, responsive,
+broadly-compatible email HTML; the `saltcorn-markup` package supplies the MJML tag
+helpers (`<mj-section>`, `<mj-column>`, "bulletproof" buttons, etc.) and a renderer
+that translates a Saltcorn **layout** — the same structure the web renderer uses —
+into MJML.
+
+These come together in the **Send email** action (a base-plugin action on triggers
+and workflow steps) and in **system emails** (verification, password reset). To use
+a view as the body, Saltcorn runs the view against a mock request/response (flagged
+as email generation so components resolve absolute URLs from the base URL), wraps
+the markup in an MJML document, and compiles it to final HTML; MJML fields are
+compiled the same way, while text and HTML fields pass through unchanged. At run
+time the action resolves recipients, evaluates the subject and any "only if"
+condition against the joined row and user, builds the body, attaches files (from a
+field or related rows), obtains a transport, and sends — optionally recording
+success back on the row. It also runs in **workflow mode**, where recipients,
+subject and body are plain interpolated strings rather than a view, and system
+emails reuse the same rendering and transport so they inherit the site's setup and
+branding.
+
+### Data flow summary
+
+```
+Config (smtp_* / email_from) ─► transport (nodemailer SMTP | OAuth2 | MS Graph)
+
+Send email action / system email
+   → resolve recipients, subject, condition (row + user, {{ }} interpolation)
+   → build body:
+        view    → run view → wrap in MJML → compile to responsive HTML
+        MJML field → compile to HTML
+        text / HTML field → as-is
+   → attach files (field or related rows)
+   → transport.sendMail(...)  → (optionally record confirmation on the row)
+```
+
 ## Resources
 
 Code: https://github.com/saltcorn/saltcorn
