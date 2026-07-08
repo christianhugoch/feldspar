@@ -251,6 +251,198 @@ Cross-cutting characteristics worth preserving or consciously revising in a next
     redeploy.
 * Multi-tenancy via schema-per-tenant on one server process.
 
+
+## Saltcorn Mobile Apps
+
+### For users
+
+Saltcorn can turn any Saltcorn application into a native **Android or iOS app**
+without writing native code. From the admin panel (**Settings → Mobile app**), an
+administrator fills in a build form and Saltcorn produces an installable app
+package — an `.apk`/`.aab` for Android or an `.ipa` for iOS.
+
+The generated app runs your existing **views and pages** natively on the phone.
+You choose an *entry point* (the first view or page the user sees, optionally
+different per user role), pick the target platform(s), and configure options such
+as an app name, icon, splash screen, and which plugins/themes to include. When the
+build finishes, the result files appear in the server's `mobile_app` file folder,
+ready to download and publish to the app stores (or sideload for testing).
+
+Beyond being a thin wrapper around your website, the app can do things a browser
+cannot:
+
+- **Offline mode** — data for selected tables is copied into a database on the
+  phone, so users can keep reading and editing while disconnected. Changes are
+  reconciled with the server later.
+- **Synchronization** — offline changes sync back to the server automatically on
+  reconnect, when the app resumes, on a timer (background sync), or when the
+  server pushes a "please sync" signal.
+- **Push notifications** — via Firebase (Android) and APNs (iOS).
+- **Share-to** — the app can appear in the OS "Share" sheet so users can send
+  content from other apps into your Saltcorn app.
+- **Native login** — including single-sign-on / OAuth methods that redirect back
+  into the app.
+
+The build can run **locally** on the server machine (requires the platform
+toolchains — Android SDK/Gradle, or Xcode + CocoaPods on a Mac) or inside a
+prebuilt **Docker image** (`saltcorn/capacitor-builder`), which is the recommended
+way to build Android apps on a server that does not have the Android toolchain
+installed. iOS builds require a macOS machine with Xcode.
+
+---
+
+### Technical implementation
+
+#### High-level shape
+
+A Saltcorn mobile app is a [**Capacitor**](https://capacitorjs.com/) application.
+Capacitor wraps a WebView in a native shell and gives JavaScript access to native
+APIs (filesystem, SQLite, network status, push, share intents, etc.). What makes
+Saltcorn's approach unusual is that the app does **not** simply point the WebView
+at the server URL. Instead, the **Saltcorn engine itself runs inside the WebView**:
+the same `@saltcorn/data`, `@saltcorn/markup` and base-plugin code that renders
+views on the server is bundled into the app and executes on the device. The app is
+effectively a "Saltcorn server in the browser."
+
+Two packages implement this:
+
+| Package | Role |
+| --- | --- |
+| `packages/saltcorn-mobile-builder` | **Build-time.** Orchestrates producing a Capacitor project and compiling it into an app package. |
+| `packages/saltcorn-mobile-app` | **Run-time.** The template project + client-side engine that ships inside every generated app. |
+
+The build **UI** lives in the server admin routes
+(`packages/server/routes/admin.ts`, compiled to `admin.js`), which render the
+build form and drive the build.
+
+#### 1. The build UI 
+
+The app is created by the admin inside the Saltcorn app under the Mobile app menu item, with the following information needed?
+
+  - Candidate **entry points**: all `View`s, `Page`s and `PageGroup`s.
+  - **Images** (`.png`) usable as an app icon.
+  - Config files uploaded to the `mobile-app-configurations` file folder — Android
+    **keystores** and iOS **provisioning profiles** are selected from here.
+  - Tables that carry sync info (`has_sync_info: true`) for offline selection.
+  - **Plugins** eligible for mobile (excluding `base`/`sbadmin2` and any plugin
+    that opts out via `exclude_from_mobile()`); `ready_for_mobile()` plugins are
+    passed to the client as `pluginsReadyForMobile`.
+  - Environment probes for the build toolchains: `imageAvailable("saltcorn/capacitor-builder", scVersion)` (Docker),
+    `checkXcodebuild()`, `checkCocoaPods()`, `checkIosRuntime()`, plus whether the
+    host is macOS. These gate which options are offered.
+  - Firebase config (`firebase_json_key`, `firebase_app_services`) for push.
+  - Persisted form state from the `mobile_builder_settings` config key, so the form
+    remembers previous choices.
+
+The form is grouped into "Common configuration" and platform-specific sections,
+
+Once activated, it constructs the builder config,
+  and kicks off the build. Because a full build is long-running, the browser is not
+  blocked on it.
+
+#### 3. The runtime app 
+
+This is the template that ships inside every app; at runtime it *is* a small
+Saltcorn engine.
+
+**Startup (`src/init.js`, `init(mobileConfig)`)** runs when Capacitor signals the
+device is ready:
+
+1. Platform setup — for `web` (the test/dev target) it initializes `jeep-sqlite`;
+   for `android` it wires the hardware back button; it registers an `appUrlOpen`
+   listener that handles OAuth redirects (`mobileapp://auth/callback?token=…`) by
+   calling the auth plugin's `finishLogin`.
+2. Dynamically injects the bundled engine scripts (`addScripts`): jQuery, common
+   chunks, then `markup`, `data`, `base_plugin`, `sbadmin2` bundles — these expose
+   the `saltcorn.*` globals.
+3. Initializes the local DB (`saltcorn.data.db.init()`), reads the shipped
+   `tables.json` schema (`readSchemaIfNeeded`) and applies migrations if the stored
+   schema is out of date (`dbUpdateNeeded` / `updateDb` / `updateScPlugins`).
+4. Loads plugins (`loadPlugins`), registers them and their headers
+   (`handlePluginHeaders` — headers marked `mobile_top_scope` go in the top
+   document `<head>`, others into the rendered iframe), refreshes all cached state
+   (tables, views, pages, page groups, triggers, config, code pages), sets up i18n
+   and the site logo.
+5. Resolves **auth state** and navigates to the entry point:
+   - Reads a persisted **JWT** from a local `jwt_table`. If present/valid (or the
+     network is down but a token exists) the user is treated as logged in;
+     otherwise it checks for a public JWT, then tries **auto public login** if the
+     entry point is public-readable, else shows the login page.
+   - If offline mode is enabled it decides whether to enter offline mode or run a
+     `sync(...)`, guarding against a different user having un-uploaded offline data.
+   - Push and background sync are initialized (`tryInitPush`,
+     `tryInitBackgroundSync`).
+   - Finally it resolves the entry point (fixed, or per-role via
+     `home_page_by_role`) — or the last visited location — through the router and
+     renders it.
+
+**Routing — the "server in the browser" (`src/routing/`)**
+
+The client reuses the server's request-handling logic by reproducing Express
+routes with [`universal-router`](https://github.com/kriasoft/universal-router).
+`routing/index.js` declares routes whose paths are prefixed with the HTTP method
+(e.g. `get/view/:viewname`, `post/api/:tableName`, `post/page/:page_name/action/:rndid`,
+sync/auth/notification routes). Each route handler builds a **mock request/response**:
+
+- `routing/mocks/request.js` (`MobileRequest`) fakes the Express `req` object —
+  `req.__` (i18n via i18next), `req.user`, `isAuthenticated()`, `flash`,
+  `getLocale()`, `csrfToken()` (empty), `headers.referer`, `query`, `body`, `files`.
+  It reads the current user/JWT from the in-memory `mobileConfig`.
+- `routing/mocks/response.js` mirrors the Express `res`.
+
+Handlers call the same `@saltcorn/data`/`@saltcorn/markup` rendering code the
+server uses, producing HTML that is injected into an iframe
+(`helpers/navigation.js` → `replaceIframe`, plus history handling). Navigation
+inside the app is therefore local route resolution, not network requests.
+
+**Data, offline & sync (`src/helpers/`)**
+
+- `db_schema.js` — creates/updates the local schema, sync-info tables, and the JWT
+  table.
+- `offline_mode.js` — `startOfflineMode`, the `sync(...)` engine, network-change
+  callback, and offline-session bookkeeping (which user "owns" the pending offline
+  data).
+- `api.js` (`apiCall`) — the **online** path: an `axios` wrapper that talks to the
+  real server at `mobileConfig.server_path`, attaching `Authorization: jwt <token>`,
+  `X-Saltcorn-Client: mobile-app`, and the tenant header. It also proactively
+  detects expired JWTs and bounces the user to the login view. So the app renders
+  UI locally but reaches back to the server for authenticated API operations when
+  online, and against the local SQLite DB when offline.
+- `auth.js` — `publicLogin`, `checkJWT`; `file_system.js` — Cordova filesystem
+  reads for the shipped schema, locales and encoded site logo; `common.js` — share
+  intents (`checkSendIntentReceived`), background sync and push initialization.
+
+**Optional sources** (`optional_sources/notifications.js`,
+`optional_sources/background_sync.js`) are copied into the build only when the
+corresponding features are enabled, keeping unused native capabilities out of the
+bundle. **Share-extension files** (`share_extension_files/`) provide the iOS
+share-sheet target.
+
+### Data flow summary
+
+```
+Admin form (admin.ts routes)
+        │  builder config
+        ▼
+MobileBuilder.prepareStep() ──► copy template + capacitor config + add platforms
+        │
+MobileBuilder.finishStep()  ──► writeCfgFile (runtime config)
+        │                        bundle engine + plugins (webpack → www/js)
+        │                        build tables.json + prepopulated SQLite
+        │                        platform patches (manifest/plist/gradle/podfile)
+        ▼
+CapacitorHelper.buildApp()  ──► cap sync + gradle/xcodebuild (local or Docker)
+        │
+        ▼
+   .apk / .aab / .ipa  ──►  copied into server's `mobile_app` file folder
+
+── on the device ────────────────────────────────────────────────
+init(mobileConfig) → load engine bundles → init local SQLite from tables.json
+      → resolve JWT/auth → router.resolve(entryPoint) → render into iframe
+      → online: axios to server API ; offline: local SQLite + later sync()
+```
+
+
 ## Resources
 
 Code: https://github.com/saltcorn/saltcorn

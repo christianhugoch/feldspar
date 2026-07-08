@@ -153,28 +153,40 @@ Principles:
 
 ## Milestones
 
-### 1
+### 1 - Tables and users
 
-Database drivers, tables, fields, users. admin UI for those. Single database only (same as the primary data store).
+Database drivers, tables, fields, users. admin UI for tables, fields and users. Single database only (same as the primary data store).
 
 CLI that can run server for admin UI
 
-The user can: create table, create fields, edit rows, create users, 
+The user can: when there is no user, login directs to "create first user" screen; create table, show list of fields in table, create fields, edit rows, create users
 
-no table properties
+Everything here is web 1.0. Generate HTML on the server, mininimal client JS
 
-### 2 - Add app 
+### 2 - Files
 
-an app can be built on react, completely served from our process. the app has connection to database
+Files: a file store can be connected. Basic file manager and ability to edit files
 
-### 3 - MVP
+still web 1.0. 
 
-database, api and react app. authentication from react app.
+### 3 - React app
+
+an app can be built on react, completely served from Saltcorn process. the app has no connection to database. The app lives in a file store which is a git repository. there must be a build step 
+
+In the web admin UI everything is still web 1.0.
+
+### 3 - API 
+
+api to serve the react app. authentication from react app.
+
+this is MVP - the system is now useful.
 
 ## UNRESOLVED
 
-- do users still have a numeric role?
+- do users still have a numeric role? Or do they only have attributes
 - can you mix react and saltcorn1 applications?
 - how are we creating emails. 
 - workflow durability features
 - auth features beyond device recognition
+- javascript or CEL for table auth formulae
+- framework for admin UI
