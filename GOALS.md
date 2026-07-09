@@ -62,6 +62,7 @@ API:
 - high-quality API for applications. Look at Hasura, postgrest, supabase api for this
 - enable REST, GraphQL, gRPC, tRPC, and MCP APIs per-application
 - each of these run by an API Provider
+- the API is enabled as part of an application (see below) 
 
 
 Admin UI:
@@ -74,6 +75,7 @@ Admin UI:
 - much improved table editor. bring in as much functionality from airtable's admin ui as possible. this needs to be 
 - to comply with CSP we need a new html generating model that can split out onclick etc handlers into a script file. And also XSS needs to be built in, so html tags need to be represented symbolically with raw string values escaped. Client JS must be extractable without applying a value, so the component cannot be a functions. All of the extracted JS will be bundled 
 - we will need to recreate a dynamic form framework. Again the client js for this in saltcorn got messy as it grew. Form framework needs to cover conditional fields (field shown depending on value of other fields), repeated forms (like orderlines on an order), selects where options are populated dynamically (from the server, or from client code) depending on other form values, dynamic attributes or contents depending on other form values, form validation
+- This needs to be implemented in react due to high availability of underlying libraries i.e. craft and react-flow. There are also components for file managers.
 
 Agents and Copilot:
 
@@ -82,9 +84,12 @@ Agents and Copilot:
 
 Application UI:
 
-- applications can be written with modern code front end frameworks like next.js and sveltekit and crossplatform mobile frameworks like react native. Code front ends live in a git repository that is equal to or a subdir in a selected file store, and can be edited in a in-browser editor - ideally VS Code for the web.
+- There are multiple application providers (Frameworks). Each application has one primary framework. 
+- applications can be written with modern code front end frameworks like next.js and sveltekit and crossplatform mobile frameworks like react native. Code front ends live in a git repository that is equal to or a subdir in a selected file store, and can be edited in a in-browser editor - ideally VS Code for the web
 - applications can also be built in the saltcorn1 experience which will continue to improve
 - MAYBE? it should be possible to mix salcorn1 views/pages with code pages. not sure. its tempting to say that each application should be built with either some framework or salcorn1 views. Perhaps the right thing is that each application has a primary UI handler but can also bring in others.
+- each application can contain any number of APIs, each served on a sub path
+- Each application is served on a specific subdomain
 - enable strict CSP
 
 ## Code entities (supplied by core or plugins)
@@ -93,7 +98,7 @@ Database driver: is instantiated once for connecting to a specific database. mus
 
 Database driver must be written in Rust. The remaining code entities can be written in any supported language.
 
-Table provider: can provide a virtual table. It will look to the user as if it is a database table with fields and rows. Examples: SQL query, RSS feed, IMAP, instant messaging search. This has to interpret the universal query language. and return the rows corresponding to the query. 
+Table provider: can provide a virtual table. It will look to the user as if it is a database table with fields and rows. Examples: SQL query, RSS feed, IMAP, instant messaging search. This has to interpret the universal query language. and return the rows corresponding to the query. Any provided table can optionally be materialised into a real table with options for syncing.
 
 Types: Rich types: types known to saltcorn, with attributes and fieldviews. Basic types: other types not known. The database driver makes a correspondence between types in its database and rich types. 
 
@@ -117,7 +122,7 @@ Cache: all entities except users, workflow runs and files are cached in memory f
 
 all of the following can be seen and edited in the admin web UI
 
-Fields: cleaner than saltcorn 1 (we confused DB fields and Form fields). There should be interfaces for BaseField (shared properties), DataField (a field in a database table) and FormField (a form field) with options to convert between them.
+Fields: cleaner than saltcorn 1 (we confused DB fields and Form fields). There should be interfaces for BaseField (shared properties), DataField (a field in a database table) and FormField (a form field) with options to convert between them. Fields can be calculated, either stored or not stored. These are defined either by simple expressions that can access related fields in either directions of foreign keys, or by running code in one of the code adapters. dependencies between calculated fields need to be carefully considered. If no calculated fields are using code adapters, everything can be implmeneted as triggers with a recursion limit. But if simple expressions are mixed with e.g. javascript code that runs custom functions, their dependencies and dependencies on that field needs to sorted topologically. Key fields and File fields are special. Key fields hold the value of the referenced field (not necessarily the primary key) and can as its attributes also have a "summary field" selection, which is another field on the target table that by default can be used as the label when selecting. File fields are defined by the relative file path in the target file store. The file store name is a attribute setting as well as restriction on the file type and location (may be restricted to a specific folder). 
 
 Table: Every table had a table provider (may be a database driver). Each table has an array of fields, any number of rows, and settings for authorization: in saltcorn 1 we had roles (each user has a role), ownership fields and ownership formulae. 
 
@@ -129,11 +134,11 @@ Agents: similar to v1. An agent is a type of action.,
 
 Triggers: triggers can be actions, workflows or agents. A trigger is defined by: name, when (event that triggers it)
 
-File stores: Connect 
+File stores: Connect any directory or other sources (S3) as a file store to the catalog. Each file store has a unique name
 
-Files:
+Files: files can have access rules set. also per directory. To access a file, the user needs the right to access every directory in its path.
 
-Prdictive models: 
+Predictive models: There are different model providers. E.g. scikit learn model, mc-stan model etc. Each model has configuration fields. Then a model can be run against a subset of the data (also by setting hyperparameters; the model provider defines what hyperparameters it has). Running a model creates a model instance. This has parameters that can be inspected, which may be the main point of the fit. Or it can be applied to a new row in a table. The model provider defines what the outcome would be, depending on the configuration parameters.
 
 ## Code guidelines
 
@@ -151,31 +156,64 @@ Principles:
 
 ### code reuse
 
+### Target Platforms
+
+We are targeting Linux, MacOS, Windows and FreeBSD 
+
+### Data Model
+
+We are not using the same storage format as saltcorn v1, but it is similar
+
+All metadata and users are stored in the primary database. Any table in the primary table called `_sc_*` is regarded as a system system metadata table and not visible to the user. Any system metadata table must have: name, id (uuid), description, attributes (JSON field, always an object) and any other fields. Fields that has a value for many rows should be their own field, fields that have a sparse value can be set in the attributes. This is a value judgement and key part of the design.
+
+Files are on-disk, there is no database reppresentation per file. any per-file metadata must be stored as xattrs, we need a cross platform library to access this
+
+Tables and fields : all tables and fields work out of the box when a database driver is connected. So no metadata is strictly necessary for the tables. But both tables and fields may need to have metadata added to them - access rules, attributes. The primary database contains a table for metadata called `_sc_tables` and `_sc_fields` that stores an "overlay" on the existing tables with any additional information and also details on any provided tables. 
+
+Triggers, agents and workflows: Stored in the `_sc_triggers` table. Workflows must be versioned so a suspended run can finish with its version of the workflow.
+
+Workflow and agent runs: stored in the `_sc_runs` table. 
+
+Applications
+
+Models and model instances: stored in `_sc_models` and `_sc_model_instances` tables
+
+Users: users are stored in a database table called `users` in the primary database. Passwords are stored encrypted according to best practices. The user primary key should be UUID, for importing legacy saltcorn applications where the user id was autoincrementing integers, a legacy_id field can be created as needed. Initially every user has an email, but this field can be deleted by the admin and a different field can be introduced. Code should never assume the user has any other field than the id (which must not be deletable). Admin can add any field to the user table.
+
+Migrations: Similar to Saltcorn1. Migration is an array of Postgresql SQL valus. Databse drivers must be able to translate to their own SQL dialect.
+
 ## Milestones
 
-### 1 - Tables and users
+### MVP
 
-Database drivers, tables, fields, users. admin UI for tables, fields and users. Single database only (same as the primary data store).
+Scope: Database drivers, tables, fields, users. admin UI for tables, fields and users. Single database only (same as the primary data store).
+
+Library: 
+
+Query is an enum whcih allows us to build "select fields... from table_name where ... limit ...".
+
+Postgresql Database driver is an object created with postgres host, username, password, db name etc. Methods are to run query etc
+
+Catalog is an object. The catalog (cache of tables and fields) is initialised with a database driver. it uses information schema to find tables and fields. Cache has methods for getting, creating and creating table and field. There is no stored metadata outside the information_schema
+
+Types: no Rich types. all types are basic types
+
+server routes: the server routes for the web admin UI live in a crate for the server.
+
+Tests: the tests must be run against a real postgres database, which is reinitialised at the bginning of every test. test table creation, field creation, initialising the catalog with exisitng tables
 
 CLI that can run server for admin UI
 
-The user can: when there is no user, login directs to "create first user" screen; create table, show list of fields in table, create fields, edit rows, create users
+The user can: when there is no user, login directs to "create first user" screen; create table, show list of fields in table, create fields, edit rows, create users. Users can login and log out
 
 Everything here is web 1.0. Generate HTML on the server, mininimal client JS
 
-### 2 - Files
 
 Files: a file store can be connected. Basic file manager and ability to edit files
-
-still web 1.0. 
-
-### 3 - React app
 
 an app can be built on react, completely served from Saltcorn process. the app has no connection to database. The app lives in a file store which is a git repository. there must be a build step 
 
 In the web admin UI everything is still web 1.0.
-
-### 3 - API 
 
 api to serve the react app. authentication from react app.
 
@@ -189,4 +227,4 @@ this is MVP - the system is now useful.
 - workflow durability features
 - auth features beyond device recognition
 - javascript or CEL for table auth formulae
-- framework for admin UI
+- are we using bootstrap for web admin UI
