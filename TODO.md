@@ -20,7 +20,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] Create Cargo workspace (`Cargo.toml`) with the MVP crates
 - [x] `sc-error`: single `Error` enum + `Result<T>` alias; context helpers; lint against `unwrap()`/`expect()` in libs (clippy config)
 - [x] Repo hygiene: `rustfmt.toml`, `clippy.toml`, CI skeleton (fmt + clippy + test), `.gitignore` for Rust/node
-- [ ] Decide async runtime (tokio) and pin core deps (serde, uuid, argon2, sqlx-or-tokio-postgres)
+- [x] Decide async runtime (tokio) and pin core deps (serde, uuid, argon2, sqlx-or-tokio-postgres)
 - [ ] Integration-test harness: spin up / reset a real Postgres per test (testcontainers or a reset fixture); shared helper crate under `tests/`
 
 ## Phase 1 — Query language (`sc-query`)

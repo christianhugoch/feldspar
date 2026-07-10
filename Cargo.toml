@@ -48,6 +48,46 @@ sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-server = { path = "crates/sc-server" }
 
+# --- Core third-party dependencies, pinned once for the whole workspace ------
+#
+# Runtime decision (TODO Phase 0): the workspace is built on the **tokio** async
+# runtime. Every async trait in the technical design (`DatabaseDriver`,
+# `TableProvider`, `FileStore`, `ApiProvider`, …) is expressed with `async_trait`
+# over tokio.
+#
+# Postgres driver decision: **tokio-postgres + deadpool-postgres**, not sqlx.
+# `sc-query` already renders a `Statement` into `(sql, binds)`, so sqlx's
+# compile-time-checked query macros would add no value; tokio-postgres gives
+# native `$n` parameter binding and row streaming that map directly onto the
+# design's `RowStream`, and deadpool-postgres supplies pooling. This keeps the
+# dependency graph minimal (design principle: minimal, acyclic deps).
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "net",
+    "time",
+    "sync",
+    "io-util",
+] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+# argon2id password hashing. Pinned to the stable 0.5 line (0.6 is only an RC).
+argon2 = "0.5"
+# Postgres driver + pool. `with-*` features light up ToSql/FromSql for the
+# `Value` variants the driver maps in later phases.
+tokio-postgres = { version = "0.7", features = [
+    "with-uuid-1",
+    "with-chrono-0_4",
+    "with-serde_json-1",
+] }
+deadpool-postgres = "0.14"
+# Temporal + decimal backing for the `Value` enum (Date/Time/Timestamp/Decimal).
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
+
 # Workspace-wide lints. Principle 5 (no silent failures): library code must not
 # `unwrap()`/`expect()` on fallible paths — return a `sc-error::Result` instead.
 # Member crates opt in with `[lints]` + `workspace = true`. Test code is exempted

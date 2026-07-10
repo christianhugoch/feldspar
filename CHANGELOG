@@ -4,6 +4,24 @@ Changes in reverse chronological order.
 
 ## 2026-07-10
 
+- Decided the async runtime and pinned core deps (Phase 0). The workspace runs
+  on the **tokio** multi-threaded runtime; every async trait in the design is
+  expressed with `async_trait` over it. Chose **tokio-postgres +
+  deadpool-postgres** as the Postgres driver rather than sqlx — `sc-query`
+  already renders a `Statement` into `(sql, binds)`, so sqlx's compile-time
+  query macros add no value, while tokio-postgres gives native `$n` binding and
+  row streaming that map directly onto the design's `RowStream`, keeping the
+  dependency graph minimal. Added a single `[workspace.dependencies]` block to
+  the root `Cargo.toml` pinning `tokio`, `async-trait`, `serde`/`serde_json`,
+  `uuid`, `argon2` (stable 0.5; 0.6 is only an RC), `tokio-postgres` (with the
+  `uuid`/`chrono`/`serde_json` `ToSql`/`FromSql` features), `deadpool-postgres`,
+  and `chrono`/`rust_decimal` (temporal + decimal backing for the `Value` enum).
+  Wired tokio into the `saltcorn` binary (`#[tokio::main] async fn main`) so the
+  runtime decision is exercised, not just declared. New `core_deps` integration
+  test in `sc-cli` asserts each core dep is pinned once in
+  `[workspace.dependencies]`, that the driver is tokio-postgres and not sqlx,
+  and drives a `#[tokio::test]` end to end.
+
 - Repo hygiene (Phase 0): added `rustfmt.toml` (stable-only options, edition
   pinned to 2024, `max_width = 100`, Unix newlines) so `cargo fmt --check` on a
   stable toolchain matches the workspace. Added a GitHub Actions CI skeleton
