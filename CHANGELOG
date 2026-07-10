@@ -4,6 +4,24 @@ Changes in reverse chronological order.
 
 ## 2026-07-10
 
+- `Value` enum (Phase 1, `sc-query`): landed the universal row value type that
+  the rest of the query AST is built on (technical design §4). A single
+  `serde`-serializable enum with the twelve MVP variants — `Null`, `Bool`,
+  `Int(i64)`, `Float(f64)`, `Text(String)`, `Bytes(Vec<u8>)`,
+  `Json(serde_json::Value)`, `Uuid`, `Date(NaiveDate)`, `Time(NaiveTime)`,
+  `Timestamp(DateTime<Utc>)` (maps to `timestamptz`), and `Decimal` (maps to
+  `numeric`). JSON is a first-class variant per the design, not an add-on. The
+  enum is `PartialEq` but deliberately not `Eq`/`Hash` because `f64` has no
+  total order/equality. Added ergonomic `From` conversions for each backing type
+  (plus `&str`, `i32`, and `Option<T> → Null`) and small accessors
+  (`is_null`, `kind`, `as_text`/`as_int`/`as_bool`). Serialised with an
+  externally-tagged `{ "type", "value" }` shape so a statement stays inspectable
+  and reconstructable by code adapters. Pulled `serde`, `serde_json`, `uuid`,
+  `chrono`, and `rust_decimal` (all already pinned in `[workspace.dependencies]`)
+  into `sc-query`. Unit tests cover the `From` conversions, `Option`→`Null`
+  mapping, accessors, the stable serde tag shape, and JSON round-trips of every
+  rich variant (uuid/date/time/timestamp/decimal). `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` both pass clean on the crate.
 - Integration-test harness (Phase 0): added a shared helper crate
   `sc-test-harness` under `tests/harness` (workspace member, `publish = false`)
   implementing the "real Postgres, reset per test" strategy from the technical

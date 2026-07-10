@@ -1,20 +1,19 @@
 //! Universal query language: enum AST and SQL rendering trait (layer 1)
 //!
-//! Skeleton crate for the Saltcorn v2 workspace. Functionality is filled in by
-//! later TODO items.
+//! This crate is filled in incrementally by the Phase 1 TODO items. The first
+//! landed piece is [`Value`], the universal row value type that every later
+//! part of the AST (literals, bind parameters, rendered binds) is built on.
 
-/// Returns this crate's name. Placeholder so the skeleton has something to test
-/// until the real API lands.
-pub fn crate_name() -> &'static str {
-    "sc-query"
-}
+mod value;
+
+pub use value::Value;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn crate_name_is_set() {
-        assert_eq!(crate_name(), "sc-query");
+    fn value_is_exported() {
+        assert_eq!(Value::Int(1).kind(), "int");
     }
 }

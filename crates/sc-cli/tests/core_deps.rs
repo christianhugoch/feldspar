@@ -81,9 +81,7 @@ fn postgres_driver_is_tokio_postgres_not_sqlx() {
     );
     // No line may *declare* sqlx as a dependency (prose in comments is fine).
     assert!(
-        !deps
-            .lines()
-            .any(|l| l.trim_start().starts_with("sqlx ")),
+        !deps.lines().any(|l| l.trim_start().starts_with("sqlx ")),
         "sqlx was deliberately not chosen; sc-query renders SQL itself"
     );
 }

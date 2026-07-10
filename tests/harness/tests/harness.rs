@@ -16,7 +16,10 @@ async fn creates_a_usable_database() {
         .await
         .expect("create table");
     client
-        .execute("insert into item (id, name) values ($1, $2)", &[&1i32, &"a"])
+        .execute(
+            "insert into item (id, name) values ($1, $2)",
+            &[&1i32, &"a"],
+        )
         .await
         .expect("insert row");
 
