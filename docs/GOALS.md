@@ -67,7 +67,7 @@ API:
 
 Admin UI:
 
-- only a subset of users can log in. The uber-admin can define who has admin access and what they can do
+- only admin users can log in. Later, admins can give restricted access (e.g. only developing application) to some non-admin users
 - separate the admin ui for the user serving routes. Admin ui has its own URL (could be a different subdomain, or a url path). But it is the same process
 - enable strict content security policy
 - much better file manager.
@@ -118,13 +118,15 @@ Viewpatterns: as in saltcorn v1.
 
 ## Created Entities (created by applciation developer)
 
-Cache: all entities except users, workflow runs and files are cached in memory for performance. When a transaction has modified an entity it should signal to all other connected entities to reload the cache for the changed entities.
+Cache: all entities except users, workflow runs and files are cached in memory for performance. When a transaction has modified an entity it should signal to all other connected entities to reload the cache for the changed entities. 
 
 all of the following can be seen and edited in the admin web UI
 
 Fields: cleaner than saltcorn 1 (we confused DB fields and Form fields). There should be interfaces for BaseField (shared properties), DataField (a field in a database table) and FormField (a form field) with options to convert between them. Fields can be calculated, either stored or not stored. These are defined either by simple expressions that can access related fields in either directions of foreign keys, or by running code in one of the code adapters. dependencies between calculated fields need to be carefully considered. If no calculated fields are using code adapters, everything can be implmeneted as triggers with a recursion limit. But if simple expressions are mixed with e.g. javascript code that runs custom functions, their dependencies and dependencies on that field needs to sorted topologically. Key fields and File fields are special. Key fields hold the value of the referenced field (not necessarily the primary key) and can as its attributes also have a "summary field" selection, which is another field on the target table that by default can be used as the label when selecting. File fields are defined by the relative file path in the target file store. The file store name is a attribute setting as well as restriction on the file type and location (may be restricted to a specific folder). 
 
 Table: Every table had a table provider (may be a database driver). Each table has an array of fields, any number of rows, and settings for authorization: in saltcorn 1 we had roles (each user has a role), ownership fields and ownership formulae. 
+
+Users: each user has a role, which is an integer 1-100. 1 is admin with full access. 100 is public (not logged in). USers can also have additional fields created by the admin.
 
 Workflows: similar to v1. Every workflow is a trigger. Each workflow consists of a number of steps, each of which can read and write to a context for that run.
 
@@ -139,6 +141,8 @@ File stores: Connect any directory or other sources (S3) as a file store to the 
 Files: files can have access rules set. also per directory. To access a file, the user needs the right to access every directory in its path.
 
 Predictive models: There are different model providers. E.g. scikit learn model, mc-stan model etc. Each model has configuration fields. Then a model can be run against a subset of the data (also by setting hyperparameters; the model provider defines what hyperparameters it has). Running a model creates a model instance. This has parameters that can be inspected, which may be the main point of the fit. Or it can be applied to a new row in a table. The model provider defines what the outcome would be, depending on the configuration parameters.
+
+Tags can be created in the admin UI any created entity gave have a tag applied to it. This helps when selecting several entities, a tag can be selected instead so the operation is applied to each entity in the tag
 
 ## Code guidelines
 
@@ -160,7 +164,7 @@ Principles:
 
 We are targeting Linux, MacOS, Windows and FreeBSD 
 
-### Data Model
+### On-disk metadata storage
 
 We are not using the same storage format as saltcorn v1, but it is similar
 
@@ -174,7 +178,9 @@ Triggers, agents and workflows: Stored in the `_sc_triggers` table. Workflows mu
 
 Workflow and agent runs: stored in the `_sc_runs` table. 
 
-Applications
+Configuration: stored in a `_sc_config` table. Configurations can apply to the setup as a whole or each application, and specific frameworks will have different configuration values. for each permissible key, there must be a restriction on the types of values this can take, but all values are stored as JSON values.
+
+Applications: applications are stored in a `_sc_applications` table. 
 
 Models and model instances: stored in `_sc_models` and `_sc_model_instances` tables
 
@@ -190,7 +196,7 @@ Scope: Database drivers, tables, fields, users. admin UI for tables, fields and 
 
 Library: 
 
-Query is an enum whcih allows us to build "select fields... from table_name where ... limit ...".
+Query is an enum whcih allows us to build "select fields... from table_name where ... limit ...". Also inserts, updates, deletes
 
 Postgresql Database driver is an object created with postgres host, username, password, db name etc. Methods are to run query etc
 
@@ -221,7 +227,6 @@ this is MVP - the system is now useful.
 
 ## UNRESOLVED
 
-- do users still have a numeric role? Or do they only have attributes
 - can you mix react and saltcorn1 applications?
 - how are we creating emails. 
 - workflow durability features
