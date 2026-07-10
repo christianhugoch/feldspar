@@ -4,6 +4,26 @@ Changes in reverse chronological order.
 
 ## MVP Phase 2
 
+- Integration tests: create table, add fields, introspect, CRUD rows (Phase 2,
+  `sc-db-postgres`): added `tests/crud.rs`, a single end-to-end walk of the whole
+  Phase 2 story against a real Postgres, closing the last Phase 2 item. The
+  per-operation behaviour already had focused coverage across the sibling test
+  files (dialect rendering, `query`, `introspect`, `apply_schema`, transactions),
+  but **UPDATE and DELETE had only ever been rendered, never executed** against a
+  live database — this test exercises them for real. It creates a table with an
+  explicit key (no invented `id`), adds two fields via `AddColumn` (one with a
+  `DEFAULT false`, one nullable), introspects and asserts the resulting columns/
+  order/primary key/nullability, then runs the full CRUD cycle through the
+  driver: INSERT two rows (RETURNING their ids), SELECT them back and check the
+  applied column default and NULL, UPDATE one row's `done`/`priority` and confirm
+  only that row changed, DELETE the other (RETURNING its id) and confirm one row
+  remains, and finally re-introspect to confirm the table still reflects the
+  added fields. Fixed one lint along the way: a non-`#[test]` helper using
+  `.expect()` isn't covered by clippy's test exemption, so `task_table` now
+  returns `Result` and uses `ok_or_else` like the other files' helpers. `cargo
+  fmt --check`, `cargo clippy -p sc-db-postgres --all-targets -- -D warnings`,
+  and `cargo test -p sc-db-postgres` (12 unit + 7 integration across five files)
+  all pass. **Phase 2 (`sc-db`, `sc-db-postgres`) is now complete.**
 - Transactions: `begin()` → commit/rollback, and the full `DatabaseDriver`
   trait impl (Phase 2, `sc-db-postgres`): added `PgDriver::begin`, returning a
   `Box<dyn Transaction>` that scopes queries and schema changes to one Postgres

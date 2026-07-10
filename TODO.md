@@ -40,7 +40,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] `introspect()` via `information_schema` → `PhysicalTable` (columns, types, PKs incl. composite, FKs)
 - [x] `apply_schema`: create/drop table, add/drop column — **no auto `id` column** created
 - [x] Transactions: `begin()` → commit/rollback; used by metadata mutations
-- [ ] Integration tests: create table, add fields, introspect existing tables, CRUD rows
+- [x] Integration tests: create table, add fields, introspect existing tables, CRUD rows
 
 ## Phase 3 — Types (`sc-types`, MVP: basic only)
 
