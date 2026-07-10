@@ -22,6 +22,8 @@ members = [
     "crates/sc-server",
     # Layer 10 — CLI binary
     "crates/sc-cli",
+    # Cross-crate integration-test harness (shared helper; not published)
+    "tests/harness",
 ]
 
 # Shared package metadata inherited by every member crate via `field.workspace = true`.
@@ -47,6 +49,7 @@ sc-files = { path = "crates/sc-files" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-server = { path = "crates/sc-server" }
+sc-test-harness = { path = "tests/harness" }
 
 # --- Core third-party dependencies, pinned once for the whole workspace ------
 #

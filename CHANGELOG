@@ -4,6 +4,24 @@ Changes in reverse chronological order.
 
 ## 2026-07-10
 
+- Integration-test harness (Phase 0): added a shared helper crate
+  `sc-test-harness` under `tests/harness` (workspace member, `publish = false`)
+  implementing the "real Postgres, reset per test" strategy from the technical
+  design (principle 4). `TestDb::new()` creates a **freshly named, empty
+  database per test** (`sc_test_<uuid>`) from a maintenance connection and hands
+  back a `deadpool-postgres` pool bound to it; `Drop` closes the pool and drops
+  the database (`DROP DATABASE … WITH (FORCE)` on a dedicated teardown thread,
+  since `Drop` is sync and may run inside the tokio runtime). Full isolation —
+  including DDL and `information_schema` introspection — so tests run in
+  parallel with no shared state. The base connection is read from `DATABASE_URL`
+  (the same variable CI sets) with a local default. Three integration tests
+  assert a usable database (DDL + CRUD), cross-database isolation, and that the
+  database is gone after teardown; all pass against a clean `postgres:16`. Note:
+  running locally needs a reachable Postgres with `CREATEDB` rights — set
+  `DATABASE_URL` accordingly (a fresh `postgres:16`, e.g. via Docker, avoids the
+  glibc collation-version mismatch that a system Postgres upgraded across glibc
+  releases will otherwise raise on `CREATE DATABASE`).
+
 - Decided the async runtime and pinned core deps (Phase 0). The workspace runs
   on the **tokio** multi-threaded runtime; every async trait in the design is
   expressed with `async_trait` over it. Chose **tokio-postgres +
