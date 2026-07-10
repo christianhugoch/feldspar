@@ -1,20 +1,12 @@
-//! Postgres DatabaseDriver implementation (layer 2)
+//! Postgres backend for the database layer (layer 2).
 //!
-//! Skeleton crate for the Saltcorn v2 workspace. Functionality is filled in by
-//! later TODO items.
+//! Implements the `sc-db` contract against a real Postgres server. The first
+//! piece is [`PgDialect`], the Postgres [`SqlDialect`](sc_query::SqlDialect) that
+//! renders a [`Statement`](sc_query::Statement) to `(sql, binds)` with
+//! double-quoted identifiers and `$n` placeholders. Connection/pooling,
+//! introspection, schema application, and transactions land in the following
+//! Phase 2 items.
 
-/// Returns this crate's name. Placeholder so the skeleton has something to test
-/// until the real API lands.
-pub fn crate_name() -> &'static str {
-    "sc-db-postgres"
-}
+mod dialect;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crate_name_is_set() {
-        assert_eq!(crate_name(), "sc-db-postgres");
-    }
-}
+pub use dialect::PgDialect;

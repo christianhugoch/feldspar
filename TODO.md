@@ -35,7 +35,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 - [x] `DatabaseDriver` trait (introspect, query, apply_schema, begin/tx, capabilities, dialect)
 - [x] `DbCapabilities` (row_level_security, composite_pk, listen_notify, returning, …)
-- [ ] Postgres `SqlDialect` implementation (quoting, `$n` placeholders, JSON operators, RETURNING)
+- [x] Postgres `SqlDialect` implementation (quoting, `$n` placeholders, JSON operators, RETURNING)
 - [ ] Postgres connection + pooling; run `Statement` → `RowStream`
 - [ ] `introspect()` via `information_schema` → `PhysicalTable` (columns, types, PKs incl. composite, FKs)
 - [ ] `apply_schema`: create/drop table, add/drop column — **no auto `id` column** created

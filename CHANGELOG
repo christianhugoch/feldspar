@@ -4,6 +4,28 @@ Changes in reverse chronological order.
 
 ## MVP Phase 2
 
+- Postgres `SqlDialect` implementation (Phase 2, `sc-db-postgres`): added
+  `PgDialect`, the concrete Postgres dialect that renders a `sc-query`
+  `Statement` to `(sql, binds)` (technical design §4/§5). Because the
+  `SqlDialect` trait already carries a shared default `render` that walks the AST
+  and emits clause order, operator spelling, `RETURNING`, `CASE`, `IN`, and the
+  JSON access path (`->`) — all of which are already valid Postgres — the
+  concrete dialect supplies only the two things that genuinely differ between
+  backends: identifier **quoting** (double quotes, embedded quotes doubled, so a
+  reserved word or odd identifier is safe and case-exact) and **placeholders**
+  (the numbered `$n` form tokio-postgres binds positionally). `PgDialect` is a
+  zero-sized, `Copy` struct with a `const new()`, so `dialect()` on the future
+  driver can hand back a reference cheaply. Injection-safety is inherited from
+  the query layer: every `Value` leaves through the shared renderer's bind
+  vector, never interpolated. Seven unit tests exercise quoting (plain, reserved
+  word, embedded quote), `$n` placeholders, and full-statement rendering for
+  each kind — a joined/filtered/ordered `SELECT` with `LIMIT`/`OFFSET`, an
+  `INSERT … RETURNING`, `UPDATE`/`DELETE` (the latter with `RETURNING`), JSON
+  arrow access with parameterised path steps, and a SQL-injection payload that
+  stays a single bind and never appears in the SQL text. Connection/pooling,
+  introspection, `apply_schema`, and transactions are the following Phase 2
+  items. `cargo fmt --check`, `cargo clippy -p sc-db-postgres --all-targets -- -D
+  warnings`, and `cargo test -p sc-db-postgres` (7 tests) all pass.
 - `DatabaseDriver` trait + `DbCapabilities` (Phase 2, `sc-db`): landed the
   database-layer *contract* — the async trait one connected database implements,
   plus every data type it exchanges with the rest of the system (technical
