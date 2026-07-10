@@ -4,6 +4,39 @@ Changes in reverse chronological order.
 
 ## MVP Phase 2
 
+- Transactions: `begin()` → commit/rollback, and the full `DatabaseDriver`
+  trait impl (Phase 2, `sc-db-postgres`): added `PgDriver::begin`, returning a
+  `Box<dyn Transaction>` that scopes queries and schema changes to one Postgres
+  transaction (technical design §5). New `transaction.rs` defines
+  `PgTransaction`: rather than borrow a `tokio_postgres::Transaction` from the
+  pooled client (which would make the handle a self-referential struct), it
+  **owns** its pooled connection and drives `BEGIN`/`COMMIT`/`ROLLBACK`
+  directly. `commit`/`rollback` consume the boxed handle and take the connection
+  out (leaving `None`), so the transaction is finalised exactly once and a
+  `Drop` after an explicit finish is a no-op; a handle dropped **without**
+  finishing rolls back (spawned on the current runtime, or a short-lived thread
+  if none) so the connection returns to the pool clean rather than
+  mid-transaction. To share the exact execution path between the driver and a
+  transaction — both hold a `deadpool` connection that derefs to a
+  `tokio_postgres::Client` — the query/DDL logic moved into a new `exec.rs`
+  (`run_query`/`run_ddl`), and `PgDriver::query`/`apply_schema` now call it.
+  With `begin` in place, `PgDriver` now implements the whole `sc-db`
+  `DatabaseDriver` trait (introspect, query, apply_schema, begin, capabilities,
+  dialect); the trait methods delegate to the inherent methods (which shadow
+  them in resolution, so there is no recursion), so the crate keeps its
+  ergonomic inherent API while the catalog can hold an `Arc<dyn DatabaseDriver>`.
+  Added `async-trait` and `tokio` as regular dependencies (the transaction's
+  drop-rollback needs the tokio runtime handle). Three integration tests: commit
+  makes a table+row visible to a separate pooled connection while an uncommitted
+  one stays invisible (DDL is transactional in Postgres), and rollback discards
+  a table that its own transaction could see; an abandoned handle (dropped
+  without finishing) rolls back its table while leaving the pool usable; and the
+  driver is exercised end-to-end through an `Arc<dyn DatabaseDriver>` trait
+  object (capabilities, dialect render, create/insert/begin/commit/select).
+  `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  and `cargo test -p sc-db-postgres` (12 unit + 6 integration across four files)
+  all pass. This completes the Postgres `DatabaseDriver` implementation; only the
+  Phase 2 integration-test umbrella item remains.
 - `apply_schema`: create/drop table, add/drop column (Phase 2,
   `sc-db-postgres`): added `PgDriver::apply_schema`, which renders one
   `SchemaChange` to a single Postgres DDL statement and runs it over the

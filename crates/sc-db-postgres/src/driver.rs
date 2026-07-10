@@ -1,23 +1,22 @@
-//! [`PgDriver`] — a pooled connection to one Postgres database that runs a
-//! rendered [`Statement`] and streams the result back as a
-//! [`RowStream`](sc_db::RowStream).
+//! [`PgDriver`] — a pooled connection to one Postgres database, and its
+//! [`DatabaseDriver`] implementation.
 //!
-//! This is the first working piece of the Postgres backend: connection and
-//! pooling (via `deadpool-postgres`) and the query path. Introspection, schema
-//! application, and transactions — and the full `DatabaseDriver` trait impl that
-//! ties them together — arrive in the following Phase 2 items.
+//! The driver owns a `deadpool-postgres` pool and renders statements with
+//! [`PgDialect`]. Query and DDL execution live in [`crate::exec`] (shared with
+//! transactions); introspection in [`crate::introspect`]; DDL rendering in
+//! [`crate::ddl`]; transactions in [`crate::transaction`]. This module wires
+//! them together and exposes them both as inherent methods (convenient, and what
+//! the crate's tests use) and through the `DatabaseDriver` trait (for the
+//! catalog's `Arc<dyn DatabaseDriver>`).
 
-use std::sync::Arc;
-
+use async_trait::async_trait;
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
-use sc_db::{DbCapabilities, PhysicalTable, Row, RowStream, SchemaChange};
+use sc_db::{DatabaseDriver, DbCapabilities, PhysicalTable, RowStream, SchemaChange, Transaction};
 use sc_error::{Error, Result};
 use sc_query::{SqlDialect, Statement};
-use tokio_postgres::types::ToSql;
 use tokio_postgres::{Config, NoTls};
 
 use crate::dialect::PgDialect;
-use crate::value::{PgParam, decode};
 
 /// A connection pool to one Postgres database, plus its SQL dialect.
 ///
@@ -86,18 +85,28 @@ impl PgDriver {
         crate::introspect::introspect(&client).await
     }
 
-    /// Apply a single schema change (create/drop table, add/drop column) by
-    /// rendering it to Postgres DDL and executing it. Creating a table emits
-    /// exactly the columns given — no `id` column is invented (see [`crate::ddl`]).
-    pub async fn apply_schema(&self, change: &SchemaChange) -> Result<()> {
-        let sql = crate::ddl::render(&self.dialect, change)?;
+    /// Render `stmt` to Postgres SQL, run it on a pooled connection, and return
+    /// the rows.
+    pub async fn query(&self, stmt: &Statement) -> Result<RowStream> {
         let client = self.client().await?;
-        // DDL is issued over the simple-query protocol (no binds).
-        client
-            .batch_execute(&sql)
-            .await
-            .map_err(|e| Error::database(format!("apply_schema failed: {e}")))?;
-        Ok(())
+        crate::exec::run_query(&client, &self.dialect, stmt).await
+    }
+
+    /// Apply a single schema change (create/drop table, add/drop column).
+    /// Creating a table emits exactly the columns given — no `id` column is
+    /// invented (see [`crate::ddl`]).
+    pub async fn apply_schema(&self, change: &SchemaChange) -> Result<()> {
+        let client = self.client().await?;
+        crate::exec::run_ddl(&client, &self.dialect, change).await
+    }
+
+    /// Begin a transaction on a dedicated pooled connection. Metadata mutations
+    /// run inside one; the returned handle is committed or rolled back exactly
+    /// once (dropping it rolls back).
+    pub async fn begin(&self) -> Result<Box<dyn Transaction>> {
+        let client = self.client().await?;
+        let tx = crate::transaction::PgTransaction::begin(client, self.dialect).await?;
+        Ok(Box::new(tx))
     }
 
     /// Check out a pooled connection.
@@ -107,45 +116,34 @@ impl PgDriver {
             .await
             .map_err(|e| Error::database(format!("checkout connection: {e}")))
     }
+}
 
-    /// Render `stmt` to Postgres SQL, run it on a pooled connection, and return
-    /// the rows.
-    ///
-    /// Any statement kind is accepted; a non-`RETURNING` mutation simply yields
-    /// no rows. Result rows are materialised into the stream (buffered) for the
-    /// MVP — the signature stays a `RowStream` so a future switch to true
-    /// server-side streaming is invisible to callers.
-    pub async fn query(&self, stmt: &Statement) -> Result<RowStream> {
-        let (sql, binds) = self.dialect.render(stmt)?;
-        let client = self.client().await?;
+// The trait impl delegates to the inherent methods above. Inherent methods
+// shadow trait methods in resolution, so the `PgDriver::method(self, …)` calls
+// below refer to the inherent implementations (no recursion).
+#[async_trait]
+impl DatabaseDriver for PgDriver {
+    async fn introspect(&self) -> Result<Vec<PhysicalTable>> {
+        PgDriver::introspect(self).await
+    }
 
-        // Bind values are wrapped so the whole ordered set can be passed as
-        // `&[&(dyn ToSql + Sync)]`.
-        let params: Vec<PgParam> = binds.iter().map(PgParam).collect();
-        let param_refs: Vec<&(dyn ToSql + Sync)> =
-            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+    async fn query(&self, stmt: &Statement) -> Result<RowStream> {
+        PgDriver::query(self, stmt).await
+    }
 
-        let pg_rows = client
-            .query(&sql, &param_refs)
-            .await
-            .map_err(|e| Error::database(format!("query failed: {e}")))?;
+    async fn apply_schema(&self, change: &SchemaChange) -> Result<()> {
+        PgDriver::apply_schema(self, change).await
+    }
 
-        // All rows in a result share one column list; build it once.
-        let columns: Arc<Vec<String>> = Arc::new(
-            pg_rows
-                .first()
-                .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-                .unwrap_or_default(),
-        );
+    async fn begin(&self) -> Result<Box<dyn Transaction>> {
+        PgDriver::begin(self).await
+    }
 
-        let mut rows = Vec::with_capacity(pg_rows.len());
-        for pg in &pg_rows {
-            let mut values = Vec::with_capacity(pg.len());
-            for i in 0..pg.len() {
-                values.push(decode(pg, i)?);
-            }
-            rows.push(Row::new(columns.clone(), values)?);
-        }
-        Ok(RowStream::from_rows(rows))
+    fn capabilities(&self) -> DbCapabilities {
+        PgDriver::capabilities(self)
+    }
+
+    fn dialect(&self) -> &dyn SqlDialect {
+        &self.dialect
     }
 }

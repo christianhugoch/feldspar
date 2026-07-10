@@ -12,6 +12,8 @@ rust-version.workspace = true
 sc-error.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
 tokio-postgres.workspace = true
 deadpool-postgres.workspace = true
 # Backing types for the wire-level `Value` ⇆ Postgres mapping.
@@ -23,7 +25,6 @@ serde_json.workspace = true
 bytes.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 sc-test-harness.workspace = true
 
 [lints]
