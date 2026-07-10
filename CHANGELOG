@@ -4,6 +4,36 @@ Changes in reverse chronological order.
 
 ## 2026-07-10
 
+- `Statement` AST + `Expr` (Phase 1, `sc-query`): landed the enum-based query
+  AST that `Value` feeds into (technical design §4). Two new modules. `expr.rs`
+  defines `Expr` with the nine MVP variants — `Col(ColRef)`, `Lit(Value)`
+  (always parameterised on render, never interpolated), `Param(usize)`,
+  `Binary{op,l,r}`, `Unary{op,e}`, `Func{name,args}`, `In{e,set}`,
+  `Json{target,path}` (JSON is first-class, not an add-on), and
+  `Case{operand,arms,else_result}` — plus supporting `ColRef` (optional table
+  qualifier, so composite keys and FKs to non-primary-key columns are
+  expressible), `BinOp`, `UnOp`, `JsonStep`, `InSet` (list or subquery), and
+  `CaseArm`. `statement.rs` defines `Statement` (`Select`/`Insert`/`Update`/
+  `Delete`, each boxed so the enum stays small) with `Select` carrying
+  from/columns/joins/filter/group/having/order/limit/offset, and the supporting
+  `Source` (table or aliased subquery), `Projection` (wildcard or `expr AS
+  alias`), `Join`/`JoinKind` (`on` is a general `Option<Expr>`), `OrderBy`/
+  `OrderDir`/`Nulls`, `Insert` (multi-row + `RETURNING`), `Update`/`Assignment`,
+  and `Delete`. Every type is `serde`-round-trippable (enums externally tagged,
+  `snake_case`) so a statement stays inspectable and reconstructable by code
+  adapters. Added ergonomic constructors/combinators (`Expr::col/qcol/lit/eq/
+  and/or`, `Select::from(..).filter(..).join(..).limit(..)`, `Source::table`,
+  `Projection::expr`, `Delete::from`, `Insert::row`, `From<Select> for
+  Statement`, etc.) to keep call sites readable without a fluent builder layer.
+  Note: the blanket `From<T: Into<Value>> for Expr` was intentionally avoided —
+  it collides with the std reflexive `From<T> for T` under coherence — in favour
+  of concrete `From<Value>`/`From<ColRef>` impls. Four new unit tests build a
+  joined/filtered/ordered `Select`, the three mutating statements with
+  `RETURNING`/filters, the JSON/`IN`/`CASE` expression shapes, and a full serde
+  round-trip. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  and `cargo test -p sc-query` all pass clean; `cargo build --workspace` is
+  green. (Rendering to SQL — the `SqlDialect` trait and its parameterisation
+  tests — remains the next Phase 1 item.)
 - `Value` enum (Phase 1, `sc-query`): landed the universal row value type that
   the rest of the query AST is built on (technical design §4). A single
   `serde`-serializable enum with the twelve MVP variants — `Null`, `Bool`,

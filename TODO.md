@@ -26,8 +26,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 ## Phase 1 — Query language (`sc-query`)
 
 - [x] `Value` enum (Null/Bool/Int/Float/Text/Bytes/Json/Uuid/Date/Time/Timestamp/Decimal)
-- [ ] `Statement` AST: `Select` (from, columns, joins, filter, group, having, order, limit, offset), `Insert`, `Update`, `Delete`
-- [ ] `Expr` (Col, Lit, Param, Binary, Unary, Func, In, Json, Case) — enough for MVP CRUD + joins
+- [x] `Statement` AST: `Select` (from, columns, joins, filter, group, having, order, limit, offset), `Insert`, `Update`, `Delete`
+- [x] `Expr` (Col, Lit, Param, Binary, Unary, Func, In, Json, Case) — enough for MVP CRUD + joins
 - [ ] `SqlDialect` trait: render `Statement` → (sql, binds); literals **always parameterised**
 - [ ] Unit tests: render each statement kind; verify parameterisation (no literal interpolation)
 
