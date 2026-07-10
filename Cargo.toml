@@ -74,6 +74,9 @@ tokio = { version = "1", features = [
     "io-util",
 ] }
 async-trait = "0.1"
+# Async stream abstractions for `RowStream` (the type `DatabaseDriver::query`
+# returns). Only the lightweight `Stream` trait + combinators are used.
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }

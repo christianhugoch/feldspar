@@ -11,6 +11,13 @@ rust-version.workspace = true
 [dependencies]
 sc-error.workspace = true
 sc-query.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -33,8 +33,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 2 — Database driver (`sc-db`, `sc-db-postgres`)
 
-- [ ] `DatabaseDriver` trait (introspect, query, apply_schema, begin/tx, capabilities, dialect)
-- [ ] `DbCapabilities` (row_level_security, composite_pk, listen_notify, returning, …)
+- [x] `DatabaseDriver` trait (introspect, query, apply_schema, begin/tx, capabilities, dialect)
+- [x] `DbCapabilities` (row_level_security, composite_pk, listen_notify, returning, …)
 - [ ] Postgres `SqlDialect` implementation (quoting, `$n` placeholders, JSON operators, RETURNING)
 - [ ] Postgres connection + pooling; run `Statement` → `RowStream`
 - [ ] `introspect()` via `information_schema` → `PhysicalTable` (columns, types, PKs incl. composite, FKs)

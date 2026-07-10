@@ -2,6 +2,53 @@
 
 Changes in reverse chronological order.
 
+## MVP Phase 2
+
+- `DatabaseDriver` trait + `DbCapabilities` (Phase 2, `sc-db`): landed the
+  database-layer *contract* — the async trait one connected database implements,
+  plus every data type it exchanges with the rest of the system (technical
+  design §5). The concrete Postgres backend (connection/pooling, real
+  `introspect`, `apply_schema`, transactions) is deferred to the remaining
+  Phase 2 items in `sc-db-postgres`; this crate owns only the trait and its type
+  surface, keeping the layering clean. Five new modules. `driver.rs` defines
+  `DatabaseDriver: Send + Sync` (async via `async_trait`) with the six methods
+  from the design — `introspect() -> Vec<PhysicalTable>`, `query(&Statement) ->
+  RowStream`, `apply_schema(&SchemaChange)`, `begin() -> Box<dyn Transaction>`,
+  `capabilities()`, and `dialect() -> &dyn SqlDialect` — object-safe so the
+  catalog can hold it behind `Arc<dyn DatabaseDriver>` (§8). The `Transaction`
+  trait carries in-transaction `query`/`apply_schema` and consumes itself on
+  `commit`/`rollback` (`self: Box<Self>`) so a transaction is finalised exactly
+  once. `capabilities.rs` defines `DbCapabilities` (`row_level_security`,
+  `composite_pk`, `listen_notify`, `returning`) with a `none()` constructor so
+  adding a future flag never silently flips existing drivers to "supported"; the
+  authz layer (§7) and message bus (§16) branch on these rather than assuming a
+  Postgres feature set. `schema.rs` models both directions of schema work:
+  `PhysicalTable`/`Column`/`ForeignKey` as the *result* of introspection, and a
+  `SchemaChange` enum (`CreateTable`/`DropTable`/`AddColumn`/`DropColumn`, serde
+  tagged on `op`) with a `ColumnDef` builder as the *input* to `apply_schema`.
+  Two design invariants are encoded structurally: primary keys and FK column
+  lists are always `Vec<String>` (composite PKs and FKs to non-PK columns are
+  first-class, as the goals require), and `CreateTable` carries an explicit
+  (possibly empty) primary key so creating a table never invents an `id` column.
+  `row.rs` defines `Row` (named `Value`s addressable by name or index, sharing
+  one `Arc`'d column-name vector across a whole result set so streaming a large
+  set doesn't re-allocate the column list per row) and `RowStream`, an async
+  `futures::Stream` of `Result<Row>` that maps straight onto tokio-postgres row
+  streaming, with `from_rows`/`empty`/`try_collect` helpers. Added `futures` to
+  the workspace deps (only the lightweight `Stream` trait + combinators) and
+  `serde` derives on the schema descriptors so introspection output stays
+  inspectable/reconstructable by code adapters. Tests: an in-memory `MockDriver`
+  (+`MockTx`) implementing the full trait proves it is object-safe and usable
+  end to end — held as `Arc<dyn DatabaseDriver>`, it advertises capabilities,
+  starts with an empty introspect (no discovery step), applies a `CreateTable`
+  with a composite PK and no id column, reflects it in a later introspect,
+  streams named/positional rows out of `query`, renders a statement through
+  `dialect()`, and opens/commits a transaction; plus a row length-mismatch
+  rejection and a serde round-trip of `PhysicalTable`/`SchemaChange`. `cargo fmt
+  --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test -p sc-db`
+  (3 tests), and `cargo build --workspace` all pass. Completes the
+  `DatabaseDriver` trait and `DbCapabilities` items of Phase 2.
+
 ## MVP Phase 1
 
 - `SqlDialect` trait + rendering (Phase 1, `sc-query`): completed the query
