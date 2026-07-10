@@ -1,0 +1,12 @@
+[package]
+name = "sc-error"
+description = "Single Error enum and Result alias; no-silent-failure helpers (layer 0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+

@@ -1,0 +1,19 @@
+[package]
+name = "sc-server"
+description = "HTTP server: admin routes, auth, CSP (layer 9)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+sc-catalog.workspace = true
+sc-auth.workspace = true
+sc-files.workspace = true
+sc-app.workspace = true
+sc-api.workspace = true
+sc-db.workspace = true
+sc-db-postgres.workspace = true

@@ -1,0 +1,14 @@
+# Changelog
+
+Changes in reverse chronological order.
+
+## 2026-07-10
+
+- Created the Cargo workspace with the MVP crate skeletons (Phase 0). Root
+  `Cargo.toml` defines shared package metadata (`workspace.package`) and internal
+  path dependencies (`workspace.dependencies`) so the strict layering from the
+  technical design (§2) is expressed in the dependency graph. Member crates:
+  `sc-error`, `sc-query`, `sc-db`, `sc-db-postgres`, `sc-types`, `sc-catalog`,
+  `sc-auth`, `sc-files`, `sc-api`, `sc-app`, `sc-server` (libs) and `sc-cli`
+  (binary, built as `saltcorn`). Each crate is a compiling stub with a smoke test;
+  `cargo build --workspace` and `cargo test --workspace` pass.

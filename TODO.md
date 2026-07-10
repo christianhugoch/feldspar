@@ -17,7 +17,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 0 — Workspace & foundations
 
-- [ ] Create Cargo workspace (`Cargo.toml`) with the MVP crates
+- [x] Create Cargo workspace (`Cargo.toml`) with the MVP crates
 - [ ] `sc-error`: single `Error` enum + `Result<T>` alias; context helpers; lint against `unwrap()`/`expect()` in libs (clippy config)
 - [ ] Repo hygiene: `rustfmt.toml`, `clippy.toml`, CI skeleton (fmt + clippy + test), `.gitignore` for Rust/node
 - [ ] Decide async runtime (tokio) and pin core deps (serde, uuid, argon2, sqlx-or-tokio-postgres)

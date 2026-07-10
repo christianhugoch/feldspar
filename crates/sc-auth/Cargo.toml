@@ -1,0 +1,15 @@
+[package]
+name = "sc-auth"
+description = "User, Role, sessions, authentication (layer 5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+sc-catalog.workspace = true

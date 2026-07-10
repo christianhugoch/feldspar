@@ -1,0 +1,13 @@
+[package]
+name = "sc-types"
+description = "Type system: basic types, attributes, validation (layer 3)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+sc-query.workspace = true

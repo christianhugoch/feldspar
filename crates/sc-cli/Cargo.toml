@@ -1,0 +1,17 @@
+[package]
+name = "sc-cli"
+description = "The saltcorn binary: serve and management commands (layer 10)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "saltcorn"
+path = "src/main.rs"
+
+[dependencies]
+sc-error.workspace = true
+sc-server.workspace = true

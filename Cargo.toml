@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = [
+    # Layer 0 — foundations
+    "crates/sc-error",
+    # Layer 1 — query language
+    "crates/sc-query",
+    # Layer 2 — database
+    "crates/sc-db",
+    "crates/sc-db-postgres",
+    # Layer 3 — types
+    "crates/sc-types",
+    # Layer 4 — catalog
+    "crates/sc-catalog",
+    # Layer 5 — users/auth, files
+    "crates/sc-auth",
+    "crates/sc-files",
+    # Layer 8 — applications & API
+    "crates/sc-api",
+    "crates/sc-app",
+    # Layer 9 — server
+    "crates/sc-server",
+    # Layer 10 — CLI binary
+    "crates/sc-cli",
+]
+
+# Shared package metadata inherited by every member crate via `field.workspace = true`.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Saltcorn contributors"]
+repository = "https://github.com/saltcorn/saltcorn"
+rust-version = "1.85"
+
+# Internal crates are referenced by path so the strict layering in the technical
+# design (§2) is expressed directly in the dependency graph.
+[workspace.dependencies]
+sc-error = { path = "crates/sc-error" }
+sc-query = { path = "crates/sc-query" }
+sc-db = { path = "crates/sc-db" }
+sc-db-postgres = { path = "crates/sc-db-postgres" }
+sc-types = { path = "crates/sc-types" }
+sc-catalog = { path = "crates/sc-catalog" }
+sc-auth = { path = "crates/sc-auth" }
+sc-files = { path = "crates/sc-files" }
+sc-api = { path = "crates/sc-api" }
+sc-app = { path = "crates/sc-app" }
+sc-server = { path = "crates/sc-server" }
