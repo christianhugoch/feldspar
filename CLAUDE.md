@@ -12,8 +12,9 @@ Standard working mode:
 
 1. Pick the most recent unfinished item on the todo list. You can grep for [ ] and [~]
 2. Mark the item as in progess if it is not already do
-3. Implement the work, making changes to the repository code
-4. Write at least one test to assert that the changes work
-5. Describe what you did in the changelog
-6. Mark the item as complete
-7. Do not commit to git. A human will review the work and commit.
+3. Refer to the Technical design document (docs/TECHNICAL_DESIGN.md) if anything is not clear
+4. Implement the work, making changes to the repository code
+5. Write at least one test to assert that the changes work
+6. Describe what you did in the changelog
+7. Mark the item as complete
+8. Do not commit to git. A human will review the work and commit.
