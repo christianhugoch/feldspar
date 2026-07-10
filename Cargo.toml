@@ -90,6 +90,9 @@ tokio-postgres = { version = "0.7", features = [
     "with-serde_json-1",
 ] }
 deadpool-postgres = "0.14"
+# tokio-postgres re-exports `bytes` in its `ToSql`/`FromSql` signatures; pinned
+# here so the Postgres driver names the same version.
+bytes = "1"
 # Temporal + decimal backing for the `Value` enum (Date/Time/Timestamp/Decimal).
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["db-tokio-postgres"] }

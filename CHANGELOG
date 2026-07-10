@@ -4,6 +4,46 @@ Changes in reverse chronological order.
 
 ## MVP Phase 2
 
+- Postgres connection + pooling; run `Statement` → `RowStream` (Phase 2,
+  `sc-db-postgres`): landed `PgDriver`, the first working piece of the Postgres
+  backend (technical design §5). It wraps a `deadpool-postgres` pool
+  (`connect(url)` / `from_config(&Config)` / `from_pool(pool)`, `max_size(8)`,
+  fast recycling) and exposes `query(&Statement) -> Result<RowStream>`: render
+  the statement with `PgDialect`, check out a pooled connection, bind the ordered
+  literals, run it, and decode the result rows into `sc-db` `Row`s wrapped in a
+  `RowStream`. Any statement kind works — an INSERT/UPDATE/DELETE with
+  `RETURNING` yields its rows, without `RETURNING` yields an empty stream. Also
+  added `capabilities()` advertising Postgres's full basic set
+  (`row_level_security`/`composite_pk`/`listen_notify`/`returning`). Rows are
+  materialised into the stream for the MVP; the `RowStream` signature keeps a
+  later switch to server-side streaming invisible to callers. New `value.rs`
+  holds the wire-level `Value` ⇆ Postgres mapping (basic types only this
+  milestone): `PgParam(&Value)` implements tokio-postgres' `ToSql` by dispatching
+  each variant to the underlying type's own `to_sql_checked` (so a non-null bind
+  is type-checked against its column exactly as that Rust type would be), with
+  `Value::Null` short-circuiting to a *typeless* SQL `NULL` — unlike
+  `Option::<T>::None`, which only accepts one column type, so a NULL bind lands
+  correctly in a text/bool/etc. column. `decode()` reads a result column by its
+  Postgres `Type` (bool, int2/4/8, float4/8, text/varchar/bpchar/name, bytea,
+  uuid, json/jsonb, date, time, timestamp(tz), numeric) into the matching
+  `Value`, maps SQL `NULL` to `Value::Null`, and returns an explicit error for an
+  unmapped type rather than silently coercing. Pinned `bytes` in the workspace
+  (named only in the `ToSql` signatures) and pulled `uuid`/`chrono`/`rust_decimal`
+  /`serde_json` into the crate for the mapping. Test harness: added an optional,
+  backward-compatible `SC_TEST_TEMPLATE` env override to `sc-test-harness` so a
+  dev box whose `template1` has a glibc collation-version mismatch (which makes
+  `CREATE DATABASE` fail — the known local issue noted in Phase 0) can clone from
+  a database it owns; CI leaves it unset, so behaviour there is unchanged. New
+  integration test (`tests/query.rs`) drives the whole path against a real
+  Postgres via the harness: create a table, `INSERT … RETURNING` two rows
+  (including a NULL bind into a text column and both boolean values), `SELECT`
+  them back ordered and assert every decoded `Value` (int/text/bool/NULL), then
+  fire a parameterised `WHERE` carrying a `'; DROP TABLE item; --` payload and
+  confirm it matches no row **and** leaves the table intact — injection safety
+  proven end to end, not just in rendering. `cargo fmt --check`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, and `cargo test -p sc-db-postgres`
+  (7 unit + 1 integration) all pass, as do the harness's own 3 tests. Next Phase
+  2 items — `introspect`, `apply_schema`, transactions — build on this pool.
 - Postgres `SqlDialect` implementation (Phase 2, `sc-db-postgres`): added
   `PgDialect`, the concrete Postgres dialect that renders a `sc-query`
   `Statement` to `(sql, binds)` (technical design §4/§5). Because the

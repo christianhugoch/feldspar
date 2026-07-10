@@ -962,9 +962,18 @@ dependencies = [
 name = "sc-db-postgres"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "chrono",
+ "deadpool-postgres",
+ "rust_decimal",
  "sc-db",
  "sc-error",
  "sc-query",
+ "sc-test-harness",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]

@@ -12,6 +12,19 @@ rust-version.workspace = true
 sc-error.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
+tokio-postgres.workspace = true
+deadpool-postgres.workspace = true
+# Backing types for the wire-level `Value` ⇆ Postgres mapping.
+uuid.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+serde_json.workspace = true
+# Named only in the `ToSql` method signatures the param wrapper implements.
+bytes.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+sc-test-harness.workspace = true
 
 [lints]
 workspace = true
