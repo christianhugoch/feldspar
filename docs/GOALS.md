@@ -56,6 +56,7 @@ Workflows and triggers:
 - ensure that the workflow engine matches modern workflow engines for durability and error handling. Look at [DBOS](https://docs.dbos.dev/architecture), temporal ([1](https://medium.com/data-science-collective/system-design-series-a-step-by-step-breakdown-of-temporals-internal-architecture-52340cc36f30), [2](https://docs.temporal.io/evaluate/understanding-temporal)) and [restate](https://www.restate.dev/blog/building-a-modern-durable-execution-engine-from-first-principles)
 - workflow execution code is a mess in saltcorn v1. This needs to be much cleaner.
 - The number of built-in workflow actions should be minimal
+- explicit guarantees about execution: Each step runs in a transaction. Each step is run at least once: if the workflow engine crashes during execution, it will resume  the step it was running. Error handling settings per workflow, acan be overridden per step: A designated error handling step or explicit retries up to a set limit with a configurable backoff policy. 
 
 API:
 
@@ -76,6 +77,7 @@ Admin UI:
 - to comply with CSP we need a new html generating model that can split out onclick etc handlers into a script file. And also XSS needs to be built in, so html tags need to be represented symbolically with raw string values escaped. Client JS must be extractable without applying a value, so the component cannot be a functions. All of the extracted JS will be bundled 
 - we will need to recreate a dynamic form framework. Again the client js for this in saltcorn got messy as it grew. Form framework needs to cover conditional fields (field shown depending on value of other fields), repeated forms (like orderlines on an order), selects where options are populated dynamically (from the server, or from client code) depending on other form values, dynamic attributes or contents depending on other form values, form validation
 - This needs to be implemented in react due to high availability of underlying libraries i.e. craft and react-flow. There are also components for file managers.
+- use Bootstrap 5.3 as the CSS framework with React. (react-bootstrap)
 
 Agents and Copilot:
 
@@ -176,7 +178,7 @@ Tables and fields : all tables and fields work out of the box when a database dr
 
 Triggers, agents and workflows: Stored in the `_sc_triggers` table. Workflows must be versioned so a suspended run can finish with its version of the workflow.
 
-Workflow and agent runs: stored in the `_sc_runs` table. 
+Workflow and agent runs: stored in the `_sc_runs` table which stored the current context and state (updated after each step). When enabled for a specific workflow, runs can write the centext and timing of each step to the `_sc_run_traces` table. 
 
 Configuration: stored in a `_sc_config` table. Configurations can apply to the setup as a whole or each application, and specific frameworks will have different configuration values. for each permissible key, there must be a restriction on the types of values this can take, but all values are stored as JSON values.
 
@@ -229,7 +231,5 @@ this is MVP - the system is now useful.
 
 - can you mix react and saltcorn1 applications?
 - how are we creating emails. 
-- workflow durability features
 - auth features beyond device recognition
 - javascript or CEL for table auth formulae
-- are we using bootstrap for web admin UI
