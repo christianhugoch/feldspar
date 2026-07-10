@@ -831,9 +831,15 @@ pub trait CodeAdapter: Send + Sync {
 ## 16. Cross-cutting concerns
 
 **Error handling (principle 5).** `sc-error` defines one `Error` enum and `Result<T>`.
-Library code MUST NOT `unwrap()`/`expect()` on fallible paths; errors carry context and
-either are handled or propagate to a crash with a clear message. No `Result` is silently
-discarded.
+The variants are coarse and location-based (`NotFound`, `Invalid`, `Config`, `Database`,
+`Query`, `Auth`, `File`, `Serde`, `Internal`, plus a `Context` variant that wraps a source),
+with a `Context` extension trait (`.context()` / `.with_context()`) on both `Result` and
+`Option` that preserves the underlying error as a `std::error::Error` source chain, and
+`bail!` / `ensure!` macros. Library code MUST NOT `unwrap()`/`expect()` on fallible paths;
+this is enforced mechanically — `[workspace.lints.clippy]` denies `unwrap_used`/`expect_used`,
+each crate opts in via `[lints] workspace = true`, and `clippy.toml` exempts test code.
+Errors carry context and either are handled or propagate to a crash with a clear message. No
+`Result` is silently discarded.
 
 **Message bus.** One `BusDriver` trait, several drivers: in-process (single node),
 Postgres LISTEN/NOTIFY (simple, reuses the primary DB), and redis/kafka (scale-out). The bus
@@ -846,6 +852,23 @@ initialising the catalog against existing tables, row CRUD, user create/login/lo
 
 **Target platforms.** Linux, macOS, Windows, FreeBSD — constrains dependency choices,
 especially the cross-platform xattr library and the native code adapters.
+
+**Runtime and core dependencies.** The workspace is a single Cargo workspace on Rust
+**edition 2024** with an MSRV of **1.85**. The async runtime is **tokio** (multi-threaded);
+every async trait in this document is expressed with `async_trait` over it, and the
+`saltcorn` binary's entry point is `#[tokio::main]`. The MVP Postgres driver is
+**tokio-postgres** with **deadpool-postgres** for pooling — deliberately **not sqlx**:
+`sc-query` already renders a `Statement` into `(sql, binds)` (§3), so sqlx's compile-time
+query macros would add no value, whereas tokio-postgres offers native `$n` parameter binding
+and row streaming that map directly onto the `RowStream` returned by `DatabaseDriver::query`
+(§4). Core third-party dependencies are pinned once in the root `[workspace.dependencies]`
+and inherited by member crates (`dep.workspace = true`): `tokio`, `async-trait`,
+`serde`/`serde_json`, `uuid`, `argon2` (argon2id password hashing; pinned to the stable 0.5
+line), `tokio-postgres` (with the `uuid`/`chrono`/`serde_json` `ToSql`/`FromSql` features),
+`deadpool-postgres`, and `chrono`/`rust_decimal` (temporal and decimal backing for the
+`Value` enum). This keeps versions coherent and the dependency graph minimal and acyclic
+(principle 7). Formatting and linting are gated in CI (`cargo fmt --check`, `cargo clippy
+--all-targets -D warnings`); tests run against a real Postgres.
 
 **Security posture.** Strict CSP everywhere; structural XSS safety in `sc-markup`;
 structural SQL-injection safety in `sc-query`; per-CRUD authorization enforced at the query
