@@ -12,10 +12,12 @@
 //! - [`Statement`] ([`Select`]/[`Insert`]/[`Update`]/[`Delete`]) — the
 //!   top-level query AST.
 
+mod dialect;
 mod expr;
 mod statement;
 mod value;
 
+pub use dialect::SqlDialect;
 pub use expr::{BinOp, CaseArm, ColRef, Expr, InSet, JsonStep, UnOp};
 pub use statement::{
     Assignment, Delete, Insert, Join, JoinKind, Nulls, OrderBy, OrderDir, Projection, Select,

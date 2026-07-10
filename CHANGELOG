@@ -2,8 +2,33 @@
 
 Changes in reverse chronological order.
 
-## 2026-07-10
+## MVP Phase 1
 
+- `SqlDialect` trait + rendering (Phase 1, `sc-query`): completed the query
+  layer with the trait that turns a `Statement` into `(sql, binds)` (technical
+  design §4). Per the design, rendering is a trait so each dialect owns only the
+  bits that actually differ — identifier quoting and bind-placeholder syntax —
+  exposed as two required hooks (`quote_ident`, `placeholder`); everything else
+  (clause order, operator spelling, `RETURNING`/`CASE`/`IN`/JSON structure) is a
+  shared default `render` implementation walking the AST via a private
+  `Renderer`. Kept the concrete Postgres dialect out of this crate (that's Phase
+  2 / `sc-db-postgres`); the trait and shared walk live in `sc-query`, with a
+  test-only `TestDialect` (double-quoted idents, `$n` placeholders) exercising
+  it. The cardinal invariant is enforced structurally: the **only** path a
+  `Value` takes into the SQL string is through `Renderer::bind`, which appends to
+  the bind vector and emits a placeholder — so literals can never be
+  interpolated. JSON path steps are parameterised too (`data -> $1 -> $2` with
+  the field name/index as binds), so even a field name can't break out into SQL;
+  and `LIMIT`/`OFFSET` render as binds. `render` validates and returns
+  `Error::query` for degenerate statements (empty projection, no INSERT
+  columns/rows, an INSERT row whose arity doesn't match its columns, empty
+  UPDATE assignments). Six unit tests cover each statement kind (joined/filtered/
+  ordered `Select` with `LIMIT`/`OFFSET`, multi-row `INSERT … RETURNING`,
+  `UPDATE`/`DELETE`), the JSON/`IN`/`CASE` shapes, a SQL-injection payload that
+  stays a single bind and never appears in the SQL text, and the empty-projection
+  error path. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  and `cargo test -p sc-query` (17 tests) all pass; `cargo build --workspace` is
+  green. Phase 1 (`sc-query`) is now complete.
 - `Statement` AST + `Expr` (Phase 1, `sc-query`): landed the enum-based query
   AST that `Value` feeds into (technical design §4). Two new modules. `expr.rs`
   defines `Expr` with the nine MVP variants — `Col(ColRef)`, `Lit(Value)`
@@ -52,6 +77,9 @@ Changes in reverse chronological order.
   mapping, accessors, the stable serde tag shape, and JSON round-trips of every
   rich variant (uuid/date/time/timestamp/decimal). `cargo fmt --check` and
   `cargo clippy --all-targets -- -D warnings` both pass clean on the crate.
+
+## MVP Phase 0
+
 - Integration-test harness (Phase 0): added a shared helper crate
   `sc-test-harness` under `tests/harness` (workspace member, `publish = false`)
   implementing the "real Postgres, reset per test" strategy from the technical
