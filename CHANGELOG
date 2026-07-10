@@ -4,6 +4,32 @@ Changes in reverse chronological order.
 
 ## MVP Phase 2
 
+- `apply_schema`: create/drop table, add/drop column (Phase 2,
+  `sc-db-postgres`): added `PgDriver::apply_schema`, which renders one
+  `SchemaChange` to a single Postgres DDL statement and runs it over the
+  simple-query protocol (technical design §5). New `ddl.rs` does the rendering:
+  table and column *names* are quoted through `PgDialect`, while a `ColumnDef`'s
+  `sql_type` and `default` are treated as structural SQL fragments from trusted
+  schema definitions (`int8`, `varchar(255)`, `now()`, …) and pass through
+  verbatim — DDL cannot be parameterised in any case. The goals' cardinal rule
+  is honoured by omission: `CreateTable` emits **exactly** the columns given and
+  **never** invents an `id` column; a primary key is declared only when asked
+  for and may be composite (`PRIMARY KEY ("a", "b")`). A column renders as
+  `"name" type [NOT NULL] [DEFAULT …] [UNIQUE]`; `DropTable`/`DropColumn` honour
+  `if_exists`. Rendering validates that every primary-key column is one of the
+  declared columns, returning `Error::invalid` before Postgres would. Wired as
+  an inherent `async fn apply_schema(&self)` on `PgDriver`. Five unit tests
+  cover the rendered SQL for each variant (composite-PK create asserting no
+  `"id"` leaks in, column default, PK-column-not-declared rejection, drop
+  table/column with and without `if_exists`); a new integration test
+  (`tests/apply_schema.rs`) drives the whole lifecycle against real Postgres and
+  verifies each step by introspecting — create a table with a composite PK and
+  confirm the columns are exactly those declared (no invented `id`) with correct
+  order/nullability/PK, `AddColumn` with a default, `DropColumn`, then
+  `DropTable` — and checks that dropping a missing column/table errors without
+  `if_exists` and succeeds with it. `cargo fmt --check`, `cargo clippy -p
+  sc-db-postgres --all-targets -- -D warnings`, and `cargo test -p
+  sc-db-postgres` (12 unit + 3 integration) all pass.
 - `introspect()` → `PhysicalTable` (Phase 2, `sc-db-postgres`): added
   `PgDriver::introspect`, which reads the connected database's live schema into
   `sc-db` `PhysicalTable`s (technical design §5). Per the goals there is **no

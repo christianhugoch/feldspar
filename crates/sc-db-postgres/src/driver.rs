@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
-use sc_db::{DbCapabilities, PhysicalTable, Row, RowStream};
+use sc_db::{DbCapabilities, PhysicalTable, Row, RowStream, SchemaChange};
 use sc_error::{Error, Result};
 use sc_query::{SqlDialect, Statement};
 use tokio_postgres::types::ToSql;
@@ -84,6 +84,20 @@ impl PgDriver {
     pub async fn introspect(&self) -> Result<Vec<PhysicalTable>> {
         let client = self.client().await?;
         crate::introspect::introspect(&client).await
+    }
+
+    /// Apply a single schema change (create/drop table, add/drop column) by
+    /// rendering it to Postgres DDL and executing it. Creating a table emits
+    /// exactly the columns given — no `id` column is invented (see [`crate::ddl`]).
+    pub async fn apply_schema(&self, change: &SchemaChange) -> Result<()> {
+        let sql = crate::ddl::render(&self.dialect, change)?;
+        let client = self.client().await?;
+        // DDL is issued over the simple-query protocol (no binds).
+        client
+            .batch_execute(&sql)
+            .await
+            .map_err(|e| Error::database(format!("apply_schema failed: {e}")))?;
+        Ok(())
     }
 
     /// Check out a pooled connection.

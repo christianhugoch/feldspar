@@ -11,6 +11,7 @@
 //! Introspection, schema application, and transactions (and the full
 //! `DatabaseDriver` trait impl) land in the following Phase 2 items.
 
+mod ddl;
 mod dialect;
 mod driver;
 mod introspect;
