@@ -4,6 +4,37 @@ Changes in reverse chronological order.
 
 ## MVP Phase 2
 
+- `introspect()` → `PhysicalTable` (Phase 2, `sc-db-postgres`): added
+  `PgDriver::introspect`, which reads the connected database's live schema into
+  `sc-db` `PhysicalTable`s (technical design §5). Per the goals there is **no
+  discovery/registration step** — every user base table reachable through the
+  connection is returned. New `introspect.rs` runs four parameterless catalog
+  queries on a pooled connection and collates them by `(schema, table)`: the
+  table list and the columns come from `information_schema` (using `udt_name`
+  for the backend's own type name — `int8`/`text`/`timestamptz`/`bool` — so it
+  round-trips with what `apply_schema` will emit, plus `is_nullable` and
+  `column_default`); the primary keys and foreign keys come from `pg_catalog`
+  instead, because the goals require **composite primary keys** and **foreign
+  keys to non-primary-key columns**, and only the catalog's `conkey`/`confkey`
+  attribute-number arrays give the key columns in the correct order (the
+  `information_schema` constraint views lose that ordering). `unnest(…) WITH
+  ORDINALITY` preserves per-key column order, and the multi-array
+  `unnest(conkey, confkey)` form pairs each local FK column with the referenced
+  column it points at. System schemas (`pg_catalog`, `information_schema`) are
+  excluded. Wired as an inherent `async fn introspect(&self)` on `PgDriver`
+  (the full `DatabaseDriver` trait impl still follows once transactions land).
+  Integration test (`tests/introspect.rs`) creates `sc_it_org` (single-column PK
+  + a UNIQUE non-key `code`) and `sc_it_member` (composite PK `(org, user_id)`,
+  a `bool NOT NULL DEFAULT true` column, and two FKs — one to the PK, one to the
+  non-PK `code`), then asserts the introspected columns/types/nullability, the
+  captured default, the ordered composite PK, and both foreign keys (looked up
+  by local column so ordering is irrelevant) — including the FK that targets a
+  non-primary-key column. The test asserts on its own distinctively named tables
+  rather than the exact table set, so it holds regardless of what else the
+  database contains (which is exactly the "no discovery step" property).
+  `cargo fmt --check`, `cargo clippy -p sc-db-postgres --all-targets -- -D
+  warnings`, and `cargo test -p sc-db-postgres` (7 unit + 2 integration) all
+  pass.
 - Postgres connection + pooling; run `Statement` → `RowStream` (Phase 2,
   `sc-db-postgres`): landed `PgDriver`, the first working piece of the Postgres
   backend (technical design §5). It wraps a `deadpool-postgres` pool

@@ -13,6 +13,7 @@
 
 mod dialect;
 mod driver;
+mod introspect;
 mod value;
 
 pub use dialect::PgDialect;

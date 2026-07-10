@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
-use sc_db::{DbCapabilities, Row, RowStream};
+use sc_db::{DbCapabilities, PhysicalTable, Row, RowStream};
 use sc_error::{Error, Result};
 use sc_query::{SqlDialect, Statement};
 use tokio_postgres::types::ToSql;
@@ -77,6 +77,13 @@ impl PgDriver {
             listen_notify: true,
             returning: true,
         }
+    }
+
+    /// Read the live schema of every user table reachable through the
+    /// connection (there is no discovery step — see [`crate::introspect`]).
+    pub async fn introspect(&self) -> Result<Vec<PhysicalTable>> {
+        let client = self.client().await?;
+        crate::introspect::introspect(&client).await
     }
 
     /// Check out a pooled connection.
