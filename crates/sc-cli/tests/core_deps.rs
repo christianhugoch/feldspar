@@ -8,6 +8,11 @@
 //!     multi-threaded runtime end to end. If the runtime decision regressed
 //!     (e.g. tokio dropped), this test would not compile.
 
+// This whole file is test code, so `expect()`/`unwrap()` are appropriate. The
+// `allow-expect-in-tests` clippy config only exempts calls inside `#[test]`
+// functions; the free helpers below are not, so opt the module out explicitly.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
