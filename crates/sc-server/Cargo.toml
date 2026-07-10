@@ -17,3 +17,6 @@ sc-app.workspace = true
 sc-api.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
+
+[lints]
+workspace = true

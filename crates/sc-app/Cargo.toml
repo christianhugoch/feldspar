@@ -13,3 +13,6 @@ sc-error.workspace = true
 sc-catalog.workspace = true
 sc-files.workspace = true
 sc-api.workspace = true
+
+[lints]
+workspace = true

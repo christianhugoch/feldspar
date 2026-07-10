@@ -1,0 +1,8 @@
+# Clippy configuration for the Saltcorn v2 workspace.
+#
+# The `unwrap_used` / `expect_used` lints are denied workspace-wide (see the
+# `[workspace.lints.clippy]` table in the root Cargo.toml) to enforce principle 5
+# — no silent failures — in library code. Tests may still use `unwrap()` /
+# `expect()` freely, so exempt them here.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

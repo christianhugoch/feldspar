@@ -47,3 +47,12 @@ sc-files = { path = "crates/sc-files" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-server = { path = "crates/sc-server" }
+
+# Workspace-wide lints. Principle 5 (no silent failures): library code must not
+# `unwrap()`/`expect()` on fallible paths — return a `sc-error::Result` instead.
+# Member crates opt in with `[lints]` + `workspace = true`. Test code is exempted
+# via `clippy.toml` (`allow-unwrap-in-tests` / `allow-expect-in-tests`). These
+# lints fire under `cargo clippy`, not `cargo build`/`cargo test`.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

@@ -13,3 +13,6 @@ sc-error.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
 sc-catalog.workspace = true
+
+[lints]
+workspace = true

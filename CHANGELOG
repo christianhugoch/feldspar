@@ -4,6 +4,17 @@ Changes in reverse chronological order.
 
 ## 2026-07-10
 
+- Implemented `sc-error` (Phase 0, layer 0): a single `Error` enum with coarse,
+  location-based variants (`NotFound`, `Invalid`, `Config`, `Database`, `Query`,
+  `Auth`, `File`, `Serde`, `Internal`, and a `Context` variant that preserves a
+  wrapped source), a `Result<T, E = Error>` alias, and per-variant constructors.
+  Added a `Context` extension trait (`.context()` / `.with_context()`) for both
+  `Result` and `Option` that keeps the underlying error as a `std::error::Error`
+  source chain, plus `bail!` / `ensure!` macros and a `From<std::io::Error>`
+  conversion. Enforced principle 5 mechanically: `[workspace.lints.clippy]` denies
+  `unwrap_used`/`expect_used`, each member crate opts in via `[lints] workspace =
+  true`, and `clippy.toml` exempts test code. Unit + doc tests cover the source
+  chain, lazy `with_context`, macros, and `Send + Sync`.
 - Created the Cargo workspace with the MVP crate skeletons (Phase 0). Root
   `Cargo.toml` defines shared package metadata (`workspace.package`) and internal
   path dependencies (`workspace.dependencies`) so the strict layering from the
