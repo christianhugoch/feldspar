@@ -4,6 +4,18 @@ Changes in reverse chronological order.
 
 ## 2026-07-10
 
+- Repo hygiene (Phase 0): added `rustfmt.toml` (stable-only options, edition
+  pinned to 2024, `max_width = 100`, Unix newlines) so `cargo fmt --check` on a
+  stable toolchain matches the workspace. Added a GitHub Actions CI skeleton
+  (`.github/workflows/ci.yml`) with three jobs — `fmt` (`cargo fmt --check`),
+  `clippy` (`cargo clippy --all-targets -D warnings`), and `test` (`cargo test`
+  against a real Postgres 16 service, ready for the integration harness) — with
+  build caching and superseded-run cancellation. Extended `.gitignore` to cover
+  Node/frontend artifacts (`node_modules/`, `dist/`, `build/`, bundler debug
+  logs, `.env*`, `.DS_Store`) for the React apps served by `sc-server`. Added a
+  `repo_hygiene` integration test in `sc-cli` that walks up to the workspace
+  root and asserts these artifacts exist and declare their required gates
+  (`clippy.toml` was already present from the `sc-error` work).
 - Implemented `sc-error` (Phase 0, layer 0): a single `Error` enum with coarse,
   location-based variants (`NotFound`, `Invalid`, `Config`, `Database`, `Query`,
   `Auth`, `File`, `Serde`, `Internal`, and a `Context` variant that preserves a

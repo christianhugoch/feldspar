@@ -1,0 +1,10 @@
+# Rustfmt configuration for the Saltcorn v2 workspace.
+#
+# Only stable options are used so `cargo fmt` (and the CI `--check` gate) works
+# on a stable toolchain without requiring nightly.
+edition = "2024"
+max_width = 100
+newline_style = "Unix"
+reorder_imports = true
+reorder_modules = true
+use_field_init_shorthand = true
