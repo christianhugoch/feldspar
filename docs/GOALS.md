@@ -32,6 +32,7 @@ General:
 - polyglot. Everything can be written in many different languages. JavaScript, Rust, Python, Java, C#, Go. Plugin mechanisms need to be defined for each of those. Initial focus is on Javascript and Rust
 - multiple applications for a single data layer. Each application can have access to a subset of tables, file stores etc.
 - message bus which is backed by a message bus driver, with an option to use postgres LISTEN/NOTIFY for a simple bus backed by the exisitng database (and another option built in, using a rust library such as apalis or zeromq) and other drivers for Redis, Kafka etc for scalability. real time chat, real time collaboration, cache updates flow over the bus
+- full restart should never be required. Only individual apis and applications may need restart
 
 Auth:
 
