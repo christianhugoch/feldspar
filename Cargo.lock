@@ -1008,6 +1008,7 @@ name = "sc-auth"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "chrono",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",

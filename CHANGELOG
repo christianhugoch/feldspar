@@ -4,6 +4,34 @@ Changes in reverse chronological order.
 
 ## MVP Phase 5
 
+- Login/logout auth + session logic (Phase 5, `sc-auth`): delivered the
+  credential and session substance behind login/logout (technical design §7.2).
+  The HTTP session **cookie** and **auth middleware** themselves live in the
+  server and are wired in Phase 6 (`sc-server`, which does not exist yet); they
+  build directly on the pieces added here.
+  - `password::verify_password` completes the argon2id primitive: it verifies a
+    plaintext against a stored PHC hash, returning `Ok(false)` for the ordinary
+    wrong-password case and reserving `Err` for a genuinely broken stored hash.
+    This finishes the "Password hashing (argon2id) + verification" TODO item too
+    (the hash side shipped with create-first-user).
+  - `authenticate(catalog, email, password)` looks a user up by email
+    (`SELECT *`, so the returned `User` carries every admin column) and checks
+    the password. Returns `Ok(None)` for every ordinary failure — unknown email,
+    no stored password, wrong password — and `Err` only on infrastructure faults.
+    It applies no role gate (the admin-UI gate is a separate later item).
+  - `session` module: an in-memory `SessionStore` (single-process MVP; an
+    `RwLock<HashMap>` keyed by an opaque 256-bit token from two v4 UUIDs).
+    `login(user)` mints a token with a TTL (`with_ttl`; `DEFAULT_TTL_HOURS` = 24,
+    the `Default`), `user_for(token)` returns the snapshotted user when the token
+    is known and unexpired (purging expired tokens lazily), `logout(token)` ends
+    a session, and `sweep_expired()` is optional housekeeping.
+  - Tests: added unit tests for `verify_password` (right/wrong/empty password;
+    broken-hash error) and the `SessionStore` (login→resolve, unknown token,
+    logout, expiry via zero TTL, token distinctness), plus one integration test
+    against real Postgres walking login → session → logout: wrong/unknown
+    credentials rejected, correct login authenticates to the created admin, its
+    token resolves back to the user, and logout invalidates it.
+
 - Create-first-user flow (Phase 5, `sc-auth`): added the logic behind the
   "create first user" screen (technical design §7; GOALS acceptance story) in a
   new `first_user` module, plus the argon2id password-hashing primitive it

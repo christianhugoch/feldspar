@@ -15,6 +15,7 @@ sc-db.workspace = true
 sc-catalog.workspace = true
 sc-types.workspace = true
 argon2.workspace = true
+chrono.workspace = true
 serde.workspace = true
 uuid.workspace = true
 
