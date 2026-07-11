@@ -5,11 +5,13 @@ Ordered, checkable task list for the MVP milestone. Scope and rationale are in
 
 **MVP definition of done:** a single Postgres database, connected as both primary and only
 data store. An admin can create the first user, log in/out, create tables and fields, edit
-rows, and manage users. A file store can be connected with a basic file manager. One React
-app (no DB access, living in a git-repo file store, with a build step) is served entirely
-from the Saltcorn process and authenticates against the API. Everything else is web 1.0
-(server-rendered HTML, minimal client JS). All of it is covered by integration tests against
-a real Postgres reinitialised per test.
+rows, and manage users — through a **React + TypeScript admin SPA** (`ui/admin`) served by the
+Saltcorn process over a **typed JSON API**. A file store can be connected with a basic file
+manager. One React app (no DB access, living in a git-repo file store, with a build step) is
+served entirely from the Saltcorn process and authenticates against the API. The admin API is
+a set of **typed endpoint values that also generate a TypeScript consumer client** — no
+server-rendered admin HTML (the earlier web-1.0 / `sc-markup` plan is dropped). All of it is
+covered by integration tests against a real Postgres reinitialised per test.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -68,16 +70,44 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] Role gate: admin-only login for the admin UI (per MVP)
 - [x] Integration tests: create-first-user, login success/failure, logout, session expiry
 
-## Phase 6 — Server: admin UI, web 1.0 (`sc-server`)
+## Phase 6 — Server: typed API + React admin SPA (`sc-server`, `sc-api`, `ui/admin`)
+
+Reflects the GOALS pivot (design §12–§13): the admin UI is a React + TypeScript SPA over a
+**typed JSON API**, not server-rendered "web 1.0" HTML. The endpoint model and TypeScript
+consumer generation live in `sc-api`; `sc-server` mounts it and serves the built `ui/admin`
+bundle.
+
+**Reconcile existing code with the pivot first:**
+
+- [ ] Do **not** create an `sc-markup` crate — it is dropped from the design (§12); remove it from any planning notes
+- [ ] Update `sc-types` `src/catchall.rs` doc comments: they describe a `FieldView` "symbolic markup tree" that is no longer planned (fieldviews are now React components, §6.3)
+- [ ] Confirm the `sc-server` / `sc-api` / `sc-app` stub crates (currently ~20-line placeholders) carry no server-HTML / `sc-markup` assumptions before building on them
+
+**Endpoint model & typed client (`sc-api`):**
+
+- [ ] `Endpoint` value (method, typed path/query params, `TypeSchema` input, `TypeSchema` output, `auth` requirement, handler ref) — design §13.1
+- [ ] `TypeSchema` enum sufficient to describe args/results and emit TS (Value types, struct, array, optional)
+- [ ] Register endpoints as runtime values (routes need not be known at compile time); admin API expressed as fixed `Endpoint` constants through the **same** machinery
+- [ ] TypeScript generator: emit type declarations + a typed API-consumer client from the `Endpoint` set
+- [ ] Tests: generated TS type-checks against the declared endpoints
+
+**Server (`sc-server`):**
 
 - [ ] HTTP server bootstrap (axum/actix); config from CLI; graceful shutdown
-- [ ] Session + CSRF middleware; strict-ish CSP headers
-- [ ] Server-rendered HTML for admin (minimal markup helper; full `sc-markup` symbolic tree is post-MVP)
-- [ ] Routes: first-user, login, logout
-- [ ] Routes: list tables, create table, show table's fields, create field
-- [ ] Routes: edit rows (list / create / edit / delete a row in a table)
-- [ ] Routes: list users, create user
-- [ ] Integration tests: drive each route end-to-end against a real DB
+- [ ] Mount the `sc-api` endpoint set as JSON routes; auth enforced per `Endpoint.auth`
+- [ ] Session + CSRF handling for the SPA; strict CSP headers (no `unsafe-inline`; bundle-only)
+- [ ] Serve the built `ui/admin` bundle + a minimal bootstrap document (no server-rendered admin HTML)
+- [ ] API endpoints: first-user, login, logout
+- [ ] API endpoints: list tables, create table, list a table's fields, create field
+- [ ] API endpoints: rows CRUD (list / create / edit / delete a row in a table)
+- [ ] API endpoints: list users, create user
+- [ ] Integration tests: drive each endpoint end-to-end against a real DB
+
+**Admin SPA (`ui/admin`):**
+
+- [ ] Scaffold React + TypeScript + react-bootstrap SPA consuming the generated typed client
+- [ ] Screens: create-first-user, login/logout, tables list, table fields, row editor, users
+- [ ] Wire the `ui/admin` build into the server build so the bundle is served by `sc-server`
 
 ## Phase 7 — Files (`sc-files`)
 
@@ -93,7 +123,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [ ] `Application` model (name, subdomain, framework, tables subset, file stores, apis, csp)
 - [ ] `Framework` trait; code-framework implementation that serves bundled static assets
 - [ ] React app lives in a git-repo file store; **build step** wired (invoke bundler, output served by `sc-server`)
-- [ ] `ApiProvider` trait; minimal REST provider (the app's data/auth surface for MVP)
+- [ ] `ApiProvider` trait; minimal REST provider projecting the app's `Endpoint` set (design §13.1/§13.4) — tables + actions + custom code/SQL routes (custom routes MAY be stubbed for MVP)
+- [ ] Generate the app's TypeScript API-consumer client from its `Endpoint` set (same machinery as the admin API in Phase 6)
 - [ ] API auth: React app authenticates against `sc-auth` (token/session); authz honored
 - [ ] Serve the built React app from the Saltcorn process (no direct DB access from the app)
 - [ ] Integration tests: build serves assets; API auth round-trip; unauthorized request rejected
@@ -120,7 +151,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 Tracked so they aren't accidentally pulled in early:
 
 - Multiple / non-primary databases
-- Rich types & full `FieldView` trait; symbolic CSP markup tree (`sc-markup`) + JS extraction
+- Rich types & full `FieldView` trait (React-component fieldviews) — basic types only for MVP
 - Stored `_sc_tables` / `_sc_fields` overlay metadata
 - Workflows & durable engine (`sc-workflow`), triggers, actions registry
 - Agents / skills / copilot (`sc-agent`, `sc-copilot`)
@@ -130,3 +161,8 @@ Tracked so they aren't accidentally pulled in early:
 - GraphQL / gRPC / tRPC / MCP API providers (REST only for MVP)
 - Code adapters / polyglot plugins (`sc-code`)
 - OAuth2 IdP, device recognition, RLS-based authz
+
+**Dropped from the design entirely (not merely deferred):** the `sc-markup` symbolic-HTML /
+CSP tree + JS-extraction crate. The admin UI is a React + TypeScript SPA and CSP is satisfied
+structurally by the bundle; there is no server-side symbolic-HTML model. How Saltcorn-v1 views
+render CSP-safe HTML post-MVP is an open design question (design §18.5).

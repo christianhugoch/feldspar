@@ -2,6 +2,28 @@
 
 Changes in reverse chronological order.
 
+## Design
+
+- Design docs updated to follow a GOALS.md revision (`docs/GOALS.md`, uncommitted
+  at the time): the admin UI pivots from server-rendered "web 1.0" HTML to a
+  **React + TypeScript SPA over a typed JSON API**, and the planned `sc-markup`
+  symbolic-HTML / CSP-tree + JS-extraction crate is **dropped entirely**. New
+  requirements captured: APIs expose tables, actions, and custom code/SQL routes
+  per permissions, and **all APIs generate TypeScript type declarations / a typed
+  consumer library** (admin UI and per-app APIs alike). Added an "HTTP server
+  framework" concept — endpoints reified as **Rust values** (`Endpoint` /
+  `TypeSchema`) with typed args/results, supporting runtime-registered dynamic
+  routes while the compile-time-known admin API reuses the same machinery.
+  - `docs/TECHNICAL_DESIGN.md`: removed `sc-markup` from the crate list; rewrote
+    §6.3 (fieldviews are React components), §12 (admin SPA + CSP-via-React +
+    form-runtime), and §13 (new §13.1 endpoint model + typed API generation,
+    renumbered subsections); updated §2, §4, §16, §17, and added open question
+    §18.5 (how v1 views render CSP-safe HTML without `sc-markup`).
+  - `TODO.md`: reworked Phase 6 into "typed API + React admin SPA" (with a
+    reconcile-existing-code checklist at its start), extended Phase 8's API
+    provider tasks (custom routes + TS consumer generation), and updated the MVP
+    definition of done and the out-of-scope list.
+
 ## MVP Phase 5
 
 - Phase 5 integration-test rollup (`sc-auth`): added `tests/auth_flow.rs`, a

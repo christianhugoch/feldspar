@@ -64,7 +64,9 @@ API:
 - high-quality API for applications. Look at Hasura, postgrest, supabase api for this
 - enable REST, GraphQL, gRPC, tRPC, and MCP APIs per-application
 - each of these run by an API Provider
-- the API is enabled as part of an application (see below) 
+- the API is enabled as part of an application (see below)
+- The API should offer access to tables and actions per permissions settings and also custom routes using user-written code (in a supported language) and SQL queries.
+- all APIs should generate information and typescript type declarations (or a typed API-consumer library). This is the case both for the admin UI and APIs enabled per application. 
 
 
 Admin UI:
@@ -74,11 +76,11 @@ Admin UI:
 - enable strict content security policy
 - much better file manager.
 - builder is not built in to the admin ui. This comes with the saltcorn1 views. but the builder 
-- much improved table editor. bring in as much functionality from airtable's admin ui as possible. this needs to be 
-- to comply with CSP we need a new html generating model that can split out onclick etc handlers into a script file. And also XSS needs to be built in, so html tags need to be represented symbolically with raw string values escaped. Client JS must be extractable without applying a value, so the component cannot be a functions. All of the extracted JS will be bundled 
+- much improved table editor. bring in as much functionality from airtable's admin ui as possible. 
 - we will need to recreate a dynamic form framework. Again the client js for this in saltcorn got messy as it grew. Form framework needs to cover conditional fields (field shown depending on value of other fields), repeated forms (like orderlines on an order), selects where options are populated dynamically (from the server, or from client code) depending on other form values, dynamic attributes or contents depending on other form values, form validation
 - This needs to be implemented in react due to high availability of underlying libraries i.e. craft and react-flow. There are also components for file managers.
 - use Bootstrap 5.3 as the CSS framework with React. (react-bootstrap)
+- Use TypeScript for the React code. Interactions with the Admin UI API must go through a typed Typescript library consumer.
 
 Agents and Copilot:
 
@@ -191,6 +193,13 @@ Users: users are stored in a database table called `users` in the primary databa
 
 Migrations: Similar to Saltcorn1. Migration is an array of Postgresql SQL valus. Databse drivers must be able to translate to their own SQL dialect. Howver, do not start changing the table definitions with migrations until we are much more stable - until then change the initial setup.
 
+### HTTP server framework
+
+- must be dynamic enough to add routes that are not known at compile time. So not everything can be statically typed. 
+- must be able to generate TypeScript typed API consumer libraries 
+- The Admin UI API is known at compile time. But in order to maximise code reusability make it fixed-values for the dynamic API route definition and use the same machinery to generate a typescript API consumer.
+- So we need a representation of API endpoints as a rust value, with a resentation of the types for arguments and result values
+
 ## Milestones
 
 ### MVP
@@ -215,14 +224,9 @@ CLI that can run server for admin UI
 
 The user can: when there is no user, login directs to "create first user" screen; create table, show list of fields in table, create fields, edit rows, create users. Users can login and log out
 
-Everything here is web 1.0. Generate HTML on the server, mininimal client JS
-
-
 Files: a file store can be connected. Basic file manager and ability to edit files
 
 an app can be built on react, completely served from Saltcorn process. the app has no connection to database. The app lives in a file store which is a git repository. there must be a build step 
-
-In the web admin UI everything is still web 1.0.
 
 api to serve the react app. authentication from react app.
 

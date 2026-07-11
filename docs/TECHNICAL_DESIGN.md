@@ -66,16 +66,17 @@ saltcorn/
 │  ├─ sc-workflow/               # 7. durable workflow engine (steps, runs, traces, recovery)
 │  ├─ sc-agent/                   # 7. Agent action + Skill trait + inference loop
 │  ├─ sc-model/                   # 7. ModelProvider trait, model instances, inference
-│  ├─ sc-markup/                  # 6. CSP-safe symbolic HTML tree + JS extraction
-│  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews
+│  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
 │  ├─ sc-viewpattern/             # 8. ViewPattern trait (v1-style views: Show/List/Edit/Filter…)
-│  ├─ sc-api/                     # 8. ApiProvider trait (REST, GraphQL, gRPC, tRPC, MCP)
+│  ├─ sc-api/                     # 8. Endpoint model (typed Rust values) + API providers
+│  │                              #    (REST/GraphQL/gRPC/tRPC/MCP) + TypeScript consumer gen
 │  ├─ sc-app/                     # 8. Application, Framework provider trait, routing/subdomains
 │  ├─ sc-copilot/                 # 9. copilot agent + AppConstructor stages
 │  ├─ sc-server/                  # 9. HTTP server: admin routes, user routes, auth, CSP, sockets
 │  └─ sc-cli/                     # 10. `saltcorn` binary (serve, user/app mgmt, backup/restore)
 ├─ ui/
-│  ├─ admin/                      # React + react-bootstrap admin SPA (table editor, file mgr)
+│  ├─ admin/                      # React + TypeScript + react-bootstrap admin SPA over the
+│  │                              #    generated typed API client (table editor, file mgr)
 │  ├─ builder/                    # React + Craft.js + react-flow drag-and-drop builder
 │  └─ form-runtime/               # React dynamic-form framework (conditional/repeated/dynamic)
 ├─ plugins/                       # first-party plugins (may be JS or Rust)
@@ -88,9 +89,10 @@ Notes:
   providers, types, fieldviews, actions, agents/skills, importers/exporters, model
   providers, view patterns, frameworks, API providers) MAY be implemented in Rust or in a
   guest language via `sc-code`.
-- The React apps under `ui/` are built to static bundles and **served by `sc-server`**;
-  there is no separate front-end server. A strict CSP is applied, so all bundles must be
-  self-hostable with no inline handlers (see §12).
+- The React apps under `ui/` (including the admin SPA) are built to static bundles and
+  **served by `sc-server`**; there is no separate front-end server. A strict CSP is applied,
+  and it is satisfied *structurally* by the React build (no inline scripts or handlers) rather
+  than by a server-side symbolic-HTML model (see §12).
 - `sc-error` sits below everything and defines the single `Error`/`Result` convention so
   principle 5 is mechanically enforced (no `unwrap()` in library code; errors carry
   context).
@@ -105,14 +107,14 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `DatabaseDriver` | `sc-db` | Rust only | Connect to one database; run queries; manage schema |
 | `TableProvider` | `sc-catalog` | any | Present a data source as a virtual table |
 | `RichType` | `sc-types` | any | A type known to Saltcorn (attributes + validation) |
-| `FieldView` | `sc-fieldview` | any | Display/edit a value of one or more types as HTML |
+| `FieldView` | `sc-fieldview` | any | Display/edit a value of one or more types (React component) |
 | `Action` | `sc-action` | any | One elementary step; configurable; reads/writes context |
 | `Skill` | `sc-agent` | any | An elementary agent capability (usually an LLM tool) |
 | `Importer` / `Exporter` | `sc-catalog` | any | Move table data to/from a format |
 | `ModelProvider` | `sc-model` | any | Fit/inspect/apply a predictive model over table data |
 | `ViewPattern` | `sc-viewpattern` | any | A v1-style view template over a table |
 | `FileStore` | `sc-files` | any | A named directory/object store |
-| `ApiProvider` | `sc-api` | any | Expose an application's data over a protocol |
+| `ApiProvider` | `sc-api` | any | Expose tables, actions & custom routes over a protocol; emit a typed TS client |
 | `Framework` | `sc-app` | any | Own an application's primary UI (React/Next/Svelte/v1) |
 | `BusDriver` | `sc-bus` | Rust | Publish/subscribe transport for the message bus |
 | `CodeAdapter` | `sc-code` | Rust | Host a guest-language interpreter exposing the catalog |
@@ -220,7 +222,7 @@ Requirements the AST **MUST** support because the goals demand them:
   and join conditions are general `Expr`s, never "the id column".
 - **JSON as a built-in** — `Expr::Json` and `Value::Json`, not an add-on type.
 - **Literals are always parameterised** on render (SQL-injection-safe by construction; this
-  is the query-layer half of the XSS/injection story, the markup layer is the other half).
+  is the query-layer half of the XSS/injection story, the React UI layer is the other half).
 
 Rendering is a trait so each dialect controls quoting, placeholders, JSON operators, upsert
 syntax, etc.:
@@ -366,19 +368,27 @@ pub enum CalcSource { Expr(Formula), Code { adapter: AdapterId, body: String } }
 
 ### 6.3 Fieldviews
 
+A fieldview displays and optionally edits a value of one or more types. With the admin UI and
+applications rendered by React (§12), a fieldview is fundamentally a **React (TypeScript)
+component**, described on the Rust side by a small metadata record so the catalog can list,
+select, and configure it:
+
 ```rust
-/// Renders and optionally edits a value. MUST be extractable without a value so its client
-/// JS can be bundled ahead of time (see CSP model, §11).
-pub trait FieldView: Send + Sync {
-    fn name(&self) -> &str;
-    fn handles(&self) -> &[&str];               // type names, or "*" catch-all
-    fn is_edit(&self) -> bool;
-    /// Produce a symbolic markup node (never a raw string); value is escaped by the tree.
-    fn render(&self, ctx: &RenderCtx, v: &Value, cfg: &Attrs) -> Node;
-    /// Client behaviour, emitted once and bundled — not a closure over a value.
-    fn client_script(&self) -> Option<ScriptModule>;
+/// Rust-side descriptor for a fieldview; the actual render/edit UI is a React component
+/// referenced by `component` and bundled with the relevant UI (admin SPA, v1-view runtime).
+pub struct FieldView {
+    pub name: String,
+    pub handles: Vec<String>,    // type names this covers, or "*" catch-all
+    pub is_edit: bool,
+    pub config_spec: Vec<AttrSpec>,
+    pub component: ComponentRef, // bundled TS component id
 }
 ```
+
+The earlier symbolic-HTML `Node` model — a `sc-markup` crate producing CSP-safe server HTML
+with extracted client JS — has been **dropped**: React satisfies the strict CSP structurally
+(no inline handlers) and supplies the interactive components directly. Fieldviews remain
+post-MVP; the MVP uses only the catch-all display/parse path over `Value`.
 
 ---
 
@@ -664,46 +674,85 @@ feedback → self-heal). For users who prefer an external coding agent, the copi
 
 ---
 
-## 12. Markup, CSP, and the form runtime (`sc-markup`, `ui/form-runtime`)
+## 12. Admin UI, CSP, and the form runtime (`ui/admin`, `ui/form-runtime`)
 
-Admin UI and applications enforce a **strict Content-Security-Policy** (no inline scripts,
-no inline event handlers). This forces a new HTML model relative to v1:
+The admin UI and applications enforce a **strict Content-Security-Policy** (no inline
+scripts, no inline event handlers). v2 satisfies this **structurally through React** rather
+than through a server-side HTML model: the admin UI is a **React + TypeScript SPA**
+(`ui/admin`) that talks to the server exclusively over a **typed JSON API** (§13), and every
+UI bundle is self-hosted with no inline handlers, so the CSP needs no `unsafe-inline`.
 
-- HTML is a **symbolic tree** (`Node`), never assembled from raw strings. Element structure
-  is data; text/attribute *values* are stored raw and escaped by the renderer — so **XSS
-  protection is structural**, matching the query layer's structural SQL-injection safety.
-- **Client JS is extractable without a value.** A component cannot be a closure over runtime
-  data; it declares its behaviour as a `ScriptModule` that is bundled ahead of time and
-  referenced (by hash) from the page. `onclick`/handlers are split out into bundled script,
-  wired up by data attributes, never inlined.
+This replaces v1's server-string HTML **and the previously-planned `sc-markup` symbolic
+tree + JS-extraction crate — both dropped.** The server renders no admin HTML beyond a
+minimal bootstrap document that loads the SPA bundle; all data flows as JSON through the
+generated typed client (§13.1), so the API and the UI cannot drift.
 
-```rust
-pub enum Node {
-    Element { tag: Tag, attrs: Vec<(Attr, AttrValue)>, children: Vec<Node>, behaviour: Option<ScriptRef> },
-    Text(String),        // escaped on render
-    Raw(SafeHtml),       // only from a vetted source; never user data
-}
-```
+- **`ui/admin`** — React + TypeScript + **react-bootstrap** (Bootstrap 5.3) SPA. Served under
+  a separate URL (subdomain or path) from user-facing routes. Only admins log in initially;
+  later, admins may grant restricted access (e.g. app development only) to selected
+  non-admins. Includes a much-improved **table editor** (Airtable-inspired) and **file
+  manager**, both built against the typed API client.
+- **`ui/form-runtime`** — the dynamic form framework (React + TypeScript), rebuilt cleanly
+  from v1's messy client JS. Covers the requirements GOALS lists explicitly: conditional
+  fields (shown based on other values), repeated sub-forms (order lines on an order),
+  dynamically populated selects (options from the server or from client code, depending on
+  other field values), dynamic attributes/contents, and client+server validation. Styling is
+  **Bootstrap 5.3 via react-bootstrap**.
+- **`ui/builder`** — the Craft.js + react-flow drag-and-drop builder is *not* built into the
+  admin UI; it arrives with the Saltcorn-v1 view/page experience (post-MVP).
 
-The **dynamic form framework** (React, because Craft.js / react-flow / file-manager
-components are React) is rebuilt cleanly as `ui/form-runtime`, covering the requirements
-GOALS lists explicitly: conditional fields (shown based on other values), repeated
-sub-forms (order lines on an order), dynamically populated selects (options from the server
-or from client code, depending on other field values), dynamic attributes/contents, and
-client+server validation. Styling is **Bootstrap 5.3 via react-bootstrap**.
-
-The **admin UI** (`ui/admin`) is a React SPA served under a separate URL (subdomain or path)
-from user-facing routes. Only admins log in initially; later, admins may grant restricted
-access (e.g. app development only) to selected non-admins. It includes a much-improved
-**table editor** (Airtable-inspired) and **file manager**. The **builder** (`ui/builder`,
-Craft.js + react-flow) is *not* built into the admin UI — it arrives with the Saltcorn-v1
-view/page experience.
+The XSS-safety story is now the ordinary React one — values are escaped by the framework and
+`dangerouslySetInnerHTML` is banned by lint — pairing with the structural SQL-injection
+safety in `sc-query` (§4).
 
 ---
 
-## 13. Applications, frameworks, and APIs (`sc-app`, `sc-api`)
+## 13. HTTP endpoints, applications, frameworks, and APIs (`sc-api`, `sc-app`)
 
-### 13.1 Applications
+### 13.1 The endpoint model and typed API generation
+
+The GOALS "HTTP server framework" requirement drives a **single machinery** shared by the
+admin UI API and every application API:
+
+- **Endpoints are Rust values, not just handler functions.** `sc-api` defines a reified
+  representation of an endpoint — method, path (with typed path/query params), a typed
+  request body, and a typed response — where argument and result types are described by a
+  small schema enum. This mirrors the "data, not fluent calls" philosophy of `sc-query`
+  (§4) at the HTTP layer.
+
+```rust
+pub struct Endpoint {
+    pub method:  Method,
+    pub path:    PathSpec,          // literal segments + typed params, e.g. /tables/{id}/rows
+    pub input:   TypeSchema,        // query + body args
+    pub output:  TypeSchema,        // result value
+    pub auth:    AuthRequirement,   // role / ownership, enforced via §7
+    pub handler: HandlerRef,        // Rust fn, or guest code / SQL for custom routes
+}
+
+pub enum TypeSchema {               // enough to describe args & results and emit TS types
+    Value(ValueType),
+    Struct(Vec<(String, TypeSchema)>),
+    Array(Box<TypeSchema>),
+    Optional(Box<TypeSchema>),
+    // …
+}
+```
+
+- **Dynamic routes.** Application APIs and custom user routes are registered at runtime and
+  are **not known at compile time**, so the endpoint set is a runtime value — not everything
+  can be statically typed in Rust. The `Endpoint`/`TypeSchema` representation is what lets a
+  runtime-defined route still be fully described (and typed for consumers).
+- **The admin UI API is compile-time-known, but expressed as the same fixed values.** Rather
+  than a bespoke statically-typed router, the admin API is built as a set of constant
+  `Endpoint` values fed through the identical machinery. This maximises code reuse and means
+  the admin SPA consumes a generated typed client exactly as an application would.
+- **TypeScript generation.** From the `Endpoint`/`TypeSchema` values, `sc-api` generates
+  TypeScript **type declarations and a typed API-consumer library**. GOALS requires this for
+  both the admin UI and per-application APIs, so `ui/admin` and every code-framework app get a
+  type-checked client that cannot drift from the server contract.
+
+### 13.2 Applications
 
 ```rust
 pub struct Application {
@@ -723,7 +772,7 @@ pub struct Application {
 tables and file stores. This is v2's replacement for v1 schema-per-tenant multi-tenancy —
 lighter-weight and driven by access subsets rather than separate schemas.
 
-### 13.2 Frameworks
+### 13.3 Frameworks
 
 ```rust
 /// Owns an application's primary UI.
@@ -741,9 +790,10 @@ pub trait Framework: Send + Sync {
   editor (ideally VS Code for the Web), with a build step. `sc-server` serves the bundled
   assets. The app talks to data only through the API providers.
 - **Saltcorn-v1 framework**: the drag-and-drop views/pages experience, continuously
-  improved, using `sc-viewpattern` + `sc-markup` + `ui/builder`.
+  improved, using `sc-viewpattern` + `ui/builder`. How its rendered output stays CSP-safe
+  now that `sc-markup` is dropped is an open question (§18.5).
 
-### 13.3 API providers
+### 13.4 API providers
 
 ```rust
 #[async_trait]
@@ -755,9 +805,13 @@ pub trait ApiProvider: Send + Sync {
 ```
 
 Per application, any number of API providers can be enabled, each on a sub-path: **REST,
-GraphQL, gRPC, tRPC, MCP**. Quality bar: Hasura / PostgREST / Supabase. All API access flows
-through the same authorization layer (§7), so an API caller sees exactly the rows a user of
-that role/ownership would.
+GraphQL, gRPC, tRPC, MCP**. Each provider projects the application's shared `Endpoint` set
+(§13.1) into its protocol. An application's API surface covers **tables and actions** (subject
+to the permission settings of §7) **and custom routes** authored by the developer as guest
+code (in a supported language) or as SQL queries. Quality bar: Hasura / PostgREST / Supabase.
+All API access flows through the same authorization layer (§7), so an API caller sees exactly
+the rows a user of that role/ownership would, and every provider participates in the shared
+TypeScript consumer generation (§13.1).
 
 ---
 
@@ -870,16 +924,18 @@ line), `tokio-postgres` (with the `uuid`/`chrono`/`serde_json` `ToSql`/`FromSql`
 (principle 7). Formatting and linting are gated in CI (`cargo fmt --check`, `cargo clippy
 --all-targets -D warnings`); tests run against a real Postgres.
 
-**Security posture.** Strict CSP everywhere; structural XSS safety in `sc-markup`;
-structural SQL-injection safety in `sc-query`; per-CRUD authorization enforced at the query
-layer or via RLS; passwords argon2id; optional OAuth2 IdP; new-device detection.
+**Security posture.** Strict CSP everywhere, satisfied structurally by the React UI bundles
+(no inline handlers) rather than a server markup model; framework-level XSS escaping in the
+React layer; structural SQL-injection safety in `sc-query`; per-CRUD authorization enforced
+at the query layer or via RLS; passwords argon2id; optional OAuth2 IdP; new-device detection.
 
 ---
 
 ## 17. MVP scope (mapping the milestone to this design)
 
-The MVP milestone from GOALS, expressed in the crates above. Everything is "web 1.0"
-(server-rendered HTML, minimal client JS) except the one bundled React app.
+The MVP milestone from GOALS, expressed in the crates above. The admin UI is a **React +
+TypeScript SPA** served by `sc-server` over a **typed JSON API**; there is no server-rendered
+admin HTML (the earlier "web 1.0 admin" and `sc-markup` plan are dropped, §12).
 
 | MVP requirement | Crates involved |
 |---|---|
@@ -888,7 +944,8 @@ The MVP milestone from GOALS, expressed in the crates above. Everything is "web 
 | Catalog initialised from a driver; introspect via information_schema; get/create table & field; **no stored metadata beyond information_schema** | `sc-catalog` |
 | Types: all **basic**, no rich types | `sc-types` |
 | Users: create-first-user flow; login/logout | `sc-auth`, `sc-server` |
-| Admin web routes (server-rendered) | `sc-server` |
+| Endpoint model (typed Rust values) + generated TypeScript API client | `sc-api` |
+| Admin UI: typed JSON API + served React/TS SPA | `sc-server`, `sc-api`, `ui/admin` |
 | CLI to run the server | `sc-cli` |
 | File store connect + basic file manager + edit files | `sc-files`, `sc-server` |
 | React app served entirely from the Saltcorn process, no DB access, living in a git-repo file store, with a build step | `sc-app`, `ui/` build path, `sc-server` |
@@ -915,6 +972,10 @@ These are deliberately not settled here; they need prototyping or a product deci
 4. **Formula language for table auth** — JavaScript vs **CEL** for ownership/ACL formulas.
    CEL is sandboxed and language-neutral; JavaScript maximises v1 compatibility. This choice
    also affects the ACL language in §7.3.
+5. **Server-rendered v1 views under strict CSP.** With the `sc-markup` symbolic-HTML model
+   dropped (§12), how the Saltcorn-v1 view/page experience renders CSP-safe HTML — server
+   templates with externalised JS, or React-rendered views driven by the builder — is an open
+   design question (post-MVP).
 
 ---
 
