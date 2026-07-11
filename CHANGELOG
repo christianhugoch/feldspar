@@ -2,6 +2,27 @@
 
 Changes in reverse chronological order.
 
+## MVP Phase 6
+
+- Reconcile existing code with the React-admin-UI / typed-API pivot (Phase 6
+  "reconcile" subphase; design §6.3, §12, §13.1), before building the server on it:
+  - Confirmed the `sc-markup` symbolic-HTML crate is dropped everywhere — no
+    `crates/sc-markup` directory and no reference in the workspace manifest or any
+    planning notes (the design/TODO removals were done in the prior doc pass).
+  - `sc-types` (`src/catchall.rs`): reworded the module/`display` doc comments that
+    described the future `FieldView` as a "symbolic markup tree". Fieldviews are now
+    React (TypeScript) components; the catch-all path is documented as returning
+    plain text, not HTML. No behaviour change.
+  - `sc-server` / `sc-api` stub crates: updated their pre-pivot module docs to the
+    new framing (axum server that mounts the typed API and serves the `ui/admin`
+    React SPA; `sc-api` as the endpoint model + providers + TypeScript consumer
+    generation). Confirmed all three stubs (`sc-server`/`sc-api`/`sc-app`) carry no
+    server-HTML assumptions.
+  - Test: added `tests/harness/tests/workspace_invariants.rs`, a DB-free guard that
+    asserts no `sc-markup` crate/reference exists and that the reconciled sources
+    contain no leftover "markup"/"symbolic" language — so the pivot cannot silently
+    regress. `cargo test` + `cargo clippy --all-targets` clean on the touched crates.
+
 ## Design
 
 - Chose the Rust web framework: **axum** (on hyper + tower), with `axum-extra`

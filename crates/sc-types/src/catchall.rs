@@ -1,15 +1,15 @@
 //! The catch-all display/edit path.
 //!
-//! The full [`FieldView`] trait — symbolic markup nodes, bundled client
-//! behaviour, per-type editors — is deferred to post-MVP (technical design §6.3;
-//! this milestone ships "no rich types … everything is basic"). What the MVP
-//! server *does* need is a single, type-directed way to turn any [`Value`] into
-//! displayable text and to parse a submitted form string back into a [`Value`]
-//! of the right [`BasicType`]. That is the catch-all fieldview reduced to its
-//! two essential operations, over plain strings rather than a markup tree.
+//! The full [`FieldView`] system — per-type editors implemented as React
+//! (TypeScript) components — is deferred to post-MVP (technical design §6.3; this
+//! milestone ships "no rich types … everything is basic"). What the MVP server
+//! *does* need is a single, type-directed way to turn any [`Value`] into
+//! displayable text and to parse a submitted string back into a [`Value`] of the
+//! right [`BasicType`]. That is the catch-all fieldview reduced to its two
+//! essential operations, over plain strings.
 //!
 //! - [`display`] renders a value as text for a table cell or an input's current
-//!   value. It never emits markup, so escaping is the caller's concern.
+//!   value. It returns plain text, not HTML, so escaping is the caller's concern.
 //! - [`parse`] converts one submitted string into a [`Value`], validating it
 //!   against the target [`BasicType`]. An empty string parses to [`Value::Null`]
 //!   so that clearing a field is expressible.
@@ -28,7 +28,7 @@ use crate::BasicType;
 ///
 /// [`Value::Null`] renders as the empty string. Bytes render as lowercase hex so
 /// the representation is lossless and round-trips through [`parse`]. The output
-/// is *text*, never markup — callers escape it for their target medium.
+/// is plain *text*, not HTML — callers escape it for their target medium.
 pub fn display(value: &Value) -> String {
     match value {
         Value::Null => String::new(),

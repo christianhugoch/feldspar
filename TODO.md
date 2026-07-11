@@ -79,9 +79,9 @@ bundle.
 
 **Reconcile existing code with the pivot first:**
 
-- [ ] Do **not** create an `sc-markup` crate — it is dropped from the design (§12); remove it from any planning notes
-- [ ] Update `sc-types` `src/catchall.rs` doc comments: they describe a `FieldView` "symbolic markup tree" that is no longer planned (fieldviews are now React components, §6.3)
-- [ ] Confirm the `sc-server` / `sc-api` / `sc-app` stub crates (currently ~20-line placeholders) carry no server-HTML / `sc-markup` assumptions before building on them
+- [x] Do **not** create an `sc-markup` crate — it is dropped from the design (§12); remove it from any planning notes
+- [x] Update `sc-types` `src/catchall.rs` doc comments: they describe a `FieldView` "symbolic markup tree" that is no longer planned (fieldviews are now React components, §6.3)
+- [x] Confirm the `sc-server` / `sc-api` / `sc-app` stub crates (currently ~20-line placeholders) carry no server-HTML / `sc-markup` assumptions before building on them
 
 **Endpoint model & typed client (`sc-api`):**
 

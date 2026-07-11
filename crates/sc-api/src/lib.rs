@@ -1,4 +1,5 @@
-//! ApiProvider trait and REST provider (layer 8)
+//! Endpoint model (typed Rust values) + API providers + TypeScript consumer
+//! generation (layer 8; technical design §13.1).
 //!
 //! Skeleton crate for the Saltcorn v2 workspace. Functionality is filled in by
 //! later TODO items.
