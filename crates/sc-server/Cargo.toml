@@ -18,5 +18,14 @@ sc-api.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 
+tokio.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+tower = { workspace = true, features = ["util"] }
+tower-http.workspace = true
+matchit.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
 [lints]
 workspace = true

@@ -4,6 +4,46 @@ Changes in reverse chronological order.
 
 ## MVP Phase 6
 
+- Server infrastructure (`sc-server`, `sc-cli`; Phase 6 "Server" subphase, first
+  half; design §13.1, §16). The axum server that mounts the typed API and serves
+  the React admin SPA — everything except the concrete admin handlers, which are
+  the second half:
+  - `src/config.rs`: `ServerConfig` (bind address, static bundle dir, session
+    TTL, secure-cookie flag) with `from_args` CLI parsing (no arg-parsing
+    dependency); unknown/typo'd flags fail loudly.
+  - `src/handler.rs`: the `HandlerRegistry` (name → async handler) that endpoint
+    dispatch resolves `HandlerRef::Named` against, plus `HandlerCtx` (path/query
+    params, parsed JSON body, authenticated `User`) and `HandlerResponse`.
+    Handlers stay free of HTTP plumbing and manage login/logout declaratively via
+    `SessionAction` (Keep/Start/End), so the dispatcher owns all cookie writes.
+  - `src/router.rs`: `build_router` assembles a single axum fallback that
+    dispatches **every** endpoint through one `matchit` router built from the
+    `EndpointSet` values (the "routes need not be known at compile time"
+    machinery — admin API and future app routes share it). Per request it
+    enforces `Endpoint.auth` against the session (Public / LoggedIn / MinRole →
+    401/403), parses the body, resolves the handler (absent or guest-code/SQL →
+    501), and applies the session action. Non-API GETs fall through to the
+    `ui/admin` bundle via `tower-http` `ServeDir`, else the minimal, inline-free
+    bootstrap document (`BOOTSTRAP_HTML`; no server-rendered admin HTML). Strict
+    CSP + `X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy` applied via
+    `tower-http` `set-header`.
+  - `src/security.rs`: strict `Content-Security-Policy` (no `unsafe-inline`),
+    the double-submit-cookie CSRF middleware (mutating requests must echo the
+    `sc_csrf` cookie in `x-csrf-token`), and the shared cookie conventions
+    (`SameSite=Strict`, `HttpOnly` session cookie, `Secure` behind TLS).
+  - `src/serve.rs`: binds the listener and runs `axum::serve` with graceful
+    shutdown on Ctrl-C / SIGTERM (tokio `signal`).
+  - `sc-cli`: `saltcorn serve [--bind …] [--static-dir …] [--session-ttl-hours …]
+    [--secure-cookies]` builds the config, mounts `sc_api::admin_endpoints()` with
+    an (as-yet empty) handler registry, and serves.
+  - Tests: `config.rs` unit tests cover flag parsing/validation;
+    `tests/router.rs` drives the assembled router with `tower::oneshot` (no DB) —
+    bootstrap doc + security headers, public handler dispatch, unimplemented → 501,
+    wrong method → 405, admin route → 401, insufficient role → 403, CSRF
+    block/allow, and a full login→session→admin-route flow. Also smoke-tested the
+    real `saltcorn serve` binary over HTTP (headers, 501/401/403, clean SIGTERM
+    shutdown). `cargo test`/`clippy --all-targets`/`fmt` clean workspace-wide.
+
 - Endpoint model & typed TypeScript client (`sc-api`; Phase 6 "Endpoint model &
   typed client" subphase; design §13.1). Endpoints are now reified as **data**,
   not just handler functions, and the same machinery drives both the admin API

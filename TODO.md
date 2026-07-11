@@ -93,10 +93,10 @@ bundle.
 
 **Server (`sc-server`):**
 
-- [ ] HTTP server bootstrap (**axum** on hyper/tower; design §16); config from CLI; graceful shutdown (tokio `signal`)
-- [ ] Mount the `sc-api` endpoint set as JSON routes; runtime/dynamic routes dispatched via `matchit`; auth enforced per `Endpoint.auth`
-- [ ] Session (via `axum-extra` cookie jar; store in `sc-auth`) + CSRF handling for the SPA; strict CSP headers via `tower-http` `set-header` (no `unsafe-inline`; bundle-only)
-- [ ] Serve the built `ui/admin` bundle via `tower-http` `ServeDir` + a minimal bootstrap document (no server-rendered admin HTML)
+- [x] HTTP server bootstrap (**axum** on hyper/tower; design §16); config from CLI; graceful shutdown (tokio `signal`)
+- [x] Mount the `sc-api` endpoint set as JSON routes; runtime/dynamic routes dispatched via `matchit`; auth enforced per `Endpoint.auth`
+- [x] Session (via `axum-extra` cookie jar; store in `sc-auth`) + CSRF handling for the SPA; strict CSP headers via `tower-http` `set-header` (no `unsafe-inline`; bundle-only)
+- [x] Serve the built `ui/admin` bundle via `tower-http` `ServeDir` + a minimal bootstrap document (no server-rendered admin HTML)
 - [ ] API endpoints: first-user, login, logout
 - [ ] API endpoints: list tables, create table, list a table's fields, create field
 - [ ] API endpoints: rows CRUD (list / create / edit / delete a row in a table)

@@ -1,22 +1,33 @@
 //! HTTP server (axum): mounts the typed API, serves the `ui/admin` React SPA
 //! bundle, sessions + strict CSP (layer 9; technical design §12, §16).
 //!
-//! Skeleton crate for the Saltcorn v2 workspace. The admin UI is a React SPA over
-//! a typed JSON API — there is no server-rendered admin HTML. Functionality is
-//! filled in by later TODO items.
+//! The admin UI is a React SPA over a typed JSON API — there is **no**
+//! server-rendered admin HTML. This crate provides the server half:
+//!
+//! - [`ServerConfig`] — bind address, static bundle directory, cookie/session
+//!   settings, parsed from the CLI ([`ServerConfig::from_args`]).
+//! - [`HandlerRegistry`] / [`HandlerCtx`] / [`HandlerResponse`] — the name→code
+//!   map that endpoint dispatch resolves against; handlers stay free of HTTP
+//!   plumbing and manage sessions declaratively via [`SessionAction`].
+//! - [`build_router`] — assembles an axum [`Router`](axum::Router) that dispatches
+//!   every [`sc_api::Endpoint`] through a single [`matchit`] router (runtime
+//!   routes included), enforces per-endpoint auth, applies strict CSP/security
+//!   headers and CSRF protection, and serves the static bundle / bootstrap doc.
+//! - [`serve`] — binds the listener and runs with graceful shutdown.
+//!
+//! The concrete admin handlers (login, tables, rows, users) and their DB-backed
+//! integration tests land in the second half of the Phase 6 server subphase.
 
-/// Returns this crate's name. Placeholder so the skeleton has something to test
-/// until the real API lands.
-pub fn crate_name() -> &'static str {
-    "sc-server"
-}
+mod config;
+mod handler;
+mod router;
+mod security;
+mod serve;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crate_name_is_set() {
-        assert_eq!(crate_name(), "sc-server");
-    }
-}
+pub use config::{DEFAULT_BIND, ServerConfig};
+pub use handler::{
+    BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
+};
+pub use router::{BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, build_router};
+pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
+pub use serve::serve;
