@@ -4,6 +4,18 @@ Changes in reverse chronological order.
 
 ## MVP Phase 5
 
+- Phase 5 integration-test rollup (`sc-auth`): added `tests/auth_flow.rs`, a
+  consolidated end-to-end acceptance walk against real Postgres covering the
+  whole users-and-auth story in one place — create-first-user (including the
+  no-user precondition and refusal of a second first-user), login failure (wrong
+  password and unknown email), login success (authenticated user matches the
+  created admin), logout (session resolves, then is gone), and **session
+  expiry** (a short-TTL session resolves while fresh and lapses after the TTL
+  elapses). Session expiry previously had only unit coverage; this adds the
+  integration-level check the TODO called for. The per-feature integration tests
+  (`first_user`, `login`, `role_gate`, `user_roundtrip`, `users`) remain as
+  focused tests. This completes Phase 5.
+
 - Admin-only login role gate (Phase 5, `sc-auth`): added the MVP role gate that
   restricts admin-UI login to administrators (technical design §7.3).
   - `User::meets_role(min_role)` — a general privilege check encoding the 1–100
