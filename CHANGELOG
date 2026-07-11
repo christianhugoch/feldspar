@@ -4,6 +4,32 @@ Changes in reverse chronological order.
 
 ## MVP Phase 5
 
+- Create-first-user flow (Phase 5, `sc-auth`): added the logic behind the
+  "create first user" screen (technical design §7; GOALS acceptance story) in a
+  new `first_user` module, plus the argon2id password-hashing primitive it
+  depends on in a new `password` module.
+  - `password::hash_password` hashes a plaintext password with argon2id
+    (`Argon2::default` = argon2id v0x13, recommended params) and a fresh random
+    OS-CSPRNG salt, returning a self-describing PHC string
+    (`$argon2id$v=19$…`). `password::is_valid_hash` reports whether a stored
+    string parses as a PHC hash. (Verification — the read side used at login —
+    lands with the login item.) This required enabling the `std` feature on the
+    workspace `argon2` pin so `getrandom`/`OsRng` are available for salt
+    generation.
+  - `any_user_exists` runs a `SELECT id FROM users LIMIT 1` so the server can
+    decide between the login and create-first-user screens. `create_first_user`
+    validates non-blank email/password, hashes the password, and inserts an
+    **admin** (role 1) with a Rust-generated UUID — all inside a transaction that
+    re-checks the empty-table precondition, so it cannot mint a second "first"
+    admin (concurrent-bootstrap hardening via table locking is unnecessary for
+    the single-process MVP). Returns the created `User` (email in `extra`, hash
+    never carried).
+  - Tests: three DB-free unit tests for hashing (PHC/argon2id shape; random-salt
+    uniqueness; garbage rejected) plus one integration test against real Postgres
+    walking the whole flow — no user → blank inputs rejected → first admin
+    created → user now exists → second attempt refused → the stored password is a
+    verifiable hash, never the plaintext.
+
 - `User` struct (Phase 5, `sc-auth`): added the `User` value model (technical
   design §7.1) in a new `user` module — `id: Uuid`, `role: u8` (1–100), and
   `extra: BTreeMap<String, Value>` for the admin-defined columns. The model makes

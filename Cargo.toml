@@ -81,7 +81,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 # argon2id password hashing. Pinned to the stable 0.5 line (0.6 is only an RC).
-argon2 = "0.5"
+# `std` pulls in `getrandom` (via rand_core) so a random salt can be drawn from
+# the OS CSPRNG (`OsRng`) when hashing.
+argon2 = { version = "0.5", features = ["std"] }
 # Postgres driver + pool. `with-*` features light up ToSql/FromSql for the
 # `Value` variants the driver maps in later phases.
 tokio-postgres = { version = "0.7", features = [
