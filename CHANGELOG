@@ -2,6 +2,44 @@
 
 Changes in reverse chronological order.
 
+## MVP Phase 3
+
+- Type system: basic types, `TypeRef`, and the catch-all display/edit path
+  (Phase 3, `sc-types`): fleshed out the skeleton crate into the MVP type layer
+  (technical design §6.1–6.3). Per the milestone there are **no rich types** —
+  everything is basic. Three pieces, all covered by 13 unit tests:
+  - `BasicType` (`basic.rs`) is the `Value`↔Postgres type mapping. `from_sql_type`
+    resolves a driver `sql_type` string — the Postgres `udt_name` that
+    introspection emits (`int8`, `varchar`, `timestamptz`, …) — to one of eleven
+    scalar families, each mirroring a `sc_query::Value` variant. The match is
+    case-insensitive and covers the common aliases (every integer width →
+    `Int`, `json`/`jsonb` → `Json`, etc.). A type it doesn't recognise is never
+    an error: it becomes `BasicType::Other(name)`, carrying the backend name so
+    it stays usable through the catch-all path as text ("a Basic type is any DB
+    type not mapped to a rich type"). `sql_type()` gives the canonical Postgres
+    type for DDL (collapsing aliases, e.g. every integer → `int8`), `value_kind()`
+    the expected `Value::kind`, `of_value()` the reverse mapping, and
+    `accepts()`/`validate()` check a value's family (Null always accepted;
+    mismatches are a descriptive `Error::Invalid`, no silent coercion).
+  - `TypeRef` (`type_ref.rs`) is the "rich or basic" type a field carries
+    (design's `BaseField.type_`). Only the `Basic` variant exists in the MVP, but
+    it is modelled as an enum (not an alias for `BasicType`) so a future `Rich`
+    variant slots in without touching field definitions. Delegates
+    `sql_type`/`name`/`validate` to the wrapped basic type; `as_basic()` returns
+    an `Option` for forward compatibility.
+  - `catchall` (`catchall.rs`) is the full `FieldView` trait reduced to its two
+    essential operations over plain strings, standing in until the symbolic
+    markup tree and bundled client behaviour land post-MVP. `display(&Value)`
+    renders any value as text (Null → empty, bytes → lowercase hex, timestamps →
+    RFC 3339); `parse(&BasicType, &str)` converts a submitted form string back to
+    a `Value` of the target type, with an empty/blank string → `Value::Null` so
+    clearing a field is expressible, common boolean spellings accepted, and
+    malformed input reported as `Error::Invalid`. A round-trip test asserts
+    `parse(ty, display(v)) == v` for every basic value kind.
+  Added the crate's runtime deps (serde/serde_json/uuid/chrono/rust_decimal).
+  `cargo test -p sc-types` (13 pass), `cargo clippy -p sc-types --all-targets`,
+  and `cargo fmt` all clean. **Phase 3 (`sc-types`) is now complete.**
+
 ## MVP Phase 2
 
 - Integration tests: create table, add fields, introspect, CRUD rows (Phase 2,

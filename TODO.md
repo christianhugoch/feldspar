@@ -44,9 +44,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 3 — Types (`sc-types`, MVP: basic only)
 
-- [ ] `Value`↔Postgres type mapping (basic types only; no rich types this milestone)
-- [ ] `TypeRef` / basic-type representation used by fields
-- [ ] Catch-all display/edit path (defer real `FieldView` trait richness to post-MVP)
+- [x] `Value`↔Postgres type mapping (basic types only; no rich types this milestone)
+- [x] `TypeRef` / basic-type representation used by fields
+- [x] Catch-all display/edit path (defer real `FieldView` trait richness to post-MVP)
 
 ## Phase 4 — Catalog (`sc-catalog`)
 

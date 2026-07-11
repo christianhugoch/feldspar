@@ -1029,8 +1029,13 @@ dependencies = [
 name = "sc-types"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "rust_decimal",
  "sc-error",
  "sc-query",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
