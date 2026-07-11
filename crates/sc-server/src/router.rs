@@ -38,13 +38,17 @@ use crate::security::{
 
 /// The minimal bootstrap document served for non-API navigations. It has **no
 /// server-rendered admin markup** and no inline script/style (so it satisfies
-/// the strict CSP): just the SPA mount point and the bundle entry point.
+/// the strict CSP): just the SPA mount point and the bundle's stable entry
+/// points. The `ui/admin` build pins these to `/main.js` + `/main.css` (see its
+/// `vite.config.ts`), so a request that falls back to this document loads the
+/// same assets the built `index.html` links — both same-origin, `'self'`-clean.
 pub const BOOTSTRAP_HTML: &str = "<!doctype html>\n\
 <html lang=\"en\">\n\
 <head>\n\
 <meta charset=\"utf-8\">\n\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
 <title>Saltcorn</title>\n\
+<link rel=\"stylesheet\" href=\"/main.css\">\n\
 </head>\n\
 <body>\n\
 <div id=\"root\"></div>\n\

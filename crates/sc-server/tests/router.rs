@@ -116,6 +116,41 @@ fn cookie_value(cookies: &[String], name: &str) -> Option<String> {
 }
 
 #[tokio::test]
+async fn serves_a_static_bundle_and_falls_back_to_bootstrap() {
+    // A temp "built bundle" with an entry file, served via `--static-dir`.
+    let dir = std::env::temp_dir().join(format!("sc-admin-bundle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("main.js"), "export const x = 1;\n").unwrap();
+
+    let sessions = Arc::new(SessionStore::default());
+    let config = ServerConfig {
+        static_dir: Some(dir.clone()),
+        ..ServerConfig::default()
+    };
+    let router = build_router(&test_endpoints(), test_registry(), sessions, &config).unwrap();
+
+    // The bundle asset is served from the static dir.
+    let (status, _, body) = call(
+        &router,
+        Request::get("/main.js").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("export const x"));
+
+    // An unknown (client-routed) path falls back to the bootstrap document.
+    let (status, _, body) = call(
+        &router,
+        Request::get("/some/spa/route").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<div id=\"root\"></div>"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn serves_bootstrap_document_with_security_headers() {
     let (router, _) = test_router();
     let response = router
@@ -147,8 +182,10 @@ async fn serves_bootstrap_document_with_security_headers() {
         .unwrap();
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("<div id=\"root\"></div>"));
-    // No server-rendered admin markup and no inline script.
+    // No server-rendered admin markup and no inline script/style: the SPA loads
+    // via stable same-origin entry points that the strict CSP permits.
     assert!(html.contains("<script type=\"module\" src=\"/main.js\">"));
+    assert!(html.contains("<link rel=\"stylesheet\" href=\"/main.css\">"));
     assert!(!html.contains("onclick"));
 }
 

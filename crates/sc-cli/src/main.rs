@@ -46,7 +46,14 @@ async fn run(args: &[String]) -> Result<()> {
 
 /// `saltcorn serve [--bind ADDR] [--static-dir DIR] [...]`.
 async fn serve_command(args: &[String]) -> Result<()> {
-    let config = ServerConfig::from_args(args)?;
+    let mut config = ServerConfig::from_args(args)?;
+    // When the binary was built with the admin bundle (`SC_BUILD_ADMIN=1`, see
+    // `build.rs`) and no explicit `--static-dir` was given, serve that bundle.
+    if config.static_dir.is_none() {
+        if let Some(dir) = option_env!("SC_ADMIN_BUNDLE_DIR") {
+            config.static_dir = Some(std::path::PathBuf::from(dir));
+        }
+    }
     let sessions = Arc::new(SessionStore::default());
     eprintln!("saltcorn: listening on http://{}", config.addr);
     // Handlers need a connected Catalog; DB-connection config is Phase 9, so the

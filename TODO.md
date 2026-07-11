@@ -105,9 +105,9 @@ bundle.
 
 **Admin SPA (`ui/admin`):**
 
-- [ ] Scaffold React + TypeScript + react-bootstrap SPA consuming the generated typed client
-- [ ] Screens: create-first-user, login/logout, tables list, table fields, row editor, users
-- [ ] Wire the `ui/admin` build into the server build so the bundle is served by `sc-server`
+- [x] Scaffold React + TypeScript + react-bootstrap SPA consuming the generated typed client
+- [x] Screens: create-first-user, login/logout, tables list, table fields, row editor, users
+- [x] Wire the `ui/admin` build into the server build so the bundle is served by `sc-server`
 
 ## Phase 7 — Files (`sc-files`)
 

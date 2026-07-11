@@ -1,0 +1,26 @@
+{
+  "name": "@saltcorn/admin-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Saltcorn admin SPA — React + TypeScript + react-bootstrap over the generated typed API client (design §12).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "gen-client": "cargo run -q -p sc-api --example emit_admin_client -- src/client.ts"
+  },
+  "dependencies": {
+    "bootstrap": "^5.3.3",
+    "react": "^18.3.1",
+    "react-bootstrap": "^2.10.4",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  }
+}

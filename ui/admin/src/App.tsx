@@ -1,0 +1,132 @@
+// Top-level admin app: bootstraps auth state and gates the three top-level
+// states the design calls for — create-first-user, login, and the authenticated
+// admin shell — then routes between the admin screens with a tiny hash router
+// (no router dependency, and no inline styles, so the strict CSP holds).
+
+import { useCallback, useEffect, useState } from "react";
+import Container from "react-bootstrap/Container";
+import Nav from "react-bootstrap/Nav";
+import Navbar from "react-bootstrap/Navbar";
+import Spinner from "react-bootstrap/Spinner";
+
+import { api } from "./api";
+import type { AuthStatusResponse } from "./client";
+import { FirstUser } from "./screens/FirstUser";
+import { Login } from "./screens/Login";
+import { Tables } from "./screens/Tables";
+import { TableDetail } from "./screens/TableDetail";
+import { Users } from "./screens/Users";
+
+/** The authenticated user, as reported by `authStatus` / `login`. */
+export type CurrentUser = NonNullable<AuthStatusResponse["current_user"]>;
+
+/** Subscribe to `location.hash`, normalised to a path like `/tables`. */
+function useHashRoute(): string {
+  const read = () => window.location.hash.replace(/^#/, "") || "/tables";
+  const [route, setRoute] = useState(read);
+  useEffect(() => {
+    const onChange = () => setRoute(read());
+    window.addEventListener("hashchange", onChange);
+    return () => window.removeEventListener("hashchange", onChange);
+  }, []);
+  return route;
+}
+
+/** Navigate by updating the hash (the router above reacts to it). */
+export function navigate(path: string): void {
+  window.location.hash = path;
+}
+
+export function App() {
+  const [status, setStatus] = useState<AuthStatusResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await api.authStatus());
+      setError(null);
+    } catch {
+      setError("Could not reach the server. Is it running?");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  if (error) {
+    return (
+      <Container className="py-5">
+        <div className="alert alert-danger">{error}</div>
+      </Container>
+    );
+  }
+
+  if (!status) {
+    return (
+      <Container className="py-5 text-center">
+        <Spinner animation="border" role="status" />
+      </Container>
+    );
+  }
+
+  if (!status.any_user_exists) {
+    return <FirstUser onCreated={refresh} />;
+  }
+
+  if (!status.current_user) {
+    return <Login onLoggedIn={refresh} />;
+  }
+
+  return <Shell user={status.current_user} onLogout={refresh} />;
+}
+
+/** The authenticated admin shell: a nav bar plus the routed screen. */
+function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) {
+  const route = useHashRoute();
+
+  const logout = async () => {
+    try {
+      await api.logout();
+    } finally {
+      onLogout();
+    }
+  };
+
+  return (
+    <>
+      <Navbar bg="dark" variant="dark" expand="lg" className="mb-4">
+        <Container>
+          <Navbar.Brand href="#/tables">Saltcorn</Navbar.Brand>
+          <Nav className="me-auto">
+            <Nav.Link href="#/tables" active={route.startsWith("/tables")}>
+              Tables
+            </Nav.Link>
+            <Nav.Link href="#/users" active={route.startsWith("/users")}>
+              Users
+            </Nav.Link>
+          </Nav>
+          <Navbar.Text className="me-3">{user.email}</Navbar.Text>
+          <Nav>
+            <Nav.Link onClick={logout}>Log out</Nav.Link>
+          </Nav>
+        </Container>
+      </Navbar>
+      <Container>
+        <Screen route={route} />
+      </Container>
+    </>
+  );
+}
+
+/** Resolve the current hash route to a screen. */
+function Screen({ route }: { route: string }) {
+  const tableMatch = route.match(/^\/tables\/([^/]+)$/);
+  if (tableMatch) {
+    return <TableDetail table={decodeURIComponent(tableMatch[1])} />;
+  }
+  if (route.startsWith("/users")) {
+    return <Users />;
+  }
+  return <Tables />;
+}

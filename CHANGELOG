@@ -4,6 +4,43 @@ Changes in reverse chronological order.
 
 ## MVP Phase 6
 
+- Admin SPA (`ui/admin`; Phase 6 "Admin SPA" subphase; design §12, §16). A
+  React + TypeScript + react-bootstrap single-page app that consumes the
+  **generated** typed API client — no bespoke API code, no server-rendered admin
+  HTML — served by `sc-server` as a static bundle.
+  - `ui/admin/`: Vite project. `src/client.ts` is the generated typed client
+    (emitted from `sc_api::admin_endpoints()`); `src/api.ts` wraps
+    `createClient` with a browser `fetch` that carries the session cookie
+    (`credentials: same-origin`) and the CSRF double-submit header
+    (`x-csrf-token` echoing the `sc_csrf` cookie). `src/App.tsx` bootstraps auth
+    state via `authStatus` and gates the three top-level states — create-first-user,
+    login, and the authenticated shell — routing between admin screens with a tiny
+    hash router (no router dependency).
+  - Screens (`src/screens/`): `FirstUser` (creates the initial admin, who is
+    logged straight in), `Login`/logout, `Tables` (list + create), `TableDetail`
+    (fields list + add-field, plus a row editor that creates/updates/deletes rows
+    addressed by their `id`), and `Users` (list + create with an integer role).
+    Styling is Bootstrap classes only — no runtime inline styles — so the strict
+    `style-src 'self'` CSP holds; the bundle emits a single same-origin
+    `/main.css` loaded via `<link>`.
+  - Generation & wiring. `sc-api/examples/emit_admin_client.rs` is the single
+    command that (re)writes `ui/admin/src/client.ts`. `vite.config.ts` pins the
+    output to stable `/main.js` + `/main.css` entry points matching the server's
+    `BOOTSTRAP_HTML` fallback (now also linking `/main.css`). `sc-cli/build.rs`
+    runs the `ui/admin` production build **opt-in** (`SC_BUILD_ADMIN=1`) and
+    records the bundle dir in `SC_ADMIN_BUNDLE_DIR`; `saltcorn serve` defaults
+    `--static-dir` to it, so a bundle-built binary serves the SPA out of the box
+    (Rust-only builds need no Node toolchain and fall back to the bootstrap doc).
+  - Tests: `sc-api/tests/admin_client_sync.rs` asserts the committed `client.ts`
+    matches the generator (no drift); `sc-server/tests/admin_spa_typecheck.rs`
+    runs the SPA's strict `tsc --noEmit` over the screens + generated client
+    (skips when `ui/admin` deps are not installed, mirroring the existing TS
+    type-check test); `sc-server/tests/router.rs` gains coverage that a configured
+    static bundle is served and unknown (client-routed) paths fall back to the
+    bootstrap document. `cargo test`/`clippy --all-targets`/`fmt` clean; the SPA
+    `npm run build` and a `saltcorn serve` smoke test confirm the bundle is served
+    with the strict CSP.
+
 - Admin API handlers (`sc-server`, `sc-auth`; Phase 6 "Server" subphase, second
   half; design §13.1, §7). The concrete code behind every `sc_api::admin_endpoints()`
   endpoint — the server-side half of the typed API — resolved by name against the
