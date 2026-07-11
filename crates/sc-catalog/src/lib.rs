@@ -1,20 +1,151 @@
-//! Catalog, Table, Field, TableProvider trait, cache (layer 4)
+//! Catalog, Table, Field, TableProvider trait, cache (layer 4).
 //!
-//! Skeleton crate for the Saltcorn v2 workspace. Functionality is filled in by
-//! later TODO items.
+//! This crate is the hub of the data layer (technical design §8). It holds the
+//! connected database driver and an in-memory cache of its [`Table`]s, each a set
+//! of [`DataField`]s built from live introspection — the MVP stores **no**
+//! metadata beyond `information_schema`, so a freshly connected database is
+//! immediately usable with zero setup. A [`Catalog`] can also create tables and
+//! fields, keeping its cache in step, and hand out a [`TableProvider`] to run
+//! queries against a table.
+//!
+//! Deferred to post-MVP (see the design): `FormField` and calculated fields,
+//! rich types, the `_sc_tables`/`_sc_fields` overlay metadata, virtual and
+//! materialised providers, and cross-process cache invalidation over a bus.
 
-/// Returns this crate's name. Placeholder so the skeleton has something to test
-/// until the real API lands.
-pub fn crate_name() -> &'static str {
-    "sc-catalog"
-}
+mod catalog;
+mod field;
+mod provider;
+mod table;
+
+pub use catalog::Catalog;
+pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
+pub use provider::{DriverTableProvider, TableProvider};
+pub use table::{AccessRules, Table, TableSource};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sc_db::{Column, ForeignKey, PhysicalTable};
+    use sc_types::{BasicType, TypeRef};
 
     #[test]
-    fn crate_name_is_set() {
-        assert_eq!(crate_name(), "sc-catalog");
+    fn data_field_builder_and_column_def() {
+        let f = DataField::plain("email", TypeRef::Basic(BasicType::Text))
+            .label("Email address")
+            .required()
+            .unique();
+        assert_eq!(f.base.label, "Email address");
+        assert!(f.required && f.unique && !f.primary_key);
+
+        let col = f.to_column_def();
+        assert_eq!(col.name, "email");
+        assert_eq!(col.sql_type, "text");
+        assert!(!col.nullable); // required → NOT NULL
+        assert!(col.unique);
+    }
+
+    #[test]
+    fn primary_key_field_has_no_default_and_maps_type() {
+        let id = DataField::plain("id", TypeRef::Basic(BasicType::Uuid))
+            .required()
+            .primary_key();
+        let col = id.to_column_def();
+        assert_eq!(col.sql_type, "uuid");
+        assert!(!col.nullable);
+        assert!(col.default.is_none());
+        assert!(id.primary_key);
+    }
+
+    #[test]
+    fn base_field_label_defaults_to_name() {
+        let b = BaseField::new("count", TypeRef::Basic(BasicType::Int));
+        assert_eq!(b.name, "count");
+        assert_eq!(b.label, "count");
+        assert!(b.attributes.is_empty());
+    }
+
+    /// A physical table with a primary key and a single-column foreign key, used
+    /// to check the introspection → catalog mapping.
+    fn physical_with_fk() -> PhysicalTable {
+        PhysicalTable {
+            name: "book".into(),
+            schema: Some("public".into()),
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    sql_type: "int8".into(),
+                    nullable: false,
+                    default: None,
+                },
+                Column {
+                    name: "title".into(),
+                    sql_type: "text".into(),
+                    nullable: false,
+                    default: None,
+                },
+                Column {
+                    name: "author".into(),
+                    sql_type: "int8".into(),
+                    nullable: true,
+                    default: None,
+                },
+            ],
+            primary_key: vec!["id".into()],
+            foreign_keys: vec![ForeignKey {
+                columns: vec!["author".into()],
+                referenced_table: "person".into(),
+                referenced_columns: vec!["id".into()],
+            }],
+        }
+    }
+
+    #[test]
+    fn table_from_physical_maps_pk_types_and_nullability() {
+        let table = Table::from_physical(DbId::primary(), &physical_with_fk());
+        assert_eq!(table.id, TableId("book".into()));
+        assert_eq!(table.name, "book");
+        assert_eq!(table.database, DbId::primary());
+        assert_eq!(table.source, TableSource::Database);
+        assert_eq!(table.primary_key, vec!["id".to_string()]);
+        assert_eq!(table.access, AccessRules::default());
+
+        let id = table.field("id").expect("id field");
+        assert!(id.primary_key);
+        assert!(id.required); // NOT NULL
+        assert_eq!(id.base.type_, TypeRef::Basic(BasicType::Int));
+
+        let title = table.field("title").expect("title field");
+        assert!(!title.primary_key);
+        assert_eq!(title.kind, DataFieldKind::Plain);
+    }
+
+    #[test]
+    fn table_from_physical_derives_key_kind_from_foreign_key() {
+        let table = Table::from_physical(DbId::primary(), &physical_with_fk());
+        let author = table.field("author").expect("author field");
+        assert!(!author.required); // nullable
+        assert_eq!(
+            author.kind,
+            DataFieldKind::Key {
+                target_table: TableId("person".into()),
+                target_field: FieldId("id".into()),
+                summary_field: None,
+            }
+        );
+    }
+
+    #[test]
+    fn access_rules_default_is_admin_only() {
+        let rules = AccessRules::default();
+        assert_eq!(rules.min_role_read, 1);
+        assert_eq!(rules.min_role_write, 1);
+    }
+
+    #[test]
+    fn is_system_detects_sc_prefixed_tables() {
+        let mut physical = physical_with_fk();
+        assert!(!Table::from_physical(DbId::primary(), &physical).is_system());
+        physical.name = "_sc_config".into();
+        assert!(Table::from_physical(DbId::primary(), &physical).is_system());
     }
 }

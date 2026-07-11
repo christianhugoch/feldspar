@@ -50,13 +50,13 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 4 — Catalog (`sc-catalog`)
 
-- [ ] `BaseField` / `DataField` (name, label, type, attrs, required, unique, primary_key, kind)
-- [ ] `DataFieldKind`: Plain, Key (target table/field/summary), File (store/folder/mime) — Key/File may be stubbed for MVP UI but modeled now
-- [ ] `Table` (id, name, database, provider, fields, access, attributes)
-- [ ] `Catalog` initialised from a `DatabaseDriver`; **no stored metadata beyond information_schema** for MVP
-- [ ] Cache of tables/fields; get / create-table / create-field methods
-- [ ] `TableProvider` trait defined; trivial driver-backed provider implemented
-- [ ] Integration tests: init catalog from existing DB; create table + fields via catalog; reflect in introspection
+- [x] `BaseField` / `DataField` (name, label, type, attrs, required, unique, primary_key, kind)
+- [x] `DataFieldKind`: Plain, Key (target table/field/summary), File (store/folder/mime) — Key/File may be stubbed for MVP UI but modeled now
+- [x] `Table` (id, name, database, provider, fields, access, attributes)
+- [x] `Catalog` initialised from a `DatabaseDriver`; **no stored metadata beyond information_schema** for MVP
+- [x] Cache of tables/fields; get / create-table / create-field methods
+- [x] `TableProvider` trait defined; trivial driver-backed provider implemented
+- [x] Integration tests: init catalog from existing DB; create table + fields via catalog; reflect in introspection
 
 ## Phase 5 — Users & auth (`sc-auth`)
 

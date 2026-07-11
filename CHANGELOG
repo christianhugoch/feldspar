@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## MVP Phase 4
+
+- Catalog: fields, tables, the `TableProvider` trait, and the `Catalog` hub
+  (Phase 4, `sc-catalog`): built the skeleton crate out into the data-layer hub
+  (technical design §8), completing all seven Phase 4 items. Four modules, plus
+  seven DB-free unit tests and one end-to-end integration test against real
+  Postgres:
+  - `field.rs` — `BaseField`/`DataField`/`DataFieldKind` (§6.2), the `Attrs`
+    JSON-object alias, and the id newtypes (`TableId`, `FieldId`, `DbId`,
+    `FileStoreId`). `DataFieldKind` models `Plain`, `Key { target_table,
+    target_field, summary_field }`, and `File { store, folder, mime_allow }` —
+    the `Key`/`File` kinds are modelled now even though the MVP UI only exercises
+    `Plain`. `DataField` has builder methods (`required`/`unique`/`primary_key`/
+    `label`) and converts both ways with the driver's column types:
+    `to_column_def()` (using `TypeRef::sql_type()` from `sc-types`) and
+    `from_column()`. **Deviation from §6.2**, documented in the module: the
+    design sketches these under `sc-types`, but the `Key` kind references a table
+    and field by id — a catalog concept — so keeping the field types here (beside
+    `Table`) avoids `sc-types` depending on catalog ids and matches the Phase 4
+    TODO grouping.
+  - `table.rs` — `Table` (§8.2) as pure data: id, name, database, `source`,
+    fields, primary key, `access`, attributes. `Table::from_physical` maps an
+    introspected `PhysicalTable` into the catalog: primary-key membership from the
+    physical key, nullability → `required`, `TypeRef` from each `sql_type`, and a
+    single-column foreign key → a `Key` field (no summary field, which is overlay
+    metadata). `TableSource` records which provider kind backs the table
+    (`Database` only for MVP — the design's serialisable stand-in for the
+    behavioural provider). `AccessRules` defaults to admin-only (role 1) since an
+    introspected table carries no overlay; `is_system()` flags `_sc_*` tables.
+  - `provider.rs` — the `TableProvider` trait (`fields`/`query`/`write`; §8.3)
+    and the trivial `DriverTableProvider` that forwards straight to a
+    `DatabaseDriver`. Non-trivial and materialised providers are post-MVP, so the
+    trait carries only the read/write surface.
+  - `catalog.rs` — `Catalog` owns the primary `Arc<dyn DatabaseDriver>` and an
+    `RwLock`-guarded cache of tables. `init` loads the cache from introspection
+    (no metadata beyond `information_schema`; a freshly connected DB is usable
+    with zero setup); `reload` rebuilds it (doing the DB I/O before taking the
+    lock, never across an await); `get`/`require`/`tables` read it; `create_table`
+    and `create_field` issue schema changes and refresh; `provider` hands out a
+    `DriverTableProvider` for a table. No `id` column is invented — primary-key
+    columns are the fields marked `primary_key`.
+  - Integration test (`tests/catalog.rs`) walks the whole story against a real
+    Postgres: create a table out-of-band and have `Catalog::init` discover it,
+    `create_table` + two `create_field`s through the catalog, assert the cache and
+    a fresh driver introspection agree on columns/order, then round-trip a row
+    through the table's provider (INSERT then SELECT).
+  Added deps (`async-trait`, `serde_json`) and dev-deps (`sc-db-postgres`,
+  `sc-test-harness`, `tokio`). `cargo test -p sc-catalog` (7 unit + 1 integration),
+  `cargo clippy -p sc-catalog --all-targets`, and `cargo fmt` all pass. **Phase 4
+  (`sc-catalog`) is now complete.**
+
 ## MVP Phase 3
 
 - Type system: basic types, `TypeRef`, and the catch-all display/edit path

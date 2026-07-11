@@ -13,6 +13,13 @@ sc-error.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
 sc-types.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+tokio = { workspace = true }
 
 [lints]
 workspace = true
