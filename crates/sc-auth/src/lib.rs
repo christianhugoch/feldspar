@@ -15,7 +15,7 @@ mod user;
 mod users;
 
 pub use first_user::{any_user_exists, create_first_user};
-pub use login::authenticate;
+pub use login::{authenticate, authenticate_admin};
 pub use password::{hash_password, is_valid_hash, verify_password};
 pub use session::{DEFAULT_TTL_HOURS, SessionStore};
 pub use user::User;

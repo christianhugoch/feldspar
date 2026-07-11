@@ -94,6 +94,13 @@ impl User {
         self.role == ROLE_ADMIN
     }
 
+    /// Whether this user meets a `min_role` gate. Roles run 1–100 with **lower =
+    /// more privileged** (matching [`AccessRules`](sc_catalog::AccessRules)), so a
+    /// user passes when `role <= min_role`.
+    pub fn meets_role(&self, min_role: u8) -> bool {
+        self.role <= min_role
+    }
+
     /// The value of an extra (admin-defined) field, if present.
     pub fn get(&self, field: &str) -> Option<&Value> {
         self.extra.get(field)
@@ -130,6 +137,19 @@ mod tests {
         let u = User::new(Uuid::new_v4(), ROLE_ADMIN).unwrap();
         assert!(u.is_admin());
         assert!(u.extra.is_empty());
+    }
+
+    #[test]
+    fn meets_role_gates_on_privilege() {
+        let admin = User::new(Uuid::new_v4(), ROLE_ADMIN).unwrap();
+        let editor = User::new(Uuid::new_v4(), 40).unwrap();
+        // Admin (role 1) passes every gate; a lower-privilege user only passes
+        // gates at or below its own role number.
+        assert!(admin.meets_role(ROLE_ADMIN));
+        assert!(admin.meets_role(100));
+        assert!(!editor.meets_role(ROLE_ADMIN)); // 40 <= 1 is false
+        assert!(editor.meets_role(40));
+        assert!(editor.meets_role(100));
     }
 
     #[test]

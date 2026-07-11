@@ -4,6 +4,22 @@ Changes in reverse chronological order.
 
 ## MVP Phase 5
 
+- Admin-only login role gate (Phase 5, `sc-auth`): added the MVP role gate that
+  restricts admin-UI login to administrators (technical design §7.3).
+  - `User::meets_role(min_role)` — a general privilege check encoding the 1–100
+    "lower = more privileged" convention (a user passes when `role <= min_role`),
+    matching `AccessRules`; reused by later per-CRUD authz.
+  - `authenticate_admin(catalog, email, password)` — authenticates then requires
+    admin. Returns `Ok(Some(user))` only for valid admin credentials; wrong
+    credentials *and* a valid non-admin both collapse to `Ok(None)`, so the admin
+    login screen leaks nothing about which check failed (including whether a
+    non-admin account with that email exists). `Err` stays reserved for
+    infrastructure faults.
+  - Tests: a unit test for `meets_role` across admin/non-admin gates, plus one
+    integration test against real Postgres — an admin passes the gate, a wrong
+    admin password is rejected, and a role-40 user with correct credentials is
+    accepted by the ungated `authenticate` yet rejected by `authenticate_admin`.
+
 - Login/logout auth + session logic (Phase 5, `sc-auth`): delivered the
   credential and session substance behind login/logout (technical design §7.2).
   The HTTP session **cookie** and **auth middleware** themselves live in the

@@ -65,7 +65,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] Create-first-user flow (when no user exists, login redirects here)
 - [x] Login / logout; session cookie; auth middleware — auth/session logic in `sc-auth`; HTTP cookie + middleware wiring is Phase 6 (`sc-server`)
 - [x] Password hashing (argon2id) + verification
-- [ ] Role gate: admin-only login for the admin UI (per MVP)
+- [x] Role gate: admin-only login for the admin UI (per MVP)
 - [ ] Integration tests: create-first-user, login success/failure, logout, session expiry
 
 ## Phase 6 — Server: admin UI, web 1.0 (`sc-server`)

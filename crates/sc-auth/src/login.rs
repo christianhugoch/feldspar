@@ -58,3 +58,23 @@ pub async fn authenticate(catalog: &Catalog, email: &str, password: &str) -> Res
 
     Ok(Some(User::from_row(&row)?))
 }
+
+/// Authenticate credentials and require **admin** access — the role gate for the
+/// MVP admin UI (technical design §7.3; only role 1 may reach it).
+///
+/// Returns `Ok(Some(user))` only when the credentials are valid *and* the user
+/// is an admin. Every other outcome — wrong credentials, or a valid but
+/// non-admin user — collapses to `Ok(None)`, so the admin login screen leaks
+/// nothing about which check failed (in particular, not whether a non-admin
+/// account with that email exists). `Err` is still reserved for infrastructure
+/// faults.
+pub async fn authenticate_admin(
+    catalog: &Catalog,
+    email: &str,
+    password: &str,
+) -> Result<Option<User>> {
+    match authenticate(catalog, email, password).await? {
+        Some(user) if user.is_admin() => Ok(Some(user)),
+        _ => Ok(None),
+    }
+}
