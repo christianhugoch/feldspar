@@ -1,20 +1,11 @@
-//! User, Role, sessions, authentication (layer 5)
+//! User, Role, sessions, authentication (layer 5).
 //!
-//! Skeleton crate for the Saltcorn v2 workspace. Functionality is filled in by
-//! later TODO items.
+//! The MVP fills this in incrementally (TODO Phase 5). So far: the `users` table
+//! schema and its one-time [`bootstrap`] into the [`Catalog`](sc_catalog::Catalog).
 
-/// Returns this crate's name. Placeholder so the skeleton has something to test
-/// until the real API lands.
-pub fn crate_name() -> &'static str {
-    "sc-auth"
-}
+mod users;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crate_name_is_set() {
-        assert_eq!(crate_name(), "sc-auth");
-    }
-}
+pub use users::{
+    COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, USERS_TABLE,
+    bootstrap, role_in_range,
+};

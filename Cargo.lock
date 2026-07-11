@@ -922,8 +922,12 @@ version = "0.1.0"
 dependencies = [
  "sc-catalog",
  "sc-db",
+ "sc-db-postgres",
  "sc-error",
  "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "tokio",
 ]
 
 [[package]]

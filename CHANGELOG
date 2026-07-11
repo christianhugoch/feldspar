@@ -2,6 +2,35 @@
 
 Changes in reverse chronological order.
 
+## MVP Phase 5
+
+- Users table bootstrap (Phase 5, `sc-auth`): built the skeleton crate out with a
+  `users` module holding the users-table schema and its one-time `bootstrap` into
+  the `Catalog` (technical design §7.1). The table is deliberately minimal and
+  driver-agnostic — it is created through the catalog like any other table, with
+  no Postgres-specific defaults:
+  - `id` — UUID primary key, `NOT NULL`. The non-deletable identity; the UUID is
+    generated in Rust when a user is created (a later Phase 5 item), not by a
+    `gen_random_uuid()` DB default, so the schema stays portable.
+  - `role` — `int8`, `NOT NULL`. Integer 1–100 (1 = admin, 100 = public); the
+    range is enforced in application code via the exported `role_in_range` helper
+    (with `ROLE_ADMIN`/`ROLE_PUBLIC` constants) rather than a DB `CHECK`, which
+    the MVP schema layer does not yet render.
+  - `email` — `text`, `NOT NULL`, `UNIQUE`. The initial identifier field; the
+    admin may later delete it and substitute another.
+  - `password_hash` — `text`, nullable. Stores the argon2id PHC string
+    (hashing/verification land in a later Phase 5 item); nullable so
+    password-less accounts (e.g. future OAuth-only users) are representable.
+  - Column and table names are exported as constants (`USERS_TABLE`, `COL_ID`,
+    `COL_ROLE`, `COL_EMAIL`, `COL_PASSWORD_HASH`) so later flows and the server
+    reference them symbolically. `bootstrap` is idempotent: it returns an
+    existing `users` table unchanged (no schema reconciliation for the MVP).
+  - Tests: two DB-free unit tests (schema shape; role-range bounds) plus one
+    end-to-end integration test against real Postgres that drops any pre-existing
+    `users` tables (the local multi-tenant v1 test template carries several),
+    bootstraps, and asserts the created columns/PK both in the catalog and in a
+    fresh driver introspection, including idempotency of a second `bootstrap`.
+
 ## MVP Phase 4
 
 - Catalog: fields, tables, the `TableProvider` trait, and the `Catalog` hub
