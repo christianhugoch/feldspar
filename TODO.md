@@ -97,11 +97,11 @@ bundle.
 - [x] Mount the `sc-api` endpoint set as JSON routes; runtime/dynamic routes dispatched via `matchit`; auth enforced per `Endpoint.auth`
 - [x] Session (via `axum-extra` cookie jar; store in `sc-auth`) + CSRF handling for the SPA; strict CSP headers via `tower-http` `set-header` (no `unsafe-inline`; bundle-only)
 - [x] Serve the built `ui/admin` bundle via `tower-http` `ServeDir` + a minimal bootstrap document (no server-rendered admin HTML)
-- [ ] API endpoints: first-user, login, logout
-- [ ] API endpoints: list tables, create table, list a table's fields, create field
-- [ ] API endpoints: rows CRUD (list / create / edit / delete a row in a table)
-- [ ] API endpoints: list users, create user
-- [ ] Integration tests: drive each endpoint end-to-end against a real DB
+- [x] API endpoints: first-user, login, logout
+- [x] API endpoints: list tables, create table, list a table's fields, create field
+- [x] API endpoints: rows CRUD (list / create / edit / delete a row in a table)
+- [x] API endpoints: list users, create user
+- [x] Integration tests: drive each endpoint end-to-end against a real DB
 
 **Admin SPA (`ui/admin`):**
 

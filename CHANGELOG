@@ -4,6 +4,41 @@ Changes in reverse chronological order.
 
 ## MVP Phase 6
 
+- Admin API handlers (`sc-server`, `sc-auth`; Phase 6 "Server" subphase, second
+  half; design §13.1, §7). The concrete code behind every `sc_api::admin_endpoints()`
+  endpoint — the server-side half of the typed API — resolved by name against the
+  `HandlerRegistry` at dispatch time:
+  - `sc-server/src/handlers.rs`: `admin_handlers(catalog)` builds the registry,
+    one entry per endpoint `name`, each closing over a shared `Catalog`:
+    - bootstrap/auth: `authStatus` (any-user-exists + current user), `createFirstUser`
+      (creates the initial admin and logs them straight in), `login`
+      (`authenticate_admin` → session, else 401), `logout` (ends the session).
+    - catalog: `listTables` (non-system tables), `createTable` (gives a new table a
+      default database-generated identity `id` primary key so the row editor can
+      address rows — the endpoint contract carries only a name), `listFields`,
+      `createField` (raw `sql_type` → `TypeRef::from_sql_type`).
+    - row CRUD: `listRows`/`createRow`/`updateRow`/`deleteRow`, addressing a row by
+      its single-column primary key (composite keys are post-MVP), with `RETURNING`
+      so the mutated row is echoed back; a missing row on update/delete is a 404.
+    - users: `listUsers`, `createUser`.
+    Handlers stay free of HTTP plumbing — they read `HandlerCtx` and return
+    `HandlerResponse`, deferring session cookies to the dispatcher.
+  - `sc-server/src/convert.rs`: `json_to_value`/`value_to_json` bridge the JSON wire
+    shape to the query layer's `Value`, coercing incoming scalars to the variant a
+    column's `BasicType` calls for (uuid/date/timestamp/decimal parsed, malformed →
+    400) and rendering values back as natural JSON (not `Value`'s tagged form).
+  - `sc-auth`: new `create_user(catalog, email, password, role)` — the admin-driven
+    counterpart to `create_first_user` (caller-supplied role, no empty-table
+    precondition); UUID minted in Rust, password argon2id-hashed before insert.
+  - Tests: `sc-server/tests/admin_api.rs` drives the whole admin story end-to-end
+    through the assembled router against a real Postgres (per-test isolated DB) with
+    a cookie-carrying client (session + CSRF double-submit like a browser):
+    bootstrap → create table + field → row create/list/update/delete (+404 on a gone
+    row) → create/list users → logout → non-admin login rejected → wrong password
+    rejected → admin re-login unlocks admin routes. `convert.rs` unit tests cover the
+    JSON⇄`Value` round-trips and malformed-input rejection. `cargo test`/`clippy
+    --all-targets`/`fmt` clean.
+
 - Server infrastructure (`sc-server`, `sc-cli`; Phase 6 "Server" subphase, first
   half; design §13.1, §16). The axum server that mounts the typed API and serves
   the React admin SPA — everything except the concrete admin handlers, which are

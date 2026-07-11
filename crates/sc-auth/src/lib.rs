@@ -5,8 +5,10 @@
 //! the [`User`] value read back from a row, argon2id password hashing and
 //! verification ([`hash_password`], [`verify_password`]), the create-first-user
 //! flow ([`create_first_user`], [`any_user_exists`]), credential
-//! [`authenticate`]ion, and the in-memory [`SessionStore`] behind login/logout.
+//! [`authenticate`]ion, the admin-driven [`create_user`] path, and the in-memory
+//! [`SessionStore`] behind login/logout.
 
+mod create;
 mod first_user;
 mod login;
 mod password;
@@ -14,6 +16,7 @@ mod session;
 mod user;
 mod users;
 
+pub use create::create_user;
 pub use first_user::{any_user_exists, create_first_user};
 pub use login::{authenticate, authenticate_admin};
 pub use password::{hash_password, is_valid_hash, verify_password};

@@ -1,0 +1,317 @@
+//! End-to-end integration tests for the admin API handlers, driven through the
+//! assembled router against a **real Postgres database** (Phase 6 server
+//! subphase, final item).
+//!
+//! Unlike `router.rs` — which exercises dispatch/auth/CSRF with stub handlers and
+//! no database — this walks the whole admin story through the concrete
+//! [`admin_handlers`]: bootstrap the first user, create a table and a field, CRUD
+//! a row, and manage users, each as an HTTP request carrying the session and CSRF
+//! cookies a browser would. A fresh, isolated database is created per test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use sc_auth::SessionStore;
+use sc_catalog::Catalog;
+use sc_db::DatabaseDriver;
+use sc_db_postgres::PgDriver;
+use sc_server::{
+    CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, ServerConfig, admin_handlers, build_router,
+};
+use sc_test_harness::TestDb;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+/// A cookie-jar-carrying client over the router: it remembers `Set-Cookie`
+/// values (CSRF + session) between requests and echoes the CSRF token on
+/// mutations, exactly as a browser-based SPA would.
+struct Client {
+    router: Router,
+    cookies: HashMap<String, String>,
+}
+
+impl Client {
+    fn new(router: Router) -> Client {
+        Client {
+            router,
+            cookies: HashMap::new(),
+        }
+    }
+
+    /// Issue a request, updating the stored cookies from the response.
+    async fn send(&mut self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let mut builder = Request::builder().method(method).uri(path);
+
+        // Send every stored cookie.
+        if !self.cookies.is_empty() {
+            let cookie_header = self
+                .cookies
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            builder = builder.header(header::COOKIE, cookie_header);
+        }
+        // Echo the CSRF token on mutating requests (double-submit).
+        if method != "GET" && method != "HEAD" {
+            if let Some(csrf) = self.cookies.get(CSRF_COOKIE) {
+                builder = builder.header(CSRF_HEADER, csrf);
+            }
+        }
+
+        let request = match body {
+            Some(ref b) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(b).unwrap()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+
+        // Fold Set-Cookie values into the jar (empty value → cleared).
+        for raw in response.headers().get_all(header::SET_COOKIE) {
+            if let Ok(text) = raw.to_str() {
+                let pair = text.split(';').next().unwrap_or("");
+                if let Some((name, value)) = pair.split_once('=') {
+                    if value.is_empty() {
+                        self.cookies.remove(name);
+                    } else {
+                        self.cookies.insert(name.to_owned(), value.to_owned());
+                    }
+                }
+            }
+        }
+
+        let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, value)
+    }
+}
+
+/// Build a router over the admin endpoints backed by a fresh catalog, plus the
+/// client that drives it. The users table is bootstrapped so auth works. The
+/// returned [`TestDb`] must be kept in scope: dropping it deletes the database.
+async fn setup() -> sc_error::Result<(Client, TestDb)> {
+    let db = TestDb::new().await?;
+
+    // The multi-tenant v1 test template carries `users` tables in several
+    // schemas; drop them all so bootstrap creates the clean MVP table. No-op in
+    // clean CI.
+    db.client()
+        .await?
+        .batch_execute(
+            "DO $$ DECLARE r record; BEGIN \
+               FOR r IN SELECT table_schema FROM information_schema.tables \
+               WHERE table_name = 'users' AND table_type = 'BASE TABLE' LOOP \
+                 EXECUTE format('DROP TABLE IF EXISTS %I.users CASCADE', r.table_schema); \
+               END LOOP; END $$",
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+
+    let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
+    let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
+    sc_auth::bootstrap(&catalog).await?;
+
+    let sessions = Arc::new(SessionStore::default());
+    let router = build_router(
+        &sc_api::admin_endpoints(),
+        admin_handlers(catalog),
+        sessions,
+        &ServerConfig::default(),
+    )?;
+
+    Ok((Client::new(router), db))
+}
+
+#[tokio::test]
+async fn full_admin_api_story() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+
+    // --- bootstrap: no user yet -------------------------------------------
+    let (status, body) = client.send("GET", "/api/auth/status", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["any_user_exists"], json!(false));
+    assert_eq!(body["current_user"], Value::Null);
+
+    // Admin routes are locked before login.
+    let (status, _) = client.send("GET", "/api/tables", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // --- create the first user (logs them straight in) --------------------
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/first-user",
+            Some(json!({ "email": "admin@example.com", "password": "hunter2pass" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["email"], json!("admin@example.com"));
+    assert_eq!(body["role"], json!(1));
+    assert!(client.cookies.contains_key(SESSION_COOKIE));
+
+    // Now the status reflects the logged-in admin.
+    let (_, body) = client.send("GET", "/api/auth/status", None).await;
+    assert_eq!(body["any_user_exists"], json!(true));
+    assert_eq!(body["current_user"]["email"], json!("admin@example.com"));
+
+    // --- tables & fields ---------------------------------------------------
+    let (status, body) = client
+        .send("POST", "/api/tables", Some(json!({ "name": "book" })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["name"], json!("book"));
+
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({ "name": "title", "sql_type": "text", "nullable": false })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["name"], json!("title"));
+    assert_eq!(body["sql_type"], json!("text"));
+    assert_eq!(body["nullable"], json!(false));
+
+    let (_, body) = client.send("GET", "/api/tables", None).await;
+    let names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(names.contains(&"book"), "book listed: {names:?}");
+
+    let (_, body) = client.send("GET", "/api/tables/book/fields", None).await;
+    let field_names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert_eq!(field_names, ["id", "title"]);
+
+    // --- row CRUD ----------------------------------------------------------
+    let (status, row) = client
+        .send(
+            "POST",
+            "/api/tables/book/rows",
+            Some(json!({ "title": "Dune" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(row["title"], json!("Dune"));
+    let id = row["id"].as_i64().expect("generated integer id");
+
+    let (_, body) = client.send("GET", "/api/tables/book/rows", None).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["title"], json!("Dune"));
+
+    let (status, updated) = client
+        .send(
+            "PUT",
+            &format!("/api/tables/book/rows/{id}"),
+            Some(json!({ "title": "Dune Messiah" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["title"], json!("Dune Messiah"));
+    assert_eq!(updated["id"], json!(id));
+
+    let (status, body) = client
+        .send("DELETE", &format!("/api/tables/book/rows/{id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], json!(true));
+
+    // Deleting a row that no longer exists is a 404.
+    let (status, _) = client
+        .send("DELETE", &format!("/api/tables/book/rows/{id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (_, body) = client.send("GET", "/api/tables/book/rows", None).await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
+
+    // --- users -------------------------------------------------------------
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/users",
+            Some(json!({ "email": "editor@example.com", "password": "editorpass", "role": 40 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["email"], json!("editor@example.com"));
+    assert_eq!(body["role"], json!(40));
+
+    let (_, body) = client.send("GET", "/api/users", None).await;
+    let emails: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["email"].as_str())
+        .collect();
+    assert_eq!(emails.len(), 2);
+    assert!(emails.contains(&"admin@example.com"));
+    assert!(emails.contains(&"editor@example.com"));
+
+    // --- logout / login ----------------------------------------------------
+    let (status, _) = client.send("POST", "/api/logout", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!client.cookies.contains_key(SESSION_COOKIE));
+
+    // Logged out → admin routes locked again.
+    let (status, _) = client.send("GET", "/api/tables", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A non-admin cannot log into the admin UI (role gate).
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": "editor@example.com", "password": "editorpass" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Wrong password is rejected.
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": "admin@example.com", "password": "wrong" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Correct admin credentials log back in and unlock admin routes.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": "admin@example.com", "password": "hunter2pass" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["role"], json!(1));
+
+    let (status, _) = client.send("GET", "/api/tables", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    Ok(())
+}

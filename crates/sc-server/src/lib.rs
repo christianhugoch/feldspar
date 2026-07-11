@@ -15,11 +15,14 @@
 //!   headers and CSRF protection, and serves the static bundle / bootstrap doc.
 //! - [`serve`] — binds the listener and runs with graceful shutdown.
 //!
-//! The concrete admin handlers (login, tables, rows, users) and their DB-backed
-//! integration tests land in the second half of the Phase 6 server subphase.
+//! The concrete admin handlers (login, tables, rows, users) live in
+//! [`admin_handlers`]; they are resolved by name against the [`sc_api`] admin
+//! endpoint set at dispatch time.
 
 mod config;
+mod convert;
 mod handler;
+mod handlers;
 mod router;
 mod security;
 mod serve;
@@ -28,6 +31,7 @@ pub use config::{DEFAULT_BIND, ServerConfig};
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
+pub use handlers::admin_handlers;
 pub use router::{BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, build_router};
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::serve;
