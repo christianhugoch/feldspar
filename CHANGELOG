@@ -4,6 +4,24 @@ Changes in reverse chronological order.
 
 ## MVP Phase 5
 
+- `User` struct (Phase 5, `sc-auth`): added the `User` value model (technical
+  design §7.1) in a new `user` module — `id: Uuid`, `role: u8` (1–100), and
+  `extra: BTreeMap<String, Value>` for the admin-defined columns. The model makes
+  only the two guaranteed assumptions about the table's shape; everything else
+  (including `email`) rides opaquely in `extra`.
+  - `User::new(id, role)` validates the role range; `User::from_row(&Row)` reads
+    the UUID `id` and integer `role` (validating both type and range) and
+    collects every other column into `extra`. The **password hash is
+    deliberately excluded** from `extra` so a `User` — the object passed through
+    requests/sessions — never carries the hash into logs, session state, or API
+    responses. Convenience: `is_admin()` and `get(field)`. Derives
+    `Serialize`/`Deserialize` (ready for session storage) and `PartialEq`.
+  - Tests: three DB-free unit tests (role validation; `from_row` extracts
+    id/role/extra while dropping the hash; rejects bad role, wrong `id` type, and
+    missing columns) plus one integration test against real Postgres that inserts
+    a user row through the table provider and round-trips it back into a `User`,
+    asserting the hash stays out of `extra`.
+
 - Users table bootstrap (Phase 5, `sc-auth`): built the skeleton crate out with a
   `users` module holding the users-table schema and its one-time `bootstrap` into
   the `Catalog` (technical design §7.1). The table is deliberately minimal and

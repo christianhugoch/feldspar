@@ -14,6 +14,8 @@ sc-query.workspace = true
 sc-db.workspace = true
 sc-catalog.workspace = true
 sc-types.workspace = true
+serde.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 sc-db-postgres.workspace = true

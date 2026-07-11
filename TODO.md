@@ -61,7 +61,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 ## Phase 5 — Users & auth (`sc-auth`)
 
 - [x] `users` table bootstrap: UUID PK (not deletable), `role` (1–100), argon2id password hash, initial `email` field
-- [ ] `User` struct (id, role, extra fields map)
+- [x] `User` struct (id, role, extra fields map)
 - [ ] Create-first-user flow (when no user exists, login redirects here)
 - [ ] Login / logout; session cookie; auth middleware
 - [ ] Password hashing (argon2id) + verification

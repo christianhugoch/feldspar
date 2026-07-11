@@ -927,7 +927,9 @@ dependencies = [
  "sc-query",
  "sc-test-harness",
  "sc-types",
+ "serde",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
