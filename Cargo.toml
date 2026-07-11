@@ -99,6 +99,27 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 
+# --- HTTP server framework ---------------------------------------------------
+#
+# Web framework decision (design §16): **axum**, on hyper + tower. It is
+# maintained by the tokio team and runs directly on the already-chosen
+# tokio/hyper stack with no separate runtime (unlike actix-web's actix-rt);
+# handlers are plain async fns rather than macro-driven routing (unlike Rocket);
+# and it is unopinionated enough to build the reified `Endpoint` registry
+# (design §13.1) on top of. tower / tower-http supply the middleware the design
+# needs — strict CSP + security headers (`set-header`) and `ServeDir` (`fs`) to
+# serve the built `ui/admin` SPA bundle. `matchit` is axum's own path-router
+# crate, used directly to dispatch application routes that are registered at
+# runtime and are therefore not known at compile time (design §13.1). `axum-extra`
+# supplies the cookie jar for session cookies; the session store itself stays in
+# `sc-auth`. Versions track the current axum 0.8 stable line; exact pairings are
+# confirmed when Phase 6 first compiles against them.
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "set-header", "trace"] }
+matchit = "0.8"
+
 # Workspace-wide lints. Principle 5 (no silent failures): library code must not
 # `unwrap()`/`expect()` on fallible paths — return a `sc-error::Result` instead.
 # Member crates opt in with `[lints]` + `workspace = true`. Test code is exempted

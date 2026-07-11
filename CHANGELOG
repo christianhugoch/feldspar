@@ -4,6 +4,17 @@ Changes in reverse chronological order.
 
 ## Design
 
+- Chose the Rust web framework: **axum** (on hyper + tower), with `axum-extra`
+  (cookie jar), `tower`/`tower-http` (`set-header` for strict CSP headers, `fs`
+  `ServeDir` for the `ui/admin` bundle), and `matchit` (axum's path router, used
+  directly to dispatch the runtime-registered `Endpoint` routes that aren't known
+  at compile time). Picked over actix-web (separate `actix-rt` runtime) and Rocket
+  (macro-driven routing) for coherence with the already-selected tokio/hyper stack
+  and to carry the reified endpoint registry (design §13.1) rather than fight a
+  built-in router. Pinned in the root `Cargo.toml` `[workspace.dependencies]`;
+  recorded in `docs/TECHNICAL_DESIGN.md` §16 and the Phase 6 tasks in `TODO.md`
+  (replacing the "axum/actix" placeholder).
+
 - Design docs updated to follow a GOALS.md revision (`docs/GOALS.md`, uncommitted
   at the time): the admin UI pivots from server-rendered "web 1.0" HTML to a
   **React + TypeScript SPA over a typed JSON API**, and the planned `sc-markup`

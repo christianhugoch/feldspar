@@ -924,6 +924,20 @@ line), `tokio-postgres` (with the `uuid`/`chrono`/`serde_json` `ToSql`/`FromSql`
 (principle 7). Formatting and linting are gated in CI (`cargo fmt --check`, `cargo clippy
 --all-targets -D warnings`); tests run against a real Postgres.
 
+The **HTTP server framework is axum** (on hyper + tower), pinned alongside `axum-extra`,
+`tower`, `tower-http`, and `matchit`. axum is chosen over actix-web (which brings its own
+`actix-rt` runtime) and Rocket (macro-driven routing) because it is maintained by the tokio
+team, runs directly on the already-selected tokio/hyper stack with no second runtime, exposes
+handlers as plain async fns, and is unopinionated enough to carry the reified `Endpoint`
+registry (§13.1) rather than fighting a built-in router. The tower ecosystem provides exactly
+the middleware this design calls for: `tower-http`'s `set-header` for strict CSP/security
+headers and `ServeDir` for serving the built `ui/admin` SPA bundle. Crucially, **routes not
+known at compile time** (§13.1: application and custom user routes) are matched with
+`matchit` — axum's own path-router crate — used directly to dispatch the runtime `Endpoint`
+set, while the compile-time-known admin API mounts through the same machinery. Session cookies
+use `axum-extra`'s cookie jar; the session store stays in `sc-auth`. Streaming responses map
+onto the same `futures::Stream` used for `RowStream`.
+
 **Security posture.** Strict CSP everywhere, satisfied structurally by the React UI bundles
 (no inline handlers) rather than a server markup model; framework-level XSS escaping in the
 React layer; structural SQL-injection safety in `sc-query`; per-CRUD authorization enforced
