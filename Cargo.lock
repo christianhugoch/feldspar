@@ -991,6 +991,7 @@ dependencies = [
  "sc-auth",
  "sc-catalog",
  "sc-error",
+ "serde",
 ]
 
 [[package]]

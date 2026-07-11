@@ -1,21 +1,143 @@
 //! Endpoint model (typed Rust values) + API providers + TypeScript consumer
 //! generation (layer 8; technical design §13.1).
 //!
-//! Skeleton crate for the Saltcorn v2 workspace. Functionality is filled in by
-//! later TODO items.
+//! This crate reifies HTTP endpoints as **data**: an [`Endpoint`] records its
+//! method, typed path, request/response [`TypeSchema`], auth requirement, and a
+//! handler reference — described well enough to be dispatched by the server and
+//! typed for a consumer even when registered at runtime. Endpoints live in an
+//! [`EndpointSet`] runtime registry; the admin API ([`admin::admin_endpoints`])
+//! is a fixed set built through the *same* machinery. [`generate_client`] emits a
+//! type-checked TypeScript client from any set, so the server contract and its
+//! consumers cannot drift.
+//!
+//! API providers (REST/GraphQL/… — design §13.4) build on this model in a later
+//! phase.
 
-/// Returns this crate's name. Placeholder so the skeleton has something to test
-/// until the real API lands.
-pub fn crate_name() -> &'static str {
-    "sc-api"
-}
+mod admin;
+mod endpoint;
+mod schema;
+mod typescript;
+
+pub use admin::{ADMIN_API_PREFIX, admin_endpoints};
+pub use endpoint::{
+    AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec,
+};
+pub use schema::{StructField, TypeSchema, ValueType};
+pub use typescript::generate_client;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn crate_name_is_set() {
-        assert_eq!(crate_name(), "sc-api");
+    fn path_spec_builds_pattern_and_typed_params() {
+        let path = PathSpec::root()
+            .lit("api/tables")
+            .param("table", ValueType::Text)
+            .lit("rows")
+            .param("id", ValueType::Uuid);
+        assert_eq!(path.pattern(), "/api/tables/{table}/rows/{id}");
+        let params: Vec<_> = path.params().collect();
+        assert_eq!(
+            params,
+            vec![("table", ValueType::Text), ("id", ValueType::Uuid)]
+        );
+    }
+
+    #[test]
+    fn endpoint_defaults_and_builder() {
+        let ep = Endpoint::new("login", Method::Post, PathSpec::root().lit("api/login"));
+        // Defaults: empty i/o, logged-in auth, handler named after the endpoint.
+        assert!(ep.input.is_empty());
+        assert!(ep.output.is_empty());
+        assert_eq!(ep.auth, AuthRequirement::LoggedIn);
+        assert_eq!(ep.handler, HandlerRef::named("login"));
+
+        let ep = ep.auth(AuthRequirement::Public).output(TypeSchema::text());
+        assert_eq!(ep.auth, AuthRequirement::Public);
+        assert!(!ep.output.is_empty());
+    }
+
+    #[test]
+    fn endpoint_set_is_a_runtime_registry() {
+        let mut set = EndpointSet::new();
+        set.register(Endpoint::new("a", Method::Get, PathSpec::root().lit("a")));
+        set.register(Endpoint::new("b", Method::Get, PathSpec::root().lit("b")));
+        assert_eq!(set.len(), 2);
+        assert!(set.find("a").is_some());
+        assert!(set.find("missing").is_none());
+        // Iteration preserves registration order.
+        let names: Vec<_> = set.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate endpoint name")]
+    fn duplicate_endpoint_names_panic() {
+        let mut set = EndpointSet::new();
+        set.register(Endpoint::new("dup", Method::Get, PathSpec::root().lit("x")));
+        set.register(Endpoint::new(
+            "dup",
+            Method::Post,
+            PathSpec::root().lit("y"),
+        ));
+    }
+
+    #[test]
+    fn admin_endpoints_use_the_same_machinery() {
+        let set = admin_endpoints();
+        // A representative sample of the fixed admin contract.
+        assert!(set.find("login").is_some());
+        assert!(set.find("createFirstUser").is_some());
+        assert!(set.find("listTables").is_some());
+        assert!(set.find("createRow").is_some());
+        assert!(set.find("listUsers").is_some());
+
+        // Auth is set as the design requires: bootstrap is public, admin routes gated.
+        assert_eq!(set.find("login").unwrap().auth, AuthRequirement::Public);
+        assert_eq!(
+            set.find("listTables").unwrap().auth,
+            AuthRequirement::admin()
+        );
+    }
+
+    #[test]
+    fn typeschema_renders_to_typescript() {
+        // Optional struct field becomes `?`-optional and `| null`.
+        let schema = TypeSchema::struct_of([
+            StructField::new("id", TypeSchema::uuid()),
+            StructField::new("tags", TypeSchema::array(TypeSchema::text())),
+            StructField::new("note", TypeSchema::optional(TypeSchema::text())),
+        ]);
+        let client = generate_client(&EndpointSet::new().with(
+            Endpoint::new("thing", Method::Post, PathSpec::root().lit("thing")).input(schema),
+        ));
+        assert!(client.contains("id: string"));
+        assert!(client.contains("tags: Array<string>"));
+        assert!(client.contains("note?: string | null"));
+    }
+
+    #[test]
+    fn generated_client_has_typed_methods_and_urls() {
+        let ts = generate_client(&admin_endpoints());
+
+        // Type declarations for endpoints with a body/response.
+        assert!(ts.contains("export type LoginRequest = "));
+        assert!(ts.contains("export type LoginResponse = "));
+
+        // The client interface and factory.
+        assert!(ts.contains("export interface ApiClient {"));
+        assert!(ts.contains("export function createClient("));
+
+        // Path params are typed method args; the URL interpolates them.
+        assert!(ts.contains("listRows(table: string): Promise<ListRowsResponse>"));
+        assert!(ts.contains("/api/tables/${table}/rows"));
+
+        // A void endpoint (logout has no response payload).
+        assert!(ts.contains("logout(): Promise<void>"));
+
+        // Correct HTTP verbs are emitted.
+        assert!(ts.contains("method: \"POST\""));
+        assert!(ts.contains("method: \"DELETE\""));
     }
 }

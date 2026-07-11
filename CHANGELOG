@@ -4,6 +4,42 @@ Changes in reverse chronological order.
 
 ## MVP Phase 6
 
+- Endpoint model & typed TypeScript client (`sc-api`; Phase 6 "Endpoint model &
+  typed client" subphase; design §13.1). Endpoints are now reified as **data**,
+  not just handler functions, and the same machinery drives both the admin API
+  and (later) application APIs:
+  - `src/schema.rs`: `ValueType` (the scalar leaf set, mirroring the non-null
+    `Value` families, each with a fixed TypeScript mapping) and `TypeSchema`
+    (`Value` / `Struct` / `Array` / `Optional`) — a small, serializable schema
+    sufficient to describe args and results and to emit TS. Includes convenience
+    constructors and an `empty()`/`is_empty()` "no value" shape.
+  - `src/endpoint.rs`: the `Endpoint` value (`name`, `Method`, typed `PathSpec`,
+    input/output `TypeSchema`, `AuthRequirement`, `HandlerRef`) with a builder;
+    `PathSpec` (literal segments + typed params, with `pattern()` for
+    matchit/axum and `params()` for the generator); `Method`; `AuthRequirement`
+    (`Public` / `LoggedIn` / `MinRole`, with `admin()` from `sc_auth::ROLE_ADMIN`);
+    `HandlerRef` (`Named` Rust handler, or guest-code / SQL for custom routes).
+    `EndpointSet` is the runtime registry (register/iterate/find, duplicate-name
+    guard) — routes need not be known at compile time.
+  - `src/admin.rs`: the admin API (`admin_endpoints()`) built as fixed `Endpoint`
+    values through the **same** `EndpointSet` machinery — auth-status/first-user/
+    login/logout, tables + fields, row CRUD, and users — establishing the
+    contract the server handlers and generated client are both held to.
+  - `src/typescript.rs`: `generate_client()` emits a single TS module —
+    per-endpoint request/response type declarations plus an `ApiClient` interface
+    and a `createClient` factory (fetch-based, path params interpolated into the
+    URL, typed bodies/results). Output is deterministic and valid strict-mode TS;
+    the factory is contextually typed by `ApiClient`, so a drift from a declared
+    endpoint is a compile error.
+  - Tests: unit tests cover path/pattern building, endpoint defaults + registry
+    behaviour (incl. the duplicate-name panic), the admin contract, and the
+    `TypeSchema`→TS rendering. `tests/typescript_typecheck.rs` generates the admin
+    client, writes it beside a strict usage module that calls a cross-section of
+    endpoints, and runs `tsc --noEmit --strict` — proving the generated client
+    genuinely type-checks against the declared endpoints (verified locally against
+    TypeScript 5; the test skips cleanly when no `tsc` is resolvable via `SC_TSC`
+    or `crates/sc-api/node_modules`). `cargo test`/`clippy`/`fmt` clean.
+
 - Reconcile existing code with the React-admin-UI / typed-API pivot (Phase 6
   "reconcile" subphase; design §6.3, §12, §13.1), before building the server on it:
   - Confirmed the `sc-markup` symbolic-HTML crate is dropped everywhere — no

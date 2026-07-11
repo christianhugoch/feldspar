@@ -85,11 +85,11 @@ bundle.
 
 **Endpoint model & typed client (`sc-api`):**
 
-- [ ] `Endpoint` value (method, typed path/query params, `TypeSchema` input, `TypeSchema` output, `auth` requirement, handler ref) — design §13.1
-- [ ] `TypeSchema` enum sufficient to describe args/results and emit TS (Value types, struct, array, optional)
-- [ ] Register endpoints as runtime values (routes need not be known at compile time); admin API expressed as fixed `Endpoint` constants through the **same** machinery
-- [ ] TypeScript generator: emit type declarations + a typed API-consumer client from the `Endpoint` set
-- [ ] Tests: generated TS type-checks against the declared endpoints
+- [x] `Endpoint` value (method, typed path/query params, `TypeSchema` input, `TypeSchema` output, `auth` requirement, handler ref) — design §13.1
+- [x] `TypeSchema` enum sufficient to describe args/results and emit TS (Value types, struct, array, optional)
+- [x] Register endpoints as runtime values (routes need not be known at compile time); admin API expressed as fixed `Endpoint` constants through the **same** machinery
+- [x] TypeScript generator: emit type declarations + a typed API-consumer client from the `Endpoint` set
+- [x] Tests: generated TS type-checks against the declared endpoints
 
 **Server (`sc-server`):**
 
