@@ -142,7 +142,7 @@ bundle.
 - [ ] End-to-end acceptance test walking the full MVP DoD user story
 - [ ] Confirm every route/action has integration coverage; Postgres reset-per-test verified
 - [ ] Manual pass: create-first-user → create table → add fields → edit rows → create user → login/out → connect file store → serve React app
-- [ ] README quickstart (build, run, connect DB, open admin)
+- [x] README quickstart (build, run, connect DB, open admin)
 - [ ] Tag MVP
 
 ---

@@ -2,6 +2,16 @@
 
 Changes in reverse chronological order.
 
+## Docs
+
+- Operator `README.md`: install prerequisites (Rust 1.85+, PostgreSQL 13+/16,
+  optional Node for the admin UI), one-time database setup (create role + database,
+  local or Docker), building the server with/without the admin bundle
+  (`SC_BUILD_ADMIN=1`), running `saltcorn serve` (full flag/env reference), the
+  create-first-user flow (UI and API), the `/health` route, and troubleshooting.
+  Covers the Phase 10 "README quickstart" item early since the boot path it
+  documents now exists.
+
 ## MVP Phase 7 — CLI (`sc-cli`)
 
 - `saltcorn serve` now brings the data layer up and mounts the live admin API,
