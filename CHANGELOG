@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## MVP Phase 7 — CLI (`sc-cli`)
+
+- `saltcorn serve` now brings the data layer up and mounts the live admin API,
+  instead of the placeholder empty handler registry (design §16, §17). The
+  command connects the primary Postgres database, initialises the
+  [`Catalog`](sc_catalog::Catalog) from its live schema, ensures the `users`
+  table exists (`sc_auth::bootstrap`), and serves the admin `EndpointSet` backed
+  by `admin_handlers(catalog)`. Previously admin routes answered `501` because no
+  database was wired in; they now answer for real.
+- Database connection configuration (`sc-cli/src/db.rs`, `DbConfig`). A `serve`
+  invocation takes either a full connection URL (`--database-url`, falling back to
+  `DATABASE_URL`) or the individual parts (`--db-host` / `--db-port` / `--db-user`
+  / `--db-password` / `--db-name`, falling back to the conventional `PGHOST`,
+  `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`); a URL, when present, wins
+  wholesale. `DbConfig::extract` pulls just the database flags out of the argument
+  list and returns the remainder, which `ServerConfig::from_args` parses as before,
+  so a typo in either group still fails loudly.
+- No silent failures on a bad database. The connection pool is built eagerly but
+  the first real connection happens when the catalog introspects; that failure is
+  surfaced with the **password-redacted** target (`DbConfig::target`) for context,
+  so an unreachable or misconfigured database fails at startup with a clear message
+  rather than a server that boots and then 500s.
+- Operational health route. `sc-server`'s router now serves `GET /health` →
+  `200 {"status":"ok"}` as a fixed, unauthenticated route outside the typed API
+  (for CLI smoke tests, load balancers, and orchestrators); it takes precedence
+  over the SPA fallback.
+- `sc-cli` gained a library half (`src/lib.rs`) exposing `DbConfig` and
+  `connect_catalog`, so the binary stays thin and integration tests drive the same
+  boot path.
+- Tests: `DbConfig` argument parsing / env-fallback / password redaction unit
+  tests, plus an integration smoke test (`crates/sc-cli/tests/serve.rs`) that boots
+  the full CLI path against a real per-test Postgres and asserts `/health` answers,
+  the users table is bootstrapped, and connecting to a dead port fails with the
+  redacted target and no leaked password.
+
 ## MVP Phase 6
 
 - Admin SPA (`ui/admin`; Phase 6 "Admin SPA" subphase; design §12, §16). A

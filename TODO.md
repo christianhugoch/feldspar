@@ -109,7 +109,14 @@ bundle.
 - [x] Screens: create-first-user, login/logout, tables list, table fields, row editor, users
 - [x] Wire the `ui/admin` build into the server build so the bundle is served by `sc-server`
 
-## Phase 7 — Files (`sc-files`)
+## Phase 7 — CLI (`sc-cli`)
+
+- [x] `saltcorn serve` — run the server (db connection args, port, admin URL/subdomain)
+- [x] DB connection config (host/user/pass/db) surfaced as flags/env
+- [x] Helpful startup errors (no silent failures) when DB unreachable / misconfigured
+- [x] Smoke test: `serve` boots against a test DB and answers a health route
+
+## Phase 8 — Files (`sc-files`)
 
 - [ ] `FileStore` trait (read, write, list, is_git_repo, get/set xattr meta)
 - [ ] Local-directory driver
@@ -118,7 +125,7 @@ bundle.
 - [ ] Server routes: basic file manager (browse, upload, download, edit a text file)
 - [ ] Integration tests: connect store, list/read/write, round-trip xattr metadata
 
-## Phase 8 — Applications & API for the React app (`sc-app`, `sc-api`)
+## Phase 9 — Applications & API for the React app (`sc-app`, `sc-api`)
 
 - [ ] `Application` model (name, subdomain, framework, tables subset, file stores, apis, csp)
 - [ ] `Framework` trait; code-framework implementation that serves bundled static assets
@@ -129,12 +136,6 @@ bundle.
 - [ ] Serve the built React app from the Saltcorn process (no direct DB access from the app)
 - [ ] Integration tests: build serves assets; API auth round-trip; unauthorized request rejected
 
-## Phase 9 — CLI (`sc-cli`)
-
-- [ ] `saltcorn serve` — run the server (db connection args, port, admin URL/subdomain)
-- [ ] DB connection config (host/user/pass/db) surfaced as flags/env
-- [ ] Helpful startup errors (no silent failures) when DB unreachable / misconfigured
-- [ ] Smoke test: `serve` boots against a test DB and answers a health route
 
 ## Phase 10 — MVP hardening & acceptance
 

@@ -1289,11 +1289,19 @@ dependencies = [
 name = "sc-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "sc-api",
  "sc-auth",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
  "sc-error",
  "sc-server",
+ "sc-test-harness",
+ "serde_json",
  "tokio",
+ "tokio-postgres",
+ "tower",
 ]
 
 [[package]]

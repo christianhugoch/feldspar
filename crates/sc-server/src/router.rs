@@ -91,6 +91,10 @@ pub fn build_router(
     };
 
     let app = Router::new()
+        // Operational health check: a fixed, unauthenticated route (outside the
+        // typed API) so a CLI smoke test, load balancer, or orchestrator can
+        // confirm the process is up. It takes precedence over the SPA fallback.
+        .route("/health", axum::routing::get(health))
         .fallback(dispatch)
         .with_state(state)
         // CSRF runs outside dispatch so it guards every route and can mint the
@@ -118,6 +122,12 @@ pub fn build_router(
         ));
 
     Ok(app)
+}
+
+/// The operational health check. Always `200 {"status":"ok"}`; reaching it at
+/// all is the signal that the server booted and is accepting requests.
+async fn health() -> Response {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }
 
 /// Group endpoints by path pattern and insert them into a `matchit` router.
