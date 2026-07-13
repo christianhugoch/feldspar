@@ -15,7 +15,7 @@ use std::sync::Arc;
 use sc_api::admin_endpoints;
 use sc_auth::SessionStore;
 use sc_cli::DbConfig;
-use sc_cli::connect_catalog;
+use sc_cli::{connect_catalog, connect_file_stores, extract_file_stores};
 use sc_error::Result;
 use sc_server::{ServerConfig, admin_handlers, serve};
 
@@ -50,7 +50,8 @@ async fn run(args: &[String]) -> Result<()> {
 /// Database flags are consumed by [`DbConfig::extract`]; whatever is left over is
 /// parsed as [`ServerConfig`], so a typo in either still fails loudly.
 async fn serve_command(args: &[String]) -> Result<()> {
-    let (db, server_args) = DbConfig::extract(args)?;
+    let (db, rest) = DbConfig::extract(args)?;
+    let (file_store_specs, server_args) = extract_file_stores(rest)?;
     let mut config = ServerConfig::from_args(server_args)?;
     // When the binary was built with the admin bundle (`SC_BUILD_ADMIN=1`, see
     // `build.rs`) and no explicit `--static-dir` was given, serve that bundle.
@@ -64,6 +65,9 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // catalog, and ensure the users table exists. A bad connection fails here
     // with a clear message rather than a server that boots then 500s.
     let catalog = connect_catalog(&db).await?;
+    // Connect any file stores requested with `--file-store NAME=PATH` so the file
+    // manager can browse/read/write them.
+    connect_file_stores(&catalog, &file_store_specs)?;
 
     let sessions = Arc::new(SessionStore::default());
     eprintln!("saltcorn: listening on http://{}", config.addr);
@@ -81,4 +85,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("  server:");
     eprintln!("    --bind ADDR  --static-dir DIR  --session-ttl-hours N  --secure-cookies");
+    eprintln!(
+        "    --file-store NAME=PATH   connect a local directory as a named file store (repeatable)"
+    );
 }

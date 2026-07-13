@@ -163,6 +163,73 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- files (file manager) ----------------------------------------------
+
+    // The connected file stores (name + whether they are a git repo).
+    set.register(
+        Endpoint::new("listFileStores", Method::Get, api().lit("file-stores"))
+            .output(TypeSchema::array(file_store_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // Browse one directory of a store. A POST (not GET) so the directory — which
+    // may contain `/` and would not fit a single path segment — rides in the body.
+    set.register(
+        Endpoint::new(
+            "browseFiles",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("browse"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "dir",
+            TypeSchema::text(),
+        )]))
+        .output(TypeSchema::array(file_entry_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Read one file's bytes (download) — base64 always, plus a UTF-8 `text`
+    // shortcut when the contents decode cleanly (for the text editor).
+    set.register(
+        Endpoint::new(
+            "readFile",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("read"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "path",
+            TypeSchema::text(),
+        )]))
+        .output(file_content_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Write one file (upload / save an edited text file). The body carries the
+    // contents as either base64 (`base64`) or UTF-8 (`text`); exactly one.
+    set.register(
+        Endpoint::new(
+            "writeFile",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("write"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("path", TypeSchema::text()),
+            StructField::new("base64", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("text", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(file_entry_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- users --------------------------------------------------------------
 
     set.register(
@@ -218,5 +285,33 @@ fn field_schema() -> TypeSchema {
         StructField::new("name", TypeSchema::text()),
         StructField::new("sql_type", TypeSchema::text()),
         StructField::new("nullable", TypeSchema::bool()),
+    ])
+}
+
+/// A connected file store.
+fn file_store_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("is_git_repo", TypeSchema::bool()),
+    ])
+}
+
+/// One entry (file or sub-directory) inside a browsed directory.
+fn file_entry_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("path", TypeSchema::text()),
+        StructField::new("is_dir", TypeSchema::bool()),
+        StructField::new("size", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// A file's contents: base64 always, plus decoded `text` when it is valid UTF-8.
+fn file_content_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("path", TypeSchema::text()),
+        StructField::new("size", TypeSchema::int()),
+        StructField::new("base64", TypeSchema::text()),
+        StructField::new("text", TypeSchema::optional(TypeSchema::text())),
     ])
 }

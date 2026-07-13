@@ -18,6 +18,7 @@ sc-server.workspace = true
 sc-api.workspace = true
 sc-auth.workspace = true
 sc-catalog.workspace = true
+sc-files.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 tokio.workspace = true

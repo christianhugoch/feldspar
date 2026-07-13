@@ -13,6 +13,7 @@ sc-error.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
 sc-types.workspace = true
+sc-files.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 

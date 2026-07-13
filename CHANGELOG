@@ -24,6 +24,33 @@ Changes in reverse chronological order.
 
 ## MVP Phase 8 — Files (`sc-files`)
 
+- **File store connected to the catalog.** The `Catalog` now owns a named registry
+  of connected `FileStore` handles (not their contents — files keep no database
+  row, design §9): `connect_file_store`, `file_store`/`require_file_store`, and
+  `file_store_names`. `sc-catalog` gains an `sc-files` dependency for the trait
+  object. The CLI can connect local stores at boot with a repeatable
+  `--file-store NAME=PATH` flag (parsed by `sc_cli::extract_file_stores`, wired by
+  `sc_cli::connect_file_stores`), so `saltcorn serve --file-store docs=/srv/docs`
+  makes that directory browsable through the file manager.
+
+- **File-manager API + handlers.** Four new admin endpoints (design §13.1/§14.1),
+  admin-only and flowing through the same typed-JSON dispatch as the rest of the
+  admin API: `listFileStores` (`GET /api/file-stores`), `browseFiles`
+  (`POST /api/file-stores/{store}/browse` with `{ dir }`), `readFile`
+  (`POST …/read` with `{ path }`), and `writeFile` (`POST …/write` with `{ path,
+  base64 | text }`). Reads/writes carry bytes as base64 (with a UTF-8 `text`
+  shortcut for editing text files) rather than special-casing binary routes, so the
+  generated TypeScript client covers files like everything else. `sc-server` gains
+  `base64`/`bytes` dependencies; `ui/admin/src/client.ts` regenerated.
+
+- Tests: new `sc-server/tests/file_manager.rs` integration suite (real Postgres for
+  auth) connects a `LocalFileStore` to the catalog and, as a logged-in admin,
+  lists stores, writes a text file, browses root + sub-directory, reads it back
+  (text + base64), round-trips arbitrary non-UTF-8 bytes via base64, and asserts
+  the error cases (unknown store → 404, both `text` and `base64` → 400). A second
+  test round-trips per-file xattr `FileMeta` through the catalog-resolved store
+  handle and confirms the metadata never surfaces as a file in a browse listing.
+
 - **Cross-platform xattr access.** New `sc-files::xattr` module: async `get` /
   `set` / `remove` wrappers over the `fsquirrel` crate, which stores extended
   attributes as POSIX xattrs (`user.` namespace) on Linux/macOS/FreeBSD/NetBSD/

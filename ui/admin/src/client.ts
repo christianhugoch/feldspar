@@ -17,6 +17,13 @@ export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
 export type UpdateRowRequest = unknown;
 export type UpdateRowResponse = unknown;
+export type ListFileStoresResponse = Array<{ name: string; is_git_repo: boolean }>;
+export type BrowseFilesRequest = { dir: string };
+export type BrowseFilesResponse = Array<{ name: string; path: string; is_dir: boolean; size?: number | null }>;
+export type ReadFileRequest = { path: string };
+export type ReadFileResponse = { path: string; size: number; base64: string; text?: string | null };
+export type WriteFileRequest = { path: string; base64?: string | null; text?: string | null };
+export type WriteFileResponse = { name: string; path: string; is_dir: boolean; size?: number | null };
 export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
 export type CreateUserRequest = { email: string; password: string; role: number };
 export type CreateUserResponse = { id: string; email: string; role: number };
@@ -34,6 +41,10 @@ export interface ApiClient {
   createRow(table: string, body: CreateRowRequest): Promise<CreateRowResponse>;
   updateRow(table: string, id: string, body: UpdateRowRequest): Promise<UpdateRowResponse>;
   deleteRow(table: string, id: string): Promise<void>;
+  listFileStores(): Promise<ListFileStoresResponse>;
+  browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
+  readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
+  writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
   listUsers(): Promise<ListUsersResponse>;
   createUser(body: CreateUserRequest): Promise<CreateUserResponse>;
 }
@@ -144,6 +155,40 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw new Error(`deleteRow failed: ${res.status}`);
       return;
+    },
+    async listFileStores() {
+      const res = await doFetch(`${baseUrl}/api/file-stores`, {
+        method: "GET",
+      });
+      if (!res.ok) throw new Error(`listFileStores failed: ${res.status}`);
+      return (await res.json()) as ListFileStoresResponse;
+    },
+    async browseFiles(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/browse`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`browseFiles failed: ${res.status}`);
+      return (await res.json()) as BrowseFilesResponse;
+    },
+    async readFile(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/read`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`readFile failed: ${res.status}`);
+      return (await res.json()) as ReadFileResponse;
+    },
+    async writeFile(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/write`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`writeFile failed: ${res.status}`);
+      return (await res.json()) as WriteFileResponse;
     },
     async listUsers() {
       const res = await doFetch(`${baseUrl}/api/users`, {

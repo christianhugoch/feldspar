@@ -15,14 +15,17 @@ use std::sync::{Arc, RwLock};
 
 use sc_db::{DatabaseDriver, SchemaChange};
 use sc_error::{Error, Result};
+use sc_files::FileStore;
 
 use crate::field::{DataField, DbId, TableId};
 use crate::provider::{DriverTableProvider, TableProvider};
 use crate::table::Table;
 
 /// The catalog: the connected primary database plus a cache of its tables
-/// (technical design §8.1). Users, workflow runs, and files are deliberately not
-/// cached; for the MVP the cache holds tables only.
+/// (technical design §8.1). Row data for users, workflow runs, and files is
+/// deliberately not cached; for the MVP the cache holds tables only. Connected
+/// **file stores** (§14.1) are registered here too — not their contents, just
+/// the named store handles — so the server can resolve a store by name.
 pub struct Catalog {
     /// The primary (and, for the MVP, only) database driver.
     primary: Arc<dyn DatabaseDriver>,
@@ -30,6 +33,10 @@ pub struct Catalog {
     primary_db: DbId,
     /// Cache of tables keyed by id, rebuilt from introspection.
     cache: RwLock<HashMap<TableId, Table>>,
+    /// Connected file stores, keyed by their [`name`](FileStore::name). Only the
+    /// store handles live here (files keep no database row, design §9); the bytes
+    /// and per-file metadata stay in the store itself.
+    file_stores: RwLock<HashMap<String, Arc<dyn FileStore>>>,
 }
 
 impl Catalog {
@@ -40,6 +47,7 @@ impl Catalog {
             primary,
             primary_db: DbId::primary(),
             cache: RwLock::new(HashMap::new()),
+            file_stores: RwLock::new(HashMap::new()),
         };
         catalog.reload().await?;
         Ok(catalog)
@@ -149,5 +157,44 @@ impl Catalog {
             self.primary.clone(),
             table.fields.clone(),
         ))
+    }
+
+    /// Connect a named file store, making it resolvable by
+    /// [`file_store`](Self::file_store). A store whose name is already connected
+    /// is replaced (re-connecting the same name re-points it).
+    pub fn connect_file_store(&self, store: Arc<dyn FileStore>) -> Result<()> {
+        let mut guard = self
+            .file_stores
+            .write()
+            .map_err(|_| Error::msg("catalog file-store registry lock poisoned"))?;
+        guard.insert(store.name().to_owned(), store);
+        Ok(())
+    }
+
+    /// The connected file store with the given name, if any.
+    pub fn file_store(&self, name: &str) -> Result<Option<Arc<dyn FileStore>>> {
+        let guard = self
+            .file_stores
+            .read()
+            .map_err(|_| Error::msg("catalog file-store registry lock poisoned"))?;
+        Ok(guard.get(name).cloned())
+    }
+
+    /// The connected file store with the given name, or a
+    /// [`NotFound`](Error::NotFound) error.
+    pub fn require_file_store(&self, name: &str) -> Result<Arc<dyn FileStore>> {
+        self.file_store(name)?
+            .ok_or_else(|| Error::not_found(format!("file store `{name}` is not connected")))
+    }
+
+    /// The names of every connected file store, sorted.
+    pub fn file_store_names(&self) -> Result<Vec<String>> {
+        let guard = self
+            .file_stores
+            .read()
+            .map_err(|_| Error::msg("catalog file-store registry lock poisoned"))?;
+        let mut names: Vec<String> = guard.keys().cloned().collect();
+        names.sort();
+        Ok(names)
     }
 }

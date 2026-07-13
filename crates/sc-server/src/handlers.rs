@@ -15,6 +15,9 @@
 
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use bytes::Bytes;
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, USERS_TABLE, User, any_user_exists, authenticate_admin,
     create_first_user, create_user,
@@ -22,6 +25,7 @@ use sc_auth::{
 use sc_catalog::{Catalog, DataField, Table};
 use sc_db::Row;
 use sc_error::{Error, Result};
+use sc_files::Entry;
 use sc_query::{
     Assignment, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
 };
@@ -273,6 +277,83 @@ pub fn admin_handlers(catalog: Arc<Catalog>) -> HandlerRegistry {
         }
     });
 
+    // --- files (file manager) ----------------------------------------------
+
+    reg.register("listFileStores", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let mut out = Vec::new();
+                for name in catalog.file_store_names()? {
+                    let store = catalog.require_file_store(&name)?;
+                    out.push(json!({
+                        "name": name,
+                        "is_git_repo": store.is_git_repo(),
+                    }));
+                }
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("browseFiles", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let store = catalog.require_file_store(ctx.path_param("store")?)?;
+                let obj = require_object(&ctx.body)?;
+                // `dir` is optional-ish: an absent/empty value lists the root.
+                let dir = obj.get("dir").and_then(Json::as_str).unwrap_or("");
+                let entries = store.list(dir).await?;
+                let out: Vec<Json> = entries.iter().map(entry_json).collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("readFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let store = catalog.require_file_store(ctx.path_param("store")?)?;
+                let obj = require_object(&ctx.body)?;
+                let path = non_empty_str_field(obj, "path")?;
+                let bytes = store.read(path).await?;
+                // Always provide base64 (for binary download); add a decoded
+                // `text` when the bytes are valid UTF-8 (for the text editor).
+                let text = std::str::from_utf8(&bytes)
+                    .ok()
+                    .map(|s| Json::String(s.to_owned()))
+                    .unwrap_or(Json::Null);
+                Ok(HandlerResponse::ok(json!({
+                    "path": path,
+                    "size": bytes.len(),
+                    "base64": BASE64.encode(&bytes),
+                    "text": text,
+                })))
+            }
+        }
+    });
+
+    reg.register("writeFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let store = catalog.require_file_store(ctx.path_param("store")?)?;
+                let obj = require_object(&ctx.body)?;
+                let path = non_empty_str_field(obj, "path")?.to_owned();
+                let data = file_body_bytes(obj)?;
+                let size = data.len();
+                store.write(&path, data).await?;
+                Ok(HandlerResponse::ok(file_entry_written_json(&path, size)).with_status(201))
+            }
+        }
+    });
+
     // --- users --------------------------------------------------------------
 
     reg.register("listUsers", {
@@ -338,6 +419,49 @@ fn field_json(field: &DataField) -> Json {
         "sql_type": field.base.type_.sql_type(),
         "nullable": !field.required,
     })
+}
+
+/// A [`FileStore`](sc_files::FileStore) directory listing entry as JSON, matching
+/// the API's `file_entry_schema` (`name`, `path`, `is_dir`, `size?`).
+fn entry_json(entry: &Entry) -> Json {
+    json!({
+        "name": entry.name,
+        "path": entry.path,
+        "is_dir": entry.is_dir,
+        "size": entry.size,
+    })
+}
+
+/// The entry JSON returned after a successful `writeFile`: a file (never a
+/// directory) at `path` with the byte count just written.
+fn file_entry_written_json(path: &str, size: usize) -> Json {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    json!({
+        "name": name,
+        "path": path,
+        "is_dir": false,
+        "size": size,
+    })
+}
+
+/// Decode a `writeFile` body's contents: exactly one of `base64` (arbitrary
+/// bytes) or `text` (UTF-8) must be present.
+fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
+    let base64 = obj.get("base64").and_then(Json::as_str);
+    let text = obj.get("text").and_then(Json::as_str);
+    match (base64, text) {
+        (Some(_), Some(_)) => Err(Error::invalid(
+            "provide either `base64` or `text`, not both",
+        )),
+        (Some(encoded), None) => BASE64
+            .decode(encoded)
+            .map(Bytes::from)
+            .map_err(|e| Error::invalid(format!("invalid base64 in `base64`: {e}"))),
+        (None, Some(text)) => Ok(Bytes::from(text.to_owned().into_bytes())),
+        (None, None) => Err(Error::invalid(
+            "missing file contents: set `base64` or `text`",
+        )),
+    }
 }
 
 /// A row as a JSON object keyed by column name, values in natural JSON.

@@ -121,9 +121,9 @@ bundle.
 - [x] `FileStore` trait (read, write, list, is_git_repo, get/set xattr meta)
 - [x] Local-directory driver
 - [x] Cross-platform xattr access (Linux/macOS/Windows/FreeBSD) for per-file metadata
-- [ ] Connect a file store to the catalog (named)
-- [ ] Server routes: basic file manager (browse, upload, download, edit a text file)
-- [ ] Integration tests: connect store, list/read/write, round-trip xattr metadata
+- [x] Connect a file store to the catalog (named)
+- [x] Server routes: basic file manager (browse, upload, download, edit a text file)
+- [x] Integration tests: connect store, list/read/write, round-trip xattr metadata
 
 ## Phase 9 — Applications & API for the React app (`sc-app`, `sc-api`)
 
