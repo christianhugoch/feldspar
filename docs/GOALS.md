@@ -196,12 +196,15 @@ Users: users are stored in a database table called `users` in the primary databa
 
 Migrations: Similar to Saltcorn1. Migration is an array of Postgresql SQL valus. Databse drivers must be able to translate to their own SQL dialect. Howver, do not start changing the table definitions with migrations until we are much more stable - until then change the initial setup.
 
-### HTTP server framework
+### HTTP server
 
 - must be dynamic enough to add routes that are not known at compile time. So not everything can be statically typed. 
 - must be able to generate TypeScript typed API consumer libraries 
 - The Admin UI API is known at compile time. But in order to maximise code reusability make it fixed-values for the dynamic API route definition and use the same machinery to generate a typescript API consumer.
 - So we need a representation of API endpoints as a rust value, with a resentation of the types for arguments and result values
+
+- Server must send a systemd notification when ready on linux, but must still compile and skip this step on non-linux or on linux without systemd. Ideally do not depend on libsystemd-dev being installed, if possible
+- certificates must be obtained by an ACME server like LetsEncrypt, or allow admin user to enter certificates manually.
 
 ## Milestones
 

@@ -818,6 +818,38 @@ All API access flows through the same authorization layer (§7), so an API calle
 the rows a user of that role/ownership would, and every provider participates in the shared
 TypeScript consumer generation (§13.1).
 
+### 13.5 Serving: TLS certificates and readiness notification
+
+The HTTP server (`sc-server`) terminates TLS in-process so a deployment needs no external
+reverse proxy (though one may still front it). TLS uses **rustls** (via `tokio-rustls` /
+`axum-server`), keeping the stack pure-Rust and off OpenSSL, consistent with the dependency
+posture of §16.
+
+**Certificates** are obtained two ways, admin-selectable per deployment:
+
+- **ACME (Let's Encrypt).** Certificates are provisioned and renewed automatically from an
+  ACME CA using a pure-Rust ACME client (e.g. `rustls-acme` / `instant-acme`) — no external
+  `certbot` process and no C dependency. The ACME account key and issued certificates are
+  persisted (in the primary DB metadata or a file store) so renewals survive restarts and are
+  shared across nodes. The CA directory URL is configurable so any ACME server, not only
+  Let's Encrypt, can be used.
+- **Manual.** An admin may instead paste/upload a certificate chain and private key. These are
+  stored the same way and loaded at startup; no ACME traffic occurs in this mode.
+
+Both modes feed the same rustls `ServerConfig`; switching modes does not change how the
+listener is set up. Plain-HTTP serving (behind a trusted proxy, or for local development)
+remains available.
+
+**Readiness notification.** On systemd-managed Linux, `sc-server` sends `READY=1` via the
+`sd_notify` protocol once it has bound its listener(s) and the catalog is initialised, so the
+unit can use `Type=notify`. This must not add a build-time dependency on `libsystemd-dev`: the
+protocol is just a datagram written to the unix socket named by the `$NOTIFY_SOCKET`
+environment variable, so it is implemented with a pure-Rust helper (e.g. the `sd-notify` crate,
+which has no C dependency) or a few lines writing to that socket directly. **The code compiles
+on every target platform**; on non-Linux, or on Linux where `$NOTIFY_SOCKET` is unset (not run
+under systemd `Type=notify`), the call is a no-op. `RELOADING=1` / `STOPPING=1` can be sent on
+the corresponding lifecycle transitions by the same helper.
+
 ---
 
 ## 14. Files and models (`sc-files`, `sc-model`)
@@ -971,7 +1003,10 @@ known at compile time** (§13.1: application and custom user routes) are matched
 `matchit` — axum's own path-router crate — used directly to dispatch the runtime `Endpoint`
 set, while the compile-time-known admin API mounts through the same machinery. Session cookies
 use `axum-extra`'s cookie jar; the session store stays in `sc-auth`. Streaming responses map
-onto the same `futures::Stream` used for `RowStream`.
+onto the same `futures::Stream` used for `RowStream`. **TLS is terminated in-process with
+rustls** (no OpenSSL), fed by either ACME-provisioned or admin-supplied certificates, and the
+server emits a systemd `sd_notify` readiness signal without any `libsystemd-dev` build
+dependency — both detailed in §13.5.
 
 **Security posture.** Strict CSP everywhere, satisfied structurally by the React UI bundles
 (no inline handlers) rather than a server markup model; framework-level XSS escaping in the
