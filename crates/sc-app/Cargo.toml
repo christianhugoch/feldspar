@@ -13,6 +13,11 @@ sc-error.workspace = true
 sc-catalog.workspace = true
 sc-files.workspace = true
 sc-api.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

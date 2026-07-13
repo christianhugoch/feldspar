@@ -1275,10 +1275,13 @@ dependencies = [
 name = "sc-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "sc-api",
  "sc-catalog",
  "sc-error",
  "sc-files",
+ "tokio",
 ]
 
 [[package]]
