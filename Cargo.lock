@@ -1344,7 +1344,12 @@ version = "0.1.0"
 name = "sc-files"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "sc-error",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

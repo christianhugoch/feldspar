@@ -118,8 +118,8 @@ bundle.
 
 ## Phase 8 — Files (`sc-files`)
 
-- [ ] `FileStore` trait (read, write, list, is_git_repo, get/set xattr meta)
-- [ ] Local-directory driver
+- [x] `FileStore` trait (read, write, list, is_git_repo, get/set xattr meta)
+- [x] Local-directory driver
 - [ ] Cross-platform xattr access (Linux/macOS/Windows/FreeBSD) for per-file metadata
 - [ ] Connect a file store to the catalog (named)
 - [ ] Server routes: basic file manager (browse, upload, download, edit a text file)

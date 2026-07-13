@@ -22,6 +22,33 @@ Changes in reverse chronological order.
   Covers the Phase 10 "README quickstart" item early since the boot path it
   documents now exists.
 
+## MVP Phase 8 — Files (`sc-files`)
+
+- **`FileStore` trait + descriptors.** New `sc-files::store` module defines the
+  async `FileStore` contract (technical design §14.1): `name`, `read`, `write`,
+  `list`, `is_git_repo`, and `get_meta`/`set_meta`. Supporting value types: `Entry`
+  (name, root-relative path, `is_dir`, size) for directory listings, and `FileMeta`
+  (per-file `min_role` for path-cumulative authz plus a free-form `attributes`
+  map) as the per-file metadata that replaces a database row (design §9). Paths are
+  root-relative with `/` separators; drivers must reject absolute paths and `..`
+  traversal.
+
+- **Local-directory driver.** New `sc-files::local::LocalFileStore` backs a named
+  store with a local directory. `new()` canonicalises and validates the root;
+  `resolve()` sanitises every store-relative path (rejecting `..` escapes and the
+  reserved metadata directory) before any I/O. `read`/`write` use `tokio::fs`
+  (write creates parent dirs); `list` returns sorted `Entry`s with sizes and hides
+  the metadata directory; `is_git_repo` detects a `.git` entry. Per-file metadata
+  is round-tripped through a JSON sidecar under a hidden `.scmeta/` tree — a
+  portable placeholder that the next TODO item swaps for cross-platform extended
+  attributes without changing the trait surface. `get_meta` returns
+  `FileMeta::default()` when unset; `set_meta` requires the target file to exist.
+
+- Tests: write/read round-trip, sorted listing with sizes and sub-directory
+  relative paths, path-traversal rejection, metadata round-trip + defaults +
+  sidecar hidden from listings, `set_meta` on a missing file, and git-repo
+  detection.
+
 ## MVP Phase 7 — CLI (`sc-cli`)
 
 - `saltcorn serve` now brings the data layer up and mounts the live admin API,
