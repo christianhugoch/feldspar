@@ -523,6 +523,7 @@ a sparse value goes into `attributes`.**
 | `_sc_triggers` | triggers, workflows, agents | workflows are **versioned** so a suspended run finishes on its own version |
 | `_sc_runs` | workflow & agent runs | current context + state, updated after each step |
 | `_sc_run_traces` | per-step context + timing | only when tracing is enabled for that workflow |
+| `_sc_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
 | `_sc_config` | configuration | scoped to whole setup or one application; per-key value-type restriction; values stored as JSON |
 | `_sc_applications` | applications | framework, subdomain, table/store subset, API config |
 | `_sc_models` | model definitions | provider + config fields |
@@ -687,9 +688,13 @@ tree + JS-extraction crate — both dropped.** The server renders no admin HTML 
 minimal bootstrap document that loads the SPA bundle; all data flows as JSON through the
 generated typed client (§13.1), so the API and the UI cannot drift.
 
-- **`ui/admin`** — React + TypeScript + **react-bootstrap** (Bootstrap 5.3) SPA. Served under
-  a separate URL (subdomain or path) from user-facing routes. Only admins log in initially;
-  later, admins may grant restricted access (e.g. app development only) to selected
+- **`ui/admin`** — React + TypeScript + **react-bootstrap** (Bootstrap 5.3) SPA, themed with
+  **Tabler** ([tabler.io](https://tabler.io)). Tabler is a Bootstrap-5 admin UI kit, so it
+  layers directly on the react-bootstrap decision rather than replacing it: Tabler supplies
+  the design system (layout shell, navigation, cards, forms, icons, dashboard components) as
+  the admin UI's look and feel, while react-bootstrap remains the component primitives. Served
+  under a separate URL (subdomain or path) from user-facing routes. Only admins log in
+  initially; later, admins may grant restricted access (e.g. app development only) to selected
   non-admins. Includes a much-improved **table editor** (Airtable-inspired) and **file
   manager**, both built against the typed API client.
 - **`ui/form-runtime`** — the dynamic form framework (React + TypeScript), rebuilt cleanly
@@ -894,6 +899,36 @@ this is enforced mechanically — `[workspace.lints.clippy]` denies `unwrap_used
 each crate opts in via `[lints] workspace = true`, and `clippy.toml` exempts test code.
 Errors carry context and either are handled or propagate to a crash with a clear message. No
 `Result` is silently discarded.
+
+**Error classification and logging (from GOALS).** Every `Error` carries a **kind** that
+splits errors into two classes with different audiences and different remedies:
+
+- **Application errors** — the fault is in *configuration authored by an app builder*: an
+  invalid calculated-field equation, a malformed access formula, a bad action config, a
+  workflow that references a missing field. Nothing is wrong with Saltcorn; the person
+  building the app must fix their configuration. These map to the `Config`/`Invalid`/`Query`
+  family (and to guest-code errors surfaced through `sc-code`).
+- **System errors** — something crashed and there is *likely a bug in the Saltcorn code*
+  (or the infrastructure it depends on): a driver failure, a panic caught at a boundary, an
+  `Internal` invariant violation. These map to the `Database`/`Internal`/`Serde` family.
+
+```rust
+pub enum ErrorKind { Application, System }
+impl Error { pub fn kind(&self) -> ErrorKind { /* per-variant classification */ } }
+```
+
+Regardless of whether an error is handled or propagates to a crash, it is **logged to an
+error log in the primary database** — the `_sc_errors` table (§9). A log row records the
+kind, the variant, the message and source chain, and context (application, request/route,
+table, workflow run + step, user role) where available. The error log is a runtime record
+stream, so like users/runs/files it is **not cached** and is written on a best-effort path
+that must never itself mask the original failure (a logging failure is swallowed after being
+reported, never allowed to replace the real error). Errors are also an `Event` (§10.2), so a
+trigger MAY fire on them (e.g. alert an admin on a `System` error); the admin UI surfaces the
+log with a filter on `kind` so operators can separate "my app is misconfigured" from "report
+this bug". This is a cross-cutting concern layered on `sc-error`; it is **not required for the
+MVP** but the `ErrorKind` split lands with `sc-error` from the start so classification is
+never retrofitted.
 
 **Message bus.** One `BusDriver` trait, several drivers: in-process (single node),
 Postgres LISTEN/NOTIFY (simple, reuses the primary DB), and redis/kafka (scale-out). The bus

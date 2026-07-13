@@ -4,6 +4,16 @@ Changes in reverse chronological order.
 
 ## Docs
 
+- `docs/TECHNICAL_DESIGN.md`: fold in two new GOALS additions. (1) **Error
+  classification + error log** — every `Error` carries an `ErrorKind`
+  (Application vs System) and is logged to a new `_sc_errors` table in the primary
+  database; documented in §16 (cross-cutting error handling), added to the §9
+  metadata-table catalogue (uncached runtime stream), and tied to the existing
+  `error` trigger event. Noted as non-MVP, but the `ErrorKind` split lands with
+  `sc-error` from the start. (2) **Tabler admin theme** — §12 now specifies the
+  admin SPA is themed with Tabler (tabler.io), a Bootstrap-5 kit that layers on the
+  existing react-bootstrap decision rather than replacing it.
+
 - Operator `README.md`: install prerequisites (Rust 1.85+, PostgreSQL 13+/16,
   optional Node for the admin UI), one-time database setup (create role + database,
   local or Docker), building the server with/without the admin bundle

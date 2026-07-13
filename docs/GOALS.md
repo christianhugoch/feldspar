@@ -33,6 +33,8 @@ General:
 - multiple applications for a single data layer. Each application can have access to a subset of tables, file stores etc.
 - message bus which is backed by a message bus driver, with an option to use postgres LISTEN/NOTIFY for a simple bus backed by the exisitng database (and another option built in, using a rust library such as apalis or zeromq) and other drivers for Redis, Kafka etc for scalability. real time chat, real time collaboration, cache updates flow over the bus
 - full restart should never be required. Only individual apis and applications may need restart
+- Error handling: Log every error into an error log in the database. Distinguish between 
+Application errors (errors in the configuration, for instance the person building an app has entered an invalid equation somewhere) and System errors (something crashed, there is likely an error in the Saltcorn code somewhere)
 
 Auth:
 
@@ -81,6 +83,7 @@ Admin UI:
 - This needs to be implemented in react due to high availability of underlying libraries i.e. craft and react-flow. There are also components for file managers.
 - use Bootstrap 5.3 as the CSS framework with React. (react-bootstrap)
 - Use TypeScript for the React code. Interactions with the Admin UI API must go through a typed Typescript library consumer.
+- Use the tabler theme (tabler.io) for the admin UI.
 
 Agents and Copilot:
 
