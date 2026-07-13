@@ -6,12 +6,10 @@
 //!
 //! ## Metadata
 //!
-//! Per-file [`FileMeta`] is currently kept in a JSON **sidecar** under a hidden
-//! `.scmeta/` directory that mirrors the file tree. This is a portable
-//! placeholder: the next TODO item swaps the backend for cross-platform
-//! extended attributes (Linux/macOS/Windows/FreeBSD) while keeping this trait
-//! surface unchanged. The `.scmeta/` directory is never returned by
-//! [`FileStore::list`].
+//! Per-file [`FileMeta`] is stored in a single extended attribute
+//! ([`META_ATTR`]) on the file itself, via the cross-platform [`crate::xattr`]
+//! layer (POSIX xattrs on Unix, NTFS Alternate Data Streams on Windows). Files
+//! therefore need no database row and no sidecar (design §9).
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -20,8 +18,10 @@ use std::path::{Path, PathBuf};
 
 use crate::store::{Entry, FileMeta, FileStore};
 
-/// Hidden directory (relative to the store root) holding metadata sidecars.
-const META_DIR: &str = ".scmeta";
+/// Name of the extended attribute holding a file's serialised [`FileMeta`]. On
+/// Unix the effective key is `user.saltcorn.meta` (the `user.` namespace is
+/// applied by the xattr layer).
+const META_ATTR: &str = "saltcorn.meta";
 
 /// A [`FileStore`] backed by a directory on the local filesystem.
 #[derive(Debug, Clone)]
@@ -64,37 +64,9 @@ impl LocalFileStore {
                         "path {rel:?} escapes the file store root"
                     )));
                 }
-                seg if seg == META_DIR => {
-                    return Err(Error::invalid(format!(
-                        "path {rel:?} touches the reserved {META_DIR} directory"
-                    )));
-                }
                 seg => out.push(seg),
             }
         }
-        Ok(out)
-    }
-
-    /// The sidecar path holding metadata for a store-relative file path.
-    fn meta_path(&self, rel: &str) -> Result<PathBuf> {
-        // Validate `rel` first (reuse the traversal checks), then map it under
-        // the meta directory with a `.json` suffix.
-        self.resolve(rel)?;
-        let mut out = self.root.join(META_DIR);
-        for segment in rel.split('/') {
-            if matches!(segment, "" | ".") {
-                continue;
-            }
-            out.push(segment);
-        }
-        let file_name = out
-            .file_name()
-            .context("metadata path has no file name")?
-            .to_owned();
-        out.set_file_name(format!(
-            "{}.json",
-            file_name.to_string_lossy()
-        ));
         Ok(out)
     }
 }
@@ -141,10 +113,6 @@ impl FileStore for LocalFileStore {
             .with_context(|| format!("reading dir entry in {dir:?}"))?
         {
             let name = dirent.file_name().to_string_lossy().into_owned();
-            // Hide the metadata sidecar directory from listings.
-            if prefix.is_empty() && name == META_DIR {
-                continue;
-            }
             let meta = dirent
                 .metadata()
                 .await
@@ -172,14 +140,12 @@ impl FileStore for LocalFileStore {
     }
 
     async fn get_meta(&self, path: &str) -> Result<FileMeta> {
-        let meta_path = self.meta_path(path)?;
-        match tokio::fs::read(&meta_path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes)
+        let abs = self.resolve(path)?;
+        match crate::xattr::get(&abs, META_ATTR).await? {
+            Some(bytes) => serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing metadata for {path:?}")),
-            // No sidecar yet: the file simply has default metadata.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileMeta::default()),
-            Err(e) => Err(Error::from(e))
-                .with_context(|| format!("reading metadata for {path:?}")),
+            // The attribute has never been set: default metadata.
+            None => Ok(FileMeta::default()),
         }
     }
 
@@ -195,17 +161,9 @@ impl FileStore for LocalFileStore {
                 self.name
             )));
         }
-        let meta_path = self.meta_path(path)?;
-        if let Some(parent) = meta_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("creating metadata dir for {path:?}"))?;
-        }
         let json = serde_json::to_vec(meta)
             .with_context(|| format!("serialising metadata for {path:?}"))?;
-        tokio::fs::write(&meta_path, &json)
-            .await
-            .with_context(|| format!("writing metadata for {path:?}"))?;
+        crate::xattr::set(&abs, META_ATTR, json).await?;
         Ok(())
     }
 }

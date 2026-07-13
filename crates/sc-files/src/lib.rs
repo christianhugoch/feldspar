@@ -9,12 +9,14 @@
 //!
 //! - **Files have no database row** (design §9). Per-file metadata is
 //!   [`FileMeta`], round-tripped via [`FileStore::get_meta`] /
-//!   [`FileStore::set_meta`]; for on-disk stores it is kept beside the bytes.
+//!   [`FileStore::set_meta`]; for on-disk stores it is kept beside the bytes in
+//!   cross-platform extended attributes (see [`xattr`]).
 //! - **Paths are confined to the store root.** Absolute paths and `..`
 //!   traversal are rejected before any I/O.
 
 mod local;
 mod store;
+pub mod xattr;
 
 pub use local::LocalFileStore;
 pub use store::{Entry, FileMeta, FileStore};
@@ -111,7 +113,7 @@ mod tests {
         let got = store.get_meta("doc.md").await.unwrap();
         assert_eq!(got, m);
 
-        // Metadata sidecar directory is hidden from listings.
+        // Metadata lives in an extended attribute, so it never shows as a file.
         let names: Vec<_> = store
             .list("")
             .await

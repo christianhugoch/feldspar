@@ -24,6 +24,20 @@ Changes in reverse chronological order.
 
 ## MVP Phase 8 — Files (`sc-files`)
 
+- **Cross-platform xattr access.** New `sc-files::xattr` module: async `get` /
+  `set` / `remove` wrappers over the `fsquirrel` crate, which stores extended
+  attributes as POSIX xattrs (`user.` namespace) on Linux/macOS/FreeBSD/NetBSD/
+  Android and as NTFS Alternate Data Streams on Windows — the four platforms the
+  MVP targets (design §9/§14.1). `fsquirrel` was chosen over the more popular
+  `xattr` crate because `xattr` has no Windows support; on Unix `fsquirrel`
+  delegates to `xattr`, so the mature path is inherited. The blocking syscalls run
+  on tokio's blocking pool. `LocalFileStore` now stores each file's serialised
+  `FileMeta` in a single `saltcorn.meta` extended attribute on the file itself,
+  replacing the earlier JSON-sidecar placeholder: no sidecar files, no reserved
+  directory, and `get_meta` returns defaults when the attribute is absent. Tests:
+  direct get/set/overwrite/remove round-trip, plus the existing `FileMeta`
+  round-trip now exercising real xattrs.
+
 - **`FileStore` trait + descriptors.** New `sc-files::store` module defines the
   async `FileStore` contract (technical design §14.1): `name`, `read`, `write`,
   `list`, `is_git_repo`, and `get_meta`/`set_meta`. Supporting value types: `Entry`

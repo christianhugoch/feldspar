@@ -14,7 +14,13 @@ async-trait.workspace = true
 bytes.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "rt"] }
+# Cross-platform extended-attribute access (technical design §9/§14.1): POSIX
+# xattrs (`user.` namespace) on Linux/macOS/FreeBSD/NetBSD/Android via the
+# mature `xattr` crate, and NTFS Alternate Data Streams on Windows. This is the
+# only maintained crate covering every platform the MVP targets; `xattr` alone
+# has no Windows support.
+fsquirrel = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["fs", "rt", "macros"] }
