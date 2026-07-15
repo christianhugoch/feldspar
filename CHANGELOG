@@ -4,6 +4,56 @@ Changes in reverse chronological order.
 
 ## MVP Phase 9 — Applications & framework (`sc-app`)
 
+- **`ApiProvider` trait + REST provider (design §13.4).** `sc-api` now defines
+  `ApiProvider` — `name()`, `mount()`, `endpoints()`, and an async
+  `handle(req, cat, user)` — with transport-agnostic `ApiRequest`/`ApiResponse`
+  (method, path, query, JSON), so a provider is testable without a socket and
+  `sc-server` maps HTTP onto it. The MVP ships one provider; the trait exists now
+  so GraphQL/gRPC/tRPC/MCP slot in without a shape change.
+
+  `RestProvider::project(mount, tables)` projects an app's declared table subset
+  into REST in the shape of the design's quality bar (Hasura/PostgREST/Supabase):
+  `posts` becomes `GET/POST /api/posts` and `PUT/DELETE /api/posts/{id}`. The
+  table is a **literal** path segment rather than a `{table}` parameter — an app's
+  API exposes the app's own tables, so they belong in the contract and get typed
+  client methods (`listPosts`, `createPosts`, …) instead of a stringly-typed
+  table argument. A table with no single-column primary key gets only the
+  collection endpoints: there is no way to address one of its rows, so
+  `PUT`/`DELETE` would be promises the API could not keep. The projection is an
+  ordinary `EndpointSet`, so an app's typed client comes from the same
+  `generate_client` the admin API uses.
+
+  **Authorization** is taken from each table's own `AccessRules` (§7): reads
+  carry `MinRole(min_role_read)`, writes `MinRole(min_role_write)`, enforced
+  before anything runs — an under-privileged caller gets `403`, an anonymous one
+  `401`, and a rejected write never reaches the database. A table the app did not
+  declare has no route at all (§13.2), not merely a failing one. Dispatch
+  distinguishes an unclaimed path (`404`) from a path that exists for another
+  method (`405`).
+
+  **Custom routes** (guest code / SQL) are carried and typed but answer `501 Not
+  Implemented` — the MVP stub the TODO allows, failing honestly rather than
+  pretending. **Actions are not projected**: the actions registry (`sc-action`)
+  is explicitly outside MVP scope, so there is nothing yet to project; the item's
+  "actions" clause lands with it.
+
+- **Row CRUD unified across API surfaces (`sc-api::rows`).** Reading and writing a
+  table's rows as JSON is the substance of *both* the admin API's row endpoints
+  and an app's REST API — same tables, same query layer, same wire shape — so it
+  now lives once in `sc-api`, below both, as `list_rows`/`create_row`/
+  `update_row`/`delete_row`. `sc-server`'s admin handlers became thin wrappers
+  over it (`handlers.rs` shrank by ~130 lines) and `RestProvider` calls the same
+  functions, which is what makes "an app's API and the admin API are the same
+  machinery" true in the code rather than only in the docs. `convert` (JSON ↔ the
+  query layer's `Value`) moved from `sc-server` to `sc-api` for the same reason,
+  and `ValueType::from_basic` maps a column's `BasicType` to its wire type (1:1,
+  with `BasicType::Other` travelling as text per its own contract).
+  `PathSpec::match_path` matches a concrete path back to an endpoint and captures
+  its params, so a provider that owns its dispatch need not re-derive path
+  matching from `segments`. `sc-api` accordingly gains `sc-db`/`sc-query`/
+  `sc-types`/`serde_json`/`async-trait` (+ chrono/rust_decimal/uuid for
+  `convert`).
+
 - **Code-framework build step wired (design §13.3).** An app's React source lives
   in a git repo inside one of its file stores; `sc-app`'s new `build` module runs
   the bundler over it and turns the output into the `AssetBundle` a

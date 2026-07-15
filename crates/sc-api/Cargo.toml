@@ -12,7 +12,23 @@ rust-version.workspace = true
 sc-error.workspace = true
 sc-catalog.workspace = true
 sc-auth.workspace = true
+# The row layer (`rows`) executes table CRUD for every API surface, so it speaks
+# the query language and the type system directly.
+sc-db.workspace = true
+sc-query.workspace = true
+sc-types.workspace = true
+async-trait.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+# `convert` bridges JSON to the temporal/decimal/uuid `Value` variants.
+chrono.workspace = true
+rust_decimal.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

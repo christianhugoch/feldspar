@@ -8,10 +8,12 @@
 //! a [`HandlerCtx`] and return a [`HandlerResponse`], deferring cookies/sessions
 //! to the dispatcher via [`SessionAction`](crate::SessionAction).
 //!
-//! Data crosses the wire as plain JSON; [`crate::convert`] bridges it to the
-//! query layer's [`Value`]. Row endpoints address a row by its single-column
-//! primary key (composite keys are post-MVP), and `createTable` gives a new table
-//! a default identity `id` key so the row editor has something to address.
+//! Data crosses the wire as plain JSON. The row endpoints are thin wrappers over
+//! [`sc_api::rows`], the shared row-CRUD layer an application's REST API runs
+//! too — the admin API is not a privileged special case, it is the same
+//! machinery (design §13.1). A row is addressed by its single-column primary key
+//! (composite keys are post-MVP), and `createTable` gives a new table a default
+//! identity `id` key so the row editor has something to address.
 
 use std::sync::Arc;
 
@@ -22,17 +24,14 @@ use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, USERS_TABLE, User, any_user_exists, authenticate_admin,
     create_first_user, create_user,
 };
-use sc_catalog::{Catalog, DataField, Table};
-use sc_db::Row;
+use sc_api::rows::{self, require_object};
+use sc_catalog::{Catalog, DataField};
 use sc_error::{Error, Result};
 use sc_files::Entry;
-use sc_query::{
-    Assignment, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
-};
+use sc_query::{Expr, Projection, Select, Source, Statement, Value};
 use sc_types::TypeRef;
 use serde_json::{Map, Value as Json, json};
 
-use crate::convert::{json_to_value, value_to_json};
 use crate::handler::{HandlerRegistry, HandlerResponse};
 
 /// The SQL type of the default primary key `createTable` gives a new table: a
@@ -178,16 +177,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>) -> HandlerRegistry {
             let catalog = catalog.clone();
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
-                let select = Select::from(Source::table(table.name.clone()))
-                    .columns(vec![Projection::all()]);
-                let rows = catalog
-                    .provider(&table)
-                    .query(&select)
-                    .await?
-                    .try_collect()
-                    .await?;
-                let out: Vec<Json> = rows.iter().map(row_to_json).collect();
-                Ok(HandlerResponse::ok(Json::Array(out)))
+                Ok(HandlerResponse::ok(rows::list_rows(&catalog, &table).await?))
             }
         }
     });
@@ -198,21 +188,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>) -> HandlerRegistry {
             let catalog = catalog.clone();
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
-                let obj = require_object(&ctx.body)?;
-                let mut columns = Vec::with_capacity(obj.len());
-                let mut values = Vec::with_capacity(obj.len());
-                for (key, json) in obj {
-                    let value = column_value(&table, key, json)?;
-                    columns.push(key.clone());
-                    values.push(Expr::lit(value));
-                }
-                if columns.is_empty() {
-                    return Err(Error::invalid("no fields to insert"));
-                }
-                let insert = Insert::row(table.name.clone(), columns, values)
-                    .returning(vec![Projection::all()]);
-                let row = write_one(&catalog, &table, Statement::from(insert)).await?;
-                Ok(HandlerResponse::ok(row_to_json(&row)).with_status(201))
+                let row = rows::create_row(&catalog, &table, &ctx.body).await?;
+                Ok(HandlerResponse::ok(row).with_status(201))
             }
         }
     });
@@ -224,33 +201,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>) -> HandlerRegistry {
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
                 let id = ctx.path_param("id")?;
-                let obj = require_object(&ctx.body)?;
-                let pk = single_pk(&table)?;
-                let mut assignments = Vec::with_capacity(obj.len());
-                for (key, json) in obj {
-                    // The primary key addresses the row; it is not reassignable
-                    // through the body.
-                    if key == &pk {
-                        continue;
-                    }
-                    let value = column_value(&table, key, json)?;
-                    assignments.push(Assignment::new(key.clone(), Expr::lit(value)));
-                }
-                if assignments.is_empty() {
-                    return Err(Error::invalid("no fields to update"));
-                }
-                let update = Update {
-                    table: table.name.clone(),
-                    assignments,
-                    filter: Some(pk_filter(&table, &pk, id)?),
-                    returning: vec![Projection::all()],
-                };
-                let rows = write(&catalog, &table, Statement::from(update)).await?;
-                let row = rows
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| Error::not_found(format!("no row with {pk} = {id}")))?;
-                Ok(HandlerResponse::ok(row_to_json(&row)))
+                let row = rows::update_row(&catalog, &table, id, &ctx.body).await?;
+                Ok(HandlerResponse::ok(row))
             }
         }
     });
@@ -262,17 +214,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>) -> HandlerRegistry {
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
                 let id = ctx.path_param("id")?;
-                let pk = single_pk(&table)?;
-                let delete = Delete {
-                    table: table.name.clone(),
-                    filter: Some(pk_filter(&table, &pk, id)?),
-                    returning: vec![Projection::expr(Expr::col(pk.clone()))],
-                };
-                let rows = write(&catalog, &table, Statement::from(delete)).await?;
-                if rows.is_empty() {
-                    return Err(Error::not_found(format!("no row with {pk} = {id}")));
-                }
-                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+                Ok(HandlerResponse::ok(
+                    rows::delete_row(&catalog, &table, id).await?,
+                ))
             }
         }
     });
@@ -464,70 +408,6 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
     }
 }
 
-/// A row as a JSON object keyed by column name, values in natural JSON.
-fn row_to_json(row: &Row) -> Json {
-    let mut map = Map::with_capacity(row.len());
-    for (name, value) in row.columns().iter().zip(row.values()) {
-        map.insert(name.clone(), value_to_json(value));
-    }
-    Json::Object(map)
-}
-
-/// Coerce a JSON value for a named column of `table`, rejecting unknown columns.
-fn column_value(table: &Table, column: &str, json: &Json) -> Result<Value> {
-    let field = table
-        .field(column)
-        .ok_or_else(|| Error::invalid(format!("`{}` has no field `{column}`", table.name)))?;
-    let basic = field
-        .base
-        .type_
-        .as_basic()
-        .ok_or_else(|| Error::invalid(format!("field `{column}` has no basic type")))?;
-    json_to_value(basic, json)
-}
-
-/// The single primary-key column of `table`, or an error when the table has a
-/// composite or absent key (row addressing needs exactly one — composite keys
-/// are post-MVP).
-fn single_pk(table: &Table) -> Result<String> {
-    match table.primary_key.as_slice() {
-        [pk] => Ok(pk.clone()),
-        [] => Err(Error::invalid(format!(
-            "table `{}` has no primary key to address rows by",
-            table.name
-        ))),
-        _ => Err(Error::invalid(format!(
-            "table `{}` has a composite primary key (unsupported for row addressing)",
-            table.name
-        ))),
-    }
-}
-
-/// `pk = <id>`, coercing the path-parameter string to the key column's type.
-fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
-    let value = column_value(table, pk, &Json::String(id.to_owned()))?;
-    Ok(Expr::col(pk).eq(Expr::lit(value)))
-}
-
-/// Run a write statement against the table's provider, collecting `RETURNING` rows.
-async fn write(catalog: &Catalog, table: &Table, statement: Statement) -> Result<Vec<Row>> {
-    catalog
-        .provider(table)
-        .write(&statement)
-        .await?
-        .try_collect()
-        .await
-}
-
-/// Run a write expected to return exactly one row (an insert with `RETURNING`).
-async fn write_one(catalog: &Catalog, table: &Table, statement: Statement) -> Result<Row> {
-    write(catalog, table, statement)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::msg("write returned no row"))
-}
-
 // --- body accessors ------------------------------------------------------------
 
 /// Email + password from a credentials body.
@@ -536,12 +416,6 @@ fn credentials(body: &Json) -> Result<(String, String)> {
     let email = non_empty_str_field(obj, "email")?.to_owned();
     let password = non_empty_str_field(obj, "password")?.to_owned();
     Ok((email, password))
-}
-
-/// The request body as a JSON object, or a `400`-mapped error.
-fn require_object(body: &Json) -> Result<&Map<String, Json>> {
-    body.as_object()
-        .ok_or_else(|| Error::invalid("expected a JSON object body"))
 }
 
 /// A required string field of an object body.

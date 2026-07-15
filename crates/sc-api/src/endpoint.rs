@@ -108,6 +108,38 @@ impl PathSpec {
         })
     }
 
+    /// Match a concrete request path against this spec, returning the captured
+    /// parameters (by name) when it matches.
+    ///
+    /// Literal segments must match exactly and parameters capture one segment
+    /// each, so the arity is fixed: `/posts/1` matches `/posts/{id}` but
+    /// `/posts/1/comments` does not. `sc-server` routes the admin API through
+    /// `matchit` instead; this exists for an [`ApiProvider`](crate::ApiProvider),
+    /// which owns its own dispatch and would otherwise have to re-derive path
+    /// matching from `segments`.
+    pub fn match_path(&self, path: &str) -> Option<std::collections::HashMap<String, String>> {
+        let actual: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if actual.len() != self.segments.len() {
+            return None;
+        }
+        let mut params = std::collections::HashMap::new();
+        for (seg, got) in self.segments.iter().zip(actual) {
+            match seg {
+                PathSegment::Literal(want) if want == got => {}
+                PathSegment::Literal(_) => return None,
+                // An empty capture would make `/posts//` match `/posts/{id}`
+                // with an empty id; the filter above already drops empties, so
+                // reaching here with one is impossible, but a param never
+                // legitimately captures nothing.
+                PathSegment::Param { .. } if got.is_empty() => return None,
+                PathSegment::Param { name, .. } => {
+                    params.insert(name.clone(), got.to_owned());
+                }
+            }
+        }
+        Some(params)
+    }
+
     /// Render the `matchit`/axum route pattern, e.g. `/tables/{id}/rows`.
     pub fn pattern(&self) -> String {
         let mut out = String::from("/");

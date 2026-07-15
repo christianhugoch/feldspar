@@ -10,11 +10,25 @@
 //! type-checked TypeScript client from any set, so the server contract and its
 //! consumers cannot drift.
 //!
-//! API providers (REST/GraphQL/… — design §13.4) build on this model in a later
-//! phase.
+//! [`ApiProvider`] (design §13.4) is the other half: an application enables any
+//! number of providers — REST, GraphQL, gRPC, tRPC, MCP — each mounted on a
+//! sub-path and each *projecting* the shared endpoint set into its protocol.
+//! [`RestProvider`] is the MVP's one provider. Because a provider's projection is
+//! an ordinary [`EndpointSet`], an application's typed client comes from the same
+//! [`generate_client`] the admin API uses.
+//!
+//! [`rows`] holds the table row CRUD both the admin API's handlers and a
+//! provider run, and [`convert`] bridges JSON to the query layer's `Value` — kept
+//! here, below every API surface, so there is one implementation rather than one
+//! per protocol.
+
+pub mod convert;
+pub mod rows;
 
 mod admin;
 mod endpoint;
+mod provider;
+mod rest;
 mod schema;
 mod typescript;
 
@@ -22,6 +36,8 @@ pub use admin::{ADMIN_API_PREFIX, admin_endpoints};
 pub use endpoint::{
     AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec,
 };
+pub use provider::{ApiProvider, ApiRequest, ApiResponse};
+pub use rest::{REST_PROVIDER, RestProvider};
 pub use schema::{StructField, TypeSchema, ValueType};
 pub use typescript::generate_client;
 

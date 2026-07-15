@@ -12,6 +12,7 @@
 //! data layer's columns lines up one-to-one with the values that actually flow
 //! over the wire.
 
+use sc_types::BasicType;
 use serde::{Deserialize, Serialize};
 
 /// A scalar type: the leaf of a [`TypeSchema`]. The variants mirror the non-null
@@ -46,6 +47,29 @@ pub enum ValueType {
 }
 
 impl ValueType {
+    /// The wire type a column's [`BasicType`] is carried as.
+    ///
+    /// The two enums are deliberately 1:1 — [`BasicType`] is what a column *is*
+    /// in the database, [`ValueType`] is what it looks like on the wire — except
+    /// for [`BasicType::Other`], the unmapped-backend-type escape hatch, which
+    /// travels as text exactly as its own docs prescribe.
+    pub fn from_basic(basic: &BasicType) -> ValueType {
+        match basic {
+            BasicType::Bool => ValueType::Bool,
+            BasicType::Int => ValueType::Int,
+            BasicType::Float => ValueType::Float,
+            BasicType::Decimal => ValueType::Decimal,
+            BasicType::Text => ValueType::Text,
+            BasicType::Bytes => ValueType::Bytes,
+            BasicType::Json => ValueType::Json,
+            BasicType::Uuid => ValueType::Uuid,
+            BasicType::Date => ValueType::Date,
+            BasicType::Time => ValueType::Time,
+            BasicType::Timestamp => ValueType::Timestamp,
+            BasicType::Other(_) => ValueType::Text,
+        }
+    }
+
     /// The TypeScript type this scalar serializes as. See the per-variant docs
     /// for why non-string scalars (decimal, bytes) are carried as strings.
     pub fn ts_type(self) -> &'static str {

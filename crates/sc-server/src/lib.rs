@@ -20,7 +20,6 @@
 //! endpoint set at dispatch time.
 
 mod config;
-mod convert;
 mod handler;
 mod handlers;
 mod router;
