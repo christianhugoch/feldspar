@@ -12,14 +12,26 @@
 //! bundler over that source and hands back a [`CodeFramework`] serving the built
 //! bundle.
 //!
-//! API providers and subdomain routing land in later Phase 9 items.
+//! An [`Application`] is pure data; [`app_providers`]/[`app_endpoints`] are the
+//! wiring that resolves it into running API providers and the single endpoint set
+//! they project. [`app_client`] generates the app's typed TypeScript client from
+//! that set — the same generator the admin SPA uses — and [`build_application`]
+//! emits it into the app's source tree before invoking the bundler.
+//!
+//! Subdomain routing and serving an app from `sc-server` land in later Phase 9
+//! items.
 
+mod api;
 mod application;
 mod build;
 mod framework;
 
+pub use api::{app_client, app_endpoints, app_providers, app_tables};
 pub use application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef};
-pub use build::{AppSource, BuildReport, build_app, build_code_framework, run_build};
+pub use build::{
+    AppSource, BuildReport, build_app, build_application, build_code_framework, emit_client,
+    run_build,
+};
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CodeFramework, Framework, Method,
 };

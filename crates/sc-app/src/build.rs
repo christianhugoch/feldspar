@@ -17,10 +17,14 @@
 
 use std::path::{Path, PathBuf};
 
+use bytes::Bytes;
+use sc_api::{EndpointSet, generate_client};
 use sc_catalog::{Catalog, FileStoreId};
 use sc_error::{Context, Error, Result};
 use tokio::process::Command;
 
+use crate::api::app_endpoints;
+use crate::application::Application;
 use crate::framework::{AssetBundle, BuildSpec, CodeFramework};
 
 /// How much of a failed build's output to quote in the error. A bundler can emit
@@ -41,12 +45,27 @@ pub struct AppSource {
     pub store: FileStoreId,
     /// The build step to run.
     pub build: BuildSpec,
+    /// Where to emit the app's generated TypeScript client, relative to the
+    /// store (e.g. `web/src/client.ts`). `None` for an app that does not consume
+    /// a generated client.
+    pub client_path: Option<String>,
 }
 
 impl AppSource {
-    /// Source in file store `store`, built by `build`.
+    /// Source in file store `store`, built by `build`, with no generated client.
     pub fn new(store: FileStoreId, build: BuildSpec) -> AppSource {
-        AppSource { store, build }
+        AppSource {
+            store,
+            build,
+            client_path: None,
+        }
+    }
+
+    /// Emit the generated TypeScript client at `path` (relative to the store)
+    /// before building, returning `self` for chaining.
+    pub fn with_client(mut self, path: impl Into<String>) -> AppSource {
+        self.client_path = Some(path.into());
+        self
     }
 }
 
@@ -67,6 +86,9 @@ pub struct BuildReport {
     /// What the bundler wrote to stderr. Bundlers routinely report progress here
     /// on success, so this being non-empty does not mean the build failed.
     pub stderr: String,
+    /// The path the generated TypeScript client was emitted to, when the build
+    /// went through [`build_application`] and the app declares one.
+    pub client_path: Option<String>,
 }
 
 /// Run an application's build step, resolving its source store through the
@@ -86,6 +108,48 @@ pub async fn build_app(cat: &Catalog, source: &AppSource) -> Result<BuildReport>
     let mut report = run_build(&source.build, &root).await?;
     report.git_repo = store.is_git_repo();
     Ok(report)
+}
+
+/// Emit an application's typed TypeScript client into its source tree, then
+/// build it — the whole path from an [`Application`] to a servable bundle.
+///
+/// The client is generated from the app's own [`EndpointSet`](sc_api::EndpointSet)
+/// (every provider it enables, projected — see [`app_endpoints`]) by the same
+/// generator the admin SPA's client comes from (§13.1). It is written **before**
+/// the bundler runs, because the app's source imports it: an app's endpoints
+/// depend on which tables it declares, so unlike the admin's client it cannot be
+/// a checked-in artifact and is regenerated on every build. An app that declares
+/// no [`client_path`](AppSource::client_path) just builds.
+pub async fn build_application(
+    cat: &Catalog,
+    app: &Application,
+    source: &AppSource,
+) -> Result<BuildReport> {
+    let client_path = emit_client(cat, source, &app_endpoints(app, cat)?).await?;
+    let mut report = build_app(cat, source).await?;
+    report.client_path = client_path;
+    Ok(report)
+}
+
+/// Write `endpoints` as a generated TypeScript client into the app's source
+/// tree, at [`AppSource::client_path`].
+///
+/// Returns the path written, or `None` when the app declares no client path.
+/// Written through the [`FileStore`](sc_files::FileStore), not the local
+/// filesystem, so the source tree is reached the same way everything else
+/// reaches it (and the store's own traversal sandboxing applies).
+pub async fn emit_client(
+    cat: &Catalog,
+    source: &AppSource,
+    endpoints: &EndpointSet,
+) -> Result<Option<String>> {
+    let Some(path) = &source.client_path else {
+        return Ok(None);
+    };
+    let store = cat.require_file_store(&source.store.0)?;
+    let client = generate_client(endpoints);
+    store.write(path, Bytes::from(client.into_bytes())).await?;
+    Ok(Some(path.clone()))
 }
 
 /// Build an application and return a [`CodeFramework`] serving the result, with
@@ -168,6 +232,7 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
         git_repo: false,
         stdout,
         stderr,
+        client_path: None,
     })
 }
 

@@ -4,6 +4,36 @@ Changes in reverse chronological order.
 
 ## MVP Phase 9 — Applications & framework (`sc-app`)
 
+- **An application's typed TypeScript client (design §13.1).** `sc-app` gains the
+  wiring that turns a declared [`Application`] into running API machinery, which
+  nothing did before: `app_tables` resolves its declared table subset against the
+  catalog, `app_providers` builds one `ApiProvider` per `ApiConfig`, and
+  `app_endpoints` collects their projections into the app's single `EndpointSet`.
+  `app_client` generates the app's TypeScript consumer client from that set using
+  the same `generate_client` the admin SPA's client comes from — an app's client
+  is not special-cased machinery.
+
+  The admin's client is a **checked-in** artifact guarded by a drift test,
+  because its endpoints are compile-time constants. An app's endpoints depend on
+  which tables it declares, so its client cannot be committed: it is emitted into
+  the app's source tree on every build. `AppSource::with_client(path)` says where
+  it lands, `emit_client` writes it (through the `FileStore`, so the store's own
+  traversal sandboxing applies), and `build_application` emits it **before**
+  invoking the bundler — the app's source does `import { createClient } from
+  "./client"`, so a client written after bundling would be useless.
+  `BuildReport::client_path` reports where it went.
+
+  Misconfiguration fails loudly rather than yielding a quietly smaller API: a
+  declared table absent from the catalog, an unknown provider name (`graphql` is
+  in the design but not the MVP), and two providers projecting the same endpoint
+  name (the name keys both client methods and dispatch) are each an error.
+
+  The existing `tsc --noEmit --strict` typecheck test now covers **both** client
+  surfaces — the admin set and a REST projection — sharing one runner. The app
+  case needs no database (a projection is a pure function of its tables) and
+  proves the projection's types are real: passing a string to `updatePosts(id:
+  number)` fails with `TS2345`.
+
 - **`ApiProvider` trait + REST provider (design §13.4).** `sc-api` now defines
   `ApiProvider` — `name()`, `mount()`, `endpoints()`, and an async
   `handle(req, cat, user)` — with transport-agnostic `ApiRequest`/`ApiResponse`
