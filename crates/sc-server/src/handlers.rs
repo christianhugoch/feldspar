@@ -24,11 +24,12 @@ use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, USERS_TABLE, User, any_user_exists, authenticate_admin,
     create_first_user, create_user,
 };
+use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
 use sc_catalog::{Catalog, DataField};
 use sc_error::{Error, Result};
 use sc_files::Entry;
-use sc_query::{Expr, Projection, Select, Source, Statement, Value};
+use sc_query::{Expr, Projection, Select, Source, Statement};
 use sc_types::TypeRef;
 use serde_json::{Map, Value as Json, json};
 
@@ -347,15 +348,6 @@ pub fn admin_handlers(catalog: Arc<Catalog>) -> HandlerRegistry {
 
 // --- request/response shaping --------------------------------------------------
 
-/// The public JSON view of a [`User`]: id, email, role (never the password hash).
-fn user_summary_json(user: &User) -> Json {
-    json!({
-        "id": user.id.to_string(),
-        "email": user.get(COL_EMAIL).and_then(Value::as_text).unwrap_or_default(),
-        "role": i64::from(user.role),
-    })
-}
-
 /// A field (column) as `{ name, sql_type, nullable }`.
 fn field_json(field: &DataField) -> Json {
     json!({
@@ -409,14 +401,6 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
 }
 
 // --- body accessors ------------------------------------------------------------
-
-/// Email + password from a credentials body.
-fn credentials(body: &Json) -> Result<(String, String)> {
-    let obj = require_object(body)?;
-    let email = non_empty_str_field(obj, "email")?.to_owned();
-    let password = non_empty_str_field(obj, "password")?.to_owned();
-    Ok((email, password))
-}
 
 /// A required string field of an object body.
 fn str_field<'a>(obj: &'a Map<String, Json>, key: &str) -> Result<&'a str> {

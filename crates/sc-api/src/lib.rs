@@ -18,10 +18,11 @@
 //! [`generate_client`] the admin API uses.
 //!
 //! [`rows`] holds the table row CRUD both the admin API's handlers and a
-//! provider run, and [`convert`] bridges JSON to the query layer's `Value` — kept
-//! here, below every API surface, so there is one implementation rather than one
-//! per protocol.
+//! provider run, [`auth`] the login vocabulary they share, and [`convert`] the
+//! bridge from JSON to the query layer's `Value` — all kept here, below every API
+//! surface, so there is one implementation rather than one per protocol.
 
+pub mod auth;
 pub mod convert;
 pub mod rows;
 
@@ -36,7 +37,7 @@ pub use admin::{ADMIN_API_PREFIX, admin_endpoints};
 pub use endpoint::{
     AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec,
 };
-pub use provider::{ApiProvider, ApiRequest, ApiResponse};
+pub use provider::{ApiProvider, ApiRequest, ApiResponse, SessionAction};
 pub use rest::{REST_PROVIDER, RestProvider};
 pub use schema::{StructField, TypeSchema, ValueType};
 pub use typescript::generate_client;

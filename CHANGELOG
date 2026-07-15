@@ -4,6 +4,46 @@ Changes in reverse chronological order.
 
 ## MVP Phase 9 — Applications & framework (`sc-app`)
 
+- **API auth: an app authenticates against `sc-auth`, authz honored (design
+  §7.2/§13.4).** `RestProvider` now projects the app's **own** `login` / `logout`
+  / `whoami`, so a React app authenticates through its own API rather than
+  borrowing the admin's (which is admin-gated and on another subdomain). `login`
+  is the one `Public` endpoint — it is how a caller stops being anonymous — and it
+  verifies credentials with the same `sc_auth::authenticate` the admin login
+  uses, for **any** role rather than admins only. These are projected for every
+  app: an app whose users cannot log in could only ever serve public-role data.
+  A table cannot shadow them, since table operations are always prefixed (a table
+  named `login` projects `listLogin`).
+
+  A bad password and an unknown user get the same `401` with the same body, so
+  the API does not disclose which emails are registered. A malformed login
+  (missing/blank/non-string credentials) is an `Invalid` error — a bad request,
+  not a failed login.
+
+  **The provider never touches cookies.** It returns a `SessionAction`
+  (`Keep`/`Start(user)`/`End`) and the transport mints and carries the token —
+  the same seam `sc-server`'s admin login already used, so login/logout stay pure
+  and testable without a socket. `SessionAction` accordingly moved from
+  `sc-server` down to `sc-api` and is now shared: an app's `login` and the
+  admin's describe the same session change and the dispatcher applies both the
+  same way (`sc-server` re-exports it, so its public API is unchanged).
+
+  **Authenticating is not authorization**, and there is a test that says so: a
+  logged-in public-role user clears `whoami` but is still `403` on an admin-only
+  table's rows, and the forbidden write never reaches the database. Cookie/token
+  carriage is the transport's half and lands with the `sc-server` mount (the
+  "serve the built React app" item).
+
+- **Shared auth vocabulary (`sc-api::auth`).** Logging in looks the same whichever
+  API is asked, so the credentials/user-summary schemas, the wire rendering of a
+  user, and the body parsing now live once below every surface instead of once
+  per surface: `credentials_schema`, `user_summary_schema`, `user_summary_json`,
+  and `credentials`. The admin endpoint set and `sc-server`'s handlers use them,
+  and so does `RestProvider`. `user_summary_json` emits only id/email/role, so a
+  user row's admin-added columns and password hash cannot ride along — pinned by
+  a test. The admin's checked-in `client.ts` is byte-for-byte unchanged, so this
+  consolidation altered no contract.
+
 - **An application's typed TypeScript client (design §13.1).** `sc-app` gains the
   wiring that turns a declared [`Application`] into running API machinery, which
   nothing did before: `app_tables` resolves its declared table subset against the

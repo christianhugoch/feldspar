@@ -160,11 +160,14 @@ async fn an_unauthorized_request_is_rejected_and_changes_nothing() -> Result<()>
 async fn undeclared_tables_and_unknown_routes_are_not_reachable() -> Result<()> {
     let db = TestDb::new().await?;
     let cat = catalog_with_posts(&db).await?;
-    // The app declares no tables at all, so its API exposes nothing — even
-    // though `posts` exists in the catalog and the caller is an admin (§13.2).
+    // The app declares no tables at all, so its API exposes no data — even though
+    // `posts` exists in the catalog and the caller is an admin (§13.2). It still
+    // projects its own auth endpoints; those are how a caller authenticates and
+    // reach no table.
     let api = RestProvider::project("/api", &[]);
     let user = admin()?;
-    assert!(api.endpoints().is_empty());
+    assert!(api.endpoints().find("listPosts").is_none());
+    assert!(api.endpoints().find("login").is_some());
 
     let resp = api
         .handle(ApiRequest::get("/api/posts"), &cat, Some(&user))

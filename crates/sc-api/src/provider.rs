@@ -70,24 +70,54 @@ impl ApiRequest {
     }
 }
 
-/// A provider's response: an HTTP status and a JSON body.
+/// What the transport should do with the caller's session once a handler or
+/// provider has run.
+///
+/// Authentication is a **transport** concern — a session token rides in a cookie
+/// for a browser and could ride in a header for another caller — so the code
+/// that authenticates says only *what happened to the session*, and whoever owns
+/// the wire decides how to carry it. This keeps login/logout pure and testable:
+/// `sc-server` turns `Start` into a minted token in a `Set-Cookie`, and `End`
+/// into dropping the token and clearing the cookie.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum SessionAction {
+    /// Leave the session untouched.
+    #[default]
+    Keep,
+    /// Start a session for this user (login): mint a token and carry it.
+    Start(User),
+    /// End the current session (logout): drop the token.
+    End,
+}
+
+/// A provider's response: an HTTP status, a JSON body, and any session change.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApiResponse {
     /// The HTTP status code.
     pub status: u16,
     /// The JSON response body.
     pub body: Json,
+    /// The session change for the transport to apply, if any.
+    pub session: SessionAction,
 }
 
 impl ApiResponse {
-    /// A `200 OK` carrying `body`.
+    /// A `200 OK` carrying `body`, with no session change.
     pub fn ok(body: Json) -> ApiResponse {
-        ApiResponse { status: 200, body }
+        ApiResponse {
+            status: 200,
+            body,
+            session: SessionAction::Keep,
+        }
     }
 
-    /// A response with an explicit status.
+    /// A response with an explicit status and no session change.
     pub fn with_status(status: u16, body: Json) -> ApiResponse {
-        ApiResponse { status, body }
+        ApiResponse {
+            status,
+            body,
+            session: SessionAction::Keep,
+        }
     }
 
     /// An error response: `{"error": message}` with `status`.
@@ -95,6 +125,25 @@ impl ApiResponse {
         ApiResponse {
             status,
             body: serde_json::json!({ "error": message.into() }),
+            session: SessionAction::Keep,
+        }
+    }
+
+    /// A `200 OK` that also starts a session for `user` (login).
+    pub fn start_session(user: User, body: Json) -> ApiResponse {
+        ApiResponse {
+            status: 200,
+            body,
+            session: SessionAction::Start(user),
+        }
+    }
+
+    /// A `200 OK` that also ends the current session (logout).
+    pub fn end_session(body: Json) -> ApiResponse {
+        ApiResponse {
+            status: 200,
+            body,
+            session: SessionAction::End,
         }
     }
 }

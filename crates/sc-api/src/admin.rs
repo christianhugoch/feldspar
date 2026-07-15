@@ -12,6 +12,7 @@
 //! *contract* — methods, paths, schemas, and auth — that both the server and the
 //! generated client are held to.
 
+use crate::auth::{credentials_schema, user_summary_schema};
 use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, Method, PathSpec};
 use crate::schema::{StructField, TypeSchema, ValueType};
 
@@ -255,23 +256,6 @@ pub fn admin_endpoints() -> EndpointSet {
 /// A `PathSpec` rooted at the admin API prefix.
 fn api() -> PathSpec {
     PathSpec::root().lit(ADMIN_API_PREFIX)
-}
-
-/// Email + password, shared by first-user and login.
-fn credentials_schema() -> TypeSchema {
-    TypeSchema::struct_of([
-        StructField::new("email", TypeSchema::text()),
-        StructField::new("password", TypeSchema::text()),
-    ])
-}
-
-/// The public view of a user (never the password hash).
-fn user_summary_schema() -> TypeSchema {
-    TypeSchema::struct_of([
-        StructField::new("id", TypeSchema::uuid()),
-        StructField::new("email", TypeSchema::text()),
-        StructField::new("role", TypeSchema::int()),
-    ])
 }
 
 /// A table in the catalog.

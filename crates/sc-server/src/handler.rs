@@ -12,12 +12,16 @@
 //! against the endpoint's auth requirement) and return a [`HandlerResponse`]. A
 //! handler never touches cookies directly — instead it asks the dispatcher to
 //! start or end the session via [`SessionAction`], so login/logout stay pure.
+//! That type is [`sc_api::SessionAction`], shared with the API providers: an
+//! application's `login` and the admin's `login` describe the same session
+//! change and the dispatcher applies both the same way.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+pub use sc_api::SessionAction;
 use sc_auth::User;
 use sc_error::Result;
 use serde_json::Value;
@@ -52,18 +56,6 @@ impl HandlerCtx {
             .map(String::as_str)
             .ok_or_else(|| sc_error::Error::invalid(format!("missing path parameter `{name}`")))
     }
-}
-
-/// What the dispatcher should do with the session cookie after a handler runs.
-#[derive(Debug, Clone, Default)]
-pub enum SessionAction {
-    /// Leave the session cookie untouched.
-    #[default]
-    Keep,
-    /// Start a session for this user (login): mint a token and set the cookie.
-    Start(User),
-    /// End the current session (logout): drop the token and clear the cookie.
-    End,
 }
 
 /// A handler's result: a JSON body, an HTTP status, and an optional session

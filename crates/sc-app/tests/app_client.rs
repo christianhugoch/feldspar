@@ -79,8 +79,9 @@ async fn app_client_is_generated_from_the_apps_own_endpoint_set() -> Result<()> 
     let cat = catalog(&db).await?;
 
     let endpoints = app_endpoints(&blog(), &cat)?;
-    // Four endpoints for the one declared table.
-    assert_eq!(endpoints.len(), 4);
+    // Four endpoints for the one declared table, plus the app's own login /
+    // logout / whoami.
+    assert_eq!(endpoints.len(), 4 + 3);
 
     let ts = app_client(&blog(), &cat)?;
 
@@ -91,6 +92,10 @@ async fn app_client_is_generated_from_the_apps_own_endpoint_set() -> Result<()> 
     assert!(ts.contains("listPosts()"));
     assert!(ts.contains("createPosts("));
     assert!(ts.contains("/api/posts"));
+
+    // The app authenticates through its own API, so the client has login too.
+    assert!(ts.contains("login("));
+    assert!(ts.contains("/api/login"));
 
     // The app declared only `posts`, so `secrets` — which exists in the catalog —
     // is nowhere in its client (§13.2).
@@ -156,12 +161,12 @@ async fn two_providers_projecting_the_same_names_collide() -> Result<()> {
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
 
-    // Two REST providers over the same table both project `listPosts`; the name
-    // keys client methods and dispatch, so the collision is reported rather than
-    // silently resolved.
+    // Two REST providers both project the same operation names (`login` first,
+    // then the per-table ones); the name keys client methods and dispatch, so the
+    // collision is reported rather than silently resolved.
     let app = blog().with_api(ApiConfig::new("rest", "/api/v2"));
     let err = app_endpoints(&app, &cat).expect_err("duplicate endpoint names must fail");
-    assert!(err.to_string().contains("listPosts"), "{err}");
+    assert!(err.to_string().contains("two API endpoints named"), "{err}");
     Ok(())
 }
 

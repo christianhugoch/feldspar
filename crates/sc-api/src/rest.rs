@@ -16,6 +16,14 @@
 //! exactly what a user of that role would — there is no path into the data that
 //! skips the check.
 //!
+//! **Authentication**: the projection includes the app's own `login` / `logout` /
+//! `whoami`, so a React app authenticates against `sc-auth` through its own API
+//! rather than borrowing the admin's (§7.2). `login` is the one public endpoint —
+//! it is how a caller stops being anonymous — and it verifies credentials against
+//! the same `sc_auth::authenticate` the admin login uses, for any role rather
+//! than admins only. The provider never touches cookies: it returns a
+//! [`SessionAction`] and the transport mints and carries the token.
+//!
 //! **Custom routes** (developer-authored guest code or SQL, §13.4) are carried by
 //! the endpoint model and rejected with `501 Not Implemented` at runtime: the
 //! MVP stubs them (see `TODO.md` Phase 9), and the honest failure is better than
@@ -25,11 +33,12 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use sc_auth::User;
+use sc_auth::{User, authenticate};
 use sc_catalog::{Catalog, Table};
 use sc_error::{Error, Result};
-use serde_json::Value as Json;
+use serde_json::{Value as Json, json};
 
+use crate::auth::{credentials, credentials_schema, user_summary_json, user_summary_schema};
 use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSpec};
 use crate::provider::{ApiProvider, ApiRequest, ApiResponse};
 use crate::rows;
@@ -59,6 +68,13 @@ struct TableRoute {
     table: String,
 }
 
+/// The endpoint names of the app's own auth operations. They are fixed rather
+/// than derived from a table, so a table cannot collide with them: `op_name`
+/// always prefixes a table's operations with `list`/`create`/`update`/`delete`.
+const LOGIN: &str = "login";
+const LOGOUT: &str = "logout";
+const WHOAMI: &str = "whoami";
+
 /// A REST projection of an application's endpoint set (design §13.4).
 pub struct RestProvider {
     mount: String,
@@ -85,6 +101,28 @@ impl RestProvider {
         let mount = normalize_mount(&mount.into());
         let mut endpoints = EndpointSet::new();
         let mut routes = HashMap::new();
+
+        // The app's own auth (§7.2). Projected for every app: an app whose users
+        // cannot log in can only ever serve public-role data, and a caller has to
+        // have some way to stop being anonymous. Public-role browsing still works
+        // without ever calling these.
+        endpoints.register(
+            Endpoint::new(LOGIN, Method::Post, path_at(&mount).lit("login"))
+                .input(credentials_schema())
+                .output(user_summary_schema())
+                // The only public endpoint: it is what turns an anonymous caller
+                // into an authenticated one.
+                .auth(AuthRequirement::Public),
+        );
+        endpoints.register(
+            Endpoint::new(LOGOUT, Method::Post, path_at(&mount).lit("logout"))
+                .auth(AuthRequirement::LoggedIn),
+        );
+        endpoints.register(
+            Endpoint::new(WHOAMI, Method::Get, path_at(&mount).lit("whoami"))
+                .output(user_summary_schema())
+                .auth(AuthRequirement::LoggedIn),
+        );
 
         for table in tables {
             let name = &table.name;
@@ -184,6 +222,23 @@ impl RestProvider {
         })
     }
 
+    /// Verify credentials against `sc-auth` and start a session.
+    ///
+    /// Uses the same `authenticate` the admin login does, but for **any** role —
+    /// an app's users are not admins. A bad password and an unknown user are the
+    /// same `401` with the same message: distinguishing them would tell an
+    /// attacker which emails are registered.
+    async fn login(&self, body: &Json, cat: &Catalog) -> Result<ApiResponse> {
+        let (email, password) = credentials(body)?;
+        match authenticate(cat, &email, &password).await? {
+            Some(user) => {
+                let summary = user_summary_json(&user);
+                Ok(ApiResponse::start_session(user, summary))
+            }
+            None => Ok(ApiResponse::error(401, "invalid credentials")),
+        }
+    }
+
     /// Run a resolved table operation.
     async fn run(
         &self,
@@ -245,6 +300,14 @@ impl ApiProvider for RestProvider {
         }
 
         match &endpoint.handler {
+            HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req.body, cat).await,
+            HandlerRef::Named(_) if endpoint.name == LOGOUT => {
+                Ok(ApiResponse::end_session(json!({ "ok": true })))
+            }
+            HandlerRef::Named(_) if endpoint.name == WHOAMI => Ok(ApiResponse::ok(
+                // `LoggedIn` is enforced above, so a caller is present here.
+                user.map_or(Json::Null, user_summary_json),
+            )),
             HandlerRef::Named(_) => match self.routes.get(&endpoint.name) {
                 Some(route) => self.run(route, &params, &req.body, cat).await,
                 // A named handler with no projected table route: the set was
@@ -351,12 +414,16 @@ mod tests {
         User::new(uuid::Uuid::new_v4(), role).expect("role in range")
     }
 
+    /// Every app's projection carries `login`, `logout`, and `whoami` on top of
+    /// its per-table endpoints.
+    const AUTH_ENDPOINTS: usize = 3;
+
     #[test]
     fn projects_four_rest_endpoints_per_table() {
         let p = RestProvider::project("/api", &[table("posts", AccessRules::default())]);
         assert_eq!(p.name(), "rest");
         assert_eq!(p.mount(), "/api");
-        assert_eq!(p.endpoints().len(), 4);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4);
 
         // The table is a literal segment — the app's own tables are its contract.
         let list = p.endpoints().find("listPosts").unwrap();
@@ -410,7 +477,7 @@ mod tests {
     fn a_table_without_a_single_primary_key_gets_only_collection_endpoints() {
         // No key ⇒ no way to address a row, so no PUT/DELETE is promised.
         let p = RestProvider::project("/api", &[keyless("logs")]);
-        assert_eq!(p.endpoints().len(), 2);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 2);
         assert!(p.endpoints().find("listLogs").is_some());
         assert!(p.endpoints().find("createLogs").is_some());
         assert!(p.endpoints().find("updateLogs").is_none());
@@ -501,7 +568,7 @@ mod tests {
                     .handler(HandlerRef::Sql("select 1".to_owned())),
             );
         // The custom route is part of the contract even though it is stubbed.
-        assert_eq!(p.endpoints().len(), 5);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4 + 1);
         let ep = p.endpoints().find("search").unwrap();
         assert!(matches!(ep.handler, HandlerRef::Sql(_)));
 
@@ -509,6 +576,44 @@ mod tests {
         let ts = crate::generate_client(p.endpoints());
         assert!(ts.contains("search("));
         assert!(ts.contains("listPosts()"));
+    }
+
+    #[test]
+    fn every_app_projects_its_own_auth_endpoints() {
+        let p = RestProvider::project("/api", &[table("posts", AccessRules::default())]);
+
+        // The app authenticates against its own API, not the admin's (§7.2).
+        let login = p.endpoints().find("login").unwrap();
+        assert_eq!(login.method, Method::Post);
+        assert_eq!(login.path.pattern(), "/api/login");
+        // Login is the one public endpoint: it is how a caller stops being
+        // anonymous. Everything else needs a session.
+        assert_eq!(login.auth, AuthRequirement::Public);
+
+        assert_eq!(
+            p.endpoints().find("logout").unwrap().auth,
+            AuthRequirement::LoggedIn
+        );
+        assert_eq!(
+            p.endpoints().find("whoami").unwrap().auth,
+            AuthRequirement::LoggedIn
+        );
+
+        // Anonymous callers are turned away from everything but login.
+        assert!(p.resolve(&ApiRequest::get("/api/whoami")).is_ok());
+        assert!(enforce_auth(&AuthRequirement::LoggedIn, None).is_some());
+        assert!(enforce_auth(&login.auth, None).is_none());
+    }
+
+    #[test]
+    fn a_table_cannot_collide_with_the_auth_endpoints() {
+        // A table actually named `login` still projects `listLogin` etc., because
+        // table operations are always prefixed — so it cannot shadow the app's
+        // own `login`.
+        let p = RestProvider::project("/api", &[table("login", AccessRules::default())]);
+        assert_eq!(p.endpoints().find("login").unwrap().method, Method::Post);
+        assert!(p.endpoints().find("listLogin").is_some());
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4);
     }
 
     #[test]
