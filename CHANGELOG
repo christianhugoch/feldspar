@@ -4,6 +4,45 @@ Changes in reverse chronological order.
 
 ## MVP Phase 9 — Applications & framework (`sc-app`)
 
+- **Code-framework build step wired (design §13.3).** An app's React source lives
+  in a git repo inside one of its file stores; `sc-app`'s new `build` module runs
+  the bundler over it and turns the output into the `AssetBundle` a
+  `CodeFramework` serves. `AppSource` (file store + `BuildSpec`) says where the
+  source is; `build_app` resolves the store through the `Catalog`, invokes the
+  bundler in the spec's `source_dir`, and loads the bundle from its `output_dir`,
+  returning a `BuildReport` (bundle, absolute output dir, whether the store is a
+  git repo, and the bundler's stdout/stderr for build logs).
+  `build_code_framework` is the one-call path from source to a `CodeFramework`
+  serving the result, with the `BuildSpec` attached so the app can be rebuilt.
+  Following the `serve`/`handle` split already in the crate, the catalog-free
+  `run_build(spec, root)` holds the logic and is unit-testable without a
+  database.
+
+  Failure modes are all errors rather than silent no-ops (principle 5): a missing
+  source dir, a bundler that cannot be launched, a non-zero exit (the error
+  quotes the bundler's own diagnostics — the tail of stderr, or stdout when
+  stderr is empty — not just the exit code), and a build that exits `0` but
+  produces no output directory or an empty one. Build paths are sandboxed to the
+  store root with the same `..` rejection the file store applies to reads and
+  writes, since a `BuildSpec` is admin-supplied configuration.
+
+  Tokio gains the `process` feature workspace-wide: the bundler is an external
+  process, awaited without blocking a runtime thread.
+
+  Note: this item's "output served by `sc-server`" is the serving half — mounting
+  an app's bundle into the server's router — which is the separate Phase 9 item
+  "Serve the built React app from the Saltcorn process". The build produces the
+  bundle and `CodeFramework` serves it; the server mount is still to come.
+
+- **`FileStore::local_path` (design §14.1).** New trait method returning a
+  store-relative path's on-disk location, defaulting to `Ok(None)`. Nearly
+  everything should stay backend-agnostic behind `read`/`write`; the build step is
+  the one job that cannot, because it hands an external bundler a working
+  directory. A store with no local path (an object store) therefore cannot host a
+  buildable app, and `build_app` says so explicitly instead of failing obscurely.
+  `LocalFileStore` implements it through the existing `resolve`, so traversal
+  sandboxing is unchanged.
+
 - **`Application` model (design §13.2).** `sc-app` now defines `Application` — an
   app's id, name, subdomain, primary `FrameworkRef` (plus optional
   `extra_frameworks`), its access subset of `tables` and `file_stores`, its

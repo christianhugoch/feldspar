@@ -72,6 +72,9 @@ tokio = { version = "1", features = [
     "time",
     "sync",
     "io-util",
+    # `process` drives a code framework's build step (design §13.3): the bundler
+    # is an external process, awaited without blocking a runtime thread.
+    "process",
 ] }
 async-trait = "0.1"
 # Async stream abstractions for `RowStream` (the type `DatabaseDriver::query`

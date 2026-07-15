@@ -7,13 +7,19 @@
 //! implementation, serving a pre-built [`AssetBundle`] of static files (a bundled
 //! React/Svelte/… SPA) with an SPA fallback so client-routed deep links resolve.
 //!
-//! API providers, the wired build step, and subdomain routing land in later
-//! Phase 9 items.
+//! A code framework's source lives in a git repository inside one of the app's
+//! file stores and has a **build step**: [`build_code_framework`] invokes the
+//! bundler over that source and hands back a [`CodeFramework`] serving the built
+//! bundle.
+//!
+//! API providers and subdomain routing land in later Phase 9 items.
 
 mod application;
+mod build;
 mod framework;
 
 pub use application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef};
+pub use build::{AppSource, BuildReport, build_app, build_code_framework, run_build};
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CodeFramework, Framework, Method,
 };

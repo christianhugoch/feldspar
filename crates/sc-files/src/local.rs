@@ -139,6 +139,12 @@ impl FileStore for LocalFileStore {
         self.root.join(".git").exists()
     }
 
+    fn local_path(&self, rel: &str) -> Result<Option<PathBuf>> {
+        // A local store is all local path; `resolve` applies the same traversal
+        // sandboxing the byte-level methods get.
+        self.resolve(rel).map(Some)
+    }
+
     async fn get_meta(&self, path: &str) -> Result<FileMeta> {
         let abs = self.resolve(path)?;
         match crate::xattr::get(&abs, META_ATTR).await? {

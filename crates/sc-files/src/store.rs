@@ -68,6 +68,22 @@ pub trait FileStore: Send + Sync {
     /// Whether this store is (rooted at) a git repository.
     fn is_git_repo(&self) -> bool;
 
+    /// The on-disk path of a store-relative path, for the backends that have
+    /// one.
+    ///
+    /// Almost everything should go through [`read`](FileStore::read) /
+    /// [`write`](FileStore::write) and stay backend-agnostic. This exists for the
+    /// one job that cannot: running a code framework's **build step** (design
+    /// §13.3), where an external bundler process is handed a working directory
+    /// and reads/writes the tree itself. `Ok(None)` means the backend has no
+    /// local path (an object store), and is the default — such a store cannot
+    /// host a buildable app, and callers must say so rather than pretend
+    /// otherwise. Traversal that would escape the store root is an error, exactly
+    /// as it is for the byte-level methods.
+    fn local_path(&self, _rel: &str) -> Result<Option<std::path::PathBuf>> {
+        Ok(None)
+    }
+
     /// Read a file's metadata, returning [`FileMeta::default`] when none has been
     /// set.
     async fn get_meta(&self, path: &str) -> Result<FileMeta>;

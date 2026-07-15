@@ -129,7 +129,7 @@ bundle.
 
 - [x] `Application` model (name, subdomain, framework, tables subset, file stores, apis, csp)
 - [x] `Framework` trait; code-framework implementation that serves bundled static assets
-- [ ] React app lives in a git-repo file store; **build step** wired (invoke bundler, output served by `sc-server`)
+- [x] React app lives in a git-repo file store; **build step** wired (invoke bundler, output served by `sc-server`)
 - [ ] `ApiProvider` trait; minimal REST provider projecting the app's `Endpoint` set (design §13.1/§13.4) — tables + actions + custom code/SQL routes (custom routes MAY be stubbed for MVP)
 - [ ] Generate the app's TypeScript API-consumer client from its `Endpoint` set (same machinery as the admin API in Phase 6)
 - [ ] API auth: React app authenticates against `sc-auth` (token/session); authz honored
