@@ -28,6 +28,13 @@ pub struct ServerConfig {
     /// Whether the session/CSRF cookies carry the `Secure` attribute (set behind
     /// TLS; off for plain-HTTP local development).
     pub secure_cookies: bool,
+    /// The domain applications are served under: an app with subdomain `blog` is
+    /// served at `blog.<base_domain>` (design §13.2).
+    ///
+    /// `None` (the default) disables subdomain app routing entirely, so every
+    /// request reaches the admin. App routing is opt-in because without a base
+    /// domain to anchor it, a request's own `Host` header would choose its app.
+    pub base_domain: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -40,6 +47,7 @@ impl Default for ServerConfig {
             static_dir: None,
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,
+            base_domain: None,
         }
     }
 }
@@ -48,8 +56,9 @@ impl ServerConfig {
     /// Parse configuration from CLI arguments (everything after the subcommand).
     ///
     /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
-    /// `--session-ttl-hours <n>`, and `--secure-cookies`. Unknown flags are an
-    /// [`Error::Config`], so a typo fails loudly rather than being ignored.
+    /// `--session-ttl-hours <n>`, `--secure-cookies`, and `--base-domain
+    /// <domain>`. Unknown flags are an [`Error::Config`], so a typo fails loudly
+    /// rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
     where
         I: IntoIterator<Item = S>,
@@ -75,6 +84,9 @@ impl ServerConfig {
                     })?;
                 }
                 "--secure-cookies" => cfg.secure_cookies = true,
+                "--base-domain" => {
+                    cfg.base_domain = Some(next_value(&mut it, "--base-domain")?);
+                }
                 other => {
                     return Err(Error::config(format!("unknown server argument `{other}`")));
                 }
@@ -105,6 +117,8 @@ mod tests {
         assert_eq!(cfg.addr.to_string(), "127.0.0.1:3000");
         assert!(cfg.static_dir.is_none());
         assert!(!cfg.secure_cookies);
+        // App subdomain routing is opt-in.
+        assert!(cfg.base_domain.is_none());
     }
 
     #[test]
@@ -117,6 +131,8 @@ mod tests {
             "--session-ttl-hours",
             "12",
             "--secure-cookies",
+            "--base-domain",
+            "example.com",
         ])
         .expect("parse");
         assert_eq!(cfg.addr.to_string(), "0.0.0.0:8080");
@@ -126,6 +142,7 @@ mod tests {
         );
         assert_eq!(cfg.session_ttl_hours, 12);
         assert!(cfg.secure_cookies);
+        assert_eq!(cfg.base_domain.as_deref(), Some("example.com"));
     }
 
     #[test]

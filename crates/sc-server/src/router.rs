@@ -22,7 +22,11 @@ use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
-use sc_api::{AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method as ApiMethod};
+use sc_api::{
+    ApiRequest, AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method as ApiMethod,
+    SessionAction,
+};
+use sc_app::AppRequest;
 use sc_auth::{SessionStore, User};
 use sc_error::{Error, Result};
 use serde_json::Value;
@@ -30,8 +34,9 @@ use tower::ServiceExt;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::apps::{AppMounts, MountedApp, subdomain_of};
 use crate::config::ServerConfig;
-use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse, SessionAction};
+use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
 use crate::security::{
     CONTENT_SECURITY_POLICY, CSRF_HEADER, SESSION_COOKIE, build_cookie, csrf_middleware,
 };
@@ -69,9 +74,13 @@ struct AppState {
     static_dir: Option<Arc<PathBuf>>,
     /// Whether to set `Secure` on the session cookie.
     secure_cookies: bool,
+    /// The applications served on their own subdomains, if any.
+    apps: Arc<AppMounts>,
+    /// The domain apps are served under; `None` disables app routing.
+    base_domain: Option<Arc<String>>,
 }
 
-/// Build the axum router for an endpoint set.
+/// Build the axum router for an endpoint set, serving no applications.
 ///
 /// Fails only if the endpoint paths cannot be assembled into a [`matchit`]
 /// router (a duplicate/conflicting route pattern — a registration bug).
@@ -81,6 +90,36 @@ pub fn build_router(
     sessions: Arc<SessionStore>,
     config: &ServerConfig,
 ) -> Result<Router> {
+    build_router_with_apps(endpoints, handlers, sessions, config, AppMounts::none())
+}
+
+/// Build the axum router, also serving `apps` on their own subdomains
+/// (design §13.2).
+///
+/// A request is routed to an app by its `Host`: `blog.<base_domain>` reaches the
+/// app whose subdomain is `blog`. Anything else — the base domain, an unknown
+/// subdomain, or any host when no base domain is configured — is the admin, so
+/// mounting an app cannot take the admin away from an operator.
+pub fn build_router_with_apps(
+    endpoints: &EndpointSet,
+    handlers: HandlerRegistry,
+    sessions: Arc<SessionStore>,
+    config: &ServerConfig,
+    apps: AppMounts,
+) -> Result<Router> {
+    if !apps.is_empty() && config.base_domain.is_none() {
+        return Err(Error::config(format!(
+            "applications are mounted ({}) but no --base-domain is set, so no request \
+             could ever reach them",
+            apps.subdomains().join(", ")
+        )));
+    }
+    if !apps.is_empty() && apps.catalog().is_none() {
+        return Err(Error::config(
+            "applications are mounted but no catalog was given for their APIs to run against",
+        ));
+    }
+
     let routes = Arc::new(build_matchit(endpoints)?);
     let state = AppState {
         routes,
@@ -88,6 +127,8 @@ pub fn build_router(
         sessions,
         static_dir: config.static_dir.clone().map(Arc::new),
         secure_cookies: config.secure_cookies,
+        apps: Arc::new(apps),
+        base_domain: config.base_domain.clone().map(Arc::new),
     };
 
     let app = Router::new()
@@ -103,8 +144,12 @@ pub fn build_router(
             config.secure_cookies,
             csrf_middleware,
         ))
-        // Strict security headers on every response (design §16).
-        .layer(SetResponseHeaderLayer::overriding(
+        // Strict security headers on every response (design §16). CSP is
+        // `if_not_present`, not `overriding`: an application carries its own
+        // `CspPolicy` (§13.2) and sets it on its own responses, and this must not
+        // replace it. Everything that does not set one — the whole admin surface —
+        // still gets the strict default.
+        .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(CONTENT_SECURITY_POLICY),
         ))
@@ -158,9 +203,16 @@ async fn dispatch(
     State(state): State<AppState>,
     method: axum::http::Method,
     uri: Uri,
+    headers: axum::http::HeaderMap,
     jar: CookieJar,
     body: Bytes,
 ) -> Response {
+    // An application claims the whole of its subdomain, so this comes first: on
+    // `blog.example.com` every path is the blog's, not the admin's.
+    if let Some(app) = resolve_app(&state, &headers) {
+        return dispatch_app(&state, app, method, &uri, jar, &body).await;
+    }
+
     match state.routes.at(uri.path()) {
         Ok(matched) => {
             let params: HashMap<String, String> = matched
@@ -190,6 +242,145 @@ async fn dispatch(
             }
         }
     }
+}
+
+/// The application a request's `Host` names, if any.
+fn resolve_app<'s>(state: &'s AppState, headers: &axum::http::HeaderMap) -> Option<&'s MountedApp> {
+    let base = state.base_domain.as_ref()?;
+    let host = headers.get(header::HOST)?.to_str().ok()?;
+    let subdomain = subdomain_of(host, Some(base.as_str()))?;
+    state.apps.get(subdomain)
+}
+
+/// Serve one request against an application: its API providers first, then its
+/// framework (design §13.2/§13.3).
+///
+/// Providers win over the framework for the paths they claim, so an app's
+/// `/api/*` is its data and everything else is its UI. Both answers carry the
+/// app's own CSP.
+async fn dispatch_app(
+    state: &AppState,
+    app: &MountedApp,
+    method: axum::http::Method,
+    uri: &Uri,
+    jar: CookieJar,
+    body: &Bytes,
+) -> Response {
+    let csp = app.app.csp.header_value();
+    let Some(api_method) = map_method(method.as_str()) else {
+        return with_csp(
+            json_error(StatusCode::METHOD_NOT_ALLOWED, "unsupported method"),
+            &csp,
+        );
+    };
+    let path = uri.path();
+
+    // The app's data: an API provider that claims this path.
+    if let Some(provider) = app.provider_for(path) {
+        // An app is mounted only with a catalog (checked at build time), so this
+        // is a server bug rather than a request problem.
+        let Some(catalog) = state.apps.catalog() else {
+            return with_csp(
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "no catalog for application APIs",
+                ),
+                &csp,
+            );
+        };
+
+        let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+        let user = match &session_token {
+            Some(token) => match state.sessions.user_for(token) {
+                Ok(u) => u,
+                Err(_) => {
+                    return with_csp(
+                        json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed"),
+                        &csp,
+                    );
+                }
+            },
+            None => None,
+        };
+
+        let parsed_body = if body.is_empty() {
+            Value::Null
+        } else {
+            match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return with_csp(
+                        json_error(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+                        &csp,
+                    );
+                }
+            }
+        };
+
+        let req = ApiRequest {
+            method: api_method,
+            path: path.to_owned(),
+            query: parse_query(uri),
+            body: parsed_body,
+        };
+
+        // The provider enforces the endpoint's auth itself (§7), so unlike the
+        // admin path there is no separate check here.
+        return match provider.handle(req, catalog, user.as_ref()).await {
+            // A provider's response is shaped exactly like a handler's — body,
+            // status, session change — so it goes out through the same
+            // `apply_response`: an app's `login` sets its session cookie the very
+            // same way the admin's does.
+            Ok(resp) => with_csp(
+                apply_response(
+                    state,
+                    jar,
+                    session_token,
+                    HandlerResponse {
+                        body: resp.body,
+                        status: resp.status,
+                        session: resp.session,
+                    },
+                ),
+                &csp,
+            ),
+            Err(e) => with_csp(json_error(error_status(&e), e.to_string()), &csp),
+        };
+    }
+
+    // The app's UI: its framework serves the built bundle. No catalog access
+    // happens here for a code framework — the app reaches data only through the
+    // API above.
+    let Some(catalog) = state.apps.catalog() else {
+        return with_csp(
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "no catalog"),
+            &csp,
+        );
+    };
+    let req = AppRequest {
+        method: api_method,
+        path: path.to_owned(),
+    };
+    match app.framework.handle(req, catalog).await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+            let mut out = (status, resp.body).into_response();
+            if let Ok(ct) = HeaderValue::from_str(&resp.content_type) {
+                out.headers_mut().insert(header::CONTENT_TYPE, ct);
+            }
+            with_csp(out, &csp)
+        }
+        Err(e) => with_csp(json_error(error_status(&e), e.to_string()), &csp),
+    }
+}
+
+/// Stamp an application's own CSP onto its response (design §13.2).
+fn with_csp(mut resp: Response, csp: &str) -> Response {
+    if let Ok(value) = HeaderValue::from_str(csp) {
+        resp.headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, value);
+    }
+    resp
 }
 
 /// Enforce auth, parse the request, run the handler, and apply its session

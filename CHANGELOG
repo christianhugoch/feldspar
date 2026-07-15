@@ -4,6 +4,64 @@ Changes in reverse chronological order.
 
 ## MVP Phase 9 — Applications & framework (`sc-app`)
 
+- **Serving applications from the Saltcorn process (design §13.2/§13.3).**
+  `sc-server` can now serve applications, each on **its own subdomain**. A
+  `MountedApp` is the triple that makes an app servable — its `Application`
+  record, the `Framework` serving its UI, and the `ApiProvider`s it declares
+  (built via `sc_app::app_providers`, so a mounted app's API is exactly the one
+  its record declares and its generated client is typed against). `AppMounts` is
+  the registry, and `build_router_with_apps` assembles a router over it;
+  `build_router` is unchanged and mounts nothing, so the admin-only deployment is
+  untouched.
+
+  Routing is by `Host`: `blog.<base_domain>` reaches the app whose subdomain is
+  `blog`. Anything else — the base domain, an unknown subdomain, a deeper name,
+  or a host that merely *ends* with the base domain's text (`blog.notexample.com`)
+  — is the admin, so mounting an app can never take the admin away from an
+  operator. `--base-domain` is required for this and app routing is **opt-in**:
+  without a base domain to anchor it, a request's own `Host` header would get to
+  choose its app. Mounting an app with no base domain set, or two apps claiming
+  one subdomain, fails at boot rather than serving something unreachable or
+  arbitrary.
+
+  Within an app, its API providers win over its framework for the paths they
+  claim (longest mount first), so `/api/*` is its data and everything else is its
+  UI. A provider's response is shaped exactly like a handler's, so it goes out
+  through the same `apply_response`: an app's `login` sets its session cookie the
+  very same way the admin's does, which is the transport half of the API-auth
+  item. Each app stamps **its own `CspPolicy`** (§13.2) on its responses; the
+  server's CSP layer became `if_not_present` rather than `overriding` so it can,
+  while everything that sets no policy — the whole admin surface — still gets the
+  strict default (still asserted by the existing header test).
+
+  **The app never touches the database**: its framework serves static bundled
+  bytes and ignores the catalog it is handed, and every byte of data it shows
+  arrives through a provider that enforces the declared table subset and the §7
+  layer.
+
+- **Phase 9 acceptance test (`sc-server/tests/app_serving.rs`).** The whole story
+  end-to-end over HTTP against a real Postgres: an app is built from a git-repo
+  file store by an actual bundler invocation, mounted, and then — through the
+  assembled router, with the cookies a browser would carry — **the build's assets
+  are served** (index.html at `/`, its JS, the emitted client, and the SPA
+  fallback for a deep link), an **unauthorized request is rejected** (`401`
+  anonymous), the **API auth round-trip** works (bad password `401` → `login`
+  `200` + session cookie → the same request now succeeds → `whoami` → full CRUD →
+  `logout` ends it), and a logged-in public-role user is still `403` on an
+  admin-only table — authenticating is not authorization. The rejected write is
+  confirmed to have inserted nothing.
+
+  Worth noting for anyone writing an app: the CSRF double-submit means a client
+  must hold the `sc_csrf` cookie before it may mutate anything, and serving the
+  SPA is what hands it over — so an app's first request has to be a page load, as
+  a browser's is. The test does this explicitly rather than papering over it.
+
+  **Known gap:** `--base-domain` has no effect on `saltcorn serve` yet, because
+  nothing loads application definitions from `_sc_applications` — apps are mounted
+  programmatically today. The routing and serving work and are tested; the
+  configuration path from database to mounted app is missing. Flagged in the
+  README rather than left to be discovered.
+
 - **API auth: an app authenticates against `sc-auth`, authz honored (design
   §7.2/§13.4).** `RestProvider` now projects the app's **own** `login` / `logout`
   / `whoami`, so a React app authenticates through its own API rather than

@@ -19,6 +19,7 @@
 //! [`admin_handlers`]; they are resolved by name against the [`sc_api`] admin
 //! endpoint set at dispatch time.
 
+mod apps;
 mod config;
 mod handler;
 mod handlers;
@@ -26,11 +27,12 @@ mod router;
 mod security;
 mod serve;
 
+pub use apps::{AppMounts, MountedApp, subdomain_of};
 pub use config::{DEFAULT_BIND, ServerConfig};
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
 pub use handlers::admin_handlers;
-pub use router::{BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, build_router};
+pub use router::{BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, build_router, build_router_with_apps};
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::serve;

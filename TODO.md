@@ -133,8 +133,8 @@ bundle.
 - [x] `ApiProvider` trait; minimal REST provider projecting the app's `Endpoint` set (design §13.1/§13.4) — tables + actions + custom code/SQL routes (custom routes MAY be stubbed for MVP)
 - [x] Generate the app's TypeScript API-consumer client from its `Endpoint` set (same machinery as the admin API in Phase 6)
 - [x] API auth: React app authenticates against `sc-auth` (token/session); authz honored
-- [ ] Serve the built React app from the Saltcorn process (no direct DB access from the app)
-- [ ] Integration tests: build serves assets; API auth round-trip; unauthorized request rejected
+- [x] Serve the built React app from the Saltcorn process (no direct DB access from the app)
+- [x] Integration tests: build serves assets; API auth round-trip; unauthorized request rejected
 
 
 ## Phase 10 — MVP hardening & acceptance
