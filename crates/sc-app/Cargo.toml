@@ -10,16 +10,20 @@ rust-version.workspace = true
 
 [dependencies]
 sc-error.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+sc-types.workspace = true
 sc-catalog.workspace = true
 sc-files.workspace = true
 sc-api.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
 # `process` only: the build step spawns the bundler (design §13.3).
 tokio = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
-sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }

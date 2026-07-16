@@ -46,7 +46,7 @@ pub fn app_providers(app: &Application, cat: &Catalog) -> Result<Vec<Box<dyn Api
             other => Err(Error::config(format!(
                 "application `{}` enables unknown API provider `{other}`; \
                  the MVP ships only `{REST_PROVIDER}`",
-                app.id.0
+                app.name
             ))),
         })
         .collect()
@@ -66,7 +66,7 @@ pub fn app_endpoints(app: &Application, cat: &Catalog) -> Result<EndpointSet> {
                 return Err(Error::config(format!(
                     "application `{}` has two API endpoints named `{}`; \
                      each provider must project distinct operation names",
-                    app.id.0, endpoint.name
+                    app.name, endpoint.name
                 )));
             }
             set.register(endpoint.clone());

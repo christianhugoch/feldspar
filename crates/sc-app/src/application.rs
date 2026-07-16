@@ -3,33 +3,68 @@
 //! Multiple applications share one data layer; each sees only the subset of
 //! tables and file stores it declares, is served on its own subdomain by one
 //! primary [`Framework`](crate::Framework), exposes any number of API providers
-//! (each on a sub-path), and carries a [`CspPolicy`] that is **strict by
-//! default**. This module owns the pure-data model; the behaviour of serving an
-//! app lives behind the `Framework`/`ApiProvider` traits.
+//! (each on a sub-path), serves any number of [`StaticDir`]s, and carries a
+//! [`CspPolicy`] that is **strict by default**. This module owns the pure-data
+//! model; the behaviour of serving an app lives behind the
+//! `Framework`/`ApiProvider` traits, and the row it is stored as lives in
+//! [`store`](crate::store).
+//!
+//! An application has nothing to introspect — unlike a table, it exists only as
+//! stored configuration — so its `_sc_applications` row is its only definition
+//! (§13.2). That is why [`AppId`] is a UUID (the §9 rule for stored metadata)
+//! while `TableId`/`FileStoreId` remain names: an app's *identity* is its row,
+//! and the human-facing key that must be unique is its
+//! [`subdomain`](Application::subdomain), which is what routing dispatches on.
 
 use std::collections::BTreeMap;
 
-use sc_catalog::{FileStoreId, TableId};
+use sc_catalog::{Attrs, FileStoreId, TableId};
+use serde_json::Value as Json;
+use uuid::Uuid;
 
-/// Identifies an application within the server. Like the other MVP identifiers
-/// (`TableId`, `FileStoreId`), a stable string — its subdomain-safe slug.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AppId(pub String);
+/// Identifies an application within the server: the UUID primary key of its
+/// `_sc_applications` row (design §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AppId(pub Uuid);
+
+impl AppId {
+    /// Mint an id for a new application.
+    pub fn new() -> AppId {
+        AppId(Uuid::new_v4())
+    }
+}
+
+impl Default for AppId {
+    fn default() -> Self {
+        AppId::new()
+    }
+}
+
+impl std::fmt::Display for AppId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// A reference to an application's primary (or extra) UI framework, resolved to a
 /// concrete [`Framework`](crate::Framework) at mount time.
 ///
 /// The reference is pure data — a framework `name` (`"code"`, `"saltcorn-v1"`, …)
-/// plus free-form `config` — so an [`Application`] stays serialisable and
-/// comparable while the runtime owns the trait object. Mirrors how an
+/// plus its `config` — so an [`Application`] stays serialisable and comparable
+/// while the runtime owns the trait object. Mirrors how an
 /// [`Endpoint`](sc_api::Endpoint) names its handler rather than holding it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `config` is [`Attrs`] (a JSON object) rather than a string map because it must
+/// hold whatever that framework's `config_spec()` describes (§13.3) — booleans,
+/// numbers and lists as well as strings — and because the admin UI renders its
+/// form from that spec and posts the result back as JSON.
+#[derive(Debug, Clone, PartialEq)]
 pub struct FrameworkRef {
     /// The framework's registered name.
     pub name: String,
-    /// Free-form framework configuration (e.g. the source/output sub-paths of a
-    /// code framework's file store).
-    pub config: BTreeMap<String, String>,
+    /// Framework-specific configuration (e.g. the source/output sub-paths of a
+    /// code framework's file store), validated against its `config_spec`.
+    pub config: Attrs,
 }
 
 impl FrameworkRef {
@@ -37,14 +72,19 @@ impl FrameworkRef {
     pub fn new(name: impl Into<String>) -> FrameworkRef {
         FrameworkRef {
             name: name.into(),
-            config: BTreeMap::new(),
+            config: Attrs::new(),
         }
     }
 
     /// Set a config key, returning `self` for chaining.
-    pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> FrameworkRef {
+    pub fn with(mut self, key: impl Into<String>, value: impl Into<Json>) -> FrameworkRef {
         self.config.insert(key.into(), value.into());
         self
+    }
+
+    /// A config setting as a string, if present and textual.
+    pub fn config_str(&self, key: &str) -> Option<&str> {
+        self.config.get(key)?.as_str()
     }
 }
 
@@ -67,6 +107,35 @@ impl ApiConfig {
         ApiConfig {
             provider: provider.into(),
             mount: normalize_mount(&mount.into()),
+        }
+    }
+}
+
+/// A subdirectory of one of the app's file stores, served as static assets under
+/// a sub-path of the app (design §13.2).
+///
+/// Deliberately separate from the framework's own bundle: the framework serves
+/// the app's UI, a `StaticDir` serves files that are simply *there* — docs,
+/// media, a downloads folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticDir {
+    /// The sub-path within the app the directory is served at, e.g. `/docs`.
+    /// Normalised like an [`ApiConfig`] mount.
+    pub mount: String,
+    /// The file store the directory lives in — which should be one the app
+    /// declares access to.
+    pub store: FileStoreId,
+    /// The subdirectory within that store (`""` = the store's root).
+    pub path: String,
+}
+
+impl StaticDir {
+    /// Serve `path` within `store` at the app sub-path `mount`.
+    pub fn new(mount: impl Into<String>, store: FileStoreId, path: impl Into<String>) -> StaticDir {
+        StaticDir {
+            mount: normalize_mount(&mount.into()),
+            store,
+            path: path.into(),
         }
     }
 }
@@ -108,10 +177,8 @@ impl CspPolicy {
         name: impl Into<String>,
         sources: impl IntoIterator<Item = impl Into<String>>,
     ) -> CspPolicy {
-        self.directives.insert(
-            name.into(),
-            sources.into_iter().map(Into::into).collect(),
-        );
+        self.directives
+            .insert(name.into(), sources.into_iter().map(Into::into).collect());
         self
     }
 
@@ -142,11 +209,14 @@ impl Default for CspPolicy {
 /// served on its own subdomain (design §13.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Application {
-    /// Stable identity.
+    /// Stable identity: the UUID of its `_sc_applications` row (§9).
     pub id: AppId,
     /// Human-readable name.
     pub name: String,
-    /// The subdomain the app is served on (each app gets its own).
+    /// Human-readable description (§9 requires one on every metadata row; the
+    /// empty string means "none given").
+    pub description: String,
+    /// The subdomain the app is served on — the unique routing key.
     pub subdomain: String,
     /// The one primary UI framework.
     pub framework: FrameworkRef,
@@ -159,31 +229,56 @@ pub struct Application {
     pub file_stores: Vec<FileStoreId>,
     /// Enabled API providers, each on a sub-path.
     pub apis: Vec<ApiConfig>,
+    /// Statically-served store subdirectories, each on a sub-path.
+    pub static_dirs: Vec<StaticDir>,
     /// The content-security policy (strict by default).
     pub csp: CspPolicy,
+    /// Sparse per-app values that do not warrant a column of their own (the §9
+    /// column-vs-attributes rule). A framework's settings do **not** live here —
+    /// they belong to the framework, in [`FrameworkRef::config`].
+    pub attributes: Attrs,
 }
 
 impl Application {
-    /// Start an application with the given id, name, subdomain and primary
-    /// framework. Everything else defaults to empty; the CSP defaults to
-    /// [`CspPolicy::strict`]. Use the builder setters to fill in the rest.
+    /// Start a **new** application with the given name, subdomain and primary
+    /// framework, minting a fresh [`AppId`].
+    ///
+    /// Everything else defaults to empty; the CSP defaults to
+    /// [`CspPolicy::strict`]. Use the builder setters to fill in the rest. To
+    /// reconstruct an *existing* application (which already has an id), use
+    /// [`with_id`](Application::with_id).
     pub fn new(
-        id: impl Into<String>,
         name: impl Into<String>,
         subdomain: impl Into<String>,
         framework: FrameworkRef,
     ) -> Application {
         Application {
-            id: AppId(id.into()),
+            id: AppId::new(),
             name: name.into(),
+            description: String::new(),
             subdomain: subdomain.into(),
             framework,
             extra_frameworks: Vec::new(),
             tables: Vec::new(),
             file_stores: Vec::new(),
             apis: Vec::new(),
+            static_dirs: Vec::new(),
             csp: CspPolicy::strict(),
+            attributes: Attrs::new(),
         }
+    }
+
+    /// Set the id — for an application being reconstructed from its stored row
+    /// rather than created.
+    pub fn with_id(mut self, id: AppId) -> Application {
+        self.id = id;
+        self
+    }
+
+    /// Set the description.
+    pub fn description(mut self, description: impl Into<String>) -> Application {
+        self.description = description.into();
+        self
     }
 
     /// Grant the app access to a table.
@@ -201,6 +296,18 @@ impl Application {
     /// Enable an API provider on a sub-path.
     pub fn with_api(mut self, api: ApiConfig) -> Application {
         self.apis.push(api);
+        self
+    }
+
+    /// Serve a store subdirectory on a sub-path.
+    pub fn with_static_dir(mut self, dir: StaticDir) -> Application {
+        self.static_dirs.push(dir);
+        self
+    }
+
+    /// Set a sparse per-app attribute, returning `self` for chaining.
+    pub fn attribute(mut self, key: impl Into<String>, value: impl Into<Json>) -> Application {
+        self.attributes.insert(key.into(), value.into());
         self
     }
 
@@ -228,19 +335,26 @@ mod tests {
     #[test]
     fn builds_an_application_with_access_subset() {
         let app = Application::new(
-            "blog",
             "My Blog",
             "blog",
-            FrameworkRef::new("code").with("source", "web").with("output", "web/dist"),
+            FrameworkRef::new("code")
+                .with("source", "web")
+                .with("output", "web/dist"),
         )
+        .description("The company blog")
         .with_table(TableId("posts".to_owned()))
         .with_file_store(FileStoreId("uploads".to_owned()))
-        .with_api(ApiConfig::new("rest", "api"));
+        .with_api(ApiConfig::new("rest", "api"))
+        .with_static_dir(StaticDir::new(
+            "docs",
+            FileStoreId("uploads".to_owned()),
+            "handbook",
+        ));
 
-        assert_eq!(app.id, AppId("blog".to_owned()));
         assert_eq!(app.subdomain, "blog");
+        assert_eq!(app.description, "The company blog");
         assert_eq!(app.framework.name, "code");
-        assert_eq!(app.framework.config.get("output").unwrap(), "web/dist");
+        assert_eq!(app.framework.config_str("output"), Some("web/dist"));
 
         // Access is limited to the declared subset.
         assert!(app.can_access_table(&TableId("posts".to_owned())));
@@ -252,6 +366,37 @@ mod tests {
         assert_eq!(app.apis.len(), 1);
         assert_eq!(app.apis[0].provider, "rest");
         assert_eq!(app.apis[0].mount, "/api");
+
+        // One static dir, mount normalised the same way.
+        assert_eq!(app.static_dirs.len(), 1);
+        assert_eq!(app.static_dirs[0].mount, "/docs");
+        assert_eq!(app.static_dirs[0].path, "handbook");
+    }
+
+    #[test]
+    fn each_new_application_gets_its_own_id() {
+        let a = Application::new("A", "a", FrameworkRef::new("code"));
+        let b = Application::new("B", "b", FrameworkRef::new("code"));
+        assert_ne!(a.id, b.id);
+
+        // An app reconstructed from a row keeps the stored id.
+        let restored = Application::new("A", "a", FrameworkRef::new("code")).with_id(a.id);
+        assert_eq!(restored.id, a.id);
+    }
+
+    #[test]
+    fn framework_config_holds_json_not_just_strings() {
+        // The point of `Attrs` over a string map: a `config_spec` may describe a
+        // bool or a number, and the admin UI posts it back as one (§13.3).
+        let fw = FrameworkRef::new("code")
+            .with("source", "web")
+            .with("minify", true)
+            .with("workers", 4);
+        assert_eq!(fw.config_str("source"), Some("web"));
+        assert_eq!(fw.config["minify"], Json::Bool(true));
+        assert_eq!(fw.config["workers"], Json::from(4));
+        // A non-string setting is not silently stringified.
+        assert_eq!(fw.config_str("minify"), None);
     }
 
     #[test]
@@ -260,11 +405,15 @@ mod tests {
         assert_eq!(ApiConfig::new("rest", "/").mount, "/");
         assert_eq!(ApiConfig::new("rest", "api/").mount, "/api");
         assert_eq!(ApiConfig::new("rest", "/api/v1/").mount, "/api/v1");
+        assert_eq!(
+            StaticDir::new("docs/", FileStoreId("s".to_owned()), "d").mount,
+            "/docs"
+        );
     }
 
     #[test]
     fn csp_defaults_to_strict_and_renders() {
-        let app = Application::new("a", "A", "a", FrameworkRef::new("code"));
+        let app = Application::new("A", "a", FrameworkRef::new("code"));
         assert_eq!(app.csp, CspPolicy::strict());
         assert_eq!(app.csp.header_value(), "default-src 'self'");
 

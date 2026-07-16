@@ -108,7 +108,6 @@ async fn builds_an_app_from_a_git_repo_file_store_and_serves_the_bundle()
     // that store. The `FrameworkRef` carries the same sub-paths as the spec: it
     // is the serialisable form the runtime resolves to the framework below.
     let app = Application::new(
-        "blog",
         "My Blog",
         "blog",
         FrameworkRef::new("code")

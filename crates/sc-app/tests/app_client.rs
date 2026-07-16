@@ -68,7 +68,7 @@ async fn catalog(db: &TestDb) -> Result<Catalog> {
 
 /// An app declaring only `posts`, with one REST API at `/api`.
 fn blog() -> Application {
-    Application::new("blog", "Blog", "blog", FrameworkRef::new("code"))
+    Application::new("Blog", "blog", FrameworkRef::new("code"))
         .with_table(TableId("posts".to_owned()))
         .with_api(ApiConfig::new("rest", "/api"))
 }
@@ -110,7 +110,7 @@ async fn an_app_with_no_apis_gets_an_empty_client() -> Result<()> {
     let cat = catalog(&db).await?;
 
     // Declaring a table but enabling no provider exposes nothing.
-    let app = Application::new("blog", "Blog", "blog", FrameworkRef::new("code"))
+    let app = Application::new("Blog", "blog", FrameworkRef::new("code"))
         .with_table(TableId("posts".to_owned()));
     assert!(app_providers(&app, &cat)?.is_empty());
     assert!(app_endpoints(&app, &cat)?.is_empty());
@@ -129,7 +129,7 @@ async fn a_declared_table_missing_from_the_catalog_is_an_error() -> Result<()> {
 
     // The app declares a table nobody created: a misconfiguration, not an app
     // with a quietly smaller API.
-    let app = Application::new("blog", "Blog", "blog", FrameworkRef::new("code"))
+    let app = Application::new("Blog", "blog", FrameworkRef::new("code"))
         .with_table(TableId("ghosts".to_owned()))
         .with_api(ApiConfig::new("rest", "/api"));
     let err = app_endpoints(&app, &cat).expect_err("a missing table must fail");
@@ -144,7 +144,7 @@ async fn an_unknown_api_provider_is_a_configuration_error() -> Result<()> {
 
     // GraphQL is in the design but not the MVP; enabling it fails loudly rather
     // than serving an app with a silently missing API.
-    let app = Application::new("blog", "Blog", "blog", FrameworkRef::new("code"))
+    let app = Application::new("Blog", "blog", FrameworkRef::new("code"))
         .with_table(TableId("posts".to_owned()))
         .with_api(ApiConfig::new("graphql", "/graphql"));
     let err = app_providers(&app, &cat)

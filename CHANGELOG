@@ -2,6 +2,65 @@
 
 Changes in reverse chronological order.
 
+## Phase 10 — applications are stored rows (`_sc_applications`; design §9/§13.2)
+
+The storage half of Phase 10: an application is now something the database holds, not only
+something a Rust caller constructs. This is the groundwork for creating apps in the admin UI —
+nothing mounts from the table yet (that is the live-mounting item), and `saltcorn serve` still
+mounts the admin only.
+
+- **`_sc_applications` table + `sc_app::bootstrap`** (`crates/sc-app/src/applications.rs`),
+  built like `sc_auth::bootstrap`: idempotent, driver-agnostic (it goes through the `Catalog`
+  rather than issuing DDL), and inventing no database-side defaults. It carries the §9
+  required columns — UUID `id`, `name`, `description`, `attributes` — plus a column each for
+  the values every app has: `subdomain`, `framework`, `extra_frameworks`, `tables`,
+  `file_stores`, `apis`, `static_dirs`, `csp`. Only `subdomain` is a scalar the database can
+  index; the rest are structured lists and maps and are stored as JSON, which is not a
+  compromise but the shape they are read in — a whole app or nothing, with no query filtering
+  on them. This is the **one** stored-metadata table the MVP adds: the `_sc_tables`/`_sc_fields`
+  overlays stay out of scope, because a table exists without a metadata row and an application
+  does not.
+
+- **`subdomain` is `UNIQUE` in the database.** Routing dispatches on the subdomain, so two apps
+  claiming one is not a state the server can serve. `AppMounts` cannot be the authority on that:
+  it is in-memory and cannot see another transaction, so two admins saving concurrently would
+  both pass an in-memory check. `save_application` still checks first, so the ordinary case is
+  an `Invalid` error naming the app that already holds the subdomain rather than a raw
+  constraint violation — the constraint is the backstop, not the message.
+
+- **`Application` gained `description`, `attributes` and `static_dirs: Vec<StaticDir>`**, and
+  **`AppId` is now a UUID** rather than a slug (§9's rule for stored metadata: it is a row now).
+  Its identity is therefore its row and its routing key is its `subdomain`, so the two are no
+  longer the same string wearing two hats. `Application::new` dropped its `id` argument and
+  mints one; `with_id` reconstructs an app that already has one. The new `StaticDir`
+  (`mount`, `store`, `path`) is the "any number of statically-served subdirectories" half of the
+  admin's configuration surface, deliberately separate from the framework's bundle.
+
+- **`FrameworkRef.config` is now `Attrs` (a JSON object)** rather than `BTreeMap<String, String>`,
+  so it can hold what a framework's `config_spec()` describes (§13.3) — bools, numbers and lists,
+  not just strings — and so the admin UI can post its rendered form back as JSON.
+  `FrameworkRef::with` takes any `Into<serde_json::Value>`; `config_str` reads a setting back as
+  a string, and returns `None` for a non-string rather than stringifying it.
+
+- **Load/save/delete** (`crates/sc-app/src/store.rs`): `save_application` (insert or update in
+  place, keyed on the `AppId`), `load_application`, `load_application_by_subdomain` (the lookup
+  routing needs), `list_applications` (what the server will mount at boot, ordered by subdomain)
+  and `delete_application`. Reading is strict — a missing or ill-shaped column is an `Invalid`
+  error naming the app and the column, not a silently defaulted field, because an app *is* its
+  row and a half-understood row is a misconfiguration the admin needs told about. Saving is not
+  building or mounting: an app can be saved and unbuilt, which is what a newly created app is
+  until its first build.
+
+- **Tests**: `crates/sc-app/tests/app_store.rs` (5 integration tests against a real database) —
+  an app with every column populated round-trips identically (including non-string framework
+  config, attributes and a non-default CSP); an edit updates in place rather than adding a row,
+  and keeping its own subdomain is not a clash with itself; a duplicate subdomain is rejected
+  with an error naming both the subdomain and the incumbent, is not written, and is *also*
+  rejected by the database when a raw insert goes around the pre-check; apps list and delete,
+  freeing the subdomain for another app; and a legacy database with no `_sc_applications`
+  bootstraps cleanly, idempotently, and without disturbing its introspected tables. Plus unit
+  tests for the schema's §9 columns and the JSON-typed framework config.
+
 ## Planning — applications belong in the admin UI (design §9/§12/§13.2/§13.3/§17, TODO Phase 10)
 
 Planning and design only; no code changed, so nothing here is testable yet — the tests are

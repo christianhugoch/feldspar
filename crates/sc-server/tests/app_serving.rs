@@ -197,7 +197,6 @@ fn write_app_source(root: &Path) {
 
 fn blog_app() -> Application {
     Application::new(
-        "blog",
         "Blog",
         "blog",
         FrameworkRef::new("code").with("store", "apps"),
@@ -455,7 +454,7 @@ async fn mounting_an_app_without_a_base_domain_is_refused() -> sc_error::Result<
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
 
     let framework = Arc::new(CodeFramework::new("code", Default::default()));
-    let app = Application::new("blog", "Blog", "blog", FrameworkRef::new("code"));
+    let app = Application::new("Blog", "blog", FrameworkRef::new("code"));
     let apps = AppMounts::new(catalog.clone()).mount(MountedApp::new(app, framework, &catalog)?)?;
 
     // No base domain: no request could ever reach the app, so say so at boot
@@ -479,13 +478,13 @@ async fn two_apps_cannot_claim_the_same_subdomain() -> sc_error::Result<()> {
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
 
     let one = MountedApp::new(
-        Application::new("blog", "Blog", "blog", FrameworkRef::new("code")),
+        Application::new("Blog", "blog", FrameworkRef::new("code")),
         Arc::new(CodeFramework::new("code", Default::default())),
         &catalog,
     )?;
     // A different app claiming the same subdomain.
     let two = MountedApp::new(
-        Application::new("other", "Other", "blog", FrameworkRef::new("code")),
+        Application::new("Other", "blog", FrameworkRef::new("code")),
         Arc::new(CodeFramework::new("code", Default::default())),
         &catalog,
     )?;

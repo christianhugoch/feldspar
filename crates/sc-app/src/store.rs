@@ -1,0 +1,398 @@
+//! Persisting applications: `_sc_applications` row ⇄ [`Application`] (design
+//! §13.2).
+//!
+//! An application exists only as its stored row, so this module is the whole of
+//! its lifecycle-on-disk: [`save_application`] writes one (inserting or
+//! updating), [`load_application`] / [`load_application_by_subdomain`] /
+//! [`list_applications`] read them back, and [`delete_application`] removes one.
+//! Mounting what is loaded is the server's job (§13.2 "the mount registry is
+//! live"), and it is deliberately *not* here: saving the configuration and
+//! building/mounting it are distinct operations with distinct outcomes, and an
+//! app that is saved but unbuilt is a normal state rather than an error.
+//!
+//! The row is the [`Application`] value serialised (§13.2): one column per field
+//! every app has, with sparse values in `attributes`. The columns that are lists
+//! or maps are JSON — see [`applications`](crate::applications) for why.
+//!
+//! **Reading is strict.** A column that is missing or of the wrong shape is an
+//! [`Error::invalid`] naming the app and the column rather than a silently
+//! defaulted field: an app is its row, so a half-understood row is a
+//! misconfigured app the admin needs told about, not one to serve approximately.
+
+use sc_catalog::{Attrs, Catalog, FileStoreId, TableId};
+use sc_db::Row;
+use sc_error::{Error, Result};
+use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
+use serde_json::{Value as Json, json};
+
+use crate::application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir};
+use crate::applications::{
+    APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
+    COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
+};
+
+/// Save an application: insert its row, or update it in place if a row with its
+/// [`AppId`] already exists.
+///
+/// The subdomain is unique (§13.2 — it is the routing key), and this checks for
+/// a clash first so the admin gets an [`Error::invalid`] naming the app that
+/// already holds it, rather than a raw constraint violation. The database's
+/// `UNIQUE` constraint remains the authority: this check and the write are not
+/// one transaction, so a concurrent save is still caught — just less prettily.
+///
+/// Saving does **not** build or mount anything. An app can be saved and unbuilt;
+/// that is what a newly created app is until its first build.
+pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()> {
+    let subdomain = app.subdomain.trim();
+    if subdomain.is_empty() {
+        return Err(Error::invalid("an application needs a subdomain"));
+    }
+    if app.name.trim().is_empty() {
+        return Err(Error::invalid("an application needs a name"));
+    }
+
+    if let Some(other) = load_application_by_subdomain(catalog, subdomain).await?
+        && other.id != app.id
+    {
+        return Err(Error::invalid(format!(
+            "subdomain `{subdomain}` is already used by application `{}`; \
+             each application is served on its own subdomain",
+            other.name
+        )));
+    }
+
+    let columns = app_columns();
+    let values = app_values(app)?;
+
+    if load_application(catalog, app.id).await?.is_some() {
+        let assignments = columns
+            .iter()
+            .zip(values)
+            // The id is the row's identity, not something to reassign.
+            .filter(|(col, _)| *col != COL_ID)
+            .map(|(col, value)| Assignment::new(col.clone(), Expr::Lit(value)))
+            .collect();
+        let update = sc_query::Update::new(APPLICATIONS_TABLE, assignments)
+            .filter(Expr::col(COL_ID).eq(Expr::lit(app.id.0)));
+        run(catalog, Statement::from(update)).await?;
+    } else {
+        let insert = Insert::row(
+            APPLICATIONS_TABLE,
+            columns,
+            values.into_iter().map(Expr::Lit).collect(),
+        );
+        run(catalog, Statement::from(insert)).await?;
+    }
+    Ok(())
+}
+
+/// Load the application with this id, if it exists.
+pub async fn load_application(catalog: &Catalog, id: AppId) -> Result<Option<Application>> {
+    load_one(catalog, Expr::col(COL_ID).eq(Expr::lit(id.0))).await
+}
+
+/// Load the application served on `subdomain`, if any — the lookup routing needs
+/// (§13.2: the subdomain is the routing key).
+pub async fn load_application_by_subdomain(
+    catalog: &Catalog,
+    subdomain: &str,
+) -> Result<Option<Application>> {
+    load_one(catalog, Expr::col(COL_SUBDOMAIN).eq(Expr::lit(subdomain))).await
+}
+
+/// Every stored application, ordered by subdomain — what `sc-server` mounts at
+/// boot (§13.2).
+pub async fn list_applications(catalog: &Catalog) -> Result<Vec<Application>> {
+    let select = Select::from(Source::table(APPLICATIONS_TABLE));
+    let mut apps: Vec<Application> = rows(catalog, select)
+        .await?
+        .iter()
+        .map(application_from_row)
+        .collect::<Result<_>>()?;
+    apps.sort_by(|a, b| a.subdomain.cmp(&b.subdomain));
+    Ok(apps)
+}
+
+/// Delete an application's row, returning whether one was there to delete.
+///
+/// Unmounting the app — so its subdomain stops resolving — is the server's job;
+/// this only removes the definition.
+pub async fn delete_application(catalog: &Catalog, id: AppId) -> Result<bool> {
+    let existed = load_application(catalog, id).await?.is_some();
+    let delete = Delete::from(APPLICATIONS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
+    run(catalog, Statement::from(delete)).await?;
+    Ok(existed)
+}
+
+/// The row's columns, in the order [`app_values`] produces them.
+fn app_columns() -> Vec<String> {
+    [
+        COL_ID,
+        COL_NAME,
+        COL_DESCRIPTION,
+        COL_SUBDOMAIN,
+        COL_FRAMEWORK,
+        COL_EXTRA_FRAMEWORKS,
+        COL_TABLES,
+        COL_FILE_STORES,
+        COL_APIS,
+        COL_STATIC_DIRS,
+        COL_CSP,
+        COL_ATTRIBUTES,
+    ]
+    .iter()
+    .map(|c| (*c).to_owned())
+    .collect()
+}
+
+/// The application serialised to its row's values, in [`app_columns`] order.
+fn app_values(app: &Application) -> Result<Vec<Value>> {
+    Ok(vec![
+        Value::Uuid(app.id.0),
+        Value::Text(app.name.trim().to_owned()),
+        Value::Text(app.description.clone()),
+        Value::Text(app.subdomain.trim().to_owned()),
+        Value::Json(framework_to_json(&app.framework)),
+        Value::Json(Json::Array(
+            app.extra_frameworks.iter().map(framework_to_json).collect(),
+        )),
+        Value::Json(names_to_json(app.tables.iter().map(|t| &t.0))),
+        Value::Json(names_to_json(app.file_stores.iter().map(|s| &s.0))),
+        Value::Json(Json::Array(
+            app.apis
+                .iter()
+                .map(|a| json!({ "provider": a.provider, "mount": a.mount }))
+                .collect(),
+        )),
+        Value::Json(Json::Array(
+            app.static_dirs
+                .iter()
+                .map(|d| json!({ "mount": d.mount, "store": d.store.0, "path": d.path }))
+                .collect(),
+        )),
+        Value::Json(csp_to_json(&app.csp)),
+        Value::Json(Json::Object(app.attributes.clone())),
+    ])
+}
+
+fn framework_to_json(fw: &FrameworkRef) -> Json {
+    json!({ "name": fw.name, "config": Json::Object(fw.config.clone()) })
+}
+
+fn names_to_json<'a>(names: impl Iterator<Item = &'a String>) -> Json {
+    Json::Array(names.map(|n| Json::String(n.clone())).collect())
+}
+
+fn csp_to_json(csp: &CspPolicy) -> Json {
+    Json::Object(
+        csp.directives
+            .iter()
+            .map(|(name, sources)| (name.clone(), names_to_json(sources.iter())))
+            .collect(),
+    )
+}
+
+/// Rebuild an [`Application`] from its `_sc_applications` row.
+///
+/// Public within the crate so the server can hydrate an app from a row it has
+/// already read; the strictness note in the module docs applies throughout.
+pub(crate) fn application_from_row(row: &Row) -> Result<Application> {
+    let id = match row.get(COL_ID) {
+        Some(Value::Uuid(u)) => AppId(*u),
+        other => return Err(bad_column(COL_ID, "a uuid", other)),
+    };
+    let name = text(row, COL_NAME)?;
+    let subdomain = text(row, COL_SUBDOMAIN)?;
+
+    // A NULL description is "none given", not a broken row.
+    let description = match row.get(COL_DESCRIPTION) {
+        Some(Value::Text(t)) => t.clone(),
+        Some(Value::Null) | None => String::new(),
+        other => return Err(bad_column(COL_DESCRIPTION, "text", other)),
+    };
+
+    Ok(Application {
+        id,
+        name,
+        description,
+        subdomain,
+        framework: framework_from_json(json_column(row, COL_FRAMEWORK)?, COL_FRAMEWORK)?,
+        extra_frameworks: json_array(row, COL_EXTRA_FRAMEWORKS)?
+            .iter()
+            .map(|v| framework_from_json(v.clone(), COL_EXTRA_FRAMEWORKS))
+            .collect::<Result<_>>()?,
+        tables: names_from_json(row, COL_TABLES)?
+            .into_iter()
+            .map(TableId)
+            .collect(),
+        file_stores: names_from_json(row, COL_FILE_STORES)?
+            .into_iter()
+            .map(FileStoreId)
+            .collect(),
+        apis: json_array(row, COL_APIS)?
+            .iter()
+            .map(|v| {
+                Ok(ApiConfig::new(
+                    member_str(v, "provider", COL_APIS)?,
+                    member_str(v, "mount", COL_APIS)?,
+                ))
+            })
+            .collect::<Result<_>>()?,
+        static_dirs: json_array(row, COL_STATIC_DIRS)?
+            .iter()
+            .map(|v| {
+                Ok(StaticDir::new(
+                    member_str(v, "mount", COL_STATIC_DIRS)?,
+                    FileStoreId(member_str(v, "store", COL_STATIC_DIRS)?),
+                    member_str(v, "path", COL_STATIC_DIRS)?,
+                ))
+            })
+            .collect::<Result<_>>()?,
+        csp: csp_from_json(json_column(row, COL_CSP)?)?,
+        attributes: object(json_column(row, COL_ATTRIBUTES)?, COL_ATTRIBUTES)?,
+    })
+}
+
+fn framework_from_json(value: Json, column: &str) -> Result<FrameworkRef> {
+    let name = member_str(&value, "name", column)?;
+    let config = match value.get("config") {
+        Some(Json::Object(o)) => o.clone(),
+        // A framework with no settings may have been stored without a config.
+        None | Some(Json::Null) => Attrs::new(),
+        Some(_) => {
+            return Err(Error::invalid(format!(
+                "{APPLICATIONS_TABLE}.{column}: framework `{name}` has a non-object `config`"
+            )));
+        }
+    };
+    Ok(FrameworkRef { name, config })
+}
+
+fn csp_from_json(value: Json) -> Result<CspPolicy> {
+    let object = object(value, COL_CSP)?;
+    let mut directives = std::collections::BTreeMap::new();
+    for (name, sources) in object {
+        let Json::Array(items) = sources else {
+            return Err(Error::invalid(format!(
+                "{APPLICATIONS_TABLE}.{COL_CSP}: directive `{name}` should be a list of sources"
+            )));
+        };
+        let sources = items
+            .iter()
+            .map(|s| {
+                s.as_str().map(str::to_owned).ok_or_else(|| {
+                    Error::invalid(format!(
+                        "{APPLICATIONS_TABLE}.{COL_CSP}: directive `{name}` has a non-string source"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
+        directives.insert(name, sources);
+    }
+    Ok(CspPolicy { directives })
+}
+
+/// A required text column.
+fn text(row: &Row, column: &str) -> Result<String> {
+    match row.get(column) {
+        Some(Value::Text(t)) => Ok(t.clone()),
+        other => Err(bad_column(column, "text", other)),
+    }
+}
+
+/// A JSON column's value.
+fn json_column(row: &Row, column: &str) -> Result<Json> {
+    match row.get(column) {
+        Some(Value::Json(j)) => Ok(j.clone()),
+        other => Err(bad_column(column, "json", other)),
+    }
+}
+
+/// A JSON column holding an array.
+fn json_array(row: &Row, column: &str) -> Result<Vec<Json>> {
+    match json_column(row, column)? {
+        Json::Array(items) => Ok(items),
+        _ => Err(Error::invalid(format!(
+            "{APPLICATIONS_TABLE}.{column} should be a json array"
+        ))),
+    }
+}
+
+/// A JSON column holding an array of strings (the table/store subsets).
+fn names_from_json(row: &Row, column: &str) -> Result<Vec<String>> {
+    json_array(row, column)?
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_owned).ok_or_else(|| {
+                Error::invalid(format!(
+                    "{APPLICATIONS_TABLE}.{column} should be a json array of names"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// A JSON value that must be an object.
+fn object(value: Json, column: &str) -> Result<Attrs> {
+    match value {
+        Json::Object(o) => Ok(o),
+        _ => Err(Error::invalid(format!(
+            "{APPLICATIONS_TABLE}.{column} should be a json object"
+        ))),
+    }
+}
+
+/// A required string member of a JSON object inside `column`.
+fn member_str(value: &Json, member: &str, column: &str) -> Result<String> {
+    value
+        .get(member)
+        .and_then(Json::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::invalid(format!(
+                "{APPLICATIONS_TABLE}.{column} entry is missing the string member `{member}`"
+            ))
+        })
+}
+
+fn bad_column(column: &str, expected: &str, got: Option<&Value>) -> Error {
+    match got {
+        Some(value) => Error::invalid(format!(
+            "{APPLICATIONS_TABLE}.{column} should be {expected}, got {}",
+            value.kind()
+        )),
+        None => Error::invalid(format!("row has no `{column}` column")),
+    }
+}
+
+/// Run a statement that returns no rows of interest.
+async fn run(catalog: &Catalog, statement: Statement) -> Result<()> {
+    catalog
+        .primary()
+        .query(&statement)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(())
+}
+
+/// Run a select and collect its rows.
+async fn rows(catalog: &Catalog, select: Select) -> Result<Vec<Row>> {
+    catalog
+        .primary()
+        .query(&Statement::from(select))
+        .await?
+        .try_collect()
+        .await
+}
+
+/// Load the single application matching `filter`, if any.
+async fn load_one(catalog: &Catalog, filter: Expr) -> Result<Option<Application>> {
+    let select = Select::from(Source::table(APPLICATIONS_TABLE))
+        .filter(filter)
+        .limit(1);
+    match rows(catalog, select).await?.first() {
+        Some(row) => Ok(Some(application_from_row(row)?)),
+        None => Ok(None),
+    }
+}

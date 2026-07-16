@@ -158,11 +158,11 @@ Two decisions worth reading before starting, both in §13.2:
 
 **Storage (`sc-app`):**
 
-- [ ] `_sc_applications` table + bootstrap (like `sc_auth::bootstrap`): §9 required columns (UUID `id`, `name`, `description`, `attributes`) plus subdomain, framework + config, table/store subsets, apis, static dirs, csp
-- [ ] `Application` gains `description`, `attributes`, `static_dirs: Vec<StaticDir>`; `AppId` becomes a UUID (it is a stored row now) and `subdomain` becomes the unique routing key
-- [ ] `FrameworkRef.config` becomes `Attrs` (JSON) rather than a string map, so it can hold what a framework's `config_spec` describes
-- [ ] Load/save/delete: `_sc_applications` row ⇄ `Application`; unique subdomain enforced in the database, not only in `AppMounts`
-- [ ] Integration tests: round-trip an app through the table; a duplicate subdomain is rejected; a legacy database with no `_sc_applications` bootstraps cleanly
+- [x] `_sc_applications` table + bootstrap (like `sc_auth::bootstrap`): §9 required columns (UUID `id`, `name`, `description`, `attributes`) plus subdomain, framework + config, table/store subsets, apis, static dirs, csp
+- [x] `Application` gains `description`, `attributes`, `static_dirs: Vec<StaticDir>`; `AppId` becomes a UUID (it is a stored row now) and `subdomain` becomes the unique routing key
+- [x] `FrameworkRef.config` becomes `Attrs` (JSON) rather than a string map, so it can hold what a framework's `config_spec` describes
+- [x] Load/save/delete: `_sc_applications` row ⇄ `Application`; unique subdomain enforced in the database, not only in `AppMounts`
+- [x] Integration tests: round-trip an app through the table; a duplicate subdomain is rejected; a legacy database with no `_sc_applications` bootstraps cleanly
 
 **Framework settings as data (`sc-types`, `sc-app`):**
 

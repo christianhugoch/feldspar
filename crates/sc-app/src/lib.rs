@@ -18,16 +18,33 @@
 //! that set — the same generator the admin SPA uses — and [`build_application`]
 //! emits it into the app's source tree before invoking the bundler.
 //!
-//! Subdomain routing and serving an app from `sc-server` land in later Phase 9
-//! items.
+//! Applications are **created in the admin UI, not in Rust** (§13.2), so an app
+//! is defined by its `_sc_applications` row and nothing else — there is nothing
+//! to introspect one from, which is why this is the one stored-metadata table
+//! the MVP needs. [`bootstrap`] creates the table (idempotently, on any database
+//! including one that has never seen Saltcorn) and [`save_application`] /
+//! [`load_application`] / [`list_applications`] / [`delete_application`] are the
+//! row ⇄ [`Application`] path. Saving is not building or mounting: an app that is
+//! saved but unbuilt is a normal state.
 
 mod api;
 mod application;
+mod applications;
 mod build;
 mod framework;
+mod store;
 
 pub use api::{app_client, app_endpoints, app_providers, app_tables};
-pub use application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef};
+pub use application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir};
+pub use applications::{
+    APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
+    COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
+    bootstrap,
+};
+pub use store::{
+    delete_application, list_applications, load_application, load_application_by_subdomain,
+    save_application,
+};
 pub use build::{
     AppSource, BuildReport, build_app, build_application, build_code_framework, emit_client,
     run_build,
