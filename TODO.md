@@ -175,11 +175,11 @@ Two decisions worth reading before starting, both in §13.2:
 
 **Live mounting (`sc-server`):**
 
-- [ ] `AppMounts` becomes live shared state (mount/unmount/replace one app at a time) instead of a value frozen at `build_router_with_apps`
-- [ ] Boot: load every row of `_sc_applications` and mount each; a single app that fails to build must not stop the server or the other apps
-- [ ] Build + mount an app at runtime, with **no process restart**; a failed rebuild leaves the previously mounted version serving
-- [ ] `saltcorn serve` honours `--base-domain` for real: remove the README's "no effect yet" caveat once it does
-- [ ] Integration tests: create an app over HTTP → it serves on its subdomain without a restart; edit → re-mount; delete → subdomain stops resolving; a failing build keeps the old bundle up and reports the bundler's diagnostics
+- [x] `AppMounts` becomes live shared state (mount/unmount/replace one app at a time) instead of a value frozen at `build_router_with_apps`
+- [x] Boot: load every row of `_sc_applications` and mount each; a single app that fails to build must not stop the server or the other apps
+- [x] Build + mount an app at runtime, with **no process restart**; a failed rebuild leaves the previously mounted version serving
+- [x] `saltcorn serve` honours `--base-domain` for real: remove the README's "no effect yet" caveat once it does
+- [x] Integration tests: create an app at runtime → it serves on its subdomain without a restart; edit → re-mount; delete → subdomain stops resolving; a failing build keeps the old bundle up and reports the bundler's diagnostics. (Driven through the live `AppMounts`/`build_and_mount` API, not a REST endpoint — the create/build HTTP endpoints are the next "Admin API" subphase)
 
 **Admin API (`sc-api`, `sc-server`):**
 

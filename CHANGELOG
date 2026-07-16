@@ -2,6 +2,51 @@
 
 Changes in reverse chronological order.
 
+## Phase 10 — live mounting: applications mount, rebuild and unmount with no restart (design §13.2)
+
+The configuration path finally reaches all the way from the database to a running app. Before
+this, an app was only servable by embedding `sc-server` in a bespoke binary and handing a frozen
+`AppMounts` to `build_router_with_apps`; `saltcorn serve` mounted the admin only, so
+`--base-domain` did nothing. Now the mount registry is **live**: the CLI loads every
+`_sc_applications` row at boot and builds+mounts each, and an app can be built, rebuilt or
+unmounted against a running server — "a full restart should never be required" (GOALS).
+
+- **`AppMounts` is live shared state** (`crates/sc-server/src/apps.rs`). Its `by_subdomain` map
+  moved behind an `RwLock<HashMap<String, Arc<MountedApp>>>` and its mutators take `&self`:
+  `mount` (insert, refusing a subdomain collision), `remount` (insert-or-replace, for an edit or
+  rebuild), and `unmount`. `get` hands back an `Arc<MountedApp>` the caller holds after the read
+  lock is released, so a mount/unmount never blocks an in-flight request and a request already
+  dispatched against a since-replaced app keeps serving the version it resolved. The lock
+  recovers from poisoning rather than propagating a panic — a torn write leaves at worst a stale
+  entry the next mount overwrites, which must not take the whole registry down.
+
+- **`build_and_mount` + `mount_all`** (same module). `build_and_mount(apps, app)` is the runtime
+  create/edit path: resolve the build step from the app's framework config, run the bundler, and
+  `remount` the result. Because the build runs to completion *before* anything is mounted, a
+  **failed rebuild leaves the previously mounted version serving** and returns the bundler's own
+  diagnostics (§16) — an `Err` never disturbs what is already up. `mount_all(apps)` is the boot
+  path: it lists every stored app and builds+mounts each, logging and **skipping** any that fails
+  to build so one broken app cannot stop the server or the others.
+
+- **`build_router_with_apps` takes `Arc<AppMounts>`** (`crates/sc-server/src/router.rs`), a
+  shared live handle rather than a value frozen at build time; the router resolves each request
+  against the registry's *current* contents, so an app mounted after the router was assembled
+  serves immediately. `resolve_app` returns the owned `Arc` for the reasons above.
+
+- **`saltcorn serve` honours `--base-domain` for real** (`crates/sc-cli/src/main.rs`,
+  `crates/sc-server/src/serve.rs`). `serve` now takes the live `AppMounts` handle and the CLI
+  builds it from the catalog, `mount_all`s every stored app when a base domain is set (mounting
+  is gated on it — without one no request could address an app), and keeps a clone for later
+  runtime mounts. The README's "no effect yet" caveat is gone.
+
+- **Tests.** A new `crates/sc-server/tests/live_mounting.rs` drives the whole lifecycle against a
+  real Postgres through a router built **once**: an app is created (build+mount) and appears on
+  its subdomain with no rebuild; an edit re-mounts the new bundle; a failing rebuild is reported
+  with the bundler's diagnostics while the old bundle keeps serving; an unmount makes the
+  subdomain stop resolving. A second test proves boot mounts every stored app and a failing one
+  is skipped rather than fatal, then mounts the fixed app live. The existing `app_serving`
+  tests were updated to the `&self`/`Arc<AppMounts>` API.
+
 ## Phase 10 — a framework's settings become data: `config_spec`, save-time validation, config→build (design §13.3)
 
 The framework half of "configuration as data" now works end to end: a framework declares its

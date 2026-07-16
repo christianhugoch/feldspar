@@ -245,7 +245,8 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
 
     let framework = Arc::new(CodeFramework::new("code", report.bundle));
     let mounted = MountedApp::new(blog_app(), framework, &catalog)?;
-    let apps = AppMounts::new(catalog.clone()).mount(mounted)?;
+    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    apps.mount(mounted)?;
 
     let config = ServerConfig {
         base_domain: Some(BASE_DOMAIN.to_owned()),
@@ -457,7 +458,8 @@ async fn mounting_an_app_without_a_base_domain_is_refused() -> sc_error::Result<
 
     let framework = Arc::new(CodeFramework::new("code", Default::default()));
     let app = Application::new("Blog", "blog", code_framework());
-    let apps = AppMounts::new(catalog.clone()).mount(MountedApp::new(app, framework, &catalog)?)?;
+    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    apps.mount(MountedApp::new(app, framework, &catalog)?)?;
 
     // No base domain: no request could ever reach the app, so say so at boot
     // rather than serving an app nobody can address.
@@ -491,11 +493,9 @@ async fn two_apps_cannot_claim_the_same_subdomain() -> sc_error::Result<()> {
         &catalog,
     )?;
 
-    let err = AppMounts::new(catalog)
-        .mount(one)?
-        .mount(two)
-        .map(|_| ())
-        .expect_err("a subdomain collision must fail");
+    let apps = AppMounts::new(catalog);
+    apps.mount(one)?;
+    let err = apps.mount(two).expect_err("a subdomain collision must fail");
     assert!(err.to_string().contains("blog"), "{err}");
     Ok(())
 }

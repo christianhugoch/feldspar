@@ -27,7 +27,7 @@ mod router;
 mod security;
 mod serve;
 
-pub use apps::{AppMounts, MountedApp, subdomain_of};
+pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
 pub use config::{DEFAULT_BIND, ServerConfig};
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,

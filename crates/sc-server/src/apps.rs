@@ -15,10 +15,13 @@
 //! to the database at all.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use sc_api::ApiProvider;
-use sc_app::{Application, Framework};
+use sc_app::{
+    Application, CodeFramework, Framework, app_source_from_config, build_application,
+    list_applications,
+};
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 
@@ -62,17 +65,28 @@ impl MountedApp {
     }
 }
 
-/// The applications this server serves, resolved by subdomain.
+/// The applications this server serves, resolved by subdomain — **live shared
+/// state**, not a value frozen at router-build time (design §13.2 "the mount
+/// registry is live; a full restart should never be required").
+///
+/// The registry is mutated in place through a shared handle: the boot path
+/// [`mount_all`]s every stored app, and a later create/edit/delete
+/// [`build_and_mount`]s or [`unmount`](AppMounts::unmount)s one app while the
+/// server keeps serving the rest. The mounts live behind an `RwLock` so requests
+/// read them concurrently and a mount/unmount briefly takes the write lock; each
+/// [`MountedApp`] is an [`Arc`] so a reader clones its handle and drops the lock
+/// rather than holding it across the request.
 ///
 /// Empty by default: a server with no apps mounted serves only the admin API and
 /// its SPA, which is exactly the MVP's default deployment.
 #[derive(Default)]
 pub struct AppMounts {
-    /// The catalog the providers run against. `None` only when no app is
-    /// mounted; an app's API cannot run without it.
+    /// The catalog the providers run against — and what the apps build against.
+    /// `None` only for [`none`](AppMounts::none), the admin-only server that can
+    /// never mount an app.
     catalog: Option<Arc<Catalog>>,
-    /// Subdomain → the app served there.
-    by_subdomain: HashMap<String, MountedApp>,
+    /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
+    by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
 }
 
 impl AppMounts {
@@ -81,33 +95,52 @@ impl AppMounts {
         AppMounts::default()
     }
 
-    /// A registry whose apps run against `catalog`.
+    /// A registry whose apps build and run against `catalog`.
     pub fn new(catalog: Arc<Catalog>) -> AppMounts {
         AppMounts {
             catalog: Some(catalog),
-            by_subdomain: HashMap::new(),
+            by_subdomain: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Mount an app on its declared subdomain.
+    /// Mount an app on its declared subdomain, refusing a collision.
     ///
     /// Two apps may not claim the same subdomain — it is how a request is routed
     /// to one of them, so a collision is a configuration error rather than a
-    /// last-one-wins surprise.
-    pub fn mount(mut self, app: MountedApp) -> Result<AppMounts> {
+    /// last-one-wins surprise. Use [`remount`](AppMounts::remount) to replace the
+    /// app already on a subdomain (an edit or a rebuild).
+    pub fn mount(&self, app: MountedApp) -> Result<()> {
         let subdomain = app.app.subdomain.clone();
-        if self.by_subdomain.contains_key(&subdomain) {
+        let mut mounts = self.write();
+        if mounts.contains_key(&subdomain) {
             return Err(Error::config(format!(
                 "two applications claim the subdomain `{subdomain}`"
             )));
         }
-        self.by_subdomain.insert(subdomain, app);
-        Ok(self)
+        mounts.insert(subdomain, Arc::new(app));
+        Ok(())
     }
 
-    /// The app served on `subdomain`.
-    pub fn get(&self, subdomain: &str) -> Option<&MountedApp> {
-        self.by_subdomain.get(subdomain)
+    /// Mount an app, **replacing** whatever was on its subdomain — the runtime
+    /// re-mount an edit or a rebuild does.
+    ///
+    /// A request in flight against the previous mount keeps serving from the
+    /// [`Arc`] it already cloned; the next request resolves the new one.
+    pub fn remount(&self, app: MountedApp) {
+        let subdomain = app.app.subdomain.clone();
+        self.write().insert(subdomain, Arc::new(app));
+    }
+
+    /// Unmount the app on `subdomain`, so it stops resolving. Returns whether one
+    /// was there to remove.
+    pub fn unmount(&self, subdomain: &str) -> bool {
+        self.write().remove(subdomain).is_some()
+    }
+
+    /// The app served on `subdomain`, as an [`Arc`] the caller holds after the
+    /// read lock is released.
+    pub fn get(&self, subdomain: &str) -> Option<Arc<MountedApp>> {
+        self.read().get(subdomain).cloned()
     }
 
     /// The catalog the apps' providers run against.
@@ -117,14 +150,80 @@ impl AppMounts {
 
     /// Whether any app is mounted.
     pub fn is_empty(&self) -> bool {
-        self.by_subdomain.is_empty()
+        self.read().is_empty()
     }
 
     /// The mounted subdomains, sorted.
-    pub fn subdomains(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.by_subdomain.keys().map(String::as_str).collect();
+    pub fn subdomains(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.read().keys().cloned().collect();
         names.sort_unstable();
         names
+    }
+
+    /// Read the mounts, recovering from a poisoned lock: a panic while mounting
+    /// must not take the whole registry down — the worst a torn write leaves is a
+    /// stale entry, which the next mount overwrites.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Arc<MountedApp>>> {
+        self.by_subdomain.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Write the mounts, recovering from a poisoned lock (see [`read`](Self::read)).
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<MountedApp>>> {
+        self.by_subdomain.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Build an application from its stored configuration and mount it live on its
+/// subdomain, with **no process restart** (design §13.2).
+///
+/// This is the runtime create/edit path: resolve the app's build step from its
+/// framework config, run the bundler, and [`remount`](AppMounts::remount) the
+/// resulting framework — replacing any earlier version on the same subdomain.
+///
+/// A **failed build leaves the previously mounted version serving**: the build
+/// runs to completion before anything is mounted, so an `Err` here — carrying the
+/// bundler's own diagnostics (§16) — never disturbs what is already up.
+pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_app::BuildReport> {
+    let catalog = apps.catalog().ok_or_else(|| {
+        Error::config("this server was built with no catalog, so it cannot mount applications")
+    })?;
+    let source = app_source_from_config(&app.framework)?;
+    let report = build_application(catalog, &app, &source).await?;
+    let framework = Arc::new(CodeFramework::new(
+        app.framework.name.clone(),
+        report.bundle.clone(),
+    ));
+    let mounted = MountedApp::new(app, framework, catalog)?;
+    apps.remount(mounted);
+    Ok(report)
+}
+
+/// Load every stored application and build + mount each — what the server does at
+/// boot (design §13.2).
+///
+/// **A single app that fails to build must not stop the server or the other
+/// apps**, so a per-app failure is logged and skipped rather than propagated: the
+/// operator gets a running server with the apps that built and a clear line about
+/// the one that did not, which they can fix and rebuild without a restart.
+pub async fn mount_all(apps: &AppMounts) {
+    let catalog = match apps.catalog() {
+        Some(catalog) => catalog,
+        // An admin-only server has nothing to mount.
+        None => return,
+    };
+    let stored = match list_applications(catalog).await {
+        Ok(apps) => apps,
+        Err(e) => {
+            eprintln!("saltcorn: could not load applications to mount: {e}");
+            return;
+        }
+    };
+    for app in stored {
+        let subdomain = app.subdomain.clone();
+        match build_and_mount(apps, app).await {
+            Ok(_) => eprintln!("saltcorn: mounted application `{subdomain}`"),
+            Err(e) => eprintln!("saltcorn: application `{subdomain}` failed to build, skipping: {e}"),
+        }
     }
 }
 

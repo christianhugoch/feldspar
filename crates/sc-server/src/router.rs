@@ -90,7 +90,13 @@ pub fn build_router(
     sessions: Arc<SessionStore>,
     config: &ServerConfig,
 ) -> Result<Router> {
-    build_router_with_apps(endpoints, handlers, sessions, config, AppMounts::none())
+    build_router_with_apps(
+        endpoints,
+        handlers,
+        sessions,
+        config,
+        Arc::new(AppMounts::none()),
+    )
 }
 
 /// Build the axum router, also serving `apps` on their own subdomains
@@ -100,12 +106,17 @@ pub fn build_router(
 /// app whose subdomain is `blog`. Anything else — the base domain, an unknown
 /// subdomain, or any host when no base domain is configured — is the admin, so
 /// mounting an app cannot take the admin away from an operator.
+///
+/// `apps` is a **shared, live** [`AppMounts`] handle (design §13.2): the caller
+/// keeps a clone to mount/unmount apps at runtime, and this router resolves each
+/// request against the registry's current contents — an app mounted after the
+/// router was built serves immediately, with no restart.
 pub fn build_router_with_apps(
     endpoints: &EndpointSet,
     handlers: HandlerRegistry,
     sessions: Arc<SessionStore>,
     config: &ServerConfig,
-    apps: AppMounts,
+    apps: Arc<AppMounts>,
 ) -> Result<Router> {
     if !apps.is_empty() && config.base_domain.is_none() {
         return Err(Error::config(format!(
@@ -127,7 +138,7 @@ pub fn build_router_with_apps(
         sessions,
         static_dir: config.static_dir.clone().map(Arc::new),
         secure_cookies: config.secure_cookies,
-        apps: Arc::new(apps),
+        apps,
         base_domain: config.base_domain.clone().map(Arc::new),
     };
 
@@ -210,7 +221,7 @@ async fn dispatch(
     // An application claims the whole of its subdomain, so this comes first: on
     // `blog.example.com` every path is the blog's, not the admin's.
     if let Some(app) = resolve_app(&state, &headers) {
-        return dispatch_app(&state, app, method, &uri, jar, &body).await;
+        return dispatch_app(&state, &app, method, &uri, jar, &body).await;
     }
 
     match state.routes.at(uri.path()) {
@@ -245,7 +256,12 @@ async fn dispatch(
 }
 
 /// The application a request's `Host` names, if any.
-fn resolve_app<'s>(state: &'s AppState, headers: &axum::http::HeaderMap) -> Option<&'s MountedApp> {
+///
+/// Returns an owned [`Arc`] so the live registry's read lock is released before
+/// the request is served: a concurrent mount/unmount never blocks on an in-flight
+/// request, and a request in flight against a since-replaced app keeps serving the
+/// version it resolved.
+fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap) -> Option<Arc<MountedApp>> {
     let base = state.base_domain.as_ref()?;
     let host = headers.get(header::HOST)?.to_str().ok()?;
     let subdomain = subdomain_of(host, Some(base.as_str()))?;

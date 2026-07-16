@@ -17,7 +17,7 @@ use sc_auth::SessionStore;
 use sc_cli::DbConfig;
 use sc_cli::{connect_catalog, connect_file_stores, extract_file_stores};
 use sc_error::Result;
-use sc_server::{ServerConfig, admin_handlers, serve};
+use sc_server::{AppMounts, ServerConfig, admin_handlers, mount_all, serve};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -69,9 +69,20 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // manager can browse/read/write them.
     connect_file_stores(&catalog, &file_store_specs)?;
 
+    // Bring the applications up. `--base-domain` is what makes them addressable
+    // (an app is served at `<subdomain>.<base-domain>`), so mounting is gated on
+    // it: without a base domain no request could ever reach an app, and mounting
+    // one would make the router refuse to build. With one, every stored app is
+    // built and mounted now — a build that fails is logged and skipped, never
+    // fatal (§13.2), and can be fixed and rebuilt without a restart.
+    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    if config.base_domain.is_some() {
+        mount_all(&apps).await;
+    }
+
     let sessions = Arc::new(SessionStore::default());
     eprintln!("saltcorn: listening on http://{}", config.addr);
-    serve(config, admin_endpoints(), admin_handlers(catalog), sessions).await
+    serve(config, admin_endpoints(), admin_handlers(catalog), sessions, apps).await
 }
 
 /// Print the short usage summary.

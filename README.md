@@ -189,13 +189,11 @@ present, wins.
 
 Unknown flags in either group are rejected with a clear error rather than ignored.
 
-> **`--base-domain` has no effect yet on the `saltcorn serve` command.** Serving an
-> application needs an application to serve, and defining one (loading
-> `_sc_applications`) is not wired into the binary yet — apps are currently mounted
-> programmatically, by embedding `sc-server`. The flag, the subdomain routing, and
-> the app serving all work and are covered by tests; what is missing is the
-> configuration path from the database to a mounted app. Until then `saltcorn serve`
-> serves the admin only, whatever this flag says.
+> **`--base-domain` mounts your applications.** With it set, `saltcorn serve` loads
+> every `_sc_applications` row at boot, builds each, and serves it at
+> `<subdomain>.<base-domain>`; an app that fails to build is logged and skipped, not
+> fatal, and can be fixed and rebuilt without a restart. Without a base domain the
+> server has no way to address an app, so it serves the admin only.
 
 ### Examples
 
