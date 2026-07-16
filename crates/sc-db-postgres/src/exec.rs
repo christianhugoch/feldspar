@@ -37,7 +37,18 @@ pub(crate) async fn run_query(
     let pg_rows = client
         .query(&sql, &param_refs)
         .await
-        .map_err(|e| Error::database(format!("query failed: {e}")))?;
+        // `tokio_postgres::Error` displays as a terse "db error"; the real
+        // cause (the server's SQLSTATE + message) is only in its source chain.
+        // The failing SQL is included so the error is actionable; the bind
+        // *values* are not — only their count — because they may hold secrets
+        // (passwords, tokens) and this message is also returned to the client.
+        .map_err(|e| {
+            Error::database(format!(
+                "query failed: {}\n  sql: {sql}\n  ({} bind parameter(s))",
+                sc_error::format_chain(&e),
+                binds.len(),
+            ))
+        })?;
 
     // All rows in a result share one column list; build it once.
     let columns: Arc<Vec<String>> = Arc::new(
@@ -66,9 +77,11 @@ pub(crate) async fn run_ddl(
     change: &SchemaChange,
 ) -> Result<()> {
     let sql = crate::ddl::render(dialect, change)?;
-    client
-        .batch_execute(&sql)
-        .await
-        .map_err(|e| Error::database(format!("apply_schema failed: {e}")))?;
+    client.batch_execute(&sql).await.map_err(|e| {
+        Error::database(format!(
+            "apply_schema failed: {}\n  sql: {sql}",
+            sc_error::format_chain(&e)
+        ))
+    })?;
     Ok(())
 }

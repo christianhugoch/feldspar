@@ -309,7 +309,8 @@ async fn dispatch_app(
         let user = match &session_token {
             Some(token) => match state.sessions.user_for(token) {
                 Ok(u) => u,
-                Err(_) => {
+                Err(e) => {
+                    log_failure("session lookup failed", &e);
                     return with_csp(
                         json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed"),
                         &csp,
@@ -360,7 +361,7 @@ async fn dispatch_app(
                 ),
                 &csp,
             ),
-            Err(e) => with_csp(json_error(error_status(&e), e.to_string()), &csp),
+            Err(e) => with_csp(error_response(&e), &csp),
         };
     }
 
@@ -386,7 +387,7 @@ async fn dispatch_app(
             }
             with_csp(out, &csp)
         }
-        Err(e) => with_csp(json_error(error_status(&e), e.to_string()), &csp),
+        Err(e) => with_csp(error_response(&e), &csp),
     }
 }
 
@@ -414,7 +415,8 @@ async fn handle_api(
     let user = match &session_token {
         Some(token) => match state.sessions.user_for(token) {
             Ok(u) => u,
-            Err(_) => {
+            Err(e) => {
+                log_failure("session lookup failed", &e);
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed");
             }
         },
@@ -461,7 +463,7 @@ async fn handle_api(
 
     match handler(ctx).await {
         Ok(resp) => apply_response(state, jar, session_token, resp),
-        Err(e) => json_error(error_status(&e), e.to_string()),
+        Err(e) => error_response(&e),
     }
 }
 
@@ -498,7 +500,8 @@ fn apply_response(
                 true,
                 state.secure_cookies,
             )),
-            Err(_) => {
+            Err(e) => {
+                log_failure("could not start session", &e);
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "could not start session");
             }
         },
@@ -580,5 +583,78 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
 }
 
+/// Log a domain [`Error`] at the HTTP boundary, then map it to a JSON response.
+///
+/// Principle 5 — no silent failures: an operator watching the process must see
+/// *why* a request failed, not just the terse body the client receives. Every
+/// error is printed with its full source chain ([`Error::chain`]) so a wrapped
+/// driver error (e.g. the real SQL error behind `tokio_postgres`'s `"db error"`)
+/// is visible on the console. System errors (`500`) are the ones that most need
+/// eyes, so they are flagged accordingly.
+fn error_response(err: &Error) -> Response {
+    let status = error_status(err);
+    let label = if status == StatusCode::INTERNAL_SERVER_ERROR {
+        "internal error"
+    } else {
+        "request error"
+    };
+    eprintln!("saltcorn: {label}: {}", err.chain());
+    json_error(status, err.to_string())
+}
+
+/// Log a discarded lower-level failure at a call site that only knows "it broke"
+/// (no [`Error`] value to forward). Keeps those paths from failing silently.
+fn log_failure(context: &str, err: &(dyn std::error::Error + 'static)) {
+    eprintln!("saltcorn: {context}: {}", sc_error::format_chain(err));
+}
+
 /// The header the SPA must echo the CSRF cookie in (re-exported for callers/tests).
 pub const CSRF_REQUEST_HEADER: &str = CSRF_HEADER;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn body_json(resp: Response) -> Value {
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&bytes).expect("body is JSON")
+    }
+
+    #[tokio::test]
+    async fn system_error_maps_to_500_and_reports_the_message() {
+        // A database failure is a System error (§16): the client gets a 500 and
+        // the top-level message in the body. (The full cause chain goes to the
+        // console via `error_response`'s log line.)
+        let err = Error::database("query failed: db error\n  caused by: relation \"apps\" does not exist");
+        let resp = error_response(&err);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["error"],
+            Value::String(err.to_string()),
+            "client body carries the error's Display"
+        );
+    }
+
+    #[tokio::test]
+    async fn application_error_maps_to_422() {
+        // A bad app config is the admin's to fix — a client-fixable 422, not 500.
+        let resp = error_response(&Error::config("bad framework config"));
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn request_level_errors_keep_their_conventional_codes() {
+        assert_eq!(
+            error_response(&Error::not_found("app")).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            error_response(&Error::auth("nope")).status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}

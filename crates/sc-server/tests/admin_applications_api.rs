@@ -75,7 +75,12 @@ impl Client {
         }
     }
 
-    async fn raw(&mut self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Vec<u8>) {
+    async fn raw(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Vec<u8>) {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
@@ -364,8 +369,14 @@ async fn non_admins_are_rejected_from_every_application_endpoint() -> sc_error::
     for (method, path) in [
         ("GET", "/api/applications"),
         ("POST", "/api/applications"),
-        ("PUT", "/api/applications/00000000-0000-0000-0000-000000000000"),
-        ("DELETE", "/api/applications/00000000-0000-0000-0000-000000000000"),
+        (
+            "PUT",
+            "/api/applications/00000000-0000-0000-0000-000000000000",
+        ),
+        (
+            "DELETE",
+            "/api/applications/00000000-0000-0000-0000-000000000000",
+        ),
         (
             "POST",
             "/api/applications/00000000-0000-0000-0000-000000000000/build",

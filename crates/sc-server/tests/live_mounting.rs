@@ -199,7 +199,8 @@ async fn an_app_is_created_edited_and_deleted_without_a_restart() -> sc_error::R
         .expect_err("a failing build must be reported, not swallowed");
     // The bundler's own diagnostics reach the caller (§16).
     assert!(
-        err.to_string().contains("TS2304: Cannot find name TypeError"),
+        err.to_string()
+            .contains("TS2304: Cannot find name TypeError"),
         "the bundler's diagnostics should surface: {err}"
     );
     // ...and the previously mounted v2 is still serving.

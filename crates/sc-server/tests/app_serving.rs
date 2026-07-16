@@ -495,7 +495,9 @@ async fn two_apps_cannot_claim_the_same_subdomain() -> sc_error::Result<()> {
 
     let apps = AppMounts::new(catalog);
     apps.mount(one)?;
-    let err = apps.mount(two).expect_err("a subdomain collision must fail");
+    let err = apps
+        .mount(two)
+        .expect_err("a subdomain collision must fail");
     assert!(err.to_string().contains("blog"), "{err}");
     Ok(())
 }

@@ -192,6 +192,44 @@ impl std::error::Error for Error {
     }
 }
 
+/// Render an error together with its full [`source`](std::error::Error::source)
+/// chain into a single human-readable string.
+///
+/// The top-level [`Display`](fmt::Display) of an [`Error`] shows only its own
+/// message — a wrapped cause (a driver error behind a
+/// [`Context`](Error::Context), the real SQL error behind `tokio_postgres`'s
+/// terse `"db error"`) lives in `source()`. This walks that chain so callers
+/// that log at a boundary emit everything they know, not just the outermost
+/// label. Encodes principle 5 — no silent failures.
+///
+/// ```
+/// use sc_error::{format_chain, Context, Result};
+///
+/// let inner: std::result::Result<(), std::num::ParseIntError> = "x".parse::<i32>().map(|_| ());
+/// let err = inner.context("parsing the port").unwrap_err();
+/// let chain = format_chain(&err);
+/// assert!(chain.starts_with("parsing the port"));
+/// assert!(chain.contains("caused by:"));
+/// assert!(chain.contains("invalid digit"));
+/// ```
+pub fn format_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str("\n  caused by: ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
+impl Error {
+    /// This error rendered with its full source chain — see [`format_chain`].
+    pub fn chain(&self) -> String {
+        format_chain(self)
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Context {
@@ -394,6 +432,45 @@ mod tests {
     fn error_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Error>();
+    }
+
+    #[test]
+    fn format_chain_walks_every_source() {
+        // Build a two-level chain: a context wrapping a parse error.
+        let inner: std::result::Result<(), std::num::ParseIntError> =
+            "x".parse::<i32>().map(|_| ());
+        let err = inner.context("parsing the port").unwrap_err();
+
+        let chain = format_chain(&err);
+        // The top line is the outermost context...
+        assert!(chain.starts_with("parsing the port"), "got: {chain}");
+        // ...followed by the underlying cause on its own indented line.
+        assert!(chain.contains("\n  caused by: "), "got: {chain}");
+        assert!(chain.contains("invalid digit"), "got: {chain}");
+        // `chain()` on the concrete error is the same rendering.
+        assert_eq!(err.chain(), chain);
+    }
+
+    #[test]
+    fn format_chain_of_a_leaf_error_is_just_its_message() {
+        // No source → single line, no "caused by".
+        let err = Error::database("connection refused");
+        let chain = err.chain();
+        assert_eq!(chain, "database error: connection refused");
+        assert!(!chain.contains("caused by"));
+    }
+
+    #[test]
+    fn format_chain_includes_nested_causes() {
+        // A three-deep chain: two contexts over an io error. Every level shows.
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no file");
+        let mid: Result<()> = Err::<(), _>(io).context("opening config");
+        let err = mid.context("starting up").unwrap_err();
+
+        let chain = format_chain(&err);
+        assert!(chain.starts_with("starting up"), "got: {chain}");
+        assert!(chain.contains("caused by: opening config"), "got: {chain}");
+        assert!(chain.contains("no file"), "got: {chain}");
     }
 
     #[test]

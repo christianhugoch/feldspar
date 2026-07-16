@@ -21,6 +21,8 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
+use sc_api::auth::{credentials, user_summary_json};
+use sc_api::rows::{self, require_object};
 use sc_app::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, delete_application,
     framework_config_spec, list_applications, load_application, registered_frameworks,
@@ -30,8 +32,6 @@ use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, USERS_TABLE, User, any_user_exists, authenticate_admin,
     create_first_user, create_user,
 };
-use sc_api::auth::{credentials, user_summary_json};
-use sc_api::rows::{self, require_object};
 use sc_catalog::{Attrs, Catalog, DataField, FileStoreId, TableId};
 use sc_error::{Error, Result};
 use sc_files::Entry;
@@ -193,7 +193,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
-                Ok(HandlerResponse::ok(rows::list_rows(&catalog, &table).await?))
+                Ok(HandlerResponse::ok(
+                    rows::list_rows(&catalog, &table).await?,
+                ))
             }
         }
     });
@@ -628,7 +630,9 @@ fn parse_csp(value: Option<&Json>) -> Result<CspPolicy> {
                     .iter()
                     .map(|s| {
                         s.as_str().map(str::to_owned).ok_or_else(|| {
-                            Error::invalid(format!("csp directive `{name}` has a non-string source"))
+                            Error::invalid(format!(
+                                "csp directive `{name}` has a non-string source"
+                            ))
                         })
                     })
                     .collect::<Result<_>>()?;
@@ -654,9 +658,9 @@ fn parse_str_array(obj: &Map<String, Json>, key: &str) -> Result<Vec<String>> {
     parse_array(obj, key)?
         .iter()
         .map(|v| {
-            v.as_str().map(str::to_owned).ok_or_else(|| {
-                Error::invalid(format!("field `{key}` must be an array of strings"))
-            })
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| Error::invalid(format!("field `{key}` must be an array of strings")))
         })
         .collect()
 }

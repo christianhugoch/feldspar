@@ -2,6 +2,35 @@
 
 Changes in reverse chronological order.
 
+## Error visibility — no silent failures at the HTTP boundary (principle 5)
+
+Every error that reaches an HTTP response is now logged to the console with its full cause chain,
+instead of only being encoded into a terse JSON body. Previously a request could fail with a `500`
+and `{"error":"database error: query failed: db error"}` while **nothing at all** was printed on
+the server, leaving an operator with no message and no stack of causes to act on.
+
+- **`sc_error::format_chain` / `Error::chain`** (`crates/sc-error/src/lib.rs`): walk an error's full
+  `source()` chain into one multi-line string (top message, then each `caused by:` cause). The
+  `Display` of an `Error` shows only its outermost message; the real cause lives in `source()`, so
+  anything logging at a boundary needs this to emit everything it knows.
+
+- **Postgres driver errors keep their real message and the failing SQL** (`crates/sc-db-postgres/src/{exec,introspect}.rs`):
+  `tokio_postgres::Error` renders as the near-useless string `"db error"` — the actual SQLSTATE and
+  server message are only in its source chain. The three driver call sites now format the error with
+  `format_chain`, so a failed query surfaces the true cause (e.g. `relation "..." does not exist`)
+  rather than `db error`. Each error also now carries the **offending SQL statement** on its own
+  `sql:` line, so the log shows which statement broke. The bind *values* are deliberately not
+  included — only their count (`(N bind parameter(s))`) — because they may hold secrets (passwords,
+  tokens) and this message is also returned to the client. This is exactly what was hidden when
+  creating a new application failed.
+
+- **Server logs every boundary error** (`crates/sc-server/src/router.rs`): a new `error_response`
+  helper logs the error (with its cause chain) before mapping it to a JSON response — used by every
+  handler error arm. System errors (`500`) are labelled `internal error`; others `request error`.
+  The previously-discarded `Err(_)` session-lookup and login-failure paths now log via `log_failure`
+  instead of failing silently. Logging goes to stderr with the existing `saltcorn:` prefix, matching
+  the rest of the server's diagnostics.
+
 ## Phase 10 — admin SPA: the Applications screen (design §12/§13.2/§13.3)
 
 The admin UI can now manage applications end to end, closing the "created in the admin UI" loop

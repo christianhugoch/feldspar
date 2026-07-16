@@ -43,7 +43,11 @@ impl MountedApp {
     /// The providers come from [`sc_app::app_providers`], so a mounted app's API
     /// is exactly the one its record declares and its generated client is typed
     /// against — there is no way to mount an API the app did not ask for.
-    pub fn new(app: Application, framework: Arc<dyn Framework>, cat: &Catalog) -> Result<MountedApp> {
+    pub fn new(
+        app: Application,
+        framework: Arc<dyn Framework>,
+        cat: &Catalog,
+    ) -> Result<MountedApp> {
         let providers = sc_app::app_providers(&app, cat)?;
         Ok(MountedApp {
             app,
@@ -222,7 +226,9 @@ pub async fn mount_all(apps: &AppMounts) {
         let subdomain = app.subdomain.clone();
         match build_and_mount(apps, app).await {
             Ok(_) => eprintln!("saltcorn: mounted application `{subdomain}`"),
-            Err(e) => eprintln!("saltcorn: application `{subdomain}` failed to build, skipping: {e}"),
+            Err(e) => {
+                eprintln!("saltcorn: application `{subdomain}` failed to build, skipping: {e}")
+            }
         }
     }
 }

@@ -143,8 +143,10 @@ pub async fn introspect(client: &Client) -> Result<Vec<PhysicalTable>> {
 
 /// Run a parameterless catalog query, mapping the driver error into ours.
 async fn run(client: &Client, sql: &str) -> Result<Vec<Row>> {
-    client
-        .query(sql, &[])
-        .await
-        .map_err(|e| Error::database(format!("introspect query failed: {e}")))
+    client.query(sql, &[]).await.map_err(|e| {
+        Error::database(format!(
+            "introspect query failed: {}\n  sql: {sql}",
+            sc_error::format_chain(&e)
+        ))
+    })
 }

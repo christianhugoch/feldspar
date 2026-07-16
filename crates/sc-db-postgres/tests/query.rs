@@ -7,6 +7,39 @@ use sc_db_postgres::PgDriver;
 use sc_query::{Expr, Insert, OrderBy, Projection, Select, Source, Statement, Value};
 use sc_test_harness::TestDb;
 
+/// A failed query surfaces the real Postgres cause *and* the offending SQL, so an
+/// operator reading the log knows both what broke and which statement did it — a
+/// bare `tokio_postgres::Error` renders as the useless string "db error".
+#[tokio::test]
+async fn query_error_reports_cause_and_sql() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let driver = PgDriver::from_pool(db.pool().clone());
+
+    // Select from a table that was never created.
+    let select = Select::from(Source::table("no_such_table"))
+        .columns(vec![Projection::expr(Expr::col("id"))]);
+    let msg = match driver.query(&Statement::from(select)).await {
+        Ok(_) => panic!("query over a missing table must fail"),
+        Err(e) => e.to_string(),
+    };
+    // The real server message (not the terse "db error") is present...
+    assert!(
+        msg.contains("does not exist"),
+        "expected the Postgres cause, got: {msg}"
+    );
+    // ...along with the failing SQL, naming the table.
+    assert!(
+        msg.contains("sql:") && msg.contains("no_such_table"),
+        "expected the failing SQL, got: {msg}"
+    );
+    // ...and the bind-parameter count, without leaking any values.
+    assert!(
+        msg.contains("bind parameter"),
+        "expected the bind count, got: {msg}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn runs_statements_and_decodes_rows() -> sc_error::Result<()> {
     let db = TestDb::new().await?;
