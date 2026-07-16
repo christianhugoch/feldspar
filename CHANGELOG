@@ -2,6 +2,23 @@
 
 Changes in reverse chronological order.
 
+## Fix: applications table not created at startup (admin UI 500 on load)
+
+Loading the admin UI's Applications screen failed with `relation "_sc_applications" does not exist`
+— the query behind `SELECT * FROM _sc_applications` had no table to read. The `_sc_applications`
+table has an idempotent `sc_app::bootstrap`, but the CLI boot path never called it: `connect_catalog`
+(`crates/sc-cli/src/lib.rs`) bootstrapped only the `users` table. `mount_all` hit the same missing
+table at boot but by design logs-and-skips, so the server came up and the failure only surfaced
+later, on the first admin request.
+
+- **`connect_catalog` now bootstraps both platform tables** — `sc_auth::bootstrap` (users) and
+  `sc_app::bootstrap` (`_sc_applications`), symmetric and idempotent, so every boot ensures the
+  tables exist (a legacy database gains them on first `serve`, no migration step). Added a direct
+  `sc-app` dependency to `sc-cli` for this.
+- The boot smoke test (`crates/sc-cli/tests/serve.rs`) now also asserts the applications table
+  exists after `connect_catalog` and that `list_applications` — the exact query that was failing —
+  returns an empty list rather than erroring.
+
 ## Opt-in backtraces on errors (gated by `RUST_BACKTRACE`)
 
 `Error` now also carries a `std::backtrace::Backtrace`, the companion to the always-on source

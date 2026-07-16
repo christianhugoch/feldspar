@@ -53,6 +53,19 @@ async fn serve_boots_against_a_db_and_answers_health() -> sc_error::Result<()> {
         "connect_catalog should have bootstrapped the users table"
     );
 
+    // ...and so does the applications table. The admin UI lists applications on
+    // load — the exact `SELECT * FROM _sc_applications` that failed with
+    // `relation "_sc_applications" does not exist` before this bootstrap was
+    // wired into the boot path. It must now succeed (an empty list, not an error).
+    assert!(
+        catalog.get(sc_app::APPLICATIONS_TABLE)?.is_some(),
+        "connect_catalog should have bootstrapped the applications table"
+    );
+    assert!(
+        sc_app::list_applications(&catalog).await?.is_empty(),
+        "a freshly bootstrapped applications table lists no applications"
+    );
+
     // Assemble the server exactly as `serve` does, then hit /health.
     let apps = Arc::new(AppMounts::new(catalog.clone()));
     let router = build_router(

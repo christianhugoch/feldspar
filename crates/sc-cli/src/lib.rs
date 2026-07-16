@@ -17,12 +17,17 @@ use sc_files::{FileStore, LocalFileStore};
 pub use db::DbConfig;
 
 /// Connect to the primary database described by `db`, initialise the
-/// [`Catalog`] from its live schema, and ensure the `users` table exists.
+/// [`Catalog`] from its live schema, and ensure the platform tables (`users`,
+/// `_sc_applications`) exist.
 ///
 /// This is the whole "bring the data layer up" step of `saltcorn serve`. The
 /// first real connection happens inside [`Catalog::init`] (introspection), so a
 /// database that is unreachable or misconfigured fails here — with the redacted
 /// [`DbConfig::target`] in the message rather than a silent, half-booted server.
+///
+/// Both bootstraps are idempotent (they no-op when the table already exists), so
+/// this runs on every boot: a legacy database gains the tables on first serve,
+/// and the admin UI can list/create applications without a migration step.
 pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     let driver = db
         .connect()
@@ -35,6 +40,9 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_auth::bootstrap(&catalog)
         .await
         .context("ensuring the users table exists")?;
+    sc_app::bootstrap(&catalog)
+        .await
+        .context("ensuring the applications table exists")?;
     Ok(catalog)
 }
 
