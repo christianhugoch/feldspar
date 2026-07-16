@@ -8,10 +8,11 @@ data store. An admin can create the first user, log in/out, create tables and fi
 rows, and manage users — through a **React + TypeScript admin SPA** (`ui/admin`) served by the
 Saltcorn process over a **typed JSON API**. A file store can be connected with a basic file
 manager. One React app (no DB access, living in a git-repo file store, with a build step) is
-served entirely from the Saltcorn process and authenticates against the API. The admin API is
-a set of **typed endpoint values that also generate a TypeScript consumer client** — no
-server-rendered admin HTML (the earlier web-1.0 / `sc-markup` plan is dropped). All of it is
-covered by integration tests against a real Postgres reinitialised per test.
+**created and configured in the admin UI**, then served entirely from the Saltcorn process and
+authenticates against the API. The admin API is a set of **typed endpoint values that also
+generate a TypeScript consumer client** — no server-rendered admin HTML (the earlier web-1.0 /
+`sc-markup` plan is dropped). All of it is covered by integration tests against a real Postgres
+reinitialised per test.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -137,12 +138,70 @@ bundle.
 - [x] Integration tests: build serves assets; API auth round-trip; unauthorized request rejected
 
 
-## Phase 10 — MVP hardening & acceptance
+## Phase 10 — Applications in the admin UI (`_sc_applications`, `ui/admin`)
+
+Phase 9 made an application *servable*, but the only way to define one is to embed
+`sc-server` in a bespoke Rust binary and hand `build_router_with_apps` an `Application`
+value — `saltcorn serve` mounts the admin only, which is why `--base-domain` currently does
+nothing. GOALS is explicit that **applications are created in the admin UI** (§ "Applications
+can be created in the admin UI"), so this phase closes the configuration path from database
+to mounted app. Design: §13.2 (storage, lifecycle, no-restart mounting), §13.3
+(`Framework::config_spec`), §9 (`_sc_applications`).
+
+Two decisions worth reading before starting, both in §13.2:
+
+- `_sc_applications` is **not an overlay** — an app has nothing to introspect, so its row is
+  its only definition. This is the one stored-metadata table the MVP needs; the
+  `_sc_tables`/`_sc_fields` overlays stay out of scope.
+- Mounting is a **runtime** operation. Creating an app in the admin UI must build and mount
+  it live: "full restart should never be required" (GOALS).
+
+**Storage (`sc-app`):**
+
+- [ ] `_sc_applications` table + bootstrap (like `sc_auth::bootstrap`): §9 required columns (UUID `id`, `name`, `description`, `attributes`) plus subdomain, framework + config, table/store subsets, apis, static dirs, csp
+- [ ] `Application` gains `description`, `attributes`, `static_dirs: Vec<StaticDir>`; `AppId` becomes a UUID (it is a stored row now) and `subdomain` becomes the unique routing key
+- [ ] `FrameworkRef.config` becomes `Attrs` (JSON) rather than a string map, so it can hold what a framework's `config_spec` describes
+- [ ] Load/save/delete: `_sc_applications` row ⇄ `Application`; unique subdomain enforced in the database, not only in `AppMounts`
+- [ ] Integration tests: round-trip an app through the table; a duplicate subdomain is rejected; a legacy database with no `_sc_applications` bootstraps cleanly
+
+**Framework settings as data (`sc-types`, `sc-app`):**
+
+- [ ] `AttrSpec` in `sc-types` — **it does not exist in the code yet**, and this phase is its first consumer. The design leans on it for fieldview attributes (§6.1), action config (§10.1), agents (§11.1) and models (§14.2), so keep it minimal but not framework-specific: name, label, type, required, default, options
+- [ ] Decide where `Attrs` lives: it is currently a `serde_json::Map` alias in `sc-catalog` (layer 4), but `sc-types` is layer 3 and cannot depend on it, while design §6.1 puts both `AttrSpec` and `Attrs` in `sc-types`. Moving the alias down to `sc-types` (re-exported from `sc-catalog`, so no call site changes) is the least-surprising fix — it is the same underlying type either way
+- [ ] `Framework::config_spec() -> Vec<AttrSpec>`; `CodeFramework` declares its own (source store, source/output subdirectory, build command) — the settings currently hard-coded in `AppSource`/`BuildSpec` at the call site
+- [ ] Validate `FrameworkRef.config` against the spec **on save**, so a misconfigured app is rejected where the admin can fix it, not at build or serve time
+- [ ] Resolve an `AppSource`/`BuildSpec` *from* a stored app's framework config (replacing the hand-built values in the Phase 9 tests)
+- [ ] Tests: a valid config resolves to a build spec; a missing/ill-typed setting is a clear `Invalid` error naming the setting
+
+**Live mounting (`sc-server`):**
+
+- [ ] `AppMounts` becomes live shared state (mount/unmount/replace one app at a time) instead of a value frozen at `build_router_with_apps`
+- [ ] Boot: load every row of `_sc_applications` and mount each; a single app that fails to build must not stop the server or the other apps
+- [ ] Build + mount an app at runtime, with **no process restart**; a failed rebuild leaves the previously mounted version serving
+- [ ] `saltcorn serve` honours `--base-domain` for real: remove the README's "no effect yet" caveat once it does
+- [ ] Integration tests: create an app over HTTP → it serves on its subdomain without a restart; edit → re-mount; delete → subdomain stops resolving; a failing build keeps the old bundle up and reports the bundler's diagnostics
+
+**Admin API (`sc-api`, `sc-server`):**
+
+- [ ] Endpoints: list/create/update/delete applications; build (+ mount) an application; report build status/log
+- [ ] Endpoint: list registered frameworks with their `config_spec`, so the UI can render a settings form for a framework it knows nothing about
+- [ ] Build errors are **Application errors**, not System errors (§16): the bundler's own output reaches the admin
+- [ ] Integration tests: drive each endpoint end-to-end; non-admins are rejected
+
+**Admin SPA (`ui/admin`):**
+
+- [ ] Applications screen: list, create, edit, delete
+- [ ] Create/edit form: pick a framework → render its `config_spec` settings; subdomain; table + file-store subsets; APIs (provider + mount); static dirs; CSP. `ui/form-runtime` is out of MVP scope, so render `AttrSpec` with a plain form — the point is only that no screen knows a specific framework's settings
+- [ ] Build button with its outcome surfaced (success, or the bundler's diagnostics), and a visible saved-but-unbuilt state
+- [ ] A link to the app's own subdomain from the applications list
+
+## Phase 11 — MVP hardening & acceptance
 
 - [ ] End-to-end acceptance test walking the full MVP DoD user story
 - [ ] Confirm every route/action has integration coverage; Postgres reset-per-test verified
-- [ ] Manual pass: create-first-user → create table → add fields → edit rows → create user → login/out → connect file store → serve React app
+- [ ] Manual pass: create-first-user → create table → add fields → edit rows → create user → login/out → connect file store → create a React app in the admin UI → serve it
 - [x] README quickstart (build, run, connect DB, open admin)
+- [ ] Tutorial: building a React app against an application's API (write once Phase 10 lands, so it can be admin-UI-first with no Rust)
 - [ ] Tag MVP
 
 ---
@@ -153,7 +212,7 @@ Tracked so they aren't accidentally pulled in early:
 
 - Multiple / non-primary databases
 - Rich types & full `FieldView` trait (React-component fieldviews) — basic types only for MVP
-- Stored `_sc_tables` / `_sc_fields` overlay metadata
+- Stored `_sc_tables` / `_sc_fields` overlay metadata — the *overlays* only. `_sc_applications` **is** in scope (Phase 10): a table exists without a metadata row, an application does not exist without one (design §9/§13.2)
 - Workflows & durable engine (`sc-workflow`), triggers, actions registry
 - Agents / skills / copilot (`sc-agent`, `sc-copilot`)
 - Predictive models (`sc-model`)

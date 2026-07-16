@@ -2,6 +2,59 @@
 
 Changes in reverse chronological order.
 
+## Planning — applications belong in the admin UI (design §9/§12/§13.2/§13.3/§17, TODO Phase 10)
+
+Planning and design only; no code changed, so nothing here is testable yet — the tests are
+specified as Phase 10 items.
+
+- **GOALS now says applications are created in the admin UI**, which the design did not say
+  and the code does not do: Phase 9 made an application *servable*, but the only way to
+  define one is to embed `sc-server` in a bespoke Rust binary and hand
+  `build_router_with_apps` an `Application` value. That is why `--base-domain` currently does
+  nothing on `saltcorn serve`. **Design §13.2 rewritten** around the configuration path from
+  database to mounted app: an application is created and configured in the admin UI — not in
+  Rust, not by a CLI flag — stored in `_sc_applications`, and built and mounted **without a
+  process restart** (GOALS: "full restart should never be required"). Editing an app
+  re-mounts that app alone; a failed rebuild leaves the previously mounted version serving.
+  Saving configuration and building it are distinct operations with distinct outcomes, so a
+  saved-but-unbuilt app is a normal state the UI shows rather than a save that silently
+  deployed nothing.
+
+- **`_sc_applications` is not an overlay, and that is why the MVP needs it** (§9, §17). "No
+  stored metadata beyond information_schema" was always a statement about the
+  `_sc_tables`/`_sc_fields` *overlays*: a table exists in the database whether or not a
+  metadata row describes it, so the overlays can be deferred while tables still work. An
+  application has no underlying reality to introspect — its row is its only definition — so
+  it cannot be deferred the same way. The distinction is now written down in §9 rather than
+  left as a thing to rediscover, and §17's MVP scope carries the one deliberate exception.
+
+- **`Framework::config_spec() -> Vec<AttrSpec>` (§13.3).** GOALS requires each framework to
+  have its own settings (a React app needs the file store or subdirectory holding its code; a
+  v1 app needs none of that), and the admin UI has to render a form for whichever framework
+  the admin picked without a per-framework special case — including frameworks supplied by a
+  guest language. So a framework declares its settings as data, exactly as `Action`, `Agent`
+  and `ModelProvider` already do in the design, and the config is validated on save rather
+  than at build or serve time. **`AttrSpec` does not exist in the code yet** — the design has
+  leaned on it since §6.1 without a consumer, and Phase 10 is the first; flagged as its own
+  TODO item in `sc-types` rather than left to surprise the implementer, along with the
+  layering snag it walks into (`Attrs` is currently an alias in `sc-catalog`, which `sc-types`
+  sits below and cannot depend on). `ui/form-runtime` is out of MVP scope, so the MVP renders
+  the same `AttrSpec` data with a plain form.
+
+- **`Application` gains what GOALS asks for**: `static_dirs` ("any number of subdirectories
+  that are served statically" — previously modelled nowhere), plus the `description` and
+  `attributes` §9 requires of a stored entity. Two consequences for existing code, both now
+  TODO items: `AppId` becomes a UUID (it is a stored row now, and §9 mandates a UUID `id`),
+  leaving `subdomain` as the unique routing key; and `FrameworkRef.config` becomes `Attrs`
+  rather than a string map, so it can hold what a `config_spec` describes.
+
+- **TODO: new Phase 10 "Applications in the admin UI"; the old Phase 10 is now Phase 11.**
+  Broken into storage, framework-settings-as-data, live mounting, admin API, and admin SPA,
+  each with its own tests — including that creating an app over HTTP serves it on its
+  subdomain with no restart, and that a failing build keeps the old bundle up. Phase 11 gains
+  a tutorial item, deliberately sequenced *after* Phase 10 so it can be written admin-UI-first
+  with no Rust in it, and its manual pass now goes through creating the app in the admin UI.
+
 ## MVP Phase 9 — Applications & framework (`sc-app`)
 
 - **Serving applications from the Saltcorn process (design §13.2/§13.3).**

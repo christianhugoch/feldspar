@@ -152,6 +152,8 @@ Predictive models: There are different model providers. E.g. scikit learn model,
 
 Tags can be created in the admin UI any created entity gave have a tag applied to it. This helps when selecting several entities, a tag can be selected instead so the operation is applied to each entity in the tag
 
+Applications can be created in the admin UI. When creating an application, the admin picks the Framework. Different frameworks have different settings, for instance a React application will need a file store or a subdirectory in a filestore to be the react code. The application also is configured with the subdomain on which it is served, any number of APIs that are created under an application, and any number of subdirectories that are served statically.
+
 ## Code guidelines
 
 Principles:

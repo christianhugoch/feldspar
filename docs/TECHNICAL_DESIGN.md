@@ -115,7 +115,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `ViewPattern` | `sc-viewpattern` | any | A v1-style view template over a table |
 | `FileStore` | `sc-files` | any | A named directory/object store |
 | `ApiProvider` | `sc-api` | any | Expose tables, actions & custom routes over a protocol; emit a typed TS client |
-| `Framework` | `sc-app` | any | Own an application's primary UI (React/Next/Svelte/v1) |
+| `Framework` | `sc-app` | any | Own an application's primary UI (React/Next/Svelte/v1); declares its settings for the admin UI |
 | `BusDriver` | `sc-bus` | Rust | Publish/subscribe transport for the message bus |
 | `CodeAdapter` | `sc-code` | Rust | Host a guest-language interpreter exposing the catalog |
 
@@ -525,7 +525,7 @@ a sparse value goes into `attributes`.**
 | `_sc_run_traces` | per-step context + timing | only when tracing is enabled for that workflow |
 | `_sc_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
 | `_sc_config` | configuration | scoped to whole setup or one application; per-key value-type restriction; values stored as JSON |
-| `_sc_applications` | applications | framework, subdomain, table/store subset, API config |
+| `_sc_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
 | `_sc_models` | model definitions | provider + config fields |
 | `_sc_model_instances` | fitted model instances | parameters, hyperparameters, fit metadata |
 | `users` | users | UUID PK (not `_sc_`-prefixed; it is user-facing and extensible) |
@@ -537,6 +537,12 @@ git repositories are recognised as such.
 The **overlay** principle for `_sc_tables`/`_sc_fields` is the key to "legacy databases just
 work": introspection yields the tables and fields; the overlay only *adds* access rules and
 attributes where present. A newly connected database needs zero metadata rows.
+
+The overlay principle does **not** extend to every `_sc_*` table, and the distinction decides
+what the MVP can defer. A table exists in the database whether or not `_sc_tables` has a row
+for it; an application, a trigger or a model does not exist anywhere but its row. So the
+overlay tables can be deferred while their subjects still work (§17), whereas `_sc_applications`
+must arrive with applications themselves — there is nothing to introspect an app *from*.
 
 ---
 
@@ -695,8 +701,10 @@ generated typed client (§13.1), so the API and the UI cannot drift.
   the admin UI's look and feel, while react-bootstrap remains the component primitives. Served
   under a separate URL (subdomain or path) from user-facing routes. Only admins log in
   initially; later, admins may grant restricted access (e.g. app development only) to selected
-  non-admins. Includes a much-improved **table editor** (Airtable-inspired) and **file
-  manager**, both built against the typed API client.
+  non-admins. Includes a much-improved **table editor** (Airtable-inspired), a **file
+  manager**, and an **application manager** (§13.2) — creating an app, configuring its
+  framework from that framework's declared settings, and building/mounting it are admin-UI
+  operations, not code — all built against the typed API client.
 - **`ui/form-runtime`** — the dynamic form framework (React + TypeScript), rebuilt cleanly
   from v1's messy client JS. Covers the requirements GOALS lists explicitly: conditional
   fields (shown based on other values), repeated sub-forms (order lines on an order),
@@ -761,21 +769,81 @@ pub enum TypeSchema {               // enough to describe args & results and emi
 
 ```rust
 pub struct Application {
-    pub id: AppId,
+    pub id: AppId,                       // UUID (§9 rule for stored metadata)
     pub name: String,
-    pub subdomain: String,               // each app served on its own subdomain
+    pub description: String,
+    pub subdomain: String,               // each app served on its own subdomain; unique
     pub framework: FrameworkRef,         // one primary UI framework
     pub extra_frameworks: Vec<FrameworkRef>, // may bring in others (see Open Questions)
     pub tables: Vec<TableId>,            // the subset of the data layer it can access
     pub file_stores: Vec<FileStoreId>,
     pub apis: Vec<ApiConfig>,            // any number, each on a sub-path
+    pub static_dirs: Vec<StaticDir>,     // any number, each served at a sub-path
     pub csp: CspPolicy,                  // strict by default
+    pub attributes: Attrs,               // sparse per-app values (§9 rule)
+}
+
+pub struct FrameworkRef {
+    pub name: String,                    // the registered Framework's name
+    pub config: Attrs,                   // framework-specific; validated against config_spec (§13.3)
+}
+
+/// A subdirectory of a file store served as static assets under the app.
+pub struct StaticDir {
+    pub mount: String,                   // sub-path within the app, e.g. /docs
+    pub store: FileStoreId,
+    pub path: String,                    // subdirectory within that store
 }
 ```
 
 **Multiple applications share one data layer**; each sees only its declared subset of
 tables and file stores. This is v2's replacement for v1 schema-per-tenant multi-tenancy —
 lighter-weight and driven by access subsets rather than separate schemas.
+
+**An application is created and configured in the admin UI — never in Rust code and never
+by a CLI flag.** The admin picks the framework, fills in that framework's settings (a React
+app needs the file store, or the subdirectory of one, holding its code), sets the subdomain,
+adds any number of APIs on sub-paths, and adds any number of statically-served
+subdirectories. This is the whole configuration path; embedding `sc-server` in a bespoke
+binary to declare an `Application` in Rust is not one. `sc-cli` may grow app commands for
+scripted deployment, but the admin UI is the primary and complete surface.
+
+**Applications are stored in `_sc_applications`** (§9) and so obey the §9 rules: UUID `id`,
+`name`, `description`, `attributes`. Note what this is *not*: `_sc_tables`/`_sc_fields` are
+**overlays** — introspection already yields the tables, so a row only adds to what the
+database itself reports, and a legacy database needs zero metadata rows. An application has
+no such underlying reality. It exists only as stored configuration, so its row is the
+authoritative and only definition of it. That is why applications need stored metadata even
+in the MVP, while the table/field overlays remain deferred (§17).
+
+The `Application` value is pure data, and the stored row is that value serialised — one
+column per field every app has (subdomain, framework, the subsets, the API/static-dir lists,
+the CSP), with genuinely sparse values in `attributes`, per the §9 column-vs-attributes rule.
+A framework's own settings live in `FrameworkRef.config` rather than the app's `attributes`,
+because they belong to the framework, not the app: the admin UI renders a form for them from
+that framework's `config_spec()` (§13.3), as it will for an action's configuration when the
+actions registry arrives.
+
+**Lifecycle: create → build → mount, without a restart.** GOALS is explicit that a full
+restart should never be required and that only individual APIs and applications may need
+one, so mounting is a runtime operation, not a boot-time one:
+
+- **At boot**, `sc-server` loads every row of `_sc_applications` and mounts each app.
+- **On create/edit**, the admin UI's call persists the row, then builds (for a framework with
+  a build step, §13.3) and mounts or re-mounts *that app alone*. Other apps keep serving; the
+  admin never goes away; the process does not restart.
+- **On delete**, the app is unmounted and its row removed; its subdomain stops resolving.
+- The mount registry is therefore **live**, not a value fixed at router construction: it is
+  shared mutable state behind the router, keyed by subdomain.
+- A **build failure leaves the previously mounted version serving** and surfaces the
+  bundler's diagnostics to the admin (§16 error handling; the failure is an *Application*
+  error — bad configuration or bad app code — not a *System* error).
+
+Because a build runs a bundler, which is slow and can fail, "save the configuration" and
+"build and mount it" are distinct operations with distinct outcomes: an app can be saved but
+unbuilt, and the admin UI shows that state rather than pretending a save deployed anything.
+A saved-but-unbuilt app is a normal state, not an error — it is what a newly created app is
+until its first build.
 
 ### 13.3 Frameworks
 
@@ -784,16 +852,33 @@ lighter-weight and driven by access subsets rather than separate schemas.
 #[async_trait]
 pub trait Framework: Send + Sync {
     fn name(&self) -> &str;
+    /// The settings this framework needs, so the admin UI can render a form for
+    /// them without knowing anything about this framework (§13.2).
+    fn config_spec(&self) -> Vec<AttrSpec>;
     /// Serve the app's routes (bundled assets, SSR, or v1 view/page rendering).
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse>;
     fn build(&self) -> Option<BuildSpec>;   // code frameworks have a build step
 }
 ```
 
+**`config_spec` is what makes "the admin picks a Framework" work.** GOALS requires that
+different frameworks have different settings — a React app needs the file store or
+subdirectory holding its code; a Saltcorn-v1 app needs none of that. The admin UI must render
+a form for whichever framework the admin picked *without* a per-framework special case, and
+a framework supplied by a guest language through `sc-code` must work the same way. So a
+framework declares its settings as data, exactly as `Action` (§10.1), `Agent` (§11.1) and
+`ModelProvider` (§14.2) declare theirs — one `AttrSpec` vocabulary, one way to render a
+configuration form, for every configurable extension point. Post-MVP this is `ui/form-runtime`
+(§12); the MVP, which does not have it yet, renders the same `AttrSpec` data with a plain
+form and gains the runtime later without a contract change. `FrameworkRef.config` is
+validated against the spec on save, so a misconfigured app is rejected at the point the admin
+can fix it rather than at build or serve time.
+
 - **Code frameworks** (React, Next.js, SvelteKit, React Native): the app's source lives in
   a git repository that is (a subdir of) a selected file store, editable in an in-browser
   editor (ideally VS Code for the Web), with a build step. `sc-server` serves the bundled
-  assets. The app talks to data only through the API providers.
+  assets. The app talks to data only through the API providers. Their `config_spec` is
+  where "which file store, which subdirectory, which build command" is declared.
 - **Saltcorn-v1 framework**: the drag-and-drop views/pages experience, continuously
   improved, using `sc-viewpattern` + `ui/builder`. How its rendered output stays CSP-safe
   now that `sc-markup` is dropped is an open question (§18.5).
@@ -1025,7 +1110,7 @@ admin HTML (the earlier "web 1.0 admin" and `sc-markup` plan are dropped, §12).
 |---|---|
 | Enum `Statement` for select/insert/update/delete | `sc-query` |
 | Postgres driver (host/user/pass/db); run queries | `sc-db`, `sc-db-postgres` |
-| Catalog initialised from a driver; introspect via information_schema; get/create table & field; **no stored metadata beyond information_schema** | `sc-catalog` |
+| Catalog initialised from a driver; introspect via information_schema; get/create table & field; **no stored metadata beyond information_schema and `_sc_applications`** | `sc-catalog` |
 | Types: all **basic**, no rich types | `sc-types` |
 | Users: create-first-user flow; login/logout | `sc-auth`, `sc-server` |
 | Endpoint model (typed Rust values) + generated TypeScript API client | `sc-api` |
@@ -1034,11 +1119,18 @@ admin HTML (the earlier "web 1.0 admin" and `sc-markup` plan are dropped, §12).
 | File store connect + basic file manager + edit files | `sc-files`, `sc-server` |
 | React app served entirely from the Saltcorn process, no DB access, living in a git-repo file store, with a build step | `sc-app`, `ui/` build path, `sc-server` |
 | API to serve the React app; auth from the React app | `sc-api`, `sc-auth` |
+| **Applications created and configured in the admin UI**; stored in `_sc_applications`; built and mounted with no process restart | `sc-app`, `sc-api`, `sc-server`, `ui/admin` |
 | Tests against a real Postgres, reinitialised per test | `tests/` |
 
 MVP explicitly excludes: multiple databases, rich types, stored table/field metadata
 overlay, workflows, agents, models, and the drag-and-drop builder. The system is "useful" at
 the end of the MVP.
+
+Note the one deliberate exception to "no stored metadata": `_sc_applications` is in scope
+because an application has no other definition (§9), while the `_sc_tables`/`_sc_fields`
+overlays stay out because tables and fields work without them. "No stored metadata beyond
+information_schema" was always a statement about *overlays*, not a ban on the `_sc_*` tables
+whose subjects exist nowhere else.
 
 ---
 
