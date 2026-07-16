@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## Phase 10 — settings are `FormField`s; `BaseField`/`Attrs` move to `sc-types` (design §6.1/§6.2/§13.3)
+
+The vocabulary every configurable extension point declares its settings in. Nothing consumes it
+yet — `Framework::config_spec()` and validation-on-save are the next items — but it is the type
+they are both defined in terms of.
+
+- **There is no `AttrSpec`. Settings are declared as `FormField`s** (`crates/sc-types/src/field.rs`).
+  The design had `AttrSpec` as a separate settings vocabulary, and building it made the overlap
+  with §6.2's `FormField` obvious: both are "name, label, type, required, and how to pick a
+  value", because both answer *what should the admin be asked?*. §6.2 already says a form field
+  "may derive from a `DataField` **or be standalone**" — a setting is exactly the standalone
+  case. So a `Framework` (§13.3), `Action` (§10.1), `Agent` (§11.1), `ModelProvider` (§14.2),
+  `FieldView` (§6.3) and a `RichType`'s attributes (§6.1) all declare `Vec<FormField>`. One
+  vocabulary, one form for the admin UI to render, one type a guest-language extension must
+  know about — instead of two that would declare `name`/`label`/`type_` twice and drift once.
+  **Design §6.2/§6.1/§10.1/§11.1/§13.3/§14.2 updated** accordingly.
+
+- **`FormField`**: `base: BaseField`, `required`, `default`, `options`, with chaining setters and
+  a `resolve` that reads a supplied value or falls back to the default. Two deliberate
+  departures from §6.2's sketch: it gains a `default` (a settings form needs one, and a
+  `DataField`'s DDL default projects onto it), and it carries a plain `options: Vec<Json>` where
+  §6.2 has an `OptionsSource` of *static | server query | client code* — only the static case is
+  reachable with no form runtime, so the enum would have one meaningful variant. `fieldview` and
+  `visibility` are left out entirely: they name types that do not exist (fieldviews and formulas
+  are post-MVP), and inventing them with no consumer would fix a contract nothing can test.
+
+- **A `FormField` describes JSON, not a Rust value.** `default` and `options` are
+  `serde_json::Value`, because the values it describes as settings live in an `Attrs`, are
+  stored in a JSON column and reach the admin UI as JSON — plain JSON is what ends up in the
+  bag, whereas `Value` serialises tagged (`{"type":"text","value":"web"}`), which is not a shape
+  to hand a form renderer. `type_` stays a `TypeRef`, so a control is chosen for a setting
+  exactly as for a column and rich types slot in later without a change here.
+
+- **`Attrs` and `BaseField` moved from `sc-catalog` down to `sc-types`**, both re-exported from
+  `sc-catalog`. `sc-types` is layer 3 and cannot depend on layer 4, but `FormField` carries a
+  `BaseField` and describes `Attrs` entries. `BaseField` never needed layer 4 in the first
+  place — it touches only `TypeRef` and `Attrs`. What did, and what stays in `sc-catalog`, is
+  `DataField`: its `Key`/`File` kinds reference catalog identifiers and it bridges to
+  `Column`/`ColumnDef`. The move is invisible — `sc_catalog::{Attrs, BaseField}` still resolve
+  and **no call site changed** — and a test pins that the re-exports are genuinely the same
+  types rather than look-alikes. `Attrs` was also `sc-catalog`'s only use of `serde_json`, so
+  that dependency went with it.
+
+- **On the self-reference**: `BaseField.attributes` is an `Attrs`, and what may go in it is
+  described by that type's `attributes()` — a `Vec<FormField>`. So a `FormField` both carries a
+  `BaseField` and describes what another field's attributes may hold. This is the same
+  self-description a JSON Schema has and it is well-founded: the recursion bottoms out at basic
+  types, which have no attributes. Written down in §6.2 rather than left to be rediscovered.
+
 ## Phase 10 — applications are stored rows (`_sc_applications`; design §9/§13.2)
 
 The storage half of Phase 10: an application is now something the database holds, not only

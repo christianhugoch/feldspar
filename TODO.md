@@ -166,9 +166,9 @@ Two decisions worth reading before starting, both in §13.2:
 
 **Framework settings as data (`sc-types`, `sc-app`):**
 
-- [ ] `AttrSpec` in `sc-types` — **it does not exist in the code yet**, and this phase is its first consumer. The design leans on it for fieldview attributes (§6.1), action config (§10.1), agents (§11.1) and models (§14.2), so keep it minimal but not framework-specific: name, label, type, required, default, options
-- [ ] Decide where `Attrs` lives: it is currently a `serde_json::Map` alias in `sc-catalog` (layer 4), but `sc-types` is layer 3 and cannot depend on it, while design §6.1 puts both `AttrSpec` and `Attrs` in `sc-types`. Moving the alias down to `sc-types` (re-exported from `sc-catalog`, so no call site changes) is the least-surprising fix — it is the same underlying type either way
-- [ ] `Framework::config_spec() -> Vec<AttrSpec>`; `CodeFramework` declares its own (source store, source/output subdirectory, build command) — the settings currently hard-coded in `AppSource`/`BuildSpec` at the call site
+- [x] Settings-as-data vocabulary in `sc-types` — the design leans on it for fieldview attributes (§6.1), action config (§10.1), agents (§11.1) and models (§14.2). **Resolved: no `AttrSpec`; settings are declared as `FormField`s** (§6.2), which already covers name/label/type/required/default/options and is the standalone half of the `DataField`/`FormField` split. One vocabulary, one form, one type for the admin UI to render
+- [x] Decide where `Attrs` lives: it was a `serde_json::Map` alias in `sc-catalog` (layer 4), but `sc-types` is layer 3 and cannot depend on it. Moved down to `sc-types` (re-exported from `sc-catalog`, so no call site changes) — it is the same underlying type either way. **`BaseField` moved down with it**, since `FormField` carries one; `DataField` stays in `sc-catalog`, where its `Key`/`File` kinds and `Column`/`ColumnDef` bridge need it
+- [ ] `Framework::config_spec() -> Vec<FormField>`; `CodeFramework` declares its own (source store, source/output subdirectory, build command) — the settings currently hard-coded in `AppSource`/`BuildSpec` at the call site. **Open**: the source-store setting is a pick-list of connected stores, but `config_spec` takes no `&Catalog`, so a static `options` list cannot express it (§6.2's `OptionsSource::ServerQuery` is the post-MVP answer)
 - [ ] Validate `FrameworkRef.config` against the spec **on save**, so a misconfigured app is rejected where the admin can fix it, not at build or serve time
 - [ ] Resolve an `AppSource`/`BuildSpec` *from* a stored app's framework config (replacing the hand-built values in the Phase 9 tests)
 - [ ] Tests: a valid config resolves to a build spec; a missing/ill-typed setting is a clear `Invalid` error naming the setting
@@ -191,7 +191,7 @@ Two decisions worth reading before starting, both in §13.2:
 **Admin SPA (`ui/admin`):**
 
 - [ ] Applications screen: list, create, edit, delete
-- [ ] Create/edit form: pick a framework → render its `config_spec` settings; subdomain; table + file-store subsets; APIs (provider + mount); static dirs; CSP. `ui/form-runtime` is out of MVP scope, so render `AttrSpec` with a plain form — the point is only that no screen knows a specific framework's settings
+- [ ] Create/edit form: pick a framework → render its `config_spec` settings; subdomain; table + file-store subsets; APIs (provider + mount); static dirs; CSP. `ui/form-runtime` is out of MVP scope, so render the `FormField` spec with a plain form — the point is only that no screen knows a specific framework's settings
 - [ ] Build button with its outcome surfaced (success, or the bundler's diagnostics), and a visible saved-but-unbuilt state
 - [ ] A link to the app's own subdomain from the applications list
 

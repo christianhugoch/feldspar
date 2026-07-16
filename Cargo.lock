@@ -1332,7 +1332,6 @@ dependencies = [
  "sc-query",
  "sc-test-harness",
  "sc-types",
- "serde_json",
  "tokio",
 ]
 

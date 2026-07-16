@@ -15,7 +15,6 @@ sc-db.workspace = true
 sc-types.workspace = true
 sc-files.workspace = true
 async-trait.workspace = true
-serde_json.workspace = true
 
 [dev-dependencies]
 sc-db-postgres.workspace = true

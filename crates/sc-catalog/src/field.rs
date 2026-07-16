@@ -1,24 +1,36 @@
 //! Fields and the identifiers that tie them together.
 //!
 //! The technical design (§6.2) separates a **database** field ([`DataField`] —
-//! a column in a table) from a **form** field, and shares their common shape in
-//! [`BaseField`]. The MVP models `DataField` fully — including the `Key` and
-//! `File` kinds, even though the admin UI only exercises `Plain` — so the data
-//! model is right from the start (`FormField` and calculated fields are
+//! a column in a table) from a [**form** field](sc_types::FormField), and shares
+//! their common shape in [`BaseField`]. The MVP models `DataField` fully —
+//! including the `Key` and `File` kinds, even though the admin UI only exercises
+//! `Plain` — so the data model is right from the start (calculated fields are
 //! post-MVP; see the crate root).
 //!
-//! Design note (a deliberate, documented deviation): §6.2 sketches these types
-//! under `sc-types`, but the `Key` kind references a table and a field by id, and
-//! ids are a catalog concept. Keeping the field types here — one layer up, beside
-//! [`Table`](crate::Table) — avoids `sc-types` depending on catalog identifiers
-//! while matching the Phase 4 TODO grouping.
+//! Only `DataField` and the identifiers live here. `BaseField` and `FormField`
+//! are in `sc-types` beside [`Attrs`], which they carry and describe. What keeps
+//! `DataField` up here is its [`Key`](DataFieldKind::Key)/[`File`](DataFieldKind::File)
+//! kinds, which reference catalog identifiers, and its `Column`/`ColumnDef`
+//! bridge — none of which `BaseField` ever needed. All three are re-exported
+//! from this crate, so a caller reaching for `sc_catalog::BaseField` still finds
+//! it.
 
 use sc_db::{Column, ColumnDef};
 use sc_types::TypeRef;
 
 /// Type-specific attributes carried by a field or table, always a JSON object
 /// (technical design §6, §9: "a sparse value goes into `attributes`").
-pub type Attrs = serde_json::Map<String, serde_json::Value>;
+///
+/// Defined in `sc-types` beside [`FormField`](sc_types::FormField), which
+/// describes one entry of it (§6.1), and re-exported here because fields and
+/// tables are where the catalog meets it.
+pub use sc_types::Attrs;
+
+/// Properties shared by every field (technical design §6.2).
+///
+/// Defined in `sc-types` beside [`FormField`](sc_types::FormField), the other
+/// half of §6.2's split, and re-exported here beside [`DataField`].
+pub use sc_types::BaseField;
 
 /// Identifies a table within the catalog. For the MVP — which stores no metadata
 /// beyond `information_schema` — a table's stable identity is simply its name.
@@ -45,34 +57,6 @@ impl DbId {
     /// the `users` and (post-MVP) `_sc_*` metadata tables.
     pub fn primary() -> DbId {
         DbId("primary".to_owned())
-    }
-}
-
-/// Properties shared by every field: its identifier name, human label, type, and
-/// type-specific attributes (technical design §6.2).
-#[derive(Debug, Clone, PartialEq)]
-pub struct BaseField {
-    /// A valid identifier in SQL and every guest language.
-    pub name: String,
-    /// Human-facing string; defaults to the name.
-    pub label: String,
-    /// The field's type — basic in the MVP (rich types post-MVP).
-    pub type_: TypeRef,
-    /// Type-specific attributes (JSON object).
-    pub attributes: Attrs,
-}
-
-impl BaseField {
-    /// A base field with the given name and type; the label defaults to the name
-    /// and there are no attributes.
-    pub fn new(name: impl Into<String>, type_: TypeRef) -> BaseField {
-        let name = name.into();
-        BaseField {
-            label: name.clone(),
-            name,
-            type_,
-            attributes: Attrs::new(),
-        }
     }
 }
 

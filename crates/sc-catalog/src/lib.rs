@@ -148,4 +148,24 @@ mod tests {
         physical.name = "_sc_config".into();
         assert!(Table::from_physical(DbId::primary(), &physical).is_system());
     }
+
+    #[test]
+    fn attrs_and_base_field_are_re_exported_from_sc_types_not_redefined() {
+        // Both moved down to `sc-types` (layer 3) so `FormField` — which carries
+        // a `BaseField` and describes `Attrs` entries — can live beside them.
+        // This crate re-exports both, so the old paths still resolve and every
+        // existing call site is untouched. These assignments compile only if the
+        // names are the *same* types, not look-alikes.
+        let attrs: Attrs = sc_types::Attrs::new();
+        let _: sc_types::Attrs = attrs;
+        let base: BaseField = sc_types::BaseField::new("x", TypeRef::Basic(BasicType::Text));
+        let _: sc_types::BaseField = base;
+
+        // `DataField` stays here — its `Key`/`File` kinds reference catalog ids —
+        // and still builds on the very same `BaseField`.
+        let mut field = DataField::plain("x", TypeRef::Basic(BasicType::Text));
+        field.base.attributes.insert("max".to_owned(), 10.into());
+        let _: &sc_types::BaseField = &field.base;
+        let _: &sc_types::Attrs = &field.base.attributes;
+    }
 }

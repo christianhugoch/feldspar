@@ -11,14 +11,31 @@
 //!   value/type validation.
 //! - [`TypeRef`] — the "rich or basic" type reference a field carries; basic
 //!   only for now, modelled as an enum so rich types slot in later.
+//! - [`BaseField`]/[`FormField`] — the shape of a field, and a field in a form
+//!   (§6.2). `FormField` is **also** how every configurable extension point
+//!   declares its settings (§13.3), so the admin UI renders one form for all of
+//!   them and knows about none of them.
+//! - [`Attrs`] — the JSON bag those settings land in; a `FormField` describes one
+//!   entry of it.
 //! - [`catchall`] — the reduced display/edit path (value → text, text → value)
 //!   that stands in for the full `FieldView` trait until post-MVP.
+//!
+//! `BaseField` and `Attrs` live here rather than in `sc-catalog`, where they
+//! started: neither is a catalog concept, and `FormField` needs both while
+//! `sc-types` is layer 3 and cannot depend on layer 4. `DataField` stays in
+//! `sc-catalog`, because its `Key`/`File` kinds reference catalog identifiers —
+//! that was always the only part that had to. Both are re-exported from
+//! `sc-catalog`, so `sc_catalog::{Attrs, BaseField}` still resolve.
 
+mod attrs;
 mod basic;
 pub mod catchall;
+mod field;
 mod type_ref;
 
+pub use attrs::Attrs;
 pub use basic::BasicType;
+pub use field::{BaseField, FormField};
 pub use type_ref::TypeRef;
 
 #[cfg(test)]

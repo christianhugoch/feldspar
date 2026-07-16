@@ -295,7 +295,7 @@ data only. (MVP: single database, same as the primary store.)
 /// only through catch-all fieldviews. The driver maps DB types → rich/basic types.
 pub trait RichType: Send + Sync {
     fn name(&self) -> &str;
-    fn attributes(&self) -> &[AttrSpec];              // e.g. min/max, select options
+    fn attributes(&self) -> &[FormField];             // e.g. min/max, select options
     fn validate(&self, v: &Value, attrs: &Attrs) -> Result<()>;
     fn sql_types(&self) -> &[&str];                   // DB types this maps from/to
     fn fieldviews(&self) -> Vec<Box<dyn FieldView>>;
@@ -343,6 +343,7 @@ pub struct FormField {
     pub base:     BaseField,
     pub fieldview: FieldViewRef,
     pub required: bool,
+    pub default:  Option<Json>,        // value used when none is given
     pub visibility: Option<Formula>,   // conditional display on other field values
     pub options_source: OptionsSource, // static | server query | client code
     // …repeat groups & dynamic attributes handled by the form runtime (§12)
@@ -351,6 +352,28 @@ pub struct FormField {
 impl DataField { pub fn to_form_field(&self) -> FormField { /* … */ } }
 impl FormField { pub fn to_data_field(&self) -> Option<DataField> { /* … */ } }
 ```
+
+**`FormField` is also how every configurable extension point declares its settings**, and
+there is deliberately **no separate `AttrSpec` type**. A `Framework` (§13.3), `Action`
+(§10.1), `Agent` (§11.1), `ModelProvider` (§14.2), `FieldView` (§6.3) and a `RichType`'s
+attributes (§6.1) all answer one question — *what should the admin be asked?* — and all answer
+it with `Vec<FormField>`. The definition above already allows it: a form field "may derive from
+a `DataField` **or be standalone**", and a setting is exactly the standalone case. Giving
+settings a parallel type would mean two vocabularies for one question, two things for the admin
+UI to render, and two things a guest-language extension must know about; `name`/`label`/`type_`
+would be declared twice and drift once. The values a `FormField` describes as settings live in
+an `Attrs` bag, so its `default` and `options_source` deal in JSON — the same thing that ends up
+in the bag.
+
+Note the level this puts things at: `BaseField.attributes` is an `Attrs`, and what may go in it
+is described by that type's `attributes()` — a `Vec<FormField>`. A `FormField` therefore both
+carries a `BaseField` and describes what another field's attributes may hold. That is the same
+self-description a JSON Schema has, and it is well-founded: the recursion bottoms out at basic
+types, which have no attributes.
+
+`BaseField`, `FormField` and `Attrs` live in `sc-types`. `DataField` lives one layer up in
+`sc-catalog`, because its `Key`/`File` kinds reference catalog identifiers and it bridges to
+`Column`/`ColumnDef` — that is the only part of the split that ever needed layer 4.
 
 **Calculated fields.** Defined either by a simple expression (which may traverse foreign
 keys in both directions) or by guest code via a code adapter. Dependency handling per GOALS:
@@ -380,7 +403,7 @@ pub struct FieldView {
     pub name: String,
     pub handles: Vec<String>,    // type names this covers, or "*" catch-all
     pub is_edit: bool,
-    pub config_spec: Vec<AttrSpec>,
+    pub config_spec: Vec<FormField>,
     pub component: ComponentRef, // bundled TS component id
 }
 ```
@@ -555,7 +578,7 @@ must arrive with applications themselves — there is nothing to introspect an a
 #[async_trait]
 pub trait Action: Send + Sync {
     fn name(&self) -> &str;
-    fn config_spec(&self) -> Vec<AttrSpec>;
+    fn config_spec(&self) -> Vec<FormField>;
     async fn run(&self, ctx: &mut Context, cfg: &Attrs, cat: &Catalog) -> Result<()>;
 }
 ```
@@ -652,7 +675,7 @@ capability — most expose a tool to the LLM loop, some change chat behaviour.
 #[async_trait]
 pub trait Skill: Send + Sync {
     fn name(&self) -> &str;
-    fn config_spec(&self) -> Vec<AttrSpec>;
+    fn config_spec(&self) -> Vec<FormField>;
     /// Tools this skill contributes to the inference loop (may be zero).
     fn tools(&self, cfg: &Attrs, cat: &Catalog) -> Vec<Tool>;
     /// Hook to alter chat behaviour / system prompt (e.g. model picker, preload data).
@@ -854,7 +877,7 @@ pub trait Framework: Send + Sync {
     fn name(&self) -> &str;
     /// The settings this framework needs, so the admin UI can render a form for
     /// them without knowing anything about this framework (§13.2).
-    fn config_spec(&self) -> Vec<AttrSpec>;
+    fn config_spec(&self) -> Vec<FormField>;
     /// Serve the app's routes (bundled assets, SSR, or v1 view/page rendering).
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse>;
     fn build(&self) -> Option<BuildSpec>;   // code frameworks have a build step
@@ -867,9 +890,10 @@ subdirectory holding its code; a Saltcorn-v1 app needs none of that. The admin U
 a form for whichever framework the admin picked *without* a per-framework special case, and
 a framework supplied by a guest language through `sc-code` must work the same way. So a
 framework declares its settings as data, exactly as `Action` (§10.1), `Agent` (§11.1) and
-`ModelProvider` (§14.2) declare theirs — one `AttrSpec` vocabulary, one way to render a
-configuration form, for every configurable extension point. Post-MVP this is `ui/form-runtime`
-(§12); the MVP, which does not have it yet, renders the same `AttrSpec` data with a plain
+`ModelProvider` (§14.2) declare theirs — one `FormField` vocabulary (§6.2), one way to render a
+configuration form, for every configurable extension point, and the same one a row editor
+already uses. Post-MVP this is `ui/form-runtime`
+(§12); the MVP, which does not have it yet, renders the same `FormField` data with a plain
 form and gains the runtime later without a contract change. `FrameworkRef.config` is
 validated against the spec on save, so a misconfigured app is rejected at the point the admin
 can fix it rather than at build or serve time.
@@ -964,8 +988,8 @@ path** (path-cumulative authorization). Per-file metadata is xattrs, no DB rows 
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     fn name(&self) -> &str;                       // scikit-learn | mc-stan | …
-    fn config_spec(&self) -> Vec<AttrSpec>;
-    fn hyperparameters(&self) -> Vec<AttrSpec>;
+    fn config_spec(&self) -> Vec<FormField>;
+    fn hyperparameters(&self) -> Vec<FormField>;
     /// Fit against a subset of a table's rows → a model instance (parameters inspectable).
     async fn fit(&self, data: RowStream, cfg: &Attrs, hp: &Attrs) -> Result<ModelInstance>;
     /// Apply a fitted instance to a new row → an outcome defined by the provider/config.
