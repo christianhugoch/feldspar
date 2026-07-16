@@ -27,7 +27,9 @@
 //!
 //! The [`bail!`] and [`ensure!`] macros cover the common early-return cases.
 
+use std::backtrace::{Backtrace, BacktraceStatus};
 use std::fmt;
+use std::panic::Location;
 
 /// Workspace-wide result alias. Defaults to [`Error`] but keeps the error
 /// parameter open so call sites can use a more specific error where useful.
@@ -35,14 +37,40 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// The single error type shared across every Saltcorn crate.
 ///
-/// Variants are intentionally coarse: they classify *where* something went wrong
-/// (query, database, auth, …) rather than enumerate every failure. Detail lives
-/// in the message string, and the underlying cause — when there is one — is kept
-/// in [`Error::Context`] so the full chain is available via
-/// [`std::error::Error::source`].
+/// An error is its classified [`Repr`] plus the source [`Location`] where it was
+/// created — the `?`/constructor call site. That location is captured at compile
+/// time via `#[track_caller]` (a `&'static Location` threaded through the call
+/// chain), so it costs nothing at runtime and needs no `RUST_BACKTRACE`: it is
+/// always available. It is surfaced by [`format_chain`]/[`Error::chain`] (so a
+/// log line points at the failing code), but deliberately kept out of
+/// [`Display`](fmt::Display) so a message shown to a client is unchanged.
+///
+/// It also carries a [`Backtrace`], the opt-in companion to the always-on
+/// location: [`Backtrace::capture`] self-gates on `RUST_BACKTRACE`, so with the
+/// variable unset it is `Disabled` (no stack walk, no output) and with it set it
+/// records the full stack, which [`format_chain`] then appends. The location
+/// answers "which line?" for free; the backtrace answers "how did we get here?"
+/// when you ask for it.
+#[derive(Debug)]
+pub struct Error {
+    /// What went wrong, and its message/source — see [`Repr`].
+    repr: Repr,
+    /// Where this error was constructed (compile-time; zero runtime cost).
+    location: &'static Location<'static>,
+    /// Stack at construction — only populated when `RUST_BACKTRACE` is set.
+    backtrace: Backtrace,
+}
+
+/// The classified representation of an [`Error`]: *where* something went wrong
+/// (query, database, auth, …) rather than an enumeration of every failure.
+///
+/// Variants are intentionally coarse. Detail lives in the message string, and
+/// the underlying cause — when there is one — is kept in [`Repr::Context`] so the
+/// full chain is available via [`std::error::Error::source`]. Match on it via
+/// [`Error::repr`].
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum Error {
+pub enum Repr {
     /// A requested resource (table, row, user, file, …) does not exist.
     NotFound(String),
     /// Input failed validation or a precondition was not met.
@@ -73,49 +101,100 @@ pub enum Error {
 }
 
 impl Error {
-    /// A [`Error::NotFound`] from any displayable message.
+    /// Wrap a [`Repr`] with the caller's source location. `#[track_caller]` means
+    /// [`Location::caller`] resolves to the outermost non-tracked call site — the
+    /// `Error::database(…)` / `bail!(…)` line — not this helper.
+    #[track_caller]
+    fn new(repr: Repr) -> Self {
+        Self::at(repr, Location::caller())
+    }
+
+    /// Wrap a [`Repr`] with an explicitly captured location. Used where the
+    /// construction happens inside a closure (e.g. `map_err`), which is not
+    /// `#[track_caller]`-transparent, so the location must be grabbed in the
+    /// enclosing tracked function and passed in.
+    ///
+    /// The single point where an [`Error`] is built, so it is also where the
+    /// [`Backtrace`] is captured — a no-op unless `RUST_BACKTRACE` is set.
+    fn at(repr: Repr, location: &'static Location<'static>) -> Self {
+        Self {
+            repr,
+            location,
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    /// The source location where this error was created (the failing line).
+    /// Always present — captured at compile time, no `RUST_BACKTRACE` needed.
+    pub fn location(&self) -> &'static Location<'static> {
+        self.location
+    }
+
+    /// The stack captured when this error was created. Only populated when
+    /// `RUST_BACKTRACE` (or `RUST_LIB_BACKTRACE`) is set; otherwise its
+    /// [`status`](Backtrace::status) is [`Disabled`](BacktraceStatus::Disabled).
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
+    }
+
+    /// The classified [`Repr`] of this error, for callers that need to branch on
+    /// the specific variant (e.g. mapping to an HTTP status).
+    pub fn repr(&self) -> &Repr {
+        &self.repr
+    }
+
+    /// A [`Repr::NotFound`] from any displayable message.
+    #[track_caller]
     pub fn not_found(msg: impl Into<String>) -> Self {
-        Self::NotFound(msg.into())
+        Self::new(Repr::NotFound(msg.into()))
     }
 
-    /// A [`Error::Invalid`] from any displayable message.
+    /// A [`Repr::Invalid`] from any displayable message.
+    #[track_caller]
     pub fn invalid(msg: impl Into<String>) -> Self {
-        Self::Invalid(msg.into())
+        Self::new(Repr::Invalid(msg.into()))
     }
 
-    /// A [`Error::Config`] from any displayable message.
+    /// A [`Repr::Config`] from any displayable message.
+    #[track_caller]
     pub fn config(msg: impl Into<String>) -> Self {
-        Self::Config(msg.into())
+        Self::new(Repr::Config(msg.into()))
     }
 
-    /// A [`Error::Database`] from any displayable message.
+    /// A [`Repr::Database`] from any displayable message.
+    #[track_caller]
     pub fn database(msg: impl Into<String>) -> Self {
-        Self::Database(msg.into())
+        Self::new(Repr::Database(msg.into()))
     }
 
-    /// A [`Error::Query`] from any displayable message.
+    /// A [`Repr::Query`] from any displayable message.
+    #[track_caller]
     pub fn query(msg: impl Into<String>) -> Self {
-        Self::Query(msg.into())
+        Self::new(Repr::Query(msg.into()))
     }
 
-    /// A [`Error::Auth`] from any displayable message.
+    /// A [`Repr::Auth`] from any displayable message.
+    #[track_caller]
     pub fn auth(msg: impl Into<String>) -> Self {
-        Self::Auth(msg.into())
+        Self::new(Repr::Auth(msg.into()))
     }
 
-    /// A [`Error::File`] from any displayable message.
+    /// A [`Repr::File`] from any displayable message.
+    #[track_caller]
     pub fn file(msg: impl Into<String>) -> Self {
-        Self::File(msg.into())
+        Self::new(Repr::File(msg.into()))
     }
 
-    /// A [`Error::Serde`] from any displayable message.
+    /// A [`Repr::Serde`] from any displayable message.
+    #[track_caller]
     pub fn serde(msg: impl Into<String>) -> Self {
-        Self::Serde(msg.into())
+        Self::new(Repr::Serde(msg.into()))
     }
 
-    /// A free-form [`Error::Internal`]. Use for genuinely unexpected states.
+    /// A free-form [`Repr::Internal`]. Use for genuinely unexpected states.
+    #[track_caller]
     pub fn msg(msg: impl Into<String>) -> Self {
-        Self::Internal(msg.into())
+        Self::new(Repr::Internal(msg.into()))
     }
 
     /// Classify this error into one of the two audiences of §16: an
@@ -130,16 +209,16 @@ impl Error {
     /// is System otherwise (an unclassified foreign error is treated as a fault to
     /// investigate, not something an admin can fix).
     pub fn kind(&self) -> ErrorKind {
-        match self {
-            Error::NotFound(_)
-            | Error::Invalid(_)
-            | Error::Config(_)
-            | Error::Query(_)
-            | Error::Auth(_) => ErrorKind::Application,
-            Error::Database(_) | Error::File(_) | Error::Serde(_) | Error::Internal(_) => {
+        match &self.repr {
+            Repr::NotFound(_)
+            | Repr::Invalid(_)
+            | Repr::Config(_)
+            | Repr::Query(_)
+            | Repr::Auth(_) => ErrorKind::Application,
+            Repr::Database(_) | Repr::File(_) | Repr::Serde(_) | Repr::Internal(_) => {
                 ErrorKind::System
             }
-            Error::Context { source, .. } => source
+            Repr::Context { source, .. } => source
                 .downcast_ref::<Error>()
                 .map_or(ErrorKind::System, Error::kind),
         }
@@ -166,27 +245,29 @@ pub enum ErrorKind {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::NotFound(m) => write!(f, "not found: {m}"),
-            Error::Invalid(m) => write!(f, "invalid: {m}"),
-            Error::Config(m) => write!(f, "configuration error: {m}"),
-            Error::Database(m) => write!(f, "database error: {m}"),
-            Error::Query(m) => write!(f, "query error: {m}"),
-            Error::Auth(m) => write!(f, "auth error: {m}"),
-            Error::File(m) => write!(f, "file error: {m}"),
-            Error::Serde(m) => write!(f, "serialization error: {m}"),
-            Error::Internal(m) => write!(f, "internal error: {m}"),
+        // The location is intentionally not shown here — `Display` is what a
+        // client may see; the failing line belongs in the log (`format_chain`).
+        match &self.repr {
+            Repr::NotFound(m) => write!(f, "not found: {m}"),
+            Repr::Invalid(m) => write!(f, "invalid: {m}"),
+            Repr::Config(m) => write!(f, "configuration error: {m}"),
+            Repr::Database(m) => write!(f, "database error: {m}"),
+            Repr::Query(m) => write!(f, "query error: {m}"),
+            Repr::Auth(m) => write!(f, "auth error: {m}"),
+            Repr::File(m) => write!(f, "file error: {m}"),
+            Repr::Serde(m) => write!(f, "serialization error: {m}"),
+            Repr::Internal(m) => write!(f, "internal error: {m}"),
             // Only the top-level context is shown here; the wrapped cause is
             // reachable via `source()` so callers can print the whole chain.
-            Error::Context { context, .. } => write!(f, "{context}"),
+            Repr::Context { context, .. } => write!(f, "{context}"),
         }
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Context { source, .. } => Some(source.as_ref()),
+        match &self.repr {
+            Repr::Context { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
@@ -214,13 +295,30 @@ impl std::error::Error for Error {
 /// ```
 pub fn format_chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut out = err.to_string();
+    append_location(&mut out, err);
     let mut source = err.source();
     while let Some(cause) = source {
         out.push_str("\n  caused by: ");
         out.push_str(&cause.to_string());
+        append_location(&mut out, cause);
         source = cause.source();
     }
+    // The outermost error's backtrace, appended once — present only when
+    // `RUST_BACKTRACE` is set, so by default this changes nothing.
+    if let Some(e) = err.downcast_ref::<Error>()
+        && e.backtrace.status() == BacktraceStatus::Captured
+    {
+        out.push_str(&format!("\nbacktrace:\n{}", e.backtrace));
+    }
     out
+}
+
+/// If `err` is a workspace [`Error`], append its creation location (`file:line`)
+/// to `out`. A foreign error in the chain has no location and is left as-is.
+fn append_location(out: &mut String, err: &(dyn std::error::Error + 'static)) {
+    if let Some(e) = err.downcast_ref::<Error>() {
+        out.push_str(&format!(" (at {})", e.location));
+    }
 }
 
 impl Error {
@@ -231,20 +329,22 @@ impl Error {
 }
 
 impl From<std::io::Error> for Error {
+    #[track_caller]
     fn from(e: std::io::Error) -> Self {
-        Error::Context {
+        Error::new(Repr::Context {
             context: "I/O error".to_string(),
             source: Box::new(e),
-        }
+        })
     }
 }
 
 /// Attach a context message to a [`Result`] or [`Option`], converting it into a
 /// workspace [`Result`].
 ///
-/// For `Result`, the original error is preserved as the source of an
-/// [`Error::Context`]. For `Option`, a `None` becomes an [`Error::Internal`]
-/// carrying the message.
+/// For `Result`, the original error is preserved as the source of a
+/// [`Repr::Context`]. For `Option`, a `None` becomes a [`Repr::Internal`]
+/// carrying the message. Both methods are `#[track_caller]`, so the resulting
+/// error's [`location`](Error::location) is the `.context(…)` call site.
 pub trait Context<T> {
     /// Attach an eagerly-evaluated context message.
     fn context<C>(self, context: C) -> Result<T>
@@ -262,46 +362,67 @@ impl<T, E> Context<T> for std::result::Result<T, E>
 where
     E: std::error::Error + Send + Sync + 'static,
 {
+    #[track_caller]
     fn context<C>(self, context: C) -> Result<T>
     where
         C: fmt::Display,
     {
-        self.map_err(|e| Error::Context {
-            context: context.to_string(),
-            source: Box::new(e),
+        // `map_err`'s closure is not `#[track_caller]`-transparent, so capture
+        // the call site here (where the attribute is in effect) and carry it in.
+        let location = Location::caller();
+        self.map_err(|e| {
+            Error::at(
+                Repr::Context {
+                    context: context.to_string(),
+                    source: Box::new(e),
+                },
+                location,
+            )
         })
     }
 
+    #[track_caller]
     fn with_context<C, F>(self, f: F) -> Result<T>
     where
         C: fmt::Display,
         F: FnOnce() -> C,
     {
-        self.map_err(|e| Error::Context {
-            context: f().to_string(),
-            source: Box::new(e),
+        let location = Location::caller();
+        self.map_err(|e| {
+            Error::at(
+                Repr::Context {
+                    context: f().to_string(),
+                    source: Box::new(e),
+                },
+                location,
+            )
         })
     }
 }
 
 impl<T> Context<T> for Option<T> {
+    #[track_caller]
     fn context<C>(self, context: C) -> Result<T>
     where
         C: fmt::Display,
     {
-        self.ok_or_else(|| Error::Internal(context.to_string()))
+        let location = Location::caller();
+        self.ok_or_else(|| Error::at(Repr::Internal(context.to_string()), location))
     }
 
+    #[track_caller]
     fn with_context<C, F>(self, f: F) -> Result<T>
     where
         C: fmt::Display,
         F: FnOnce() -> C,
     {
-        self.ok_or_else(|| Error::Internal(f().to_string()))
+        let location = Location::caller();
+        self.ok_or_else(|| Error::at(Repr::Internal(f().to_string()), location))
     }
 }
 
-/// Return early with an [`Error::Internal`] built from a format string.
+/// Return early with a [`Repr::Internal`] error built from a format string. The
+/// error's [`location`](Error::location) is this `bail!` call site.
 ///
 /// ```
 /// use sc_error::{bail, Result};
@@ -316,12 +437,14 @@ impl<T> Context<T> for Option<T> {
 /// ```
 #[macro_export]
 macro_rules! bail {
+    // Route through the `#[track_caller]` constructor rather than building the
+    // variant here, so `location` points at the `bail!` invocation.
     ($($arg:tt)*) => {
-        return ::core::result::Result::Err($crate::Error::Internal(::std::format!($($arg)*)))
+        return ::core::result::Result::Err($crate::Error::msg(::std::format!($($arg)*)))
     };
 }
 
-/// Return early with an [`Error::Internal`] unless a condition holds.
+/// Return early with a [`Repr::Internal`] error unless a condition holds.
 ///
 /// ```
 /// use sc_error::{ensure, Result};
@@ -349,15 +472,15 @@ mod tests {
 
     #[test]
     fn constructors_map_to_variants() {
-        assert!(matches!(Error::not_found("t"), Error::NotFound(_)));
-        assert!(matches!(Error::invalid("t"), Error::Invalid(_)));
-        assert!(matches!(Error::config("t"), Error::Config(_)));
-        assert!(matches!(Error::database("t"), Error::Database(_)));
-        assert!(matches!(Error::query("t"), Error::Query(_)));
-        assert!(matches!(Error::auth("t"), Error::Auth(_)));
-        assert!(matches!(Error::file("t"), Error::File(_)));
-        assert!(matches!(Error::serde("t"), Error::Serde(_)));
-        assert!(matches!(Error::msg("t"), Error::Internal(_)));
+        assert!(matches!(Error::not_found("t").repr(), Repr::NotFound(_)));
+        assert!(matches!(Error::invalid("t").repr(), Repr::Invalid(_)));
+        assert!(matches!(Error::config("t").repr(), Repr::Config(_)));
+        assert!(matches!(Error::database("t").repr(), Repr::Database(_)));
+        assert!(matches!(Error::query("t").repr(), Repr::Query(_)));
+        assert!(matches!(Error::auth("t").repr(), Repr::Auth(_)));
+        assert!(matches!(Error::file("t").repr(), Repr::File(_)));
+        assert!(matches!(Error::serde("t").repr(), Repr::Serde(_)));
+        assert!(matches!(Error::msg("t").repr(), Repr::Internal(_)));
     }
 
     #[test]
@@ -394,7 +517,7 @@ mod tests {
     fn option_context_produces_internal_error() {
         let none: Option<i32> = None;
         let err = none.context("missing config value").unwrap_err();
-        assert!(matches!(err, Error::Internal(_)));
+        assert!(matches!(err.repr(), Repr::Internal(_)));
         assert_eq!(err.to_string(), "internal error: missing config value");
     }
 
@@ -402,7 +525,7 @@ mod tests {
     fn io_error_conversion_keeps_source() {
         let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no file");
         let err: Error = io.into();
-        assert!(matches!(err, Error::Context { .. }));
+        assert!(matches!(err.repr(), Repr::Context { .. }));
         assert!(err.source().is_some());
     }
 
@@ -453,11 +576,55 @@ mod tests {
 
     #[test]
     fn format_chain_of_a_leaf_error_is_just_its_message() {
-        // No source → single line, no "caused by".
+        // No source → single line, no "caused by". The creation location is
+        // appended (only in the chain, never in `Display`).
         let err = Error::database("connection refused");
         let chain = err.chain();
-        assert_eq!(chain, "database error: connection refused");
+        assert!(
+            chain.starts_with("database error: connection refused (at "),
+            "got: {chain}"
+        );
         assert!(!chain.contains("caused by"));
+        // The message a client would see carries no location.
+        assert_eq!(err.to_string(), "database error: connection refused");
+    }
+
+    #[test]
+    fn error_records_its_creation_location() {
+        let expected_line = line!() + 1;
+        let err = Error::database("boom");
+        // The location points at the constructor call site above, not into
+        // sc-error's own source.
+        assert_eq!(err.location().line(), expected_line);
+        assert!(err.location().file().ends_with("lib.rs"));
+        // It surfaces in the chain but not in Display.
+        assert!(err.chain().contains(&format!(":{expected_line}")));
+        assert!(!err.to_string().contains("lib.rs"));
+    }
+
+    #[test]
+    fn context_location_is_the_call_site_not_the_library() {
+        let inner: std::result::Result<(), std::io::Error> =
+            Err(std::io::Error::other("disk"));
+        let expected_line = line!() + 1;
+        let err = inner.context("while loading").unwrap_err();
+        // `#[track_caller]` threads the caller through `map_err`, so the location
+        // is this `.context(…)` line — not somewhere inside sc-error.
+        assert_eq!(err.location().line(), expected_line);
+        assert!(err.location().file().ends_with("lib.rs"));
+    }
+
+    #[test]
+    fn bail_location_is_the_macro_call_site() {
+        fn f() -> Result<()> {
+            bail!("boom");
+        }
+        let expected_line = line!() - 2; // the `bail!("boom");` line above
+        let err = f().unwrap_err();
+        // The location is captured at the `bail!` invocation, in this test file
+        // — not inside the macro definition.
+        assert!(err.location().file().ends_with("lib.rs"));
+        assert_eq!(err.location().line(), expected_line);
     }
 
     #[test]
@@ -471,6 +638,45 @@ mod tests {
         assert!(chain.starts_with("starting up"), "got: {chain}");
         assert!(chain.contains("caused by: opening config"), "got: {chain}");
         assert!(chain.contains("no file"), "got: {chain}");
+    }
+
+    #[test]
+    fn backtrace_rendering_matches_capture_status() {
+        // Robust to the ambient `RUST_BACKTRACE`: the chain shows a backtrace
+        // exactly when one was captured, and never otherwise.
+        let err = Error::database("boom");
+        let rendered = err.chain().contains("backtrace:");
+        let captured = err.backtrace().status() == BacktraceStatus::Captured;
+        assert_eq!(rendered, captured);
+    }
+
+    #[test]
+    fn backtrace_captured_when_rust_backtrace_is_set() {
+        // `Backtrace::capture()` reads `RUST_BACKTRACE` once and caches it for
+        // the process, so the enabled path can't be exercised in-process
+        // alongside the other tests. Re-exec this one test in a child with the
+        // variable set; the child branch does the real assertions.
+        const CHILD: &str = "SC_ERROR_BACKTRACE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let err = Error::database("boom");
+            assert_eq!(err.backtrace().status(), BacktraceStatus::Captured);
+            let chain = err.chain();
+            assert!(chain.contains("backtrace:"), "no backtrace in: {chain}");
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("test binary path");
+        let output = std::process::Command::new(exe)
+            .args(["backtrace_captured_when_rust_backtrace_is_set", "--exact"])
+            .env("RUST_BACKTRACE", "1")
+            .env(CHILD, "1")
+            .output()
+            .expect("re-run test binary");
+        assert!(
+            output.status.success(),
+            "child failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

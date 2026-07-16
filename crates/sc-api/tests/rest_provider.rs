@@ -209,7 +209,7 @@ async fn a_missing_row_is_not_found_and_a_bad_column_is_rejected() -> Result<()>
         )
         .await
         .expect_err("updating a missing row must fail");
-    assert!(matches!(err, sc_error::Error::NotFound(_)), "{err}");
+    assert!(matches!(err.repr(), sc_error::Repr::NotFound(_)), "{err}");
 
     // A column the table does not have is rejected rather than ignored.
     let err = api

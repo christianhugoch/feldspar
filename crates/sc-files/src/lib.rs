@@ -86,12 +86,12 @@ mod tests {
     async fn path_traversal_is_rejected() {
         let (_base, store) = temp_store();
         let err = store.read("../secret").await.unwrap_err();
-        assert!(matches!(err, sc_error::Error::Invalid(_)));
+        assert!(matches!(err.repr(), sc_error::Repr::Invalid(_)));
         let err = store
             .write("a/../../b", Bytes::from_static(b"x"))
             .await
             .unwrap_err();
-        assert!(matches!(err, sc_error::Error::Invalid(_)));
+        assert!(matches!(err.repr(), sc_error::Repr::Invalid(_)));
     }
 
     #[tokio::test]
@@ -131,7 +131,7 @@ mod tests {
             .set_meta("missing.txt", &FileMeta::default())
             .await
             .unwrap_err();
-        assert!(matches!(err, sc_error::Error::NotFound(_)));
+        assert!(matches!(err.repr(), sc_error::Repr::NotFound(_)));
     }
 
     #[tokio::test]

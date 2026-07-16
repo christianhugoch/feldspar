@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use bytes::Bytes;
 use sc_catalog::Catalog;
-use sc_error::{Error, Result};
+use sc_error::{Error, Repr, Result};
 use sc_types::{BasicType, FormField, validate_attrs};
 
 use crate::application::FrameworkRef;
@@ -210,14 +210,17 @@ pub fn framework_config_spec(name: &str) -> Result<Vec<FormField>> {
 /// a bundler error, and at serve time means a broken app.
 pub fn validate_framework_config(fw: &FrameworkRef) -> Result<()> {
     let spec = framework_config_spec(&fw.name)?;
-    validate_attrs(&spec, &fw.config).map_err(|e| match e {
+    validate_attrs(&spec, &fw.config).map_err(|e| {
         // Name the framework as well as the setting. Rebuilt rather than
         // wrapped: `Error`'s `Invalid` renders its own "invalid:" prefix, so
         // formatting the whole error into a new one would say it twice, and
-        // `Error::Context` would show only the context and hide the setting —
+        // a `Context` would show only the context and hide the setting —
         // which is the part the admin needs.
-        Error::Invalid(msg) => Error::invalid(format!("framework `{}`: {msg}", fw.name)),
-        other => other,
+        if let Repr::Invalid(msg) = e.repr() {
+            Error::invalid(format!("framework `{}`: {msg}", fw.name))
+        } else {
+            e
+        }
     })
 }
 

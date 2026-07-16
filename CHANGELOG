@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## Opt-in backtraces on errors (gated by `RUST_BACKTRACE`)
+
+`Error` now also carries a `std::backtrace::Backtrace`, the companion to the always-on source
+location. `Backtrace::capture()` self-gates on `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE`: with the
+variable unset it is `Disabled` — no stack walk, and `format_chain` output is byte-for-byte
+unchanged — and with it set, the full stack is captured and appended under a `backtrace:` line. So
+the location answers "which line?" for free on every error, and a backtrace answers "how did we get
+here?" whenever an operator opts in, with no code change. This slots into the plumbing added above:
+one field, captured in the existing `Error::at` funnel, rendered in `format_chain`; no external
+caller was touched. New accessor `Error::backtrace()`.
+
+## Errors carry their source location (zero-overhead `#[track_caller]`)
+
+Every `Error` now records the source location where it was created — the failing `file:line` — so a
+logged error points straight at the code that produced it, without a debugger or a repro. The
+location is captured at **compile time** via `#[track_caller]` (a `&'static Location` threaded
+through the constructor/`?` call chain), so it costs nothing at runtime and, unlike a captured
+`Backtrace`, needs no `RUST_BACKTRACE` and walks no stack — it is always present.
+
+- **`Error` is now a struct** (`crates/sc-error/src/lib.rs`): `{ repr: Repr, location }`. The former
+  variants moved to a public `Repr` enum, matched via the new `Error::repr()`; the new
+  `Error::location()` returns the capture site. Every constructor (`Error::database`, `invalid`, …),
+  both `Context::context`/`with_context` methods, the `bail!` macro, and the `io::Error` conversion
+  are `#[track_caller]`, so the location is the *caller's* line (e.g. the `.context(…)` or
+  `Error::database(…)` site), not somewhere inside `sc-error`.
+
+- **Location appears in the log, not the client body** (`format_chain`): each `Error` in a rendered
+  chain gets a ` (at file:line)` suffix, so `error_response` (and any `eprintln` of the chain) shows
+  where each layer originated. `Display` is deliberately unchanged, so the JSON error a client
+  receives carries no source paths.
+
+- **Callers updated for the struct**: the few sites that pattern-matched variants now match
+  `err.repr()` — `error_status` in `sc-server`, the framework-config remap in `sc-app`, and the
+  `matches!` assertions in `sc-files`/`sc-api` tests.
+
 ## Error visibility — no silent failures at the HTTP boundary (principle 5)
 
 Every error that reaches an HTTP response is now logged to the console with its full cause chain,

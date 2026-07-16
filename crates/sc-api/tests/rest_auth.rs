@@ -223,7 +223,7 @@ async fn a_malformed_login_is_rejected_before_any_password_check() -> Result<()>
             .await
             .map(|r| r.status)
             .expect_err(&format!("{body} must be rejected as malformed"));
-        assert!(matches!(err, sc_error::Error::Invalid(_)), "{err}");
+        assert!(matches!(err.repr(), sc_error::Repr::Invalid(_)), "{err}");
     }
     Ok(())
 }
