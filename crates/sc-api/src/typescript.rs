@@ -54,6 +54,27 @@ pub fn generate_client(set: &EndpointSet) -> String {
     out.push_str("  fetch?: typeof fetch;\n");
     out.push_str("}\n\n");
 
+    // A shared error builder so a failed request carries the server's own message
+    // (the `{ "error": ... }` body every endpoint returns), not just its status —
+    // this is what lets a caller surface, e.g., a failed build's bundler
+    // diagnostics. The `failed: <status>` prefix is kept stable for callers that
+    // parse the status out of the message.
+    out.push_str("async function clientError(op: string, res: Response): Promise<Error> {\n");
+    out.push_str("  let detail = \"\";\n");
+    out.push_str("  try {\n");
+    out.push_str("    const body: unknown = await res.json();\n");
+    out.push_str(
+        "    if (body && typeof body === \"object\" && \"error\" in body && \
+         typeof (body as { error: unknown }).error === \"string\") {\n",
+    );
+    out.push_str("      detail = `: ${(body as { error: string }).error}`;\n");
+    out.push_str("    }\n");
+    out.push_str("  } catch {\n");
+    out.push_str("    // Non-JSON body: the status alone will have to describe the failure.\n");
+    out.push_str("  }\n");
+    out.push_str("  return new Error(`${op} failed: ${res.status}${detail}`);\n");
+    out.push_str("}\n\n");
+
     out.push_str("export function createClient(options: ClientOptions = {}): ApiClient {\n");
     out.push_str("  const baseUrl = options.baseUrl ?? \"\";\n");
     out.push_str("  const doFetch = options.fetch ?? fetch;\n");
@@ -110,7 +131,7 @@ fn emit_method_impl(out: &mut String, ep: &Endpoint) {
     out.push_str("      });\n");
     let _ = writeln!(
         out,
-        "      if (!res.ok) throw new Error(`{} failed: ${{res.status}}`);",
+        "      if (!res.ok) throw await clientError(\"{}\", res);",
         ep.name
     );
     if ep.output.is_empty() {

@@ -2,6 +2,45 @@
 
 Changes in reverse chronological order.
 
+## Phase 10 — admin SPA: the Applications screen (design §12/§13.2/§13.3)
+
+The admin UI can now manage applications end to end, closing the "created in the admin UI" loop
+GOALS asks for: an operator lists, creates, configures, builds, edits and deletes applications
+without touching Rust or a config file.
+
+- **Applications screen** (`ui/admin/src/screens/Applications.tsx`): a list of every application
+  with its subdomain (a live link to `<subdomain>.<the admin's host>`, so it opens the running
+  app), framework, and a per-app build state. Each row has Edit, Build and Delete. Because the
+  server persists no build status, a freshly loaded or freshly created app shows **"Not built
+  yet"** rather than pretending a save deployed it; a build flips it to Built (or Build failed)
+  for the session, and the build's outcome — the bundler's log on success, its **diagnostics on
+  failure** — is surfaced in a dismissible banner.
+
+- **Create/edit form** (`ui/admin/src/screens/ApplicationForm.tsx`): the screen that proves *no
+  screen knows a specific framework's settings*. The admin picks a framework from `listFrameworks`
+  and the form renders whatever that framework's `config_spec` declares (label, required, type,
+  options, default) as a plain form — there is no `code`-framework-specific code in the UI. It
+  also edits the subdomain, the table and file-store subsets, the enabled APIs (provider + mount,
+  as add/remove rows), the static directories, and the CSP (one `directive: sources` line each).
+  Save posts to `createApplication`/`updateApplication`; a rejection (duplicate subdomain, invalid
+  framework config) shows the server's own message.
+
+- **Richer client errors, so diagnostics reach the UI** (`crates/sc-api/src/typescript.rs`): the
+  generated client discarded the response body on a failed request, throwing only
+  `"<op> failed: <status>"`. It now builds the error through a shared `clientError` helper that
+  reads the server's `{ error }` body and appends it, so a caller can surface, e.g., a failed
+  build's bundler diagnostics. `ui/admin/src/api.ts` gains `errorMessage(err, fallback)` to
+  recover that message (and `errorStatus`'s regex no longer anchors on the status, since a message
+  may follow). The committed `ui/admin/src/client.ts` was regenerated.
+
+- **Routing/nav** (`ui/admin/src/App.tsx`): an "Applications" nav item and hash routes for the
+  list, `/applications/new`, and `/applications/:id/edit`.
+
+- **Verification.** The `admin_spa_type_checks` test now compiles the new screens against the
+  generated client contract, and `npm run build` bundles the SPA; the `sc-api` client-sync and
+  TypeScript type-check tests confirm the generator change is consistent for both the admin and
+  code-framework clients.
+
 ## Phase 10 — admin API for applications: CRUD, build+mount, framework specs, typed error kinds (design §13.1/§13.2/§16)
 
 The admin UI's contract for managing applications now exists as typed endpoints, so an

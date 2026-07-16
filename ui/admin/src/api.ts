@@ -39,13 +39,29 @@ export const api: ApiClient = createClient({ fetch: browserFetch });
 
 /**
  * The HTTP status embedded in an error thrown by the generated client, if any.
- * The client throws `Error("<name> failed: <status>")`, so we recover the code
- * to distinguish, e.g., a 401 (bad credentials) from a real network failure.
+ * The client throws `Error("<name> failed: <status>[: <server message>]")`, so
+ * we recover the code to distinguish, e.g., a 401 (bad credentials) from a real
+ * network failure. The status is matched wherever it sits, since a server
+ * message may follow it.
  */
 export function errorStatus(err: unknown): number | null {
   if (err instanceof Error) {
-    const match = err.message.match(/failed: (\d+)$/);
+    const match = err.message.match(/failed: (\d+)/);
     if (match) return Number(match[1]);
   }
   return null;
+}
+
+/**
+ * The server's own message from an error the generated client threw, if it
+ * carried one (the `: <server message>` the client appends after the status) —
+ * otherwise the raw error message. This is what surfaces, e.g., a failed build's
+ * bundler diagnostics to the admin.
+ */
+export function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) {
+    const match = err.message.match(/failed: \d+: ([\s\S]+)$/);
+    if (match) return match[1];
+  }
+  return fallback;
 }

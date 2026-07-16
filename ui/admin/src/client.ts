@@ -70,6 +70,19 @@ export interface ClientOptions {
   fetch?: typeof fetch;
 }
 
+async function clientError(op: string, res: Response): Promise<Error> {
+  let detail = "";
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === "object" && "error" in body && typeof (body as { error: unknown }).error === "string") {
+      detail = `: ${(body as { error: string }).error}`;
+    }
+  } catch {
+    // Non-JSON body: the status alone will have to describe the failure.
+  }
+  return new Error(`${op} failed: ${res.status}${detail}`);
+}
+
 export function createClient(options: ClientOptions = {}): ApiClient {
   const baseUrl = options.baseUrl ?? "";
   const doFetch = options.fetch ?? fetch;
@@ -78,7 +91,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const res = await doFetch(`${baseUrl}/api/auth/status`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`authStatus failed: ${res.status}`);
+      if (!res.ok) throw await clientError("authStatus", res);
       return (await res.json()) as AuthStatusResponse;
     },
     async createFirstUser(body) {
@@ -87,7 +100,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`createFirstUser failed: ${res.status}`);
+      if (!res.ok) throw await clientError("createFirstUser", res);
       return (await res.json()) as CreateFirstUserResponse;
     },
     async login(body) {
@@ -96,21 +109,21 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`login failed: ${res.status}`);
+      if (!res.ok) throw await clientError("login", res);
       return (await res.json()) as LoginResponse;
     },
     async logout() {
       const res = await doFetch(`${baseUrl}/api/logout`, {
         method: "POST",
       });
-      if (!res.ok) throw new Error(`logout failed: ${res.status}`);
+      if (!res.ok) throw await clientError("logout", res);
       return;
     },
     async listTables() {
       const res = await doFetch(`${baseUrl}/api/tables`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`listTables failed: ${res.status}`);
+      if (!res.ok) throw await clientError("listTables", res);
       return (await res.json()) as ListTablesResponse;
     },
     async createTable(body) {
@@ -119,14 +132,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`createTable failed: ${res.status}`);
+      if (!res.ok) throw await clientError("createTable", res);
       return (await res.json()) as CreateTableResponse;
     },
     async listFields(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`listFields failed: ${res.status}`);
+      if (!res.ok) throw await clientError("listFields", res);
       return (await res.json()) as ListFieldsResponse;
     },
     async createField(table, body) {
@@ -135,14 +148,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`createField failed: ${res.status}`);
+      if (!res.ok) throw await clientError("createField", res);
       return (await res.json()) as CreateFieldResponse;
     },
     async listRows(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`listRows failed: ${res.status}`);
+      if (!res.ok) throw await clientError("listRows", res);
       return (await res.json()) as ListRowsResponse;
     },
     async createRow(table, body) {
@@ -151,7 +164,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`createRow failed: ${res.status}`);
+      if (!res.ok) throw await clientError("createRow", res);
       return (await res.json()) as CreateRowResponse;
     },
     async updateRow(table, id, body) {
@@ -160,21 +173,21 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`updateRow failed: ${res.status}`);
+      if (!res.ok) throw await clientError("updateRow", res);
       return (await res.json()) as UpdateRowResponse;
     },
     async deleteRow(table, id) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/${id}`, {
         method: "DELETE",
       });
-      if (!res.ok) throw new Error(`deleteRow failed: ${res.status}`);
+      if (!res.ok) throw await clientError("deleteRow", res);
       return;
     },
     async listFileStores() {
       const res = await doFetch(`${baseUrl}/api/file-stores`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`listFileStores failed: ${res.status}`);
+      if (!res.ok) throw await clientError("listFileStores", res);
       return (await res.json()) as ListFileStoresResponse;
     },
     async browseFiles(store, body) {
@@ -183,7 +196,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`browseFiles failed: ${res.status}`);
+      if (!res.ok) throw await clientError("browseFiles", res);
       return (await res.json()) as BrowseFilesResponse;
     },
     async readFile(store, body) {
@@ -192,7 +205,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`readFile failed: ${res.status}`);
+      if (!res.ok) throw await clientError("readFile", res);
       return (await res.json()) as ReadFileResponse;
     },
     async writeFile(store, body) {
@@ -201,14 +214,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`writeFile failed: ${res.status}`);
+      if (!res.ok) throw await clientError("writeFile", res);
       return (await res.json()) as WriteFileResponse;
     },
     async listApplications() {
       const res = await doFetch(`${baseUrl}/api/applications`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`listApplications failed: ${res.status}`);
+      if (!res.ok) throw await clientError("listApplications", res);
       return (await res.json()) as ListApplicationsResponse;
     },
     async createApplication(body) {
@@ -217,7 +230,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`createApplication failed: ${res.status}`);
+      if (!res.ok) throw await clientError("createApplication", res);
       return (await res.json()) as CreateApplicationResponse;
     },
     async updateApplication(id, body) {
@@ -226,35 +239,35 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`updateApplication failed: ${res.status}`);
+      if (!res.ok) throw await clientError("updateApplication", res);
       return (await res.json()) as UpdateApplicationResponse;
     },
     async deleteApplication(id) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
         method: "DELETE",
       });
-      if (!res.ok) throw new Error(`deleteApplication failed: ${res.status}`);
+      if (!res.ok) throw await clientError("deleteApplication", res);
       return (await res.json()) as DeleteApplicationResponse;
     },
     async buildApplication(id) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}/build`, {
         method: "POST",
       });
-      if (!res.ok) throw new Error(`buildApplication failed: ${res.status}`);
+      if (!res.ok) throw await clientError("buildApplication", res);
       return (await res.json()) as BuildApplicationResponse;
     },
     async listFrameworks() {
       const res = await doFetch(`${baseUrl}/api/frameworks`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`listFrameworks failed: ${res.status}`);
+      if (!res.ok) throw await clientError("listFrameworks", res);
       return (await res.json()) as ListFrameworksResponse;
     },
     async listUsers() {
       const res = await doFetch(`${baseUrl}/api/users`, {
         method: "GET",
       });
-      if (!res.ok) throw new Error(`listUsers failed: ${res.status}`);
+      if (!res.ok) throw await clientError("listUsers", res);
       return (await res.json()) as ListUsersResponse;
     },
     async createUser(body) {
@@ -263,7 +276,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`createUser failed: ${res.status}`);
+      if (!res.ok) throw await clientError("createUser", res);
       return (await res.json()) as CreateUserResponse;
     },
   };

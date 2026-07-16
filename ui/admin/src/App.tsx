@@ -11,6 +11,8 @@ import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "./api";
 import type { AuthStatusResponse } from "./client";
+import { Applications } from "./screens/Applications";
+import { ApplicationForm } from "./screens/ApplicationForm";
 import { FirstUser } from "./screens/FirstUser";
 import { Login } from "./screens/Login";
 import { Tables } from "./screens/Tables";
@@ -102,6 +104,12 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
             <Nav.Link href="#/tables" active={route.startsWith("/tables")}>
               Tables
             </Nav.Link>
+            <Nav.Link
+              href="#/applications"
+              active={route.startsWith("/applications")}
+            >
+              Applications
+            </Nav.Link>
             <Nav.Link href="#/users" active={route.startsWith("/users")}>
               Users
             </Nav.Link>
@@ -124,6 +132,16 @@ function Screen({ route }: { route: string }) {
   const tableMatch = route.match(/^\/tables\/([^/]+)$/);
   if (tableMatch) {
     return <TableDetail table={decodeURIComponent(tableMatch[1])} />;
+  }
+  if (route === "/applications/new") {
+    return <ApplicationForm />;
+  }
+  const editMatch = route.match(/^\/applications\/([^/]+)\/edit$/);
+  if (editMatch) {
+    return <ApplicationForm appId={decodeURIComponent(editMatch[1])} />;
+  }
+  if (route.startsWith("/applications")) {
+    return <Applications />;
   }
   if (route.startsWith("/users")) {
     return <Users />;

@@ -190,10 +190,10 @@ Two decisions worth reading before starting, both in §13.2:
 
 **Admin SPA (`ui/admin`):**
 
-- [ ] Applications screen: list, create, edit, delete
-- [ ] Create/edit form: pick a framework → render its `config_spec` settings; subdomain; table + file-store subsets; APIs (provider + mount); static dirs; CSP. `ui/form-runtime` is out of MVP scope, so render the `FormField` spec with a plain form — the point is only that no screen knows a specific framework's settings
-- [ ] Build button with its outcome surfaced (success, or the bundler's diagnostics), and a visible saved-but-unbuilt state
-- [ ] A link to the app's own subdomain from the applications list
+- [x] Applications screen: list, create, edit, delete (`ui/admin/src/screens/Applications.tsx` + `ApplicationForm.tsx`, wired into `App.tsx`)
+- [x] Create/edit form: pick a framework → render its `config_spec` settings; subdomain; table + file-store subsets; APIs (provider + mount); static dirs; CSP. Rendered as a plain form from the `config_spec` data — no framework-specific code in any screen
+- [x] Build button with its outcome surfaced (success log, or the bundler's diagnostics via the enriched client error), and a visible saved-but-unbuilt state ("Not built yet" until built this session, since the server persists no build status)
+- [x] A link to the app's own subdomain from the applications list (`<subdomain>.<the admin's host>`, opens the running app)
 
 ## Phase 11 — MVP hardening & acceptance
 
