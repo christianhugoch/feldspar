@@ -195,6 +195,11 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 > fatal, and can be fixed and rebuilt without a restart. Without a base domain the
 > server has no way to address an app, so it serves the admin only.
 
+> **Building your first application?**
+> [`docs/tutorial-react-todo.md`](docs/tutorial-react-todo.md) walks through a React
+> to-do app end to end — data model, file store, the `code` framework, building, and
+> the generated typed API client.
+
 ### Examples
 
 Local development, connecting with a URL and serving the pre-built bundle
