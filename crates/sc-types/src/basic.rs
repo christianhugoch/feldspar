@@ -175,6 +175,49 @@ impl BasicType {
         }
     }
 
+    /// Whether a **JSON** value is compatible with this type — the check for a
+    /// value that arrived as JSON rather than as a [`Value`]: an [`Attrs`](crate::Attrs)
+    /// entry, which is what a [`FormField`](crate::FormField) describes when it
+    /// declares a configurable extension's settings (§13.3).
+    ///
+    /// JSON represents three of the families natively (bool, number, string), so
+    /// those are matched strictly: a `Bool` setting wants `true`, not `"true"`.
+    /// The rest have no JSON form and travel as strings, so they are checked by
+    /// parsing them exactly the way [`catchall::parse`](crate::catchall::parse)
+    /// parses a form input. A [`Json`](BasicType::Json) setting takes any shape at
+    /// all — that is what asking for JSON means.
+    ///
+    /// `null` is accepted by every type, as [`Value::Null`] is by
+    /// [`accepts`](BasicType::accepts): it means "no value", and whether that is
+    /// allowed is a requiredness question, not a type one.
+    pub fn accepts_json(&self, json: &serde_json::Value) -> bool {
+        use serde_json::Value as Json;
+        if matches!(self, BasicType::Json) {
+            return true;
+        }
+        match json {
+            Json::Null => true,
+            Json::Bool(_) => matches!(self, BasicType::Bool),
+            Json::Number(n) => match self {
+                BasicType::Int => n.is_i64(),
+                BasicType::Float | BasicType::Decimal => true,
+                _ => false,
+            },
+            Json::String(s) => match self {
+                // Text takes any string; `Other` is edited as text (see
+                // `accepts`).
+                BasicType::Text | BasicType::Other(_) => true,
+                // Natively representable in JSON, so a string is the wrong
+                // shape — not something to coerce.
+                BasicType::Bool | BasicType::Int | BasicType::Float => false,
+                // No JSON form: a string encoding, checked by parsing it.
+                _ => crate::catchall::parse(self, s).is_ok(),
+            },
+            // No basic type is a list or an object; that is what `Json` is for.
+            Json::Array(_) | Json::Object(_) => false,
+        }
+    }
+
     /// Validate that `value` is compatible with this type, returning a
     /// descriptive [`Error::Invalid`] when it is not (principle 5: no silent
     /// coercion).

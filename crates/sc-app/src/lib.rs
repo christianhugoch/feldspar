@@ -46,9 +46,11 @@ pub use store::{
     save_application,
 };
 pub use build::{
-    AppSource, BuildReport, build_app, build_application, build_code_framework, emit_client,
-    run_build,
+    AppSource, BuildReport, app_source_from_config, build_app, build_application,
+    build_code_framework, emit_client, run_build,
 };
 pub use framework::{
-    AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CodeFramework, Framework, Method,
+    AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
+    CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, Method, code_config_spec,
+    framework_config_spec, validate_framework_config,
 };

@@ -39,32 +39,34 @@ async fn catalog(db: &TestDb) -> Result<Catalog> {
     Catalog::init(driver as Arc<dyn DatabaseDriver>).await
 }
 
+/// A `code` framework config that satisfies `code_config_spec` — what the admin
+/// UI's form would post back.
+fn code_framework() -> FrameworkRef {
+    FrameworkRef::new("code")
+        .with("store", "apps")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh")
+        .with("client", "web/src/client.ts")
+}
+
 /// An application exercising every column: both §9 required extras
-/// (description, attributes), a framework with non-string config, extra
-/// frameworks, both subsets, an API, a static dir, and a non-default CSP.
+/// (description, attributes), a configured framework, both subsets, an API, a
+/// static dir, and a non-default CSP.
 fn blog() -> Application {
-    Application::new(
-        "My Blog",
-        "blog",
-        FrameworkRef::new("code")
-            .with("store", "apps")
-            .with("source", "web")
-            .with("output", "web/dist")
-            .with("minify", true)
-            .with("workers", 4),
-    )
-    .description("The company blog")
-    .with_table(TableId("posts".to_owned()))
-    .with_table(TableId("comments".to_owned()))
-    .with_file_store(FileStoreId("uploads".to_owned()))
-    .with_api(ApiConfig::new("rest", "/api"))
-    .with_static_dir(StaticDir::new(
-        "/docs",
-        FileStoreId("uploads".to_owned()),
-        "handbook",
-    ))
-    .csp(CspPolicy::strict().directive("img-src", ["'self'", "data:"]))
-    .attribute("theme", "dark")
+    Application::new("My Blog", "blog", code_framework())
+        .description("The company blog")
+        .with_table(TableId("posts".to_owned()))
+        .with_table(TableId("comments".to_owned()))
+        .with_file_store(FileStoreId("uploads".to_owned()))
+        .with_api(ApiConfig::new("rest", "/api"))
+        .with_static_dir(StaticDir::new(
+            "/docs",
+            FileStoreId("uploads".to_owned()),
+            "handbook",
+        ))
+        .csp(CspPolicy::strict().directive("img-src", ["'self'", "data:"]))
+        .attribute("theme", "dark")
 }
 
 #[tokio::test]
@@ -81,9 +83,12 @@ async fn an_application_round_trips_through_the_table() -> Result<()> {
     let loaded = load_application(&cat, app.id).await?.expect("saved app");
     assert_eq!(loaded, app);
 
-    // Including the parts that are not plain strings.
-    assert_eq!(loaded.framework.config["minify"], serde_json::json!(true));
-    assert_eq!(loaded.framework.config["workers"], serde_json::json!(4));
+    // Including the framework's own settings and the sparse attributes.
+    assert_eq!(loaded.framework.config["store"], serde_json::json!("apps"));
+    assert_eq!(
+        loaded.framework.config["command"],
+        serde_json::json!("sh build.sh")
+    );
     assert_eq!(loaded.attributes["theme"], serde_json::json!("dark"));
     assert_eq!(
         loaded.csp.header_value(),
@@ -131,6 +136,51 @@ async fn saving_an_existing_application_updates_it_in_place() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_misconfigured_framework_is_rejected_on_save() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    bootstrap(&cat).await?;
+
+    // The point of validating on save (§13.3): the admin is standing in front of
+    // the form, so this is where a missing setting should be caught — not at
+    // build time as a bundler error, and not at serve time as a broken app.
+    let missing = Application::new(
+        "Blog",
+        "blog",
+        FrameworkRef::new("code").with("store", "apps"),
+    );
+    let err = save_application(&cat, &missing).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("output"), "should name the setting: {msg}");
+    assert!(msg.contains("code"), "should name the framework: {msg}");
+
+    // An ill-typed setting is caught the same way.
+    let ill_typed = Application::new("Blog", "blog", code_framework().with("source", 42));
+    let msg = save_application(&cat, &ill_typed)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("source"), "{msg}");
+    assert!(msg.contains("text"), "{msg}");
+
+    // A framework nothing has registered cannot be configured at all.
+    let unknown = Application::new("Blog", "blog", FrameworkRef::new("nextjs"));
+    let msg = save_application(&cat, &unknown)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("nextjs"), "{msg}");
+
+    // Rejected means nothing was written — a bad config never becomes a row.
+    assert!(list_applications(&cat).await?.is_empty());
+
+    // And the same app with its settings filled in saves.
+    save_application(&cat, &Application::new("Blog", "blog", code_framework())).await?;
+    assert_eq!(list_applications(&cat).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_duplicate_subdomain_is_rejected() -> Result<()> {
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
@@ -140,7 +190,7 @@ async fn a_duplicate_subdomain_is_rejected() -> Result<()> {
 
     // A different app (different id) claiming the same subdomain: routing
     // dispatches on the subdomain, so this is not a state the server can serve.
-    let clash = Application::new("Other", "blog", FrameworkRef::new("code"));
+    let clash = Application::new("Other", "blog", code_framework());
     let err = save_application(&cat, &clash).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -182,7 +232,7 @@ async fn applications_are_listed_and_deleted() -> Result<()> {
     bootstrap(&cat).await?;
 
     let blog = blog();
-    let shop = Application::new("Shop", "shop", FrameworkRef::new("code"));
+    let shop = Application::new("Shop", "shop", code_framework());
     save_application(&cat, &blog).await?;
     save_application(&cat, &shop).await?;
 
@@ -201,7 +251,7 @@ async fn applications_are_listed_and_deleted() -> Result<()> {
     assert!(!delete_application(&cat, blog.id).await?);
 
     // The subdomain is now free for another app to claim.
-    let replacement = Application::new("New Blog", "blog", FrameworkRef::new("code"));
+    let replacement = Application::new("New Blog", "blog", code_framework());
     save_application(&cat, &replacement).await?;
     let now_serving = load_application_by_subdomain(&cat, "blog").await?.unwrap();
     assert_eq!(now_serving.name, "New Blog");

@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sc_app::{
-    ApiConfig, AppSource, Application, BuildSpec, FrameworkRef, app_client, app_endpoints,
-    app_providers, build_application, emit_client,
+    ApiConfig, Application, FrameworkRef, app_client, app_endpoints, app_providers,
+    app_source_from_config, build_application, emit_client,
 };
-use sc_catalog::{Catalog, FileStoreId, TableId};
+use sc_catalog::{Catalog, TableId};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::Result;
@@ -67,8 +67,19 @@ async fn catalog(db: &TestDb) -> Result<Catalog> {
 }
 
 /// An app declaring only `posts`, with one REST API at `/api`.
+/// The framework config an admin would have filled in; the build settings are
+/// resolved from it rather than hand-built (§13.2).
+fn code_framework() -> FrameworkRef {
+    FrameworkRef::new("code")
+        .with("store", "apps")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh")
+        .with("client", "web/src/client.ts")
+}
+
 fn blog() -> Application {
-    Application::new("Blog", "blog", FrameworkRef::new("code"))
+    Application::new("Blog", "blog", code_framework())
         .with_table(TableId("posts".to_owned()))
         .with_api(ApiConfig::new("rest", "/api"))
 }
@@ -99,7 +110,10 @@ async fn app_client_is_generated_from_the_apps_own_endpoint_set() -> Result<()> 
 
     // The app declared only `posts`, so `secrets` — which exists in the catalog —
     // is nowhere in its client (§13.2).
-    assert!(!ts.contains("Secrets"), "undeclared table leaked into client");
+    assert!(
+        !ts.contains("Secrets"),
+        "undeclared table leaked into client"
+    );
     assert!(!ts.contains("secrets"));
     Ok(())
 }
@@ -110,8 +124,8 @@ async fn an_app_with_no_apis_gets_an_empty_client() -> Result<()> {
     let cat = catalog(&db).await?;
 
     // Declaring a table but enabling no provider exposes nothing.
-    let app = Application::new("Blog", "blog", FrameworkRef::new("code"))
-        .with_table(TableId("posts".to_owned()));
+    let app =
+        Application::new("Blog", "blog", code_framework()).with_table(TableId("posts".to_owned()));
     assert!(app_providers(&app, &cat)?.is_empty());
     assert!(app_endpoints(&app, &cat)?.is_empty());
 
@@ -129,7 +143,7 @@ async fn a_declared_table_missing_from_the_catalog_is_an_error() -> Result<()> {
 
     // The app declares a table nobody created: a misconfiguration, not an app
     // with a quietly smaller API.
-    let app = Application::new("Blog", "blog", FrameworkRef::new("code"))
+    let app = Application::new("Blog", "blog", code_framework())
         .with_table(TableId("ghosts".to_owned()))
         .with_api(ApiConfig::new("rest", "/api"));
     let err = app_endpoints(&app, &cat).expect_err("a missing table must fail");
@@ -144,7 +158,7 @@ async fn an_unknown_api_provider_is_a_configuration_error() -> Result<()> {
 
     // GraphQL is in the design but not the MVP; enabling it fails loudly rather
     // than serving an app with a silently missing API.
-    let app = Application::new("Blog", "blog", FrameworkRef::new("code"))
+    let app = Application::new("Blog", "blog", code_framework())
         .with_table(TableId("posts".to_owned()))
         .with_api(ApiConfig::new("graphql", "/graphql"));
     let err = app_providers(&app, &cat)
@@ -202,16 +216,10 @@ async fn the_client_is_emitted_into_the_apps_source_tree_before_the_bundler_runs
 
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    let source = AppSource::new(
-        FileStoreId("apps".to_owned()),
-        BuildSpec {
-            command: "sh".to_owned(),
-            args: vec!["build.sh".to_owned()],
-            source_dir: "web".to_owned(),
-            output_dir: "web/dist".to_owned(),
-        },
-    )
-    .with_client("web/src/client.ts");
+    // Every build setting comes from the stored framework config, including
+    // where the generated client goes (§13.2) — nothing is hand-built here.
+    let source = app_source_from_config(&code_framework())?;
+    assert_eq!(source.client_path.as_deref(), Some("web/src/client.ts"));
 
     let report = build_application(&cat, &blog(), &source).await?;
 
@@ -239,16 +247,15 @@ async fn emit_client_is_a_no_op_without_a_client_path() -> Result<()> {
     let tmp = TempDir::new("noclient")?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    // No `with_client`: an app that does not consume a generated client.
-    let source = AppSource::new(
-        FileStoreId("apps".to_owned()),
-        BuildSpec {
-            command: "sh".to_owned(),
-            args: vec!["build.sh".to_owned()],
-            source_dir: "web".to_owned(),
-            output_dir: "web/dist".to_owned(),
-        },
-    );
+    // The `client` setting is optional, and leaving it out of the config is how
+    // an admin says "this app does not consume a generated client".
+    let no_client = FrameworkRef::new("code")
+        .with("store", "apps")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh");
+    let source = app_source_from_config(&no_client)?;
+    assert_eq!(source.client_path, None);
     let written = emit_client(&cat, &source, &app_endpoints(&blog(), &cat)?).await?;
     assert!(written.is_none());
 

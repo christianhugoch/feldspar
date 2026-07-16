@@ -25,6 +25,7 @@
 //! thing that ends up in the bag, not [`Value`](sc_query::Value)'s tagged
 //! encoding.
 
+use sc_error::{Error, Result};
 use serde_json::Value as Json;
 
 use crate::{Attrs, TypeRef};
@@ -151,6 +152,101 @@ impl FormField {
     pub fn resolve<'a>(&'a self, attrs: &'a Attrs) -> Option<&'a Json> {
         attrs.get(&self.base.name).or(self.default.as_ref())
     }
+
+    /// Check the value this field resolves to out of `attrs`.
+    ///
+    /// Three ways to fail, each an [`Error::invalid`] **naming the field**, so the
+    /// message lands the admin on the control they have to fix:
+    ///
+    /// - required and absent (with no default to stand in),
+    /// - present but of the wrong type ([`BasicType::accepts_json`]),
+    /// - present but not one of the [`options`](FormField::options).
+    ///
+    /// A `null` counts as absent, so an optional field explicitly set to null is
+    /// fine and a required one is not.
+    pub fn validate(&self, attrs: &Attrs) -> Result<()> {
+        let label = &self.base.name;
+        let value = self.resolve(attrs).filter(|v| !v.is_null());
+
+        let Some(value) = value else {
+            if self.required {
+                return Err(Error::invalid(format!("setting `{label}` is required")));
+            }
+            return Ok(());
+        };
+
+        let Some(basic) = self.base.type_.as_basic() else {
+            // Unreachable in the MVP (`TypeRef` is basic-only); a rich type would
+            // validate through its own `validate`, not here.
+            return Ok(());
+        };
+        if !basic.accepts_json(value) {
+            return Err(Error::invalid(format!(
+                "setting `{label}` should be {}, got {}",
+                basic.name(),
+                json_kind(value)
+            )));
+        }
+
+        if !self.options.is_empty() && !self.options.contains(value) {
+            let allowed = self
+                .options
+                .iter()
+                .map(|o| o.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::invalid(format!(
+                "setting `{label}` should be one of {allowed}, got {value}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Check a whole `Attrs` bag against the spec that describes it — the check a
+/// configurable extension's config goes through **on save** (§13.3), so a
+/// misconfiguration is rejected where the admin can fix it rather than at build
+/// or serve time.
+///
+/// Every field is validated, and an `attrs` key the spec does not describe is
+/// itself an error: the admin UI renders exactly the spec, so an unknown setting
+/// is a typo or a stale config, and silently ignoring it is how a setting the
+/// admin believes they set does nothing at all.
+///
+/// The first failure wins. Reporting every problem at once would be friendlier,
+/// but it needs an error type that can carry a list; `Error` cannot yet, and
+/// inventing one here is out of proportion to a settings form.
+pub fn validate_attrs(spec: &[FormField], attrs: &Attrs) -> Result<()> {
+    for field in spec {
+        field.validate(attrs)?;
+    }
+    for key in attrs.keys() {
+        if !spec.iter().any(|f| &f.base.name == key) {
+            let known = spec
+                .iter()
+                .map(|f| f.base.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::invalid(if known.is_empty() {
+                format!("unknown setting `{key}`; this takes no settings")
+            } else {
+                format!("unknown setting `{key}`; known settings are {known}")
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// A JSON value's shape, for error messages.
+fn json_kind(value: &Json) -> &'static str {
+    match value {
+        Json::Null => "null",
+        Json::Bool(_) => "a boolean",
+        Json::Number(_) => "a number",
+        Json::String(_) => "a string",
+        Json::Array(_) => "a list",
+        Json::Object(_) => "an object",
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +325,94 @@ mod tests {
         // Absent with no default is what makes a required field invalid.
         let no_default = FormField::new("output", BasicType::Text).required();
         assert_eq!(no_default.resolve(&Attrs::new()), None);
+    }
+
+    #[test]
+    fn validate_names_the_setting_it_rejects() {
+        // Every message must name the field: it is what tells the admin which
+        // control to go and fix.
+        let required = FormField::new("store", BasicType::Text).required();
+        let err = required.validate(&Attrs::new()).unwrap_err().to_string();
+        assert!(err.contains("store"), "{err}");
+        assert!(err.contains("required"), "{err}");
+
+        let mut wrong_type = Attrs::new();
+        wrong_type.insert("store".to_owned(), json!(42));
+        let err = required.validate(&wrong_type).unwrap_err().to_string();
+        assert!(err.contains("store"), "{err}");
+        assert!(err.contains("text"), "{err}");
+        assert!(err.contains("a number"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_what_the_spec_allows() {
+        let field = FormField::new("source", BasicType::Text).required();
+        let mut attrs = Attrs::new();
+        attrs.insert("source".to_owned(), json!("web"));
+        assert!(field.validate(&attrs).is_ok());
+
+        // A default satisfies a required field: it is a value, just not a typed
+        // one.
+        let defaulted = FormField::new("source", BasicType::Text)
+            .required()
+            .default_value("web");
+        assert!(defaulted.validate(&Attrs::new()).is_ok());
+
+        // Optional and absent is fine; optional and explicitly null is too.
+        let optional = FormField::new("client", BasicType::Text);
+        assert!(optional.validate(&Attrs::new()).is_ok());
+        let mut nulled = Attrs::new();
+        nulled.insert("client".to_owned(), json!(null));
+        assert!(optional.validate(&nulled).is_ok());
+
+        // But null does not satisfy a required field — null is absence.
+        let mut nulled_required = Attrs::new();
+        nulled_required.insert("store".to_owned(), json!(null));
+        assert!(
+            FormField::new("store", BasicType::Text)
+                .required()
+                .validate(&nulled_required)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_enforces_options() {
+        let field = FormField::new("bundler", BasicType::Text).options(["vite", "webpack"]);
+        let mut ok = Attrs::new();
+        ok.insert("bundler".to_owned(), json!("vite"));
+        assert!(field.validate(&ok).is_ok());
+
+        let mut bad = Attrs::new();
+        bad.insert("bundler".to_owned(), json!("rollup"));
+        let err = field.validate(&bad).unwrap_err().to_string();
+        assert!(err.contains("bundler"), "{err}");
+        assert!(err.contains("vite"), "should list what is allowed: {err}");
+    }
+
+    #[test]
+    fn validate_attrs_rejects_an_unknown_setting() {
+        let spec = [FormField::new("store", BasicType::Text).required()];
+        let mut attrs = Attrs::new();
+        attrs.insert("store".to_owned(), json!("apps"));
+        assert!(validate_attrs(&spec, &attrs).is_ok());
+
+        // A setting the spec does not describe is a typo or a stale config.
+        // Ignoring it silently is how a setting the admin believes they set does
+        // nothing at all.
+        attrs.insert("storee".to_owned(), json!("apps"));
+        let err = validate_attrs(&spec, &attrs).unwrap_err().to_string();
+        assert!(err.contains("storee"), "{err}");
+        assert!(
+            err.contains("store"),
+            "should list the known settings: {err}"
+        );
+
+        // An extension that takes no settings says so.
+        let mut any = Attrs::new();
+        any.insert("x".to_owned(), json!(1));
+        let err = validate_attrs(&[], &any).unwrap_err().to_string();
+        assert!(err.contains("takes no settings"), "{err}");
     }
 
     #[test]

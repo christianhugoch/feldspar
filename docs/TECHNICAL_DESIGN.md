@@ -895,14 +895,26 @@ configuration form, for every configurable extension point, and the same one a r
 already uses. Post-MVP this is `ui/form-runtime`
 (§12); the MVP, which does not have it yet, renders the same `FormField` data with a plain
 form and gains the runtime later without a contract change. `FrameworkRef.config` is
-validated against the spec on save, so a misconfigured app is rejected at the point the admin
-can fix it rather than at build or serve time.
+validated against the spec on save (`validate_framework_config`), so a misconfigured app is
+rejected at the point the admin can fix it rather than at build or serve time, and the same
+config resolves to the build step (`app_source_from_config`) — the store, sub-directories and
+build command are stated in the config and nowhere else.
+
+`config_spec` takes no arguments, and that has a consequence worth stating: a framework's
+settings are **static**, so a setting whose choices depend on runtime state — the `store`
+setting should be a pick-list of the *connected* file stores — cannot express that list in the
+spec. In the MVP it is a free-text store name, validated as text and resolved against the
+catalog when the build runs (an unknown store fails the build, not the save). The general
+answer is §6.2's `OptionsSource::ServerQuery`, which the form runtime evaluates; it arrives
+with the runtime, and until then the spec deliberately under-describes this one setting rather
+than threading a `&Catalog` into every framework's `config_spec`.
 
 - **Code frameworks** (React, Next.js, SvelteKit, React Native): the app's source lives in
   a git repository that is (a subdir of) a selected file store, editable in an in-browser
   editor (ideally VS Code for the Web), with a build step. `sc-server` serves the bundled
   assets. The app talks to data only through the API providers. Their `config_spec` is
-  where "which file store, which subdirectory, which build command" is declared.
+  where "which file store, which subdirectory, which build command" is declared — as the
+  settings `store`, `source`, `output`, `command` and an optional `client`.
 - **Saltcorn-v1 framework**: the drag-and-drop views/pages experience, continuously
   improved, using `sc-viewpattern` + `ui/builder`. How its rendered output stays CSP-safe
   now that `sc-markup` is dropped is an open question (§18.5).

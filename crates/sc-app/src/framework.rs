@@ -15,6 +15,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
+use sc_types::{BasicType, FormField, validate_attrs};
+
+use crate::application::FrameworkRef;
 
 pub use sc_api::Method;
 
@@ -96,11 +99,34 @@ pub struct BuildSpec {
     pub output_dir: String,
 }
 
+/// The registered name of the MVP's one framework: a code framework serving a
+/// bundled SPA. Mirrors [`REST_PROVIDER`](sc_api::REST_PROVIDER) — a
+/// [`FrameworkRef`](crate::FrameworkRef) names its framework rather than holding
+/// it, so the name is the registry key.
+pub const CODE_FRAMEWORK: &str = "code";
+
 /// Owns an application's primary UI (design §13.3).
 #[async_trait]
 pub trait Framework: Send + Sync {
     /// The framework's registered name (`"code"`, `"saltcorn-v1"`, …).
     fn name(&self) -> &str;
+
+    /// The settings this framework needs, so the admin UI can render a form for
+    /// them **without knowing anything about this framework** (§13.2/§13.3).
+    ///
+    /// This is what makes "the admin picks a framework" work: GOALS requires that
+    /// different frameworks have different settings — a React app needs the file
+    /// store holding its code, a Saltcorn-v1 app needs none of that — and the
+    /// admin UI must render a form for whichever was picked with no
+    /// per-framework special case, including for a framework supplied by a guest
+    /// language through `sc-code`. So settings are declared as data, in the same
+    /// [`FormField`] vocabulary a row editor uses (§6.2).
+    ///
+    /// A [`FrameworkRef`](crate::FrameworkRef)'s config is checked against this on
+    /// save ([`validate_framework_config`](crate::validate_framework_config)), so
+    /// a misconfigured app is rejected where the admin can fix it rather than at
+    /// build or serve time.
+    fn config_spec(&self) -> Vec<FormField>;
 
     /// Serve one request against the app's routes. The [`Catalog`] is available
     /// for frameworks that render server-side against data; a code framework that
@@ -110,6 +136,79 @@ pub trait Framework: Send + Sync {
 
     /// The build step for a code framework, or `None` for a build-less framework.
     fn build(&self) -> Option<BuildSpec>;
+}
+
+/// The `store` setting: which file store holds the app's source.
+pub const CFG_STORE: &str = "store";
+/// The `source` setting: the sub-directory of the store the source sits in.
+pub const CFG_SOURCE: &str = "source";
+/// The `output` setting: the sub-directory the bundler emits into.
+pub const CFG_OUTPUT: &str = "output";
+/// The `command` setting: the build command, e.g. `npm run build`.
+pub const CFG_COMMAND: &str = "command";
+/// The `client` setting: where to emit the generated TypeScript client.
+pub const CFG_CLIENT: &str = "client";
+
+/// The settings a [`CodeFramework`] needs (design §13.3: "which file store, which
+/// subdirectory, which build command").
+///
+/// A free function as well as a [`Framework::config_spec`] impl, because the
+/// admin UI and the save-time check need a framework's settings **before** there
+/// is an instance to ask: a `CodeFramework` only exists once its bundle is built,
+/// and the whole point is to configure it before that. The trait method
+/// delegates here, so the two cannot drift.
+pub fn code_config_spec() -> Vec<FormField> {
+    vec![
+        FormField::new(CFG_STORE, BasicType::Text)
+            .label("File store")
+            .required(),
+        FormField::new(CFG_SOURCE, BasicType::Text)
+            .label("Source directory")
+            .default_value(""),
+        FormField::new(CFG_OUTPUT, BasicType::Text)
+            .label("Output directory")
+            .required(),
+        FormField::new(CFG_COMMAND, BasicType::Text)
+            .label("Build command")
+            .required(),
+        FormField::new(CFG_CLIENT, BasicType::Text).label("Generated client path"),
+    ]
+}
+
+/// The settings the framework registered under `name` declares — the registry
+/// lookup, resolving a [`FrameworkRef`](crate::FrameworkRef)'s name to a spec
+/// without needing an instance.
+///
+/// The MVP registers one name, [`CODE_FRAMEWORK`]; an unknown name is a
+/// configuration error rather than an app with no settings, mirroring how
+/// [`app_providers`](crate::app_providers) treats an unknown API provider.
+pub fn framework_config_spec(name: &str) -> Result<Vec<FormField>> {
+    match name {
+        CODE_FRAMEWORK => Ok(code_config_spec()),
+        other => Err(Error::config(format!(
+            "unknown framework `{other}`; the MVP ships only `{CODE_FRAMEWORK}`"
+        ))),
+    }
+}
+
+/// Check a [`FrameworkRef`](crate::FrameworkRef)'s config against its framework's
+/// [`config_spec`](Framework::config_spec) (§13.3).
+///
+/// Called **on save** (see [`save_application`](crate::save_application)), which
+/// is the point of it: a missing or ill-typed setting is the admin's to fix, and
+/// the admin is standing in front of the form. Discovering it at build time means
+/// a bundler error, and at serve time means a broken app.
+pub fn validate_framework_config(fw: &FrameworkRef) -> Result<()> {
+    let spec = framework_config_spec(&fw.name)?;
+    validate_attrs(&spec, &fw.config).map_err(|e| match e {
+        // Name the framework as well as the setting. Rebuilt rather than
+        // wrapped: `Error`'s `Invalid` renders its own "invalid:" prefix, so
+        // formatting the whole error into a new one would say it twice, and
+        // `Error::Context` would show only the context and hide the setting —
+        // which is the part the admin needs.
+        Error::Invalid(msg) => Error::invalid(format!("framework `{}`: {msg}", fw.name)),
+        other => other,
+    })
 }
 
 /// One bundled asset: its bytes and content type.
@@ -221,7 +320,10 @@ fn load_dir(root: &Path, current: &Path, bundle: &mut AssetBundle) -> Result<()>
 /// Normalise an asset key: strip leading slashes, use `/` separators.
 fn normalize_key(path: &str) -> String {
     let mut normalized = PathBuf::new();
-    for part in path.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".") {
+    for part in path
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+    {
         normalized.push(part);
     }
     normalized.to_string_lossy().replace('\\', "/")
@@ -319,6 +421,10 @@ impl Framework for CodeFramework {
         &self.name
     }
 
+    fn config_spec(&self) -> Vec<FormField> {
+        code_config_spec()
+    }
+
     async fn handle(&self, req: AppRequest, _cat: &Catalog) -> Result<AppResponse> {
         // A static bundle never touches the catalog; all behaviour lives in
         // `serve`, which is directly testable without a database.
@@ -334,9 +440,67 @@ impl Framework for CodeFramework {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_code_framework_declares_the_settings_section_13_3_names() {
+        let spec = code_config_spec();
+        let names: Vec<&str> = spec.iter().map(|f| f.name()).collect();
+        // §13.3: "which file store, which subdirectory, which build command".
+        assert_eq!(
+            names,
+            [CFG_STORE, CFG_SOURCE, CFG_OUTPUT, CFG_COMMAND, CFG_CLIENT]
+        );
+
+        // Every setting carries a human label, because the admin UI renders this
+        // and nothing else knows what these mean.
+        assert!(spec.iter().all(|f| !f.base.label.is_empty()));
+        assert!(spec.iter().any(|f| f.base.label == "File store"));
+
+        // The store, output and command are the app's to state; the source
+        // directory defaults to the store root and the client is opt-in.
+        let required: Vec<&str> = spec
+            .iter()
+            .filter(|f| f.required)
+            .map(|f| f.name())
+            .collect();
+        assert_eq!(required, [CFG_STORE, CFG_OUTPUT, CFG_COMMAND]);
+    }
+
+    #[test]
+    fn an_instance_reports_the_same_spec_as_the_free_function() {
+        // The trait method delegates, so the admin UI (which has no instance) and
+        // a mounted framework cannot disagree about what the settings are.
+        let framework = CodeFramework::new(CODE_FRAMEWORK, AssetBundle::new());
+        assert_eq!(framework.config_spec(), code_config_spec());
+        assert_eq!(
+            framework_config_spec(CODE_FRAMEWORK).unwrap(),
+            code_config_spec()
+        );
+    }
+
+    #[test]
+    fn an_unknown_framework_has_no_spec() {
+        let err = framework_config_spec("nextjs").unwrap_err().to_string();
+        assert!(err.contains("nextjs"), "{err}");
+        assert!(err.contains(CODE_FRAMEWORK), "should say what is available");
+    }
+
+    #[test]
+    fn validate_framework_config_names_the_framework_and_the_setting() {
+        let err = validate_framework_config(&FrameworkRef::new(CODE_FRAMEWORK))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(CODE_FRAMEWORK), "{err}");
+        assert!(err.contains(CFG_STORE), "{err}");
+        // One "invalid:" prefix, not two — the message is rebuilt, not nested.
+        assert_eq!(err.matches("invalid:").count(), 1, "{err}");
+    }
+
     fn sample_bundle() -> AssetBundle {
         AssetBundle::new()
-            .with("index.html", Bytes::from_static(b"<!doctype html><div id=root>"))
+            .with(
+                "index.html",
+                Bytes::from_static(b"<!doctype html><div id=root>"),
+            )
             .with("assets/app.js", Bytes::from_static(b"console.log(1)"))
             .with("assets/app.css", Bytes::from_static(b"body{}"))
             .fallback("index.html")

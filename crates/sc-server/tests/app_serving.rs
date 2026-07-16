@@ -20,7 +20,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use sc_app::{
-    ApiConfig, AppSource, Application, BuildSpec, CodeFramework, FrameworkRef, build_application,
+    ApiConfig, Application, CodeFramework, FrameworkRef, app_source_from_config, build_application,
 };
 use sc_auth::{ROLE_ADMIN, ROLE_PUBLIC, SessionStore, create_user};
 use sc_catalog::{Catalog, FileStoreId, TableId};
@@ -195,15 +195,22 @@ fn write_app_source(root: &Path) {
     }
 }
 
+/// The framework config an admin would have filled in; every build setting is
+/// resolved from it rather than hand-built (§13.2).
+fn code_framework() -> FrameworkRef {
+    FrameworkRef::new("code")
+        .with("store", "apps")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh")
+        .with("client", "web/src/client.ts")
+}
+
 fn blog_app() -> Application {
-    Application::new(
-        "Blog",
-        "blog",
-        FrameworkRef::new("code").with("store", "apps"),
-    )
-    .with_table(TableId("posts".to_owned()))
-    .with_file_store(FileStoreId("apps".to_owned()))
-    .with_api(ApiConfig::new("rest", "/api"))
+    Application::new("Blog", "blog", code_framework())
+        .with_table(TableId("posts".to_owned()))
+        .with_file_store(FileStoreId("apps".to_owned()))
+        .with_api(ApiConfig::new("rest", "/api"))
 }
 
 /// Build the app, mount it, and return a router serving it plus the admin.
@@ -233,16 +240,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
 
     // The real build path: emit the app's typed client, run the bundler, serve
     // what it produced.
-    let source = AppSource::new(
-        FileStoreId("apps".to_owned()),
-        BuildSpec {
-            command: "sh".to_owned(),
-            args: vec!["build.sh".to_owned()],
-            source_dir: "web".to_owned(),
-            output_dir: "web/dist".to_owned(),
-        },
-    )
-    .with_client("web/src/client.ts");
+    let source = app_source_from_config(&code_framework())?;
     let report = build_application(&catalog, &blog_app(), &source).await?;
 
     let framework = Arc::new(CodeFramework::new("code", report.bundle));
@@ -363,7 +361,11 @@ async fn the_built_react_app_is_served_and_its_api_round_trips() -> sc_error::Re
     let (status, _) = app.send("POST", "/api/logout", None).await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = app.send("GET", "/api/posts", None).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "logout must end the session");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "logout must end the session"
+    );
     Ok(())
 }
 
@@ -454,7 +456,7 @@ async fn mounting_an_app_without_a_base_domain_is_refused() -> sc_error::Result<
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
 
     let framework = Arc::new(CodeFramework::new("code", Default::default()));
-    let app = Application::new("Blog", "blog", FrameworkRef::new("code"));
+    let app = Application::new("Blog", "blog", code_framework());
     let apps = AppMounts::new(catalog.clone()).mount(MountedApp::new(app, framework, &catalog)?)?;
 
     // No base domain: no request could ever reach the app, so say so at boot
@@ -478,13 +480,13 @@ async fn two_apps_cannot_claim_the_same_subdomain() -> sc_error::Result<()> {
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
 
     let one = MountedApp::new(
-        Application::new("Blog", "blog", FrameworkRef::new("code")),
+        Application::new("Blog", "blog", code_framework()),
         Arc::new(CodeFramework::new("code", Default::default())),
         &catalog,
     )?;
     // A different app claiming the same subdomain.
     let two = MountedApp::new(
-        Application::new("Other", "blog", FrameworkRef::new("code")),
+        Application::new("Other", "blog", code_framework()),
         Arc::new(CodeFramework::new("code", Default::default())),
         &catalog,
     )?;

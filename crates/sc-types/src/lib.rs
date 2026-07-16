@@ -35,7 +35,7 @@ mod type_ref;
 
 pub use attrs::Attrs;
 pub use basic::BasicType;
-pub use field::{BaseField, FormField};
+pub use field::{BaseField, FormField, validate_attrs};
 pub use type_ref::TypeRef;
 
 #[cfg(test)]
@@ -122,6 +122,53 @@ mod tests {
         assert!(BasicType::Int.accepts(&Value::Null));
         assert!(BasicType::Text.accepts(&Value::Null));
         assert_eq!(BasicType::of_value(&Value::Null), None);
+    }
+
+    #[test]
+    fn accepts_json_is_strict_about_the_families_json_represents() {
+        use serde_json::json;
+
+        // JSON has bools, numbers and strings, so a setting of one of those
+        // families wants that shape and is not coerced from another.
+        assert!(BasicType::Bool.accepts_json(&json!(true)));
+        assert!(!BasicType::Bool.accepts_json(&json!("true")));
+        assert!(BasicType::Int.accepts_json(&json!(4)));
+        assert!(!BasicType::Int.accepts_json(&json!("4")));
+        assert!(!BasicType::Int.accepts_json(&json!(1.5)));
+        assert!(BasicType::Float.accepts_json(&json!(1.5)));
+        assert!(BasicType::Text.accepts_json(&json!("web")));
+        assert!(!BasicType::Text.accepts_json(&json!(4)));
+
+        // A `Json` setting takes any shape at all — that is what asking for JSON
+        // means.
+        assert!(BasicType::Json.accepts_json(&json!({"a": [1, 2]})));
+        assert!(BasicType::Json.accepts_json(&json!("anything")));
+
+        // No basic type is a list or an object.
+        assert!(!BasicType::Text.accepts_json(&json!(["a"])));
+        assert!(!BasicType::Int.accepts_json(&json!({})));
+
+        // `null` is "no value" for every type; requiredness is a separate check,
+        // matching how `accepts` treats `Value::Null`.
+        assert!(BasicType::Int.accepts_json(&json!(null)));
+        assert!(BasicType::Text.accepts_json(&json!(null)));
+    }
+
+    #[test]
+    fn accepts_json_checks_string_encoded_families_by_parsing_them() {
+        use serde_json::json;
+
+        // These have no JSON form, so they travel as strings and are checked
+        // exactly the way `catchall::parse` checks a form input.
+        assert!(BasicType::Uuid.accepts_json(&json!("00000000-0000-0000-0000-000000000000")));
+        assert!(!BasicType::Uuid.accepts_json(&json!("not-a-uuid")));
+        assert!(BasicType::Date.accepts_json(&json!("2026-07-16")));
+        assert!(!BasicType::Date.accepts_json(&json!("16/07/2026")));
+        assert!(BasicType::Decimal.accepts_json(&json!("1.25")));
+        assert!(BasicType::Decimal.accepts_json(&json!(1.25)));
+        // `Other` is edited as text, as in `accepts`.
+        assert!(BasicType::Other("inet".into()).accepts_json(&json!("::1")));
+        assert!(!BasicType::Other("inet".into()).accepts_json(&json!(1)));
     }
 
     #[test]

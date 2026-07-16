@@ -30,6 +30,7 @@ use crate::applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
     COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
 };
+use crate::framework::validate_framework_config;
 
 /// Save an application: insert its row, or update it in place if a row with its
 /// [`AppId`] already exists.
@@ -49,6 +50,16 @@ pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()
     }
     if app.name.trim().is_empty() {
         return Err(Error::invalid("an application needs a name"));
+    }
+
+    // Check the framework settings against the spec the framework declares
+    // (§13.3). This is the point of doing it on save: a missing or ill-typed
+    // setting is the admin's to fix and the admin is standing in front of the
+    // form, whereas the same mistake found at build time is a bundler error and
+    // at serve time is a broken app.
+    validate_framework_config(&app.framework)?;
+    for extra in &app.extra_frameworks {
+        validate_framework_config(extra)?;
     }
 
     if let Some(other) = load_application_by_subdomain(catalog, subdomain).await?

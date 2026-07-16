@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sc_app::{
-    AppRequest, AppSource, Application, BuildSpec, CodeFramework, FrameworkRef, build_app,
-    build_code_framework,
+    AppRequest, AppSource, Application, BuildSpec, CodeFramework, FrameworkRef,
+    app_source_from_config, build_app, build_code_framework,
 };
 use sc_catalog::{Catalog, FileStoreId};
 use sc_db::DatabaseDriver;
@@ -77,13 +77,24 @@ fn write_app_source(root: &Path) -> sc_error::Result<()> {
     Ok(())
 }
 
-fn build_spec() -> BuildSpec {
-    BuildSpec {
-        command: "sh".to_owned(),
-        args: vec!["build.sh".to_owned()],
-        source_dir: "web".to_owned(),
-        output_dir: "web/dist".to_owned(),
-    }
+/// The framework config an admin would have filled in for this app — the *only*
+/// place these settings are stated (§13.2). Everything the build needs is
+/// resolved from it by `app_source_from_config`, so no test hand-builds a
+/// `BuildSpec` any more.
+fn code_framework() -> FrameworkRef {
+    FrameworkRef::new("code")
+        .with("store", "apps")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh")
+}
+
+fn app_source() -> sc_error::Result<AppSource> {
+    app_source_from_config(&code_framework())
+}
+
+fn build_spec() -> sc_error::Result<BuildSpec> {
+    Ok(app_source()?.build)
 }
 
 /// A catalog over a real (empty) Postgres. The build step never touches table
@@ -95,8 +106,7 @@ async fn catalog(db: &TestDb) -> sc_error::Result<Catalog> {
 }
 
 #[tokio::test]
-async fn builds_an_app_from_a_git_repo_file_store_and_serves_the_bundle()
--> sc_error::Result<()> {
+async fn builds_an_app_from_a_git_repo_file_store_and_serves_the_bundle() -> sc_error::Result<()> {
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
 
@@ -107,18 +117,11 @@ async fn builds_an_app_from_a_git_repo_file_store_and_serves_the_bundle()
     // An application whose primary framework is a code framework sourced from
     // that store. The `FrameworkRef` carries the same sub-paths as the spec: it
     // is the serialisable form the runtime resolves to the framework below.
-    let app = Application::new(
-        "My Blog",
-        "blog",
-        FrameworkRef::new("code")
-            .with("store", "apps")
-            .with("source", "web")
-            .with("output", "web/dist"),
-    )
-    .with_file_store(FileStoreId("apps".to_owned()));
+    let app = Application::new("My Blog", "blog", code_framework())
+        .with_file_store(FileStoreId("apps".to_owned()));
     assert!(app.can_access_file_store(&FileStoreId("apps".to_owned())));
 
-    let source = AppSource::new(FileStoreId("apps".to_owned()), build_spec());
+    let source = app_source()?;
     let report = build_app(&cat, &source).await?;
 
     // The bundler ran and its three emitted files were picked up.
@@ -161,17 +164,17 @@ async fn build_code_framework_returns_a_rebuildable_framework() -> sc_error::Res
     write_app_source(tmp.path())?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    let source = AppSource::new(FileStoreId("apps".to_owned()), build_spec());
+    let source = app_source()?;
     let fw = build_code_framework(&cat, "code", &source).await?;
 
     assert_eq!(sc_app::Framework::name(&fw), "code");
     // The spec rides along on the framework, so the app can be rebuilt without
     // the caller having kept the source around.
-    assert_eq!(sc_app::Framework::build(&fw), Some(build_spec()));
+    assert_eq!(sc_app::Framework::build(&fw), Some(build_spec()?));
     assert_eq!(fw.serve(&AppRequest::get("/")).status, 200);
 
     // Rebuilding from the framework's own spec reproduces the bundle.
-    let rebuilt = build_app(&cat, &AppSource::new(source.store.clone(), build_spec())).await?;
+    let rebuilt = build_app(&cat, &app_source()?).await?;
     assert_eq!(rebuilt.bundle.len(), 3);
     Ok(())
 }
@@ -191,7 +194,7 @@ async fn a_failing_bundler_fails_the_build_with_its_diagnostics() -> sc_error::R
     )?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    let source = AppSource::new(FileStoreId("apps".to_owned()), build_spec());
+    let source = app_source()?;
     let err = build_app(&cat, &source)
         .await
         .expect_err("a failing bundler must fail the build");
@@ -208,7 +211,7 @@ async fn a_store_not_connected_to_the_catalog_is_rejected() -> sc_error::Result<
     let cat = catalog(&db).await?;
 
     // Nothing connected under this name.
-    let source = AppSource::new(FileStoreId("apps".to_owned()), build_spec());
+    let source = app_source()?;
     let err = build_app(&cat, &source)
         .await
         .expect_err("an unconnected store must fail the build");

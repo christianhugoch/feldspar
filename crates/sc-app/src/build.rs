@@ -19,13 +19,18 @@ use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use sc_api::{EndpointSet, generate_client};
-use sc_catalog::{Catalog, FileStoreId};
+use sc_catalog::{Attrs, Catalog, FileStoreId};
 use sc_error::{Context, Error, Result};
+use sc_types::FormField;
+use serde_json::Value as Json;
 use tokio::process::Command;
 
 use crate::api::app_endpoints;
-use crate::application::Application;
-use crate::framework::{AssetBundle, BuildSpec, CodeFramework};
+use crate::application::{Application, FrameworkRef};
+use crate::framework::{
+    AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT, CFG_SOURCE, CFG_STORE,
+    CODE_FRAMEWORK, CodeFramework, code_config_spec, validate_framework_config,
+};
 
 /// How much of a failed build's output to quote in the error. A bundler can emit
 /// a great deal on failure; the tail holds the actual error, and the whole of it
@@ -67,6 +72,97 @@ impl AppSource {
         self.client_path = Some(path.into());
         self
     }
+}
+
+/// Resolve a code framework's [`AppSource`] (and its [`BuildSpec`]) **from a
+/// stored application's framework config** (design §13.2/§13.3).
+///
+/// This is the join between "an app is a row the admin filled in" and "an app is
+/// a thing that builds": before this, the store/sub-directories/build command
+/// were hand-built in Rust at the call site, which is exactly the configuration
+/// path §13.2 rules out. Now they come from [`FrameworkRef::config`], validated
+/// against [`code_config_spec`].
+///
+/// The config is validated first, so a missing or ill-typed setting surfaces as
+/// the same [`Error::invalid`] naming the setting that a save would have
+/// rejected — a stored app should never reach here invalid, but a caller
+/// building a `FrameworkRef` in memory can.
+pub fn app_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
+    if fw.name != CODE_FRAMEWORK {
+        return Err(Error::config(format!(
+            "framework `{}` has no build step; only `{CODE_FRAMEWORK}` builds from a file store",
+            fw.name
+        )));
+    }
+    validate_framework_config(fw)?;
+
+    let spec = code_config_spec();
+    let store = required_setting(&spec, &fw.config, CFG_STORE)?;
+    let output_dir = required_setting(&spec, &fw.config, CFG_OUTPUT)?;
+    let command_line = required_setting(&spec, &fw.config, CFG_COMMAND)?;
+    // Optional, and defaulted to the store root by the spec.
+    let source_dir = setting(&spec, &fw.config, CFG_SOURCE)?.unwrap_or_default();
+    let client = setting(&spec, &fw.config, CFG_CLIENT)?.filter(|p| !p.trim().is_empty());
+
+    let (command, args) = split_command(&command_line)?;
+    let source = AppSource::new(
+        FileStoreId(store),
+        BuildSpec {
+            command,
+            args,
+            source_dir,
+            output_dir,
+        },
+    );
+    Ok(match client {
+        Some(path) => source.with_client(path),
+        None => source,
+    })
+}
+
+/// A setting's resolved value (stored, else the spec's default) as a string.
+///
+/// `Ok(None)` means "not set and no default"; a non-string value is impossible
+/// once the config has been validated against a spec whose fields are all text,
+/// so it is reported rather than silently coerced.
+fn setting(spec: &[FormField], config: &Attrs, name: &str) -> Result<Option<String>> {
+    let field = spec
+        .iter()
+        .find(|f| f.name() == name)
+        .ok_or_else(|| Error::config(format!("`{CODE_FRAMEWORK}` declares no `{name}` setting")))?;
+    match field.resolve(config) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(Error::invalid(format!(
+            "setting `{name}` should be text, got {other}"
+        ))),
+    }
+}
+
+/// A setting that must be present — [`Error::invalid`] naming it if it is not.
+fn required_setting(spec: &[FormField], config: &Attrs, name: &str) -> Result<String> {
+    setting(spec, config, name)?
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::invalid(format!("setting `{name}` is required")))
+}
+
+/// Split a build command line into the executable and its arguments.
+///
+/// Whitespace-separated, with **no quoting or escaping**: `npm run build` is the
+/// shape this is for, and an argument containing a space cannot be expressed. The
+/// alternative — a separate list-of-arguments setting — needs a form control the
+/// MVP does not have (§6.2's list options are post-MVP), and a real shell parse
+/// would invite the quoting bugs that come with it. The bundler is spawned
+/// directly, not through a shell, so this is a split rather than shell semantics:
+/// no globbing, no pipes, no substitution.
+fn split_command(line: &str) -> Result<(String, Vec<String>)> {
+    let mut parts = line.split_whitespace().map(str::to_owned);
+    let command = parts.next().ok_or_else(|| {
+        Error::invalid(format!(
+            "setting `{CFG_COMMAND}` is empty; it should be a build command such as `npm run build`"
+        ))
+    })?;
+    Ok((command, parts.collect()))
 }
 
 /// The outcome of a successful build.
@@ -270,7 +366,11 @@ fn command_line(spec: &BuildSpec) -> String {
 /// The tail of a failed build's output: stderr when it said anything, else
 /// stdout — bundlers differ on which stream they fail to.
 fn tail<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
-    let text = if stderr.trim().is_empty() { stdout } else { stderr };
+    let text = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
     let text = text.trim_end();
     if text.len() <= OUTPUT_TAIL_BYTES {
         return text;
@@ -338,6 +438,113 @@ mod tests {
             source_dir: "web".to_owned(),
             output_dir: "web/dist".to_owned(),
         }
+    }
+
+    /// A fully-populated `code` framework config — what the admin UI's form for
+    /// `code_config_spec` would post back.
+    fn code_config() -> FrameworkRef {
+        FrameworkRef::new(CODE_FRAMEWORK)
+            .with(CFG_STORE, "apps")
+            .with(CFG_SOURCE, "web")
+            .with(CFG_OUTPUT, "web/dist")
+            .with(CFG_COMMAND, "npm run build")
+    }
+
+    #[test]
+    fn a_valid_config_resolves_to_a_build_spec() {
+        let source = app_source_from_config(&code_config()).expect("valid config");
+
+        assert_eq!(source.store, FileStoreId("apps".to_owned()));
+        // The build command is split into the executable and its arguments.
+        assert_eq!(source.build.command, "npm");
+        assert_eq!(source.build.args, ["run", "build"]);
+        assert_eq!(source.build.source_dir, "web");
+        assert_eq!(source.build.output_dir, "web/dist");
+        // `client` is optional: not set means no generated client.
+        assert_eq!(source.client_path, None);
+
+        // Set, it comes through.
+        let with_client = code_config().with(CFG_CLIENT, "web/src/client.ts");
+        let source = app_source_from_config(&with_client).expect("valid config");
+        assert_eq!(source.client_path.as_deref(), Some("web/src/client.ts"));
+    }
+
+    #[test]
+    fn the_source_directory_defaults_to_the_store_root() {
+        // `source` is the one optional directory: an app whose source sits at the
+        // store root should not have to say so.
+        let mut config = code_config();
+        config.config.remove(CFG_SOURCE);
+        let source = app_source_from_config(&config).expect("valid config");
+        assert_eq!(source.build.source_dir, "");
+    }
+
+    #[test]
+    fn a_missing_setting_is_an_invalid_error_naming_it() {
+        for missing in [CFG_STORE, CFG_OUTPUT, CFG_COMMAND] {
+            let mut config = code_config();
+            config.config.remove(missing);
+            let err = app_source_from_config(&config)
+                .expect_err("should reject a config missing a required setting")
+                .to_string();
+            assert!(err.contains(missing), "should name `{missing}`: {err}");
+            assert!(err.contains("required"), "{err}");
+            // And name the framework, so an app with extra frameworks is
+            // unambiguous.
+            assert!(err.contains(CODE_FRAMEWORK), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_ill_typed_setting_is_an_invalid_error_naming_it() {
+        // The admin UI renders `store` as a text control, so a number here means
+        // something posted the wrong shape — better said than coerced.
+        let config = FrameworkRef::new(CODE_FRAMEWORK)
+            .with(CFG_STORE, 42)
+            .with(CFG_OUTPUT, "web/dist")
+            .with(CFG_COMMAND, "npm run build");
+        let err = app_source_from_config(&config)
+            .expect_err("should reject an ill-typed setting")
+            .to_string();
+        assert!(err.contains(CFG_STORE), "{err}");
+        assert!(err.contains("text"), "should say what it wanted: {err}");
+        assert!(err.contains("a number"), "should say what it got: {err}");
+    }
+
+    #[test]
+    fn an_unknown_setting_is_rejected_rather_than_ignored() {
+        let config = code_config().with("sorce", "web");
+        let err = app_source_from_config(&config)
+            .expect_err("should reject an unknown setting")
+            .to_string();
+        assert!(err.contains("sorce"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_build_command_is_rejected() {
+        // Whitespace-only passes the type check but is not a command; the error
+        // says what one looks like.
+        let config = code_config().with(CFG_COMMAND, "   ");
+        let err = app_source_from_config(&config)
+            .expect_err("should reject a blank command")
+            .to_string();
+        assert!(err.contains(CFG_COMMAND), "{err}");
+    }
+
+    #[test]
+    fn only_a_code_framework_resolves_a_build_step() {
+        let err = app_source_from_config(&FrameworkRef::new("saltcorn-v1"))
+            .expect_err("a build-less framework has no source to resolve")
+            .to_string();
+        assert!(err.contains("saltcorn-v1"), "{err}");
+    }
+
+    #[test]
+    fn a_single_word_command_has_no_arguments() {
+        let config = code_config().with(CFG_COMMAND, "build.sh");
+        let source = app_source_from_config(&config).expect("valid config");
+        assert_eq!(source.build.command, "build.sh");
+        assert!(source.build.args.is_empty());
     }
 
     /// A source tree whose "bundler" emits an index.html + a JS asset into dist.
@@ -463,5 +670,4 @@ mod tests {
         // An empty path is the root itself.
         assert_eq!(resolve_under(root, "").unwrap(), root);
     }
-
 }

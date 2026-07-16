@@ -2,6 +2,66 @@
 
 Changes in reverse chronological order.
 
+## Phase 10 — a framework's settings become data: `config_spec`, save-time validation, config→build (design §13.3)
+
+The framework half of "configuration as data" now works end to end: a framework declares its
+settings, an app's config is checked against them on save, and the build step is resolved from
+that config rather than hand-built in Rust. This closes the loop the previous entry opened —
+`FormField` had no consumer; now it has its first.
+
+- **`Framework::config_spec() -> Vec<FormField>`** (`crates/sc-app/src/framework.rs`), with
+  `CodeFramework` declaring `code_config_spec`: `store`, `source`, `output`, `command`, and an
+  optional `client` — §13.3's "which file store, which subdirectory, which build command". It
+  is a **free function** as well as a trait method, because the admin UI and the save-time check
+  need a framework's settings *before* there is an instance to ask (a `CodeFramework` only
+  exists once its bundle is built, and the point is to configure it before that); the trait
+  method delegates, so the two cannot drift. `framework_config_spec(name)` is the registry
+  lookup — an unknown framework is a config error, mirroring how an unknown API provider is.
+
+- **`validate_framework_config` runs on save.** `save_application` now validates the primary
+  framework's config — and every extra framework's — against its spec before writing, so a
+  missing or ill-typed setting is an `Invalid` error naming the framework and the setting, at
+  the point the admin can fix it. The same mistake found at build time is a bundler error and
+  at serve time is a broken app. The error message is rebuilt rather than nested, because
+  `Error::Invalid` renders its own "invalid:" prefix (double-wrapping said it twice) and
+  `Error::Context` shows only the context, which would hide the setting name — the part that
+  matters.
+
+- **`app_source_from_config`** (`crates/sc-app/src/build.rs`) resolves an `AppSource` and its
+  `BuildSpec` *from* a stored app's framework config — the join between "an app is a row the
+  admin filled in" and "an app is a thing that builds". Before this the store,
+  sub-directories and build command were hand-built at the call site, which is exactly the
+  configuration path §13.2 rules out. The `command` setting is split on whitespace into the
+  executable and its arguments (the bundler is spawned directly, not through a shell, so this
+  is a split, not shell parsing — no quoting, globbing or substitution).
+
+- **Validation lives in `sc-types`**: `FormField::validate` / `validate_attrs`, backed by a new
+  `BasicType::accepts_json`. The JSON check is stricter than the `Value` one and deliberately
+  so: JSON natively has bools, numbers and strings, so a `Bool` setting wants `true` not
+  `"true"`; the families JSON cannot represent (uuid, date, decimal, …) travel as strings and
+  are checked by parsing them exactly the way `catchall::parse` parses a form input. `null` is
+  "no value" for every type, so requiredness is a separate check. `validate_attrs` also rejects
+  an `attrs` key the spec does not describe — a setting the admin believes they set but which
+  does nothing is worse than an error.
+
+- **On the `store` setting, an admitted limitation.** `config_spec` takes no `&Catalog`, so a
+  framework's settings are static — and the `store` setting *should* be a pick-list of the
+  connected file stores, which a static spec cannot express. For the MVP it is free text,
+  validated as text and resolved against the catalog when the build runs (an unknown store
+  fails the build, not the save). Threading a `&Catalog` into every framework's `config_spec`
+  to fix this one setting is out of proportion; §6.2's `OptionsSource::ServerQuery` is the
+  post-MVP answer. Written into §13.3 rather than left implicit.
+
+- **The Phase 9 tests now resolve their build settings from config.** `build_app`, `app_client`
+  and the server's `app_serving` state the store/sub-directories/command only in a
+  `FrameworkRef` and call `app_source_from_config`; no test hand-builds a `BuildSpec` any more
+  (the one remaining literal is the catalog-free `run_build` unit test, which takes a spec by
+  design). New tests: the resolver (valid config → build spec, each missing/ill-typed/unknown
+  setting → an `Invalid` naming it, the command split, the source-dir default), the framework
+  spec (the settings §13.3 names, instance-vs-free-function agreement, unknown framework), the
+  JSON type check, and an integration test that a misconfigured framework is rejected on save
+  and never becomes a row.
+
 ## Phase 10 — settings are `FormField`s; `BaseField`/`Attrs` move to `sc-types` (design §6.1/§6.2/§13.3)
 
 The vocabulary every configurable extension point declares its settings in. Nothing consumes it
