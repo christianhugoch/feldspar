@@ -24,6 +24,14 @@ export type ReadFileRequest = { path: string };
 export type ReadFileResponse = { path: string; size: number; base64: string; text?: string | null };
 export type WriteFileRequest = { path: string; base64?: string | null; text?: string | null };
 export type WriteFileResponse = { name: string; path: string; is_dir: boolean; size?: number | null };
+export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown }>;
+export type CreateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
+export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
+export type UpdateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
+export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
+export type DeleteApplicationResponse = { deleted: boolean };
+export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
+export type ListFrameworksResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown> }> }>;
 export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
 export type CreateUserRequest = { email: string; password: string; role: number };
 export type CreateUserResponse = { id: string; email: string; role: number };
@@ -45,6 +53,12 @@ export interface ApiClient {
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
   readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
   writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
+  listApplications(): Promise<ListApplicationsResponse>;
+  createApplication(body: CreateApplicationRequest): Promise<CreateApplicationResponse>;
+  updateApplication(id: string, body: UpdateApplicationRequest): Promise<UpdateApplicationResponse>;
+  deleteApplication(id: string): Promise<DeleteApplicationResponse>;
+  buildApplication(id: string): Promise<BuildApplicationResponse>;
+  listFrameworks(): Promise<ListFrameworksResponse>;
   listUsers(): Promise<ListUsersResponse>;
   createUser(body: CreateUserRequest): Promise<CreateUserResponse>;
 }
@@ -189,6 +203,52 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw new Error(`writeFile failed: ${res.status}`);
       return (await res.json()) as WriteFileResponse;
+    },
+    async listApplications() {
+      const res = await doFetch(`${baseUrl}/api/applications`, {
+        method: "GET",
+      });
+      if (!res.ok) throw new Error(`listApplications failed: ${res.status}`);
+      return (await res.json()) as ListApplicationsResponse;
+    },
+    async createApplication(body) {
+      const res = await doFetch(`${baseUrl}/api/applications`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`createApplication failed: ${res.status}`);
+      return (await res.json()) as CreateApplicationResponse;
+    },
+    async updateApplication(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`updateApplication failed: ${res.status}`);
+      return (await res.json()) as UpdateApplicationResponse;
+    },
+    async deleteApplication(id) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`deleteApplication failed: ${res.status}`);
+      return (await res.json()) as DeleteApplicationResponse;
+    },
+    async buildApplication(id) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/build`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`buildApplication failed: ${res.status}`);
+      return (await res.json()) as BuildApplicationResponse;
+    },
+    async listFrameworks() {
+      const res = await doFetch(`${baseUrl}/api/frameworks`, {
+        method: "GET",
+      });
+      if (!res.ok) throw new Error(`listFrameworks failed: ${res.status}`);
+      return (await res.json()) as ListFrameworksResponse;
     },
     async listUsers() {
       const res = await doFetch(`${baseUrl}/api/users`, {

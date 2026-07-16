@@ -254,7 +254,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
     };
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
-        admin_handlers(catalog.clone()),
+        admin_handlers(catalog.clone(), apps.clone()),
         Arc::new(SessionStore::default()),
         &config,
         apps,
@@ -465,7 +465,7 @@ async fn mounting_an_app_without_a_base_domain_is_refused() -> sc_error::Result<
     // rather than serving an app nobody can address.
     let err = build_router_with_apps(
         &sc_api::admin_endpoints(),
-        admin_handlers(catalog),
+        admin_handlers(catalog, apps.clone()),
         Arc::new(SessionStore::default()),
         &ServerConfig::default(),
         apps,

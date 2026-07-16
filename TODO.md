@@ -183,10 +183,10 @@ Two decisions worth reading before starting, both in §13.2:
 
 **Admin API (`sc-api`, `sc-server`):**
 
-- [ ] Endpoints: list/create/update/delete applications; build (+ mount) an application; report build status/log
-- [ ] Endpoint: list registered frameworks with their `config_spec`, so the UI can render a settings form for a framework it knows nothing about
-- [ ] Build errors are **Application errors**, not System errors (§16): the bundler's own output reaches the admin
-- [ ] Integration tests: drive each endpoint end-to-end; non-admins are rejected
+- [x] Endpoints: list/create/update/delete applications; build (+ mount) an application; report build status/log (build success returns `{built, git_repo, log}`; a failed build is the §16 error path below, carrying the diagnostics)
+- [x] Endpoint: list registered frameworks with their `config_spec`, so the UI can render a settings form for a framework it knows nothing about (`listFrameworks`, backed by `sc_app::registered_frameworks`)
+- [x] Build errors are **Application errors**, not System errors (§16): the bundler's own output reaches the admin. Added `ErrorKind`/`Error::kind()` to `sc-error` (the §16 split, landed with `sc-error` as the design requires) and mapped unhandled Application errors to `422` (vs System→`500`) in the router
+- [x] Integration tests: drive each endpoint end-to-end; non-admins are rejected (`crates/sc-server/tests/admin_applications_api.rs`)
 
 **Admin SPA (`ui/admin`):**
 

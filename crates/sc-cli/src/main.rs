@@ -82,7 +82,8 @@ async fn serve_command(args: &[String]) -> Result<()> {
 
     let sessions = Arc::new(SessionStore::default());
     eprintln!("saltcorn: listening on http://{}", config.addr);
-    serve(config, admin_endpoints(), admin_handlers(catalog), sessions, apps).await
+    let handlers = admin_handlers(catalog, apps.clone());
+    serve(config, admin_endpoints(), handlers, sessions, apps).await
 }
 
 /// Print the short usage summary.

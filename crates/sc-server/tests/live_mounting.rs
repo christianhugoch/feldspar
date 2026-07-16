@@ -136,7 +136,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Arc<AppMounts>, Router, Arc<C
     };
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
-        admin_handlers(catalog.clone()),
+        admin_handlers(catalog.clone(), apps.clone()),
         Arc::new(SessionStore::default()),
         &config,
         apps.clone(),

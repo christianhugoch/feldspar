@@ -23,7 +23,7 @@ use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_files::{FileMeta, FileStore, LocalFileStore};
-use sc_server::{CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router};
+use sc_server::{AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -133,9 +133,10 @@ async fn setup() -> sc_error::Result<(Client, Arc<dyn FileStore>, TestDb)> {
     catalog.connect_file_store(store.clone())?;
 
     let sessions = Arc::new(SessionStore::default());
+    let apps = Arc::new(AppMounts::new(catalog.clone()));
     let router = build_router(
         &sc_api::admin_endpoints(),
-        admin_handlers(catalog),
+        admin_handlers(catalog, apps),
         sessions,
         &ServerConfig::default(),
     )?;

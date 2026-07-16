@@ -231,6 +231,76 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- applications -------------------------------------------------------
+    // An application is created in the admin UI and exists only as its stored
+    // row (§13.2); these endpoints are the row ⇄ mounted-app path the SPA drives.
+    // Create/update/delete manage the definition; `build` builds and mounts it
+    // live (§13.2 "no restart"); the build's outcome — including a bundler's
+    // diagnostics on failure — comes back as an Application error (§16).
+
+    set.register(
+        Endpoint::new("listApplications", Method::Get, api().lit("applications"))
+            .output(TypeSchema::array(application_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("createApplication", Method::Post, api().lit("applications"))
+            .input(application_input_schema())
+            .output(application_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateApplication",
+            Method::Put,
+            api().lit("applications").param("id", ValueType::Uuid),
+        )
+        .input(application_input_schema())
+        .output(application_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteApplication",
+            Method::Delete,
+            api().lit("applications").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Build (and mount) an application. On success the app is serving on its
+    // subdomain; the response reports the build log. A failed build leaves the
+    // previously mounted version up and comes back as an Application error whose
+    // message carries the bundler's own diagnostics (§16).
+    set.register(
+        Endpoint::new(
+            "buildApplication",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("build"),
+        )
+        .output(build_result_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- frameworks ---------------------------------------------------------
+    // The registered frameworks with their settings spec, so the create/edit
+    // form can render controls for a framework it knows nothing about (§13.3).
+    set.register(
+        Endpoint::new("listFrameworks", Method::Get, api().lit("frameworks"))
+            .output(TypeSchema::array(framework_info_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- users --------------------------------------------------------------
 
     set.register(
@@ -297,5 +367,101 @@ fn file_content_schema() -> TypeSchema {
         StructField::new("size", TypeSchema::int()),
         StructField::new("base64", TypeSchema::text()),
         StructField::new("text", TypeSchema::optional(TypeSchema::text())),
+    ])
+}
+
+/// A reference to a UI framework: its registered name and its settings bag. The
+/// settings' shape is the framework's own `config_spec`, so `config` is opaque
+/// JSON here (the form the SPA renders comes from [`framework_info_schema`]).
+fn framework_ref_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("config", TypeSchema::json()),
+    ])
+}
+
+/// One API provider enabled for an app, on a sub-path.
+fn api_config_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("provider", TypeSchema::text()),
+        StructField::new("mount", TypeSchema::text()),
+    ])
+}
+
+/// A statically-served store subdirectory, on a sub-path.
+fn static_dir_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("mount", TypeSchema::text()),
+        StructField::new("store", TypeSchema::text()),
+        StructField::new("path", TypeSchema::text()),
+    ])
+}
+
+/// The fields common to an application on the wire — everything but its id. The
+/// nested `csp` and `attributes` are opaque JSON (a directive→sources map and a
+/// sparse bag respectively), matching how they are stored (§13.2).
+fn application_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("subdomain", TypeSchema::text()),
+        StructField::new("framework", framework_ref_schema()),
+        StructField::new(
+            "extra_frameworks",
+            TypeSchema::array(framework_ref_schema()),
+        ),
+        StructField::new("tables", TypeSchema::array(TypeSchema::text())),
+        StructField::new("file_stores", TypeSchema::array(TypeSchema::text())),
+        StructField::new("apis", TypeSchema::array(api_config_schema())),
+        StructField::new("static_dirs", TypeSchema::array(static_dir_schema())),
+        StructField::new("csp", TypeSchema::json()),
+        StructField::new("attributes", TypeSchema::json()),
+    ]
+}
+
+/// An application as returned by the API: its id plus [`application_fields`].
+fn application_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(application_fields());
+    TypeSchema::Struct(fields)
+}
+
+/// The body accepted when creating or updating an application: the same fields
+/// minus the id (server-assigned on create, taken from the path on update).
+fn application_input_schema() -> TypeSchema {
+    TypeSchema::Struct(application_fields())
+}
+
+/// The outcome of a build: whether it built, whether its source is a git repo,
+/// and the bundler's log. (A *failed* build is not this shape — it is an
+/// Application error whose message carries the diagnostics, §16.)
+fn build_result_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("built", TypeSchema::bool()),
+        StructField::new("git_repo", TypeSchema::bool()),
+        StructField::new("log", TypeSchema::text()),
+    ])
+}
+
+/// A registered framework and the settings it declares, so the admin UI can
+/// render a form for a framework it knows nothing about (§13.3). Each setting is
+/// a [`form_field_schema`] — the same `FormField` vocabulary a row editor uses.
+fn framework_info_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+    ])
+}
+
+/// One settings field of a framework's `config_spec`: enough for the admin UI to
+/// render and label an input control for it.
+fn form_field_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("type", TypeSchema::text()),
+        StructField::new("required", TypeSchema::bool()),
+        StructField::new("default", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("options", TypeSchema::array(TypeSchema::json())),
     ])
 }

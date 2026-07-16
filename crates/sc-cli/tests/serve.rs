@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sc_auth::SessionStore;
 use sc_cli::{DbConfig, connect_catalog};
-use sc_server::{ServerConfig, admin_handlers, build_router};
+use sc_server::{AppMounts, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use tower::ServiceExt;
 
@@ -54,9 +54,10 @@ async fn serve_boots_against_a_db_and_answers_health() -> sc_error::Result<()> {
     );
 
     // Assemble the server exactly as `serve` does, then hit /health.
+    let apps = Arc::new(AppMounts::new(catalog.clone()));
     let router = build_router(
         &sc_api::admin_endpoints(),
-        admin_handlers(catalog),
+        admin_handlers(catalog, apps),
         Arc::new(SessionStore::default()),
         &ServerConfig::default(),
     )?;

@@ -28,7 +28,7 @@ use sc_api::{
 };
 use sc_app::AppRequest;
 use sc_auth::{SessionStore, User};
-use sc_error::{Error, Result};
+use sc_error::{Error, ErrorKind, Result};
 use serde_json::Value;
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
@@ -543,12 +543,21 @@ fn map_method(method: &str) -> Option<ApiMethod> {
 }
 
 /// Map a domain error to an HTTP status.
+///
+/// The specific request-level variants get their conventional codes; everything
+/// else is decided by the §16 [`ErrorKind`] split, so an **Application** error
+/// (bad configuration or app code the admin must fix — e.g. a failed build,
+/// carrying the bundler's diagnostics) is a client-fixable `422`, while a
+/// **System** error (a bug or infrastructure failure to report) is a `500`.
 fn error_status(err: &Error) -> StatusCode {
     match err {
         Error::NotFound(_) => StatusCode::NOT_FOUND,
         Error::Invalid(_) => StatusCode::BAD_REQUEST,
         Error::Auth(_) => StatusCode::UNAUTHORIZED,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => match err.kind() {
+            ErrorKind::Application => StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorKind::System => StatusCode::INTERNAL_SERVER_ERROR,
+        },
     }
 }
 

@@ -117,6 +117,51 @@ impl Error {
     pub fn msg(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
+
+    /// Classify this error into one of the two audiences of §16: an
+    /// [`Application`](ErrorKind::Application) error the app builder must fix in
+    /// their configuration, or a [`System`](ErrorKind::System) error that is
+    /// likely a bug in Saltcorn (or its infrastructure).
+    ///
+    /// The split follows the design's variant families: `Invalid`/`Config`/`Query`
+    /// (plus `NotFound`/`Auth`, which are request-level, never "report this bug")
+    /// are Application; `Database`/`File`/`Serde`/`Internal` are System. A
+    /// [`Context`](Error::Context) inherits the kind of the [`Error`] it wraps, and
+    /// is System otherwise (an unclassified foreign error is treated as a fault to
+    /// investigate, not something an admin can fix).
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Error::NotFound(_)
+            | Error::Invalid(_)
+            | Error::Config(_)
+            | Error::Query(_)
+            | Error::Auth(_) => ErrorKind::Application,
+            Error::Database(_) | Error::File(_) | Error::Serde(_) | Error::Internal(_) => {
+                ErrorKind::System
+            }
+            Error::Context { source, .. } => source
+                .downcast_ref::<Error>()
+                .map_or(ErrorKind::System, Error::kind),
+        }
+    }
+}
+
+/// The audience an [`Error`] is for (design §16): the two classes split "the app
+/// builder must fix their configuration" from "this is likely a bug to report".
+///
+/// The MVP does not yet log errors to `_sc_errors`, but the classification lands
+/// with `sc-error` from the start (as §16 requires) so it is never retrofitted —
+/// and `sc-server` already uses it to map a failed build to a client-fixable
+/// `422` rather than a `500`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The fault is in configuration authored by an app builder — a bad framework
+    /// config, an invalid input, a query over a missing field. Nothing is wrong
+    /// with Saltcorn; the admin fixes their configuration.
+    Application,
+    /// Something crashed and there is likely a bug in Saltcorn or the
+    /// infrastructure it depends on — a driver failure, an invariant violation.
+    System,
 }
 
 impl fmt::Display for Error {
@@ -349,5 +394,34 @@ mod tests {
     fn error_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Error>();
+    }
+
+    #[test]
+    fn kind_splits_application_from_system() {
+        // Config authored by an app builder — a bad framework config, invalid
+        // input — is the admin's to fix.
+        assert_eq!(Error::config("bad build").kind(), ErrorKind::Application);
+        assert_eq!(Error::invalid("nope").kind(), ErrorKind::Application);
+        assert_eq!(Error::query("bad sql").kind(), ErrorKind::Application);
+        assert_eq!(Error::not_found("x").kind(), ErrorKind::Application);
+        assert_eq!(Error::auth("x").kind(), ErrorKind::Application);
+
+        // A crash or infrastructure failure is likely a bug to report.
+        assert_eq!(Error::database("down").kind(), ErrorKind::System);
+        assert_eq!(Error::file("io").kind(), ErrorKind::System);
+        assert_eq!(Error::serde("bad").kind(), ErrorKind::System);
+        assert_eq!(Error::msg("invariant").kind(), ErrorKind::System);
+    }
+
+    #[test]
+    fn context_inherits_the_wrapped_errors_kind() {
+        // A context wrapping an Application error stays Application...
+        let wrapped: Result<()> = Err(Error::config("bad build"));
+        let err = wrapped.context("while building the app").unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Application);
+
+        // ...while a wrapped foreign error defaults to System.
+        let io = std::io::Error::other("disk");
+        assert_eq!(Error::from(io).kind(), ErrorKind::System);
     }
 }

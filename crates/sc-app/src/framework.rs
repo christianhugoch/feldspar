@@ -175,6 +175,16 @@ pub fn code_config_spec() -> Vec<FormField> {
     ]
 }
 
+/// The names of every registered framework — what the admin UI lists so an admin
+/// can pick one and be shown its [`config_spec`](framework_config_spec).
+///
+/// The MVP registers exactly one, [`CODE_FRAMEWORK`]; this is the single place
+/// that enumerates them, so a new framework is listed by adding it here (and to
+/// [`framework_config_spec`]).
+pub fn registered_frameworks() -> Vec<String> {
+    vec![CODE_FRAMEWORK.to_owned()]
+}
+
 /// The settings the framework registered under `name` declares — the registry
 /// lookup, resolving a [`FrameworkRef`](crate::FrameworkRef)'s name to a spec
 /// without needing an instance.
