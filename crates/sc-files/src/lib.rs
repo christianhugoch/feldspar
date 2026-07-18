@@ -14,12 +14,17 @@
 //! - **Paths are confined to the store root.** Absolute paths and `..`
 //!   traversal are rejected before any I/O.
 
+mod backend;
 mod def;
 mod local;
 mod store;
 pub mod xattr;
 
-pub use def::{CFG_PATH, FileStoreDef, FileStoreDefId, LOCAL_BACKEND};
+pub use backend::{
+    backend_config_spec, connect_from_def, local_config_spec, registered_backends,
+    validate_file_store_config,
+};
+pub use def::{CFG_CREATE, CFG_PATH, FileStoreDef, FileStoreDefId, LOCAL_BACKEND};
 pub use local::LocalFileStore;
 pub use store::{Entry, FileMeta, FileStore};
 

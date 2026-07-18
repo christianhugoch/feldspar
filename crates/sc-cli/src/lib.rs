@@ -12,7 +12,7 @@ use std::sync::Arc;
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_error::{Context, Error, Result};
-use sc_files::{FileStore, LocalFileStore};
+use sc_files::{FileStoreDef, connect_from_def};
 
 pub use db::DbConfig;
 
@@ -72,12 +72,21 @@ where
     Ok((specs, rest))
 }
 
-/// Connect each `NAME=PATH` spec as a [`LocalFileStore`] on `catalog`.
+/// Connect each `NAME=PATH` spec as a local file store on `catalog`.
 ///
 /// The store's name is the part before the first `=`; the rest is a local
-/// directory path (which must already exist — [`LocalFileStore::new`] canonicalises
-/// it). A malformed spec or an unreadable directory is an [`Error::Config`], so a
-/// typo fails at boot rather than surfacing as a puzzling 404 later.
+/// directory path, which must already exist. A malformed spec or an unreadable
+/// directory is an [`Error::Config`], so a typo fails at boot rather than
+/// surfacing as a puzzling 404 later.
+///
+/// Each spec is turned into a [`FileStoreDef`] and connected through
+/// [`connect_from_def`], rather than building a [`LocalFileStore`] here: that
+/// function is meant to be *the* place a definition becomes an instance, and a
+/// second construction path would be a second place for the two to drift — a
+/// flag-connected store would quietly not behave like a stored one. These
+/// definitions are **not** persisted; the flag stays an ephemeral,
+/// process-lifetime convenience (which is how the tests use it), and how it
+/// coexists with stored stores is TODO §1.3.
 pub fn connect_file_stores(catalog: &Catalog, specs: &[String]) -> Result<()> {
     for spec in specs {
         let (name, path) = spec.split_once('=').ok_or_else(|| {
@@ -88,9 +97,9 @@ pub fn connect_file_stores(catalog: &Catalog, specs: &[String]) -> Result<()> {
                 "invalid --file-store `{spec}`: the name must not be empty"
             )));
         }
-        let store = LocalFileStore::new(name, path)
+        let store = connect_from_def(&FileStoreDef::local(name, path))
             .with_context(|| format!("connecting file store `{name}` at `{path}`"))?;
-        catalog.connect_file_store(Arc::new(store) as Arc<dyn FileStore>)?;
+        catalog.connect_file_store(store)?;
     }
     Ok(())
 }

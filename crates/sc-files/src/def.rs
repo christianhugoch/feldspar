@@ -38,6 +38,10 @@ pub const LOCAL_BACKEND: &str = "local";
 /// store is rooted at.
 pub const CFG_PATH: &str = "path";
 
+/// The `create` setting of the [`local`](LOCAL_BACKEND) backend: whether to
+/// create the directory when it does not exist, rather than refusing to connect.
+pub const CFG_CREATE: &str = "create";
+
 /// Identifies a stored file-store definition. A UUID, per the §9 rule that every
 /// system metadata table has a UUID primary key.
 ///

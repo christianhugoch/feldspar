@@ -26,7 +26,7 @@
 
 use sc_db::Row;
 use sc_error::{Error, Result};
-use sc_files::{FileStoreDef, FileStoreDefId};
+use sc_files::{FileStoreDef, FileStoreDefId, validate_file_store_config};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
 use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
@@ -102,13 +102,18 @@ pub async fn bootstrap_file_stores(catalog: &Catalog) -> Result<Table> {
 /// constraint violation. The database's `UNIQUE` constraint remains the
 /// authority: this check and the write are not one transaction.
 ///
-/// Saving does **not** connect the store. A definition can be saved and
-/// unconnected — that is what a store with a since-unmounted path is, and it
-/// must stay editable in that state.
+/// The backend's settings are checked against the spec that backend declares
+/// ([`validate_file_store_config`]). This is the point of doing it on save: a
+/// missing or ill-typed setting is the admin's to fix and the admin is standing
+/// in front of the form, whereas the same mistake found at connect time is a
+/// store that silently never comes up.
 ///
-/// Validating the backend settings against the backend's declared spec belongs
-/// here too, and is TODO §1.2; this deliberately does not guess at settings it
-/// has no spec for yet.
+/// Saving does **not** connect the store, and deliberately does not require that
+/// it *could* be connected. A definition can be saved and unconnected — that is
+/// what a store with a since-unmounted path is, and it must stay editable in
+/// that state, since editing it is how the admin fixes it. So the settings are
+/// validated structurally here and reachability is left to
+/// [`connect_from_def`](sc_files::connect_from_def).
 pub async fn save_file_store(catalog: &Catalog, def: &FileStoreDef) -> Result<()> {
     let name = def.name.trim();
     if name.is_empty() {
@@ -119,6 +124,7 @@ pub async fn save_file_store(catalog: &Catalog, def: &FileStoreDef) -> Result<()
             "file store `{name}` needs a backend"
         )));
     }
+    validate_file_store_config(def)?;
 
     if let Some(other) = load_file_store_by_name(catalog, name).await?
         && other.id != def.id

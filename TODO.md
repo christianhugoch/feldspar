@@ -66,11 +66,28 @@ The same "settings as data" move that made "the admin picks a framework" work (�
 admin UI must render a form for a backend it knows nothing about, including one arriving later
 through `sc-code`, with no per-backend special case.
 
-- [ ] `FileStoreBackend` registry keyed by backend name, mirroring `registered_frameworks` / `framework_config_spec`: `registered_backends()`, `backend_config_spec(name) -> Result<Vec<FormField>>`
-- [ ] `local` backend declares its settings (`path`, and whether to create the directory if absent). It is the only backend this milestone registers — S3 and git-remote backends stay out of scope, but the registry is the thing that makes adding them not a UI change
-- [ ] `validate_file_store_config` called **on save**, exactly as `validate_framework_config` is: an unreadable path or a missing setting is the admin's to fix while they are standing in front of the form, not a 500 the first time someone browses the store
-- [ ] Construct a connected `Arc<dyn FileStore>` from a `FileStoreDef` (`connect_from_def`) — the one place a definition becomes an instance
-- [ ] Unit tests: spec names/labels/required-ness; unknown backend is a config error naming what is available; a bad `path` is rejected on save
+- [x] Backend registry keyed by backend name, mirroring `registered_frameworks` / `framework_config_spec`: `registered_backends()`, `backend_config_spec(name) -> Result<Vec<FormField>>` (`crates/sc-files/src/backend.rs`). **No `FileStoreBackend` trait**: a backend is a name, a spec and a constructor, all three of which the registry functions already provide — a trait would need an instance to ask for a spec that must be available *before* any instance exists, which is the same reason `code_config_spec` is a free function
+- [x] `local` backend declares its settings: `path` (required) and `create` (default false — creating a directory on the server's filesystem is a side effect to opt into, and silently creating one turns a typo'd path into a new empty store instead of an error)
+- [x] `validate_file_store_config` called **on save**, exactly as `validate_framework_config` is
+- [x] Construct a connected `Arc<dyn FileStore>` from a `FileStoreDef` (`connect_from_def`) — the one place a definition becomes an instance. `sc-cli`'s `--file-store` flag now goes through it too, rather than building a `LocalFileStore` itself, so a flag-connected store cannot drift from a stored one
+- [x] Unit tests (11 in `backend.rs`) + an integration test that a mis-configured store is rejected on save
+
+**Deviation from this section's original wording, deliberate.** The item above said "an
+unreadable path *or* a missing setting" should be rejected on save. Only the second is. The two
+are different kinds of wrong and conflating them breaks §1.1's model:
+
+- **Structurally wrong** (missing/ill-typed/unknown setting, unknown backend) is the admin's
+  typo, knowable without touching the filesystem, and the same answer on every machine. It
+  blocks the save
+- **Currently unreachable** (directory unmounted, renamed, not yet created) is often not the
+  admin's fault, can become true *after* a successful save, and can stop being true with no
+  edit. It is reported by `connect_from_def`, never enforced at save
+
+Enforcing reachability at save would make a store whose disk was unmounted **uneditable** —
+the admin could not open it to fix the path, which is the one thing they need to do. So §1.4's
+save endpoint should connect after saving and return the reachability result alongside the
+saved store, giving immediate feedback without blocking the save; §1.5 shows it as the
+"connected-or-error" state the store list already needs.
 
 ### 1.3 Live connect / disconnect (`sc-catalog`, `sc-server`)
 

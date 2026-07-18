@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## File-store backend registry (TODO §1.2)
+
+Backends now declare their settings as data, so the admin UI can render a settings form for a
+backend it knows nothing about — including one supplied later by a guest language through
+`sc-code` — with no per-backend special case. The same "settings as data" move that makes "the
+admin picks a framework" work (§13.3), applied to stores. New `crates/sc-files/src/backend.rs`.
+
+- **Registry**: `registered_backends()` and `backend_config_spec(name)`, mirroring
+  `registered_frameworks` / `framework_config_spec`. There is deliberately **no
+  `FileStoreBackend` trait** — a backend is a name, a spec and a constructor, all of which the
+  registry functions provide, and a trait would need an *instance* to ask for a spec that must be
+  available before any instance exists. That is the same reason `code_config_spec` is a free
+  function. The MVP registers one backend, `local`; the registry is what makes adding S3 or a git
+  remote a change in `sc-files` rather than a change in the admin UI.
+- **`local` settings**: `path` (required) and `create` (default false). Creating a directory on the
+  server's filesystem is a side effect an admin should opt into — silently creating one turns a
+  typo'd path into a new empty store instead of an error.
+- **`validate_file_store_config`** is now called from `save_file_store`, exactly as
+  `validate_framework_config` is called from `save_application`, and names the store, its backend
+  and the offending setting.
+- **`connect_from_def`** is the one place a definition becomes a live `Arc<dyn FileStore>`.
+  `sc-cli`'s `--file-store NAME=PATH` flag now goes through it instead of constructing a
+  `LocalFileStore` itself, so a flag-connected store cannot drift from a stored one. Those
+  definitions remain unpersisted — the flag stays an ephemeral, process-lifetime convenience, and
+  how it coexists with stored stores is §1.3.
+
+**Two kinds of wrong, deliberately kept apart** — this deviates from what §1.2 originally
+specified ("an unreadable path *or* a missing setting" rejected on save), and the deviation is the
+interesting part:
+
+- *Structurally wrong* — a missing `path`, a `path` that is a number, an unknown setting, an
+  unknown backend. The admin's typo, knowable without touching the filesystem, the same answer on
+  every machine. **Blocks the save**, so it is caught while the admin is still looking at the form.
+- *Currently unreachable* — a well-formed definition whose directory has been unmounted, renamed,
+  or not created yet. Often not the admin's fault, can become true *after* a successful save, and
+  can stop being true with no edit. **Reported by `connect_from_def`, never enforced at save.**
+
+Enforcing reachability at save time would make a store whose disk was unmounted *uneditable* — the
+admin could not open it to repoint its path, which is the one thing they need to do — and that
+contradicts the §1.1 model where a definition is inert data that may describe a store which does
+not currently work. So §1.4's save endpoint should connect after saving and return the reachability
+result alongside the saved store: immediate feedback, without blocking the save.
+
+Tests: 11 unit tests in `backend.rs` (spec names/labels/required-ness and the `create` default,
+registry round-trip, unknown backend naming what is available, missing/ill-typed/unknown settings,
+validation not touching the filesystem, connecting, an unreachable path failing to connect without
+being a config error, `create` making the directory only when asked, and connect validating first),
+plus `a_misconfigured_backend_is_rejected_on_save` in `crates/sc-catalog/tests/file_store_store.rs`,
+which also asserts the other half: a well-formed definition pointing at a non-existent directory
+*is* saved.
+
 ## File stores become persisted, editable objects — model & persistence (TODO §1.1)
 
 First step of making file stores editable in the admin UI. In the MVP a store existed *only* as a

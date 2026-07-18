@@ -285,3 +285,41 @@ async fn references_this_crate_cannot_see_are_passed_in() -> Result<()> {
     assert!(load_file_store(&cat, def.id).await?.is_some());
     Ok(())
 }
+
+/// TODO §1.2: the backend's settings are checked against its declared spec **on
+/// save**, so a mis-configured store is rejected where the admin can fix it
+/// rather than becoming a store that silently never connects.
+#[tokio::test]
+async fn a_misconfigured_backend_is_rejected_on_save() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    bootstrap_file_stores(&cat).await?;
+
+    // A `local` store with no `path` at all.
+    let err = save_file_store(&cat, &FileStoreDef::new("docs", LOCAL_BACKEND))
+        .await
+        .unwrap_err();
+    assert!(matches!(err.repr(), Repr::Invalid(_)), "{err}");
+    assert!(err.to_string().contains(CFG_PATH), "{err}");
+
+    // A backend nothing implements.
+    let err = save_file_store(
+        &cat,
+        &FileStoreDef::new("docs", "s3").with("bucket", "things"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("s3"), "{err}");
+
+    // Neither reached the table.
+    assert!(list_file_stores(&cat).await?.is_empty());
+
+    // But a well-formed definition whose directory does not exist *is* saved:
+    // reachability is not a save-time question, and a store whose disk was
+    // unmounted has to stay editable — that is how the admin repoints it.
+    let unreachable = FileStoreDef::local("docs", "/definitely/not/here");
+    save_file_store(&cat, &unreachable).await?;
+    assert_eq!(list_file_stores(&cat).await?.len(), 1);
+
+    Ok(())
+}
