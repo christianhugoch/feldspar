@@ -2,6 +2,45 @@
 
 Changes in reverse chronological order.
 
+## Error messages reach admins whole (Phase 1 loose ends)
+
+Closing out the three items Phase 1 left open — one fix, two decisions.
+
+**The truncation was never about file stores.** §1.5 found that a failed store connection reported
+only its outermost context, and fixed that one site. The audit it prompted found the real source:
+`error_response` in `sc-server/src/router.rs` sent `err.to_string()` for **every** endpoint error,
+so every admin-facing message in the product lost its cause. It could not simply be switched to
+the causal chain, because the same function serves the admin API *and* every application's API,
+and those have different readers — an app's users are not operators, and the causes below the top
+message are internals (SQL, paths, driver text).
+
+So `error_response` now takes an explicit `Audience`: `Admin` gets `err.causes()`, `App` gets the
+top-level message, and the log gets the whole chain with source locations either way. Making it an
+argument rather than a default means adding a route has to answer the question rather than inherit
+a silent choice. `Error::causes()` joins `Error::chain()` as the user-facing counterpart. Verified
+against a running server: reading a missing file now reports
+`reading "nope.txt" from store docs: No such file or directory (os error 2)` where it previously
+stopped after `from store docs`.
+
+**Decided: no `_sc_fields` overlay in this milestone.** The deciding fact is that it would be
+necessary but not sufficient — `createField` accepts only `name`/`sql_type`/`nullable`, so a
+field's *kind* cannot be declared through the API at all, and storing a `File` kind would still
+leave `File` fields unreachable. Making them reachable means field-kind editing in the API and the
+table editor, then §6.3's fieldviews to render one: a feature area, not a loose end. The overlay
+also overturns the catalog's "no stored metadata beyond `information_schema`" invariant, which is
+load-bearing for the zero-setup promise, and brings merge/precedence semantics and cache
+invalidation with it. Nothing in the milestone's definition of done needs it. The tripwire test
+remains the signal for whoever picks it up.
+
+**Decided: `min_role` enforcement cannot be closed here.** It is implemented, unit-tested and
+wired into every file endpoint, but all of those are admin-only, so the caller's role always
+clears every rule. Its first real exercise is application-facing file access, which does not exist
+yet. Moved to a new "Carried past this milestone" section in the TODO rather than left looking
+like unfinished Phase 1 work — along with the overlay and `OptionsSource::ClientCode`, so the
+decisions stay visible instead of being lost as ticked boxes.
+
+**Phase 1 is complete**: no open items remain in it.
+
 ## `OptionsSource`, and the framework `store` setting becomes a pick-list (TODO §1.6)
 
 The last of Phase 1. Now that file stores are a listable, persisted set, the compromise §13.3

@@ -271,7 +271,7 @@ async fn upload(
     };
     match handler(ctx).await {
         Ok(resp) => apply_response(&state, jar, session_token, resp),
-        Err(e) => error_response(&e),
+        Err(e) => error_response(&e, Audience::Admin),
     }
 }
 
@@ -450,7 +450,7 @@ async fn dispatch_app(
                 ),
                 &csp,
             ),
-            Err(e) => with_csp(error_response(&e), &csp),
+            Err(e) => with_csp(error_response(&e, Audience::App), &csp),
         };
     }
 
@@ -476,7 +476,7 @@ async fn dispatch_app(
             }
             with_csp(out, &csp)
         }
-        Err(e) => with_csp(error_response(&e), &csp),
+        Err(e) => with_csp(error_response(&e, Audience::App), &csp),
     }
 }
 
@@ -553,7 +553,7 @@ async fn handle_api(
 
     match handler(ctx).await {
         Ok(resp) => apply_response(state, jar, session_token, resp),
-        Err(e) => error_response(&e),
+        Err(e) => error_response(&e, Audience::Admin),
     }
 }
 
@@ -681,15 +681,43 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
 /// driver error (e.g. the real SQL error behind `tokio_postgres`'s `"db error"`)
 /// is visible on the console. System errors (`500`) are the ones that most need
 /// eyes, so they are flagged accordingly.
-fn error_response(err: &Error) -> Response {
+fn error_response(err: &Error, audience: Audience) -> Response {
     let status = error_status(err);
     let label = if status == StatusCode::INTERNAL_SERVER_ERROR {
         "internal error"
     } else {
         "request error"
     };
+    // The log always gets everything, including the failing line.
     eprintln!("saltcorn: {label}: {}", err.chain());
-    json_error(status, err.to_string())
+    let message = match audience {
+        // An admin needs the cause. `Display` on a context error renders only the
+        // outermost layer — "connecting file store `docs`" with no hint that the
+        // directory is missing — which is a message that says something failed
+        // and nothing about what to do, on the one screen whose job is to say
+        // what to do.
+        Audience::Admin => err.causes(),
+        // An application's callers are its ordinary users, not operators. The
+        // outermost message is the part deliberately written to be shown; the
+        // causes below it are internals — SQL, paths, driver text — and belong
+        // in the log, which already has them.
+        Audience::App => err.to_string(),
+    };
+    json_error(status, message)
+}
+
+/// Who will read an error message, which decides how much of it to send.
+///
+/// This is a trust boundary, not a formatting preference: the same
+/// [`error_response`] serves the admin API and every application's API, and the
+/// two have different readers. Making it an explicit argument rather than a
+/// default means adding a route forces the question to be answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Audience {
+    /// The admin API — an operator, who needs the whole causal chain.
+    Admin,
+    /// An application's own API — its end users, who get the top-level message.
+    App,
 }
 
 /// Log a discarded lower-level failure at a call site that only knows "it broke"
@@ -721,7 +749,7 @@ mod tests {
         let err = Error::database(
             "query failed: db error\n  caused by: relation \"apps\" does not exist",
         );
-        let resp = error_response(&err);
+        let resp = error_response(&err, Audience::App);
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         assert_eq!(
@@ -731,21 +759,52 @@ mod tests {
         );
     }
 
+    /// The audience split. An admin gets the cause; an application's users get
+    /// only the top-level message.
+    #[tokio::test]
+    async fn an_admin_sees_the_cause_and_an_app_user_does_not() {
+        use sc_error::Context;
+
+        // The shape that motivated this: a context layer whose own message says
+        // nothing useful, wrapping the one that does.
+        let inner: std::result::Result<(), std::io::Error> = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory",
+        ));
+        let err = inner.context("connecting file store `docs`").unwrap_err();
+
+        let admin = body_json(error_response(&err, Audience::Admin)).await;
+        let admin_text = admin["error"].as_str().unwrap();
+        assert!(admin_text.contains("connecting file store"), "{admin_text}");
+        assert!(
+            admin_text.contains("No such file or directory"),
+            "an admin must be told what actually went wrong: {admin_text}"
+        );
+
+        let app = body_json(error_response(&err, Audience::App)).await;
+        let app_text = app["error"].as_str().unwrap();
+        assert!(app_text.contains("connecting file store"), "{app_text}");
+        assert!(
+            !app_text.contains("No such file or directory"),
+            "an app's users must not be shown internals: {app_text}"
+        );
+    }
+
     #[tokio::test]
     async fn application_error_maps_to_422() {
         // A bad app config is the admin's to fix — a client-fixable 422, not 500.
-        let resp = error_response(&Error::config("bad framework config"));
+        let resp = error_response(&Error::config("bad framework config"), Audience::Admin);
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn request_level_errors_keep_their_conventional_codes() {
         assert_eq!(
-            error_response(&Error::not_found("app")).status(),
+            error_response(&Error::not_found("app"), Audience::Admin).status(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            error_response(&Error::auth("nope")).status(),
+            error_response(&Error::auth("nope"), Audience::Admin).status(),
             StatusCode::UNAUTHORIZED
         );
     }

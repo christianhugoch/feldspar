@@ -362,6 +362,13 @@ impl Error {
     pub fn chain(&self) -> String {
         format_chain(self)
     }
+
+    /// The causal chain on one line, with no code locations — see
+    /// [`format_causes`] for when to prefer this over
+    /// [`to_string`](std::string::ToString::to_string).
+    pub fn causes(&self) -> String {
+        format_causes(self)
+    }
 }
 
 impl From<std::io::Error> for Error {

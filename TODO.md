@@ -56,9 +56,18 @@ foreign key), so a column cannot say "I am a path in store `uploads`". That need
 - `file_field_references_are_inert_until_the_fields_overlay_exists` is written as a tripwire: it
   asserts the current (wrong-in-the-long-run) behaviour so that landing the overlay fails the
   test and forces the delete path to be revisited
-- [ ] Decide whether a minimal `_sc_fields` overlay — enough to persist a `File` field's store,
-  folder and MIME restrictions — belongs in this milestone. It is out of MVP scope by §9, but a
-  `File` field is unusable without it, and file stores being editable makes that more visible
+- [x] Decide whether a minimal `_sc_fields` overlay — enough to persist a `File` field's store,
+  folder and MIME restrictions — belongs in this milestone. **Decided: no.** The deciding fact
+  is that the overlay would be *necessary but not sufficient*: `createField` accepts only
+  `name`/`sql_type`/`nullable`, so a field's **kind cannot be declared at all**, through the API
+  or the UI. Storing a `File` kind would therefore still leave `File` fields unreachable, and
+  making them reachable means field-kind editing in the API and the table editor, and then §6.3's
+  fieldviews to render one. That is a feature area, not a Phase 1 loose end. It would also cost
+  more than it looks: the overlay overturns the catalog's stated invariant — "no stored metadata
+  beyond `information_schema`" — which is load-bearing for the zero-setup promise, and brings
+  merge/precedence semantics, behaviour when a column is dropped underneath a row, and cache
+  invalidation with it. Nothing in this milestone's definition of done needs it: the file-store
+  screens and the file manager are complete without a single `File` field. Tracked below instead
 
 ### 1.2 Backend registry (`sc-files`)
 
@@ -147,8 +156,9 @@ a future caller is the same mistake as the rule living only in a doc comment (wh
 `FileMeta::min_role` was until now). The rule itself is tested directly at the `sc-files` level,
 where roles other than admin can be exercised.
 
-- [ ] Revisit when application-facing file access exists: that is the first caller with a real
-  non-admin role, and the first place this enforcement does observable work
+**Not actionable in this milestone** — it needs a caller that does not exist yet. Tracked in
+"Carried past this milestone" below rather than left open here, since nothing in Phase 1 can
+close it.
 
 ### 1.5 Admin SPA (`ui/admin`) ✅
 
@@ -174,9 +184,15 @@ counterpart to `format_chain`, which is for logs) and used it where connection f
 recorded and reported. The message now reads
 `connecting file store \`gone\`: file store root /definitely/not/here: No such file or directory`.
 
-- [ ] Consider auditing other admin-facing error paths for the same truncation — anywhere
-  `e.to_string()` on a context error reaches the UI has this problem, and it is invisible until
-  someone reads the message and finds it says nothing
+- [x] Audit the other admin-facing error paths for the same truncation. **One central site, now
+  fixed**: `error_response` in `sc-server/src/router.rs` sent `err.to_string()` for *every*
+  endpoint error, so the truncation was never specific to file stores. It could not simply be
+  switched to the causal chain, because the same function serves the admin API **and** every
+  application's API, and those have different readers — so it now takes an explicit `Audience`:
+  an admin gets `err.causes()`, an application's own users get the top-level message, and the log
+  keeps getting everything either way. Making it an argument rather than a default means a new
+  route has to answer the question. No other production site formats an error into a response
+  body
 
 ### 1.6 Follow-on: the framework `store` setting becomes a pick-list ✅
 
@@ -266,10 +282,32 @@ The step that removes the SSH requirement, and the reason this is more than a se
 
 ---
 
+## Carried past this milestone
+
+Decided, not forgotten. Each of these came out of Phase 1 with a reason it cannot or should not
+close here, and each has something in the tree that will make it noisy again when its time comes.
+
+- **A `_sc_fields` overlay, so `DataFieldKind::File` can actually be stored.** Decided against for
+  this milestone (§1.1): a field's kind cannot be declared through the API at all, so the overlay
+  alone would not make `File` fields reachable, and the overlay overturns the catalog's
+  "no stored metadata beyond `information_schema`" invariant. Whoever picks this up should do it
+  as the front of the fields/fieldviews work (§6.2/§6.3), not as a storage patch. The tripwire
+  test `file_field_references_are_inert_until_the_fields_overlay_exists` fails the moment the
+  overlay lands, which is the signal to re-enable the catalog-level half of the file-store delete
+  check (`file_store_field_references`, correct but inert today).
+- **Path-cumulative `min_role` enforcement doing observable work.** Implemented and unit-tested in
+  `sc-files`, and wired into every file endpoint — but every one of those is admin-only, so the
+  caller's role is always `1` and clears every rule (§1.4b). The first real exercise is
+  application-facing file access, which does not exist yet. Nothing in this milestone can close it;
+  it is here so it is not mistaken for finished when that caller arrives.
+- **`OptionsSource::ClientCode`** — options that depend on other values in the form, which cannot
+  be pre-resolved server-side (§1.6). It arrives with `ui/form-runtime` (§12), which is the only
+  thing that could evaluate it.
+
 ## Explicitly OUT of scope for this milestone
 
 - S3 / object-store and git-remote file-store backends — the registry makes them additive; only `local` is registered now
 - In-browser VS Code for the Web (§13.3's "ideally") — the file manager's text editor is a plain editor this milestone
 - Next.js / SvelteKit / React Native frameworks — `react` is the one opinionated framework; the registry pattern makes the others additive
-- `ui/form-runtime` (§12) proper — 1.6 may need a generic `ServerQuery` evaluator, but not the whole runtime
+- `ui/form-runtime` (§12) proper — §1.6 resolved server queries server-side instead, so no evaluator was needed
 - Everything still listed as out of scope in [docs/TODO-mvp.md](./docs/TODO-mvp.md)
