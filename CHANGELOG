@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## Admin screens for file stores and the file manager (TODO §1.5)
+
+The admin UI half of Phase 1: file stores are now managed entirely in the browser, and the file
+manager the MVP built endpoints for — and then shipped no screen for — exists.
+
+- **`screens/FileStores.tsx`** — every store an admin has configured, plus any connected by
+  `--file-store`. It exists to make two states visible that had no way of being seen before: a
+  store **defined but not connected** (directory unmounted since it was saved) is listed with its
+  reason and stays editable, because editing it is the repair; and a store **connected but not
+  defined** (from the flag, ephemeral by design) is listed read-only, since its null id means there
+  is no row to edit or delete. Offering buttons that would 404 is worse than saying "not editable".
+- **`screens/FileStoreForm.tsx`** — pick a backend, get its settings. No backend-specific code, so
+  an S3 or git-remote backend added to the registry gets a working form with no change to this
+  file. A save that succeeds but leaves the store unconnected shows "Saved, but not connected"
+  with the reason and keeps the form open, rather than treating it as failure — that follows §1.2's
+  split between "you mis-configured this" and "this is not currently reachable".
+- **`src/settings.tsx`** — the `FormField[]` renderer, **factored out** of `ApplicationForm` rather
+  than copied, and now used by both. One settings vocabulary (§6.2) deserves one rendering; two
+  copies would be two places to drift, and this is the single stand-in that `ui/form-runtime` (§12)
+  eventually replaces in one file.
+- **`screens/FileManager.tsx`** — breadcrumb navigation, upload, download, new folder, rename,
+  delete, and editing a text file in place. That last one is what `readFile`'s UTF-8 `text`
+  shortcut was built for in the MVP and nothing had ever called. The permissions dialog shows a
+  file's **effective** minimum role beside the rule set on it, because a parent folder can be
+  stricter and an admin reading only the entry's own rule would conclude a locked file is
+  reachable. It round-trips the free-form attributes untouched, so opening the dialog to change an
+  access rule cannot silently drop them.
+- **`api.ts` gains `uploadFile`** — the one hand-written call in the SPA, because its route is
+  outside the typed `EndpointSet`. It lives beside the other browser concerns rather than inside a
+  screen, so the exception is in one obvious place.
+
+**Verified by running the real server**, not only by tests: created a store through the same API
+the form posts to, drove mkdir/upload/write/browse/rename/delete/meta, confirmed the uploaded bytes
+round-trip byte-identical by sha256, observed all three list states, and walked the repair flow —
+editing a broken store's path until it connected, then renaming it and confirming the old name
+disconnected.
+
+**A bug that only running it could find.** A store that failed to connect reported its error as
+`connecting file store \`gone\`` — the context and nothing else, because `Display` on a context
+error renders only the outermost layer and leaves the cause behind `source()`. On a screen whose
+entire purpose in that state is to tell the admin what to fix, that message is useless: it does not
+say the directory is missing, or which directory. Added **`sc_error::format_causes`**, the whole
+causal chain on one line with no code locations — the user-facing counterpart to `format_chain`,
+which is multi-line and carries `file:line` because whoever reads a log can also read the source.
+Connection failures now record and report through it, so the admin sees
+`connecting file store \`gone\`: file store root /definitely/not/here: No such file or directory`.
+Anywhere else `e.to_string()` on a context error reaches the UI has the same defect; that is now a
+TODO item, since it is invisible until someone reads a message and finds it says nothing.
+
 ## File operations and the path-cumulative access rule (TODO §1.4b)
 
 The second half of §1.4: operating on a store's *contents*, and finally enforcing the access rule

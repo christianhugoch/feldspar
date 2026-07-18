@@ -24,22 +24,15 @@ import type {
   ListFrameworksResponse,
 } from "../client";
 import { navigate } from "../App";
+import { SettingsFields, asString, buildConfig, readConfig } from "../settings";
 
 type FrameworkInfo = ListFrameworksResponse[number];
-type FieldSpec = FrameworkInfo["config_spec"][number];
 type AppItem = ListApplicationsResponse[number];
 
 /** A `{ provider, mount }` API row, edited as a repeatable list. */
 type ApiRow = { provider: string; mount: string };
 /** A `{ mount, store, path }` static-directory row. */
 type StaticRow = { mount: string; store: string; path: string };
-
-/** Read a record value as a display string (config bags arrive as `unknown`). */
-function asString(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  return "";
-}
 
 /** Split a comma/whitespace-separated list into trimmed, non-empty names. */
 function parseNames(raw: string): string[] {
@@ -247,14 +240,11 @@ export function ApplicationForm({ appId }: { appId?: string }) {
 
             {/* The framework's own settings, rendered from its config_spec — no
                 framework-specific code lives here. */}
-            {selected?.config_spec.map((field) => (
-              <SettingField
-                key={field.name}
-                field={field}
-                value={config[field.name] ?? asString(field.default)}
-                onChange={(v) => setConfig((c) => ({ ...c, [field.name]: v }))}
-              />
-            ))}
+            <SettingsFields
+              spec={selected?.config_spec ?? []}
+              values={config}
+              onChange={(name, v) => setConfig((c) => ({ ...c, [name]: v }))}
+            />
           </Card.Body>
         </Card>
 
@@ -322,98 +312,6 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         </Button>
       </Form>
     </>
-  );
-}
-
-/** Read an app's stored framework config (an `unknown` bag) into a string map. */
-function readConfig(raw: unknown): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (raw && typeof raw === "object") {
-    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-      out[key] = asString(value);
-    }
-  }
-  return out;
-}
-
-/** Coerce the string form values back to the types the spec declares, dropping
- * empty optional settings (a required one left empty is left to the server to
- * reject, so its message names the setting). */
-function buildConfig(
-  spec: FieldSpec[],
-  values: Record<string, string>,
-): Record<string, unknown> {
-  const config: Record<string, unknown> = {};
-  for (const field of spec) {
-    const raw = values[field.name] ?? asString(field.default);
-    if (field.type === "bool") {
-      config[field.name] = raw === "true";
-      continue;
-    }
-    if (raw.trim() === "") continue;
-    config[field.name] = field.type === "int" ? Number(raw) : raw;
-  }
-  return config;
-}
-
-/** One setting from a framework's `config_spec`, rendered as a plain control:
- * a select when it restricts options, a checkbox/number/text otherwise. */
-function SettingField({
-  field,
-  value,
-  onChange,
-}: {
-  field: FieldSpec;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const controlId = `cfg-${field.name}`;
-  if (field.options.length > 0) {
-    return (
-      <Form.Group className="mb-3" controlId={controlId}>
-        <Form.Label>
-          {field.label}
-          {field.required && <span className="text-danger"> *</span>}
-        </Form.Label>
-        <Form.Select value={value} onChange={(e) => onChange(e.target.value)}>
-          <option value="">—</option>
-          {field.options.map((opt) => {
-            const s = asString(opt);
-            return (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            );
-          })}
-        </Form.Select>
-      </Form.Group>
-    );
-  }
-  if (field.type === "bool") {
-    return (
-      <Form.Group className="mb-3" controlId={controlId}>
-        <Form.Check
-          type="checkbox"
-          label={field.label}
-          checked={value === "true"}
-          onChange={(e) => onChange(e.target.checked ? "true" : "false")}
-        />
-      </Form.Group>
-    );
-  }
-  return (
-    <Form.Group className="mb-3" controlId={controlId}>
-      <Form.Label>
-        {field.label}
-        {field.required && <span className="text-danger"> *</span>}
-      </Form.Label>
-      <Form.Control
-        type={field.type === "int" ? "number" : "text"}
-        value={value}
-        required={field.required}
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </Form.Group>
   );
 }
 

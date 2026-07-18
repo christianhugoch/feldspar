@@ -38,6 +38,42 @@ const browserFetch: typeof fetch = (input, init = {}) => {
 export const api: ApiClient = createClient({ fetch: browserFetch });
 
 /**
+ * Upload a file's bytes to a store.
+ *
+ * **The one admin operation not in the generated client**, and deliberately so.
+ * The endpoint model is JSON-only — a `TypeSchema` has no bytes shape — so a raw
+ * binary body cannot be described by it, and the server serves this from a route
+ * outside the typed `EndpointSet` (`POST /upload/{store}/{*path}`). Everything
+ * else in this SPA goes through the generated client; this is the exception, so
+ * it lives here beside the other hand-written browser concerns rather than being
+ * scattered into a screen.
+ *
+ * `writeFile` remains the typed path for small text files (the editor uses it);
+ * this is for arbitrary bytes at arbitrary size.
+ */
+export async function uploadFile(
+  store: string,
+  path: string,
+  file: File,
+): Promise<void> {
+  // Each segment is encoded separately: the path is a `{*path}` capture, so its
+  // slashes are structural and must survive, while any other special character
+  // in a filename must not.
+  const encodedPath = path
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/");
+  const res = await browserFetch(
+    `/upload/${encodeURIComponent(store)}/${encodedPath}`,
+    { method: "POST", body: file },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`uploadFile failed: ${res.status}${text ? `: ${text}` : ""}`);
+  }
+}
+
+/**
  * The HTTP status embedded in an error thrown by the generated client, if any.
  * The client throws `Error("<name> failed: <status>[: <server message>]")`, so
  * we recover the code to distinguish, e.g., a 401 (bad credentials) from a real

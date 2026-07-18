@@ -152,13 +152,33 @@ where roles other than admin can be exercised.
 - [ ] Revisit when application-facing file access exists: that is the first caller with a real
   non-admin role, and the first place this enforcement does observable work
 
-### 1.5 Admin SPA (`ui/admin`)
+### 1.5 Admin SPA (`ui/admin`) ✅
 
-- [ ] **File stores screen**: list (name, backend, path/summary, connected-or-error), create, edit, delete. Nav entry alongside Tables / Users / Applications
-- [ ] Create/edit form: pick a backend → render its `config_spec` settings as a plain form, no backend-specific code in the screen (the same rendering `ApplicationForm` already does for a framework's spec — factor the shared "render a `FormField[]`" piece out rather than copying it)
-- [ ] **File manager screen**: browse a store's tree, upload, download, create directory, rename, delete, and edit a text file in place. The MVP built `browseFiles`/`readFile`/`writeFile` — including the UTF-8 `text` shortcut explicitly "for the text editor" — and then shipped no screen that calls them
-- [ ] Surface and let an admin edit a file's `min_role`
-- [ ] A store that failed to connect is shown as such, with its error, and is still editable — that is precisely when an admin needs to fix its path
+- [x] **File stores screen** (`screens/FileStores.tsx`): list with name, backend, a generic settings summary, connected-or-error status, and create/edit/browse/remove. Nav entry "Files" alongside Tables / Applications / Users
+- [x] Create/edit form (`screens/FileStoreForm.tsx`): pick a backend → render its `config_spec`, no backend-specific code. The shared renderer was **factored out** into `src/settings.tsx` and `ApplicationForm` now uses it too, so the one settings vocabulary has one rendering
+- [x] **File manager screen** (`screens/FileManager.tsx`): breadcrumb navigation, upload, download, new folder, rename, delete, and editing a text file in place — which is what `readFile`'s UTF-8 `text` shortcut was built for and nothing had ever called
+- [x] Surface and let an admin edit a file's `min_role`, showing the **effective** role beside it, since a parent folder can be stricter and an admin reading only the entry's own rule would draw the wrong conclusion
+- [x] A store that failed to connect is shown as such, with its error, and is still editable
+- [x] Null-id (`--file-store`) stores render read-only, per the §1.4a note
+- [x] Upload is the one hand-written client call (`api.ts`), since the route is outside the typed `EndpointSet`
+
+**Verified by running the real server**, not only by tests: created a store through the API the
+form posts to, drove mkdir/upload/write/browse/rename/delete/meta, confirmed uploaded bytes match
+by sha256, saw all three list states (stored+connected, stored+unconnected with its reason, and
+flag-connected with a null id), and completed the repair flow — editing a broken store's path
+until it connects, then renaming it and watching the old name disconnect.
+
+**A bug that found:** a failed connection reported only `connecting file store \`gone\``, with no
+cause — `Display` on a context error shows just the outermost context. For a screen whose entire
+purpose in that state is telling the admin what to fix, that is useless. Added
+`sc_error::format_causes` (the whole chain on one line, no code locations — the user-facing
+counterpart to `format_chain`, which is for logs) and used it where connection failures are
+recorded and reported. The message now reads
+`connecting file store \`gone\`: file store root /definitely/not/here: No such file or directory`.
+
+- [ ] Consider auditing other admin-facing error paths for the same truncation — anywhere
+  `e.to_string()` on a context error reaches the UI has this problem, and it is invisible until
+  someone reads the message and finds it says nothing
 
 ### 1.6 Follow-on: the framework `store` setting becomes a pick-list
 

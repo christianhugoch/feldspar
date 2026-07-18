@@ -293,6 +293,42 @@ impl std::error::Error for Error {
 /// assert!(chain.contains("caused by:"));
 /// assert!(chain.contains("invalid digit"));
 /// ```
+/// The whole causal chain as one line, for a **person outside the process**:
+/// each error's message joined with `: `, and no code locations.
+///
+/// The counterpart to [`format_chain`], and the distinction is who is reading.
+/// `format_chain` is for the log — multi-line, with the failing line of source,
+/// because whoever reads it can also read the code. This is for an admin looking
+/// at a screen, where a file path is useful and `src/backend.rs:161` is noise.
+///
+/// It exists because [`Display`](std::fmt::Display) on a context error shows only
+/// the *outermost* context: an error built as "connecting file store `docs`"
+/// wrapping "no such file or directory" renders as just the former, which tells
+/// an admin that something failed but not what to fix. Anything that surfaces an
+/// error into the UI wants this rather than `to_string`.
+///
+/// ```
+/// use sc_error::{format_causes, Context, Result};
+///
+/// let inner: std::result::Result<(), std::num::ParseIntError> = "x".parse::<i32>().map(|_| ());
+/// let err = inner.context("parsing the port").unwrap_err();
+/// let text = format_causes(&err);
+/// assert!(text.starts_with("parsing the port: "));
+/// assert!(text.contains("invalid digit"));
+/// // One line, and no file:line noise.
+/// assert!(!text.contains('\n'));
+/// ```
+pub fn format_causes(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
 pub fn format_chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut out = err.to_string();
     append_location(&mut out, err);

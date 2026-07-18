@@ -13,6 +13,9 @@ import { api } from "./api";
 import type { AuthStatusResponse } from "./client";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
+import { FileManager } from "./screens/FileManager";
+import { FileStores } from "./screens/FileStores";
+import { FileStoreForm } from "./screens/FileStoreForm";
 import { FirstUser } from "./screens/FirstUser";
 import { Login } from "./screens/Login";
 import { Tables } from "./screens/Tables";
@@ -110,6 +113,12 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
             >
               Applications
             </Nav.Link>
+            <Nav.Link
+              href="#/file-stores"
+              active={route.startsWith("/file-stores") || route.startsWith("/files")}
+            >
+              Files
+            </Nav.Link>
             <Nav.Link href="#/users" active={route.startsWith("/users")}>
               Users
             </Nav.Link>
@@ -142,6 +151,20 @@ function Screen({ route }: { route: string }) {
   }
   if (route.startsWith("/applications")) {
     return <Applications />;
+  }
+  if (route === "/file-stores/new") {
+    return <FileStoreForm />;
+  }
+  const storeEditMatch = route.match(/^\/file-stores\/([^/]+)\/edit$/);
+  if (storeEditMatch) {
+    return <FileStoreForm storeId={decodeURIComponent(storeEditMatch[1])} />;
+  }
+  if (route.startsWith("/file-stores")) {
+    return <FileStores />;
+  }
+  const filesMatch = route.match(/^\/files\/([^/]+)$/);
+  if (filesMatch) {
+    return <FileManager store={decodeURIComponent(filesMatch[1])} />;
   }
   if (route.startsWith("/users")) {
     return <Users />;

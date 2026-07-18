@@ -266,7 +266,11 @@ pub fn connect_file_store_def(catalog: &Catalog, def: &FileStoreDef) -> Result<(
     match connect_from_def(def) {
         Ok(store) => catalog.connect_file_store(store),
         Err(e) => {
-            catalog.record_file_store_error(&def.name, e.to_string())?;
+            // The whole causal chain, not just `e.to_string()`: the outermost
+            // context reads "connecting file store `docs`", which tells an admin
+            // that it failed but not that the directory is missing or which one.
+            // This message is shown in the UI, so it has to be actionable.
+            catalog.record_file_store_error(&def.name, sc_error::format_causes(&e))?;
             Err(e)
         }
     }
@@ -290,7 +294,9 @@ pub async fn connect_all_file_stores(catalog: &Catalog) -> Result<FileStoreConne
     for def in list_file_stores(catalog).await? {
         match connect_file_store_def(catalog, &def) {
             Ok(()) => report.connected.push(def.name),
-            Err(e) => report.failed.push((def.name, e.to_string())),
+            // Same reasoning as above: the report reaches the boot log and
+            // the admin, so it carries the cause, not just the context.
+            Err(e) => report.failed.push((def.name, sc_error::format_causes(&e))),
         }
     }
     Ok(report)
