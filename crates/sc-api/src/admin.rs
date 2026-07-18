@@ -289,6 +289,104 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Create a directory (and any missing parents). Idempotent — asking for a
+    // directory that exists is a success, since the caller wanted one there.
+    set.register(
+        Endpoint::new(
+            "makeDirectory",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("mkdir"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "path",
+            TypeSchema::text(),
+        )]))
+        .output(file_entry_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Delete a file, or a directory and everything in it. Reports whether
+    // anything was there, so the caller need not race an existence check.
+    set.register(
+        Endpoint::new(
+            "deleteFile",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("delete"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "path",
+            TypeSchema::text(),
+        )]))
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Move or rename within the store. Never overwrites an existing destination.
+    set.register(
+        Endpoint::new(
+            "renameFile",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("rename"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("from", TypeSchema::text()),
+            StructField::new("to", TypeSchema::text()),
+        ]))
+        .output(file_entry_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Per-file metadata (design §9): the access rule and the free-form
+    // attributes kept beside the bytes rather than in a database row. `min_role`
+    // is what the path-cumulative rule is built from, so this is how an admin
+    // restricts a folder.
+    set.register(
+        Endpoint::new(
+            "getFileMeta",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("meta"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "path",
+            TypeSchema::text(),
+        )]))
+        .output(file_meta_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "setFileMeta",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("set-meta"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("path", TypeSchema::text()),
+            StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+            StructField::new("attributes", TypeSchema::json()),
+        ]))
+        .output(file_meta_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- applications -------------------------------------------------------
     // An application is created in the admin UI and exists only as its stored
     // row (§13.2); these endpoints are the row ⇄ mounted-app path the SPA drives.
@@ -453,6 +551,27 @@ fn file_store_schema() -> TypeSchema {
 /// update) and minus the live state, which is observed rather than set.
 fn file_store_input_schema() -> TypeSchema {
     TypeSchema::Struct(file_store_fields())
+}
+
+/// One file's metadata (design §9): the access rule and the free-form attributes
+/// kept beside the bytes rather than in a database row.
+///
+/// `effective_min_role` is the *computed* answer — the most restrictive rule on
+/// the whole path, including the store's own floor and every parent directory —
+/// while `min_role` is only what is set on this entry. The UI needs both: the
+/// second is what an admin edits, the first is what actually applies, and
+/// showing only the second would let an admin believe a file is public when a
+/// parent directory has locked it.
+fn file_meta_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("path", TypeSchema::text()),
+        StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+        StructField::new(
+            "effective_min_role",
+            TypeSchema::optional(TypeSchema::int()),
+        ),
+        StructField::new("attributes", TypeSchema::json()),
+    ])
 }
 
 /// A registered file-store backend and the settings it declares, so the admin UI

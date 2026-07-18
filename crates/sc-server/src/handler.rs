@@ -45,11 +45,30 @@ pub struct HandlerCtx {
     /// The authenticated user, if any. Presence/role already satisfy the
     /// endpoint's [`AuthRequirement`](sc_api::AuthRequirement).
     pub user: Option<User>,
+    /// The unparsed request body, set only for the routes that carry one.
+    ///
+    /// A typed endpoint never has this: its body is JSON, described by a
+    /// `TypeSchema`, and arrives in [`body`](HandlerCtx::body). Binary upload
+    /// cannot be described that way — the endpoint model has no bytes shape — so
+    /// it is served by a route outside the `EndpointSet` that still dispatches
+    /// *through this registry*, which is how it reaches the same catalog and the
+    /// same access checks as everything else. Threading the bytes here rather
+    /// than giving that route its own catalog handle is what keeps one code path
+    /// for "write a file", however the bytes arrived.
+    pub raw_body: Option<bytes::Bytes>,
 }
 
 impl HandlerCtx {
     /// A required path parameter, or an [`Error::Invalid`](sc_error::Error) if
     /// absent (a routing/registration bug rather than user input).
+    /// The raw request body, or an error when the route did not supply one
+    /// (which would be a registration bug, not user input).
+    pub fn raw_body(&self) -> Result<&bytes::Bytes> {
+        self.raw_body
+            .as_ref()
+            .ok_or_else(|| sc_error::Error::invalid("this handler requires a raw request body"))
+    }
+
     pub fn path_param(&self, name: &str) -> Result<&str> {
         self.path_params
             .get(name)

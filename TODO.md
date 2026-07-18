@@ -131,15 +131,26 @@ edited or deleted, because there is no row behind it.
 
 - [ ] §1.5 must render a null-id store as read-only, and not offer edit/delete for it
 
-### 1.4b Admin API — file operations & access control (`sc-api`, `sc-server`)
+### 1.4b Admin API — file operations & access control (`sc-api`, `sc-server`) ✅
 
-What the §1.5 **file manager screen** needs. Deliberately a separate pass.
+What the §1.5 **file manager screen** needs.
 
-- [ ] Extend the `FileStore` trait with `mkdir`, `delete`, `rename`/`move` (it currently has only `read`/`write`/`list`/`get_meta`/`set_meta`) plus the `LocalFileStore` implementations, then the endpoints over them
-- [ ] **Binary upload route (decided):** a multipart/streaming POST registered directly on the axum router, *outside* the typed `EndpointSet`, since `TypeSchema` is JSON-only (`Value`/`Struct`/`Array`/`Optional`) and `HandlerResponse` carries `Json`. Consequence to accept and document: it is the first admin operation absent from the generated TypeScript client, so the SPA hand-writes that one call. `writeFile`'s base64 path stays for small files
-- [ ] Endpoints for `FileMeta`: get/set `min_role` and attributes on a path. `FileMeta` is modelled and xattr-backed with no way to reach it — the path-cumulative access rule it documents is unenforceable and untestable from the UI until there is
-- [ ] Enforce the path-cumulative `min_role` rule on read/browse/write, not just store it. Note this interacts with a store-wide `min_role` (§1.1), which is the floor applied before any per-file rule
-- [ ] Integration tests: each endpoint end to end; non-admins are rejected; path traversal (`..`, absolute paths) rejected at the API edge as well as in the driver
+- [x] Extend the `FileStore` trait with `mkdir`, `delete`, `rename` plus the `LocalFileStore` implementations, then the `makeDirectory` / `deleteFile` / `renameFile` endpoints over them. Semantics chosen deliberately: `mkdir` is idempotent but refuses to shadow a file; `delete` reports whether anything was there (so a caller need not race an existence check) and refuses the store root; `rename` never overwrites — a silent replace on a file manager's drag-and-drop is a lost file with no undo
+- [x] **Binary upload route** at `POST /upload/{store}/{*path}`, outside the typed `EndpointSet`. It dispatches *through the handler registry* (`uploadFile`) rather than owning its own catalog handle, so routing around the endpoint set does not also route around the catalog or the access checks. Body capped at 256 MB; `writeFile`'s base64 path stays for small files
+- [x] `getFileMeta` / `setFileMeta`. They report `effective_min_role` (what actually applies, given the store floor and every parent) alongside `min_role` (what is set on this entry) — showing only the latter would let an admin believe a file is reachable when its folder has locked it
+- [x] Enforce the path-cumulative `min_role` rule on read/browse/write/mkdir/delete/rename/meta/upload (`sc-files/src/access.rs`). A browse is *filtered* rather than refused, since listing names the caller cannot open leaks what the rule was set to hide. Nested rules only ever tighten, and the store-wide floor (§1.1) is simply the outermost entry on the path
+- [x] Integration tests: `crates/sc-server/tests/file_operations_api.rs` (5) + 8 unit tests in `sc-files`
+
+**Known gap, deliberately not papered over.** Every file endpoint is `AuthRequirement::admin()`,
+so `caller_role` is always `1` and an admin clears every rule — the enforcement is therefore
+**inert through the admin API today**. It is wired in because it is correct by construction and
+starts working the moment a non-admin can reach a store, and because enforcement living only in
+a future caller is the same mistake as the rule living only in a doc comment (which is what
+`FileMeta::min_role` was until now). The rule itself is tested directly at the `sc-files` level,
+where roles other than admin can be exercised.
+
+- [ ] Revisit when application-facing file access exists: that is the first caller with a real
+  non-admin role, and the first place this enforcement does observable work
 
 ### 1.5 Admin SPA (`ui/admin`)
 

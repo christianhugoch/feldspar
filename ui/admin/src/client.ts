@@ -30,6 +30,16 @@ export type ReadFileRequest = { path: string };
 export type ReadFileResponse = { path: string; size: number; base64: string; text?: string | null };
 export type WriteFileRequest = { path: string; base64?: string | null; text?: string | null };
 export type WriteFileResponse = { name: string; path: string; is_dir: boolean; size?: number | null };
+export type MakeDirectoryRequest = { path: string };
+export type MakeDirectoryResponse = { name: string; path: string; is_dir: boolean; size?: number | null };
+export type DeleteFileRequest = { path: string };
+export type DeleteFileResponse = { deleted: boolean };
+export type RenameFileRequest = { from: string; to: string };
+export type RenameFileResponse = { name: string; path: string; is_dir: boolean; size?: number | null };
+export type GetFileMetaRequest = { path: string };
+export type GetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
+export type SetFileMetaRequest = { path: string; min_role?: number | null; attributes: unknown };
+export type SetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
 export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown }>;
 export type CreateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
 export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
@@ -63,6 +73,11 @@ export interface ApiClient {
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
   readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
   writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
+  makeDirectory(store: string, body: MakeDirectoryRequest): Promise<MakeDirectoryResponse>;
+  deleteFile(store: string, body: DeleteFileRequest): Promise<DeleteFileResponse>;
+  renameFile(store: string, body: RenameFileRequest): Promise<RenameFileResponse>;
+  getFileMeta(store: string, body: GetFileMetaRequest): Promise<GetFileMetaResponse>;
+  setFileMeta(store: string, body: SetFileMetaRequest): Promise<SetFileMetaResponse>;
   listApplications(): Promise<ListApplicationsResponse>;
   createApplication(body: CreateApplicationRequest): Promise<CreateApplicationResponse>;
   updateApplication(id: string, body: UpdateApplicationRequest): Promise<UpdateApplicationResponse>;
@@ -258,6 +273,51 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("writeFile", res);
       return (await res.json()) as WriteFileResponse;
+    },
+    async makeDirectory(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/mkdir`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("makeDirectory", res);
+      return (await res.json()) as MakeDirectoryResponse;
+    },
+    async deleteFile(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/delete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("deleteFile", res);
+      return (await res.json()) as DeleteFileResponse;
+    },
+    async renameFile(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/rename`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("renameFile", res);
+      return (await res.json()) as RenameFileResponse;
+    },
+    async getFileMeta(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/meta`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("getFileMeta", res);
+      return (await res.json()) as GetFileMetaResponse;
+    },
+    async setFileMeta(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/set-meta`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("setFileMeta", res);
+      return (await res.json()) as SetFileMetaResponse;
     },
     async listApplications() {
       const res = await doFetch(`${baseUrl}/api/applications`, {

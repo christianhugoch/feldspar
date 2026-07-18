@@ -2,6 +2,59 @@
 
 Changes in reverse chronological order.
 
+## File operations and the path-cumulative access rule (TODO §1.4b)
+
+The second half of §1.4: operating on a store's *contents*, and finally enforcing the access rule
+`FileMeta` has documented since the MVP.
+
+- **`FileStore` gains `mkdir`, `delete` and `rename`** (it had only `read`/`write`/`list`/
+  `get_meta`/`set_meta`), with `LocalFileStore` implementations and `makeDirectory` / `deleteFile` /
+  `renameFile` endpoints over them. The semantics are the interesting part: `mkdir` is idempotent
+  (the caller wanted a directory there and there is one) but refuses to shadow an existing file;
+  `delete` returns whether anything was there, so a caller need not race an existence check against
+  the delete, and refuses the store root however it is spelled (`""`, `"/"`, `"."`); `rename`
+  refuses to overwrite an existing destination, because a silent replace on a file manager's
+  drag-and-drop is a lost file with no undo.
+- **`getFileMeta` / `setFileMeta`** make `FileMeta` reachable at last. Both report
+  `effective_min_role` — what actually applies, given the store floor and every parent directory —
+  alongside `min_role`, what is set on this entry. Reporting only the latter would let an admin
+  believe a file is reachable when its folder has locked it.
+- **The path-cumulative rule is enforced** (`crates/sc-files/src/access.rs`) on read, browse,
+  write, mkdir, delete, rename, meta and upload. Roles are inverted (`1` admin … `100` public), so
+  the effective floor is the *most restrictive* rule on the whole path: a nested rule can only ever
+  tighten. That direction is the point — if a nested rule could widen access, restricting a folder
+  would not restrict it, since anything inside could opt back out. A browse is **filtered** rather
+  than refused, because a readable directory may hold entries the caller cannot open and listing
+  their names leaks exactly what the rule was set to hide. Access errors name neither the
+  restricting component nor whether the target exists, so the endpoint cannot be used to probe for
+  files the caller may not see.
+- **Binary upload** at `POST /upload/{store}/{*path}`, outside the typed `EndpointSet` because the
+  endpoint model is JSON-only (`TypeSchema` is `Value`/`Struct`/`Array`/`Optional`, and
+  `HandlerResponse` carries `Json`). It dispatches **through the handler registry** (`uploadFile`)
+  rather than owning its own catalog handle — routing around the endpoint set must not also mean
+  routing around the catalog or the access model, so there is still one code path for "write a
+  file" however the bytes arrived. `HandlerCtx` gained a `raw_body` for this. Bodies are capped at
+  256 MB; `writeFile`'s base64 path stays for small files and stays in the generated client.
+  The accepted cost: this is the first admin operation absent from the generated TypeScript
+  client, so the SPA will hand-write this one call.
+
+**A gap worth stating plainly rather than papering over.** Every file endpoint is
+`AuthRequirement::admin()`, so the caller's role is always `1` and an admin clears every rule —
+which makes the enforcement **inert through the admin API today**. It is wired in anyway: it is
+correct by construction, costs nothing, and starts doing real work the moment a non-admin role can
+reach a store. Enforcement living only in some future caller would be the same mistake as the rule
+living only in a doc comment, which is precisely what `FileMeta::min_role` was until this change.
+The rule itself is tested directly at the `sc-files` level, where non-admin roles can be exercised.
+
+Tests: 8 new unit tests in `sc-files` (mkdir idempotence and the file-conflict refusal, delete
+reporting and root refusal, rename creating parents / refusing to clobber / rejecting traversal on
+both sides, cumulative access, nested rules only tightening with the store floor composing, and
+listings hiding entries) plus 5 integration tests in
+`crates/sc-server/tests/file_operations_api.rs` (the operations end to end, traversal rejected on
+*every* operation including the new ones, metadata round-tripping with the effective rule, binary
+upload landing bytes verbatim, and upload rejecting an unauthenticated caller — the risk that comes
+with hand-rolling a route outside dispatch).
+
 ## Admin API for file-store configuration (TODO §1.4a)
 
 File stores can now be created, edited and deleted over the admin API, which is everything the

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum_extra::extract::CookieJar;
@@ -147,6 +147,22 @@ pub fn build_router_with_apps(
         // typed API) so a CLI smoke test, load balancer, or orchestrator can
         // confirm the process is up. It takes precedence over the SPA fallback.
         .route("/health", axum::routing::get(health))
+        // Binary file upload, deliberately **outside** the typed `EndpointSet`.
+        //
+        // The endpoint model is JSON-only — `TypeSchema` is
+        // `Value`/`Struct`/`Array`/`Optional` and `HandlerResponse` carries
+        // `Json` — so a raw body cannot be described by it. `writeFile`'s base64
+        // path stays for small files and remains in the generated TypeScript
+        // client; this exists for the ones that should not be held in memory
+        // twice and inflated by a third to cross the wire.
+        //
+        // The cost, accepted knowingly: this is the first admin operation absent
+        // from the generated client, so the SPA hand-writes this one call. It
+        // therefore has to do for itself everything `dispatch` does for a typed
+        // endpoint — session lookup and the admin check — which is why the auth
+        // is repeated here rather than inherited. CSRF is *not* repeated: the
+        // middleware wraps every route including this one.
+        .route("/upload/{store}/{*path}", axum::routing::post(upload))
         .fallback(dispatch)
         .with_state(state)
         // CSRF runs outside dispatch so it guards every route and can mint the
@@ -180,10 +196,83 @@ pub fn build_router_with_apps(
     Ok(app)
 }
 
+/// Ceiling on a single upload. Generous enough for the assets a code framework's
+/// source tree carries (images, fonts, sample data) while still bounding what one
+/// request can allocate.
+const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+
 /// The operational health check. Always `200 {"status":"ok"}`; reaching it at
 /// all is the signal that the server booted and is accepting requests.
 async fn health() -> Response {
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+}
+
+/// Stream a request body straight into a file store (see the route's comment for
+/// why this lives outside the typed endpoint set).
+///
+/// The store and destination come from the URL rather than a JSON body, because
+/// there is no JSON body — the body *is* the file. `{*path}` is a greedy capture,
+/// so a nested destination like `assets/img/logo.png` arrives whole.
+///
+/// The work itself is done by the `uploadFile` handler in the registry, not here.
+/// That is deliberate: the handler already closes over the catalog and applies
+/// the same access rule as every other file operation, so routing around the
+/// `EndpointSet` does not also mean routing around the access model. All this
+/// function adds is the plumbing dispatch would otherwise have done — session
+/// lookup, the admin check, and reading the body.
+async fn upload(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    AxumPath((store_name, path)): AxumPath<(String, String)>,
+    body: axum::body::Body,
+) -> Response {
+    let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    let user = match &session_token {
+        Some(token) => match state.sessions.user_for(token) {
+            Ok(user) => user,
+            Err(e) => {
+                log_failure("session lookup failed", &e);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed");
+            }
+        },
+        None => None,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        return rejection;
+    }
+
+    let Some(handler) = state.handlers.get("uploadFile").cloned() else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "this server has no file-upload handler registered",
+        );
+    };
+
+    // Bounded rather than unbounded: the cap is what keeps a single request from
+    // exhausting memory. True streaming to disk would remove the ceiling and is
+    // the next step if it ever binds; this is already far above what
+    // base64-in-JSON could carry.
+    let bytes = match axum::body::to_bytes(body, MAX_UPLOAD_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("upload exceeds the {MAX_UPLOAD_BYTES} byte limit"),
+            );
+        }
+    };
+
+    let ctx = HandlerCtx {
+        raw_body: Some(bytes),
+        path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
+        query: HashMap::new(),
+        body: serde_json::Value::Null,
+        user,
+    };
+    match handler(ctx).await {
+        Ok(resp) => apply_response(&state, jar, session_token, resp),
+        Err(e) => error_response(&e),
+    }
 }
 
 /// Group endpoints by path pattern and insert them into a `matchit` router.
@@ -455,6 +544,7 @@ async fn handle_api(
     };
 
     let ctx = HandlerCtx {
+        raw_body: None,
         path_params,
         query: parse_query(uri),
         body: parsed_body,

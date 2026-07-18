@@ -65,6 +65,29 @@ pub trait FileStore: Send + Sync {
     /// List the direct children of a directory (`""` or `"/"` is the root).
     async fn list(&self, dir: &str) -> Result<Vec<Entry>>;
 
+    /// Create a directory, and any missing parents.
+    ///
+    /// Creating one that already exists is **not** an error: the caller wanted a
+    /// directory there and there is one. Creating one where a *file* already sits
+    /// is, since that is a genuine conflict the caller must resolve.
+    async fn mkdir(&self, path: &str) -> Result<()>;
+
+    /// Delete a file, or a directory and everything in it.
+    ///
+    /// Returns whether anything was there to delete, so a caller can distinguish
+    /// "removed" from "already gone" without a prior existence check — the check
+    /// would race anyway. Deleting the store root is refused: a store's root is
+    /// the store, and removing it would leave a definition pointing at nothing.
+    async fn delete(&self, path: &str) -> Result<bool>;
+
+    /// Move or rename a file or directory within the store.
+    ///
+    /// Both paths are store-relative and confined to the root, so this cannot be
+    /// used to move data out of the store. Refuses to overwrite an existing
+    /// destination: a rename that silently replaced a file would destroy data the
+    /// caller never named.
+    async fn rename(&self, from: &str, to: &str) -> Result<()>;
+
     /// Whether this store is (rooted at) a git repository.
     fn is_git_repo(&self) -> bool;
 

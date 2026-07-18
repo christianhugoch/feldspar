@@ -134,6 +134,97 @@ impl FileStore for LocalFileStore {
         Ok(entries)
     }
 
+    async fn mkdir(&self, path: &str) -> Result<()> {
+        let abs = self.resolve(path)?;
+        // A file already sitting there is a real conflict — `create_dir_all`
+        // would report an opaque OS error, so name it.
+        if abs.is_file() {
+            return Err(Error::invalid(format!(
+                "cannot create directory {path:?} in store {}: a file already exists there",
+                self.name
+            )));
+        }
+        // Idempotent by construction: `create_dir_all` succeeds when the
+        // directory is already there.
+        tokio::fs::create_dir_all(&abs)
+            .await
+            .with_context(|| format!("creating directory {path:?} in store {}", self.name))?;
+        Ok(())
+    }
+
+    async fn delete(&self, path: &str) -> Result<bool> {
+        let abs = self.resolve(path)?;
+        // `resolve` collapses "", "/" and "." to the root, so this also catches
+        // an attempt to delete the whole store by passing an empty path.
+        if abs == self.root {
+            return Err(Error::invalid(format!(
+                "refusing to delete the root of file store {}",
+                self.name
+            )));
+        }
+        let meta = match tokio::fs::symlink_metadata(&abs).await {
+            Ok(meta) => meta,
+            // Already gone: report it rather than erroring, so a caller need not
+            // race an existence check against the delete.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => {
+                return Err(Error::from(e))
+                    .with_context(|| format!("stat {path:?} in store {}", self.name));
+            }
+        };
+        if meta.is_dir() {
+            tokio::fs::remove_dir_all(&abs)
+                .await
+                .with_context(|| format!("deleting directory {path:?} in store {}", self.name))?;
+        } else {
+            tokio::fs::remove_file(&abs)
+                .await
+                .with_context(|| format!("deleting {path:?} in store {}", self.name))?;
+        }
+        Ok(true)
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let src = self.resolve(from)?;
+        let dst = self.resolve(to)?;
+        if src == self.root || dst == self.root {
+            return Err(Error::invalid(format!(
+                "refusing to rename the root of file store {}",
+                self.name
+            )));
+        }
+        if !tokio::fs::try_exists(&src)
+            .await
+            .with_context(|| format!("checking {from:?} exists"))?
+        {
+            return Err(Error::not_found(format!(
+                "{from:?} does not exist in store {}",
+                self.name
+            )));
+        }
+        // Refuse to clobber. `tokio::fs::rename` would silently replace the
+        // destination, destroying data the caller never named — and on a file
+        // manager's drag-and-drop that is a lost file with no undo.
+        if tokio::fs::try_exists(&dst)
+            .await
+            .with_context(|| format!("checking {to:?} exists"))?
+        {
+            return Err(Error::invalid(format!(
+                "cannot rename {from:?} to {to:?} in store {}: the destination already exists",
+                self.name
+            )));
+        }
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating parent dirs for {to:?}"))?;
+        }
+        tokio::fs::rename(&src, &dst)
+            .await
+            .with_context(|| format!("renaming {from:?} to {to:?} in store {}", self.name))?;
+        Ok(())
+    }
+
     fn is_git_repo(&self) -> bool {
         // A `.git` directory (normal repo) or file (worktree/submodule link).
         self.root.join(".git").exists()

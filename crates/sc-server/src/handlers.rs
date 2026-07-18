@@ -34,10 +34,13 @@ use sc_auth::{
 };
 use sc_catalog::{
     Attrs, Catalog, DataField, FileStoreId, TableId, connect_file_store_def, delete_file_store,
-    list_file_stores, load_file_store, save_file_store,
+    list_file_stores, load_file_store, load_file_store_by_name, save_file_store,
 };
 use sc_error::{Error, Result};
-use sc_files::{Entry, FileStoreDef, FileStoreDefId, backend_config_spec, registered_backends};
+use sc_files::{
+    Entry, FileMeta, FileStoreDef, FileStoreDefId, backend_config_spec, check_access,
+    effective_min_role, filter_visible, registered_backends,
+};
 use sc_query::{Expr, Projection, Select, Source, Statement};
 use sc_types::{FormField, TypeRef};
 use serde_json::{Map, Value as Json, json};
@@ -366,12 +369,24 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let store = catalog.require_file_store(ctx.path_param("store")?)?;
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
                 let obj = require_object(&ctx.body)?;
                 // `dir` is optional-ish: an absent/empty value lists the root.
                 let dir = obj.get("dir").and_then(Json::as_str).unwrap_or("");
+                let role = caller_role(&ctx);
+                check_access(store.as_ref(), floor, dir, role).await?;
+
+                // The directory's own floor covers every child, so it is
+                // computed once here rather than re-walking the ancestors for
+                // each entry.
+                let dir_floor = effective_min_role(store.as_ref(), floor, dir).await?;
                 let entries = store.list(dir).await?;
-                let out: Vec<Json> = entries.iter().map(entry_json).collect();
+                // Filtered, not refused: a readable directory may hold entries
+                // the caller cannot open, and listing their names leaks exactly
+                // what the rule was set to hide.
+                let visible = filter_visible(store.as_ref(), dir_floor, entries, role).await?;
+                let out: Vec<Json> = visible.iter().map(entry_json).collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
@@ -382,9 +397,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let store = catalog.require_file_store(ctx.path_param("store")?)?;
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
                 let obj = require_object(&ctx.body)?;
                 let path = non_empty_str_field(obj, "path")?;
+                check_access(store.as_ref(), floor, path, caller_role(&ctx)).await?;
                 let bytes = store.read(path).await?;
                 // Always provide base64 (for binary download); add a decoded
                 // `text` when the bytes are valid UTF-8 (for the text editor).
@@ -407,13 +424,147 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let store = catalog.require_file_store(ctx.path_param("store")?)?;
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
                 let obj = require_object(&ctx.body)?;
                 let path = non_empty_str_field(obj, "path")?.to_owned();
+                check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
                 let data = file_body_bytes(obj)?;
                 let size = data.len();
                 store.write(&path, data).await?;
                 Ok(HandlerResponse::ok(file_entry_written_json(&path, size)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("makeDirectory", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let obj = require_object(&ctx.body)?;
+                let path = non_empty_str_field(obj, "path")?.to_owned();
+                check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
+                store.mkdir(&path).await?;
+                Ok(HandlerResponse::ok(directory_entry_json(&path)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("deleteFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let obj = require_object(&ctx.body)?;
+                let path = non_empty_str_field(obj, "path")?.to_owned();
+                check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
+                let deleted = store.delete(&path).await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    reg.register("renameFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let obj = require_object(&ctx.body)?;
+                let from = non_empty_str_field(obj, "from")?.to_owned();
+                let to = non_empty_str_field(obj, "to")?.to_owned();
+                // Both ends are checked: reading from a restricted place and
+                // writing into one are each things the rule governs, and a move
+                // does both.
+                let role = caller_role(&ctx);
+                check_access(store.as_ref(), floor, &from, role).await?;
+                check_access(store.as_ref(), floor, &to, role).await?;
+                store.rename(&from, &to).await?;
+                Ok(HandlerResponse::ok(entry_json(&renamed_entry(&to))))
+            }
+        }
+    });
+
+    // Served by the `/upload/{store}/{*path}` route rather than a typed endpoint
+    // (the endpoint model has no bytes shape), but registered here like any
+    // other handler so it reaches the same catalog and the same access rule.
+    // Routing around the `EndpointSet` must not mean routing around those.
+    reg.register("uploadFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let path = ctx.path_param("path")?.to_owned();
+                check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
+                let data = ctx.raw_body()?.clone();
+                let size = data.len();
+                store.write(&path, data).await?;
+                Ok(HandlerResponse::ok(file_entry_written_json(&path, size)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("getFileMeta", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let obj = require_object(&ctx.body)?;
+                let path = non_empty_str_field(obj, "path")?.to_owned();
+                check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
+                let meta = store.get_meta(&path).await?;
+                let effective = effective_min_role(store.as_ref(), floor, &path).await?;
+                Ok(HandlerResponse::ok(file_meta_json(&path, &meta, effective)))
+            }
+        }
+    });
+
+    reg.register("setFileMeta", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let obj = require_object(&ctx.body)?;
+                let path = non_empty_str_field(obj, "path")?.to_owned();
+                check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
+
+                let min_role = optional_role(obj, "min_role")?;
+                let attributes = match obj.get("attributes") {
+                    Some(Json::Object(o)) => o
+                        .iter()
+                        .map(|(k, v)| {
+                            let text = v.as_str().map(str::to_owned).ok_or_else(|| {
+                                Error::invalid(format!("attribute `{k}` must be a string"))
+                            })?;
+                            Ok((k.clone(), text))
+                        })
+                        .collect::<Result<BTreeMap<String, String>>>()?,
+                    None | Some(Json::Null) => BTreeMap::new(),
+                    Some(_) => return Err(Error::invalid("field `attributes` must be an object")),
+                };
+
+                let meta = FileMeta {
+                    min_role,
+                    attributes,
+                };
+                store.set_meta(&path, &meta).await?;
+                // Recomputed after the write, so the response reflects what now
+                // applies rather than what was asked for — they differ whenever a
+                // parent directory is more restrictive than the rule just set.
+                let effective = effective_min_role(store.as_ref(), floor, &path).await?;
+                Ok(HandlerResponse::ok(file_meta_json(&path, &meta, effective)))
             }
         }
     });
@@ -791,6 +942,103 @@ fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
         // A property of the instance, so null when there is no instance to ask.
         "is_git_repo": connected.map(|store| store.is_git_repo()),
     }))
+}
+
+/// Resolve a store by name to its live handle **and** its store-wide `min_role`
+/// floor (§1.1), which is the outermost entry on every path in it.
+///
+/// The floor comes from the stored definition, so a store connected by
+/// `--file-store` — which has no definition — has no floor. That is correct
+/// rather than a gap: an ephemeral developer store has no configured policy, and
+/// inventing a restrictive default would break the workflow the flag exists for.
+async fn resolve_store(
+    catalog: &Catalog,
+    name: &str,
+) -> Result<(Arc<dyn sc_files::FileStore>, Option<u8>)> {
+    let store = catalog.require_file_store(name)?;
+    let floor = load_file_store_by_name(catalog, name)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|def| def.min_role);
+    Ok((store, floor))
+}
+
+/// The role of the caller, defaulting to public when unauthenticated.
+///
+/// **Currently always `1` in practice**, because every file endpoint is
+/// `AuthRequirement::admin()` and an admin clears every rule. The check is wired
+/// in regardless: it is correct by construction, it costs nothing, and it starts
+/// doing real work the moment a non-admin role can reach a store — which is what
+/// an application's file access will need. Enforcement living only in the future
+/// caller would be the same mistake as the rule living only in a doc comment.
+fn caller_role(ctx: &crate::handler::HandlerCtx) -> u8 {
+    ctx.user
+        .as_ref()
+        .map_or(sc_files::ROLE_PUBLIC, |user| user.role)
+}
+
+/// A file's metadata as the API returns it (matching `file_meta_schema`).
+///
+/// Reports both the rule set on this entry and the `effective_min_role` that
+/// actually applies — they differ whenever a parent directory or the store
+/// itself is more restrictive, and showing only the former would let an admin
+/// believe a file is reachable when its folder has locked it.
+fn file_meta_json(path: &str, meta: &FileMeta, effective: Option<u8>) -> Json {
+    json!({
+        "path": path,
+        "min_role": meta.min_role,
+        "effective_min_role": effective,
+        "attributes": meta
+            .attributes
+            .iter()
+            .map(|(k, v)| (k.clone(), Json::String(v.clone())))
+            .collect::<Map<String, Json>>(),
+    })
+}
+
+/// An optional role field of a body: absent or null means unrestricted, and a
+/// value outside the 1–100 scale is rejected rather than clamped.
+fn optional_role(obj: &Map<String, Json>, key: &str) -> Result<Option<u8>> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(value) => {
+            let raw = value
+                .as_i64()
+                .ok_or_else(|| Error::invalid(format!("field `{key}` must be a number or null")))?;
+            u8::try_from(raw)
+                .ok()
+                .filter(|r| (1..=100).contains(r))
+                .ok_or_else(|| {
+                    Error::invalid(format!(
+                        "field `{key}` must be a role between 1 and 100, got {raw}"
+                    ))
+                })
+                .map(Some)
+        }
+    }
+}
+
+/// The entry JSON returned after creating a directory.
+fn directory_entry_json(path: &str) -> Json {
+    json!({
+        "name": path.trim_matches('/').rsplit('/').next().unwrap_or(path),
+        "path": path.trim_matches('/'),
+        "is_dir": true,
+        "size": Json::Null,
+    })
+}
+
+/// The [`Entry`] describing a rename's destination, so the response says where
+/// the thing now is.
+fn renamed_entry(to: &str) -> Entry {
+    let path = to.trim_matches('/').to_owned();
+    Entry {
+        name: path.rsplit('/').next().unwrap_or(&path).to_owned(),
+        path,
+        is_dir: false,
+        size: None,
+    }
 }
 
 /// A connected store that has **no** stored definition — one supplied by
