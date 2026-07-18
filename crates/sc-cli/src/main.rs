@@ -15,7 +15,9 @@ use std::sync::Arc;
 use sc_api::admin_endpoints;
 use sc_auth::SessionStore;
 use sc_cli::DbConfig;
-use sc_cli::{connect_catalog, connect_file_stores, extract_file_stores};
+use sc_cli::{
+    connect_catalog, connect_file_stores, connect_stored_file_stores, extract_file_stores,
+};
 use sc_error::Result;
 use sc_server::{AppMounts, ServerConfig, admin_handlers, mount_all, serve};
 
@@ -65,8 +67,12 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // catalog, and ensure the users table exists. A bad connection fails here
     // with a clear message rather than a server that boots then 500s.
     let catalog = connect_catalog(&db).await?;
-    // Connect any file stores requested with `--file-store NAME=PATH` so the file
-    // manager can browse/read/write them.
+    // Connect the file stores configured in the admin UI. One that fails — a
+    // disk unmounted since it was defined — is logged and skipped, not fatal;
+    // it stays listed and editable so the admin can repoint it.
+    connect_stored_file_stores(&catalog).await?;
+    // Then any requested with `--file-store NAME=PATH`, which are ephemeral and
+    // must not silently shadow a configured store of the same name.
     connect_file_stores(&catalog, &file_store_specs)?;
 
     // Bring the applications up. `--base-domain` is what makes them addressable

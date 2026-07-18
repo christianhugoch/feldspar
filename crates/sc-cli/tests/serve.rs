@@ -13,7 +13,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sc_auth::SessionStore;
-use sc_cli::{DbConfig, connect_catalog};
+use sc_cli::{DbConfig, connect_catalog, connect_file_stores, connect_stored_file_stores};
 use sc_server::{AppMounts, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use tower::ServiceExt;
@@ -110,4 +110,51 @@ async fn connect_to_an_unreachable_database_fails_loudly() {
         "error should name the target: {msg}"
     );
     assert!(!msg.contains("secret"), "error leaked the password: {msg}");
+}
+
+/// Phase 1.3: the boot path connects stored file stores, and `--file-store`
+/// stays an ephemeral convenience that must never silently shadow one.
+#[tokio::test]
+async fn boot_connects_stored_stores_and_refuses_a_flag_that_shadows_one() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let cfg = DbConfig::from_url(url_for(&db));
+    let catalog = connect_catalog(&cfg).await?;
+
+    // `connect_catalog` bootstraps the file-stores table alongside the others,
+    // so a legacy database gains it on first serve with no migration step.
+    assert!(
+        catalog.get(sc_catalog::FILE_STORES_TABLE)?.is_some(),
+        "connect_catalog should have bootstrapped the file stores table"
+    );
+
+    let dir = std::env::temp_dir().join(format!("sc-cli-store-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.to_string_lossy().into_owned();
+
+    sc_catalog::save_file_store(&catalog, &sc_files::FileStoreDef::local("docs", &path)).await?;
+
+    // Boot order: stored stores first …
+    let report = connect_stored_file_stores(&catalog).await?;
+    assert_eq!(report.connected, ["docs"]);
+    assert!(catalog.file_store("docs")?.is_some());
+
+    // … then the flags. A flag naming a store that is already configured is a
+    // startup error, not a silent override: `connect_file_store` replaces on a
+    // repeated name, so without this the flag would shadow the admin's store and
+    // nothing anywhere would say why their edits had no effect.
+    let clash = connect_file_stores(&catalog, &["docs=/tmp".to_owned()]).unwrap_err();
+    assert!(clash.to_string().contains("docs"), "{clash}");
+
+    // A flag with its own name still works, and is not persisted — it exists
+    // only for this process.
+    connect_file_stores(&catalog, &[format!("scratch={path}")])?;
+    assert!(catalog.file_store("scratch")?.is_some());
+    assert_eq!(
+        sc_catalog::list_file_stores(&catalog).await?.len(),
+        1,
+        "the flag must not have written a definition"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
 }

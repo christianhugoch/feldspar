@@ -2,6 +2,50 @@
 
 Changes in reverse chronological order.
 
+## File stores connect and disconnect live (TODO §1.3)
+
+Stores configured in the admin UI now come up at boot and can be re-pointed or removed while the
+server runs. The MVP could only connect a store by restarting the process with a different
+`--file-store` flag; that restriction is gone.
+
+- **`Catalog::disconnect_file_store`** — the counterpart to `connect_file_store`, and what a
+  deleted or renamed store needs. Without it a definition could be removed while its handle kept
+  serving, so the file manager would happily browse a store the admin had just deleted. (Re-pointing
+  an existing store never needed it: connecting the same name replaces the handle.)
+- **Connection errors are remembered.** The catalog records why a store is not connected
+  (`record_file_store_error` / `file_store_error`), cleared whenever it connects or is
+  disconnected. A store that failed must not vanish silently — its definition is still there, the
+  admin still needs it in the list, and the reason is the only thing telling them what to fix. A
+  stale reason would be just as bad, shown as if it were current, hence the clearing.
+- **`connect_all_file_stores`** loads every definition and connects each, returning
+  `FileStoreConnections { connected, failed }`. **One store that fails does not stop the others or
+  the server** — the same rule `mount_all` applies to an application whose build fails (§13.2): a
+  single unmounted disk is for the admin to fix in the UI, not a reason for a working server to
+  refuse to boot. Only failing to *read the table* is an `Err`, since that means the metadata
+  itself is unreachable.
+- **Boot path**: `connect_catalog` now bootstraps `_sc_file_stores` alongside `users` and
+  `_sc_applications`, and `saltcorn serve` calls `connect_stored_file_stores` (which logs each
+  outcome) before the `--file-store` flags.
+- **`--file-store` coexistence, resolved**: the flag stays ephemeral and unpersisted — a
+  developer's scratch directory, and what the tests use — is applied *after* the stored stores, and
+  a name already connected is now a **startup error** rather than a silent override. Refusing is
+  the important part: `connect_file_store` replaces on a repeated name, so a clash would let the
+  flag silently shadow a store configured in the UI. The admin would edit a store, see it save, and
+  watch the server go on serving a different directory with nothing anywhere explaining why. An
+  error at boot costs one restart; that costs an afternoon.
+
+**Two composition steps deliberately left to §1.4**, because nothing at this layer can enforce
+them: `save_file_store` does not touch the registry, so **renaming** a store must disconnect the
+old name (otherwise the old handle keeps serving), and **deleting** must disconnect after removing
+the row. The second is proven separate by `disconnecting_stops_a_store_resolving`, which asserts
+the row is gone while the handle still browses. Both are now checklist items under §1.4.
+
+Tests: 5 integration tests in `crates/sc-catalog/tests/file_store_live.rs` — stored stores connect
+and resolve, one failing store leaves the others up and records why, an edit repoints without a
+restart, disconnecting stops resolution while leaving the directory untouched, and a repaired store
+loses its stale error — plus `boot_connects_stored_stores_and_refuses_a_flag_that_shadows_one` in
+`crates/sc-cli/tests/serve.rs` covering the bootstrap, the boot order and the clash rule.
+
 ## File-store backend registry (TODO §1.2)
 
 Backends now declare their settings as data, so the admin UI can render a settings form for a

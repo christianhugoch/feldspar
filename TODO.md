@@ -94,11 +94,20 @@ saved store, giving immediate feedback without blocking the save; §1.5 shows it
 The MVP already established the pattern for applications ("the mount registry is live", §13.2);
 stores get the same treatment, because editing a store must not need a restart either.
 
-- [ ] `Catalog::disconnect_file_store`, so a deleted or renamed store stops resolving. `connect_file_store` already replaces on a repeated name, so re-pointing an edited store works today; removing one does not
-- [ ] Boot: load every `_sc_file_stores` row and connect each. One store that fails to connect (a path that has since gone missing) must not stop the server or the other stores — the same rule the MVP applied to a single app that fails to build
-- [ ] Report a store that failed to connect to the admin rather than dropping it silently: a store present in the list but not connected is a state the UI has to be able to show
-- [ ] Decide how `--file-store NAME=PATH` and persisted stores coexist. Proposal: the flag stays as an ephemeral, unpersisted store, connected after the stored ones, and a name clash is a startup error rather than a silent override — it is a dev-and-test convenience, and the tests use it heavily
-- [ ] Integration tests: create a store at runtime → it browses without a restart; edit its path → the new path serves; delete → it stops resolving; a store with a bad path leaves the others up
+- [x] `Catalog::disconnect_file_store`, so a deleted or renamed store stops resolving. `connect_file_store` already replaces on a repeated name, so re-pointing an edited store works today; removing one does not
+- [x] Boot: load every `_sc_file_stores` row and connect each (`connect_all_file_stores`, called from the CLI boot path via `connect_stored_file_stores`, which logs each outcome). One store that fails is logged and skipped, never fatal — the same rule `mount_all` applies to an app whose build fails. Only failing to *read the table* is an error, since that means the metadata itself is unreachable. `connect_catalog` also bootstraps `_sc_file_stores` alongside `users` and `_sc_applications`
+- [x] Report a store that failed to connect rather than dropping it silently: the catalog records the reason (`record_file_store_error` / `file_store_error`), cleared whenever the store connects or is disconnected so a stale reason is never shown as current. `FileStoreConnections { connected, failed }` is the boot-time report
+- [x] Decide how `--file-store NAME=PATH` and persisted stores coexist. **Resolved as proposed**: ephemeral and unpersisted, connected *after* the stored ones, and a name clash is a startup error. Refusing is the point — `connect_file_store` replaces on a repeated name, so a clash would otherwise let the flag silently shadow a store configured in the UI, and the admin would edit a store, see it save, and watch the server keep serving a different directory with nothing saying why
+- [x] Integration tests: `crates/sc-catalog/tests/file_store_live.rs` (5) — boot connects stored stores, one bad store leaves the others up and records why, an edit repoints without a restart, disconnect stops resolution while leaving the bytes alone, a repaired store loses its stale error; plus a CLI boot test for the bootstrap and the flag-clash rule
+
+**Carried into §1.4:** two composition steps live above this layer and must not be forgotten,
+because nothing at this layer can enforce them:
+
+- [ ] **Renaming** a store must disconnect the *old* name. `save_file_store` deliberately does
+  not touch the registry, so a rename otherwise leaves the old handle connected and serving. The
+  update endpoint must load the previous row, and disconnect its name when it differs
+- [ ] **Deleting** must disconnect after removing the row — proven separate by
+  `disconnecting_stops_a_store_resolving`, where the row is gone and the handle still browses
 
 ### 1.4 Admin API (`sc-api`, `sc-server`)
 

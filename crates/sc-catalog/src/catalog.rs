@@ -37,6 +37,15 @@ pub struct Catalog {
     /// store handles live here (files keep no database row, design §9); the bytes
     /// and per-file metadata stay in the store itself.
     file_stores: RwLock<HashMap<String, Arc<dyn FileStore>>>,
+    /// Why a stored file store is **not** in [`file_stores`], keyed by name.
+    ///
+    /// A store that failed to connect must not vanish silently: its definition is
+    /// still there, the admin still needs to see it in the list, and the reason —
+    /// "directory /srv/docs does not exist" — is the only thing that tells them
+    /// what to fix. Absence of a name here means either "connected" or "never
+    /// attempted"; the definition list plus [`file_store`](Self::file_store)
+    /// distinguishes those.
+    file_store_errors: RwLock<HashMap<String, String>>,
 }
 
 impl Catalog {
@@ -48,6 +57,7 @@ impl Catalog {
             primary_db: DbId::primary(),
             cache: RwLock::new(HashMap::new()),
             file_stores: RwLock::new(HashMap::new()),
+            file_store_errors: RwLock::new(HashMap::new()),
         };
         catalog.reload().await?;
         Ok(catalog)
@@ -161,13 +171,73 @@ impl Catalog {
 
     /// Connect a named file store, making it resolvable by
     /// [`file_store`](Self::file_store). A store whose name is already connected
-    /// is replaced (re-connecting the same name re-points it).
+    /// is replaced (re-connecting the same name re-points it), which is what an
+    /// edit to a store's path does.
+    ///
+    /// Connecting clears any recorded [`file_store_error`](Self::file_store_error)
+    /// for that name: the store is demonstrably working now, so a stale reason it
+    /// once failed would be shown to the admin as if it were current.
     pub fn connect_file_store(&self, store: Arc<dyn FileStore>) -> Result<()> {
+        let name = store.name().to_owned();
         let mut guard = self
             .file_stores
             .write()
             .map_err(|_| Error::msg("catalog file-store registry lock poisoned"))?;
-        guard.insert(store.name().to_owned(), store);
+        guard.insert(name.clone(), store);
+        drop(guard);
+        self.clear_file_store_error(&name)
+    }
+
+    /// Disconnect the file store named `name`, returning whether one was
+    /// connected. Also clears any recorded connection error for it.
+    ///
+    /// The counterpart to [`connect_file_store`](Self::connect_file_store), and
+    /// what a deleted or renamed store needs: without this a store's definition
+    /// could be removed while its handle kept serving, so the file manager would
+    /// happily browse a store the admin had just deleted. Re-pointing an existing
+    /// store does *not* need this — connecting the same name replaces it.
+    ///
+    /// This removes the handle only. Nothing on disk is touched; see
+    /// [`delete_file_store`](crate::delete_file_store) for why that separation
+    /// matters.
+    pub fn disconnect_file_store(&self, name: &str) -> Result<bool> {
+        let mut guard = self
+            .file_stores
+            .write()
+            .map_err(|_| Error::msg("catalog file-store registry lock poisoned"))?;
+        let existed = guard.remove(name).is_some();
+        drop(guard);
+        self.clear_file_store_error(name)?;
+        Ok(existed)
+    }
+
+    /// Record why the store named `name` could not be connected, so the admin UI
+    /// can show a store that is defined but not usable, with the reason.
+    pub fn record_file_store_error(&self, name: &str, error: impl Into<String>) -> Result<()> {
+        let mut guard = self
+            .file_store_errors
+            .write()
+            .map_err(|_| Error::msg("catalog file-store error registry lock poisoned"))?;
+        guard.insert(name.to_owned(), error.into());
+        Ok(())
+    }
+
+    /// Why the store named `name` is not connected, if it failed to connect.
+    pub fn file_store_error(&self, name: &str) -> Result<Option<String>> {
+        let guard = self
+            .file_store_errors
+            .read()
+            .map_err(|_| Error::msg("catalog file-store error registry lock poisoned"))?;
+        Ok(guard.get(name).cloned())
+    }
+
+    /// Forget any recorded connection error for `name`.
+    fn clear_file_store_error(&self, name: &str) -> Result<()> {
+        let mut guard = self
+            .file_store_errors
+            .write()
+            .map_err(|_| Error::msg("catalog file-store error registry lock poisoned"))?;
+        guard.remove(name);
         Ok(())
     }
 

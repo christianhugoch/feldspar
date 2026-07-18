@@ -9,7 +9,7 @@ pub mod db;
 
 use std::sync::Arc;
 
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, FileStoreConnections, connect_all_file_stores};
 use sc_db::DatabaseDriver;
 use sc_error::{Context, Error, Result};
 use sc_files::{FileStoreDef, connect_from_def};
@@ -43,7 +43,31 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_app::bootstrap(&catalog)
         .await
         .context("ensuring the applications table exists")?;
+    sc_catalog::bootstrap_file_stores(&catalog)
+        .await
+        .context("ensuring the file stores table exists")?;
     Ok(catalog)
+}
+
+/// Connect every **stored** file store, logging the outcome, and return the
+/// report.
+///
+/// One store that fails to connect — a disk unmounted since it was defined — is
+/// logged and skipped, never fatal. That is the same rule `mount_all` applies to
+/// an application whose build fails (§13.2), and for the same reason: a server
+/// that otherwise works should not refuse to boot over one broken store the
+/// admin can repoint in the UI. The reason is recorded on the catalog, so the
+/// admin API can still answer "why is this store not connected?" long after the
+/// boot log has scrolled away.
+pub async fn connect_stored_file_stores(catalog: &Catalog) -> Result<FileStoreConnections> {
+    let report = connect_all_file_stores(catalog).await?;
+    for name in &report.connected {
+        eprintln!("saltcorn: connected file store `{name}`");
+    }
+    for (name, error) in &report.failed {
+        eprintln!("saltcorn: file store `{name}` is defined but could not be connected: {error}");
+    }
+    Ok(report)
 }
 
 /// Pull `--file-store NAME=PATH` flags (repeatable) out of `args`, returning the
@@ -80,13 +104,24 @@ where
 /// surfacing as a puzzling 404 later.
 ///
 /// Each spec is turned into a [`FileStoreDef`] and connected through
-/// [`connect_from_def`], rather than building a [`LocalFileStore`] here: that
+/// [`connect_from_def`], rather than building a `LocalFileStore` here: that
 /// function is meant to be *the* place a definition becomes an instance, and a
 /// second construction path would be a second place for the two to drift — a
-/// flag-connected store would quietly not behave like a stored one. These
-/// definitions are **not** persisted; the flag stays an ephemeral,
-/// process-lifetime convenience (which is how the tests use it), and how it
-/// coexists with stored stores is TODO §1.3.
+/// flag-connected store would quietly not behave like a stored one.
+///
+/// **How the flag coexists with stored stores (TODO §1.3, resolved).** These
+/// definitions are *not* persisted: the flag stays an ephemeral,
+/// process-lifetime convenience, which is how the tests use it and how a
+/// developer points at a scratch directory without touching the database. It is
+/// applied **after** the stored stores, and a name already connected is a
+/// **startup error** rather than a silent override.
+///
+/// Refusing is the important part. `Catalog::connect_file_store` replaces on a
+/// repeated name, so a clash would otherwise mean the flag silently shadowed a
+/// store the admin had configured in the UI — the admin would edit a store, see
+/// their change saved, and watch the server keep serving a different directory,
+/// with nothing anywhere saying why. An error at boot costs one restart; that
+/// costs an afternoon.
 pub fn connect_file_stores(catalog: &Catalog, specs: &[String]) -> Result<()> {
     for spec in specs {
         let (name, path) = spec.split_once('=').ok_or_else(|| {
@@ -95,6 +130,12 @@ pub fn connect_file_stores(catalog: &Catalog, specs: &[String]) -> Result<()> {
         if name.is_empty() {
             return Err(Error::config(format!(
                 "invalid --file-store `{spec}`: the name must not be empty"
+            )));
+        }
+        if catalog.file_store(name)?.is_some() {
+            return Err(Error::config(format!(
+                "--file-store `{name}` clashes with a configured file store of the same name; \
+                 rename one, or drop the flag and edit the store in the admin UI"
             )));
         }
         let store = connect_from_def(&FileStoreDef::local(name, path))

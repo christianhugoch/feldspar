@@ -26,7 +26,7 @@
 
 use sc_db::Row;
 use sc_error::{Error, Result};
-use sc_files::{FileStoreDef, FileStoreDefId, validate_file_store_config};
+use sc_files::{FileStoreDef, FileStoreDefId, connect_from_def, validate_file_store_config};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
 use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
@@ -233,6 +233,67 @@ pub async fn delete_file_store(
     let delete = Delete::from(FILE_STORES_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(def.id.0)));
     run(catalog, Statement::from(delete)).await?;
     Ok(true)
+}
+
+/// The outcome of connecting the stored file stores (see
+/// [`connect_all_file_stores`]).
+///
+/// Both halves are reported because both are things the operator and the admin
+/// UI need to know: a store that failed is not a store that stopped existing,
+/// and boot must be able to say which ones came up and which did not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileStoreConnections {
+    /// Names of the stores that connected.
+    pub connected: Vec<String>,
+    /// Stores that did not connect, as `(name, reason)`.
+    pub failed: Vec<(String, String)>,
+}
+
+impl FileStoreConnections {
+    /// Whether every stored store connected.
+    pub fn all_connected(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
+/// Connect one stored definition into the catalog's registry, recording the
+/// reason on failure so the admin UI can show a defined-but-unusable store.
+///
+/// Returns the error as well as recording it, so a caller acting on one store —
+/// an admin saving from the form — can react, while a caller sweeping every
+/// store at boot can ignore the return and read the record later.
+pub fn connect_file_store_def(catalog: &Catalog, def: &FileStoreDef) -> Result<()> {
+    match connect_from_def(def) {
+        Ok(store) => catalog.connect_file_store(store),
+        Err(e) => {
+            catalog.record_file_store_error(&def.name, e.to_string())?;
+            Err(e)
+        }
+    }
+}
+
+/// Load every stored file-store definition and connect each one, returning what
+/// happened.
+///
+/// **One store that fails must not stop the others, and must not stop the
+/// server.** This is the same rule the MVP applied to an application whose build
+/// fails (§13.2): a single unmounted disk is a thing for the admin to fix in the
+/// UI, not a reason for a server that otherwise works to refuse to boot. So this
+/// returns a report rather than an error, and only a failure to *read the table*
+/// — which means the metadata itself is unreachable — is an `Err`.
+///
+/// Called at boot, and again whenever the whole set needs re-establishing.
+/// Failures are recorded on the catalog, so the admin API can answer "why is
+/// this store not connected?" long after boot has scrolled past.
+pub async fn connect_all_file_stores(catalog: &Catalog) -> Result<FileStoreConnections> {
+    let mut report = FileStoreConnections::default();
+    for def in list_file_stores(catalog).await? {
+        match connect_file_store_def(catalog, &def) {
+            Ok(()) => report.connected.push(def.name),
+            Err(e) => report.failed.push((def.name, e.to_string())),
+        }
+    }
+    Ok(report)
 }
 
 /// Every `File` field in the catalog that references the store named `name`,
