@@ -1,228 +1,159 @@
-# Saltcorn v2 — MVP Implementation TODO
+# Saltcorn v2 — Post-MVP Implementation TODO
 
-Ordered, checkable task list for the MVP milestone. Scope and rationale are in
-[docs/GOALS.md](./docs/GOALS.md) (§ Milestones) and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) (§17).
+Ordered, checkable task list for the first milestone after the MVP. The MVP's own list is
+archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md); scope and rationale remain in
+[docs/GOALS.md](./docs/GOALS.md) and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md).
 
-**MVP definition of done:** a single Postgres database, connected as both primary and only
-data store. An admin can create the first user, log in/out, create tables and fields, edit
-rows, and manage users — through a **React + TypeScript admin SPA** (`ui/admin`) served by the
-Saltcorn process over a **typed JSON API**. A file store can be connected with a basic file
-manager. One React app (no DB access, living in a git-repo file store, with a build step) is
-**created and configured in the admin UI**, then served entirely from the Saltcorn process and
-authenticates against the API. The admin API is a set of **typed endpoint values that also
-generate a TypeScript consumer client** — no server-rendered admin HTML (the earlier web-1.0 /
-`sc-markup` plan is dropped). All of it is covered by integration tests against a real Postgres
-reinitialised per test.
+**Milestone definition of done:** two gaps the MVP left open are closed.
+
+1. **File stores are first-class, admin-editable objects.** Today a store exists only as a
+   `--file-store NAME=PATH` process argument held in an in-memory catalog registry: it cannot be
+   created, edited or removed without editing the command line and restarting, and the admin SPA
+   has no file screen at all despite the browse/read/write endpoints existing. After this
+   milestone an admin creates, edits and deletes file stores in the admin UI, they persist across
+   restarts, they connect and disconnect live, and the file manager those endpoints were built
+   for is actually reachable.
+2. **An opinionated `react` framework exists alongside the general `code` one.** Today the only
+   framework is `CodeFramework`, which asks the admin for a store, a source dir, an output dir, a
+   build command and a client path, and expects them to have already scaffolded a Vite project by
+   hand over SSH (tutorial steps 2–3). That generality is right for the escape hatch and wrong for
+   the common case. After this milestone an admin picks **React**, names the app, picks a store,
+   and gets a working, scaffolded, building, authenticating React app with no shell access and no
+   choices to make. `CodeFramework` stays, unchanged, as the generic option.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ---
 
-## Phase 0 — Workspace & foundations
+## Phase 1 — File stores as editable, persisted objects
 
-- [x] Create Cargo workspace (`Cargo.toml`) with the MVP crates
-- [x] `sc-error`: single `Error` enum + `Result<T>` alias; context helpers; lint against `unwrap()`/`expect()` in libs (clippy config)
-- [x] Repo hygiene: `rustfmt.toml`, `clippy.toml`, CI skeleton (fmt + clippy + test), `.gitignore` for Rust/node
-- [x] Decide async runtime (tokio) and pin core deps (serde, uuid, argon2, sqlx-or-tokio-postgres)
-- [x] Integration-test harness: spin up / reset a real Postgres per test (testcontainers or a reset fixture); shared helper crate under `tests/`
+### 1.1 Model & persistence (`sc-files`, `sc-catalog`)
 
-## Phase 1 — Query language (`sc-query`)
+Mirrors how an application is modelled (§9/§13.2): the object exists as its stored row, one
+column per field every store has, sparse values in `attributes`, strict reads.
 
-- [x] `Value` enum (Null/Bool/Int/Float/Text/Bytes/Json/Uuid/Date/Time/Timestamp/Decimal)
-- [x] `Statement` AST: `Select` (from, columns, joins, filter, group, having, order, limit, offset), `Insert`, `Update`, `Delete`
-- [x] `Expr` (Col, Lit, Param, Binary, Unary, Func, In, Json, Case) — enough for MVP CRUD + joins
-- [x] `SqlDialect` trait: render `Statement` → (sql, binds); literals **always parameterised**
-- [x] Unit tests: render each statement kind; verify parameterisation (no literal interpolation)
+- [ ] `FileStoreDef` value type: id, name (the catalog key), backend name, backend config (`Attrs`), optional `min_role`, description. The *definition* of a store, distinct from the connected `dyn FileStore` instance it produces
+- [ ] `_sc_file_stores` table + bootstrap, following `_sc_applications` (`crates/sc-app/src/applications.rs`): name `UNIQUE` (it is the lookup key, as a subdomain is for an app), JSON `config`
+- [ ] `save_file_store` / `load_file_store` / `list_file_stores` / `delete_file_store`, following `crates/sc-app/src/store.rs` — including its strictness rule: a missing or ill-typed column is an `Error::invalid` naming the store and the column, not a silent default
+- [ ] Decide what a delete means: the row only, never the bytes. A store whose definition is removed must leave its directory untouched, and deleting one still referenced by an application's `file_stores` (or a `File` field's `FileStoreId`) must be refused with an error naming the referent
+- [ ] Integration tests against a real Postgres: round-trip a definition, reject a duplicate name, reject a delete that would orphan a reference
 
-## Phase 2 — Database driver (`sc-db`, `sc-db-postgres`)
+### 1.2 Backend registry (`sc-files`)
 
-- [x] `DatabaseDriver` trait (introspect, query, apply_schema, begin/tx, capabilities, dialect)
-- [x] `DbCapabilities` (row_level_security, composite_pk, listen_notify, returning, …)
-- [x] Postgres `SqlDialect` implementation (quoting, `$n` placeholders, JSON operators, RETURNING)
-- [x] Postgres connection + pooling; run `Statement` → `RowStream`
-- [x] `introspect()` via `information_schema` → `PhysicalTable` (columns, types, PKs incl. composite, FKs)
-- [x] `apply_schema`: create/drop table, add/drop column — **no auto `id` column** created
-- [x] Transactions: `begin()` → commit/rollback; used by metadata mutations
-- [x] Integration tests: create table, add fields, introspect existing tables, CRUD rows
+The same "settings as data" move that made "the admin picks a framework" work (§13.3) — the
+admin UI must render a form for a backend it knows nothing about, including one arriving later
+through `sc-code`, with no per-backend special case.
 
-## Phase 3 — Types (`sc-types`, MVP: basic only)
+- [ ] `FileStoreBackend` registry keyed by backend name, mirroring `registered_frameworks` / `framework_config_spec`: `registered_backends()`, `backend_config_spec(name) -> Result<Vec<FormField>>`
+- [ ] `local` backend declares its settings (`path`, and whether to create the directory if absent). It is the only backend this milestone registers — S3 and git-remote backends stay out of scope, but the registry is the thing that makes adding them not a UI change
+- [ ] `validate_file_store_config` called **on save**, exactly as `validate_framework_config` is: an unreadable path or a missing setting is the admin's to fix while they are standing in front of the form, not a 500 the first time someone browses the store
+- [ ] Construct a connected `Arc<dyn FileStore>` from a `FileStoreDef` (`connect_from_def`) — the one place a definition becomes an instance
+- [ ] Unit tests: spec names/labels/required-ness; unknown backend is a config error naming what is available; a bad `path` is rejected on save
 
-- [x] `Value`↔Postgres type mapping (basic types only; no rich types this milestone)
-- [x] `TypeRef` / basic-type representation used by fields
-- [x] Catch-all display/edit path (defer real `FieldView` trait richness to post-MVP)
+### 1.3 Live connect / disconnect (`sc-catalog`, `sc-server`)
 
-## Phase 4 — Catalog (`sc-catalog`)
+The MVP already established the pattern for applications ("the mount registry is live", §13.2);
+stores get the same treatment, because editing a store must not need a restart either.
 
-- [x] `BaseField` / `DataField` (name, label, type, attrs, required, unique, primary_key, kind)
-- [x] `DataFieldKind`: Plain, Key (target table/field/summary), File (store/folder/mime) — Key/File may be stubbed for MVP UI but modeled now
-- [x] `Table` (id, name, database, provider, fields, access, attributes)
-- [x] `Catalog` initialised from a `DatabaseDriver`; **no stored metadata beyond information_schema** for MVP
-- [x] Cache of tables/fields; get / create-table / create-field methods
-- [x] `TableProvider` trait defined; trivial driver-backed provider implemented
-- [x] Integration tests: init catalog from existing DB; create table + fields via catalog; reflect in introspection
+- [ ] `Catalog::disconnect_file_store` and a replace path, so an edited store rebinds in place — today `connect_file_store` rejects a name that is already connected, which makes an edit impossible
+- [ ] Boot: load every `_sc_file_stores` row and connect each. One store that fails to connect (a path that has since gone missing) must not stop the server or the other stores — the same rule the MVP applied to a single app that fails to build
+- [ ] Report a store that failed to connect to the admin rather than dropping it silently: a store present in the list but not connected is a state the UI has to be able to show
+- [ ] Decide how `--file-store NAME=PATH` and persisted stores coexist. Proposal: the flag stays as an ephemeral, unpersisted store, connected after the stored ones, and a name clash is a startup error rather than a silent override — it is a dev-and-test convenience, and the tests use it heavily
+- [ ] Integration tests: create a store at runtime → it browses without a restart; edit its path → the new path serves; delete → it stops resolving; a store with a bad path leaves the others up
 
-## Phase 5 — Users & auth (`sc-auth`)
+### 1.4 Admin API (`sc-api`, `sc-server`)
 
-- [x] `users` table bootstrap: UUID PK (not deletable), `role` (1–100), argon2id password hash, initial `email` field
-- [x] `User` struct (id, role, extra fields map)
-- [x] Create-first-user flow (when no user exists, login redirects here)
-- [x] Login / logout; session cookie; auth middleware — auth/session logic in `sc-auth`; HTTP cookie + middleware wiring is Phase 6 (`sc-server`)
-- [x] Password hashing (argon2id) + verification
-- [x] Role gate: admin-only login for the admin UI (per MVP)
-- [x] Integration tests: create-first-user, login success/failure, logout, session expiry
+Extends the existing `file-stores` endpoint group, which today is read/browse/write only.
 
-## Phase 6 — Server: typed API + React admin SPA (`sc-server`, `sc-api`, `ui/admin`)
+- [ ] Endpoints: create / update / delete file store
+- [ ] Endpoint: list registered backends with their `config_spec`, so the UI renders a settings form for a backend it knows nothing about (mirrors `listFrameworks`)
+- [ ] Extend `listFileStores`' schema beyond `{name, is_git_repo}`: backend, config, `min_role`, whether it is currently connected, and the connection error if not
+- [ ] File-manager endpoints the file screen needs that do not exist yet: `mkdir`, `deleteFile`, `renameFile`/`move`, and multipart or chunked upload for files too large to base64 into a JSON body
+- [ ] Endpoints for `FileMeta`: get/set `min_role` and attributes on a path. `FileMeta` is modelled and xattr-backed (`crates/sc-files/src/store.rs`) with no way to reach it — the path-cumulative access rule it documents is unenforceable and untestable from the UI until there is
+- [ ] Enforce the path-cumulative `min_role` rule on read/browse/write, not just store it
+- [ ] Integration tests: drive each endpoint end-to-end; non-admins are rejected; path traversal (`..`, absolute paths) is rejected at the API edge as well as in the driver
 
-Reflects the GOALS pivot (design §12–§13): the admin UI is a React + TypeScript SPA over a
-**typed JSON API**, not server-rendered "web 1.0" HTML. The endpoint model and TypeScript
-consumer generation live in `sc-api`; `sc-server` mounts it and serves the built `ui/admin`
-bundle.
+### 1.5 Admin SPA (`ui/admin`)
 
-**Reconcile existing code with the pivot first:**
+- [ ] **File stores screen**: list (name, backend, path/summary, connected-or-error), create, edit, delete. Nav entry alongside Tables / Users / Applications
+- [ ] Create/edit form: pick a backend → render its `config_spec` settings as a plain form, no backend-specific code in the screen (the same rendering `ApplicationForm` already does for a framework's spec — factor the shared "render a `FormField[]`" piece out rather than copying it)
+- [ ] **File manager screen**: browse a store's tree, upload, download, create directory, rename, delete, and edit a text file in place. The MVP built `browseFiles`/`readFile`/`writeFile` — including the UTF-8 `text` shortcut explicitly "for the text editor" — and then shipped no screen that calls them
+- [ ] Surface and let an admin edit a file's `min_role`
+- [ ] A store that failed to connect is shown as such, with its error, and is still editable — that is precisely when an admin needs to fix its path
 
-- [x] Do **not** create an `sc-markup` crate — it is dropped from the design (§12); remove it from any planning notes
-- [x] Update `sc-types` `src/catchall.rs` doc comments: they describe a `FieldView` "symbolic markup tree" that is no longer planned (fieldviews are now React components, §6.3)
-- [x] Confirm the `sc-server` / `sc-api` / `sc-app` stub crates (currently ~20-line placeholders) carry no server-HTML / `sc-markup` assumptions before building on them
+### 1.6 Follow-on: the framework `store` setting becomes a pick-list
 
-**Endpoint model & typed client (`sc-api`):**
+Now that stores are a listable, persisted set, the compromise §13.3 documents can be retired.
 
-- [x] `Endpoint` value (method, typed path/query params, `TypeSchema` input, `TypeSchema` output, `auth` requirement, handler ref) — design §13.1
-- [x] `TypeSchema` enum sufficient to describe args/results and emit TS (Value types, struct, array, optional)
-- [x] Register endpoints as runtime values (routes need not be known at compile time); admin API expressed as fixed `Endpoint` constants through the **same** machinery
-- [x] TypeScript generator: emit type declarations + a typed API-consumer client from the `Endpoint` set
-- [x] Tests: generated TS type-checks against the declared endpoints
-
-**Server (`sc-server`):**
-
-- [x] HTTP server bootstrap (**axum** on hyper/tower; design §16); config from CLI; graceful shutdown (tokio `signal`)
-- [x] Mount the `sc-api` endpoint set as JSON routes; runtime/dynamic routes dispatched via `matchit`; auth enforced per `Endpoint.auth`
-- [x] Session (via `axum-extra` cookie jar; store in `sc-auth`) + CSRF handling for the SPA; strict CSP headers via `tower-http` `set-header` (no `unsafe-inline`; bundle-only)
-- [x] Serve the built `ui/admin` bundle via `tower-http` `ServeDir` + a minimal bootstrap document (no server-rendered admin HTML)
-- [x] API endpoints: first-user, login, logout
-- [x] API endpoints: list tables, create table, list a table's fields, create field
-- [x] API endpoints: rows CRUD (list / create / edit / delete a row in a table)
-- [x] API endpoints: list users, create user
-- [x] Integration tests: drive each endpoint end-to-end against a real DB
-
-**Admin SPA (`ui/admin`):**
-
-- [x] Scaffold React + TypeScript + react-bootstrap SPA consuming the generated typed client
-- [x] Screens: create-first-user, login/logout, tables list, table fields, row editor, users
-- [x] Wire the `ui/admin` build into the server build so the bundle is served by `sc-server`
-
-## Phase 7 — CLI (`sc-cli`)
-
-- [x] `saltcorn serve` — run the server (db connection args, port, admin URL/subdomain)
-- [x] DB connection config (host/user/pass/db) surfaced as flags/env
-- [x] Helpful startup errors (no silent failures) when DB unreachable / misconfigured
-- [x] Smoke test: `serve` boots against a test DB and answers a health route
-
-## Phase 8 — Files (`sc-files`)
-
-- [x] `FileStore` trait (read, write, list, is_git_repo, get/set xattr meta)
-- [x] Local-directory driver
-- [x] Cross-platform xattr access (Linux/macOS/Windows/FreeBSD) for per-file metadata
-- [x] Connect a file store to the catalog (named)
-- [x] Server routes: basic file manager (browse, upload, download, edit a text file)
-- [x] Integration tests: connect store, list/read/write, round-trip xattr metadata
-
-## Phase 9 — Applications & API for the React app (`sc-app`, `sc-api`)
-
-- [x] `Application` model (name, subdomain, framework, tables subset, file stores, apis, csp)
-- [x] `Framework` trait; code-framework implementation that serves bundled static assets
-- [x] React app lives in a git-repo file store; **build step** wired (invoke bundler, output served by `sc-server`)
-- [x] `ApiProvider` trait; minimal REST provider projecting the app's `Endpoint` set (design §13.1/§13.4) — tables + actions + custom code/SQL routes (custom routes MAY be stubbed for MVP)
-- [x] Generate the app's TypeScript API-consumer client from its `Endpoint` set (same machinery as the admin API in Phase 6)
-- [x] API auth: React app authenticates against `sc-auth` (token/session); authz honored
-- [x] Serve the built React app from the Saltcorn process (no direct DB access from the app)
-- [x] Integration tests: build serves assets; API auth round-trip; unauthorized request rejected
-
-
-## Phase 10 — Applications in the admin UI (`_sc_applications`, `ui/admin`)
-
-Phase 9 made an application *servable*, but the only way to define one is to embed
-`sc-server` in a bespoke Rust binary and hand `build_router_with_apps` an `Application`
-value — `saltcorn serve` mounts the admin only, which is why `--base-domain` currently does
-nothing. GOALS is explicit that **applications are created in the admin UI** (§ "Applications
-can be created in the admin UI"), so this phase closes the configuration path from database
-to mounted app. Design: §13.2 (storage, lifecycle, no-restart mounting), §13.3
-(`Framework::config_spec`), §9 (`_sc_applications`).
-
-Two decisions worth reading before starting, both in §13.2:
-
-- `_sc_applications` is **not an overlay** — an app has nothing to introspect, so its row is
-  its only definition. This is the one stored-metadata table the MVP needs; the
-  `_sc_tables`/`_sc_fields` overlays stay out of scope.
-- Mounting is a **runtime** operation. Creating an app in the admin UI must build and mount
-  it live: "full restart should never be required" (GOALS).
-
-**Storage (`sc-app`):**
-
-- [x] `_sc_applications` table + bootstrap (like `sc_auth::bootstrap`): §9 required columns (UUID `id`, `name`, `description`, `attributes`) plus subdomain, framework + config, table/store subsets, apis, static dirs, csp
-- [x] `Application` gains `description`, `attributes`, `static_dirs: Vec<StaticDir>`; `AppId` becomes a UUID (it is a stored row now) and `subdomain` becomes the unique routing key
-- [x] `FrameworkRef.config` becomes `Attrs` (JSON) rather than a string map, so it can hold what a framework's `config_spec` describes
-- [x] Load/save/delete: `_sc_applications` row ⇄ `Application`; unique subdomain enforced in the database, not only in `AppMounts`
-- [x] Integration tests: round-trip an app through the table; a duplicate subdomain is rejected; a legacy database with no `_sc_applications` bootstraps cleanly
-
-**Framework settings as data (`sc-types`, `sc-app`):**
-
-- [x] Settings-as-data vocabulary in `sc-types` — the design leans on it for fieldview attributes (§6.1), action config (§10.1), agents (§11.1) and models (§14.2). **Resolved: no `AttrSpec`; settings are declared as `FormField`s** (§6.2), which already covers name/label/type/required/default/options and is the standalone half of the `DataField`/`FormField` split. One vocabulary, one form, one type for the admin UI to render
-- [x] Decide where `Attrs` lives: it was a `serde_json::Map` alias in `sc-catalog` (layer 4), but `sc-types` is layer 3 and cannot depend on it. Moved down to `sc-types` (re-exported from `sc-catalog`, so no call site changes) — it is the same underlying type either way. **`BaseField` moved down with it**, since `FormField` carries one; `DataField` stays in `sc-catalog`, where its `Key`/`File` kinds and `Column`/`ColumnDef` bridge need it
-- [x] `Framework::config_spec() -> Vec<FormField>`; `CodeFramework` declares its own via `code_config_spec` (`store`, `source`, `output`, `command`, optional `client`); the trait method delegates so instance and free function cannot drift. **Resolved the open question**: `config_spec` takes no `&Catalog`, so the `store` setting is free-text (validated as text, resolved against the catalog at build time) rather than a pick-list of connected stores — §6.2's `OptionsSource::ServerQuery` is the post-MVP answer, documented in §13.3
-- [x] Validate `FrameworkRef.config` against the spec **on save** (`validate_framework_config`, called from `save_application` for the primary and every extra framework), so a misconfigured app is rejected where the admin can fix it, not at build or serve time
-- [x] Resolve an `AppSource`/`BuildSpec` *from* a stored app's framework config (`app_source_from_config`) — the Phase 9 tests (`build_app`, `app_client`, server `app_serving`) now state the build settings only in the framework config and resolve from it; no test hand-builds a `BuildSpec`
-- [x] Tests: `sc-types` `FormField::validate`/`validate_attrs` and `BasicType::accepts_json`; `sc-app` resolver tests (valid config → build spec, missing/ill-typed/unknown setting → `Invalid` naming it, command split, source default); framework spec tests; integration test that a bad config is rejected on save
-
-**Live mounting (`sc-server`):**
-
-- [x] `AppMounts` becomes live shared state (mount/unmount/replace one app at a time) instead of a value frozen at `build_router_with_apps`
-- [x] Boot: load every row of `_sc_applications` and mount each; a single app that fails to build must not stop the server or the other apps
-- [x] Build + mount an app at runtime, with **no process restart**; a failed rebuild leaves the previously mounted version serving
-- [x] `saltcorn serve` honours `--base-domain` for real: remove the README's "no effect yet" caveat once it does
-- [x] Integration tests: create an app at runtime → it serves on its subdomain without a restart; edit → re-mount; delete → subdomain stops resolving; a failing build keeps the old bundle up and reports the bundler's diagnostics. (Driven through the live `AppMounts`/`build_and_mount` API, not a REST endpoint — the create/build HTTP endpoints are the next "Admin API" subphase)
-
-**Admin API (`sc-api`, `sc-server`):**
-
-- [x] Endpoints: list/create/update/delete applications; build (+ mount) an application; report build status/log (build success returns `{built, git_repo, log}`; a failed build is the §16 error path below, carrying the diagnostics)
-- [x] Endpoint: list registered frameworks with their `config_spec`, so the UI can render a settings form for a framework it knows nothing about (`listFrameworks`, backed by `sc_app::registered_frameworks`)
-- [x] Build errors are **Application errors**, not System errors (§16): the bundler's own output reaches the admin. Added `ErrorKind`/`Error::kind()` to `sc-error` (the §16 split, landed with `sc-error` as the design requires) and mapped unhandled Application errors to `422` (vs System→`500`) in the router
-- [x] Integration tests: drive each endpoint end-to-end; non-admins are rejected (`crates/sc-server/tests/admin_applications_api.rs`)
-
-**Admin SPA (`ui/admin`):**
-
-- [x] Applications screen: list, create, edit, delete (`ui/admin/src/screens/Applications.tsx` + `ApplicationForm.tsx`, wired into `App.tsx`)
-- [x] Create/edit form: pick a framework → render its `config_spec` settings; subdomain; table + file-store subsets; APIs (provider + mount); static dirs; CSP. Rendered as a plain form from the `config_spec` data — no framework-specific code in any screen
-- [x] Build button with its outcome surfaced (success log, or the bundler's diagnostics via the enriched client error), and a visible saved-but-unbuilt state ("Not built yet" until built this session, since the server persists no build status)
-- [x] A link to the app's own subdomain from the applications list (`<subdomain>.<the admin's host>`, opens the running app)
-
-## Phase 11 — MVP hardening & acceptance
-
-- [ ] End-to-end acceptance test walking the full MVP DoD user story
-- [ ] Confirm every route/action has integration coverage; Postgres reset-per-test verified
-- [ ] Manual pass: create-first-user → create table → add fields → edit rows → create user → login/out → connect file store → create a React app in the admin UI → serve it
-- [x] README quickstart (build, run, connect DB, open admin)
-- [ ] Tutorial: building a React app against an application's API (write once Phase 10 lands, so it can be admin-UI-first with no Rust)
-- [ ] Tag MVP
+- [ ] Implement `OptionsSource` in `sc-types` (§6.2: static | server query | client code). `FormField` currently carries only a static options list; `field.rs:92` already flags this as the sketch to fill in
+- [ ] The `store` setting on both frameworks becomes a `ServerQuery` pick-list of connected stores instead of validated free text. Update §13.3's note, which currently explains at length why it is free text in the MVP
+- [ ] Resolve whether the admin UI evaluates a `ServerQuery` generically now or whether that waits for `ui/form-runtime` (§12). A generic evaluator here is most of the runtime's option handling and should not be built twice
+- [ ] Tests: an unknown store name is now rejected on save rather than at build time
 
 ---
 
-## Explicitly OUT of MVP scope
+## Phase 2 — An opinionated React framework
 
-Tracked so they aren't accidentally pulled in early:
+`CodeFramework` is the right shape for "any bundler, any layout" and the wrong shape for the
+common case: five settings, all required to be mutually consistent, plus a hand-scaffolded
+project the admin must create over SSH before the settings mean anything. The `react` framework
+inverts that — conventions instead of settings, and the server creates the project.
 
-- Multiple / non-primary databases
-- Rich types & full `FieldView` trait (React-component fieldviews) — basic types only for MVP
-- Stored `_sc_tables` / `_sc_fields` overlay metadata — the *overlays* only. `_sc_applications` **is** in scope (Phase 10): a table exists without a metadata row, an application does not exist without one (design §9/§13.2)
-- Workflows & durable engine (`sc-workflow`), triggers, actions registry
-- Agents / skills / copilot (`sc-agent`, `sc-copilot`)
-- Predictive models (`sc-model`)
-- Message bus & cross-process cache invalidation (`sc-bus`) — single process for MVP
-- Drag-and-drop builder (`ui/builder`), dynamic form runtime, Saltcorn-v1 view patterns
-- GraphQL / gRPC / tRPC / MCP API providers (REST only for MVP)
-- Code adapters / polyglot plugins (`sc-code`)
-- OAuth2 IdP, device recognition, RLS-based authz
+### 2.1 Decide the opinions
 
-**Dropped from the design entirely (not merely deferred):** the `sc-markup` symbolic-HTML /
-CSP tree + JS-extraction crate. The admin UI is a React + TypeScript SPA and CSP is satisfied
-structurally by the bundle; there is no server-side symbolic-HTML model. How Saltcorn-v1 views
-render CSP-safe HTML post-MVP is an open design question (design §18.5).
+These are the choices that stop being the admin's. Each needs deciding **before** 2.2, since the
+scaffold hard-codes them; recording the reasoning here matters as much as the choice, because
+"opinionated" only pays off if the opinions are defensible and stable.
+
+- [ ] Build tooling: Vite + React + TypeScript is the presumptive answer (it is what the MVP tutorial and `ui/admin` already use)
+- [ ] Routing: a router, or the file-system convention over one? Deep links already work — `CodeFramework`'s SPA fallback resolves them — so this is about what the scaffold ships wired up
+- [ ] Data layer: the generated typed client alone, or the client plus a hooks layer (`useRows`, `useRow`, mutations) over it. The tutorial's step 5 is entirely hand-rolled `useEffect` + `useState` around the client; that is the boilerplate an opinionated framework should delete
+- [ ] Auth: the scaffold ships a login screen, session handling and a "current user" hook against the app's own `/api/login` / `/api/logout` / `/api/whoami`. Decide whether an unauthenticated route is possible and what the default is
+- [ ] Styling: what ships, and whether it is replaceable
+- [ ] Where the shared runtime lives: an npm package the scaffold depends on, or vendored source in the generated project. A package is upgradable and not hackable in place; vendored source is hackable and instantly stale. This is the main irreversible decision in this phase
+- [ ] Record the decisions and their rationale in `docs/TECHNICAL_DESIGN.md` §13.3, next to the code-framework description
+
+### 2.2 The framework (`sc-app`)
+
+- [ ] Register `react` alongside `code` in `registered_frameworks` / `framework_config_spec`
+- [ ] `react_config_spec`: the file store, the app's name/sub-directory, and as close to nothing else as the decisions in 2.1 allow. Source dir, output dir, build command and client path all become conventions derived from the name, not settings
+- [ ] Derive a `BuildSpec` from those conventions, so `app_source_from_config` keeps working unchanged for both frameworks
+- [ ] Reuse `CodeFramework`'s serving path rather than reimplementing it — a built React app is a static bundle with an SPA fallback, which is exactly what `CodeFramework::serve` already does. The difference is configuration and scaffolding, not serving
+- [ ] Sensible CSP default for the scaffolded app, since the admin is no longer making that choice either
+- [ ] Unit tests: the spec is minimal and labelled; conventions resolve to the right `BuildSpec`; an app configured for `react` serves its bundle and resolves deep links
+
+### 2.3 Scaffolding (`sc-app`)
+
+The step that removes the SSH requirement, and the reason this is more than a settings preset.
+
+- [ ] Generate a complete project into the store on first save (or an explicit "Scaffold" action): `package.json`, Vite config, `tsconfig.json`, `index.html`, entry point, app shell, login screen, router wiring, `.gitignore`
+- [ ] Generate against the app's *actual* tables — the scaffold should come up showing real data, not a placeholder counter. The endpoint set is already derived per-app (`app_endpoints`), so the shape is known
+- [ ] Wire the generated typed client in at the conventional path, so the existing client-generation step lands where the scaffold already imports from
+- [ ] `git init` the project if the store is a git repo and the sub-directory is not already tracked — §13.3 expects an app's source to be a git repo, and the MVP left that to the admin's shell
+- [ ] Never overwrite: scaffolding into a non-empty directory must refuse with a clear error, not clobber an admin's work. Re-scaffolding an existing app is a separate, explicit, destructive action if it exists at all
+- [ ] Run `npm install` when `node_modules` is absent, as part of the build. The tutorial currently makes the admin do this by hand, and an admin with no shell cannot
+- [ ] Surface install and scaffold failures as **Application** errors carrying the tool's own output (§16), the same as build failures
+- [ ] Integration tests: scaffold → build → serve, end to end, with no shell step; scaffolding into an occupied directory is refused; a scaffolded app's generated client compiles against its own endpoints
+
+### 2.4 Admin SPA (`ui/admin`)
+
+- [ ] Framework picker distinguishes the two meaningfully — React as the default path, `code` presented as the generic escape hatch — rather than as two equal names in a dropdown
+- [ ] Picking React shows the short form (store + name); picking `code` shows today's five settings. Both still render from `config_spec` with no framework-specific code in the screen
+- [ ] Scaffold/build outcome surfaced with its log, reusing the existing build banner
+- [ ] From the app row, a link into the file manager at the app's source directory — the loop an admin actually works in is edit-file → build → view
+
+### 2.5 Documentation
+
+- [ ] Rewrite `docs/tutorial-react-todo.md` for the React framework: steps 2 and 3 (SSH in, `npm create vite`, fill in five paths) collapse to "pick React, name it, pick a store". Keep the `code`-framework path documented separately for the generic case
+- [ ] Update `docs/TECHNICAL_DESIGN.md` §13.3 to describe both frameworks and why there are two
+- [ ] CHANGELOG entries as each phase lands
+
+---
+
+## Explicitly OUT of scope for this milestone
+
+- S3 / object-store and git-remote file-store backends — the registry makes them additive; only `local` is registered now
+- In-browser VS Code for the Web (§13.3's "ideally") — the file manager's text editor is a plain editor this milestone
+- Next.js / SvelteKit / React Native frameworks — `react` is the one opinionated framework; the registry pattern makes the others additive
+- `ui/form-runtime` (§12) proper — 1.6 may need a generic `ServerQuery` evaluator, but not the whole runtime
+- Everything still listed as out of scope in [docs/TODO-mvp.md](./docs/TODO-mvp.md)
