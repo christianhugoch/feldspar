@@ -60,6 +60,45 @@ impl BaseField {
     }
 }
 
+/// Where a [`FormField`]'s permitted values come from (design §6.2).
+///
+/// The design sketches this as *static | server query | client code*. Two of
+/// those are here; the third is not, for the reason the rest of this type's
+/// design follows from.
+///
+/// **Why a query is a name and not an expression.** The whole point of declaring
+/// settings as data is that the data is inert: the admin UI renders a spec it
+/// does not understand, and a spec may come from a guest language through
+/// `sc-code`. An embedded query language would make a settings spec executable,
+/// which is both a much larger design and a thing you would not want to evaluate
+/// on behalf of a plugin. So a [`ServerQuery`](OptionsSource::ServerQuery) names
+/// a source the *server* already knows how to answer, and the set of names is
+/// the server's to define (see `sc_catalog::resolve_options`).
+///
+/// **Where a query is resolved.** The server replaces it with a
+/// [`Static`](OptionsSource::Static) list before the spec reaches anyone else —
+/// when it hands the spec to the admin UI, and when it validates a config
+/// against it. That is what keeps the client from needing an evaluator at all,
+/// and it is why `ui/form-runtime` (§12) is not a prerequisite for this.
+///
+/// **`ClientCode` is deliberately absent.** It is for options that depend on
+/// *other values in the form* — a dependent dropdown — which by definition
+/// cannot be pre-resolved server-side, and needs the form runtime to evaluate
+/// per keystroke. Nothing needs it yet, and this module's convention is to leave
+/// out what has no consumer rather than invent it (the same reason `fieldview`
+/// and `visibility` are still missing).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum OptionsSource {
+    /// Unrestricted: any value of the field's type is allowed.
+    #[default]
+    None,
+    /// A fixed list, known when the spec is written.
+    Static(Vec<Json>),
+    /// A named server-side source, resolved to [`Static`](OptionsSource::Static)
+    /// before the spec is used.
+    ServerQuery(String),
+}
+
 /// A field in a form: enough to render an input control for it, and to check
 /// what comes back (design §6.2).
 ///
@@ -86,14 +125,11 @@ pub struct FormField {
     /// which for a [`required`](FormField::required) field means the admin must
     /// supply one.
     pub default: Option<Json>,
-    /// The values this field is restricted to. Empty = unrestricted; non-empty
-    /// makes it a choice, which the admin UI renders as a select.
+    /// Where the values this field is restricted to come from (§6.2).
     ///
-    /// §6.2 sketches this as an `OptionsSource` of *static | server query |
-    /// client code*. Only the static case is reachable in the MVP — there is no
-    /// form runtime to evaluate the others — so this is the static list, and
-    /// grows into the full source when something can use one.
-    pub options: Vec<Json>,
+    /// [`OptionsSource::None`] leaves the field unrestricted; anything else makes
+    /// it a choice, which the admin UI renders as a select.
+    pub options_source: OptionsSource,
     // Post-MVP (§6.2, §6.3, §12): `fieldview: FieldViewRef` and
     // `visibility: Option<Formula>`. Both name types that do not exist yet —
     // fieldviews and formulas are out of MVP scope — so they are left out rather
@@ -108,7 +144,7 @@ impl FormField {
             base: BaseField::new(name, type_.into()),
             required: false,
             default: None,
-            options: Vec::new(),
+            options_source: OptionsSource::None,
         }
     }
 
@@ -138,10 +174,55 @@ impl FormField {
         self
     }
 
-    /// Restrict the field to a set of values, rendered as a select.
+    /// Restrict the field to a fixed set of values, rendered as a select.
     pub fn options(mut self, options: impl IntoIterator<Item = impl Into<Json>>) -> FormField {
-        self.options = options.into_iter().map(Into::into).collect();
+        self.options_source = OptionsSource::Static(options.into_iter().map(Into::into).collect());
         self
+    }
+
+    /// Restrict the field to the values a **named server-side query** yields
+    /// (§6.2) — a list that is not knowable when the spec is written, such as
+    /// "the file stores that exist".
+    ///
+    /// The name is a key, not an expression: the server owns what each one means
+    /// (see `sc_catalog::resolve_options`). Declaring settings as data only works
+    /// if the data stays inert, and an embedded query language in a settings spec
+    /// would be neither inert nor safe to hand to a guest-language extension.
+    pub fn server_query(mut self, query: impl Into<String>) -> FormField {
+        self.options_source = OptionsSource::ServerQuery(query.into());
+        self
+    }
+
+    /// Replace the source with a resolved static list — what the server does to a
+    /// [`ServerQuery`](OptionsSource::ServerQuery) before handing the spec to the
+    /// admin UI or validating a config against it.
+    pub fn with_resolved_options(
+        mut self,
+        options: impl IntoIterator<Item = impl Into<Json>>,
+    ) -> FormField {
+        self.options_source = OptionsSource::Static(options.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// The values this field is restricted to **right now**: the static list, or
+    /// empty for an unrestricted field or an unresolved server query.
+    ///
+    /// An unresolved query yields nothing on purpose. It means "the answer is not
+    /// here", and the only safe reading of that is to not restrict — validating
+    /// against a list you do not have would reject every value.
+    pub fn static_options(&self) -> &[Json] {
+        match &self.options_source {
+            OptionsSource::Static(values) => values,
+            _ => &[],
+        }
+    }
+
+    /// The server-side query this field's options come from, if any.
+    pub fn query(&self) -> Option<&str> {
+        match &self.options_source {
+            OptionsSource::ServerQuery(name) => Some(name),
+            _ => None,
+        }
     }
 
     /// The value to use for this field given the `attrs` actually supplied: the
@@ -188,9 +269,9 @@ impl FormField {
             )));
         }
 
-        if !self.options.is_empty() && !self.options.contains(value) {
-            let allowed = self
-                .options
+        let options = self.static_options();
+        if !options.is_empty() && !options.contains(value) {
+            let allowed = options
                 .iter()
                 .map(|o| o.to_string())
                 .collect::<Vec<_>>()
@@ -271,7 +352,7 @@ mod tests {
         assert_eq!(f.base.type_, TypeRef::Basic(BasicType::Text));
         assert!(!f.required);
         assert_eq!(f.default, None);
-        assert!(f.options.is_empty());
+        assert!(f.static_options().is_empty());
     }
 
     #[test]
@@ -307,7 +388,7 @@ mod tests {
     #[test]
     fn options_make_a_field_a_choice() {
         let f = FormField::new("bundler", BasicType::Text).options(["vite", "webpack"]);
-        assert_eq!(f.options, vec![json!("vite"), json!("webpack")]);
+        assert_eq!(f.static_options(), [json!("vite"), json!("webpack")]);
     }
 
     #[test]

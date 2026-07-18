@@ -21,9 +21,10 @@ mod table;
 pub use catalog::Catalog;
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
 pub use file_stores::{
-    FILE_STORES_TABLE, FileStoreConnections, bootstrap_file_stores, connect_all_file_stores,
-    connect_file_store_def, delete_file_store, file_store_field_references, list_file_stores,
-    load_file_store, load_file_store_by_name, save_file_store,
+    FILE_STORES_TABLE, FileStoreConnections, QUERY_FILE_STORES, bootstrap_file_stores,
+    choosable_file_stores, connect_all_file_stores, connect_file_store_def, delete_file_store,
+    file_store_field_references, list_file_stores, load_file_store, load_file_store_by_name,
+    resolve_options, save_file_store,
 };
 pub use provider::{DriverTableProvider, TableProvider};
 pub use table::{AccessRules, Table, TableSource};

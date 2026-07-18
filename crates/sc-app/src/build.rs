@@ -29,7 +29,7 @@ use crate::api::app_endpoints;
 use crate::application::{Application, FrameworkRef};
 use crate::framework::{
     AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT, CFG_SOURCE, CFG_STORE,
-    CODE_FRAMEWORK, CodeFramework, code_config_spec, validate_framework_config,
+    CODE_FRAMEWORK, CodeFramework, code_config_spec, validate_framework_config_structure,
 };
 
 /// How much of a failed build's output to quote in the error. A bundler can emit
@@ -83,10 +83,14 @@ impl AppSource {
 /// path §13.2 rules out. Now they come from [`FrameworkRef::config`], validated
 /// against [`code_config_spec`].
 ///
-/// The config is validated first, so a missing or ill-typed setting surfaces as
-/// the same [`Error::invalid`] naming the setting that a save would have
-/// rejected — a stored app should never reach here invalid, but a caller
-/// building a `FrameworkRef` in memory can.
+/// The config's *structure* is validated first, so a missing or ill-typed
+/// setting surfaces as the same [`Error::invalid`] naming the setting that a save
+/// would have rejected — a stored app should never reach here invalid, but a
+/// caller building a `FrameworkRef` in memory can. Whether the named store
+/// actually exists is deliberately **not** re-checked here: that was settled on
+/// save, and a build failing over it would report a configuration problem when
+/// the real news is that the store cannot be resolved, which the build says
+/// anyway and says better.
 pub fn app_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
     if fw.name != CODE_FRAMEWORK {
         return Err(Error::config(format!(
@@ -94,7 +98,7 @@ pub fn app_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
             fw.name
         )));
     }
-    validate_framework_config(fw)?;
+    validate_framework_config_structure(fw)?;
 
     let spec = code_config_spec();
     let store = required_setting(&spec, &fw.config, CFG_STORE)?;

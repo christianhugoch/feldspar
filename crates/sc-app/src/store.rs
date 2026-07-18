@@ -57,9 +57,9 @@ pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()
     // setting is the admin's to fix and the admin is standing in front of the
     // form, whereas the same mistake found at build time is a bundler error and
     // at serve time is a broken app.
-    validate_framework_config(&app.framework)?;
+    validate_framework_config(catalog, &app.framework).await?;
     for extra in &app.extra_frameworks {
-        validate_framework_config(extra)?;
+        validate_framework_config(catalog, extra).await?;
     }
 
     if let Some(other) = load_application_by_subdomain(catalog, subdomain).await?

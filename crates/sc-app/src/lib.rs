@@ -49,6 +49,7 @@ pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
     CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, Method, code_config_spec,
     framework_config_spec, registered_frameworks, validate_framework_config,
+    validate_framework_config_structure,
 };
 pub use store::{
     applications_using_file_store, delete_application, list_applications, load_application,

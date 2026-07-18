@@ -35,7 +35,7 @@ mod type_ref;
 
 pub use attrs::Attrs;
 pub use basic::BasicType;
-pub use field::{BaseField, FormField, validate_attrs};
+pub use field::{BaseField, FormField, OptionsSource, validate_attrs};
 pub use type_ref::TypeRef;
 
 #[cfg(test)]

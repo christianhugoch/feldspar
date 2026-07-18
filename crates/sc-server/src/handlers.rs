@@ -34,7 +34,7 @@ use sc_auth::{
 };
 use sc_catalog::{
     Attrs, Catalog, DataField, FileStoreId, TableId, connect_file_store_def, delete_file_store,
-    list_file_stores, load_file_store, load_file_store_by_name, save_file_store,
+    list_file_stores, load_file_store, load_file_store_by_name, resolve_options, save_file_store,
 };
 use sc_error::{Error, Result};
 use sc_files::{
@@ -352,16 +352,22 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
-    reg.register("listFileStoreBackends", |_ctx| async {
-        let mut out = Vec::new();
-        for name in registered_backends() {
-            let spec = backend_config_spec(&name)?;
-            out.push(json!({
-                "name": name,
-                "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
-            }));
+    reg.register("listFileStoreBackends", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let mut out = Vec::new();
+                for name in registered_backends() {
+                    let spec = resolve_options(&catalog, backend_config_spec(&name)?).await?;
+                    out.push(json!({
+                        "name": name,
+                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                    }));
+                }
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
         }
-        Ok(HandlerResponse::ok(Json::Array(out)))
     });
 
     reg.register("browseFiles", {
@@ -663,16 +669,25 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     // --- frameworks ---------------------------------------------------------
 
-    reg.register("listFrameworks", |_ctx| async {
-        let mut out = Vec::new();
-        for name in registered_frameworks() {
-            let spec = framework_config_spec(&name)?;
-            out.push(json!({
-                "name": name,
-                "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
-            }));
+    // Server-query options are resolved here, so the UI receives a concrete list
+    // and needs no query evaluator of its own (§1.6). That is what let the
+    // `store` setting become a pick-list without waiting for `ui/form-runtime`.
+    reg.register("listFrameworks", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let mut out = Vec::new();
+                for name in registered_frameworks() {
+                    let spec = resolve_options(&catalog, framework_config_spec(&name)?).await?;
+                    out.push(json!({
+                        "name": name,
+                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                    }));
+                }
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
         }
-        Ok(HandlerResponse::ok(Json::Array(out)))
     });
 
     // --- users --------------------------------------------------------------
@@ -1160,7 +1175,7 @@ fn form_field_json(field: &FormField) -> Json {
         "type": type_name,
         "required": field.required,
         "default": field.default.clone().unwrap_or(Json::Null),
-        "options": field.options,
+        "options": field.static_options(),
     })
 }
 

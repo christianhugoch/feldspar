@@ -28,7 +28,7 @@ use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_files::{FileStoreDef, FileStoreDefId, connect_from_def, validate_file_store_config};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
-use sc_types::{Attrs, BasicType, TypeRef};
+use sc_types::{Attrs, BasicType, FormField, TypeRef};
 use serde_json::Value as Json;
 
 use crate::catalog::Catalog;
@@ -300,6 +300,77 @@ pub async fn connect_all_file_stores(catalog: &Catalog) -> Result<FileStoreConne
         }
     }
     Ok(report)
+}
+
+/// The [`ServerQuery`](sc_types::OptionsSource::ServerQuery) name that yields the
+/// file stores an admin may choose from.
+///
+/// A constant because it is a contract between whoever *declares* a setting (a
+/// framework, possibly in a guest language) and whoever *answers* it
+/// ([`resolve_options`]) — the two are in different crates and, eventually,
+/// different languages.
+pub const QUERY_FILE_STORES: &str = "file_stores";
+
+/// Resolve every [`ServerQuery`](sc_types::OptionsSource::ServerQuery) in a
+/// settings spec to a concrete list, leaving the rest untouched.
+///
+/// This is the single place the server answers "what may this setting be?", and
+/// it runs at both points a spec is used: when the admin API hands a spec to the
+/// UI (so the form renders a select), and when a config is validated on save (so
+/// an impossible value is rejected). Doing it here is what keeps the *client*
+/// from needing a query evaluator — the UI only ever sees resolved options — and
+/// is why this did not have to wait for `ui/form-runtime` (§12).
+///
+/// An unknown query name resolves to **no options**, which leaves the field
+/// unrestricted rather than rejecting every value. A spec declaring a query this
+/// server does not know is a version skew (a plugin newer than the host), and
+/// the safe reading of "I cannot answer that" is to not constrain — refusing
+/// everything would make the extension unusable rather than merely unassisted.
+pub async fn resolve_options(catalog: &Catalog, spec: Vec<FormField>) -> Result<Vec<FormField>> {
+    let mut out = Vec::with_capacity(spec.len());
+    for field in spec {
+        match field.query() {
+            Some(QUERY_FILE_STORES) => {
+                let names = choosable_file_stores(catalog).await?;
+                out.push(field.with_resolved_options(names));
+            }
+            Some(_) => out.push(field.with_resolved_options(Vec::<String>::new())),
+            None => out.push(field),
+        }
+    }
+    Ok(out)
+}
+
+/// The file stores an admin may pick: every **defined** store, plus any
+/// connected without a definition (`--file-store`), sorted and deduplicated.
+///
+/// Defined-but-unconnected stores are included deliberately. A store whose disk
+/// is currently unmounted is still a legitimate choice — §1.1 made exactly that
+/// state savable and editable — and excluding it would mean an app could not be
+/// configured against a store the admin is in the middle of repairing, or worse,
+/// that re-saving an existing app started failing because of an unrelated
+/// outage.
+pub async fn choosable_file_stores(catalog: &Catalog) -> Result<Vec<String>> {
+    // A catalog with no `_sc_file_stores` table has no stored definitions — that
+    // is what its absence *means*, so answering "none" is correct rather than
+    // lenient. Asking the catalog (a cache lookup) instead of running the query
+    // and swallowing the failure keeps a genuine database error an error: this
+    // is consulted while validating an app's config and while listing
+    // frameworks, and neither should report "no stores exist" when the truth is
+    // "the database is unreachable".
+    let mut names: Vec<String> = if catalog.get(FILE_STORES_TABLE)?.is_some() {
+        list_file_stores(catalog)
+            .await?
+            .into_iter()
+            .map(|def| def.name)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    names.extend(catalog.file_store_names()?);
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 /// Every `File` field in the catalog that references the store named `name`,

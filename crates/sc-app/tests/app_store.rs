@@ -36,7 +36,20 @@ async fn catalog(db: &TestDb) -> Result<Catalog> {
         .await
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
-    Catalog::init(driver as Arc<dyn DatabaseDriver>).await
+    let catalog = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;
+
+    // The `store` setting is a pick-list of the stores that exist (§1.6), so an
+    // app's framework config is only valid if its store is one of them. The
+    // stores these apps name have to actually be defined — which is the point of
+    // the change: an app cannot be saved pointing at a store that is not there.
+    // They need no directory on disk: saving a definition validates its settings,
+    // not its reachability (§1.2).
+    sc_catalog::bootstrap_file_stores(&catalog).await?;
+    for name in ["apps", "uploads"] {
+        sc_catalog::save_file_store(&catalog, &sc_files::FileStoreDef::local(name, "/srv/x"))
+            .await?;
+    }
+    Ok(catalog)
 }
 
 /// A `code` framework config that satisfies `code_config_spec` — what the admin
@@ -323,5 +336,80 @@ async fn applications_are_found_by_every_way_they_reference_a_store() -> Result<
             .is_empty()
     );
 
+    Ok(())
+}
+
+/// §1.6: the `store` setting is a pick-list of the stores that exist, so naming
+/// one that does not is rejected **on save** — where the admin is still looking
+/// at the form — rather than at build time, where it surfaces as a bundler
+/// failure, or at serve time, where it is a broken app.
+#[tokio::test]
+async fn an_unknown_store_is_rejected_on_save() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    bootstrap(&cat).await?;
+
+    let app = Application::new(
+        "Typo",
+        "typo",
+        FrameworkRef::new("code")
+            // `aps`, not `apps` — exactly the typo this is meant to catch.
+            .with("store", "aps")
+            .with("output", "web/dist")
+            .with("command", "npm run build"),
+    );
+    let err = save_application(&cat, &app).await.unwrap_err();
+    assert!(matches!(err.repr(), sc_error::Repr::Invalid(_)), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("store"), "should name the setting: {text}");
+    // The message lists what is allowed, so the admin can see the near-miss
+    // rather than guess.
+    assert!(text.contains("apps"), "should list the real stores: {text}");
+    assert!(
+        list_applications(&cat).await?.is_empty(),
+        "nothing was stored"
+    );
+
+    // The same app with the store that does exist saves fine.
+    let ok = Application::new(
+        "Fine",
+        "fine",
+        FrameworkRef::new("code")
+            .with("store", "apps")
+            .with("output", "web/dist")
+            .with("command", "npm run build"),
+    );
+    save_application(&cat, &ok).await?;
+    assert_eq!(list_applications(&cat).await?.len(), 1);
+
+    Ok(())
+}
+
+/// A store that is defined but currently unreachable is still a valid choice.
+///
+/// This is the interaction between §1.6 and §1.2 that would be easy to get
+/// wrong: if the pick-list were "connected stores", an app could not be saved
+/// while its store's disk was unmounted — so an unrelated outage would block
+/// editing an application, and the admin repairing the store could not
+/// reconfigure the app that uses it.
+#[tokio::test]
+async fn a_defined_but_unconnected_store_is_still_choosable() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    bootstrap(&cat).await?;
+
+    // Defined, never connected — nothing was ever mounted at `/srv/x`.
+    assert!(cat.file_store("apps")?.is_none());
+
+    let app = Application::new(
+        "Blog",
+        "blog",
+        FrameworkRef::new("code")
+            .with("store", "apps")
+            .with("output", "web/dist")
+            .with("command", "npm run build"),
+    );
+    save_application(&cat, &app).await?;
+    assert_eq!(list_applications(&cat).await?.len(), 1);
     Ok(())
 }

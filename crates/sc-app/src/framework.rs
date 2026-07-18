@@ -159,9 +159,15 @@ pub const CFG_CLIENT: &str = "client";
 /// delegates here, so the two cannot drift.
 pub fn code_config_spec() -> Vec<FormField> {
     vec![
+        // A pick-list of the file stores that exist, not free text (§1.6). The
+        // list cannot be written into a static spec — it is whatever the admin
+        // has configured — so it is declared as a named server query and
+        // resolved by `sc_catalog::resolve_options` before this spec is
+        // rendered or validated against.
         FormField::new(CFG_STORE, BasicType::Text)
             .label("File store")
-            .required(),
+            .required()
+            .server_query(sc_catalog::QUERY_FILE_STORES),
         FormField::new(CFG_SOURCE, BasicType::Text)
             .label("Source directory")
             .default_value(""),
@@ -208,9 +214,39 @@ pub fn framework_config_spec(name: &str) -> Result<Vec<FormField>> {
 /// is the point of it: a missing or ill-typed setting is the admin's to fix, and
 /// the admin is standing in front of the form. Discovering it at build time means
 /// a bundler error, and at serve time means a broken app.
-pub fn validate_framework_config(fw: &FrameworkRef) -> Result<()> {
+pub async fn validate_framework_config(catalog: &Catalog, fw: &FrameworkRef) -> Result<()> {
     let spec = framework_config_spec(&fw.name)?;
-    validate_attrs(&spec, &fw.config).map_err(|e| {
+    // Resolve any server-query options first, so a setting restricted to "the
+    // stores that exist" is checked against the stores that actually exist. This
+    // is what turns an unknown store name from a build-time failure into a
+    // save-time one, where the admin is still looking at the form.
+    let spec = sc_catalog::resolve_options(catalog, spec).await?;
+    validate_against(fw, &spec)
+}
+
+/// Check a config's **structure** only: every setting present, of the right
+/// type, and no unknown keys — but *not* whether a server-query setting names
+/// something that exists.
+///
+/// The distinction is about when each question is worth asking. "Is this
+/// well-formed?" has one answer forever and needs nothing but the spec. "Does
+/// store `apps` exist?" depends on the state of the system and is settled on save
+/// ([`validate_framework_config`]), where the admin can fix it. Re-asking it at
+/// build time would mean a build could fail for a reason unrelated to the build,
+/// and the honest error there is the one the build already gives — the store
+/// cannot be resolved.
+///
+/// This falls out of the model rather than being bolted on: an unresolved
+/// [`ServerQuery`](sc_types::OptionsSource::ServerQuery) has no static options,
+/// and `validate_attrs` only checks membership against options it has.
+pub fn validate_framework_config_structure(fw: &FrameworkRef) -> Result<()> {
+    let spec = framework_config_spec(&fw.name)?;
+    validate_against(fw, &spec)
+}
+
+/// Validate `fw`'s config against an already-prepared spec.
+fn validate_against(fw: &FrameworkRef, spec: &[FormField]) -> Result<()> {
+    validate_attrs(spec, &fw.config).map_err(|e| {
         // Name the framework as well as the setting. Rebuilt rather than
         // wrapped: `Error`'s `Invalid` renders its own "invalid:" prefix, so
         // formatting the whole error into a new one would say it twice, and
@@ -499,13 +535,49 @@ mod tests {
 
     #[test]
     fn validate_framework_config_names_the_framework_and_the_setting() {
-        let err = validate_framework_config(&FrameworkRef::new(CODE_FRAMEWORK))
+        // The structural variant: same error path, no catalog needed. Whether a
+        // named store *exists* is the async variant's job and is covered by an
+        // integration test, since it needs a real catalog to have stores in.
+        let err = validate_framework_config_structure(&FrameworkRef::new(CODE_FRAMEWORK))
             .unwrap_err()
             .to_string();
         assert!(err.contains(CODE_FRAMEWORK), "{err}");
         assert!(err.contains(CFG_STORE), "{err}");
         // One "invalid:" prefix, not two — the message is rebuilt, not nested.
         assert_eq!(err.matches("invalid:").count(), 1, "{err}");
+    }
+
+    #[test]
+    fn the_store_setting_is_a_server_query_not_free_text() {
+        // §1.6: the list of stores cannot be written into a static spec, so the
+        // setting names a server-side source instead. The admin UI never sees
+        // this — the server resolves it before handing the spec over — but the
+        // declaration is what makes that possible.
+        let spec = code_config_spec();
+        let store = spec.iter().find(|f| f.name() == CFG_STORE).unwrap();
+        assert_eq!(store.query(), Some(sc_catalog::QUERY_FILE_STORES));
+        // Unresolved, it restricts nothing: validating against options you do
+        // not have would reject every value.
+        assert!(store.static_options().is_empty());
+
+        // The other settings are genuinely free text and stay that way.
+        for name in [CFG_SOURCE, CFG_OUTPUT, CFG_COMMAND, CFG_CLIENT] {
+            let field = spec.iter().find(|f| f.name() == name).unwrap();
+            assert_eq!(field.query(), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_unresolved_server_query_does_not_reject_a_value() {
+        // Structural validation must pass for any well-formed store name: the
+        // membership question belongs to the async variant, which has a catalog
+        // to answer it with. If this ever started failing, every build would
+        // break for a reason that has nothing to do with building.
+        let fw = FrameworkRef::new(CODE_FRAMEWORK)
+            .with(CFG_STORE, "anything-at-all")
+            .with(CFG_OUTPUT, "dist")
+            .with(CFG_COMMAND, "npm run build");
+        assert!(validate_framework_config_structure(&fw).is_ok());
     }
 
     fn sample_bundle() -> AssetBundle {

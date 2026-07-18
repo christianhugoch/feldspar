@@ -900,14 +900,27 @@ rejected at the point the admin can fix it rather than at build or serve time, a
 config resolves to the build step (`app_source_from_config`) — the store, sub-directories and
 build command are stated in the config and nowhere else.
 
-`config_spec` takes no arguments, and that has a consequence worth stating: a framework's
-settings are **static**, so a setting whose choices depend on runtime state — the `store`
-setting should be a pick-list of the *connected* file stores — cannot express that list in the
-spec. In the MVP it is a free-text store name, validated as text and resolved against the
-catalog when the build runs (an unknown store fails the build, not the save). The general
-answer is §6.2's `OptionsSource::ServerQuery`, which the form runtime evaluates; it arrives
-with the runtime, and until then the spec deliberately under-describes this one setting rather
-than threading a `&Catalog` into every framework's `config_spec`.
+`config_spec` still takes no arguments, so a framework's settings remain **static data** — and
+a setting whose choices depend on runtime state, such as the `store` setting, states *where its
+options come from* rather than listing them. That is §6.2's `OptionsSource::ServerQuery`: the
+spec declares `store` as the named query `file_stores`, and the server resolves it
+(`sc_catalog::resolve_options`) at the two points a spec is used — when the admin API hands it
+to the UI, and when a config is validated on save.
+
+Resolving **server-side** is the part worth keeping: the admin UI receives a concrete option
+list and needs no query evaluator, so this did not have to wait for the form runtime (§12), and
+a spec supplied by a guest language through `sc-code` stays inert data rather than becoming
+something the host must execute. A query is therefore a *name*, not an expression, and the set
+of names is the server's to define. `OptionsSource::ClientCode` — for options that depend on
+other values in the form, which cannot be pre-resolved — is what still waits for the runtime.
+
+The consequence for an admin: an unknown store name is rejected **on save**, where they are
+still looking at the form, instead of failing the build later. The list offered is every
+*defined* store plus any connected without a definition, deliberately including stores that are
+defined but currently unreachable (§14.1) — otherwise an unmounted disk would block editing
+every application that uses it, including to repair it. Validation at *build* time checks only
+the config's structure, since whether the store exists was settled on save and re-asking it
+would make a build fail for a reason unrelated to building.
 
 - **Code frameworks** (React, Next.js, SvelteKit, React Native): the app's source lives in
   a git repository that is (a subdir of) a selected file store, editable in an in-browser

@@ -529,3 +529,58 @@ async fn a_flag_connected_store_is_listed_but_has_no_id() -> sc_error::Result<()
     std::fs::remove_dir_all(&dir).ok();
     Ok(())
 }
+
+/// §1.6: the `store` setting reaches the UI as a **resolved** pick-list.
+///
+/// The server evaluates the server-query source before handing the spec over, so
+/// the admin SPA renders a select without needing a query evaluator of its own —
+/// which is why this did not have to wait for `ui/form-runtime`.
+#[tokio::test]
+async fn the_store_setting_arrives_as_a_resolved_pick_list() -> sc_error::Result<()> {
+    let (mut client, _catalog, _db) = setup().await?;
+    let dir = temp_dir("picklist");
+
+    // With no stores configured, the pick-list is empty but still a pick-list.
+    let (status, frameworks) = client.send("GET", "/api/frameworks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let store_field = |body: &Value| -> Value {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == json!("code"))
+            .unwrap()["config_spec"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == json!("store"))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(store_field(&frameworks)["options"], json!([]));
+
+    // Configure two stores …
+    for name in ["apps", "uploads"] {
+        client
+            .send(
+                "POST",
+                "/api/file-stores",
+                Some(json!({
+                    "name": name, "description": "", "backend": "local",
+                    "config": { "path": dir.to_string_lossy() }, "min_role": Value::Null,
+                })),
+            )
+            .await;
+    }
+
+    // … and they are what the setting now offers, in order.
+    let (_, frameworks) = client.send("GET", "/api/frameworks", None).await;
+    let field = store_field(&frameworks);
+    assert_eq!(field["options"], json!(["apps", "uploads"]));
+    // Still described the same way otherwise — the UI renders it as a select
+    // purely because `options` is non-empty, with no special case for stores.
+    assert_eq!(field["type"], json!("text"));
+    assert_eq!(field["required"], json!(true));
+
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}

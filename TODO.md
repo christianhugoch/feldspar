@@ -103,11 +103,9 @@ stores get the same treatment, because editing a store must not need a restart e
 **Carried into §1.4:** two composition steps live above this layer and must not be forgotten,
 because nothing at this layer can enforce them:
 
-- [ ] **Renaming** a store must disconnect the *old* name. `save_file_store` deliberately does
-  not touch the registry, so a rename otherwise leaves the old handle connected and serving. The
-  update endpoint must load the previous row, and disconnect its name when it differs
-- [ ] **Deleting** must disconnect after removing the row — proven separate by
-  `disconnecting_stops_a_store_resolving`, where the row is gone and the handle still browses
+- [x] **Renaming** a store must disconnect the *old* name — done in §1.4a's `updateFileStore`,
+  which loads the previous row and disconnects its name when it differs
+- [x] **Deleting** must disconnect after removing the row — done in §1.4a's `deleteFileStore`
 
 ### 1.4a Admin API — store configuration (`sc-api`, `sc-server`) ✅
 
@@ -129,7 +127,7 @@ way to reach the store they had just connected. The listing is now the **union**
 connected stores, and `id` is nullable: a null id is exactly what tells the UI a store cannot be
 edited or deleted, because there is no row behind it.
 
-- [ ] §1.5 must render a null-id store as read-only, and not offer edit/delete for it
+- [x] §1.5 renders a null-id store as read-only (no edit/delete offered, labelled "from --file-store")
 
 ### 1.4b Admin API — file operations & access control (`sc-api`, `sc-server`) ✅
 
@@ -180,14 +178,33 @@ recorded and reported. The message now reads
   `e.to_string()` on a context error reaches the UI has this problem, and it is invisible until
   someone reads the message and finds it says nothing
 
-### 1.6 Follow-on: the framework `store` setting becomes a pick-list
+### 1.6 Follow-on: the framework `store` setting becomes a pick-list ✅
 
-Now that stores are a listable, persisted set, the compromise §13.3 documents can be retired.
+- [x] `OptionsSource` in `sc-types`: `None | Static | ServerQuery`. `FormField.options` became `options_source`, with `static_options()` / `query()` accessors. **A query is a name, not an expression** — settings-as-data only works if the data stays inert, and an embedded query language would make a spec executable, which is not something to run on behalf of a guest-language plugin
+- [x] `ClientCode` deliberately **not** implemented: it is for options depending on other form values (a dependent dropdown), which cannot be pre-resolved and needs the form runtime. Nothing needs it, and this module's convention is to leave out what has no consumer
+- [x] The `store` setting declares `ServerQuery(QUERY_FILE_STORES)`; `sc_catalog::resolve_options` answers it. §13.3 updated
+- [x] **Resolved: the server evaluates, not the client.** The spec is resolved before it leaves the server, so the admin UI receives a concrete list and needs no evaluator — which is why this did not have to wait for `ui/form-runtime`, and why no evaluator gets built twice. The UI renders a select purely because `options` is non-empty; there is no store-specific code in any screen
+- [x] Tests: an unknown store is rejected on save; a defined-but-unconnected store is still choosable; the pick-list arrives resolved over HTTP; unit tests for the spec and for unresolved queries not restricting
 
-- [ ] Implement `OptionsSource` in `sc-types` (§6.2: static | server query | client code). `FormField` currently carries only a static options list; `field.rs:92` already flags this as the sketch to fill in
-- [ ] The `store` setting on both frameworks becomes a `ServerQuery` pick-list of connected stores instead of validated free text. Update §13.3's note, which currently explains at length why it is free text in the MVP
-- [ ] Resolve whether the admin UI evaluates a `ServerQuery` generically now or whether that waits for `ui/form-runtime` (§12). A generic evaluator here is most of the runtime's option handling and should not be built twice
-- [ ] Tests: an unknown store name is now rejected on save rather than at build time
+**Two design points the work forced, both worth remembering:**
+
+- **Validation split in two.** `validate_framework_config(catalog, fw)` resolves queries then
+  validates (save time); `validate_framework_config_structure(fw)` checks shape only (build
+  time). Re-asking "does this store exist?" at build would make a build fail for a reason
+  unrelated to building, and the honest error there is the one the build already gives. This
+  falls out of the model rather than being bolted on: an unresolved query has no static options,
+  and `validate_attrs` only checks membership against options it has
+- **The pick-list is defined stores ∪ connected stores, not connected only.** If it were
+  connected-only, an unmounted disk would block editing every application using that store —
+  including to repair it. A defined-but-unreachable store stays a valid choice, which is the same
+  principle §1.2 established for saving one
+
+**A coupling caught and removed.** `resolve_options` reaching for `_sc_file_stores`
+unconditionally made `listFrameworks` return 500 when that table was absent — an endpoint
+failing over a table it has no visible relationship to. `choosable_file_stores` now asks the
+catalog whether the table exists (a cache lookup) and treats its absence as "no stored
+definitions", which is what absence *means*, while a genuine database error still propagates
+rather than being reported as "no stores exist".
 
 ---
 

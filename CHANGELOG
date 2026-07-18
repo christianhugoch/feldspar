@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## `OptionsSource`, and the framework `store` setting becomes a pick-list (TODO §1.6)
+
+The last of Phase 1. Now that file stores are a listable, persisted set, the compromise §13.3
+documented at length — "the `store` setting is free text because a static spec cannot express a
+runtime list" — is retired.
+
+- **`OptionsSource` in `sc-types`** (§6.2): `None | Static | ServerQuery`. `FormField.options`
+  became `options_source`, with `static_options()` and `query()` accessors.
+- **A server query is a *name*, not an expression.** The point of declaring settings as data is
+  that the data stays inert: the admin UI renders a spec it does not understand, and a spec may
+  come from a guest language through `sc-code`. An embedded query language would make a settings
+  spec executable — a much larger design, and not a thing to evaluate on a plugin's behalf. So a
+  query names a source the server already knows how to answer, and the set of names is the
+  server's to define (`sc_catalog::resolve_options`, `QUERY_FILE_STORES`).
+- **`ClientCode` is deliberately absent.** It is for options that depend on other values in the
+  form — a dependent dropdown — which by definition cannot be pre-resolved and needs the form
+  runtime to evaluate per keystroke. Nothing needs it yet, and this module's convention is to
+  leave out what has no consumer (the same reason `fieldview` and `visibility` are still missing).
+- **The server resolves, so the client needs no evaluator.** This is the open question §1.6 asked
+  and the answer that makes the rest cheap: the spec is resolved to a concrete list *before* it
+  leaves the server, at both points a spec is used — handing it to the admin UI, and validating a
+  config on save. The SPA renders a select purely because `options` is non-empty, with no
+  store-specific code in any screen and no query evaluator, so **this did not have to wait for
+  `ui/form-runtime` (§12)** and nothing gets built twice.
+- **An unknown store is now rejected on save**, where the admin is still looking at the form,
+  rather than surfacing later as a bundler failure. The error lists the real stores, so a typo
+  shows as a near-miss.
+
+**Two design points the work forced:**
+
+*Validation split in two.* `validate_framework_config(catalog, fw)` resolves queries then
+validates (save time); `validate_framework_config_structure(fw)` checks shape only (build time).
+Re-asking "does this store exist?" at build would make a build fail for a reason unrelated to
+building, when the honest error there is the one the build already gives — the store cannot be
+resolved. This falls out of the model rather than being bolted on: an unresolved query has no
+static options, and `validate_attrs` only checks membership against options it has.
+
+*The pick-list is defined stores ∪ connected stores, not connected only.* If it were
+connected-only, an unmounted disk would block editing every application that uses that store —
+including the edits needed to repair it — and an unrelated outage would start rejecting saves of
+apps nobody had touched. A defined-but-unreachable store stays a valid choice, the same principle
+§1.2 established for saving one.
+
+**A coupling caught and removed.** Resolving options reached for `_sc_file_stores`
+unconditionally, which made `listFrameworks` return 500 when that table was absent — an endpoint
+failing over a table with no visible relationship to it. `choosable_file_stores` now asks the
+catalog whether the table exists (a cache lookup, not a query) and treats its absence as "no
+stored definitions", which is what absence means; a genuine database error still propagates rather
+than being quietly reported as "no stores exist".
+
+Tests: the framework spec declares a query and an unresolved one restricts nothing (unit);
+an unknown store rejected on save with the real stores listed, and a defined-but-unconnected store
+still choosable (`app_store.rs`); the pick-list arriving resolved over HTTP
+(`file_store_admin_api.rs`). Several existing tests now define the stores their apps name — which
+is the change working: an application can no longer be saved pointing at a store that is not there.
+
 ## Admin screens for file stores and the file manager (TODO §1.5)
 
 The admin UI half of Phase 1: file stores are now managed entirely in the browser, and the file
