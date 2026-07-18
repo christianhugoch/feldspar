@@ -109,17 +109,37 @@ because nothing at this layer can enforce them:
 - [ ] **Deleting** must disconnect after removing the row — proven separate by
   `disconnecting_stops_a_store_resolving`, where the row is gone and the handle still browses
 
-### 1.4 Admin API (`sc-api`, `sc-server`)
+### 1.4a Admin API — store configuration (`sc-api`, `sc-server`) ✅
 
-Extends the existing `file-stores` endpoint group, which today is read/browse/write only.
+Split from §1.4b so the security-sensitive access check does not land in the same review as
+routine CRUD. This half is everything the §1.5 **file stores screen** needs.
 
-- [ ] Endpoints: create / update / delete file store
-- [ ] Endpoint: list registered backends with their `config_spec`, so the UI renders a settings form for a backend it knows nothing about (mirrors `listFrameworks`)
-- [ ] Extend `listFileStores`' schema beyond `{name, is_git_repo}`: backend, config, `min_role`, whether it is currently connected, and the connection error if not
-- [ ] File-manager endpoints the file screen needs that do not exist yet: `mkdir`, `deleteFile`, `renameFile`/`move`, and multipart or chunked upload for files too large to base64 into a JSON body
-- [ ] Endpoints for `FileMeta`: get/set `min_role` and attributes on a path. `FileMeta` is modelled and xattr-backed (`crates/sc-files/src/store.rs`) with no way to reach it — the path-cumulative access rule it documents is unenforceable and untestable from the UI until there is
-- [ ] Enforce the path-cumulative `min_role` rule on read/browse/write, not just store it
-- [ ] Integration tests: drive each endpoint end-to-end; non-admins are rejected; path traversal (`..`, absolute paths) is rejected at the API edge as well as in the driver
+- [x] Endpoints: create / update / delete file store, addressed by **id** (the row identity, which survives a rename) while the file manager stays addressed by **name** (what the admin picked and what everything else references)
+- [x] Endpoint `listFileStoreBackends`, mirroring `listFrameworks`
+- [x] Extend `listFileStores` beyond `{name, is_git_repo}`: id, description, backend, config, `min_role`, `connected`, `error`, `is_git_repo`
+- [x] **Both composition steps carried from §1.3**: a rename disconnects the old name (otherwise the old handle keeps serving under a name with no definition), and a delete disconnects after removing the row. Create and update also connect immediately, so an admin learns now — not at next boot — whether the directory is reachable
+- [x] Delete composes both halves of the reference check: `sc-catalog` sees `File` fields, this layer adds `applications_using_file_store`
+- [x] Regenerate `ui/admin/src/client.ts` (`cargo run -p sc-api --example emit_admin_client -- ui/admin/src/client.ts`)
+- [x] Integration tests: `crates/sc-server/tests/file_store_admin_api.rs` (8), end to end through the assembled router
+
+**A design change forced by the work.** `listFileStores` was going to be driven by the stored
+definitions, which would have made a `--file-store` store **invisible** — it is connected and
+browsable but has no row, so a developer running with the flag would see an empty screen and no
+way to reach the store they had just connected. The listing is now the **union** of defined and
+connected stores, and `id` is nullable: a null id is exactly what tells the UI a store cannot be
+edited or deleted, because there is no row behind it.
+
+- [ ] §1.5 must render a null-id store as read-only, and not offer edit/delete for it
+
+### 1.4b Admin API — file operations & access control (`sc-api`, `sc-server`)
+
+What the §1.5 **file manager screen** needs. Deliberately a separate pass.
+
+- [ ] Extend the `FileStore` trait with `mkdir`, `delete`, `rename`/`move` (it currently has only `read`/`write`/`list`/`get_meta`/`set_meta`) plus the `LocalFileStore` implementations, then the endpoints over them
+- [ ] **Binary upload route (decided):** a multipart/streaming POST registered directly on the axum router, *outside* the typed `EndpointSet`, since `TypeSchema` is JSON-only (`Value`/`Struct`/`Array`/`Optional`) and `HandlerResponse` carries `Json`. Consequence to accept and document: it is the first admin operation absent from the generated TypeScript client, so the SPA hand-writes that one call. `writeFile`'s base64 path stays for small files
+- [ ] Endpoints for `FileMeta`: get/set `min_role` and attributes on a path. `FileMeta` is modelled and xattr-backed with no way to reach it — the path-cumulative access rule it documents is unenforceable and untestable from the UI until there is
+- [ ] Enforce the path-cumulative `min_role` rule on read/browse/write, not just store it. Note this interacts with a store-wide `min_role` (§1.1), which is the floor applied before any per-file rule
+- [ ] Integration tests: each endpoint end to end; non-admins are rejected; path traversal (`..`, absolute paths) rejected at the API edge as well as in the driver
 
 ### 1.5 Admin SPA (`ui/admin`)
 

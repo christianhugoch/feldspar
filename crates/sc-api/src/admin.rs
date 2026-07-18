@@ -164,14 +164,72 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // --- files (file manager) ----------------------------------------------
+    // --- file stores (configuration) ---------------------------------------
+    // A file store, like an application, exists only as its stored row (§9,
+    // §14.1); these endpoints are the row ⇄ connected-store path the SPA drives.
+    // Create/update/delete manage the definition and keep the live registry in
+    // step — a renamed store's old handle is disconnected, a deleted store's
+    // handle too, so nothing goes on serving a store the admin has removed.
+    //
+    // Note the addressing split, which is deliberate: these operate on a store's
+    // **id**, because the row's identity survives a rename, while the file
+    // manager below operates on a store's **name**, because that is what an
+    // admin picked and what everything else references.
 
-    // The connected file stores (name + whether they are a git repo).
+    // Every *defined* store — not merely every connected one — with whether it
+    // is currently connected and, if not, why. A store whose directory has been
+    // unmounted must still be listed and editable: editing it is the repair.
     set.register(
         Endpoint::new("listFileStores", Method::Get, api().lit("file-stores"))
             .output(TypeSchema::array(file_store_schema()))
             .auth(AuthRequirement::admin()),
     );
+
+    set.register(
+        Endpoint::new("createFileStore", Method::Post, api().lit("file-stores"))
+            .input(file_store_input_schema())
+            .output(file_store_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateFileStore",
+            Method::Put,
+            api().lit("file-stores").param("id", ValueType::Uuid),
+        )
+        .input(file_store_input_schema())
+        .output(file_store_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteFileStore",
+            Method::Delete,
+            api().lit("file-stores").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The registered backends with their settings spec, so the create/edit form
+    // can render controls for a backend it knows nothing about — the same move
+    // `listFrameworks` makes for frameworks (§13.3).
+    set.register(
+        Endpoint::new(
+            "listFileStoreBackends",
+            Method::Get,
+            api().lit("file-store-backends"),
+        )
+        .output(TypeSchema::array(backend_info_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- files (file manager) ----------------------------------------------
 
     // Browse one directory of a store. A POST (not GET) so the directory — which
     // may contain `/` and would not fit a single path segment — rides in the body.
@@ -342,11 +400,69 @@ fn field_schema() -> TypeSchema {
     ])
 }
 
-/// A connected file store.
+/// The fields common to a file store on the wire — everything but its id.
+///
+/// `config` is opaque JSON: it is whatever the chosen backend's `config_spec`
+/// declares, and the API cannot know that statically any more than it can know a
+/// framework's settings (see [`framework_ref_schema`]).
+fn file_store_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("backend", TypeSchema::text()),
+        StructField::new("config", TypeSchema::json()),
+        // Null means unrestricted, which is distinct from any particular role.
+        StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+    ]
+}
+
+/// A file store as reported to the admin UI: its definition, plus the live state
+/// that only the running server knows.
+///
+/// The trailing fields are why a store is more than its row. `connected` and
+/// `error` exist because a definition can be perfectly valid and still not
+/// usable — a directory unmounted since it was saved — and the UI has to show
+/// that state with its reason rather than silently omitting the store or
+/// pretending it works. `is_git_repo` is a property of the connected instance,
+/// so it is null when there is no instance to ask.
+///
+/// **`id` is nullable, and that is the interesting case.** A store connected by
+/// the `--file-store` flag is real and usable but has no row (§1.3: the flag is
+/// deliberately ephemeral), so it has no id. Listing only stored definitions
+/// would hide it — a developer running with the flag would see an empty store
+/// list and no store to browse — so the listing is the *union* of defined and
+/// connected stores. A null id is precisely what tells the UI that a store
+/// cannot be edited or deleted: there is no row to edit, and it will be gone on
+/// the next boot unless the flag is passed again.
 fn file_store_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new(
+        "id",
+        TypeSchema::optional(TypeSchema::uuid()),
+    )];
+    fields.extend(file_store_fields());
+    fields.extend([
+        StructField::new("connected", TypeSchema::bool()),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("is_git_repo", TypeSchema::optional(TypeSchema::bool())),
+    ]);
+    TypeSchema::Struct(fields)
+}
+
+/// The body accepted when creating or updating a file store: the definition's
+/// fields minus the id (server-assigned on create, taken from the path on
+/// update) and minus the live state, which is observed rather than set.
+fn file_store_input_schema() -> TypeSchema {
+    TypeSchema::Struct(file_store_fields())
+}
+
+/// A registered file-store backend and the settings it declares, so the admin UI
+/// can render a form for a backend it knows nothing about. Each setting is a
+/// [`form_field_schema`] — the same `FormField` vocabulary a row editor and a
+/// framework's settings use.
+fn backend_info_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("name", TypeSchema::text()),
-        StructField::new("is_git_repo", TypeSchema::bool()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
     ])
 }
 

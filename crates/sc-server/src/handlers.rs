@@ -24,17 +24,20 @@ use bytes::Bytes;
 use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
 use sc_app::{
-    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, delete_application,
-    framework_config_spec, list_applications, load_application, registered_frameworks,
-    save_application,
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir,
+    applications_using_file_store, delete_application, framework_config_spec, list_applications,
+    load_application, registered_frameworks, save_application,
 };
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, USERS_TABLE, User, any_user_exists, authenticate_admin,
     create_first_user, create_user,
 };
-use sc_catalog::{Attrs, Catalog, DataField, FileStoreId, TableId};
+use sc_catalog::{
+    Attrs, Catalog, DataField, FileStoreId, TableId, connect_file_store_def, delete_file_store,
+    list_file_stores, load_file_store, save_file_store,
+};
 use sc_error::{Error, Result};
-use sc_files::Entry;
+use sc_files::{Entry, FileStoreDef, FileStoreDefId, backend_config_spec, registered_backends};
 use sc_query::{Expr, Projection, Select, Source, Statement};
 use sc_types::{FormField, TypeRef};
 use serde_json::{Map, Value as Json, json};
@@ -241,22 +244,121 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     // --- files (file manager) ----------------------------------------------
 
+    // The **union** of defined and connected stores, which neither alone gets
+    // right. Listing only the connected ones (what the MVP did) hides a store
+    // whose directory has been unmounted — exactly the store the admin needs to
+    // find and repoint. Listing only the definitions hides a store connected by
+    // `--file-store`, which has no row but is real and browsable, so a developer
+    // running with the flag would see an empty list. Stored stores come first,
+    // then any connected store with no definition, which reports a null id to
+    // say "there is nothing here to edit".
     reg.register("listFileStores", {
         let catalog = catalog.clone();
         move |_ctx| {
             let catalog = catalog.clone();
             async move {
-                let mut out = Vec::new();
+                let defs = list_file_stores(&catalog).await?;
+                let mut out: Vec<Json> = defs
+                    .iter()
+                    .map(|def| file_store_json(&catalog, def))
+                    .collect::<Result<_>>()?;
+
                 for name in catalog.file_store_names()? {
-                    let store = catalog.require_file_store(&name)?;
-                    out.push(json!({
-                        "name": name,
-                        "is_git_repo": store.is_git_repo(),
-                    }));
+                    if !defs.iter().any(|def| def.name == name) {
+                        out.push(ephemeral_file_store_json(&catalog, &name)?);
+                    }
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
+    });
+
+    reg.register("createFileStore", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // A create mints a fresh id; the body carries everything else.
+                let def = file_store_from_body(FileStoreDefId::new(), &ctx.body)?;
+                save_file_store(&catalog, &def).await?;
+                // Connect it straight away so the admin finds out now whether the
+                // directory is actually reachable, rather than on next boot. A
+                // failure is deliberately *not* an error: the definition is saved
+                // and valid, and the reason is reported in the response so the UI
+                // can show "saved, but not connected: <why>".
+                let _ = connect_file_store_def(&catalog, &def);
+                Ok(HandlerResponse::ok(file_store_json(&catalog, &def)?).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateFileStore", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_file_store_id(ctx.path_param("id")?)?;
+                let existing = load_file_store(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no file store with id {id:?}")))?;
+                // The id is the path's, not the body's — the row's identity is
+                // not something a payload gets to reassign.
+                let def = file_store_from_body(id, &ctx.body)?;
+                save_file_store(&catalog, &def).await?;
+
+                // A rename leaves the old handle connected under the old name,
+                // still serving, because saving deliberately does not touch the
+                // registry (§1.1). Disconnect it here — this is the one place
+                // that knows both the before and the after.
+                if existing.name != def.name {
+                    catalog.disconnect_file_store(&existing.name)?;
+                }
+                // Reconnect under the current name so an edited path takes
+                // effect immediately, with no restart (§1.3).
+                let _ = connect_file_store_def(&catalog, &def);
+                Ok(HandlerResponse::ok(file_store_json(&catalog, &def)?))
+            }
+        }
+    });
+
+    reg.register("deleteFileStore", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_file_store_id(ctx.path_param("id")?)?;
+                let existing = load_file_store(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no file store with id {id:?}")))?;
+
+                // Collect the references `sc-catalog` cannot see. Applications
+                // live a crate above it, so this is the one place that can put
+                // both halves of the check together — without it a store still
+                // serving an app's source could be deleted out from under it.
+                let app_refs = applications_using_file_store(&catalog, &existing.name).await?;
+                let deleted = delete_file_store(&catalog, id, &app_refs).await?;
+
+                // Removing the row is the definition's end; disconnecting is what
+                // stops it serving. Both are needed — the file manager would
+                // otherwise go on browsing a store the admin had just deleted.
+                if deleted {
+                    catalog.disconnect_file_store(&existing.name)?;
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    reg.register("listFileStoreBackends", |_ctx| async {
+        let mut out = Vec::new();
+        for name in registered_backends() {
+            let spec = backend_config_spec(&name)?;
+            out.push(json!({
+                "name": name,
+                "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+            }));
+        }
+        Ok(HandlerResponse::ok(Json::Array(out)))
     });
 
     reg.register("browseFiles", {
@@ -666,6 +768,117 @@ fn parse_str_array(obj: &Map<String, Json>, key: &str) -> Result<Vec<String>> {
 }
 
 /// Parse an application id from a path segment.
+/// A file store as the API returns it (matching `file_store_schema`): its stored
+/// definition plus the live state only the running server knows.
+///
+/// `connected`/`error`/`is_git_repo` are read from the catalog rather than the
+/// row, because they are not properties of the definition: the same definition
+/// is connected on one machine and not on another, and that difference is
+/// exactly what the admin needs to see.
+fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
+    let connected = catalog.file_store(&def.name)?;
+    Ok(json!({
+        "id": Some(def.id.0),
+        "name": def.name,
+        "description": def.description,
+        "backend": def.backend,
+        "config": Json::Object(def.config.clone()),
+        "min_role": def.min_role,
+        "connected": connected.is_some(),
+        // Only meaningful when not connected; a connected store has had any
+        // recorded reason cleared, so this is null for a working store.
+        "error": catalog.file_store_error(&def.name)?,
+        // A property of the instance, so null when there is no instance to ask.
+        "is_git_repo": connected.map(|store| store.is_git_repo()),
+    }))
+}
+
+/// A connected store that has **no** stored definition — one supplied by
+/// `--file-store` (§1.3), which is deliberately ephemeral and unpersisted.
+///
+/// Reported with a null id, which is what tells the admin UI there is nothing to
+/// edit or delete: the store is real and browsable, but its existence ends with
+/// the process unless the flag is passed again. It is listed rather than hidden
+/// because a developer running with the flag would otherwise see an empty
+/// file-stores screen and have no way to reach the store they just connected.
+fn ephemeral_file_store_json(catalog: &Catalog, name: &str) -> Result<Json> {
+    let store = catalog.require_file_store(name)?;
+    Ok(json!({
+        "id": Json::Null,
+        "name": name,
+        "description": "",
+        // Named rather than left blank: the flag only ever makes local stores,
+        // and the UI shows this next to the stored ones.
+        "backend": sc_files::LOCAL_BACKEND,
+        "config": json!({}),
+        "min_role": Json::Null,
+        // It is in the registry, so by construction it is connected.
+        "connected": true,
+        "error": Json::Null,
+        "is_git_repo": Some(store.is_git_repo()),
+    }))
+}
+
+/// Build a [`FileStoreDef`] from a create/update body, with `id` supplied by the
+/// caller (minted on create, taken from the path on update).
+///
+/// The backend's settings are *not* validated here: `save_file_store` checks
+/// them against the backend's declared spec, which is the single place that
+/// knows how, and doing it twice would risk the two drifting.
+fn file_store_from_body(id: FileStoreDefId, body: &Json) -> Result<FileStoreDef> {
+    let obj = require_object(body)?;
+    let name = non_empty_str_field(obj, "name")?.to_owned();
+    let backend = non_empty_str_field(obj, "backend")?.to_owned();
+    let description = obj
+        .get("description")
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let config = match obj.get("config") {
+        Some(Json::Object(o)) => o.clone(),
+        // A backend with no settings may be posted without a config at all.
+        None | Some(Json::Null) => sc_types::Attrs::new(),
+        Some(_) => return Err(Error::invalid("field `config` must be an object")),
+    };
+    // Absent or null means unrestricted. A value outside the role scale is
+    // rejected rather than clamped — clamping would quietly change who can
+    // reach the store, which is the opposite of what the admin asked for.
+    let min_role = match obj.get("min_role") {
+        None | Some(Json::Null) => None,
+        Some(value) => {
+            let raw = value
+                .as_i64()
+                .ok_or_else(|| Error::invalid("field `min_role` must be a number or null"))?;
+            Some(
+                u8::try_from(raw)
+                    .ok()
+                    .filter(|r| (1..=100).contains(r))
+                    .ok_or_else(|| {
+                        Error::invalid(format!(
+                            "field `min_role` must be a role between 1 and 100, got {raw}"
+                        ))
+                    })?,
+            )
+        }
+    };
+
+    Ok(FileStoreDef {
+        id,
+        name,
+        description,
+        backend,
+        config,
+        min_role,
+        attributes: sc_types::Attrs::new(),
+    })
+}
+
+fn parse_file_store_id(raw: &str) -> Result<FileStoreDefId> {
+    uuid::Uuid::parse_str(raw)
+        .map(FileStoreDefId)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid file store id")))
+}
+
 fn parse_app_id(raw: &str) -> Result<AppId> {
     uuid::Uuid::parse_str(raw)
         .map(AppId)

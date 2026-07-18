@@ -17,7 +17,13 @@ export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
 export type UpdateRowRequest = unknown;
 export type UpdateRowResponse = unknown;
-export type ListFileStoresResponse = Array<{ name: string; is_git_repo: boolean }>;
+export type ListFileStoresResponse = Array<{ id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null }>;
+export type CreateFileStoreRequest = { name: string; description: string; backend: string; config: unknown; min_role?: number | null };
+export type CreateFileStoreResponse = { id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null };
+export type UpdateFileStoreRequest = { name: string; description: string; backend: string; config: unknown; min_role?: number | null };
+export type UpdateFileStoreResponse = { id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null };
+export type DeleteFileStoreResponse = { deleted: boolean };
+export type ListFileStoreBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown> }> }>;
 export type BrowseFilesRequest = { dir: string };
 export type BrowseFilesResponse = Array<{ name: string; path: string; is_dir: boolean; size?: number | null }>;
 export type ReadFileRequest = { path: string };
@@ -50,6 +56,10 @@ export interface ApiClient {
   updateRow(table: string, id: string, body: UpdateRowRequest): Promise<UpdateRowResponse>;
   deleteRow(table: string, id: string): Promise<void>;
   listFileStores(): Promise<ListFileStoresResponse>;
+  createFileStore(body: CreateFileStoreRequest): Promise<CreateFileStoreResponse>;
+  updateFileStore(id: string, body: UpdateFileStoreRequest): Promise<UpdateFileStoreResponse>;
+  deleteFileStore(id: string): Promise<DeleteFileStoreResponse>;
+  listFileStoreBackends(): Promise<ListFileStoreBackendsResponse>;
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
   readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
   writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
@@ -189,6 +199,38 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listFileStores", res);
       return (await res.json()) as ListFileStoresResponse;
+    },
+    async createFileStore(body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createFileStore", res);
+      return (await res.json()) as CreateFileStoreResponse;
+    },
+    async updateFileStore(id, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateFileStore", res);
+      return (await res.json()) as UpdateFileStoreResponse;
+    },
+    async deleteFileStore(id) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw await clientError("deleteFileStore", res);
+      return (await res.json()) as DeleteFileStoreResponse;
+    },
+    async listFileStoreBackends() {
+      const res = await doFetch(`${baseUrl}/api/file-store-backends`, {
+        method: "GET",
+      });
+      if (!res.ok) throw await clientError("listFileStoreBackends", res);
+      return (await res.json()) as ListFileStoreBackendsResponse;
     },
     async browseFiles(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/browse`, {
