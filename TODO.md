@@ -32,11 +32,33 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 Mirrors how an application is modelled (§9/§13.2): the object exists as its stored row, one
 column per field every store has, sparse values in `attributes`, strict reads.
 
-- [ ] `FileStoreDef` value type: id, name (the catalog key), backend name, backend config (`Attrs`), optional `min_role`, description. The *definition* of a store, distinct from the connected `dyn FileStore` instance it produces
-- [ ] `_sc_file_stores` table + bootstrap, following `_sc_applications` (`crates/sc-app/src/applications.rs`): name `UNIQUE` (it is the lookup key, as a subdomain is for an app), JSON `config`
-- [ ] `save_file_store` / `load_file_store` / `list_file_stores` / `delete_file_store`, following `crates/sc-app/src/store.rs` — including its strictness rule: a missing or ill-typed column is an `Error::invalid` naming the store and the column, not a silent default
-- [ ] Decide what a delete means: the row only, never the bytes. A store whose definition is removed must leave its directory untouched, and deleting one still referenced by an application's `file_stores` (or a `File` field's `FileStoreId`) must be refused with an error naming the referent
-- [ ] Integration tests against a real Postgres: round-trip a definition, reject a duplicate name, reject a delete that would orphan a reference
+**Placement (resolved):** the value type goes in `sc-files`, the persistence in `sc-catalog`.
+`sc-files` cannot hold the persistence — it has no `Catalog`, and it cannot gain one because
+`sc-catalog` already depends on *it*. `sc-catalog` is the lowest crate holding both the
+`FileStore` trait and a `Catalog`, and it already owns the connected-store registry, so the
+definition and the instance it produces live one crate apart at most.
+
+- [x] `FileStoreDef` value type: id, name (the catalog key), backend name, backend config (`Attrs`), optional `min_role`, description. The *definition* of a store, distinct from the connected `dyn FileStore` instance it produces. `FileStoreDefId` (UUID) is the row identity, separate from the *name* `FileStoreId` references, so a store can be renamed without its row changing identity
+- [x] `_sc_file_stores` table + bootstrap, following `_sc_applications` (`crates/sc-app/src/applications.rs`): name `UNIQUE` (it is the lookup key, as a subdomain is for an app), JSON `config`
+- [x] `save_file_store` / `load_file_store` / `load_file_store_by_name` / `list_file_stores` / `delete_file_store`, following `crates/sc-app/src/store.rs` — including its strictness rule: a missing or ill-typed column is an `Error::invalid` naming the store and the column, not a silent default
+- [x] Decide what a delete means. **Resolved: the row only, never the bytes** — a definition is a connection to data that exists independently of Saltcorn (often an admin's own directory, possibly a git working tree), so disconnecting is not consent to destroy. A delete is refused if anything still references the store, naming the referents. The check is **split across crates by necessity**: `sc-catalog` scans its own tables (`file_store_field_references`), and application references live in `sc-app` above it (`applications_using_file_store`, matching the store subset, static dirs and a framework's `store` setting), passed down as `extra_referents`. §1.4's delete endpoint is the one place that must compose both
+- [x] Integration tests against a real Postgres: round-trip a definition, reject a duplicate name, reject a delete that would orphan a reference
+
+**Gap found while doing this — affects §1.4/§1.5, and §1.6 more than expected.**
+`DataFieldKind::File` is modelled (§6.2) but persisted **nowhere**: `create_table` reloads the
+catalog from introspection and `Table::from_physical` derives only `Plain` or `Key` (from a
+foreign key), so a column cannot say "I am a path in store `uploads`". That needs the
+`_sc_fields` overlay, which §9 puts out of MVP scope. Consequences to carry forward:
+
+- `file_store_field_references` is correct but **inert** today; only the application-level check
+  actually protects a store. A passing delete is not proof nothing points at the store, and the
+  admin UI must not claim otherwise in §1.5
+- `file_field_references_are_inert_until_the_fields_overlay_exists` is written as a tripwire: it
+  asserts the current (wrong-in-the-long-run) behaviour so that landing the overlay fails the
+  test and forces the delete path to be revisited
+- [ ] Decide whether a minimal `_sc_fields` overlay — enough to persist a `File` field's store,
+  folder and MIME restrictions — belongs in this milestone. It is out of MVP scope by §9, but a
+  `File` field is unusable without it, and file stores being editable makes that more visible
 
 ### 1.2 Backend registry (`sc-files`)
 
@@ -55,7 +77,7 @@ through `sc-code`, with no per-backend special case.
 The MVP already established the pattern for applications ("the mount registry is live", §13.2);
 stores get the same treatment, because editing a store must not need a restart either.
 
-- [ ] `Catalog::disconnect_file_store` and a replace path, so an edited store rebinds in place — today `connect_file_store` rejects a name that is already connected, which makes an edit impossible
+- [ ] `Catalog::disconnect_file_store`, so a deleted or renamed store stops resolving. `connect_file_store` already replaces on a repeated name, so re-pointing an edited store works today; removing one does not
 - [ ] Boot: load every `_sc_file_stores` row and connect each. One store that fails to connect (a path that has since gone missing) must not stop the server or the other stores — the same rule the MVP applied to a single app that fails to build
 - [ ] Report a store that failed to connect to the admin rather than dropping it silently: a store present in the list but not connected is a state the UI has to be able to show
 - [ ] Decide how `--file-store NAME=PATH` and persisted stores coexist. Proposal: the flag stays as an ephemeral, unpersisted store, connected after the stored ones, and a name clash is a startup error rather than a silent override — it is a dev-and-test convenience, and the tests use it heavily

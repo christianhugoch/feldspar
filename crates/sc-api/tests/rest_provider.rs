@@ -144,7 +144,9 @@ async fn an_unauthorized_request_is_rejected_and_changes_nothing() -> Result<()>
     assert_eq!(write.status, 403);
 
     // An anonymous caller is unauthenticated rather than forbidden.
-    let anon = api.handle(ApiRequest::get("/api/posts"), &cat, None).await?;
+    let anon = api
+        .handle(ApiRequest::get("/api/posts"), &cat, None)
+        .await?;
     assert_eq!(anon.status, 401);
 
     // The rejected write never reached the database: authorization runs before

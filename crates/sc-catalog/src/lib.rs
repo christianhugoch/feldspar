@@ -14,11 +14,16 @@
 
 mod catalog;
 mod field;
+mod file_stores;
 mod provider;
 mod table;
 
 pub use catalog::Catalog;
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
+pub use file_stores::{
+    FILE_STORES_TABLE, bootstrap_file_stores, delete_file_store, file_store_field_references,
+    list_file_stores, load_file_store, load_file_store_by_name, save_file_store,
+};
 pub use provider::{DriverTableProvider, TableProvider};
 pub use table::{AccessRules, Table, TableSource};
 

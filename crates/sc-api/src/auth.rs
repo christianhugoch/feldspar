@@ -90,8 +90,10 @@ mod tests {
         user.extra
             .insert(COL_EMAIL.to_owned(), Value::Text("a@b.c".to_owned()));
         // An admin-added column, and something that must never travel.
-        user.extra
-            .insert("password_hash".to_owned(), Value::Text("$argon2id$".to_owned()));
+        user.extra.insert(
+            "password_hash".to_owned(),
+            Value::Text("$argon2id$".to_owned()),
+        );
 
         let json = user_summary_json(&user);
         assert_eq!(json["email"], json!("a@b.c"));

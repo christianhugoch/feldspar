@@ -216,7 +216,10 @@ impl RestProvider {
             }
         }
         Err(if path_matched {
-            ApiResponse::error(405, format!("{} is not allowed on {}", req.method.as_str(), req.path))
+            ApiResponse::error(
+                405,
+                format!("{} is not allowed on {}", req.method.as_str(), req.path),
+            )
         } else {
             ApiResponse::error(404, format!("no endpoint for {}", req.path))
         })
@@ -368,7 +371,10 @@ fn normalize_mount(raw: &str) -> String {
 /// name is alphanumeric-ish, which the catalog's own naming already requires.
 fn op_name(op: &str, table: &str) -> String {
     let mut out = String::from(op);
-    for word in table.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+    for word in table
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
         let mut chars = word.chars();
         if let Some(first) = chars.next() {
             out.extend(first.to_uppercase());
@@ -540,7 +546,9 @@ mod tests {
     fn auth_is_enforced_before_anything_runs() {
         // Anonymous callers are rejected...
         assert_eq!(
-            enforce_auth(&AuthRequirement::MinRole(1), None).unwrap().status,
+            enforce_auth(&AuthRequirement::MinRole(1), None)
+                .unwrap()
+                .status,
             401
         );
         // ...under-privileged ones are forbidden...

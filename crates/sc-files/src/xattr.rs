@@ -86,14 +86,18 @@ mod tests {
         // Absent attribute reads back as None.
         assert_eq!(get(&path, "saltcorn.test").await.unwrap(), None);
 
-        set(&path, "saltcorn.test", b"value-1".to_vec()).await.unwrap();
+        set(&path, "saltcorn.test", b"value-1".to_vec())
+            .await
+            .unwrap();
         assert_eq!(
             get(&path, "saltcorn.test").await.unwrap().as_deref(),
             Some(&b"value-1"[..])
         );
 
         // Overwrite.
-        set(&path, "saltcorn.test", b"value-2".to_vec()).await.unwrap();
+        set(&path, "saltcorn.test", b"value-2".to_vec())
+            .await
+            .unwrap();
         assert_eq!(
             get(&path, "saltcorn.test").await.unwrap().as_deref(),
             Some(&b"value-2"[..])

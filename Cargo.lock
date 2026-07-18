@@ -1332,6 +1332,7 @@ dependencies = [
  "sc-query",
  "sc-test-harness",
  "sc-types",
+ "serde_json",
  "tokio",
 ]
 
@@ -1400,9 +1401,11 @@ dependencies = [
  "bytes",
  "fsquirrel",
  "sc-error",
+ "sc-types",
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

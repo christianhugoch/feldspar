@@ -604,8 +604,7 @@ mod tests {
 
     #[test]
     fn context_location_is_the_call_site_not_the_library() {
-        let inner: std::result::Result<(), std::io::Error> =
-            Err(std::io::Error::other("disk"));
+        let inner: std::result::Result<(), std::io::Error> = Err(std::io::Error::other("disk"));
         let expected_line = line!() + 1;
         let err = inner.context("while loading").unwrap_err();
         // `#[track_caller]` threads the caller through `map_err`, so the location

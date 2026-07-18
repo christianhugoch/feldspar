@@ -628,7 +628,9 @@ mod tests {
         // A database failure is a System error (§16): the client gets a 500 and
         // the top-level message in the body. (The full cause chain goes to the
         // console via `error_response`'s log line.)
-        let err = Error::database("query failed: db error\n  caused by: relation \"apps\" does not exist");
+        let err = Error::database(
+            "query failed: db error\n  caused by: relation \"apps\" does not exist",
+        );
         let resp = error_response(&err);
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;

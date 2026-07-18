@@ -287,3 +287,41 @@ async fn a_legacy_database_with_no_applications_table_bootstraps_cleanly() -> Re
 
     Ok(())
 }
+
+/// Phase 1.1: the application-level half of the file-store reference check.
+///
+/// This is the half that actually protects a store today — the catalog-level
+/// `File`-field scan is inert until the `_sc_fields` overlay exists — so all
+/// three ways an application can reference a store need to be caught.
+#[tokio::test]
+async fn applications_are_found_by_every_way_they_reference_a_store() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    bootstrap(&cat).await?;
+    save_application(&cat, &blog()).await?;
+
+    // `blog()` references `uploads` twice — as a declared store subset and as a
+    // static dir — and `apps` once, as its code framework's source store. All
+    // three must find the app, because a store serving an app's source is
+    // precisely the one that must not vanish under it.
+    assert_eq!(
+        sc_app::applications_using_file_store(&cat, "uploads").await?,
+        ["application `My Blog`"],
+        "the subset and static-dir references"
+    );
+    assert_eq!(
+        sc_app::applications_using_file_store(&cat, "apps").await?,
+        ["application `My Blog`"],
+        "the framework's `store` setting — where the app's source lives"
+    );
+
+    // An app is named once however many ways it references the store, and an
+    // unreferenced store is free to delete.
+    assert!(
+        sc_app::applications_using_file_store(&cat, "scratch")
+            .await?
+            .is_empty()
+    );
+
+    Ok(())
+}

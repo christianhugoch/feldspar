@@ -14,10 +14,12 @@
 //! - **Paths are confined to the store root.** Absolute paths and `..`
 //!   traversal are rejected before any I/O.
 
+mod def;
 mod local;
 mod store;
 pub mod xattr;
 
+pub use def::{CFG_PATH, FileStoreDef, FileStoreDefId, LOCAL_BACKEND};
 pub use local::LocalFileStore;
 pub use store::{Entry, FileMeta, FileStore};
 
@@ -56,9 +58,18 @@ mod tests {
     #[tokio::test]
     async fn list_returns_sorted_children_with_sizes() {
         let (_base, store) = temp_store();
-        store.write("z.txt", Bytes::from_static(b"12345")).await.unwrap();
-        store.write("a.txt", Bytes::from_static(b"x")).await.unwrap();
-        store.write("sub/c.txt", Bytes::from_static(b"y")).await.unwrap();
+        store
+            .write("z.txt", Bytes::from_static(b"12345"))
+            .await
+            .unwrap();
+        store
+            .write("a.txt", Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        store
+            .write("sub/c.txt", Bytes::from_static(b"y"))
+            .await
+            .unwrap();
 
         let root = store.list("").await.unwrap();
         let names: Vec<_> = root.iter().map(|e| e.name.as_str()).collect();
@@ -97,7 +108,10 @@ mod tests {
     #[tokio::test]
     async fn meta_round_trips_and_defaults() {
         let (_base, store) = temp_store();
-        store.write("doc.md", Bytes::from_static(b"# hi")).await.unwrap();
+        store
+            .write("doc.md", Bytes::from_static(b"# hi"))
+            .await
+            .unwrap();
 
         // No metadata set yet → defaults.
         let meta = store.get_meta("doc.md").await.unwrap();

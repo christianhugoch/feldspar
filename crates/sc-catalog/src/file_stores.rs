@@ -1,0 +1,464 @@
+//! The `_sc_file_stores` table: its schema, bootstrap, and the
+//! [`FileStoreDef`] ⇄ row mapping (design §9, §14.1).
+//!
+//! A file store, like an application (§13.2), has **nothing to introspect it
+//! from**: `information_schema` knows about tables, not about which directories
+//! an admin has connected. So — by the same §9 argument that gives
+//! `_sc_applications` its existence — a store's row *is* the store's definition,
+//! and this is the second stored-metadata table Saltcorn needs. It is not an
+//! overlay: without the row there is no store at all.
+//!
+//! This module lives in `sc-catalog` rather than `sc-files`, where
+//! [`FileStoreDef`] does, for a reason that is not negotiable: persistence needs
+//! a [`Catalog`], and `sc-files` cannot have one, because `sc-catalog` already
+//! depends on `sc-files`. `sc-catalog` is the lowest crate holding both the
+//! `FileStore` trait and a `Catalog`, and it already owns the connected-store
+//! registry ([`Catalog::connect_file_store`]), so definition and instance stay
+//! within one crate of each other.
+//!
+//! **Reading is strict**, exactly as it is for applications: a column that is
+//! missing or of the wrong shape is an [`Error::invalid`] naming the store and
+//! the column, not a silently defaulted field. A half-understood row is a
+//! misconfigured store the admin needs told about.
+//!
+//! **Deleting a definition never touches the bytes.** See
+//! [`delete_file_store`].
+
+use sc_db::Row;
+use sc_error::{Error, Result};
+use sc_files::{FileStoreDef, FileStoreDefId};
+use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
+use sc_types::{Attrs, BasicType, TypeRef};
+use serde_json::Value as Json;
+
+use crate::catalog::Catalog;
+use crate::field::{DataField, DataFieldKind};
+use crate::table::Table;
+
+/// Name of the file-stores table in the primary database.
+pub const FILE_STORES_TABLE: &str = "_sc_file_stores";
+
+/// The UUID primary-key column (§9).
+pub const COL_ID: &str = "id";
+/// The store's name — the key it is connected and referenced under (§14.1).
+pub const COL_NAME: &str = "name";
+/// The human-readable description column (§9).
+pub const COL_DESCRIPTION: &str = "description";
+/// The backend serving the store (`local`, later `s3`, …).
+pub const COL_BACKEND: &str = "backend";
+/// The backend's settings (JSON object).
+pub const COL_CONFIG: &str = "config";
+/// The store-wide minimum role, or NULL for unrestricted.
+pub const COL_MIN_ROLE: &str = "min_role";
+/// The sparse per-store values column (§9) — JSON, always an object.
+pub const COL_ATTRIBUTES: &str = "attributes";
+
+/// The fields of the `_sc_file_stores` table, in declaration order.
+///
+/// `name` carries the `UNIQUE` constraint, for the same reason an application's
+/// `subdomain` does: it is the key everything resolves through — a `File` field's
+/// `FileStoreId`, an application's store subset, the catalog's registry — so two
+/// definitions claiming one name is not a state the system can serve. The
+/// database is the authority because two admins saving concurrently cannot see
+/// each other's transaction.
+fn file_store_fields() -> Vec<DataField> {
+    let text = || TypeRef::Basic(BasicType::Text);
+    let json = || TypeRef::Basic(BasicType::Json);
+    let uuid = || TypeRef::Basic(BasicType::Uuid);
+    let int = || TypeRef::Basic(BasicType::Int);
+    vec![
+        DataField::plain(COL_ID, uuid()).required().primary_key(),
+        DataField::plain(COL_NAME, text()).required().unique(),
+        DataField::plain(COL_DESCRIPTION, text()),
+        DataField::plain(COL_BACKEND, text()).required(),
+        DataField::plain(COL_CONFIG, json()).required(),
+        // Nullable: "no floor" is a real state, and distinct from role 100
+        // (public) only in intent, but the admin UI shows them differently.
+        DataField::plain(COL_MIN_ROLE, int()),
+        DataField::plain(COL_ATTRIBUTES, json()).required(),
+    ]
+}
+
+/// Ensure the `_sc_file_stores` table exists, creating it if absent, and return
+/// it.
+///
+/// Idempotent, and safe against a database that has never seen Saltcorn — the
+/// same contract as `sc_app::bootstrap`. Call once at startup, after the
+/// [`Catalog`] is initialised and before loading stored stores.
+pub async fn bootstrap_file_stores(catalog: &Catalog) -> Result<Table> {
+    if let Some(existing) = catalog.get(FILE_STORES_TABLE)? {
+        return Ok(existing);
+    }
+    catalog
+        .create_table(FILE_STORES_TABLE, &file_store_fields())
+        .await
+}
+
+/// Save a file-store definition: insert its row, or update it in place if a row
+/// with its [`FileStoreDefId`] already exists.
+///
+/// The name is unique, and this checks for a clash first so the admin gets an
+/// [`Error::invalid`] naming the store that already holds it rather than a raw
+/// constraint violation. The database's `UNIQUE` constraint remains the
+/// authority: this check and the write are not one transaction.
+///
+/// Saving does **not** connect the store. A definition can be saved and
+/// unconnected — that is what a store with a since-unmounted path is, and it
+/// must stay editable in that state.
+///
+/// Validating the backend settings against the backend's declared spec belongs
+/// here too, and is TODO §1.2; this deliberately does not guess at settings it
+/// has no spec for yet.
+pub async fn save_file_store(catalog: &Catalog, def: &FileStoreDef) -> Result<()> {
+    let name = def.name.trim();
+    if name.is_empty() {
+        return Err(Error::invalid("a file store needs a name"));
+    }
+    if def.backend.trim().is_empty() {
+        return Err(Error::invalid(format!(
+            "file store `{name}` needs a backend"
+        )));
+    }
+
+    if let Some(other) = load_file_store_by_name(catalog, name).await?
+        && other.id != def.id
+    {
+        return Err(Error::invalid(format!(
+            "file store name `{name}` is already used; \
+             each store is connected under its own name"
+        )));
+    }
+
+    let columns = store_columns();
+    let values = store_values(def);
+
+    if load_file_store(catalog, def.id).await?.is_some() {
+        let assignments = columns
+            .iter()
+            .zip(values)
+            // The id is the row's identity, not something to reassign.
+            .filter(|(col, _)| *col != COL_ID)
+            .map(|(col, value)| Assignment::new(col.clone(), Expr::Lit(value)))
+            .collect();
+        let update = sc_query::Update::new(FILE_STORES_TABLE, assignments)
+            .filter(Expr::col(COL_ID).eq(Expr::lit(def.id.0)));
+        run(catalog, Statement::from(update)).await?;
+    } else {
+        let insert = Insert::row(
+            FILE_STORES_TABLE,
+            columns,
+            values.into_iter().map(Expr::Lit).collect(),
+        );
+        run(catalog, Statement::from(insert)).await?;
+    }
+    Ok(())
+}
+
+/// Load the definition with this id, if it exists.
+pub async fn load_file_store(
+    catalog: &Catalog,
+    id: FileStoreDefId,
+) -> Result<Option<FileStoreDef>> {
+    load_one(catalog, Expr::col(COL_ID).eq(Expr::lit(id.0))).await
+}
+
+/// Load the definition named `name`, if any — the lookup everything that
+/// references a store by name needs.
+pub async fn load_file_store_by_name(
+    catalog: &Catalog,
+    name: &str,
+) -> Result<Option<FileStoreDef>> {
+    load_one(catalog, Expr::col(COL_NAME).eq(Expr::lit(name))).await
+}
+
+/// Every stored definition, ordered by name — what the server connects at boot
+/// and what the admin UI lists.
+pub async fn list_file_stores(catalog: &Catalog) -> Result<Vec<FileStoreDef>> {
+    let select = Select::from(Source::table(FILE_STORES_TABLE));
+    let mut defs: Vec<FileStoreDef> = rows(catalog, select)
+        .await?
+        .iter()
+        .map(file_store_from_row)
+        .collect::<Result<_>>()?;
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(defs)
+}
+
+/// Delete a file-store definition, returning whether one was there to delete.
+///
+/// **This removes the row and nothing else.** The directory and every byte in it
+/// are left exactly as they were: a store definition is a connection to data
+/// that exists independently of Saltcorn — very often an admin's own directory,
+/// possibly a git working tree — and disconnecting it is not consent to destroy
+/// it. An admin who wants the files gone deletes them with the file manager.
+///
+/// Refuses if anything still references the store, naming the referents rather
+/// than leaving them dangling. `extra_referents` is how references this crate
+/// cannot see are supplied: `sc-catalog` can scan its own tables for `File`
+/// fields (see [`file_store_field_references`]), but an *application*'s store
+/// subset lives in `sc-app`, which sits above this crate and cannot be reached
+/// from here. Callers that know about applications must collect those first —
+/// `sc_app::applications_using_file_store` does exactly that — and pass them in.
+/// A caller that passes an empty slice gets the catalog-level check only, which
+/// is correct for a system with no applications and wrong for one with them.
+///
+/// Disconnecting the live store so it stops resolving is the caller's job (TODO
+/// §1.3); this only removes the definition.
+pub async fn delete_file_store(
+    catalog: &Catalog,
+    id: FileStoreDefId,
+    extra_referents: &[String],
+) -> Result<bool> {
+    let Some(def) = load_file_store(catalog, id).await? else {
+        return Ok(false);
+    };
+
+    let mut referents = file_store_field_references(catalog, &def.name)?;
+    referents.extend(extra_referents.iter().cloned());
+    if !referents.is_empty() {
+        return Err(Error::invalid(format!(
+            "file store `{}` is still used by {}; \
+             remove those references before deleting it",
+            def.name,
+            referents.join(", ")
+        )));
+    }
+
+    let delete = Delete::from(FILE_STORES_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(def.id.0)));
+    run(catalog, Statement::from(delete)).await?;
+    Ok(true)
+}
+
+/// Every `File` field in the catalog that references the store named `name`,
+/// described as `table.field` — the catalog-level half of the reference check
+/// [`delete_file_store`] performs.
+///
+/// Public because the admin UI wants to show what a store is used by *before*
+/// the admin tries to delete it, not only as the error when they do.
+///
+/// **This finds nothing in the MVP, and the reason is worth knowing.**
+/// [`DataFieldKind::File`] is modelled but persisted nowhere: the catalog builds
+/// its fields from introspection, and a column cannot say "I am a path in store
+/// `uploads`" — [`Table::from_physical`](crate::Table::from_physical) can only
+/// derive `Plain` or `Key`. Storing that needs the `_sc_fields` overlay, which
+/// §9 places out of MVP scope. So this scan is correct against whatever the
+/// catalog holds and inert until the overlay exists, and the *application*-level
+/// references passed as `extra_referents` are what actually protect a store
+/// today. Do not read a passing delete as proof nothing points at the store.
+pub fn file_store_field_references(catalog: &Catalog, name: &str) -> Result<Vec<String>> {
+    let mut refs = Vec::new();
+    for table in catalog.tables()? {
+        for field in &table.fields {
+            if let DataFieldKind::File { store, .. } = &field.kind
+                && store.0 == name
+            {
+                refs.push(format!("{}.{}", table.name, field.base.name));
+            }
+        }
+    }
+    refs.sort();
+    Ok(refs)
+}
+
+/// The row's columns, in the order [`store_values`] produces them.
+fn store_columns() -> Vec<String> {
+    [
+        COL_ID,
+        COL_NAME,
+        COL_DESCRIPTION,
+        COL_BACKEND,
+        COL_CONFIG,
+        COL_MIN_ROLE,
+        COL_ATTRIBUTES,
+    ]
+    .iter()
+    .map(|c| (*c).to_owned())
+    .collect()
+}
+
+/// The definition serialised to its row's values, in [`store_columns`] order.
+fn store_values(def: &FileStoreDef) -> Vec<Value> {
+    vec![
+        Value::Uuid(def.id.0),
+        Value::Text(def.name.trim().to_owned()),
+        Value::Text(def.description.clone()),
+        Value::Text(def.backend.trim().to_owned()),
+        Value::Json(Json::Object(def.config.clone())),
+        match def.min_role {
+            Some(role) => Value::Int(i64::from(role)),
+            None => Value::Null,
+        },
+        Value::Json(Json::Object(def.attributes.clone())),
+    ]
+}
+
+/// Rebuild a [`FileStoreDef`] from its `_sc_file_stores` row. The strictness
+/// note in the module docs applies throughout.
+fn file_store_from_row(row: &Row) -> Result<FileStoreDef> {
+    let id = match row.get(COL_ID) {
+        Some(Value::Uuid(u)) => FileStoreDefId(*u),
+        other => return Err(bad_column(COL_ID, "a uuid", other)),
+    };
+
+    // A NULL description is "none given", not a broken row.
+    let description = match row.get(COL_DESCRIPTION) {
+        Some(Value::Text(t)) => t.clone(),
+        Some(Value::Null) | None => String::new(),
+        other => return Err(bad_column(COL_DESCRIPTION, "text", other)),
+    };
+
+    // A NULL min_role is "unrestricted". A value outside 1–100 is not clamped:
+    // roles are a fixed scale (`sc-auth`), so an out-of-range one is a corrupt
+    // row, and silently reading it as the nearest valid role would quietly
+    // change who can reach the store.
+    let min_role = match row.get(COL_MIN_ROLE) {
+        Some(Value::Null) | None => None,
+        Some(Value::Int(i)) => Some(u8::try_from(*i).ok().filter(|r| (1..=100).contains(r)).ok_or_else(
+            || {
+                Error::invalid(format!(
+                    "{FILE_STORES_TABLE}.{COL_MIN_ROLE} should be a role between 1 and 100, got {i}"
+                ))
+            },
+        )?),
+        other => return Err(bad_column(COL_MIN_ROLE, "an integer role", other)),
+    };
+
+    Ok(FileStoreDef {
+        id,
+        name: text(row, COL_NAME)?,
+        description,
+        backend: text(row, COL_BACKEND)?,
+        config: object(row, COL_CONFIG)?,
+        min_role,
+        attributes: object(row, COL_ATTRIBUTES)?,
+    })
+}
+
+/// A required text column.
+fn text(row: &Row, column: &str) -> Result<String> {
+    match row.get(column) {
+        Some(Value::Text(t)) => Ok(t.clone()),
+        other => Err(bad_column(column, "text", other)),
+    }
+}
+
+/// A JSON column that must hold an object.
+fn object(row: &Row, column: &str) -> Result<Attrs> {
+    match row.get(column) {
+        Some(Value::Json(Json::Object(o))) => Ok(o.clone()),
+        Some(Value::Json(_)) => Err(Error::invalid(format!(
+            "{FILE_STORES_TABLE}.{column} should be a json object"
+        ))),
+        other => Err(bad_column(column, "json", other)),
+    }
+}
+
+fn bad_column(column: &str, expected: &str, got: Option<&Value>) -> Error {
+    match got {
+        Some(value) => Error::invalid(format!(
+            "{FILE_STORES_TABLE}.{column} should be {expected}, got {}",
+            value.kind()
+        )),
+        None => Error::invalid(format!("row has no `{column}` column")),
+    }
+}
+
+/// Run a statement that returns no rows of interest.
+async fn run(catalog: &Catalog, statement: Statement) -> Result<()> {
+    catalog
+        .primary()
+        .query(&statement)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(())
+}
+
+/// Run a select and collect its rows.
+async fn rows(catalog: &Catalog, select: Select) -> Result<Vec<Row>> {
+    catalog
+        .primary()
+        .query(&Statement::from(select))
+        .await?
+        .try_collect()
+        .await
+}
+
+/// Load the single definition matching `filter`, if any.
+async fn load_one(catalog: &Catalog, filter: Expr) -> Result<Option<FileStoreDef>> {
+    let select = Select::from(Source::table(FILE_STORES_TABLE))
+        .filter(filter)
+        .limit(1);
+    match rows(catalog, select).await?.first() {
+        Some(row) => Ok(Some(file_store_from_row(row)?)),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_has_the_section_9_required_columns() {
+        let fields = file_store_fields();
+        let by_name = |n: &str| fields.iter().find(|f| f.base.name == n).unwrap();
+
+        // §9: every system metadata table MUST have id (UUID), name,
+        // description, attributes (JSON object).
+        let id = by_name(COL_ID);
+        assert!(id.primary_key && id.required);
+        assert_eq!(id.base.type_, TypeRef::Basic(BasicType::Uuid));
+        assert!(by_name(COL_NAME).required);
+        assert_eq!(
+            by_name(COL_ATTRIBUTES).base.type_,
+            TypeRef::Basic(BasicType::Json)
+        );
+        // A description is optional; NULL reads back as "".
+        assert!(!by_name(COL_DESCRIPTION).required);
+    }
+
+    #[test]
+    fn name_is_the_unique_key() {
+        // Everything resolves a store by name, so two rows cannot claim one.
+        let fields = file_store_fields();
+        let name = fields.iter().find(|f| f.base.name == COL_NAME).unwrap();
+        assert!(name.required && name.unique);
+        assert_eq!(name.base.type_, TypeRef::Basic(BasicType::Text));
+    }
+
+    #[test]
+    fn min_role_is_nullable_because_unrestricted_is_a_real_state() {
+        let fields = file_store_fields();
+        let min_role = fields.iter().find(|f| f.base.name == COL_MIN_ROLE).unwrap();
+        assert!(!min_role.required);
+        assert_eq!(min_role.base.type_, TypeRef::Basic(BasicType::Int));
+    }
+
+    #[test]
+    fn the_table_is_a_hidden_system_table() {
+        assert!(FILE_STORES_TABLE.starts_with("_sc_"));
+    }
+
+    #[test]
+    fn columns_and_values_stay_in_step() {
+        // The insert pairs these two positionally, so a column added to one and
+        // not the other would write settings into the wrong column.
+        let def = FileStoreDef::local("apps", "/srv/apps");
+        assert_eq!(store_columns().len(), store_values(&def).len());
+        assert_eq!(store_columns().len(), file_store_fields().len());
+    }
+
+    #[test]
+    fn an_unset_min_role_is_written_as_null() {
+        let values = store_values(&FileStoreDef::local("apps", "/srv/apps"));
+        let idx = store_columns()
+            .iter()
+            .position(|c| c == COL_MIN_ROLE)
+            .unwrap();
+        assert_eq!(values[idx], Value::Null);
+
+        let restricted = FileStoreDef::local("apps", "/srv/apps").min_role(40);
+        assert_eq!(store_values(&restricted)[idx], Value::Int(40));
+    }
+}

@@ -171,6 +171,10 @@ pub trait ApiProvider: Send + Sync {
     /// Handle one request. `user` is the authenticated caller, or `None` for an
     /// anonymous one; the provider is responsible for enforcing each endpoint's
     /// auth requirement.
-    async fn handle(&self, req: ApiRequest, cat: &Catalog, user: Option<&User>)
-    -> Result<ApiResponse>;
+    async fn handle(
+        &self,
+        req: ApiRequest,
+        cat: &Catalog,
+        user: Option<&User>,
+    ) -> Result<ApiResponse>;
 }

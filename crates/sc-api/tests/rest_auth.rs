@@ -55,7 +55,9 @@ async fn react_app_logs_in_against_sc_auth_and_the_session_identifies_it() -> Re
     create_user(&cat, "editor@example.com", "correct-horse", ROLE_ADMIN).await?;
 
     // The app starts anonymous: it cannot read, and `whoami` tells it so.
-    let anon = api.handle(ApiRequest::get("/api/posts"), &cat, None).await?;
+    let anon = api
+        .handle(ApiRequest::get("/api/posts"), &cat, None)
+        .await?;
     assert_eq!(anon.status, 401);
     assert_eq!(
         api.handle(ApiRequest::get("/api/whoami"), &cat, None)
@@ -74,7 +76,11 @@ async fn react_app_logs_in_against_sc_auth_and_the_session_identifies_it() -> Re
         )
         .await?;
     assert_eq!(bad.status, 401);
-    assert_eq!(bad.session, SessionAction::Keep, "no session on a bad login");
+    assert_eq!(
+        bad.session,
+        SessionAction::Keep,
+        "no session on a bad login"
+    );
 
     // ...and neither does an unknown user — with the same answer, so the API does
     // not reveal which emails are registered.
@@ -108,7 +114,10 @@ async fn react_app_logs_in_against_sc_auth_and_the_session_identifies_it() -> Re
     // The provider does not touch cookies: it reports the session change and the
     // transport carries it. This is the seam `sc-server` mints the token at.
     let SessionAction::Start(user) = ok.session else {
-        panic!("a successful login must start a session, got {:?}", ok.session);
+        panic!(
+            "a successful login must start a session, got {:?}",
+            ok.session
+        );
     };
 
     // That is exactly what a session store does with it — mint a token, and hand

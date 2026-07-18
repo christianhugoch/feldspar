@@ -30,7 +30,7 @@ use crate::applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
     COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
 };
-use crate::framework::validate_framework_config;
+use crate::framework::{CFG_STORE, validate_framework_config};
 
 /// Save an application: insert its row, or update it in place if a row with its
 /// [`AppId`] already exists.
@@ -133,6 +133,48 @@ pub async fn delete_application(catalog: &Catalog, id: AppId) -> Result<bool> {
     let delete = Delete::from(APPLICATIONS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     run(catalog, Statement::from(delete)).await?;
     Ok(existed)
+}
+
+/// Every application that references the file store named `name`, described as
+/// ``application `Name` `` — the application-level half of the reference check
+/// [`delete_file_store`](sc_catalog::delete_file_store) performs.
+///
+/// This lives here rather than beside that function because `sc-catalog` sits
+/// *below* this crate: it can scan its own tables for `File` fields but has no
+/// idea applications exist. So the check is split, and a caller deleting a store
+/// in a system that has applications must collect these and pass them in as
+/// `extra_referents`. The admin API is the one place that knows about both, and
+/// is where they are composed.
+///
+/// An application references a store three ways, and all three count — a store
+/// still serving an app's source is exactly the one an admin must not be able to
+/// delete out from under it:
+///
+/// 1. its declared store subset ([`Application::file_stores`]),
+/// 2. a statically-served directory ([`StaticDir::store`]),
+/// 3. a framework's `store` setting — where a code framework's source lives.
+///
+/// The third is matched on the setting *name*, which is a known limitation: a
+/// framework declares its settings as data but has no way to mark one as "this
+/// is a file-store reference", so a framework using some other name for it would
+/// not be seen here. TODO §1.6 fixes this properly by making the setting a
+/// server-query pick-list of stores, which does carry that meaning.
+pub async fn applications_using_file_store(catalog: &Catalog, name: &str) -> Result<Vec<String>> {
+    let mut refs: Vec<String> = list_applications(catalog)
+        .await?
+        .into_iter()
+        .filter(|app| {
+            let in_subset = app.file_stores.iter().any(|s| s.0 == name);
+            let in_static = app.static_dirs.iter().any(|d| d.store.0 == name);
+            let in_framework = std::iter::once(&app.framework)
+                .chain(&app.extra_frameworks)
+                .any(|fw| fw.config.get(CFG_STORE).and_then(Json::as_str) == Some(name));
+            in_subset || in_static || in_framework
+        })
+        .map(|app| format!("application `{}`", app.name))
+        .collect();
+    refs.sort();
+    Ok(refs)
 }
 
 /// The row's columns, in the order [`app_values`] produces them.

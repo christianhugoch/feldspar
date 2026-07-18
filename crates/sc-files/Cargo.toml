@@ -10,10 +10,14 @@ rust-version.workspace = true
 
 [dependencies]
 sc-error.workspace = true
+# `Attrs` for a store definition's backend settings, so a backend's settings use
+# the same vocabulary every other configurable extension point does (§6.2).
+sc-types.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+uuid.workspace = true
 tokio = { workspace = true, features = ["fs", "rt"] }
 # Cross-platform extended-attribute access (technical design §9/§14.1): POSIX
 # xattrs (`user.` namespace) on Linux/macOS/FreeBSD/NetBSD/Android via the

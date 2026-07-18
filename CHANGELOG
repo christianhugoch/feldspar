@@ -2,6 +2,64 @@
 
 Changes in reverse chronological order.
 
+## File stores become persisted, editable objects — model & persistence (TODO §1.1)
+
+First step of making file stores editable in the admin UI. In the MVP a store existed *only* as a
+`--file-store NAME=PATH` process argument held in an in-memory catalog registry: nothing to
+persist, nothing to edit, and no way to add or re-point one without changing the command line and
+restarting. A store now has a definition with a lifecycle, which is the prerequisite for every
+later part of Phase 1 (backend registry, live connect/disconnect, admin API, admin screens).
+
+- **`FileStoreDef` (`sc-files`)** — the stored *definition* of a store: name, backend, backend
+  config (`Attrs`), optional store-wide `min_role`, description, sparse attributes. Deliberately
+  distinct from the connected `Arc<dyn FileStore>` instance it produces: a definition is inert data
+  that may describe a store which does not currently work (a path since unmounted), and that is a
+  state the admin UI must show and let them fix, not an error that refuses to load. `FileStoreDefId`
+  is the row identity (UUID, per §9), separate from the *name* that `FileStoreId` references, so a
+  store can be renamed without its row changing identity.
+- **`_sc_file_stores` (`sc-catalog`)** — the second stored-metadata table, by the same §9 argument
+  that gives `_sc_applications` its existence: `information_schema` knows about tables, not about
+  which directories an admin has connected, so there is nothing to introspect a store from and its
+  row *is* its definition. Idempotent `bootstrap_file_stores`, a legacy database gaining the table
+  on first call with no migration step. `name` is `UNIQUE` — it is the key everything resolves
+  through — with a pre-flight check so a clash names the offender rather than surfacing a raw
+  constraint violation. Reads are strict: a missing or ill-typed column is an `Error::invalid`
+  naming the store and the column, never a silent default (an out-of-range `min_role` is a corrupt
+  row, not something to clamp — clamping would quietly change who can reach the store).
+- **CRUD**: `save_file_store` (insert or update in place), `load_file_store`,
+  `load_file_store_by_name`, `list_file_stores`, `delete_file_store`.
+- **Placement**: the value type is in `sc-files`, the persistence in `sc-catalog`. `sc-files` cannot
+  hold the persistence — it has no `Catalog` and cannot gain one, since `sc-catalog` already depends
+  on it. `sc-catalog` is the lowest crate holding both the `FileStore` trait and a `Catalog`, and it
+  already owns the connected-store registry.
+- **Deleting removes the row and nothing else.** A store definition is a connection to data that
+  exists independently of Saltcorn — very often an admin's own directory, possibly a git working
+  tree — so disconnecting it is not consent to destroy it. A delete is refused if anything still
+  references the store, with the error naming the referents.
+- **The reference check is split across two crates, deliberately.** `sc-catalog` scans its own
+  tables for `File` fields (`file_store_field_references`); an *application*'s references live in
+  `sc-app`, above it, so `sc_app::applications_using_file_store` collects those and callers pass
+  them to `delete_file_store` as `extra_referents`. An application counts as a referent three ways:
+  its declared store subset, a static dir, and a framework's `store` setting — a store serving an
+  app's source is precisely the one that must not vanish underneath it.
+
+**Gap found and pinned down, not papered over:** `DataFieldKind::File` is modelled (§6.2) but
+persisted nowhere. `create_table` reloads the catalog from introspection and `Table::from_physical`
+can only derive `Plain` or `Key` (from a foreign key) — a column has no way to say "I am a path in
+store `uploads`". Storing that needs the `_sc_fields` overlay, which §9 puts out of MVP scope. So
+`file_store_field_references` is correct but **inert** today, and the application-level check is
+what actually protects a store. This is documented on the function and asserted by
+`file_field_references_are_inert_until_the_fields_overlay_exists`, which is written as a tripwire:
+when the overlay lands the assertion flips and the test fails, forcing the delete path to be
+revisited rather than quietly staying half-enforced.
+
+Tests: 9 integration tests against a real Postgres (`crates/sc-catalog/tests/file_store_store.rs`)
+covering round-trip with every column, update-in-place including clearing `min_role` back to NULL,
+duplicate-name rejection, name/backend validation, ordering, delete semantics, and both halves of
+the reference check; plus unit tests for the schema (§9 required columns, `name` unique, `min_role`
+nullable, columns and values staying positionally in step) and for `FileStoreDef`; and
+`applications_are_found_by_every_way_they_reference_a_store` in `crates/sc-app/tests/app_store.rs`.
+
 ## Fix: applications table not created at startup (admin UI 500 on load)
 
 Loading the admin UI's Applications screen failed with `relation "_sc_applications" does not exist`
