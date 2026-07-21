@@ -133,6 +133,16 @@ async fn setup() -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
     Ok((client, catalog, db))
 }
 
+/// The role numbers in a `listRoles` response, in order.
+fn role_numbers(roles: &Value) -> Vec<i64> {
+    roles
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["role"].as_i64().unwrap())
+        .collect()
+}
+
 /// One named table out of a `listTables` response. The listing also contains
 /// `users`, which is an ordinary table like any other.
 fn listed_table<'a>(tables: &'a Value, name: &str) -> &'a Value {
@@ -380,42 +390,47 @@ async fn settings_outlive_their_table_and_can_be_cleaned_up() -> sc_error::Resul
 }
 
 #[tokio::test]
-async fn the_role_choices_are_the_named_ends_plus_the_roles_in_use() -> sc_error::Result<()> {
+async fn roles_are_rows_that_can_be_created_and_deleted() -> sc_error::Result<()> {
     let (mut client, _catalog, _db) = setup().await?;
 
-    // A fresh installation: only the two ends of the scale mean anything, so
-    // those are the choices. Offering all hundred numbers would be a dropdown
-    // nobody can read.
+    // A fresh installation is bootstrapped with the two roles the system itself
+    // depends on, and only those. An invented middle role nobody uses would be
+    // one every admin has to read and decide to delete.
     let (status, roles) = client.send("GET", "/api/roles", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        roles,
-        json!([
-            { "role": 1, "label": "Admin" },
-            { "role": 100, "label": "Public" },
-        ])
-    );
+    assert_eq!(role_numbers(&roles), vec![1, 100]);
+    assert_eq!(roles.as_array().unwrap()[0]["name"], json!("Admin"));
+    assert_eq!(roles.as_array().unwrap()[0]["builtin"], json!(true));
 
-    // Creating a user of role 40 makes 40 a meaningful choice — the list grows
-    // by itself as an installation acquires roles, with no roles table to keep
-    // in step.
+    // Creating a role adds it to the list — a real row now, not a number
+    // inferred from who happens to hold it.
     let (status, _) = client
         .send(
             "POST",
-            "/api/users",
-            Some(json!({ "email": "editor@example.com", "password": "hunter2pass", "role": 40 })),
+            "/api/roles",
+            Some(json!({ "role": 40, "name": "Editor", "description": "Edits things." })),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
 
     let (_, roles) = client.send("GET", "/api/roles", None).await;
-    assert_eq!(
-        roles,
-        json!([
-            { "role": 1, "label": "Admin" },
-            { "role": 40, "label": "Role 40" },
-            { "role": 100, "label": "Public" },
-        ])
-    );
+    assert_eq!(role_numbers(&roles), vec![1, 40, 100]);
+    let editor = roles
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["role"] == json!(40))
+        .unwrap();
+    assert_eq!(editor["name"], json!("Editor"));
+    assert_eq!(editor["builtin"], json!(false));
+
+    // A built-in role cannot be deleted; a created one, held by nobody, can.
+    let (status, _) = client.send("DELETE", "/api/roles/1", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = client.send("DELETE", "/api/roles/40", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], json!(true));
+    let (_, roles) = client.send("GET", "/api/roles", None).await;
+    assert_eq!(role_numbers(&roles), vec![1, 100]);
     Ok(())
 }

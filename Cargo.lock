@@ -1316,6 +1316,7 @@ dependencies = [
  "sc-test-harness",
  "sc-types",
  "serde",
+ "serde_json",
  "tokio",
  "uuid",
 ]

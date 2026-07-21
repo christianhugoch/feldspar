@@ -144,6 +144,16 @@ impl DataField {
     /// The column definition this field emits when the table or column is
     /// created via the catalog. Primary-key membership is applied at the table
     /// level (in the `CREATE TABLE`), not here.
+    ///
+    /// A [`Key`](DataFieldKind::Key) field emits a real foreign key. That is the
+    /// direction that closes the loop: introspection *derives* `Key` from a
+    /// foreign key ([`Table::from_physical`](crate::Table::from_physical)), so a
+    /// `Key` field that created a plain column would be silently downgraded to
+    /// `Plain` the moment the catalog reloaded — the field would claim a
+    /// relationship the database did not have, and nothing would enforce it.
+    ///
+    /// A [`File`](DataFieldKind::File) field emits none: its target is a path in
+    /// a file store, which is not a table and has nothing to constrain against.
     pub fn to_column_def(&self) -> ColumnDef {
         let mut col = ColumnDef::new(self.base.name.clone(), self.base.type_.sql_type());
         if self.required {
@@ -151,6 +161,14 @@ impl DataField {
         }
         if self.unique {
             col = col.unique();
+        }
+        if let DataFieldKind::Key {
+            target_table,
+            target_field,
+            ..
+        } = &self.kind
+        {
+            col = col.references(target_table.0.clone(), target_field.0.clone());
         }
         col
     }

@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use sc_auth::{
-    COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, USERS_TABLE, authenticate, authenticate_admin,
-    bootstrap, create_first_user, hash_password,
+    COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, Role, USERS_TABLE, authenticate,
+    authenticate_admin, bootstrap, create_first_user, hash_password, save_role,
 };
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
@@ -42,6 +42,11 @@ async fn admin_only_login_gate() -> sc_error::Result<()> {
 
     // The first user is an admin.
     create_first_user(&catalog, "admin@example.com", "admin-pw").await?;
+
+    // Role 40 has to exist before anyone can hold it: `users.role` is a foreign
+    // key onto `_sc_roles` (§7.1), so this is not setup noise — it is the
+    // constraint doing its job.
+    save_role(&catalog, &Role::new(40, "Member")).await?;
 
     // Add a non-admin (role 40) directly, with a properly hashed password.
     let users = catalog.require(USERS_TABLE)?;

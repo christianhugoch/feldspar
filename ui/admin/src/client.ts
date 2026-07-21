@@ -13,7 +13,10 @@ export type UpdateTableRequest = { label: string; description: string; min_role_
 export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; configured: boolean };
 export type DeleteTableSettingsResponse = { deleted: boolean };
 export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number }>;
-export type ListRolesResponse = Array<{ role: number; label: string }>;
+export type ListRolesResponse = Array<{ role: number; name: string; description: string; builtin: boolean }>;
+export type CreateRoleRequest = { role: number; name: string; description: string };
+export type CreateRoleResponse = { role: number; name: string; description: string; builtin: boolean };
+export type DeleteRoleResponse = { deleted: boolean };
 export type ListFieldsResponse = Array<{ name: string; sql_type: string; nullable: boolean }>;
 export type CreateFieldRequest = { name: string; sql_type: string; nullable: boolean };
 export type CreateFieldResponse = { name: string; sql_type: string; nullable: boolean };
@@ -68,6 +71,8 @@ export interface ApiClient {
   deleteTableSettings(table: string): Promise<DeleteTableSettingsResponse>;
   listOrphanTableSettings(): Promise<ListOrphanTableSettingsResponse>;
   listRoles(): Promise<ListRolesResponse>;
+  createRole(body: CreateRoleRequest): Promise<CreateRoleResponse>;
+  deleteRole(role: number): Promise<DeleteRoleResponse>;
   listFields(table: string): Promise<ListFieldsResponse>;
   createField(table: string, body: CreateFieldRequest): Promise<CreateFieldResponse>;
   listRows(table: string): Promise<ListRowsResponse>;
@@ -223,6 +228,23 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listRoles", res);
       return (await res.json()) as ListRolesResponse;
+    },
+    async createRole(body) {
+      const res = await doFetch(`${baseUrl}/api/roles`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createRole", res);
+      return (await res.json()) as CreateRoleResponse;
+    },
+    async deleteRole(role) {
+      const res = await doFetch(`${baseUrl}/api/roles/${role}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteRole", res);
+      return (await res.json()) as DeleteRoleResponse;
     },
     async listFields(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {

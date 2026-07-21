@@ -9,7 +9,10 @@
 //!   delete it and substitute another identifier field.
 //! - Passwords are stored hashed with argon2id in [`password_hash`](COL_PASSWORD_HASH).
 //! - [`role`](COL_ROLE) is an integer **1–100**; `1` = admin (full access),
-//!   `100` = public (not logged in). Admins MAY add arbitrary fields.
+//!   `100` = public (not logged in). Admins MAY add arbitrary fields. It is a
+//!   **foreign key onto [`_sc_roles`](crate::ROLES_TABLE)** — a role is a row
+//!   that can carry a name and role-specific settings, and a user whose role
+//!   names nothing would be a user whose privileges cannot be described.
 //!
 //! The bootstrap is driver-agnostic: it goes through the [`Catalog`] like any
 //! other table creation, and it invents no database-specific defaults — the
@@ -45,27 +48,40 @@ pub fn role_in_range(role: u8) -> bool {
 
 /// The fields of the users table, in declaration order.
 ///
-/// `role` is modelled as a plain integer here; the 1–100 bound is enforced in
-/// application code (see [`role_in_range`]) rather than as a database `CHECK`,
-/// which the MVP schema layer does not yet render.
+/// `role` is a foreign key onto [`_sc_roles`](crate::ROLES_TABLE) (see
+/// [`user_role_field`](crate::roles::user_role_field)); the 1–100 bound is
+/// enforced in application code (see [`role_in_range`]) rather than as a
+/// database `CHECK`, which the MVP schema layer does not yet render — but the
+/// *existence* of the role is enforced by the database, because that is the
+/// part concurrency can break.
 fn users_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
-    let int = || TypeRef::Basic(BasicType::Int);
     let uuid = || TypeRef::Basic(BasicType::Uuid);
     vec![
         DataField::plain(COL_ID, uuid()).required().primary_key(),
-        DataField::plain(COL_ROLE, int()).required(),
+        crate::roles::user_role_field(),
         DataField::plain(COL_EMAIL, text()).required().unique(),
         DataField::plain(COL_PASSWORD_HASH, text()),
     ]
 }
 
-/// Ensure the users table exists, creating it if absent, and return it.
+/// Ensure the roles and users tables exist, creating them if absent, and return
+/// the users table.
+///
+/// **Roles first, and that order is load-bearing**: `users.role` references
+/// `_sc_roles`, and a foreign key onto a table that does not exist is not a
+/// constraint any database will accept. It also means the two built-in roles
+/// exist before the first user can be created with one.
 ///
 /// Idempotent: if a `users` table is already present in the catalog it is
 /// returned unchanged (the MVP performs no schema reconciliation on an existing
-/// table). Call this once at startup after the [`Catalog`] is initialised.
+/// table). A database that predates the roles table therefore **gains
+/// `_sc_roles` but keeps its unconstrained `role` column** — per GOALS, early
+/// development evolves the initial setup rather than running migrations, so the
+/// constraint arrives with the next database rather than being retrofitted onto
+/// this one. Call this once at startup after the [`Catalog`] is initialised.
 pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
+    crate::roles::bootstrap_roles(catalog).await?;
     if let Some(existing) = catalog.get(USERS_TABLE)? {
         return Ok(existing);
     }

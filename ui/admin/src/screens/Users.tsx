@@ -1,5 +1,9 @@
-// Users screen: list users and create new ones. Roles are integers (lower = more
-// privileged; see `sc-auth`), with a small preset select for the common roles.
+// Users screen: list users and create new ones.
+//
+// A user's role is a reference to a row in `_sc_roles` (design §7.1, §9), so the
+// form offers the roles that exist rather than a free integer: a number with no
+// role behind it is a user whose privileges cannot be described, and the
+// database refuses it. New roles are made on the Roles screen.
 
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -12,23 +16,16 @@ import Table from "react-bootstrap/Table";
 
 import { api } from "../api";
 import type { ListUsersResponse } from "../client";
-
-// Roles are integers in the range 1–100 (lower = more privileged; see
-// `sc-auth`). Only the endpoints of that range are named — 1 is admin, 100 is
-// public — so the form takes a plain number and the table annotates just those.
-function roleLabel(role: number): string {
-  if (role === 1) return "1 (admin)";
-  if (role === 100) return "100 (public)";
-  return String(role);
-}
+import { roleLabel, useRoles } from "../roles";
 
 export function Users() {
   const [users, setUsers] = useState<ListUsersResponse | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState(80);
+  const [role, setRole] = useState(100);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const roles = useRoles();
 
   const load = async () => {
     try {
@@ -83,7 +80,7 @@ export function Users() {
               {users?.map((u) => (
                 <tr key={u.id}>
                   <td>{u.email}</td>
-                  <td>{roleLabel(u.role)}</td>
+                  <td>{roleLabel(u.role, roles)}</td>
                 </tr>
               ))}
             </tbody>
@@ -116,14 +113,16 @@ export function Users() {
                 </Form.Group>
                 <Form.Group className="mb-3" controlId="userRole">
                   <Form.Label>Role</Form.Label>
-                  <Form.Control
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={role}
-                    onChange={(e) => setRole(Number(e.target.value))}
-                  />
-                  <Form.Text muted>1 = admin, 100 = public.</Form.Text>
+                  <Form.Select value={role} onChange={(e) => setRole(Number(e.target.value))}>
+                    {(roles ?? []).map((r) => (
+                      <option key={r.role} value={r.role}>
+                        {r.name} ({r.role})
+                      </option>
+                    ))}
+                  </Form.Select>
+                  <Form.Text muted>
+                    Lower is more privileged. Add roles on the <a href="#/roles">Roles</a> screen.
+                  </Form.Text>
                 </Form.Group>
                 <Button type="submit" disabled={busy}>
                   Create user

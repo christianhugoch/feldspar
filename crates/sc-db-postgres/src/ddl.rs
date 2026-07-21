@@ -80,7 +80,8 @@ pub fn render(dialect: &PgDialect, change: &SchemaChange) -> Result<String> {
     Ok(sql)
 }
 
-/// Render one column definition: `"name" type [NOT NULL] [DEFAULT …] [UNIQUE]`.
+/// Render one column definition:
+/// `"name" type [NOT NULL] [DEFAULT …] [UNIQUE] [REFERENCES "t" ("c")]`.
 fn column_def(dialect: &PgDialect, col: &ColumnDef) -> String {
     let mut s = dialect.quote_ident(&col.name);
     s.push(' ');
@@ -94,6 +95,17 @@ fn column_def(dialect: &PgDialect, col: &ColumnDef) -> String {
     }
     if col.unique {
         s.push_str(" UNIQUE");
+    }
+    if let Some(target) = &col.references {
+        // A column-level REFERENCES clause, so the same rendering serves both
+        // CREATE TABLE and ADD COLUMN. The referenced column is named
+        // explicitly rather than left implicit: the goals require keys onto
+        // non-primary-key columns, and the implicit form always means the PK.
+        s.push_str(" REFERENCES ");
+        s.push_str(&dialect.quote_ident(&target.table));
+        s.push_str(" (");
+        s.push_str(&dialect.quote_ident(&target.column));
+        s.push(')');
     }
     s
 }
@@ -130,6 +142,40 @@ mod tests {
         );
         // No auto `id` column is ever added.
         assert!(!sql.contains("\"id\""));
+    }
+
+    #[test]
+    fn create_table_renders_a_foreign_key_naming_the_target_column() {
+        // The referenced column is named explicitly, not left implicit: the
+        // goals require keys onto non-primary-key columns, and an implicit
+        // REFERENCES always means the target's primary key.
+        let change = SchemaChange::CreateTable {
+            name: "users".into(),
+            columns: vec![
+                ColumnDef::new("id", "uuid").not_null(),
+                ColumnDef::new("role", "int8")
+                    .not_null()
+                    .references("_sc_roles", "role"),
+            ],
+            primary_key: vec!["id".into()],
+        };
+        assert_eq!(
+            render_ok(&change),
+            "CREATE TABLE \"users\" (\"id\" uuid NOT NULL, \
+             \"role\" int8 NOT NULL REFERENCES \"_sc_roles\" (\"role\"), PRIMARY KEY (\"id\"))"
+        );
+    }
+
+    #[test]
+    fn add_column_can_be_a_foreign_key() {
+        let change = SchemaChange::AddColumn {
+            table: "book".into(),
+            column: ColumnDef::new("author", "int8").references("person", "id"),
+        };
+        assert_eq!(
+            render_ok(&change),
+            "ALTER TABLE \"book\" ADD COLUMN \"author\" int8 REFERENCES \"person\" (\"id\")"
+        );
     }
 
     #[test]

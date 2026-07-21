@@ -12,6 +12,7 @@ use sc_query::{Expr, Insert, Statement, Value};
 use uuid::Uuid;
 
 use crate::password::hash_password;
+use crate::roles::load_role;
 use crate::user::User;
 use crate::users::USERS_TABLE;
 use crate::users::{COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, role_in_range};
@@ -19,9 +20,13 @@ use crate::users::{COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, role_in_range
 /// Create a user with the given email, plaintext password, and role, returning
 /// the resulting [`User`].
 ///
-/// Fails with [`Error::invalid`] if the email or password is blank or the role
-/// is outside `1..=100`. A duplicate email violates the table's `UNIQUE`
-/// constraint and surfaces as a database error. Unlike
+/// Fails with [`Error::invalid`] if the email or password is blank, the role is
+/// outside `1..=100`, or **no such role exists**. That last check is not
+/// redundant with the foreign key on `users.role`: the constraint is what makes
+/// the state impossible, and this is what makes the refusal legible — "role 40
+/// does not exist" rather than a raw constraint violation naming an index. A
+/// duplicate email violates the table's `UNIQUE` constraint and surfaces as a
+/// database error. Unlike
 /// [`create_first_user`](crate::create_first_user) this imposes no
 /// empty-table precondition — it is the general "admin adds a user" path.
 pub async fn create_user(catalog: &Catalog, email: &str, password: &str, role: u8) -> Result<User> {
@@ -34,6 +39,11 @@ pub async fn create_user(catalog: &Catalog, email: &str, password: &str, role: u
     }
     if !role_in_range(role) {
         return Err(Error::invalid(format!("role {role} is not in 1..=100")));
+    }
+    if load_role(catalog, role).await?.is_none() {
+        return Err(Error::invalid(format!(
+            "role {role} does not exist; create it before assigning users to it"
+        )));
     }
 
     // Hash before touching the database — argon2id is deliberately slow.

@@ -131,6 +131,29 @@ pub struct ColumnDef {
     /// Whether a `UNIQUE` constraint should be attached to the column.
     #[serde(default)]
     pub unique: bool,
+    /// The column this one references, if it is a foreign key.
+    ///
+    /// Single-column only, which is what a `REFERENCES` clause on the column
+    /// itself can express. A composite foreign key is a table-level constraint
+    /// and will need its own [`SchemaChange`] when something needs one; nothing
+    /// does yet, and inventing the general form here would mean two ways to
+    /// declare the simple case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<ColumnRef>,
+}
+
+/// A reference to one column of one table — the target of a single-column
+/// foreign key (see [`ColumnDef::references`]).
+///
+/// The target need not be a primary key; it must only be unique, which the
+/// goals require (a `Key` field "holds the value of a referenced field, not
+/// necessarily the target PK").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnRef {
+    /// The referenced table's (unqualified) name.
+    pub table: String,
+    /// The referenced column.
+    pub column: String,
 }
 
 impl ColumnDef {
@@ -143,6 +166,7 @@ impl ColumnDef {
             nullable: true,
             default: None,
             unique: false,
+            references: None,
         }
     }
 
@@ -161,6 +185,15 @@ impl ColumnDef {
     /// Set the column default (backend SQL).
     pub fn default(mut self, sql: impl Into<String>) -> Self {
         self.default = Some(sql.into());
+        self
+    }
+
+    /// Make this column a foreign key onto `table`.`column`.
+    pub fn references(mut self, table: impl Into<String>, column: impl Into<String>) -> Self {
+        self.references = Some(ColumnRef {
+            table: table.into(),
+            column: column.into(),
+        });
         self
     }
 }

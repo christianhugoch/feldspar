@@ -128,12 +128,45 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // The roles an admin can pick from. See `roles_schema` for why this is a
-    // query and not a constant.
+    // --- roles --------------------------------------------------------------
+    // A role is a row in `_sc_roles` (§7.1, §9), not a bare integer: it carries
+    // a name and, in `attributes`, whatever role-specific settings arrive later.
+    // `users.role` is a foreign key onto it, so creating a role is a
+    // prerequisite for assigning a user to it — which is why creating and
+    // deleting roles has to be reachable from the admin UI and not only from a
+    // SQL prompt.
+
     set.register(
         Endpoint::new("listRoles", Method::Get, api().lit("roles"))
             .output(TypeSchema::array(role_schema()))
             .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("createRole", Method::Post, api().lit("roles"))
+            .input(TypeSchema::struct_of([
+                StructField::new("role", TypeSchema::int()),
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("description", TypeSchema::text()),
+            ]))
+            .output(role_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    // Addressed by the role *number*, not the row id: the number is what
+    // `users.role` and every `min_role` holds, so it is the handle an admin
+    // already has in front of them.
+    set.register(
+        Endpoint::new(
+            "deleteRole",
+            Method::Delete,
+            api().lit("roles").param("role", ValueType::Int),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
     );
 
     set.register(
@@ -589,22 +622,27 @@ fn orphan_table_settings_schema() -> TypeSchema {
     TypeSchema::Struct(fields)
 }
 
-/// One role an admin may choose, as a number and a name.
+/// One role (technical design §7.1, §9).
 ///
-/// **Why this is a query rather than a constant list.** Roles are the fixed
-/// scale `1..=100` (§7.1), but only two of those hundred numbers mean anything
-/// on their own — `1` is admin and `100` is public — and the rest mean whatever
-/// the installation's users make them mean. Offering all hundred would be a
-/// dropdown of meaningless numbers; offering only two would make the middle of
-/// the scale unreachable through the UI. So the server answers with the two
-/// named ends plus every role its users actually hold, which is exactly the set
-/// that can matter today, and grows by itself as an admin creates users. When
-/// roles gain names of their own, this endpoint is where that lands and no
-/// caller changes.
+/// **Why roles are rows and not a constant list.** Roles are the fixed scale
+/// `1..=100`, and for a while an integer was all a role was: `1` meant admin
+/// because a constant said so, `100` meant public, and the ninety-eight numbers
+/// between meant whatever an installation's users made them mean. That stops
+/// working the moment a role has to *carry* something — a name to show in a
+/// pick-list, settings that apply to everyone holding it — because a row can
+/// carry those and an integer cannot. So `_sc_roles` holds them, `users.role`
+/// references it, and this endpoint reports what is there rather than what a
+/// constant asserts.
+///
+/// `builtin` marks the two the system itself depends on (admin and public):
+/// they are not deletable, and the UI has to know that before offering the
+/// button rather than after refusing the request.
 fn role_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("role", TypeSchema::int()),
-        StructField::new("label", TypeSchema::text()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("builtin", TypeSchema::bool()),
     ])
 }
 

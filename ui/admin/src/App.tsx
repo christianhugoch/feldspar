@@ -18,6 +18,7 @@ import { FileStores } from "./screens/FileStores";
 import { FileStoreForm } from "./screens/FileStoreForm";
 import { FirstUser } from "./screens/FirstUser";
 import { Login } from "./screens/Login";
+import { Roles } from "./screens/Roles";
 import { Tables } from "./screens/Tables";
 import { TableDetail } from "./screens/TableDetail";
 import { Users } from "./screens/Users";
@@ -122,6 +123,9 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
             <Nav.Link href="#/users" active={route.startsWith("/users")}>
               Users
             </Nav.Link>
+            <Nav.Link href="#/roles" active={route.startsWith("/roles")}>
+              Roles
+            </Nav.Link>
           </Nav>
           <Navbar.Text className="me-3">{user.email}</Navbar.Text>
           <Nav>
@@ -175,6 +179,9 @@ function Screen({ route }: { route: string }) {
   }
   if (route.startsWith("/users")) {
     return <Users />;
+  }
+  if (route.startsWith("/roles")) {
+    return <Roles />;
   }
   return <Tables />;
 }

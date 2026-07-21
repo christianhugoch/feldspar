@@ -248,7 +248,21 @@ async fn full_admin_api_story() -> sc_error::Result<()> {
     let (_, body) = client.send("GET", "/api/tables/book/rows", None).await;
     assert_eq!(body.as_array().unwrap().len(), 0);
 
-    // --- users -------------------------------------------------------------
+    // --- roles & users -----------------------------------------------------
+    // A user's role references `_sc_roles`, so the role has to exist before a
+    // user can hold it. The two built-ins are seeded at bootstrap; role 40 is
+    // created here, which is the ordinary flow (make the role, then the users).
+    let (status, role) = client
+        .send(
+            "POST",
+            "/api/roles",
+            Some(json!({ "role": 40, "name": "Editor", "description": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(role["role"], json!(40));
+    assert_eq!(role["builtin"], json!(false));
+
     let (status, body) = client
         .send(
             "POST",

@@ -2,6 +2,60 @@
 
 Changes in reverse chronological order.
 
+## Roles are rows in `_sc_roles`, and `users.role` is a foreign key onto them
+
+A role was a bare integer with a convention attached: `1` meant admin because a constant said
+so, `100` meant public, and the ninety-eight between meant whatever an installation's users made
+them mean. `listRoles` (from the previous entry) even inferred the set from which numbers users
+happened to hold. That stops working the moment a role has to *carry* something — and it does:
+role-specific settings are coming, and a pick-list wants a name, not a number. A row can carry a
+name and settings; an integer cannot.
+
+So `_sc_roles` now holds them — id, `role` number (unique, on the 1–100 scale), `name`,
+`description`, and `attributes` for whatever role-specific settings arrive, needing no schema
+change to do so — and **`users.role` is a real foreign key onto it**. That is the part that had
+to be a database constraint rather than a convention: a user whose role names nothing is a user
+whose privileges cannot be described, and under concurrency the database is the only thing that
+can rule that state out. `_sc_roles` is **not an overlay** (§9): a role does not exist without
+its row, exactly as an application or a file store does not, so the table is the authoritative
+list rather than an addition to introspection.
+
+**The foreign key is emitted, not just modelled.** `DataFieldKind::Key` has described foreign
+keys since the MVP, and introspection *derived* `Key` from one, but `to_column_def` created a
+plain column — so a `Key` field round-tripped to `Plain` the moment the catalog reloaded,
+claiming a relationship the database never had. `ColumnDef` gained a `references` clause,
+`Key` fields now render `REFERENCES "table" ("column")` (naming the target column explicitly,
+because the goals require keys onto non-primary-key columns and the implicit form always means
+the PK), and `users.role` is the first field to use it. Two DDL tests and the introspection
+round-trip pin it down.
+
+**Bootstrap seeds exactly two roles** — admin and public — and no plausible-looking middle. A
+seeded "staff" or "editor" nobody uses is a role every admin has to read, understand and decide
+to delete. Roles are created **before** the users table, because a foreign key onto a table that
+does not exist is not a constraint any database accepts; `bootstrap` does them in that order. A
+database that predates this keeps its unconstrained `role` column — per GOALS, early development
+evolves the initial setup rather than retrofitting migrations.
+
+Both built-ins are undeletable (without admin nobody can administer anything; without public an
+anonymous request has no role to be), and a role any user still holds cannot be deleted either —
+the answer names the holder count rather than surfacing the foreign key, and nothing cascades a
+user to some other role. `create_user` now checks the role exists first, turning a raw
+constraint violation into "role 40 does not exist; create it before assigning users to it".
+
+**The admin API and SPA gained roles as a thing you manage.** `GET api/roles` reports the rows
+(with a `builtin` flag so the UI declines to offer a delete it would only be refused for);
+`POST api/roles` and `DELETE api/roles/{role}` create and remove them. A new Roles screen lists,
+adds and deletes; the Users screen's role field became a pick-list over the roles that exist,
+because a user can no longer be given a role that does not; and the table settings' role selects
+render each role's name. The `listRoles` shape changed from `{ role, label }` to
+`{ role, name, description, builtin }` — it reports rows now, not a synthesised list.
+
+Five integration tests in `sc-auth` (`crates/sc-auth/tests/roles_store.rs`): bootstrap seeds
+exactly the two built-ins and does not overwrite a renamed one, a role round-trips including its
+attributes, a user cannot hold a role that does not exist, a held role cannot be deleted, and
+the table is hidden. The admin-API role flow (create → assign a user → refuse to delete the
+built-ins) is covered over HTTP.
+
 ## An admin can set a table's access rules
 
 The rules have been storable since `_sc_tables` landed and merged since `Catalog::reload` read

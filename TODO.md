@@ -91,15 +91,26 @@ whose whole purpose is the case where the fields are *unknown*. The pick-list is
 `listRoles` endpoint instead. (§3.4's attribute forms **are** the unknown-fields case, and that
 is where the spec machinery earns its place.)
 
-**What `listRoles` answers, and why it is a query at all.** Roles are the fixed scale `1..=100`
-(§7.1), but only `1` (admin) and `100` (public) mean anything on their own; the rest mean
-whatever an installation's users make them mean. All hundred would be a dropdown of meaningless
-numbers, and only the two named ones would make the middle of the scale unreachable through the
-UI. So the server answers with the two ends plus every role its users actually hold — the set
-that can matter today — and it grows by itself as an admin creates users, with no roles table to
-keep in step. The SPA merges a table's *current* value into the choices even when the server did
-not list it, so a table configured for role 40 after the last role-40 user was deleted still
-shows 40 rather than silently snapping to a neighbour on the next save.
+**What `listRoles` answers.** *(Superseded by the roles-table work below — kept for the
+reasoning.)* When first written, `listRoles` synthesised its answer: the two named ends of the
+scale plus every role its users happened to hold, because there was no roles table to read. That
+was the right shape for "no stored roles" but the wrong thing once a role has to carry more than
+a number — see the follow-on. The SPA still merges a table's *current* value into the choices
+even when the server does not list it, so a table configured for a role that has since been
+deleted shows that role rather than silently snapping to a neighbour on the next save.
+
+### 1.3a Follow-on: roles are rows in `_sc_roles` ✅
+
+`listRoles`'s synthesised list was a stopgap, and it stopped being enough as soon as the design
+called for **role-specific settings**: a setting has to attach to *something*, and a role that
+is only an integer inferred from who holds it has nowhere to put one. So a role became a row.
+
+- [x] `_sc_roles` table in `sc-auth` (`crates/sc-auth/src/roles.rs`): id, `role` number (unique — it is the key everything holds), `name` (unique), `description`, `attributes` for the role-specific settings that motivated this. **Not an overlay** (§9): a role does not exist without its row, like an application or a store, so the table is the authoritative list
+- [x] `users.role` is a **real foreign key** onto `_sc_roles.role`. This forced the schema layer to actually emit foreign keys: `DataFieldKind::Key` was modelled and introspection *derived* it, but `to_column_def` created a plain column — so a `Key` field round-tripped to `Plain` on the next reload, claiming a relationship the database did not have. `ColumnDef::references` + the DDL `REFERENCES` clause close that loop, naming the target column explicitly because the goals require keys onto non-PK columns
+- [x] Bootstrap seeds exactly the two roles the system depends on (admin, public) and no invented middle; **roles before users**, since a foreign key onto a missing table is not a constraint any database accepts. A database predating this keeps its unconstrained `role` column (GOALS: evolve the setup, do not retrofit migrations)
+- [x] Both built-ins undeletable, a held role undeletable (naming the holder count, nothing cascades), and `create_user` checks the role exists first so the failure is legible rather than a raw constraint violation
+- [x] `listRoles` now reports the rows (`{ role, name, description, builtin }`, replacing `{ role, label }`); `createRole` / `deleteRole` added; a Roles screen lists/adds/deletes; the Users role field is a pick-list over roles that exist; the table-settings selects show each role's name
+- [x] Tests: 5 in `crates/sc-auth/tests/roles_store.rs` (bootstrap seeds and does not overwrite, round-trip with attributes, a user cannot hold a missing role, a held role cannot be deleted, the table is hidden), the admin-API role flow over HTTP, and two DDL tests for the emitted `REFERENCES`
 
 ### 1.4 Enforcement doing observable work (`sc-api`, `sc-server`)
 

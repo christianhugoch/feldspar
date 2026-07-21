@@ -18,6 +18,8 @@ argon2.workspace = true
 chrono.workspace = true
 serde.workspace = true
 uuid.workspace = true
+# The `_sc_roles` attributes column (role-specific settings, §9).
+serde_json.workspace = true
 
 [dev-dependencies]
 sc-db-postgres.workspace = true

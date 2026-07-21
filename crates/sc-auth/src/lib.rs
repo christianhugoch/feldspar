@@ -7,11 +7,16 @@
 //! flow ([`create_first_user`], [`any_user_exists`]), credential
 //! [`authenticate`]ion, the admin-driven [`create_user`] path, and the in-memory
 //! [`SessionStore`] behind login/logout.
+//!
+//! Roles live in [`_sc_roles`](ROLES_TABLE) and `users.role` is a foreign key
+//! onto it (§7.1, §9): a role is a row carrying a name and role-specific
+//! settings, not a bare integer with a convention attached.
 
 mod create;
 mod first_user;
 mod login;
 mod password;
+mod roles;
 mod session;
 mod user;
 mod users;
@@ -20,6 +25,11 @@ pub use create::create_user;
 pub use first_user::{any_user_exists, create_first_user};
 pub use login::{authenticate, authenticate_admin};
 pub use password::{hash_password, is_valid_hash, verify_password};
+pub use roles::{
+    COL_ATTRIBUTES as COL_ROLE_ATTRIBUTES, COL_DESCRIPTION as COL_ROLE_DESCRIPTION,
+    COL_NAME as COL_ROLE_NAME, ROLES_TABLE, Role, bootstrap_roles, delete_role, list_roles,
+    load_role, load_role_by_name, save_role,
+};
 pub use session::{DEFAULT_TTL_HOURS, SessionStore};
 pub use user::User;
 pub use users::{

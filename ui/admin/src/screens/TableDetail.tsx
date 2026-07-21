@@ -266,7 +266,7 @@ function RoleSelect({
       <Form.Select value={value} onChange={(e) => onChange(Number(e.target.value))}>
         {roleOptions(value, roles).map((option) => (
           <option key={option.role} value={option.role}>
-            {option.label} ({option.role})
+            {option.name} ({option.role})
           </option>
         ))}
       </Form.Select>

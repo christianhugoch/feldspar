@@ -429,7 +429,9 @@ Per GOALS, the `users` table lives in the primary database and is deliberately m
 - A `legacy_id` field MAY be added when importing v1 apps (v1 user ids were autoincrement
   integers).
 - `role` is an integer **1–100**; 1 = admin (full access), 100 = public (not logged in).
-  Admins MAY add arbitrary fields to the user table.
+  Admins MAY add arbitrary fields to the user table. `role` is a **foreign key onto
+  `_sc_roles`** (§7.4): a role is a row carrying a name and role-specific settings, so
+  `users.role` naming a role that does not exist is a state the database rules out.
 
 ```rust
 pub struct User {
@@ -464,6 +466,23 @@ Enforcement strategy is chosen from `DbCapabilities`:
 
 Beyond roles, GOALS asks for **access-control lists / an ACL language**; this is layered on
 top of the role model and is expressed as formulas (JavaScript or CEL — see Open Questions).
+
+### 7.4 Roles (`_sc_roles`)
+
+A role is a **row in `_sc_roles`**, not a bare integer. It carries the role number on the fixed
+1–100 scale (lower = more privileged), a name shown wherever a role is chosen or displayed, and
+`attributes` for role-specific settings (§9's sparse-value rule, so the first such setting needs
+no schema change). `users.role` is a foreign key onto it, and so, in intent, is every
+`min_role` the access model uses.
+
+`_sc_roles` is **not an overlay** (§9): a role does not exist without its row, exactly as an
+application or a file store does not, so the table holds the authoritative list rather than
+adding to introspection. Bootstrap seeds exactly the two roles the system itself depends on —
+**admin (1)** and **public (100)** — and no invented middle role, because a seeded role nobody
+uses is one every admin has to read and decide to delete. Those two are **built in**: neither is
+deletable (without admin nobody can administer anything; without public an anonymous request has
+no role to be), and a role any user still holds cannot be deleted either — nothing cascades a
+user to a different role.
 
 ---
 
@@ -551,6 +570,7 @@ a sparse value goes into `attributes`.**
 | `_sc_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
 | `_sc_models` | model definitions | provider + config fields |
 | `_sc_model_instances` | fitted model instances | parameters, hyperparameters, fit metadata |
+| `_sc_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
 | `users` | users | UUID PK (not `_sc_`-prefixed; it is user-facing and extensible) |
 
 **Files have no per-file database row.** Per-file metadata is stored in **xattrs** on disk;

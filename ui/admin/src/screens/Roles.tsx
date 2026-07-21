@@ -1,0 +1,162 @@
+// Roles screen: list the roles that exist, add one, delete one.
+//
+// A role is a row in `_sc_roles` (design §7.1, §9): a number on the fixed 1–100
+// scale, a name, and — in its attributes — whatever role-specific settings
+// arrive later. `users.role` is a foreign key onto it, so this screen is a
+// prerequisite for the Users screen rather than a decoration: a user cannot hold
+// a role that does not exist here.
+//
+// Admin (1) and Public (100) are marked built in and cannot be deleted. Without
+// the first nobody can administer anything; without the second an anonymous
+// caller has no role to be. The server refuses either way; the button is hidden
+// so an admin is not invited to try.
+
+import { useEffect, useState, type FormEvent } from "react";
+import Alert from "react-bootstrap/Alert";
+import Button from "react-bootstrap/Button";
+import Card from "react-bootstrap/Card";
+import Col from "react-bootstrap/Col";
+import Form from "react-bootstrap/Form";
+import Row from "react-bootstrap/Row";
+import Table from "react-bootstrap/Table";
+
+import { api } from "../api";
+import type { ListRolesResponse } from "../client";
+
+export function Roles() {
+  const [roles, setRoles] = useState<ListRolesResponse | null>(null);
+  const [number, setNumber] = useState(40);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      setRoles(await api.listRoles());
+    } catch {
+      setError("Could not load roles.");
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const create = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.createRole({ role: number, name: name.trim(), description: description.trim() });
+      setName("");
+      setDescription("");
+      await load();
+    } catch (e) {
+      // The server's message is the useful part here — "role 40 is already used
+      // by `Staff`" tells the admin what to change, and a generic sentence
+      // would not.
+      setError(e instanceof Error ? e.message : "Could not create the role.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (role: number) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteRole(role);
+      await load();
+    } catch (e) {
+      // Most often: users still hold it, and the message says how many.
+      setError(e instanceof Error ? e.message : "Could not delete the role.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h1 className="h3 mb-4">Roles</h1>
+      {error && <Alert variant="danger">{error}</Alert>}
+
+      <Row>
+        <Col lg={7} className="mb-4">
+          <Table hover responsive>
+            <thead>
+              <tr>
+                <th>Number</th>
+                <th>Name</th>
+                <th>Description</th>
+                <th className="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {roles?.map((r) => (
+                <tr key={r.role}>
+                  <td>{r.role}</td>
+                  <td>{r.name}</td>
+                  <td className="text-muted">{r.description}</td>
+                  <td className="text-end">
+                    {r.builtin ? (
+                      <span className="text-muted small">built in</span>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        disabled={busy}
+                        onClick={() => void remove(r.role)}
+                      >
+                        Delete
+                      </Button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          <p className="text-muted small">
+            Lower numbers are more privileged: 1 is the administrator, 100 is anyone at all. A
+            table&rsquo;s access rules name the least-privileged role still allowed.
+          </p>
+        </Col>
+        <Col lg={5} className="mb-4">
+          <Card>
+            <Card.Header>Add role</Card.Header>
+            <Card.Body>
+              <Form onSubmit={create}>
+                <Form.Group className="mb-2" controlId="roleNumber">
+                  <Form.Label>Number</Form.Label>
+                  <Form.Control
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={number}
+                    onChange={(e) => setNumber(Number(e.target.value))}
+                  />
+                  <Form.Text muted>Between 1 and 100, and not already taken.</Form.Text>
+                </Form.Group>
+                <Form.Group className="mb-2" controlId="roleName">
+                  <Form.Label>Name</Form.Label>
+                  <Form.Control value={name} onChange={(e) => setName(e.target.value)} />
+                </Form.Group>
+                <Form.Group className="mb-3" controlId="roleDescription">
+                  <Form.Label>Description</Form.Label>
+                  <Form.Control
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                  />
+                </Form.Group>
+                <Button type="submit" disabled={busy || !name.trim()}>
+                  Create role
+                </Button>
+              </Form>
+            </Card.Body>
+          </Card>
+        </Col>
+      </Row>
+    </>
+  );
+}

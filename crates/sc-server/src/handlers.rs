@@ -15,7 +15,7 @@
 //! (composite keys are post-MVP), and `createTable` gives a new table a default
 //! identity `id` key so the row editor has something to address.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -30,8 +30,8 @@ use sc_app::{
     require_scaffoldable, save_application, scaffold_app,
 };
 use sc_auth::{
-    COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, USERS_TABLE, User, any_user_exists,
-    authenticate_admin, create_first_user, create_user,
+    COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, any_user_exists,
+    authenticate_admin, create_first_user, create_user, delete_role, list_roles, save_role,
 };
 use sc_catalog::{
     AccessRules, Attrs, Catalog, DataField, FileStoreId, Table, TableId, TableMeta,
@@ -242,9 +242,42 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |_ctx| {
             let catalog = catalog.clone();
             async move {
-                Ok(HandlerResponse::ok(Json::Array(
-                    roles_in_use(&catalog).await?,
-                )))
+                let out: Vec<Json> = list_roles(&catalog).await?.iter().map(role_json).collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createRole", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let number = role_field(obj, "role")?;
+                let mut role = Role::new(number, non_empty_str_field(obj, "name")?.trim());
+                role.description = str_field(obj, "description")?.trim().to_owned();
+                save_role(&catalog, &role).await?;
+                Ok(HandlerResponse::ok(role_json(&role)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("deleteRole", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let raw = ctx.path_param("role")?;
+                let number = raw
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|r| (ROLE_ADMIN..=ROLE_PUBLIC).contains(r))
+                    .ok_or_else(|| {
+                        Error::invalid(format!("`{raw}` is not a role between 1 and 100"))
+                    })?;
+                let deleted = delete_role(&catalog, number).await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
             }
         }
     });
@@ -1438,53 +1471,18 @@ fn role_field(obj: &Map<String, Json>, key: &str) -> Result<u8> {
         })
 }
 
-/// The roles an admin may choose from: the two named ends of the scale, plus
-/// every role the installation's users actually hold.
+/// One role on the wire (§7.1, §9).
 ///
-/// The scale is `1..=100` (§7.1) but only `1` (admin) and `100` (public) mean
-/// anything on their own; the rest mean whatever an installation's users make
-/// them mean. Offering all hundred would be a dropdown of meaningless numbers,
-/// and offering only the two named ones would make the middle of the scale
-/// unreachable through the UI — so the answer is the set that can matter here
-/// today, and it grows by itself as the admin creates users. A role with no
-/// name of its own is labelled by its number, which is all anyone knows about it
-/// until roles become objects.
-async fn roles_in_use(catalog: &Catalog) -> Result<Vec<Json>> {
-    let select = Select::from(Source::table(USERS_TABLE))
-        .columns(vec![Projection::expr(Expr::col(COL_ROLE))]);
-    let rows = catalog
-        .primary()
-        .query(&Statement::from(select))
-        .await?
-        .try_collect()
-        .await?;
-
-    let mut roles: BTreeSet<u8> = BTreeSet::from([ROLE_ADMIN, ROLE_PUBLIC]);
-    for row in &rows {
-        // A role outside the scale is a corrupt users row; it is reported by the
-        // user endpoints rather than here, and offering it as a *choice* would
-        // spread the corruption to whatever the admin then configured with it.
-        if let Some(role) = row
-            .get(COL_ROLE)
-            .and_then(sc_query::Value::as_int)
-            .and_then(|i| u8::try_from(i).ok())
-            .filter(|r| (ROLE_ADMIN..=ROLE_PUBLIC).contains(r))
-        {
-            roles.insert(role);
-        }
-    }
-
-    Ok(roles
-        .into_iter()
-        .map(|role| {
-            let label = match role {
-                ROLE_ADMIN => "Admin".to_owned(),
-                ROLE_PUBLIC => "Public".to_owned(),
-                other => format!("Role {other}"),
-            };
-            json!({ "role": role, "label": label })
-        })
-        .collect())
+/// `builtin` travels with the role so the UI can decline to offer a delete it
+/// would only be refused for — admin and public are what "administer" and
+/// "anonymous caller" mean, and neither is an installation's to remove.
+fn role_json(role: &Role) -> Json {
+    json!({
+        "role": role.role,
+        "name": role.name,
+        "description": role.description,
+        "builtin": role.is_builtin(),
+    })
 }
 
 fn str_field<'a>(obj: &'a Map<String, Json>, key: &str) -> Result<&'a str> {
