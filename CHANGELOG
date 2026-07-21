@@ -2,6 +2,61 @@
 
 Changes in reverse chronological order.
 
+## The first overlay: a table's access rules can be stored
+
+`AccessRules` has been modelled since the MVP, is read by the application REST provider on
+every request, and has been `{ read: 1, write: 1 }` for every table that ever existed —
+because `Table::from_physical` had nowhere else to read it from. Every app-facing table was
+therefore admin-only, which makes an application serving anyone but its admin impossible to
+configure. `_sc_tables` is where the other value comes from.
+
+This is the first **overlay** Saltcorn stores, and the word is the whole design constraint. A
+file store or an application *is* its row — delete the row, the object is gone. A table is not:
+it exists in the database whether or not a row describes it, and it must stay exactly as usable
+with no row as it was before this table existed. So `TableMeta` carries only what introspection
+cannot yield — access rules, label, description, sparse attributes — and deliberately nothing
+else. A `nullable` column in `_sc_tables` would break the precedence rule the merge (§1.2) is
+about to rely on: *the database is the authority on everything it knows, the overlay on
+everything it knows, and the two sets do not intersect.* A merge with no contested field has no
+conflict semantics to get wrong. There is a unit test asserting the column list in full, rather
+than spot-checking it, for exactly that reason.
+
+`TableMeta` is a separate type from `Table`, not an extension of it. A `Table` is the merged
+view — fields, primary key, source, all from introspection; a `TableMeta` is only the part an
+admin configured. Collapsing them would make "no row" inexpressible, which is the state most
+tables are in.
+
+Storage follows `_sc_file_stores` column for column (`crates/sc-catalog/src/table_meta.rs`):
+UUID row identity separate from the name everything references, `name` `UNIQUE` because the
+merge joins on it, sparse values in `attributes`, strict reads. Three places it deliberately
+differs, each because the values here decide who may read and write data:
+
+- **Both role columns are `NOT NULL`.** A store's `min_role` is nullable because "no floor" is
+  a real state for it; a table's rules are always a pair, and a NULL would be a third state
+  ("inherit from what?") with no answer.
+- **A role off the 1–100 scale is refused, never clamped** — on save and on read alike.
+  Rounding an out-of-range role to the nearest legal one would silently decide who can reach
+  the data. A row that fails to parse is an error, not a degraded default.
+- **A system (`_sc_*`) table may not have a row at all.** They are hidden from users (§9) and
+  their access is not the admin's to widen; refusing on save means the merge never has to
+  decide what to do with one.
+
+**An overlay whose table has been dropped is kept, and reported** (`orphan_table_meta`).
+Deleting it on sight would be tidier and wrong: a table dropped and recreated — a restore, a
+migration run outside Saltcorn — would come back with `AccessRules::default()`, so an
+application that served it stops working with nothing anywhere saying why. Keeping the row means
+recreating the table restores its configuration, and the admin UI can say "these rows describe
+tables that are not here" instead of the admin finding out. Symmetrically, deleting an overlay
+removes the configuration and never the table — the same rule a file-store delete follows, and
+stronger here, since for an overlay the subject outliving its row is not a caveat but the point.
+
+Eight integration tests against a real Postgres (`crates/sc-catalog/tests/table_meta_store.rs`)
+assert each of those as behaviour, not as shape: a round-trip that includes both roles
+separately, a second row for one table refused with the first left un-widened, an off-scale role
+rejected with nothing written, a system table refused, an overlay surviving `DROP TABLE` and
+un-orphaning itself when the table returns, and a delete that leaves the table and its columns
+where they were.
+
 ## The generated client now satisfies the CSRF contract it was generated from
 
 Reported from the tutorial: the React app's login failed with `403 CSRF token missing or

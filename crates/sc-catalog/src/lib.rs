@@ -8,15 +8,21 @@
 //! fields, keeping its cache in step, and hand out a [`TableProvider`] to run
 //! queries against a table.
 //!
-//! Deferred to post-MVP (see the design): `FormField` and calculated fields,
-//! rich types, the `_sc_tables`/`_sc_fields` overlay metadata, virtual and
-//! materialised providers, and cross-process cache invalidation over a bus.
+//! The `_sc_tables` overlay ([`TableMeta`]) is the first stored metadata that
+//! *adds* to introspection rather than replacing it: a table with no overlay row
+//! is exactly as usable as it was before the overlay existed, which is what
+//! keeps the zero-setup promise true (§9).
+//!
+//! Deferred (see the design): `FormField` and calculated fields, rich types, the
+//! `_sc_fields` overlay, virtual and materialised providers, and cross-process
+//! cache invalidation over a bus.
 
 mod catalog;
 mod field;
 mod file_stores;
 mod provider;
 mod table;
+mod table_meta;
 
 pub use catalog::Catalog;
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
@@ -28,6 +34,10 @@ pub use file_stores::{
 };
 pub use provider::{DriverTableProvider, TableProvider};
 pub use table::{AccessRules, Table, TableSource};
+pub use table_meta::{
+    TABLE_META_TABLE, TableMeta, TableMetaId, bootstrap_table_meta, delete_table_meta,
+    list_table_meta, load_table_meta, load_table_meta_by_name, orphan_table_meta, save_table_meta,
+};
 
 #[cfg(test)]
 mod tests {

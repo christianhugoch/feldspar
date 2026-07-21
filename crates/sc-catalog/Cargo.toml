@@ -17,6 +17,8 @@ sc-files.workspace = true
 async-trait.workspace = true
 # The `_sc_file_stores` JSON columns (a backend's settings, sparse attributes).
 serde_json.workspace = true
+# UUID row identities for the `_sc_*` tables this crate stores (§9).
+uuid.workspace = true
 
 [dev-dependencies]
 sc-db-postgres.workspace = true
