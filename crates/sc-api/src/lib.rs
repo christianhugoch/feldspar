@@ -38,7 +38,7 @@ pub use endpoint::{
     AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec,
 };
 pub use provider::{ApiProvider, ApiRequest, ApiResponse, SessionAction};
-pub use rest::{REST_PROVIDER, RestProvider};
+pub use rest::{REST_PROVIDER, RestProvider, op_name};
 pub use schema::{StructField, TypeSchema, ValueType};
 pub use typescript::generate_client;
 

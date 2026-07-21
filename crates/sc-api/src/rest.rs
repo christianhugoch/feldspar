@@ -369,7 +369,12 @@ fn normalize_mount(raw: &str) -> String {
 /// `list` + `blog_posts` → `listBlogPosts`. Table names are unique, so these are
 /// unique too; the result is a valid TypeScript identifier as long as the table
 /// name is alphanumeric-ish, which the catalog's own naming already requires.
-fn op_name(op: &str, table: &str) -> String {
+///
+/// Public because generated code has to call these methods by name: `sc-app`'s
+/// React scaffold writes hooks that invoke `listTasks`/`createTasks`/…, and
+/// recomputing the convention there would be a second copy of it, free to drift
+/// from the endpoints the client is actually generated with.
+pub fn op_name(op: &str, table: &str) -> String {
     let mut out = String::from(op);
     for word in table
         .split(|c: char| !c.is_alphanumeric())

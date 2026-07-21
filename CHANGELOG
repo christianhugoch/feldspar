@@ -2,6 +2,158 @@
 
 Changes in reverse chronological order.
 
+## The server writes the app: React scaffolding (TODO §2.3)
+
+Creating a React application now generates its whole project into the file store — on the
+first save, from a browser, with no shell. The MVP tutorial's steps 2 and 3 (`ssh` in,
+`npm create vite`, `npm install`, `git init`, then fill in five paths) are gone; an admin picks
+React, names the project, picks a store.
+
+For a one-table app that is 14 files: `package.json`, `vite.config.ts`, `tsconfig.json`,
+`index.html`, `.gitignore`, the entry point, the app shell, `auth.tsx`, a login screen, the
+route list, a stylesheet, **one page per table**, and the two-file runtime under
+`src/saltcorn/`. The pages and hooks are generated against the app's *actual* columns —
+`TasksRow` has `title: string` and `done?: boolean | null` because that is what the table says
+— so the app comes up showing real rows instead of a placeholder whose first job is to be
+deleted.
+
+**Never overwrites, and says so before writing anything.** Scaffolding into a directory with
+anything in it is refused with an error naming the directory. The test puts a file in the way
+and asserts it is byte-identical afterwards, because a generator that clobbers is worse than no
+generator — the work it destroys is the admin's.
+
+**Scaffolding does not fail the create.** The row is saved and valid before any file is
+written, and an occupied directory or an unwritable store is something the admin fixes and
+retries. Losing the application they just configured over it would be the wrong trade, so the
+create response carries `scaffolded` or `scaffold_error` *alongside* the created app.
+
+**`npm install` is part of the build now**, when `node_modules` is absent. It is carried on the
+`BuildSpec` as an `InstallSpec { command, args, marker }` rather than assumed by the build step,
+so `run_build` stays a framework-agnostic "run this over that tree" and a `code` app — whose
+dependencies are its admin's business, stated in their own build command — is unaffected. The
+marker is checked on disk rather than remembered, so a store restored from a backup installs
+again instead of building against nothing. A failed install is an Application error carrying
+npm's own output (§16), and the install log is surfaced separately in the build banner, because
+the first build of a scaffolded app is mostly the install.
+
+**`git init` only when the store is not already a repo.** If it is, the project sits inside it
+and a nested repository would leave the source tracked by one nobody expects. A missing or
+failing `git` is reported rather than fatal: refusing to keep a project that was written
+correctly because version control was unavailable is the wrong trade.
+
+**The generated/yours boundary is now enforced, not just documented.** Only `src/saltcorn/` is
+rewritten — on every build, from the app's endpoints — and both files in it carry a DO NOT EDIT
+header. A test adds a table to an app, regenerates, and asserts `useNotes()` and `NotesRow`
+appeared while the admin's edited `App.tsx` is untouched. That is §2.1's irreversible decision
+doing its job: a registry package could not have contained a hook typed from this app's
+columns.
+
+**The end-to-end test is real, and opt-in.** `SC_TEST_NPM=1` runs scaffold → `npm install` →
+`tsc --noEmit && vite build` → serve against a real Node toolchain (react 19, vite 8,
+react-router 7), verified passing locally. Because the project's build script type-checks
+before bundling, that run is also what proves the generated hooks compile against the generated
+client — a drift between what `sc-api` emits and what the scaffold calls fails there. It is
+gated because it needs npm and a network, which the rest of the Rust suite deliberately does
+not; the other four tests in that file run unconditionally.
+
+Two smaller notes. `sc-api`'s `op_name` became public: the hooks call `listTasks`/`createTasks`
+by name, and recomputing that convention inside the scaffold would have been a second copy of it
+free to drift from the endpoints the client is generated with. And the generator itself
+(`scaffold/files.rs`) is **pure** — tables and an `EndpointSet` in, file contents out — so the
+templates are assertable with no store, no database and no Node, and the store-writing half has
+no templates in it.
+
+## The `react` framework: two settings instead of five (TODO §2.2)
+
+`react` is registered alongside `code`. An app picks a **file store** and a **project name**,
+and everything the `code` framework has to be told is derived: a project `todo` builds from
+`todo/` into `todo/dist` with `npm run build`, and its generated client lands at
+`todo/src/saltcorn/client.ts`.
+
+**The measure of the design is how little had to change.** `app_source_from_config` grew a
+dispatch on the framework name, and both arms produce the same `AppSource` — stated for `code`,
+derived for `react`. Below that function nothing can tell which framework it is building, so
+`build_app`, `build_application`, `build_and_mount` and the live mount registry are untouched. A
+test pins this by asserting a `react` config and the equivalent hand-written `code` config
+resolve to an identical `BuildSpec`. Serving is likewise reused rather than reimplemented: a
+built React app is a static bundle with an SPA fallback, which is what `CodeFramework::serve`
+already does.
+
+**That reuse did expose one thing.** `CodeFramework::config_spec` hard-coded `code_config_spec()`,
+so a mounted `react` app — which is a `CodeFramework` under its own name — would have reported
+`code`'s five settings as its own. It now looks the spec up by name, so the instance and the
+registry agree for both frameworks.
+
+**The registry list is now ordered, and the order means something**: `react` first because it is
+the path an admin should take, `code` second as the generic escape hatch. §2.4 renders that
+distinction; this is where it starts, rather than two equal names in a dropdown.
+
+**The project name is checked on save, not at build.** The first cut checked it while resolving
+the build, which §1.6's own argument rules out — the admin should hear about it while looking at
+the form. It cannot be expressed in the spec (§6.2 states presence, type and membership, not
+patterns) and growing that vocabulary for one setting would oblige every guest-language framework
+to be understood by it, so the framework checks its own name rule and both validation paths run
+it. The payoff is the error an admin actually gets: `setting `project` is "../../etc", which is
+not a usable directory name` instead of a build path caught escaping the file store two layers
+down.
+
+**A framework now supplies the default CSP** for an app that states none (`framework_default_csp`).
+An admin who no longer chooses the bundler should not have to derive the policy that bundler
+needs. `react`'s is the strict baseline plus exactly what a Vite bundle requires — `data:` for
+images and fonts, since Vite inlines small assets — with `connect-src 'self'` for the app's own
+API and `object-src`/`base-uri`/`frame-ancestors` tightened. **No `unsafe-inline` or
+`unsafe-eval` anywhere**, which is the §2.1 tooling and styling decisions cashing out rather than
+a coincidence, and a test asserts it so a future dependency cannot quietly introduce one. A
+stated policy still wins: this is a default, not a fixture.
+
+Conventions live in `sc-app/src/react.rs` as pure functions of the project name with no I/O, so
+§2.3's scaffold reads its paths from there instead of restating them. Tested at unit level (spec
+shape, derivations, name rule, CSP) and over HTTP (React listed first with its store pre-resolved,
+the default policy applied and overridable, a traversal name refused on save). One caveat stated
+plainly: the "serves its bundle and resolves deep links" test runs against the derived
+directories but with `npm` stubbed by a shell script — a real `npm run build` arrives with §2.3's
+scaffold → build → serve integration test, which is the first point there is a project to run it
+on.
+
+## The opinions of the `react` framework, decided (TODO §2.1)
+
+Phase 2 opens with a decision item, not code: the `react` framework's whole value is that it stops
+asking the admin questions, so the answers have to be settled before the scaffold hard-codes them.
+No code changed; the record lives in TODO §2.1 and in a new "Two code frameworks, and why"
+subsection of design §13.3, which also stops §13.3 describing "code frameworks" as a single
+category now that there will be two entries with very different purposes.
+
+The choices: **Vite + React + TypeScript, no SSR**; **routes as data in one file** via
+`react-router` rather than a file-system convention; **the generated client plus generated typed
+hooks** (`useRows`/`useRow`/`useCreate`/`useUpdate`/`useDelete`) with no data-fetching dependency;
+**authenticated by default**, with a per-route `public` opt-out; **plain CSS**, replaceable, no
+framework and no CSS-in-JS. Settings collapse to two — the store and the app's name — with source,
+output, build command and client path derived from the name.
+
+**The irreversible one — where the shared runtime lives — went to generated-into-the-project
+rather than an npm package**, and not for the reason the question was originally framed around.
+Upgradability versus hackability turned out to be the wrong axis: the runtime is *app-shaped*.
+Hooks worth having are typed per table, so they are generated from this app's `EndpointSet` just
+as `client.ts` already is, and a registry package cannot contain them — it could only ship generic
+untyped hooks, which discards the reason to have a hooks layer at all. That also dissolves the
+staleness objection to vendoring: `src/saltcorn/**` is not a snapshot but generated output,
+refreshed every build, so a server upgrade cannot leave a client runtime pinned behind it. The
+cost is stated rather than hidden — it is overwritten, therefore not editable in place; everything
+outside it belongs to the admin and is never touched.
+
+Two smaller notes worth keeping. **No SSR is a principled exclusion, not an omission**: §13.3
+serves bundled assets, and server rendering would put a Node process in every application's
+request path — a different serving model rather than a different setting. And **two of the
+decisions were made by the CSP**: Vite's output has no inline script, and CSS-in-JS would have
+forced `style-src 'unsafe-inline'` into the default policy of every scaffolded app, which is a
+poor thing to hard-code on an admin's behalf.
+
+The through-line, which is the test for the next opinion: each choice is either derived from the
+app's own schema, or a dependency not taken. Generated things regenerate and need no version
+negotiation with the server; things not depended on cannot drift out of step with it. An opinion
+that can only be honoured by a package the admin must keep in step with the server is the wrong
+opinion.
+
 ## Error messages reach admins whole (Phase 1 loose ends)
 
 Closing out the three items Phase 1 left open — one fix, two decisions.

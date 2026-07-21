@@ -17,7 +17,10 @@ use sc_catalog::Catalog;
 use sc_error::{Error, Repr, Result};
 use sc_types::{BasicType, FormField, validate_attrs};
 
-use crate::application::FrameworkRef;
+use crate::application::{CspPolicy, FrameworkRef};
+use crate::react::{
+    CFG_PROJECT, REACT_FRAMEWORK, check_project_name, react_config_spec, react_csp,
+};
 
 pub use sc_api::Method;
 
@@ -97,6 +100,30 @@ pub struct BuildSpec {
     /// The output directory the bundle lands in, relative to the file store; its
     /// contents are what [`CodeFramework`] serves.
     pub output_dir: String,
+    /// A dependency-install step to run before the build, when its marker is
+    /// absent from the source directory. `None` for a framework that does not
+    /// manage dependencies.
+    pub install: Option<InstallSpec>,
+}
+
+/// How to install an app's dependencies before building it (TODO §2.3).
+///
+/// A property of the framework, not of the build: the `react` framework knows its
+/// projects have a `package.json` and are installed with `npm`, while a `code`
+/// app's dependencies are the admin's business and their build command is where
+/// they say so. Carried on the [`BuildSpec`] rather than assumed by the build
+/// step, so `run_build` stays a framework-agnostic "run this over that tree".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallSpec {
+    /// The installer executable (e.g. `npm`).
+    pub command: String,
+    /// Arguments passed to it (e.g. `["install"]`).
+    pub args: Vec<String>,
+    /// A directory, relative to the source directory, whose presence means the
+    /// install has already been done (e.g. `node_modules`). Checked rather than
+    /// remembered, because the truth is on disk: a store restored from a backup,
+    /// or a project whose `node_modules` was deleted, must install again.
+    pub marker: String,
 }
 
 /// The registered name of the MVP's one framework: a code framework serving a
@@ -184,26 +211,52 @@ pub fn code_config_spec() -> Vec<FormField> {
 /// The names of every registered framework — what the admin UI lists so an admin
 /// can pick one and be shown its [`config_spec`](framework_config_spec).
 ///
-/// The MVP registers exactly one, [`CODE_FRAMEWORK`]; this is the single place
-/// that enumerates them, so a new framework is listed by adding it here (and to
-/// [`framework_config_spec`]).
+/// **Order is meaningful**: [`REACT_FRAMEWORK`] comes first because it is the
+/// path an admin should take, and [`CODE_FRAMEWORK`] second because it is the
+/// generic escape hatch for a project React's conventions do not fit. Two names
+/// in a dropdown are not two equal choices, and the list is where that starts
+/// (the admin UI's presentation of it is §2.4).
+///
+/// This is the single place that enumerates them, so a new framework is listed by
+/// adding it here (and to [`framework_config_spec`]).
 pub fn registered_frameworks() -> Vec<String> {
-    vec![CODE_FRAMEWORK.to_owned()]
+    vec![REACT_FRAMEWORK.to_owned(), CODE_FRAMEWORK.to_owned()]
 }
 
 /// The settings the framework registered under `name` declares — the registry
 /// lookup, resolving a [`FrameworkRef`](crate::FrameworkRef)'s name to a spec
 /// without needing an instance.
 ///
-/// The MVP registers one name, [`CODE_FRAMEWORK`]; an unknown name is a
-/// configuration error rather than an app with no settings, mirroring how
-/// [`app_providers`](crate::app_providers) treats an unknown API provider.
+/// An unknown name is a configuration error rather than an app with no settings,
+/// mirroring how [`app_providers`](crate::app_providers) treats an unknown API
+/// provider.
 pub fn framework_config_spec(name: &str) -> Result<Vec<FormField>> {
     match name {
         CODE_FRAMEWORK => Ok(code_config_spec()),
+        REACT_FRAMEWORK => Ok(react_config_spec()),
         other => Err(Error::config(format!(
-            "unknown framework `{other}`; the MVP ships only `{CODE_FRAMEWORK}`"
+            "unknown framework `{other}`; this server registers {}",
+            registered_frameworks()
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
+    }
+}
+
+/// The Content-Security-Policy an application gets when the admin does not state
+/// one, chosen by its framework.
+///
+/// The framework knows what its own output needs — `react` scaffolds a Vite
+/// bundle and can therefore name a policy tighter and more specific than
+/// "strict" ([`react_csp`]), while a `code` app is arbitrary and gets the strict
+/// baseline. A framework that does not answer gets the baseline too, which is the
+/// safe direction to fail in.
+pub fn framework_default_csp(name: &str) -> CspPolicy {
+    match name {
+        REACT_FRAMEWORK => react_csp(),
+        _ => CspPolicy::strict(),
     }
 }
 
@@ -244,8 +297,32 @@ pub fn validate_framework_config_structure(fw: &FrameworkRef) -> Result<()> {
     validate_against(fw, &spec)
 }
 
-/// Validate `fw`'s config against an already-prepared spec.
+/// Validate `fw`'s config against an already-prepared spec, then apply any check
+/// the spec vocabulary cannot express ([`framework_specific_checks`]).
 fn validate_against(fw: &FrameworkRef, spec: &[FormField]) -> Result<()> {
+    check_attrs(fw, spec)?;
+    framework_specific_checks(fw)
+}
+
+/// Checks a [`FormField`] spec cannot state.
+///
+/// §6.2's vocabulary covers presence, type and membership of a list; `react`'s
+/// project name needs "is a usable directory name", which is a pattern. Rather
+/// than growing the spec vocabulary for one setting — every guest-language
+/// framework would then have to be understood by it — the framework checks its
+/// own. It runs on both validation paths, so an unusable name is refused **on
+/// save**, not discovered when a build interpolates it into a path.
+fn framework_specific_checks(fw: &FrameworkRef) -> Result<()> {
+    if fw.name == REACT_FRAMEWORK
+        && let Some(project) = fw.config.get(CFG_PROJECT).and_then(|v| v.as_str())
+    {
+        check_project_name(project)?;
+    }
+    Ok(())
+}
+
+/// Validate `fw`'s config against `spec`, naming the framework in any error.
+fn check_attrs(fw: &FrameworkRef, spec: &[FormField]) -> Result<()> {
     validate_attrs(spec, &fw.config).map_err(|e| {
         // Name the framework as well as the setting. Rebuilt rather than
         // wrapped: `Error`'s `Invalid` renders its own "invalid:" prefix, so
@@ -471,7 +548,15 @@ impl Framework for CodeFramework {
     }
 
     fn config_spec(&self) -> Vec<FormField> {
-        code_config_spec()
+        // Looked up by name rather than hard-coded to `code_config_spec`, because
+        // one `CodeFramework` serves both registered code frameworks: a built
+        // React app is a static bundle with an SPA fallback, so `react` is
+        // mounted as an instance of this type under its own name. Reporting
+        // `code`'s five settings for it would make the instance disagree with the
+        // registry about what the admin was asked. An unregistered name falls
+        // back rather than failing: `config_spec` cannot report an error, and a
+        // framework serving a bundle is at worst a `code` one.
+        framework_config_spec(&self.name).unwrap_or_else(|_| code_config_spec())
     }
 
     async fn handle(&self, req: AppRequest, _cat: &Catalog) -> Result<AppResponse> {
@@ -524,6 +609,68 @@ mod tests {
             framework_config_spec(CODE_FRAMEWORK).unwrap(),
             code_config_spec()
         );
+
+        // And a `react` app — mounted as a `CodeFramework` because a built React
+        // app is just a bundle — reports `react`'s two settings, not `code`'s
+        // five. The instance and the registry agree for both names.
+        let react = CodeFramework::new(REACT_FRAMEWORK, AssetBundle::new());
+        assert_eq!(react.config_spec(), react_config_spec());
+        assert_ne!(react.config_spec(), code_config_spec());
+    }
+
+    #[test]
+    fn both_code_frameworks_are_registered_react_first() {
+        // Order is the registry's one editorial statement: React is the path an
+        // admin should take, `code` the escape hatch (§2.4 renders that).
+        assert_eq!(registered_frameworks(), [REACT_FRAMEWORK, CODE_FRAMEWORK]);
+        // Every registered name resolves to a spec — the list and the lookup
+        // cannot drift apart without this failing.
+        for name in registered_frameworks() {
+            let spec = framework_config_spec(&name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!spec.is_empty(), "{name}");
+            assert!(spec.iter().all(|f| !f.base.label.is_empty()), "{name}");
+        }
+        // The two really are different forms; that is the point of having both.
+        assert!(react_config_spec().len() < code_config_spec().len());
+    }
+
+    #[test]
+    fn an_unusable_project_name_is_refused_at_validation_not_at_build() {
+        // §1.6's principle applied to the one setting a spec cannot describe: the
+        // admin hears about it while looking at the form. Both validation paths
+        // apply it, so saving and building agree.
+        let fw = FrameworkRef::new(REACT_FRAMEWORK)
+            .with(CFG_STORE, "apps")
+            .with(CFG_PROJECT, "../../etc");
+        let err = validate_framework_config_structure(&fw)
+            .expect_err("a traversal is not a directory name")
+            .to_string();
+        assert!(err.contains(CFG_PROJECT), "{err}");
+        assert!(err.contains("directory name"), "{err}");
+
+        // A plain name passes, and `code` is unaffected by react's rule.
+        let ok = fw.with(CFG_PROJECT, "todo");
+        assert!(validate_framework_config_structure(&ok).is_ok());
+        let code = FrameworkRef::new(CODE_FRAMEWORK)
+            .with(CFG_STORE, "apps")
+            .with(CFG_OUTPUT, "../shared/dist")
+            .with(CFG_COMMAND, "npm run build");
+        assert!(validate_framework_config_structure(&code).is_ok());
+    }
+
+    #[test]
+    fn the_default_csp_comes_from_the_framework() {
+        // A `react` app's default is fitted to what Vite emits...
+        assert_eq!(framework_default_csp(REACT_FRAMEWORK), react_csp());
+        assert!(
+            framework_default_csp(REACT_FRAMEWORK)
+                .header_value()
+                .contains("connect-src 'self'")
+        );
+        // ...while an arbitrary bundle gets the strict baseline, as does anything
+        // unrecognised — failing towards the tighter policy.
+        assert_eq!(framework_default_csp(CODE_FRAMEWORK), CspPolicy::strict());
+        assert_eq!(framework_default_csp("saltcorn-v1"), CspPolicy::strict());
     }
 
     #[test]
@@ -674,6 +821,7 @@ mod tests {
             args: vec!["run".to_owned(), "build".to_owned()],
             source_dir: "web".to_owned(),
             output_dir: "web/dist".to_owned(),
+            install: None,
         };
         let fw = CodeFramework::new("code", sample_bundle()).with_build(spec.clone());
         assert_eq!(fw.name(), "code");

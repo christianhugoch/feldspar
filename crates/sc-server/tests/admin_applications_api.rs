@@ -357,6 +357,131 @@ async fn applications_are_managed_over_http_and_serve_without_a_restart() -> sc_
     Ok(())
 }
 
+/// The `react` framework as the admin API presents it (TODO §2.2): offered
+/// first, described by two settings, and choosing its own default CSP.
+///
+/// Driven over HTTP because that is the only place the claims meet: the admin SPA
+/// renders whatever `/api/frameworks` says, and the app row it posts back is
+/// where a default policy is or is not applied.
+#[tokio::test]
+async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> sc_error::Result<()>
+{
+    let tmp = TempDir::new("react");
+    let (router, catalog, _db) = setup(&tmp).await?;
+    create_user(&catalog, "admin@example.com", "correct-horse", ROLE_ADMIN).await?;
+    let mut admin = Client::new(router, BASE_DOMAIN);
+    admin.login("admin@example.com", "correct-horse").await;
+
+    // --- the pick-list: React first, `code` as the escape hatch --------------
+    let (status, frameworks) = admin.send("GET", "/api/frameworks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = frameworks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["react", "code"]);
+
+    // Two settings, both required — the short form §2.4 renders.
+    let react = &frameworks[0];
+    let spec = react["config_spec"].as_array().unwrap();
+    let setting_names: Vec<&Value> = spec.iter().map(|f| &f["name"]).collect();
+    assert_eq!(setting_names, [&json!("store"), &json!("project")]);
+    assert!(spec.iter().all(|f| f["required"] == json!(true)));
+    // The store arrives already resolved to the stores that exist, so the UI
+    // renders a select with no query evaluator of its own (§1.6).
+    assert_eq!(spec[0]["options"], json!(["apps"]));
+
+    // --- a react app: two settings, and no CSP stated ------------------------
+    let body = json!({
+        "name": "Todo",
+        "subdomain": "todo",
+        "framework": {
+            "name": "react",
+            "config": { "store": "apps", "project": "todo" }
+        },
+        "tables": ["posts"],
+        "file_stores": ["apps"],
+        "apis": [{ "provider": "rest", "mount": "/api" }],
+    });
+    let (status, created) = admin
+        .send("POST", "/api/applications", Some(body.clone()))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    // The framework's own policy, not the bare strict baseline: an admin who no
+    // longer picks the bundler is not asked to work out the policy it needs.
+    let csp = &created["csp"];
+    assert_eq!(csp["default-src"], json!(["'self'"]));
+    assert_eq!(csp["img-src"], json!(["'self'", "data:"]));
+    assert_eq!(csp["connect-src"], json!(["'self'"]));
+    assert_eq!(csp["frame-ancestors"], json!(["'none'"]));
+    // Nothing unsafe: the tooling decision (§2.1) is what earns this.
+    assert!(!created["csp"].to_string().contains("unsafe-"));
+
+    // A stated policy still wins — this is a default, not a fixture.
+    let mut strict_only = body.clone();
+    strict_only["subdomain"] = json!("todo2");
+    strict_only["csp"] = json!({ "default-src": ["'self'"] });
+    let (status, plain) = admin
+        .send("POST", "/api/applications", Some(strict_only))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(plain["csp"], json!({ "default-src": ["'self'"] }));
+
+    // --- creating it scaffolded the project, with no shell step --------------
+    // This is §2.3's whole point: the admin filled in two fields in a browser and
+    // a complete Vite project now exists on the server.
+    assert!(
+        created["scaffolded"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("scaffolded"),
+        "{created}"
+    );
+    assert!(created["scaffold_error"].is_null(), "{created}");
+    let project = tmp.path().join("todo");
+    assert!(project.join("package.json").is_file());
+    assert!(project.join("src/saltcorn/hooks.ts").is_file());
+    // Generated against the app's declared table.
+    assert!(project.join("src/pages/Posts.tsx").is_file());
+
+    // A second app pointed at the *same* project directory is created (the row is
+    // valid and saved) but reports why nothing was generated — scaffolding never
+    // overwrites, and losing the app the admin just configured over it would be
+    // the wrong trade.
+    let mut collide = body.clone();
+    collide["subdomain"] = json!("todo-again");
+    let (status, second) = admin.send("POST", "/api/applications", Some(collide)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(second["scaffolded"].is_null(), "{second}");
+    let scaffold_error = second["scaffold_error"].as_str().unwrap_or_default();
+    assert!(scaffold_error.contains("not empty"), "{second}");
+
+    // --- the settings a spec cannot describe are still checked on save -------
+    let mut traversal = body.clone();
+    traversal["subdomain"] = json!("todo3");
+    traversal["framework"]["config"]["project"] = json!("../../etc");
+    let (status, err) = admin
+        .send("POST", "/api/applications", Some(traversal))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Named as the setting the admin typed, not as a build path that escaped the
+    // store several layers later.
+    let message = err["error"].as_str().unwrap_or_default();
+    assert!(message.contains("project"), "{err}");
+    assert!(message.contains("directory name"), "{err}");
+
+    // And a `code` setting on a react app is refused rather than ignored.
+    let mut extra = body;
+    extra["subdomain"] = json!("todo4");
+    extra["framework"]["config"]["command"] = json!("make");
+    let (status, err) = admin.send("POST", "/api/applications", Some(extra)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn non_admins_are_rejected_from_every_application_endpoint() -> sc_error::Result<()> {
     let tmp = TempDir::new("authz");

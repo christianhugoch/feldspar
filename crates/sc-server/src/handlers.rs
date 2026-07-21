@@ -25,8 +25,9 @@ use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
 use sc_app::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir,
-    applications_using_file_store, delete_application, framework_config_spec, list_applications,
-    load_application, registered_frameworks, save_application,
+    applications_using_file_store, delete_application, framework_config_spec,
+    framework_default_csp, list_applications, load_application, registered_frameworks,
+    require_scaffoldable, save_application, scaffold_app,
 };
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, USERS_TABLE, User, any_user_exists, authenticate_admin,
@@ -597,7 +598,27 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // A create mints a fresh id; the body carries everything else.
                 let app = application_from_body(AppId::new(), &ctx.body)?;
                 save_application(&catalog, &app).await?;
-                Ok(HandlerResponse::ok(application_json(&app)).with_status(201))
+                // A `react` app's project is the server's to create (§2.3): this
+                // is the step that removes the SSH requirement, so it happens on
+                // the first save rather than waiting for an admin to ask. It is
+                // deliberately *not* fatal to the create — the row is already
+                // saved and valid, and an unwritable store or an occupied
+                // directory is a thing the admin fixes and re-tries, not a reason
+                // to lose the application they just configured.
+                let mut body = application_json(&app);
+                let scaffold = scaffold_new_app(&catalog, &app).await;
+                if let Some(obj) = body.as_object_mut() {
+                    match &scaffold {
+                        Ok(Some(report)) => {
+                            obj.insert("scaffolded".to_owned(), json!(report.summary()));
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            obj.insert("scaffold_error".to_owned(), json!(e.causes()));
+                        }
+                    }
+                }
+                Ok(HandlerResponse::ok(body).with_status(201))
             }
         }
     });
@@ -789,6 +810,24 @@ fn csp_json(csp: &CspPolicy) -> Json {
     )
 }
 
+/// Scaffold a newly created application's project, when it is one that has a
+/// project to scaffold.
+///
+/// `Ok(None)` means "nothing to do" — the app uses a framework that brings its
+/// own project (`code`), which is not a failure and should not be reported as
+/// one. An `Err` is a real scaffold failure (unreachable store, occupied
+/// directory) and is surfaced *alongside* the created application rather than
+/// instead of it.
+async fn scaffold_new_app(
+    catalog: &Catalog,
+    app: &Application,
+) -> Result<Option<sc_app::ScaffoldReport>> {
+    if require_scaffoldable(app).is_err() {
+        return Ok(None);
+    }
+    scaffold_app(catalog, app).await.map(Some)
+}
+
 /// Parse an [`Application`] from a create/update body (matching
 /// `application_input_schema`), carrying `id` — the body never sets the identity.
 ///
@@ -842,7 +881,7 @@ fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
             ))
         })
         .collect::<Result<_>>()?;
-    let csp = parse_csp(obj.get("csp"))?;
+    let csp = parse_csp(obj.get("csp"), &framework.name)?;
     let attributes = match obj.get("attributes") {
         None | Some(Json::Null) => Attrs::new(),
         Some(Json::Object(o)) => o.clone(),
@@ -882,10 +921,17 @@ fn parse_framework(value: &Json) -> Result<FrameworkRef> {
     Ok(FrameworkRef { name, config })
 }
 
-/// Parse a `csp` directive→sources object; absent means [`CspPolicy::strict`].
-fn parse_csp(value: Option<&Json>) -> Result<CspPolicy> {
+/// Parse a `csp` directive→sources object; absent means the framework's default
+/// policy ([`framework_default_csp`]).
+///
+/// The default is the framework's rather than a fixed `strict` because a
+/// framework that also chooses the build tooling knows what that tooling's output
+/// needs — a scaffolded React app gets a policy fitted to a Vite bundle, and the
+/// admin who is no longer picking the bundler is not asked to derive the policy
+/// for it either. A stated `csp` always wins: this is a default, not a fixture.
+fn parse_csp(value: Option<&Json>, framework: &str) -> Result<CspPolicy> {
     match value {
-        None | Some(Json::Null) => Ok(CspPolicy::strict()),
+        None | Some(Json::Null) => Ok(framework_default_csp(framework)),
         Some(Json::Object(o)) => {
             let mut directives = BTreeMap::new();
             for (name, sources) in o {
@@ -1150,7 +1196,16 @@ fn parse_app_id(raw: &str) -> Result<AppId> {
 
 /// The bundler's combined output, for the build log: stdout then stderr.
 fn build_log(report: &sc_app::BuildReport) -> String {
-    let mut log = report.stdout.clone();
+    let mut log = String::new();
+    // The first build of a scaffolded app is mostly the install, and an admin
+    // watching a build that takes a minute needs to see why (§2.3).
+    if let Some(install) = &report.install_log {
+        log.push_str(install);
+        if !log.is_empty() && !log.ends_with('\n') {
+            log.push('\n');
+        }
+    }
+    log.push_str(&report.stdout);
     if !report.stderr.is_empty() {
         if !log.is_empty() && !log.ends_with('\n') {
             log.push('\n');

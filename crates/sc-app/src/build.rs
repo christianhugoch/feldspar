@@ -31,6 +31,10 @@ use crate::framework::{
     AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT, CFG_SOURCE, CFG_STORE,
     CODE_FRAMEWORK, CodeFramework, code_config_spec, validate_framework_config_structure,
 };
+use crate::react::{
+    CFG_PROJECT, REACT_FRAMEWORK, react_build_spec, react_client_path, react_config_spec,
+};
+use crate::scaffold::emit_react_runtime;
 
 /// How much of a failed build's output to quote in the error. A bundler can emit
 /// a great deal on failure; the tail holds the actual error, and the whole of it
@@ -91,13 +95,26 @@ impl AppSource {
 /// save, and a build failing over it would report a configuration problem when
 /// the real news is that the store cannot be resolved, which the build says
 /// anyway and says better.
+///
+/// Both registered frameworks resolve here and produce the same [`AppSource`],
+/// which is what keeps the build and serve paths shared rather than forked: for
+/// `code` the store, directories and command are *stated*; for `react` they are
+/// *derived* from the project name (see [`crate::react`]). Nothing downstream can
+/// tell which framework it is building.
 pub fn app_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
-    if fw.name != CODE_FRAMEWORK {
-        return Err(Error::config(format!(
-            "framework `{}` has no build step; only `{CODE_FRAMEWORK}` builds from a file store",
-            fw.name
-        )));
+    match fw.name.as_str() {
+        CODE_FRAMEWORK => code_source_from_config(fw),
+        REACT_FRAMEWORK => react_source_from_config(fw),
+        other => Err(Error::config(format!(
+            "framework `{other}` has no build step; only `{CODE_FRAMEWORK}` and \
+             `{REACT_FRAMEWORK}` build from a file store"
+        ))),
     }
+}
+
+/// The `code` framework's resolution: every path and the command come from the
+/// admin's five settings.
+fn code_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
     validate_framework_config_structure(fw)?;
 
     let spec = code_config_spec();
@@ -116,12 +133,36 @@ pub fn app_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
             args,
             source_dir,
             output_dir,
+            // A `code` app's dependencies are the admin's business; their build
+            // command is where they say how to get them.
+            install: None,
         },
     );
     Ok(match client {
         Some(path) => source.with_client(path),
         None => source,
     })
+}
+
+/// The `react` framework's resolution: two settings in, the same [`AppSource`]
+/// out, with the source directory, output directory, build command and client
+/// path all derived from the project name.
+///
+/// The project name is not re-checked here: `validate_framework_config_structure`
+/// applies the framework's own naming rule, so a name like `../..` is refused as
+/// the setting the admin typed rather than, several layers down, as a build path
+/// `resolve_under` caught escaping the store.
+fn react_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
+    validate_framework_config_structure(fw)?;
+
+    let spec = react_config_spec();
+    let store = required_setting(&spec, &fw.config, CFG_STORE)?;
+    let project = required_setting(&spec, &fw.config, CFG_PROJECT)?;
+
+    Ok(
+        AppSource::new(FileStoreId(store), react_build_spec(&project))
+            .with_client(react_client_path(&project)),
+    )
 }
 
 /// A setting's resolved value (stored, else the spec's default) as a string.
@@ -133,7 +174,7 @@ fn setting(spec: &[FormField], config: &Attrs, name: &str) -> Result<Option<Stri
     let field = spec
         .iter()
         .find(|f| f.name() == name)
-        .ok_or_else(|| Error::config(format!("`{CODE_FRAMEWORK}` declares no `{name}` setting")))?;
+        .ok_or_else(|| Error::config(format!("this framework declares no `{name}` setting")))?;
     match field.resolve(config) {
         None | Some(Json::Null) => Ok(None),
         Some(Json::String(s)) => Ok(Some(s.clone())),
@@ -189,6 +230,13 @@ pub struct BuildReport {
     /// The path the generated TypeScript client was emitted to, when the build
     /// went through [`build_application`] and the app declares one.
     pub client_path: Option<String>,
+    /// Whether dependencies were installed as part of this build — true only on
+    /// the first build of a project (or after its `node_modules` went away).
+    pub installed: bool,
+    /// What the installer wrote, when it ran. Kept separate from the bundler's
+    /// output because it answers a different question, and because the first
+    /// build of a scaffolded app is mostly this.
+    pub install_log: Option<String>,
 }
 
 /// Run an application's build step, resolving its source store through the
@@ -226,6 +274,15 @@ pub async fn build_application(
     source: &AppSource,
 ) -> Result<BuildReport> {
     let client_path = emit_client(cat, source, &app_endpoints(app, cat)?).await?;
+    // A `react` app's generated runtime is more than the client: its hooks are
+    // typed from this app's tables, so they are regenerated on the same schedule
+    // and for the same reason (§2.1/§2.3). Adding a table in the admin UI makes
+    // `useNewTable()` exist at the next build, with nobody regenerating anything
+    // by hand. `emit_react_runtime` rewrites the client too, which is harmless
+    // and keeps "the runtime is one directory" true.
+    if app.framework.name == REACT_FRAMEWORK {
+        emit_react_runtime(cat, app, source).await?;
+    }
     let mut report = build_app(cat, source).await?;
     report.client_path = client_path;
     Ok(report)
@@ -280,6 +337,8 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
         )));
     }
 
+    let install_log = run_install(spec, &source_dir).await?;
+
     let output = Command::new(&spec.command)
         .args(&spec.args)
         .current_dir(&source_dir)
@@ -333,7 +392,54 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
         stdout,
         stderr,
         client_path: None,
+        installed: install_log.is_some(),
+        install_log,
     })
+}
+
+/// Install the app's dependencies when the [`BuildSpec`]'s install step says to
+/// and its marker directory is absent (TODO §2.3).
+///
+/// Returns the installer's output when it ran, `None` when there was nothing to
+/// do. The MVP tutorial made the admin run this over SSH; an admin with no shell
+/// could not, which is the whole reason it is here.
+///
+/// A failure is an **Application** error carrying the installer's own output
+/// (§16), exactly as a failed build is: "npm install failed" tells an admin
+/// nothing, while the registry error, the missing peer dependency or the ENOSPC
+/// underneath it tells them what to do.
+async fn run_install(spec: &BuildSpec, source_dir: &Path) -> Result<Option<String>> {
+    let Some(install) = &spec.install else {
+        return Ok(None);
+    };
+    if source_dir.join(&install.marker).exists() {
+        return Ok(None);
+    }
+
+    let line = format!("{} {}", install.command, install.args.join(" "));
+    let output = Command::new(&install.command)
+        .args(&install.args)
+        .current_dir(source_dir)
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "launching install command `{line}` in {}",
+                source_dir.display()
+            )
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() {
+        return Err(Error::config(format!(
+            "install command `{line}` failed in {} with {}\n{}",
+            source_dir.display(),
+            output.status,
+            tail(&stderr, &stdout)
+        )));
+    }
+    Ok(Some(format!("{stdout}{stderr}")))
 }
 
 /// Join a store-relative path onto `root`, rejecting anything that escapes it.
@@ -390,7 +496,7 @@ fn tail<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framework::AppRequest;
+    use crate::framework::{AppRequest, Framework, InstallSpec};
 
     /// A scratch directory removed when the guard drops, so a failing assertion
     /// does not leave a tree behind.
@@ -426,7 +532,12 @@ mod tests {
     /// view — a process that emits files — and depending on a Node toolchain
     /// here would make the Rust test suite need one.
     fn write_fake_bundler(source: &Path, script: &str) {
-        let path = source.join("build.sh");
+        write_script(source, "build.sh", script);
+    }
+
+    /// Write an executable script into `dir`.
+    fn write_script(dir: &Path, name: &str, script: &str) {
+        let path = dir.join(name);
         std::fs::write(&path, script).unwrap();
         #[cfg(unix)]
         {
@@ -441,6 +552,7 @@ mod tests {
             args: args.iter().map(|a| (*a).to_owned()).collect(),
             source_dir: "web".to_owned(),
             output_dir: "web/dist".to_owned(),
+            install: None,
         }
     }
 
@@ -541,6 +653,148 @@ mod tests {
             .expect_err("a build-less framework has no source to resolve")
             .to_string();
         assert!(err.contains("saltcorn-v1"), "{err}");
+        // Both frameworks that do build are named, so the error says what would
+        // have worked.
+        assert!(
+            err.contains(CODE_FRAMEWORK) && err.contains(REACT_FRAMEWORK),
+            "{err}"
+        );
+    }
+
+    /// A `react` config: the whole form is two fields.
+    fn react_config() -> FrameworkRef {
+        FrameworkRef::new(REACT_FRAMEWORK)
+            .with(CFG_STORE, "apps")
+            .with(CFG_PROJECT, "todo")
+    }
+
+    #[test]
+    fn a_react_config_derives_what_code_has_to_be_told() {
+        let source = app_source_from_config(&react_config()).expect("valid config");
+
+        assert_eq!(source.store, FileStoreId("apps".to_owned()));
+        // Everything below came from the project name `todo` and nothing else.
+        assert_eq!(source.build.command, "npm");
+        assert_eq!(source.build.args, ["run", "build"]);
+        assert_eq!(source.build.source_dir, "todo");
+        assert_eq!(source.build.output_dir, "todo/dist");
+        // The client is not opt-in as it is for `code`: the scaffold imports it,
+        // so an app that did not emit one would not compile.
+        assert_eq!(
+            source.client_path.as_deref(),
+            Some("todo/src/saltcorn/client.ts")
+        );
+
+        // Dependencies install themselves on first build (§2.3): the framework
+        // knows its projects are npm projects, so an admin with no shell never
+        // has to run `npm install`.
+        let install = source.build.install.clone().expect("react installs");
+        assert_eq!(install.command, "npm");
+        assert_eq!(install.args, ["install"]);
+        assert_eq!(install.marker, "node_modules");
+
+        // The two frameworks meet in the same type, which is why `build_app`,
+        // `build_application` and the mount path needed no change at all. The
+        // install step is the one thing `code` does not get: an arbitrary app's
+        // dependencies are the admin's business, and their build command is
+        // where they say how to get them.
+        let equivalent = code_config()
+            .with(CFG_SOURCE, "todo")
+            .with(CFG_OUTPUT, "todo/dist")
+            .with(CFG_COMMAND, "npm run build")
+            .with(CFG_CLIENT, "todo/src/saltcorn/client.ts");
+        let code_build = app_source_from_config(&equivalent).unwrap().build;
+        assert_eq!(code_build.install, None);
+        assert_eq!(
+            code_build,
+            BuildSpec {
+                install: None,
+                ..source.build.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn a_react_config_takes_no_other_settings() {
+        // Stating a `code` setting on a `react` app is rejected rather than
+        // ignored: it would otherwise look configured and behave as if it were
+        // not, which is the failure mode conventions exist to remove.
+        for stated in [CFG_SOURCE, CFG_OUTPUT, CFG_COMMAND, CFG_CLIENT] {
+            let err = app_source_from_config(&react_config().with(stated, "web"))
+                .expect_err("react declares no such setting")
+                .to_string();
+            assert!(err.contains(stated), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_react_config_missing_a_setting_names_it_and_the_framework() {
+        for missing in [CFG_STORE, CFG_PROJECT] {
+            let mut config = react_config();
+            config.config.remove(missing);
+            let err = app_source_from_config(&config)
+                .expect_err("should reject a config missing a required setting")
+                .to_string();
+            assert!(err.contains(missing), "should name `{missing}`: {err}");
+            assert!(err.contains(REACT_FRAMEWORK), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_project_name_that_is_not_a_directory_name_is_refused_by_name() {
+        // The check is here, at the setting, rather than several layers down in
+        // `resolve_under`: a traversal attempt should be reported as the setting
+        // it came from, not as a build path that escaped the store.
+        for bad in ["../../etc", "a/b", "my app", ".hidden", ""] {
+            let err = app_source_from_config(&react_config().with(CFG_PROJECT, bad))
+                .expect_err("should reject an unusable project name")
+                .to_string();
+            assert!(err.contains(CFG_PROJECT), "{bad:?}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_react_apps_conventional_output_is_served_with_spa_deep_links() {
+        // The conventions have to point at the directory the bundler actually
+        // fills, and what lands there has to serve like an SPA. `npm` is stubbed
+        // — a Node toolchain in the Rust test suite would make every build test
+        // depend on one — but the source and output directories under test are
+        // the derived ones, not hand-written paths. §2.3's integration test runs
+        // the real thing, once there is a scaffold to run it on.
+        let tmp = TempDir::new("react");
+        let source = app_source_from_config(&react_config()).unwrap();
+        let project = tmp.path().join("todo");
+        std::fs::create_dir_all(&project).unwrap();
+        write_fake_bundler(
+            &project,
+            "#!/bin/sh\n\
+             set -e\n\
+             mkdir -p dist/assets\n\
+             printf '<!doctype html><div id=root>' > dist/index.html\n\
+             printf 'export {}' > dist/assets/index.js\n",
+        );
+        let stubbed = BuildSpec {
+            command: "sh".to_owned(),
+            args: vec!["build.sh".to_owned()],
+            // The install step is stubbed out along with the bundler: it is
+            // covered on its own below, and a real `npm install` needs a network.
+            install: None,
+            ..source.build.clone()
+        };
+
+        let report = run_build(&stubbed, tmp.path()).await.unwrap();
+        // Built into `<project>/dist`, exactly where the convention said.
+        assert_eq!(report.output_dir, project.join("dist"));
+
+        let fw = CodeFramework::new(REACT_FRAMEWORK, report.bundle).with_build(source.build);
+        assert_eq!(fw.name(), REACT_FRAMEWORK);
+        assert_eq!(fw.serve(&AppRequest::get("/")).status, 200);
+        assert_eq!(fw.serve(&AppRequest::get("/assets/index.js")).status, 200);
+        // A client-routed deep link resolves to the entry point — the reason
+        // `react` reuses this serving path rather than growing its own.
+        let deep = fw.serve(&AppRequest::get("/tasks/42"));
+        assert_eq!(deep.status, 200);
+        assert_eq!(&deep.body[..], b"<!doctype html><div id=root>");
     }
 
     #[test]
@@ -605,6 +859,72 @@ mod tests {
         let deep = fw.serve(&AppRequest::get("/posts/42"));
         assert_eq!(deep.status, 200);
         assert_eq!(&deep.body[..], b"<!doctype html><div id=root>");
+    }
+
+    /// A stand-in installer: creates the marker directory, as `npm install`
+    /// creates `node_modules`. Stubbed for the same reason the bundler is — the
+    /// Rust suite should not need a Node toolchain or a network.
+    fn install_step() -> InstallSpec {
+        InstallSpec {
+            command: "sh".to_owned(),
+            args: vec!["install.sh".to_owned()],
+            marker: "node_modules".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dependencies_are_installed_once_when_the_marker_is_absent() {
+        let tmp = TempDir::new("install");
+        good_source(tmp.path());
+        let web = tmp.path().join("web");
+        write_script(
+            &web,
+            "install.sh",
+            "#!/bin/sh\nmkdir -p node_modules\necho 'added 214 packages'\n",
+        );
+        let mut spec = spec(&["build.sh"]);
+        spec.install = Some(install_step());
+
+        // First build: nothing installed, so the installer runs and its output is
+        // reported separately from the bundler's — on a first build that log is
+        // most of what there is to see.
+        let report = run_build(&spec, tmp.path()).await.unwrap();
+        assert!(report.installed);
+        assert!(
+            report
+                .install_log
+                .as_deref()
+                .unwrap_or_default()
+                .contains("added 214 packages")
+        );
+        assert!(web.join("node_modules").is_dir());
+
+        // Second build: the marker is there, so it does not run again. The check
+        // is the directory on disk rather than a remembered flag, so restoring a
+        // store from a backup installs again instead of building against nothing.
+        let report = run_build(&spec, tmp.path()).await.unwrap();
+        assert!(!report.installed);
+        assert_eq!(report.install_log, None);
+    }
+
+    #[tokio::test]
+    async fn a_failing_install_carries_the_installers_own_output() {
+        let tmp = TempDir::new("installfail");
+        good_source(tmp.path());
+        write_script(
+            &tmp.path().join("web"),
+            "install.sh",
+            "#!/bin/sh\necho 'npm ERR! 404 Not Found - GET registry/nope' >&2\nexit 1\n",
+        );
+        let mut spec = spec(&["build.sh"]);
+        spec.install = Some(install_step());
+
+        let err = run_build(&spec, tmp.path()).await.unwrap_err().to_string();
+        // §16: the useful part of an install failure is what npm said, not that
+        // something failed. And it must not be reported as a *build* failure —
+        // the bundler never ran.
+        assert!(err.contains("npm ERR! 404 Not Found"), "{err}");
+        assert!(err.contains("install command"), "{err}");
     }
 
     #[tokio::test]

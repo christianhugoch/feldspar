@@ -12,6 +12,14 @@
 //! bundler over that source and hands back a [`CodeFramework`] serving the built
 //! bundle.
 //!
+//! Two code frameworks are registered (§13.3). `code` is the generic one — any
+//! bundler, any layout, stated as five settings. [`react`](crate::react) is the
+//! opinionated one: it asks for the file store and a project directory and
+//! *derives* the rest, and (from §2.3) the server scaffolds the project itself.
+//! It is not a second serving implementation — a built React app is a static
+//! bundle with an SPA fallback, so it mounts as a [`CodeFramework`] under its own
+//! name, and [`app_source_from_config`] resolves both to the same [`AppSource`].
+//!
 //! An [`Application`] is pure data; [`app_providers`]/[`app_endpoints`] are the
 //! wiring that resolves it into running API providers and the single endpoint set
 //! they project. [`app_client`] generates the app's typed TypeScript client from
@@ -32,6 +40,8 @@ mod application;
 mod applications;
 mod build;
 mod framework;
+mod react;
+mod scaffold;
 mod store;
 
 pub use api::{app_client, app_endpoints, app_providers, app_tables};
@@ -47,9 +57,17 @@ pub use build::{
 };
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
-    CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, Method, code_config_spec,
-    framework_config_spec, registered_frameworks, validate_framework_config,
-    validate_framework_config_structure,
+    CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, InstallSpec, Method,
+    code_config_spec, framework_config_spec, framework_default_csp, registered_frameworks,
+    validate_framework_config, validate_framework_config_structure,
+};
+pub use react::{
+    CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,
+    REACT_OUTPUT_SUBDIR, REACT_RUNTIME_SUBDIR, check_project_name, react_build_spec,
+    react_client_path, react_config_spec, react_csp, react_runtime_dir, valid_project_name,
+};
+pub use scaffold::{
+    GeneratedFile, ScaffoldReport, emit_react_runtime, require_scaffoldable, scaffold_app,
 };
 pub use store::{
     applications_using_file_store, delete_application, list_applications, load_application,
