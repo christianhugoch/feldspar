@@ -2,6 +2,56 @@
 
 Changes in reverse chronological order.
 
+## An admin can set a table's access rules
+
+The rules have been storable since `_sc_tables` landed and merged since `Catalog::reload` read
+it; this is the phase where an admin can actually set them. `listTables` now carries `label`,
+`description`, `min_role_read`, `min_role_write` and `configured`; `PUT api/tables/{table}`
+sets them; `DELETE api/tables/{table}/settings` forgets them; and the table editor grew a
+settings card above the fields.
+
+The roles are in the *list*, not only the detail screen, because "which of these can the public
+read?" is a question about the whole set and should not take eight screens to answer.
+`configured` is the overlay's presence rather than its content: a table an admin deliberately
+set to admin-only and one nobody has ever opened both report `1`/`1`, and only the first has
+settings to forget. Without that flag the UI could not offer "forget these settings" honestly.
+
+**Two endpoints that were not in the plan, both earning their place.** `deleteTableSettings` is
+what "forget what I configured" means — it returns the table to the closed default, immediately,
+and never touches the table or its rows. `listOrphanTableSettings` is the visible half of an
+earlier decision: settings whose table has been dropped are *kept*, so a restore gets its rules
+back, and a row nobody can see is indistinguishable from a leak. Both are addressed by table
+name and neither requires the table to exist — an orphan has no table to open, so name is the
+only handle there is.
+
+**Roles are a query, not a constant, and not the settings-spec machinery.** The plan said the
+role pick-list should come through `OptionsSource::ServerQuery`. It does not. That machinery
+exists so the admin UI can render a form for settings it knows *nothing* about — a file-store
+backend's, a framework's — and a table's four settings are not that case; routing them through
+a spec resolver would mean building a spec-driven renderer for a static form. `GET api/roles`
+answers instead, with the two ends of the 1–100 scale that mean something on their own (1 =
+Admin, 100 = Public) plus every role the installation's users actually hold. All hundred numbers
+would be a dropdown nobody can read; only the two named ones would make the middle of the scale
+unreachable. The list grows by itself as an admin creates users, with no roles table to keep in
+step, and when roles gain names of their own this endpoint is where that lands with no caller
+changing.
+
+The SPA merges a table's *current* role into the choices even when the server did not list it
+(`ui/admin/src/roles.ts`). A table configured for role 40 after the last role-40 user was
+deleted must still show 40 — a select that silently snapped to the nearest listed role would
+change who can reach the data on the next save, and would do it without saying so.
+
+Four integration tests over the real HTTP surface (`crates/sc-server/tests/table_settings_api.rs`):
+configure → list → edit → forget, with the second save asserted to *edit* rather than duplicate
+(a second row for one table is refused by the storage layer, so an editor that forgot the row id
+would fail on every edit after the first); an off-scale role refused with nothing written and a
+404 leaving no stray row behind; settings outliving a `DROP TABLE`, still listed, still waiting
+when the table returns, and cleanable by name; and the role list growing when a user of role 40
+is created.
+
+Nothing yet *enforces* these rules on an application's data — the REST provider reads
+`table.access` at mount time, and making an access change take effect on a mounted app is §1.4.
+
 ## The overlay reaches the table: stored access rules are the ones the catalog serves
 
 `_sc_tables` had rows and no readers. `Catalog::reload` now applies them: it introspects as

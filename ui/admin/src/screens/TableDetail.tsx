@@ -16,7 +16,11 @@ import Table from "react-bootstrap/Table";
 
 import { api } from "../api";
 import { navigate } from "../App";
-import type { ListFieldsResponse } from "../client";
+import type { ListFieldsResponse, ListTablesResponse } from "../client";
+import { roleOptions, useRoles, type Roles } from "../roles";
+
+/** One table as `listTables` reports it, including its overlay settings. */
+type TableSummary = ListTablesResponse[number];
 
 /** A row as returned by `listRows` — arbitrary JSON keyed by column name. */
 type RowRecord = Record<string, unknown>;
@@ -46,14 +50,23 @@ function parseInput(raw: string): unknown {
 export function TableDetail({ table }: { table: string }) {
   const [fields, setFields] = useState<ListFieldsResponse | null>(null);
   const [rows, setRows] = useState<RowRecord[] | null>(null);
+  const [settings, setSettings] = useState<TableSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = async () => {
     setError(null);
     try {
-      const [f, r] = await Promise.all([api.listFields(table), api.listRows(table)]);
+      // The settings come from the tables listing rather than a per-table
+      // endpoint: the list already carries every overlay field, so a second
+      // endpoint would be a second thing to keep in step with it.
+      const [f, r, t] = await Promise.all([
+        api.listFields(table),
+        api.listRows(table),
+        api.listTables(),
+      ]);
       setFields(f);
       setRows(r as RowRecord[]);
+      setSettings(t.find((candidate) => candidate.name === table) ?? null);
     } catch {
       setError("Could not load the table.");
     }
@@ -70,9 +83,11 @@ export function TableDetail({ table }: { table: string }) {
         <Button variant="link" className="ps-0" onClick={() => navigate("/tables")}>
           ← Tables
         </Button>
-        <h1 className="h3 mb-0 ms-2">{table}</h1>
+        <h1 className="h3 mb-0 ms-2">{settings?.label || table}</h1>
       </div>
       {error && <Alert variant="danger">{error}</Alert>}
+
+      <Settings table={table} settings={settings} onChange={load} />
 
       <Row>
         <Col lg={5} className="mb-4">
@@ -83,6 +98,179 @@ export function TableDetail({ table }: { table: string }) {
         </Col>
       </Row>
     </>
+  );
+}
+
+/**
+ * The table's settings: the `_sc_tables` overlay (design §9).
+ *
+ * Everything here is *added* to what the database already says about the table —
+ * nothing on this card restates a column, a type or a key, because those are the
+ * database's to state and the overlay's to leave alone.
+ *
+ * The two roles are the point of the card. Until they can be set, every table is
+ * admin-only and an application cannot serve anyone but its admin.
+ */
+function Settings({
+  table,
+  settings,
+  onChange,
+}: {
+  table: string;
+  settings: TableSummary | null;
+  onChange: () => void;
+}) {
+  const roles = useRoles();
+  const [label, setLabel] = useState("");
+  const [description, setDescription] = useState("");
+  const [read, setRead] = useState(1);
+  const [write, setWrite] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Re-seed the form whenever the loaded table changes — including after a save,
+  // so what is shown is what the server stored rather than what was typed.
+  useEffect(() => {
+    setLabel(settings?.label ?? "");
+    setDescription(settings?.description ?? "");
+    setRead(settings?.min_role_read ?? 1);
+    setWrite(settings?.min_role_write ?? 1);
+    setSaved(false);
+  }, [settings]);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateTable(table, {
+        label: label.trim(),
+        description: description.trim(),
+        min_role_read: read,
+        min_role_write: write,
+      });
+      setSaved(true);
+      onChange();
+    } catch {
+      setError("Could not save the settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const forget = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteTableSettings(table);
+      onChange();
+    } catch {
+      setError("Could not forget the settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="mb-4">
+      <Card.Header>Settings</Card.Header>
+      <Card.Body>
+        {error && <Alert variant="danger">{error}</Alert>}
+        {saved && !error && (
+          <Alert variant="success" className="py-2">
+            Saved. The new rules apply immediately — no restart.
+          </Alert>
+        )}
+        <Form onSubmit={save}>
+          <Row>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="tableLabel">
+                <Form.Label>Label</Form.Label>
+                <Form.Control
+                  value={label}
+                  placeholder={table}
+                  onChange={(e) => setLabel(e.target.value)}
+                />
+                <Form.Text muted>Shown instead of the table name. Blank uses the name.</Form.Text>
+              </Form.Group>
+            </Col>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="tableDescription">
+                <Form.Label>Description</Form.Label>
+                <Form.Control
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </Form.Group>
+            </Col>
+          </Row>
+          <Row>
+            <Col md={6}>
+              <RoleSelect
+                id="tableReadRole"
+                label="Who can read rows"
+                value={read}
+                roles={roles}
+                onChange={setRead}
+              />
+            </Col>
+            <Col md={6}>
+              <RoleSelect
+                id="tableWriteRole"
+                label="Who can create, update and delete rows"
+                value={write}
+                roles={roles}
+                onChange={setWrite}
+              />
+            </Col>
+          </Row>
+          <div className="d-flex gap-2 mt-2">
+            <Button type="submit" size="sm" disabled={busy}>
+              Save settings
+            </Button>
+            {settings?.configured && (
+              <Button size="sm" variant="outline-secondary" disabled={busy} onClick={forget}>
+                Forget settings
+              </Button>
+            )}
+          </div>
+          {settings?.configured && (
+            <Form.Text muted className="d-block mt-2">
+              Forgetting returns the table to admin-only. It never touches the table or its rows.
+            </Form.Text>
+          )}
+        </Form>
+      </Card.Body>
+    </Card>
+  );
+}
+
+/** A select over the roles the server offers, with the current value included. */
+function RoleSelect({
+  id,
+  label,
+  value,
+  roles,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: number;
+  roles: Roles;
+  onChange: (role: number) => void;
+}) {
+  return (
+    <Form.Group className="mb-3" controlId={id}>
+      <Form.Label>{label}</Form.Label>
+      <Form.Select value={value} onChange={(e) => onChange(Number(e.target.value))}>
+        {roleOptions(value, roles).map((option) => (
+          <option key={option.role} value={option.role}>
+            {option.label} ({option.role})
+          </option>
+        ))}
+      </Form.Select>
+    </Form.Group>
   );
 }
 

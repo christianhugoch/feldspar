@@ -15,7 +15,7 @@
 //! (composite keys are post-MVP), and `createTable` gives a new table a default
 //! identity `id` key so the row editor has something to address.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -30,12 +30,14 @@ use sc_app::{
     require_scaffoldable, save_application, scaffold_app,
 };
 use sc_auth::{
-    COL_EMAIL, COL_ID, COL_ROLE, USERS_TABLE, User, any_user_exists, authenticate_admin,
-    create_first_user, create_user,
+    COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, USERS_TABLE, User, any_user_exists,
+    authenticate_admin, create_first_user, create_user,
 };
 use sc_catalog::{
-    Attrs, Catalog, DataField, FileStoreId, TableId, connect_file_store_def, delete_file_store,
-    list_file_stores, load_file_store, load_file_store_by_name, resolve_options, save_file_store,
+    AccessRules, Attrs, Catalog, DataField, FileStoreId, Table, TableId, TableMeta,
+    connect_file_store_def, delete_file_store, delete_table_meta, list_file_stores,
+    load_file_store, load_file_store_by_name, load_table_meta_by_name, orphan_table_meta,
+    resolve_options, save_file_store, save_table_meta,
 };
 use sc_error::{Error, Result};
 use sc_files::{
@@ -134,7 +136,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let out: Vec<Json> = tables
                     .iter()
                     .filter(|t| !t.is_system())
-                    .map(|t| json!({ "name": t.name }))
+                    .map(table_json)
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -152,7 +154,97 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .required()
                     .primary_key();
                 let table = catalog.create_table(name, &[id]).await?;
-                Ok(HandlerResponse::ok(json!({ "name": table.name })).with_status(201))
+                Ok(HandlerResponse::ok(table_json(&table)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateTable", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // The table must exist: this configures a table the admin is
+                // looking at. A row for a table that is *not* there is an
+                // orphan, which is cleaned up rather than edited — see
+                // `deleteTableSettings`.
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let obj = require_object(&ctx.body)?;
+
+                // Reuse the existing row when there is one. Creating a second
+                // row for the same table is refused by `save_table_meta`, so
+                // getting this wrong would turn every edit after the first into
+                // an error the admin could do nothing about.
+                let mut meta = TableMeta::new(&table.name);
+                if let Some(id) = table.overlay {
+                    meta = meta.id(id);
+                }
+                meta.label = str_field(obj, "label")?.trim().to_owned();
+                meta.description = str_field(obj, "description")?.trim().to_owned();
+                meta.access = AccessRules {
+                    min_role_read: role_field(obj, "min_role_read")?,
+                    min_role_write: role_field(obj, "min_role_write")?,
+                };
+
+                // Saving reloads the catalog, so the table read back here — and
+                // served to the next request — already carries the new rules.
+                save_table_meta(&catalog, &meta).await?;
+                Ok(HandlerResponse::ok(table_json(
+                    &catalog.require(&table.name)?,
+                )))
+            }
+        }
+    });
+
+    reg.register("deleteTableSettings", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // Addressed by name and looked up in the *rows*, not the
+                // catalog: this is also how an orphan is cleaned up, and an
+                // orphan by definition has no table to look up.
+                let name = ctx.path_param("table")?.to_owned();
+                let deleted = match load_table_meta_by_name(&catalog, &name).await? {
+                    Some(meta) => delete_table_meta(&catalog, meta.id).await?,
+                    None => false,
+                };
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    reg.register("listOrphanTableSettings", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let out: Vec<Json> = orphan_table_meta(&catalog)
+                    .await?
+                    .iter()
+                    .map(|meta| {
+                        json!({
+                            "name": meta.table_name,
+                            "label": meta.label,
+                            "description": meta.description,
+                            "min_role_read": meta.access.min_role_read,
+                            "min_role_write": meta.access.min_role_write,
+                        })
+                    })
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("listRoles", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                Ok(HandlerResponse::ok(Json::Array(
+                    roles_in_use(&catalog).await?,
+                )))
             }
         }
     });
@@ -1312,6 +1404,89 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
 // --- body accessors ------------------------------------------------------------
 
 /// A required string field of an object body.
+/// A table as the admin UI sees it: its name plus the `_sc_tables` overlay
+/// merged onto it (§9).
+///
+/// `configured` is the overlay's *presence*, not its content. A table an admin
+/// deliberately set to admin-only and one nobody has ever opened both report
+/// `1`/`1`; only the first has a row, and only the first can be "forgotten".
+fn table_json(table: &Table) -> Json {
+    json!({
+        "name": table.name,
+        "label": table.label,
+        "description": table.description,
+        "min_role_read": table.access.min_role_read,
+        "min_role_write": table.access.min_role_write,
+        "configured": table.overlay.is_some(),
+    })
+}
+
+/// A required role field of an object body: an integer on the `1..=100` scale.
+///
+/// Rejects rather than clamps, for the reason the storage layer does: the
+/// nearest legal role is still a decision about who reaches the data, and it is
+/// not one the server gets to make on the admin's behalf.
+fn role_field(obj: &Map<String, Json>, key: &str) -> Result<u8> {
+    let raw = int_field(obj, key)?;
+    u8::try_from(raw)
+        .ok()
+        .filter(|r| (ROLE_ADMIN..=ROLE_PUBLIC).contains(r))
+        .ok_or_else(|| {
+            Error::invalid(format!(
+                "field `{key}` must be a role between 1 and 100, got {raw}"
+            ))
+        })
+}
+
+/// The roles an admin may choose from: the two named ends of the scale, plus
+/// every role the installation's users actually hold.
+///
+/// The scale is `1..=100` (§7.1) but only `1` (admin) and `100` (public) mean
+/// anything on their own; the rest mean whatever an installation's users make
+/// them mean. Offering all hundred would be a dropdown of meaningless numbers,
+/// and offering only the two named ones would make the middle of the scale
+/// unreachable through the UI — so the answer is the set that can matter here
+/// today, and it grows by itself as the admin creates users. A role with no
+/// name of its own is labelled by its number, which is all anyone knows about it
+/// until roles become objects.
+async fn roles_in_use(catalog: &Catalog) -> Result<Vec<Json>> {
+    let select = Select::from(Source::table(USERS_TABLE))
+        .columns(vec![Projection::expr(Expr::col(COL_ROLE))]);
+    let rows = catalog
+        .primary()
+        .query(&Statement::from(select))
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut roles: BTreeSet<u8> = BTreeSet::from([ROLE_ADMIN, ROLE_PUBLIC]);
+    for row in &rows {
+        // A role outside the scale is a corrupt users row; it is reported by the
+        // user endpoints rather than here, and offering it as a *choice* would
+        // spread the corruption to whatever the admin then configured with it.
+        if let Some(role) = row
+            .get(COL_ROLE)
+            .and_then(sc_query::Value::as_int)
+            .and_then(|i| u8::try_from(i).ok())
+            .filter(|r| (ROLE_ADMIN..=ROLE_PUBLIC).contains(r))
+        {
+            roles.insert(role);
+        }
+    }
+
+    Ok(roles
+        .into_iter()
+        .map(|role| {
+            let label = match role {
+                ROLE_ADMIN => "Admin".to_owned(),
+                ROLE_PUBLIC => "Public".to_owned(),
+                other => format!("Role {other}"),
+            };
+            json!({ "role": role, "label": label })
+        })
+        .collect())
+}
+
 fn str_field<'a>(obj: &'a Map<String, Json>, key: &str) -> Result<&'a str> {
     obj.get(key)
         .and_then(Json::as_str)

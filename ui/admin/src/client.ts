@@ -6,9 +6,14 @@ export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };
 export type LoginResponse = { id: string; email: string; role: number };
-export type ListTablesResponse = Array<{ name: string }>;
+export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; configured: boolean }>;
 export type CreateTableRequest = { name: string };
-export type CreateTableResponse = { name: string };
+export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; configured: boolean };
+export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number };
+export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; configured: boolean };
+export type DeleteTableSettingsResponse = { deleted: boolean };
+export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number }>;
+export type ListRolesResponse = Array<{ role: number; label: string }>;
 export type ListFieldsResponse = Array<{ name: string; sql_type: string; nullable: boolean }>;
 export type CreateFieldRequest = { name: string; sql_type: string; nullable: boolean };
 export type CreateFieldResponse = { name: string; sql_type: string; nullable: boolean };
@@ -59,6 +64,10 @@ export interface ApiClient {
   logout(): Promise<void>;
   listTables(): Promise<ListTablesResponse>;
   createTable(body: CreateTableRequest): Promise<CreateTableResponse>;
+  updateTable(table: string, body: UpdateTableRequest): Promise<UpdateTableResponse>;
+  deleteTableSettings(table: string): Promise<DeleteTableSettingsResponse>;
+  listOrphanTableSettings(): Promise<ListOrphanTableSettingsResponse>;
+  listRoles(): Promise<ListRolesResponse>;
   listFields(table: string): Promise<ListFieldsResponse>;
   createField(table: string, body: CreateFieldRequest): Promise<CreateFieldResponse>;
   listRows(table: string): Promise<ListRowsResponse>;
@@ -181,6 +190,39 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("createTable", res);
       return (await res.json()) as CreateTableResponse;
+    },
+    async updateTable(table, body) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateTable", res);
+      return (await res.json()) as UpdateTableResponse;
+    },
+    async deleteTableSettings(table) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/settings`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteTableSettings", res);
+      return (await res.json()) as DeleteTableSettingsResponse;
+    },
+    async listOrphanTableSettings() {
+      const res = await doFetch(`${baseUrl}/api/table-settings/orphans`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listOrphanTableSettings", res);
+      return (await res.json()) as ListOrphanTableSettingsResponse;
+    },
+    async listRoles() {
+      const res = await doFetch(`${baseUrl}/api/roles`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listRoles", res);
+      return (await res.json()) as ListRolesResponse;
     },
     async listFields(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {

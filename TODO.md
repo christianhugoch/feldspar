@@ -69,14 +69,37 @@ The rule that keeps the zero-setup promise true, stated once and tested directly
 - [x] Saving **or deleting** an overlay reloads the catalog cache, exactly as a schema change does — otherwise an admin sets a role, sees it saved, and the running server keeps serving the old one
 - [x] Tests: 6 integration (`crates/sc-catalog/tests/table_meta_merge.rs`) — an unconfigured table compared to `from_physical` **in full** rather than spot-checked, an overlay surviving reload and a fresh catalog, a delete reverting to admin-only, an orphan merging onto nothing and still waiting when its table returns, a system table ignoring a row inserted behind the API, and a database with no overlay table loading — plus 3 unit tests on `apply_overlay` itself
 
-### 1.3 Admin API & SPA — table settings (`sc-api`, `sc-server`, `ui/admin`)
+### 1.3 Admin API & SPA — table settings (`sc-api`, `sc-server`, `ui/admin`) ✅
 
-- [ ] `table_schema()` grows the merged fields: `label`, `description`, `min_role_read`, `min_role_write` — so `listTables` shows the roles in the list, where an admin scanning for "which of these is public" needs them
-- [ ] `updateTable` endpoint (`PUT api/tables/{table}`), admin-only, taking the overlay fields only. Renaming a table is **not** in scope — that is a schema change with references to chase
-- [ ] Roles come from the same server-resolved pick-list machinery §1.6 of the last milestone built for stores (`OptionsSource::ServerQuery`), not a hand-typed integer: the admin picks "Public (100)", not `100`
-- [ ] Table editor UI in `ui/admin/src/screens/TableDetail.tsx`: a settings card above the fields card
-- [ ] The table list shows read/write roles per table, and flags an orphan overlay row (§1.1)
-- [ ] Integration test through the HTTP surface: set roles, read them back, restart-equivalent (fresh catalog) still has them
+- [x] `table_schema()` grows the merged fields: `label`, `description`, `min_role_read`, `min_role_write` — so `listTables` shows the roles in the list, where an admin scanning for "which of these is public" needs them — plus `configured`, the overlay's *presence*: a table an admin deliberately set to admin-only and one nobody has opened both read `1`/`1`, and only the first has settings to forget
+- [x] `updateTable` endpoint (`PUT api/tables/{table}`), admin-only, taking the overlay fields only. Renaming a table is **not** in scope — that is a schema change with references to chase. The handler reuses the table's existing `overlay` row id, without which every edit after the first would hit the one-row-per-table rule and fail
+- [x] `deleteTableSettings` (`DELETE api/tables/{table}/settings`) — "forget what I configured", returning the table to the closed default. Not in the original list; it is what gives `delete_table_meta` a caller, and it is also the only way to clean up an orphan, whose table cannot be opened because it is not there
+- [x] `listOrphanTableSettings` (`GET api/table-settings/orphans`) — §1.1 decided orphan rows are kept, and a row nobody can see is indistinguishable from a leak
+- [x] Roles are a server-answered list (`GET api/roles`), and the admin picks "Public (100)", not `100`
+- [x] Table editor UI in `ui/admin/src/screens/TableDetail.tsx`: a settings card above the fields card, with role selects, and a "Forget settings" button that appears only when there is something to forget
+- [x] The table list shows read/write roles per table, and flags orphan rows in a banner with a per-row "Forget" action (§1.1)
+- [x] Integration tests through the HTTP surface (`crates/sc-server/tests/table_settings_api.rs`, 4): configure → list → edit → forget, an off-scale role refused with nothing written and a 404 leaving no stray row, settings outliving a `DROP TABLE` and being cleaned up by name, and the role list growing when a user of role 40 is created
+
+**Deviation from this section's original wording, deliberate.** The plan said roles should come
+through §1.6's `OptionsSource::ServerQuery` machinery. They do not, and the reason is what that
+machinery is *for*: it exists so the admin UI can render a form for settings it knows nothing
+about — a file-store backend's, a framework's — by resolving a spec it did not write. A table's
+settings are not that. There are exactly four of them, the SPA knows all four by name, and the
+form is hand-written like every other fixed form in the admin UI. Routing it through a spec
+resolver would mean building a spec-driven renderer for a static form, to reuse a mechanism
+whose whole purpose is the case where the fields are *unknown*. The pick-list is a plain
+`listRoles` endpoint instead. (§3.4's attribute forms **are** the unknown-fields case, and that
+is where the spec machinery earns its place.)
+
+**What `listRoles` answers, and why it is a query at all.** Roles are the fixed scale `1..=100`
+(§7.1), but only `1` (admin) and `100` (public) mean anything on their own; the rest mean
+whatever an installation's users make them mean. All hundred would be a dropdown of meaningless
+numbers, and only the two named ones would make the middle of the scale unreachable through the
+UI. So the server answers with the two ends plus every role its users actually hold — the set
+that can matter today — and it grows by itself as an admin creates users, with no roles table to
+keep in step. The SPA merges a table's *current* value into the choices even when the server did
+not list it, so a table configured for role 40 after the last role-40 user was deleted still
+shows 40 rather than silently snapping to a neighbour on the next save.
 
 ### 1.4 Enforcement doing observable work (`sc-api`, `sc-server`)
 

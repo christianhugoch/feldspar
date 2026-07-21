@@ -76,6 +76,66 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // Set a table's configuration: the `_sc_tables` overlay fields, and only
+    // those (§9). A `PUT` on the table's own path rather than a nested
+    // `…/settings` resource, because from the admin's side there is one table
+    // with settings, not a table plus a settings object hanging off it — and
+    // renaming, the other thing a `PUT` on a table might mean, is a schema
+    // change with references to chase and is deliberately not offered.
+    set.register(
+        Endpoint::new(
+            "updateTable",
+            Method::Put,
+            api().lit("tables").param("table", ValueType::Text),
+        )
+        .input(table_settings_schema())
+        .output(table_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Forget a table's configuration, returning it to the closed default. Also
+    // the way an *orphan* row — one whose table is gone (§1.1) — is cleaned up,
+    // which is why the path is addressed by name and does not require the table
+    // to exist.
+    set.register(
+        Endpoint::new(
+            "deleteTableSettings",
+            Method::Delete,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("settings"),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Stored settings whose table is not in the database. These are deliberately
+    // kept rather than deleted (§1.1) — a restore or an external migration can
+    // drop and recreate a table, and the configuration must be waiting when it
+    // returns — so something has to be able to *show* them, or "kept" becomes
+    // "invisible and inexplicable".
+    set.register(
+        Endpoint::new(
+            "listOrphanTableSettings",
+            Method::Get,
+            api().lit("table-settings").lit("orphans"),
+        )
+        .output(TypeSchema::array(orphan_table_settings_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The roles an admin can pick from. See `roles_schema` for why this is a
+    // query and not a constant.
+    set.register(
+        Endpoint::new("listRoles", Method::Get, api().lit("roles"))
+            .output(TypeSchema::array(role_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
     set.register(
         Endpoint::new(
             "listFields",
@@ -484,9 +544,68 @@ fn api() -> PathSpec {
     PathSpec::root().lit(ADMIN_API_PREFIX)
 }
 
-/// A table in the catalog.
+/// A table in the catalog: its name, plus the `_sc_tables` overlay merged onto
+/// it (§9).
+///
+/// The access roles are in the *list* response, not only in a detail one,
+/// because "which of these tables can the public read?" is a question an admin
+/// asks about the whole set and should not have to open eight screens to answer.
+///
+/// `configured` distinguishes a table an admin has set to admin-only from one
+/// nobody has touched — both read `1`/`1`, and only the first has a row to
+/// delete. Without it the UI could not offer "forget these settings" honestly.
 fn table_schema() -> TypeSchema {
-    TypeSchema::struct_of([StructField::new("name", TypeSchema::text())])
+    let mut fields = vec![StructField::new("name", TypeSchema::text())];
+    fields.extend(table_settings_fields());
+    fields.push(StructField::new("configured", TypeSchema::bool()));
+    TypeSchema::Struct(fields)
+}
+
+/// The overlay fields of a table — everything an admin may set, and nothing the
+/// database is the authority on (§9's precedence rule).
+fn table_settings_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("min_role_read", TypeSchema::int()),
+        StructField::new("min_role_write", TypeSchema::int()),
+    ]
+}
+
+/// The body accepted when configuring a table.
+///
+/// Not optional fields: a settings save states the whole configuration, so an
+/// omitted role would have to mean either "leave it" or "reset it" and the wire
+/// cannot say which. The admin UI edits a loaded table and sends it back, so it
+/// always has every value to hand.
+fn table_settings_schema() -> TypeSchema {
+    TypeSchema::Struct(table_settings_fields())
+}
+
+/// Stored settings for a table that is not in the database (§1.1).
+fn orphan_table_settings_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("name", TypeSchema::text())];
+    fields.extend(table_settings_fields());
+    TypeSchema::Struct(fields)
+}
+
+/// One role an admin may choose, as a number and a name.
+///
+/// **Why this is a query rather than a constant list.** Roles are the fixed
+/// scale `1..=100` (§7.1), but only two of those hundred numbers mean anything
+/// on their own — `1` is admin and `100` is public — and the rest mean whatever
+/// the installation's users make them mean. Offering all hundred would be a
+/// dropdown of meaningless numbers; offering only two would make the middle of
+/// the scale unreachable through the UI. So the server answers with the two
+/// named ends plus every role its users actually hold, which is exactly the set
+/// that can matter today, and grows by itself as an admin creates users. When
+/// roles gain names of their own, this endpoint is where that lands and no
+/// caller changes.
+fn role_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("role", TypeSchema::int()),
+        StructField::new("label", TypeSchema::text()),
+    ])
 }
 
 /// A field (column) of a table.
