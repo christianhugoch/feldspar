@@ -160,8 +160,9 @@ The JSON API still works, but the browser shows only an empty bootstrap document
 
 ## 6. Running the server
 
-The one command is `saltcorn serve`. It takes **database flags** and **server
-flags**; database settings may also come from environment variables.
+The main command is `saltcorn serve`. It takes **database flags** and **server
+flags**; database settings may also come from environment variables. (The other
+command is `saltcorn build-app`, below.)
 
 ### Database connection
 
@@ -194,6 +195,21 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 > `<subdomain>.<base-domain>`; an app that fails to build is logged and skipped, not
 > fatal, and can be fixed and rebuilt without a restart. Without a base domain the
 > server has no way to address an app, so it serves the admin only.
+
+### Building one application from the command line
+
+```bash
+saltcorn build-app <subdomain> [database flags] [--file-store NAME=PATH]
+```
+
+Builds the application served at that subdomain — regenerating its typed client,
+installing its dependencies if needed, and running its build command — and prints
+the tool output as it goes, failing with the bundler's own diagnostics. It is the
+same build the admin UI's **Build** button runs, so reach for it in a deploy
+script, in CI, or when a failed build has left the app unreachable in a browser.
+
+It **mounts nothing**: no application is served by this process, so running it
+against a live deployment's database cannot disturb what that server is serving.
 
 > **Building your first application?**
 > [`docs/tutorial-react-todo.md`](docs/tutorial-react-todo.md) walks through a React

@@ -1351,6 +1351,7 @@ dependencies = [
  "sc-files",
  "sc-server",
  "sc-test-harness",
+ "sc-types",
  "serde_json",
  "tokio",
  "tokio-postgres",

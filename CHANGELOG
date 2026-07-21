@@ -2,6 +2,53 @@
 
 Changes in reverse chronological order.
 
+## A scaffolded app that would not build, and the tools that should have caught it (TODO §2.6)
+
+Reported from an actual run of the tutorial. **An application with no tables did not build**:
+its generated `hooks.ts` declared the shared `useQuery`/`useMutation` that the per-table hooks
+sit on, nothing called them, and `noUnusedLocals` failed the build with `TS6133` — a TypeScript
+error in code the admin never wrote, on their first Build. Creating the application before its
+data model is an ordinary order to work in, so this was not an edge case.
+
+Both helpers are now **exported**, which fixes it and is the more honest shape anyway: an app
+that adds a custom endpoint should be able to join the same cache rather than build a second one
+beside it.
+
+**Why no test caught it.** Every test around the scaffold either asserted the generated *text*
+or stubbed the toolchain, and the one real `npm install` + `vite build` was behind an opt-in
+`SC_TEST_NPM=1` — a gate this changelog defended two entries ago and which was, in hindsight,
+the reason the bug shipped. An opt-in test is one nobody runs.
+
+So `crates/sc-app/tests/tutorial_app_build.rs` runs the tutorial for real — table created
+through the same catalog calls the admin UI makes, app scaffolded, then `npm install`,
+`tsc --noEmit` and `vite build`, asserting that what is served is a *bundled* index rather than
+the scaffold's own. It **skips only when `npm` is absent from `PATH`**, so a Rust-only checkout
+stays green and everyone else runs it. A second test covers the app shapes the tutorial does not
+produce — no tables, a keyless table, date/int columns — which is where the failure lived. A
+unit-level guard holds the line where `npm` is unavailable, and it checks the rule rather than
+the two names: in any table set, every privately-declared thing in the runtime must be
+referenced.
+
+**Backtraces are capped at ten frames.** With `RUST_BACKTRACE` set, every logged error carried
+around forty frames of async-runtime machinery below the code anyone was looking for, once per
+error — and that volume is what pushes the real message off the screen. `head_frames` truncates
+the rendered text (stable Rust does not expose a `Backtrace`'s frames), keeps the innermost ten,
+and says how many it dropped so the trace does not merely appear to end. Anything that does not
+look like a backtrace passes through byte-identical, so an unrecognised rendering loses nothing.
+
+**New: `saltcorn build-app SUBDOMAIN`.** The admin UI can already build an application; what a
+command line adds is the *run* rather than the result — scriptable, pipeable, greppable, and
+usable when the app cannot be reached in a browser at all, which is exactly the state a failing
+build leaves a deployment in. It prints the installer's and the bundler's output whole rather
+than the tail an error message can carry. It **builds without mounting**, so running it against
+a live deployment's database cannot disturb what that server is currently serving. Driven in
+tests through the real binary.
+
+The lesson worth keeping: the generator's tests asserted what it *wrote*, and what it wrote was
+right. The failure was in what a compiler made of it, for a table set no test used. Generated
+code needs a test that runs the generator's own toolchain over the shapes real input takes — and
+that test has to run by default, or it does not exist.
+
 ## The tutorial loses its SSH session (TODO §2.5) — Phase 2 complete
 
 `docs/tutorial-react-todo.md` is rewritten for the React framework. Its old steps 2 and 3 — log

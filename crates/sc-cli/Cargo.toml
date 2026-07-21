@@ -27,6 +27,7 @@ tokio-postgres.workspace = true
 
 [dev-dependencies]
 sc-test-harness.workspace = true
+sc-types.workspace = true
 axum.workspace = true
 tower.workspace = true
 serde_json.workspace = true

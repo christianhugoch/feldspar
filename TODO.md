@@ -478,6 +478,46 @@ app's own API → see it in the admin's table. Then the schema-change loop: add 
 rebuild, and `TasksRow` grows `due?: string | null` while the page — the admin's file — is
 untouched.
 
+### 2.6 Follow-on: a real build failure, and the tools to have caught it ✅
+
+Reported from an actual run of the tutorial, not from the test suite — which is the point of
+the whole item: every test around the scaffold either stopped at the generated *text* or
+stubbed the toolchain, so a project that was word-perfect and did not compile passed all of
+them.
+
+- [x] **Backtraces capped at 10 frames** (`sc-error`). With `RUST_BACKTRACE` set, every logged
+  error carried ~40 frames of async-runtime machinery, and the volume is what makes the real
+  error scroll off a terminal. `head_frames` truncates the *rendered* text (stable Rust does
+  not expose the frames), keeping the innermost ten — the ones that identify the failure — and
+  saying how many were dropped rather than letting the trace appear to end. Text that does not
+  look like a backtrace passes through untouched, so an unrecognised rendering loses nothing
+- [x] **`saltcorn build-app SUBDOMAIN`** (`sc-cli`). The admin UI can already build an app;
+  what this adds is the *run* rather than the result — scriptable, pipeable, and available
+  when the app cannot be reached in a browser, which is exactly the state a failing build
+  leaves a deployment in. It builds **without mounting**, so pointing it at a live
+  deployment's database cannot disturb what that server is serving
+- [x] **`crates/sc-app/tests/tutorial_app_build.rs`**: the tutorial executed — table created
+  through the same catalog calls the admin UI makes, app scaffolded, then a real `npm install`
+  + `tsc --noEmit` + `vite build`, asserting the served index is a *bundled* one. It **skips
+  only when `npm` is absent**, deliberately not behind an opt-in variable: §2.3's `SC_TEST_NPM`
+  gate is why this bug shipped, since an opt-in test is one nobody runs
+- [x] **The bug, found and fixed.** An application with **no tables** — created before its
+  data model, an ordinary order to work in — generated a `hooks.ts` whose shared
+  `useQuery`/`useMutation` were never called, so `noUnusedLocals` failed the build with
+  `TS6133` *in generated code the admin never wrote*. Both are now exported, which is also the
+  honest shape: an app adding a custom endpoint should be able to join the same cache rather
+  than build a second one beside it
+- [x] Regression guarded at unit level too (`the_runtime_declares_nothing_it_does_not_export`),
+  so the fix holds where `npm` is unavailable. It checks the general rule rather than the two
+  names: with any table set, every privately-declared thing in the runtime must be referenced
+- [x] `saltcorn build-app` driven through the **real binary** in `sc-cli/tests/build_app.rs`,
+  covering the argument errors everywhere and the full build where `npm` exists
+
+**The lesson worth keeping.** The scaffold's tests asserted what the generator *wrote*, and
+what it wrote was right; the failure was in what a compiler made of it, for a table set no test
+used. Generated code needs a test that runs the generator's own toolchain over the shapes real
+input takes — and that test has to run by default, or it does not exist.
+
 ---
 
 ## Carried past this milestone

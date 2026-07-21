@@ -193,6 +193,11 @@ having gone through the file manager.
   Pick another project name, or point the app at the project that is already there.
 - **The first build is the slow one** — it installs dependencies. Later builds skip that unless
   `node_modules` has gone away.
+- **Building from a terminal**: `saltcorn build-app todo` builds one application by subdomain
+  and prints the installer's and bundler's output as it goes. It is the same build the button
+  runs, so it is what to reach for in a deploy script — or when a failing build has left the
+  app unreachable in a browser. It does not mount anything, so it is safe to run against a
+  live deployment's database.
 
 ## When React's conventions do not fit
 

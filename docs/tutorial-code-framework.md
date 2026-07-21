@@ -87,6 +87,10 @@ build leaves the previously built version serving.
 **Dependencies are yours to install.** Unlike a scaffolded React app, `code` runs no
 `npm install`: if the build needs it, run it on the host, or make your build command do it.
 
+The same build runs from a terminal as `saltcorn build-app todo`, which prints your bundler's
+output whole and mounts nothing — useful in a deploy script, or when a failed build has left the
+app unreachable.
+
 ## Step 5 — Use the generated client
 
 The generated `client.ts` is a typed factory. Endpoint paths already include the API mount, so

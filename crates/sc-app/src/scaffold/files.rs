@@ -805,7 +805,15 @@ export function invalidate(table: string): void {
   listeners.get(table)?.forEach((l) => l());
 }
 
-function useQuery<T>(table: string, load: () => Promise<T>): Query<T> {
+/**
+ * Read something from the API, cached under `table` and re-run whenever anything
+ * writes to that table.
+ *
+ * Exported because the per-table hooks below cannot cover a custom endpoint, and
+ * an app that adds one should be able to join the same cache rather than build a
+ * second one beside it.
+ */
+export function useQuery<T>(table: string, load: () => Promise<T>): Query<T> {
   const version = useSyncExternalStore(
     (cb) => subscribe(table, cb),
     () => versionOf(table),
@@ -841,7 +849,11 @@ function useQuery<T>(table: string, load: () => Promise<T>): Query<T> {
   return { ...state, refresh: () => invalidate(table) };
 }
 
-function useMutation<A>(table: string, fn: (arg: A) => Promise<unknown>): Mutation<A> {
+/**
+ * Write through `fn`, then invalidate `table` so every query over it re-runs.
+ * Exported for the same reason as `useQuery`.
+ */
+export function useMutation<A>(table: string, fn: (arg: A) => Promise<unknown>): Mutation<A> {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<Error | undefined>(undefined);
   const run = useCallback(
@@ -1124,6 +1136,51 @@ mod tests {
         assert!(hooks.contains("api.updateTasks(id, body)"), "{hooks}");
         assert!(hooks.contains("api.deleteTasks(id)"), "{hooks}");
         assert!(hooks.contains("export function useTasks(): Query<TasksRow[]>"));
+    }
+
+    #[test]
+    fn the_runtime_declares_nothing_it_does_not_export() {
+        // The generated project type-checks with `noUnusedLocals`, so a helper
+        // that is only *sometimes* called is a build failure waiting for the app
+        // that does not call it. That is not hypothetical: an application created
+        // before its tables generates a hooks file with no per-table hooks at all,
+        // and the shared `useQuery`/`useMutation` underneath them are then dead —
+        // `TS6133`, in generated code the admin never wrote, on their first build.
+        // Exporting them is also honest: an app adding a custom endpoint should be
+        // able to join this cache rather than build a second one beside it.
+        let empty = hooks_ts(&[]);
+        for declaration in ["function useQuery", "function useMutation"] {
+            assert!(
+                empty.contains(&format!("export {declaration}")),
+                "`{declaration}` must be exported:\n{empty}"
+            );
+        }
+        // The general rule the compiler applies: nothing declared privately may
+        // be dead. Private module state (the cache maps) is fine — the exported
+        // helpers use it, in every table set — so the check is "is it referenced
+        // at all", which is exactly what `noUnusedLocals` asks.
+        for tables in [vec![], vec![tasks()]] {
+            let hooks = hooks_ts(&tables);
+            for line in hooks.lines() {
+                let Some(name) = line
+                    .strip_prefix("function ")
+                    .or_else(|| line.strip_prefix("const "))
+                    .and_then(|rest| {
+                        rest.split(['<', '(', ' ', ':', '='].as_slice())
+                            .next()
+                            .filter(|n| !n.is_empty())
+                    })
+                else {
+                    continue;
+                };
+                assert!(
+                    hooks.matches(name).count() > 1,
+                    "`{name}` is declared but never used with {} table(s); \
+                     `noUnusedLocals` fails the admin's build over it",
+                    tables.len()
+                );
+            }
+        }
     }
 
     #[test]

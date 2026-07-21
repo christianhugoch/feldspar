@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use sc_api::admin_endpoints;
+use sc_app::{app_source_from_config, build_application, load_application_by_subdomain};
 use sc_auth::SessionStore;
 use sc_cli::DbConfig;
 use sc_cli::{
@@ -37,6 +38,7 @@ async fn main() -> ExitCode {
 async fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("serve") => serve_command(&args[1..]).await,
+        Some("build-app") => build_app_command(&args[1..]).await,
         Some(other) => Err(sc_error::Error::config(format!(
             "unknown command `{other}`"
         ))),
@@ -92,16 +94,94 @@ async fn serve_command(args: &[String]) -> Result<()> {
     serve(config, admin_endpoints(), handlers, sessions, apps).await
 }
 
+/// `saltcorn build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]`.
+///
+/// Builds one application from the command line, printing the tool output as it
+/// goes and failing with the bundler's own diagnostics.
+///
+/// The admin UI can already build an app, and this does the same work — so why
+/// have it? Because when a build fails, the UI shows the *result* and this shows
+/// the *run*: it is scriptable, it is what a deploy step or a CI job calls, and
+/// its output goes to a terminal where it can be piped, grepped and kept. It also
+/// works when the app cannot be reached in a browser at all, which is precisely
+/// the state a failing build tends to leave a deployment in.
+///
+/// Deliberately **builds without mounting**: nothing is served by this process,
+/// so running it against a live deployment's database cannot disturb what that
+/// server is serving. The next build or restart there picks up the output.
+async fn build_app_command(args: &[String]) -> Result<()> {
+    let (subdomain, rest) = match args.split_first() {
+        Some((first, rest)) if !first.starts_with('-') => (first.clone(), rest.to_vec()),
+        _ => {
+            return Err(sc_error::Error::config(
+                "build-app requires the application's subdomain: \
+                 saltcorn build-app SUBDOMAIN [database flags]",
+            ));
+        }
+    };
+    let (db, rest) = DbConfig::extract(rest)?;
+    let (file_store_specs, leftover) = extract_file_stores(rest)?;
+    if let Some(unknown) = leftover.first() {
+        return Err(sc_error::Error::config(format!(
+            "unknown build-app argument `{unknown}`"
+        )));
+    }
+
+    let catalog = connect_catalog(&db).await?;
+    connect_stored_file_stores(&catalog).await?;
+    connect_file_stores(&catalog, &file_store_specs)?;
+
+    let app = load_application_by_subdomain(&catalog, &subdomain)
+        .await?
+        .ok_or_else(|| {
+            sc_error::Error::not_found(format!("no application with subdomain `{subdomain}`"))
+        })?;
+
+    eprintln!(
+        "saltcorn: building application `{}` ({})",
+        app.name, subdomain
+    );
+    let source = app_source_from_config(&app.framework)?;
+    let report = build_application(&catalog, &app, &source).await?;
+
+    // The tool output is the point of running this here rather than clicking
+    // Build, so it goes to stdout whole — not the tail an error message can
+    // carry, and not summarised.
+    if let Some(log) = &report.install_log {
+        print!("{log}");
+    }
+    print!("{}", report.stdout);
+    eprint!("{}", report.stderr);
+
+    eprintln!(
+        "saltcorn: built {} file{} into {}{}",
+        report.bundle.len(),
+        if report.bundle.len() == 1 { "" } else { "s" },
+        report.output_dir.display(),
+        if report.installed {
+            " (dependencies installed)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 /// Print the short usage summary.
 fn print_usage() {
     eprintln!("saltcorn — usage:");
     eprintln!("  saltcorn serve [database flags] [server flags]");
+    eprintln!("  saltcorn build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]");
     eprintln!();
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
     eprintln!("    --database-url URL   full connection string (takes precedence)");
     eprintln!("    --db-host H  --db-port N  --db-user U  --db-password P  --db-name D");
     eprintln!();
-    eprintln!("  server:");
+    eprintln!(
+        "  build-app: builds one application and prints the bundler's output.
+
+  server:"
+    );
     eprintln!("    --bind ADDR  --static-dir DIR  --session-ttl-hours N  --secure-cookies");
     eprintln!(
         "    --file-store NAME=PATH   connect a local directory as a named file store (repeatable)"

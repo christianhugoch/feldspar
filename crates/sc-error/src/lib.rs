@@ -344,9 +344,66 @@ pub fn format_chain(err: &(dyn std::error::Error + 'static)) -> String {
     if let Some(e) = err.downcast_ref::<Error>()
         && e.backtrace.status() == BacktraceStatus::Captured
     {
-        out.push_str(&format!("\nbacktrace:\n{}", e.backtrace));
+        out.push_str(&format!(
+            "\nbacktrace:\n{}",
+            head_frames(&e.backtrace.to_string(), MAX_BACKTRACE_FRAMES)
+        ));
     }
     out
+}
+
+/// How many stack frames of a captured backtrace reach the log.
+///
+/// A full backtrace here is ~40 frames, most of them the async runtime's own
+/// machinery below the code anyone is looking for, and it arrives *per logged
+/// error*. The frames that identify the failure are the innermost ones, so the
+/// tail is pure volume — and volume is not free: it is what makes a real error
+/// scroll off an admin's terminal. Ten is enough to cross a couple of `?`
+/// boundaries and still fit on a screen.
+const MAX_BACKTRACE_FRAMES: usize = 10;
+
+/// The first `max` frames of a rendered backtrace, with a line saying how many
+/// were dropped.
+///
+/// Works on the rendered text rather than the frames themselves because
+/// [`Backtrace`] does not expose them on stable Rust. A frame starts at a line
+/// like `   3: some::function`, and everything up to the next such line (the
+/// `at file:line` continuation) belongs to it. Text that does not look like that
+/// at all is returned unchanged: an unrecognised format should lose nothing.
+fn head_frames(rendered: &str, max: usize) -> String {
+    let is_frame_start = |line: &str| {
+        let t = line.trim_start();
+        t.split_once(':')
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+
+    let mut kept = String::new();
+    let mut frames = 0usize;
+    let mut dropped = 0usize;
+    for line in rendered.lines() {
+        if is_frame_start(line) {
+            frames += 1;
+            if frames > max {
+                dropped += 1;
+                continue;
+            }
+        } else if frames > max {
+            // A continuation line of a dropped frame.
+            continue;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    if dropped == 0 {
+        return rendered.to_owned();
+    }
+    kept.push_str(&format!(
+        "  … {dropped} further frame{} not shown (of {}); \
+         the innermost {max} are the ones that identify this error\n",
+        if dropped == 1 { "" } else { "s" },
+        frames
+    ));
+    kept
 }
 
 /// If `err` is a workspace [`Error`], append its creation location (`file:line`)
@@ -704,6 +761,22 @@ mod tests {
             assert_eq!(err.backtrace().status(), BacktraceStatus::Captured);
             let chain = err.chain();
             assert!(chain.contains("backtrace:"), "no backtrace in: {chain}");
+            // Capped: a real backtrace here is dozens of frames of runtime
+            // machinery, arriving once per logged error. Whatever the ambient
+            // depth, at most `MAX_BACKTRACE_FRAMES` reach the log.
+            let frames = chain
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    t.split_once(':').is_some_and(|(n, _)| {
+                        !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                    })
+                })
+                .count();
+            assert!(
+                frames <= MAX_BACKTRACE_FRAMES,
+                "{frames} frames survived the cap:\n{chain}"
+            );
             return;
         }
 
@@ -719,6 +792,54 @@ mod tests {
             "child failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// A stand-in for what `Backtrace`'s `Display` produces: numbered frames,
+    /// each with an indented `at file:line` continuation.
+    fn rendered_backtrace(frames: usize) -> String {
+        (0..frames)
+            .map(|i| format!("{i:>4}: some::function::h{i}\n             at ./src/lib.rs:{i}:9\n"))
+            .collect()
+    }
+
+    #[test]
+    fn a_long_backtrace_is_cut_to_its_innermost_frames() {
+        let cut = head_frames(&rendered_backtrace(40), 10);
+        // The innermost frames survive whole, `at` lines and all...
+        assert!(cut.contains("   0: some::function::h0"));
+        assert!(cut.contains("at ./src/lib.rs:0:9"));
+        assert!(cut.contains("   9: some::function::h9"));
+        // ...and everything past the cap goes, continuation lines included.
+        assert!(!cut.contains("some::function::h10"), "{cut}");
+        assert!(!cut.contains("at ./src/lib.rs:10:9"), "{cut}");
+        // The reader is told what was dropped rather than left to wonder whether
+        // the trace simply ended there.
+        assert!(cut.contains("30 further frames not shown (of 40)"), "{cut}");
+    }
+
+    #[test]
+    fn a_short_backtrace_is_left_exactly_as_it_was() {
+        // Under the cap nothing is rewritten — not even the trailing newline —
+        // so the common case is byte-identical to what `Backtrace` rendered.
+        let short = rendered_backtrace(3);
+        assert_eq!(head_frames(&short, 10), short);
+        // Exactly at the cap is still untouched: the boundary drops nothing.
+        let exact = rendered_backtrace(10);
+        assert_eq!(head_frames(&exact, 10), exact);
+    }
+
+    #[test]
+    fn text_that_is_not_a_backtrace_survives_unchanged() {
+        // `Backtrace`'s rendering is not a stable contract, and the ones that
+        // say only "disabled" or "unsupported" have no frames at all. Anything
+        // unrecognised must pass through rather than be truncated to nothing.
+        for text in [
+            "disabled backtrace",
+            "unsupported backtrace",
+            "note: some other rendering entirely\n",
+        ] {
+            assert_eq!(head_frames(text, 10), text);
+        }
     }
 
     #[test]
