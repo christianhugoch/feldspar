@@ -12,7 +12,10 @@
 //! preference: it is what keeps §9's "legacy databases just work" true, and it
 //! is why a column like `nullable` must never appear in this table.
 //!
-//! The merge itself (TODO §1.2) lands next; this module is the storage under it.
+//! The merge — where a stored row becomes part of the [`Table`] the rest of the
+//! system sees — is [`Table::apply_overlay`], applied by
+//! [`Catalog::reload`](crate::Catalog::reload); the precedence rule is stated
+//! there. This module is the storage under it.
 //!
 //! The shape follows the `_sc_file_stores` module column for column:
 //! one column per value every row has, sparse values in `attributes`, and
@@ -215,6 +218,12 @@ pub async fn bootstrap_table_meta(catalog: &Catalog) -> Result<Table> {
 /// [`orphan_table_meta`] for why an overlay may legitimately outlive its table,
 /// and note that requiring existence here would make the row unsavable in
 /// exactly the situation where an admin is repairing one.
+///
+/// **Saving reloads the catalog cache**, exactly as a schema change does. Access
+/// rules are read from the cached [`Table`] on the request path, so without the
+/// reload an admin would set a role, watch it save, and watch the running server
+/// go on enforcing the old one — with the stored row and the served behaviour
+/// disagreeing until something else happened to reload.
 pub async fn save_table_meta(catalog: &Catalog, meta: &TableMeta) -> Result<()> {
     let name = meta.table_name.trim();
     if name.is_empty() {
@@ -257,7 +266,7 @@ pub async fn save_table_meta(catalog: &Catalog, meta: &TableMeta) -> Result<()> 
         );
         run(catalog, Statement::from(insert)).await?;
     }
-    Ok(())
+    catalog.reload().await
 }
 
 /// Load the overlay with this id, if it exists.
@@ -316,12 +325,17 @@ pub async fn orphan_table_meta(catalog: &Catalog) -> Result<Vec<TableMeta>> {
 /// [`delete_file_store`](crate::delete_file_store) is exact, and stronger here:
 /// for an overlay, the subject existing independently of its row is not a
 /// caveat, it is the whole point.
+///
+/// Reloads the cache for the same reason [`save_table_meta`] does: the table
+/// reverts to [`AccessRules::default`], and that must take effect now rather
+/// than at the next restart.
 pub async fn delete_table_meta(catalog: &Catalog, id: TableMetaId) -> Result<bool> {
     if load_table_meta(catalog, id).await?.is_none() {
         return Ok(false);
     }
     let delete = Delete::from(TABLE_META_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     run(catalog, Statement::from(delete)).await?;
+    catalog.reload().await?;
     Ok(true)
 }
 

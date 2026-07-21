@@ -2,6 +2,47 @@
 
 Changes in reverse chronological order.
 
+## The overlay reaches the table: stored access rules are the ones the catalog serves
+
+`_sc_tables` had rows and no readers. `Catalog::reload` now applies them: it introspects as
+before, then merges each overlay row onto the table it names. `Table` gains `label`,
+`description` and `overlay` (the row's id, `None` when nobody has configured the table) beside
+the `access` it always had.
+
+**The precedence rule, now stated in one place** (`Table::apply_overlay`): the database is the
+authority on everything it knows — columns, types, nullability, keys — and the overlay is the
+authority on everything it knows — access, label, description, attributes. *The two sets do not
+intersect*, so there is no contested value and no conflict semantics to get wrong. That is a
+constraint on what may ever be added to `_sc_tables`, not a description of what it holds today.
+
+**A table nobody has configured must come out exactly as it did before this existed**, or the
+zero-setup promise is gone. The merge loop can only modify entries the introspection loop
+already created, and the test asserts an unconfigured table equals `Table::from_physical` in
+full rather than spot-checking a field. Three ways an overlay could reach somewhere it should
+not, each closed and tested: a row for a table that is not there merges onto nothing (it does
+not conjure a table, and it is still waiting when the table returns); a row for a `_sc_*` table
+is ignored even though `save_table_meta` already refuses to write one, because a restored dump
+or a hand-edited database can contain what the API would not; and a database with no
+`_sc_tables` table at all is never queried for one.
+
+That last case is not defensiveness — it is required. `bootstrap_table_meta` creates the table
+*through* `create_table`, which reloads, so the reload runs at least once on a database where
+`_sc_tables` genuinely does not exist. A reload that assumed the table were there could never
+bootstrap it.
+
+**Saving or deleting an overlay reloads the cache**, as a schema change does. Access rules are
+read from the cached `Table` on the request path; without the reload an admin would set a role,
+watch it save, and watch the running server go on enforcing the old one — the stored row and
+the served behaviour disagreeing until something else happened to reload. Deleting reverts the
+table to `AccessRules::default()` (admin-only), immediately, not to the previous value.
+
+`connect_catalog` now bootstraps `_sc_tables` beside `users`, `_sc_applications` and
+`_sc_file_stores`. Lazily creating it on first save would mean the merge silently does nothing
+on exactly the databases nobody has configured yet — which is all of them, until they are.
+
+Six integration tests (`crates/sc-catalog/tests/table_meta_merge.rs`) and three unit tests on
+the merge itself. Nothing yet *sets* an overlay through the API; that is §1.3.
+
 ## The first overlay: a table's access rules can be stored
 
 `AccessRules` has been modelled since the MVP, is read by the application REST provider on

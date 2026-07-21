@@ -63,8 +63,11 @@ fn the_generated_client_echoes_the_csrf_cookie_on_mutations() -> std::io::Result
             DataField::plain("title", TypeRef::Basic(BasicType::Text)),
         ],
         primary_key: vec!["id".to_owned()],
+        label: "posts".to_owned(),
+        description: String::new(),
         access: AccessRules::default(),
         attributes: Default::default(),
+        overlay: None,
     };
     let provider = RestProvider::project("/api", &[posts]);
     let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));

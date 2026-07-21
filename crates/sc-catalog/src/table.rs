@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use sc_db::PhysicalTable;
 
 use crate::field::{Attrs, DataField, DataFieldKind, DbId, FieldId, TableId};
+use crate::table_meta::{TableMeta, TableMetaId};
 
 /// Which kind of provider serves a table's rows (technical design §8.3). The MVP
 /// only has database-backed tables; virtual providers (RSS, IMAP, search, …) add
@@ -64,10 +65,23 @@ pub struct Table {
     /// Names of the primary-key columns, in key order (empty for none; more than
     /// one for a composite key).
     pub primary_key: Vec<String>,
+    /// A human label. Defaults to the table's own name; an overlay row may
+    /// replace it.
+    pub label: String,
+    /// A human description; empty unless an overlay row gives one.
+    pub description: String,
     /// Per-CRUD access rules.
     pub access: AccessRules,
     /// Table-level attributes (JSON object).
     pub attributes: Attrs,
+    /// The overlay row this table's configuration came from, if it has one.
+    ///
+    /// `None` is the ordinary case and the important one: it means "nobody has
+    /// configured this table", which is exactly how a freshly connected database
+    /// looks and must keep looking (§9). It is recorded rather than inferred so
+    /// that saving a change updates the existing row instead of racing to create
+    /// a second one for the same table.
+    pub overlay: Option<TableMetaId>,
 }
 
 impl Table {
@@ -101,9 +115,46 @@ impl Table {
             source: TableSource::Database,
             fields,
             primary_key: physical.primary_key.clone(),
+            label: physical.name.clone(),
+            description: String::new(),
             access: AccessRules::default(),
             attributes: Attrs::new(),
+            overlay: None,
         }
+    }
+
+    /// Apply an overlay row to this table (technical design §9, TODO §1.2).
+    ///
+    /// **The precedence rule, stated once:** the database is the authority on
+    /// everything it knows — columns, types, nullability, keys, the primary key
+    /// — and the overlay is the authority on everything *it* knows — access
+    /// rules, label, description, attributes. The two sets do not intersect, so
+    /// there is no contested value and no conflict semantics to get wrong. That
+    /// is a constraint on what may ever be added to `_sc_tables`, not merely a
+    /// description of what it holds today: a `nullable` column there would break
+    /// this method's correctness, which is why `table_meta`'s column list is
+    /// asserted in full by a test rather than spot-checked.
+    ///
+    /// A **system table never takes an overlay**. `save_table_meta` refuses to
+    /// write one, so this only fires on a row inserted behind the API's back —
+    /// and the answer there is to ignore it, because `_sc_*` tables are hidden
+    /// from users (§9) and their access is not configurable by anyone.
+    ///
+    /// An empty label or description in the row means "none given", so the
+    /// table's own name stays its label rather than becoming blank.
+    pub fn apply_overlay(&mut self, meta: &TableMeta) {
+        if self.is_system() {
+            return;
+        }
+        if !meta.label.is_empty() {
+            self.label = meta.label.clone();
+        }
+        if !meta.description.is_empty() {
+            self.description = meta.description.clone();
+        }
+        self.access = meta.access.clone();
+        self.attributes = meta.attributes.clone();
+        self.overlay = Some(meta.id);
     }
 
     /// Whether this is a system table (`_sc_*`), hidden from users (technical

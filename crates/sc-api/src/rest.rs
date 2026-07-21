@@ -407,8 +407,11 @@ mod tests {
                 DataField::plain("title", TypeRef::Basic(BasicType::Text)),
             ],
             primary_key: vec!["id".to_owned()],
+            label: name.to_owned(),
+            description: String::new(),
             access,
             attributes: Default::default(),
+            overlay: None,
         }
     }
 

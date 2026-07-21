@@ -18,16 +18,22 @@ pub use db::DbConfig;
 
 /// Connect to the primary database described by `db`, initialise the
 /// [`Catalog`] from its live schema, and ensure the platform tables (`users`,
-/// `_sc_applications`) exist.
+/// `_sc_applications`, `_sc_file_stores`, `_sc_tables`) exist.
 ///
 /// This is the whole "bring the data layer up" step of `saltcorn serve`. The
 /// first real connection happens inside [`Catalog::init`] (introspection), so a
 /// database that is unreachable or misconfigured fails here — with the redacted
 /// [`DbConfig::target`] in the message rather than a silent, half-booted server.
 ///
-/// Both bootstraps are idempotent (they no-op when the table already exists), so
+/// Every bootstrap is idempotent (each no-ops when its table already exists), so
 /// this runs on every boot: a legacy database gains the tables on first serve,
 /// and the admin UI can list/create applications without a migration step.
+///
+/// `_sc_tables` is bootstrapped here rather than lazily on first use because it
+/// is an **overlay**: [`Catalog::reload`] consults it on every reload, and a
+/// table that only appears once someone saves an overlay would mean the merge
+/// silently does nothing on exactly the databases nobody has configured yet —
+/// which is all of them, until they are.
 pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     let driver = db
         .connect()
@@ -46,6 +52,9 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_catalog::bootstrap_file_stores(&catalog)
         .await
         .context("ensuring the file stores table exists")?;
+    sc_catalog::bootstrap_table_meta(&catalog)
+        .await
+        .context("ensuring the table overlay table exists")?;
     Ok(catalog)
 }
 

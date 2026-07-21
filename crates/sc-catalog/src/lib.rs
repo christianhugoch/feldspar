@@ -167,6 +167,65 @@ mod tests {
     }
 
     #[test]
+    fn apply_overlay_adds_what_the_database_cannot_know_and_nothing_else() {
+        let physical = physical_with_fk();
+        let plain = Table::from_physical(DbId::primary(), &physical);
+        let mut table = plain.clone();
+
+        let meta = TableMeta::new("book")
+            .label("Books")
+            .description("The library catalogue")
+            .access(80, 40);
+        table.apply_overlay(&meta);
+
+        // Added: exactly the four things the overlay is the authority on.
+        assert_eq!(table.label, "Books");
+        assert_eq!(table.description, "The library catalogue");
+        assert_eq!(table.access.min_role_read, 80);
+        assert_eq!(table.access.min_role_write, 40);
+        assert_eq!(table.overlay, Some(meta.id));
+
+        // Untouched: everything the database is the authority on. The merge has
+        // no conflict semantics because the two sets do not intersect, and this
+        // is what asserts they still don't.
+        assert_eq!(table.id, plain.id);
+        assert_eq!(table.name, plain.name);
+        assert_eq!(table.fields, plain.fields);
+        assert_eq!(table.primary_key, plain.primary_key);
+        assert_eq!(table.source, plain.source);
+        assert_eq!(table.database, plain.database);
+    }
+
+    #[test]
+    fn an_empty_label_means_none_given_not_a_blank_label() {
+        let mut table = Table::from_physical(DbId::primary(), &physical_with_fk());
+        table.apply_overlay(&TableMeta::new("book").access(100, 100));
+        assert_eq!(table.label, "book", "the table's own name stays the label");
+        assert_eq!(table.description, "");
+        assert_eq!(table.access.min_role_read, 100);
+    }
+
+    #[test]
+    fn a_system_table_never_takes_an_overlay() {
+        // `save_table_meta` refuses to write such a row, so this only fires on
+        // one inserted behind the API's back — a hand-edited database, a
+        // restored dump. `_sc_*` tables are hidden from users (§9) and their
+        // access is not configurable, so the row is ignored rather than obeyed.
+        let mut physical = physical_with_fk();
+        physical.name = "_sc_config".into();
+        let mut table = Table::from_physical(DbId::primary(), &physical);
+        table.apply_overlay(
+            &TableMeta::new("_sc_config")
+                .label("Config")
+                .access(100, 100),
+        );
+
+        assert_eq!(table.access, AccessRules::default());
+        assert_eq!(table.label, "_sc_config");
+        assert_eq!(table.overlay, None);
+    }
+
+    #[test]
     fn attrs_and_base_field_are_re_exported_from_sc_types_not_redefined() {
         // Both moved down to `sc-types` (layer 3) so `FormField` — which carries
         // a `BaseField` and describes `Attrs` entries — can live beside them.

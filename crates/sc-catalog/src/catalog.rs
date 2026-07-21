@@ -20,6 +20,7 @@ use sc_files::FileStore;
 use crate::field::{DataField, DbId, TableId};
 use crate::provider::{DriverTableProvider, TableProvider};
 use crate::table::Table;
+use crate::table_meta::{TABLE_META_TABLE, list_table_meta};
 
 /// The catalog: the connected primary database plus a cache of its tables
 /// (technical design §8.1). Row data for users, workflow runs, and files is
@@ -68,9 +69,17 @@ impl Catalog {
         &self.primary
     }
 
-    /// Re-introspect the primary database and rebuild the table cache. Called
-    /// after every schema change the catalog applies so the cache never drifts
-    /// from the live schema.
+    /// Re-introspect the primary database and rebuild the table cache, applying
+    /// the `_sc_tables` overlay on top. Called after every schema change the
+    /// catalog applies, and after every overlay change, so the cache never
+    /// drifts from either source.
+    ///
+    /// **Introspection is still what makes a table exist.** The overlay only
+    /// adds to a table already found, so a database with no `_sc_tables` table
+    /// — or one whose rows describe tables that are not there — behaves exactly
+    /// as it did before the overlay existed. That is the zero-setup promise of
+    /// §9 in one line of code: the loop below can only ever modify entries the
+    /// introspection loop above it created.
     pub async fn reload(&self) -> Result<()> {
         let physicals = self.primary.introspect().await?;
         let mut map = HashMap::with_capacity(physicals.len());
@@ -78,6 +87,22 @@ impl Catalog {
             let table = Table::from_physical(self.primary_db.clone(), physical);
             map.insert(table.id.clone(), table);
         }
+
+        // Only query the overlay when the database has one. Asking first is not
+        // defensiveness — it is required: `bootstrap_table_meta` creates the
+        // table *through* `create_table`, which reloads, so this runs at least
+        // once on a database where `_sc_tables` genuinely does not exist yet.
+        // Selecting from it there would make bootstrapping impossible.
+        if map.contains_key(&TableId(TABLE_META_TABLE.to_owned())) {
+            for meta in list_table_meta(self).await? {
+                // An overlay for a table that is not here is not an error and is
+                // not dropped; see `orphan_table_meta` for why it is kept.
+                if let Some(table) = map.get_mut(&TableId(meta.table_name.clone())) {
+                    table.apply_overlay(&meta);
+                }
+            }
+        }
+
         // The DB I/O is done; take the lock only to swap in the new snapshot so
         // it is never held across an await.
         let mut guard = self

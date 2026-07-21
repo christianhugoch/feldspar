@@ -1119,8 +1119,11 @@ mod tests {
                 DataField::plain("done", TypeRef::Basic(BasicType::Bool)),
             ],
             primary_key: vec!["id".to_owned()],
+            label: "tasks".to_owned(),
+            description: String::new(),
             access: AccessRules::default(),
             attributes: Default::default(),
+            overlay: None,
         }
     }
 
