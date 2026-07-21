@@ -57,8 +57,29 @@ pub fn runtime_files(tables: &[Table], endpoints: &EndpointSet) -> Vec<Generated
             format!("{REACT_RUNTIME_SUBDIR}/{REACT_CLIENT_FILE}"),
             generate_client(endpoints),
         ),
-        GeneratedFile::new(format!("{REACT_RUNTIME_SUBDIR}/hooks.ts"), hooks_ts(tables)),
+        GeneratedFile::new(
+            format!("{REACT_RUNTIME_SUBDIR}/hooks.ts"),
+            hooks_ts(tables, endpoints),
+        ),
     ]
+}
+
+/// The tables the generated project may have pages and hooks for: those the
+/// app's API actually exposes.
+///
+/// **The endpoint set is the source of truth, not the table list**, and the
+/// difference is not academic. An application declares tables *and* API
+/// providers; a table it declares but does not expose has no `listTasks` on the
+/// generated client, so a page calling one would not compile — which is exactly
+/// what a real app hit. Deriving "what can this project talk to?" from the same
+/// value the client is generated from makes that class of mismatch unable to
+/// occur, where re-deriving it from the tables only made the two agree *by
+/// coincidence* while they happened to be computed the same way.
+fn exposed_tables<'a>(tables: &'a [Table], endpoints: &EndpointSet) -> Vec<&'a Table> {
+    tables
+        .iter()
+        .filter(|t| endpoints.find(&op_name("list", &t.name)).is_some())
+        .collect()
 }
 
 /// The whole project: the runtime plus everything written once.
@@ -67,6 +88,7 @@ pub fn project_files(
     tables: &[Table],
     endpoints: &EndpointSet,
 ) -> Vec<GeneratedFile> {
+    let exposed = exposed_tables(tables, endpoints);
     let mut files = vec![
         GeneratedFile::new("package.json", package_json(project)),
         GeneratedFile::new("vite.config.ts", VITE_CONFIG),
@@ -76,14 +98,14 @@ pub fn project_files(
         GeneratedFile::new("src/main.tsx", MAIN_TSX),
         GeneratedFile::new("src/auth.tsx", AUTH_TSX),
         GeneratedFile::new("src/Login.tsx", LOGIN_TSX),
-        GeneratedFile::new("src/App.tsx", app_tsx(project, tables)),
-        GeneratedFile::new("src/routes.tsx", routes_tsx(tables)),
+        GeneratedFile::new("src/App.tsx", app_tsx(project)),
+        GeneratedFile::new("src/routes.tsx", routes_tsx(&exposed, endpoints)),
         GeneratedFile::new("src/app.css", APP_CSS),
     ];
-    for table in tables {
+    for table in &exposed {
         files.push(GeneratedFile::new(
             format!("src/pages/{}.tsx", pascal(&table.name)),
-            page_tsx(table),
+            page_tsx(table, endpoints),
         ));
     }
     files.extend(runtime_files(tables, endpoints));
@@ -320,8 +342,7 @@ export default function Login() {
 
 /// The shell: a header naming the app, a nav built from the route list, the
 /// signed-in user, and the routes themselves.
-fn app_tsx(project: &str, tables: &[Table]) -> String {
-    let _ = tables;
+fn app_tsx(project: &str) -> String {
     format!(
         r#"import {{ Link, Route, Routes, useLocation }} from "react-router-dom";
 import {{ routes }} from "./routes";
@@ -384,7 +405,8 @@ export default function App() {{
 /// without a build-time plugin scanning directories. `public` is the per-route
 /// opt-out from the authenticated-by-default rule — one word, and its absence
 /// means "signed in", which is the direction a forgotten flag should fail in.
-fn routes_tsx(tables: &[Table]) -> String {
+fn routes_tsx(tables: &[&Table], endpoints: &EndpointSet) -> String {
+    let _ = endpoints;
     let mut imports =
         String::from("import type { ReactNode } from \"react\";\nimport Login from \"./Login\";\n");
     let mut entries = String::new();
@@ -421,7 +443,7 @@ export const routes: AppRoute[] = [
 
 /// The first table owns `/`; the rest get `/<table>`. An app whose only table is
 /// `tasks` should not open on an empty index page.
-fn route_path(table: &str, tables: &[Table]) -> String {
+fn route_path(table: &str, tables: &[&Table]) -> String {
     if tables.first().is_some_and(|t| t.name == table) {
         "/".to_owned()
     } else {
@@ -435,30 +457,14 @@ fn route_path(table: &str, tables: &[Table]) -> String {
 /// This is what "generate against the app's *actual* tables" buys — the app comes
 /// up showing real rows in real columns, so the admin's first act is editing
 /// working code rather than replacing a placeholder.
-fn page_tsx(table: &Table) -> String {
+fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     let pascal = pascal(&table.name);
     let row_type = format!("{pascal}Row");
-    let editable = single_pk(table).is_some();
-    // Primary-key columns get no input. A v2 table's key is a
-    // database-generated identity, so offering a control for it would invite an
-    // insert that fights the database for the value — and the catalog does not
-    // record "generated" as a property, so "is it the key?" is the honest
-    // question available. A table with an admin-supplied key is the case this
-    // gets wrong, and the fix is to edit the page, which is the admin's file.
-    let inputs: Vec<&sc_catalog::DataField> =
-        table.fields.iter().filter(|f| !f.primary_key).collect();
+    // What the page may do is what the app's API offers, not what the table looks
+    // like: a table the app declares but does not expose has no hooks to call.
+    let can_create = has_op(endpoints, "create", &table.name);
+    let can_delete = has_op(endpoints, "delete", &table.name);
 
-    // The create form's state: one entry per writable field.
-    let empty_form = inputs
-        .iter()
-        .map(|f| format!("  {}: {}", f.base.name, ts_empty(f)))
-        .collect::<Vec<_>>()
-        .join(",\n");
-    let form_fields = inputs
-        .iter()
-        .map(|f| form_control(&f.base.name, basic_type(f)))
-        .collect::<Vec<_>>()
-        .join("\n");
     let headers = table
         .fields
         .iter()
@@ -477,54 +483,49 @@ fn page_tsx(table: &Table) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut imports = format!("import {{ use{pascal}, useCreate{pascal}");
-    if editable {
-        imports.push_str(&format!(", useDelete{pascal}"));
+    // Imports, hooks and state are assembled rather than templated, because a
+    // page that imports a hook it does not call — or declares state it does not
+    // use — fails the project's own type-check (`noUnusedLocals`), in generated
+    // code the admin never wrote.
+    let mut hook_imports = format!("use{pascal}");
+    if can_create {
+        hook_imports.push_str(&format!(", useCreate{pascal}"));
     }
-    imports.push_str(&format!(
-        ", type {row_type} }} from \"../saltcorn/hooks\";\n"
+    if can_delete {
+        hook_imports.push_str(&format!(", useDelete{pascal}"));
+    }
+
+    let mut head = String::new();
+    if can_create {
+        head.push_str("import { useState } from \"react\";\n");
+    }
+    head.push_str(&format!(
+        "import {{ {hook_imports}, type {row_type} }} from \"../saltcorn/hooks\";\n"
     ));
 
-    let delete_column = if editable {
-        "            <th />\n".to_owned()
-    } else {
-        String::new()
-    };
-    let delete_cell = if editable {
-        let pk = single_pk(table).unwrap_or_default();
-        format!(
-            r#"              <td>
-                <button onClick={{() => void remove.run(row.{pk})}}>Delete</button>
-              </td>
-"#
-        )
-    } else {
-        String::new()
-    };
-    let delete_hook = if editable {
-        format!("  const remove = useDelete{pascal}();\n")
-    } else {
-        String::new()
-    };
-
-    format!(
-        r#"import {{ useState }} from "react";
-{imports}
-const empty = {{
-{empty_form}
-}};
-
-export default function {pascal}Page() {{
-  const {{ data, loading, error }} = use{pascal}();
-  const create = useCreate{pascal}();
-{delete_hook}  const [form, setForm] = useState(empty);
-
-  if (error) return <p className="sc-error">{{error.message}}</p>;
-
-  return (
-    <section>
-      <h1>{title}</h1>
-      <form
+    let (empty_const, create_form) = if can_create {
+        // Primary-key columns get no input. A v2 table's key is a
+        // database-generated identity, so offering a control for it would invite
+        // an insert that fights the database for the value — and the catalog does
+        // not record "generated" as a property, so "is it the key?" is the honest
+        // question available. A table with an admin-supplied key is the case this
+        // gets wrong, and the fix is to edit the page, which is the admin's file.
+        let inputs: Vec<&sc_catalog::DataField> =
+            table.fields.iter().filter(|f| !f.primary_key).collect();
+        let empty_form = inputs
+            .iter()
+            .map(|f| format!("  {}: {}", f.base.name, ts_empty(f)))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let form_fields = inputs
+            .iter()
+            .map(|f| form_control(&f.base.name, basic_type(f)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (
+            format!("\nconst empty = {{\n{empty_form}\n}};\n"),
+            format!(
+                r#"      <form
         className="card"
         onSubmit={{(e) => {{
           e.preventDefault();
@@ -537,7 +538,47 @@ export default function {pascal}Page() {{
         </button>
         {{create.error && <p className="sc-error">{{create.error.message}}</p>}}
       </form>
-      {{loading && !data ? (
+"#
+            ),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
+    let mut hooks = format!("  const {{ data, loading, error }} = use{pascal}();\n");
+    if can_create {
+        hooks.push_str(&format!("  const create = useCreate{pascal}();\n"));
+        hooks.push_str("  const [form, setForm] = useState(empty);\n");
+    }
+    if can_delete {
+        hooks.push_str(&format!("  const remove = useDelete{pascal}();\n"));
+    }
+
+    let (delete_column, delete_cell) = if can_delete {
+        let pk = single_pk(table).unwrap_or_default();
+        (
+            "            <th />\n".to_owned(),
+            format!(
+                r#"              <td>
+                <button onClick={{() => void remove.run(row.{pk})}}>Delete</button>
+              </td>
+"#
+            ),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
+    format!(
+        r#"{head}{empty_const}
+export default function {pascal}Page() {{
+{hooks}
+  if (error) return <p className="sc-error">{{error.message}}</p>;
+
+  return (
+    <section>
+      <h1>{title}</h1>
+{create_form}      {{loading && !data ? (
         <p>Loading…</p>
       ) : (
         <table>
@@ -561,6 +602,12 @@ export default function {pascal}Page() {{
 "#,
         title = title(&table.name)
     )
+}
+
+/// Whether the app's API exposes `op` on `table` — the single question every
+/// "should this be generated?" decision here reduces to.
+fn has_op(endpoints: &EndpointSet, op: &str, table: &str) -> bool {
+    endpoints.find(&op_name(op, table)).is_some()
 }
 
 /// A labelled input bound into the create form's state, typed by the column.
@@ -756,7 +803,7 @@ th {
 /// mutation of that table, with `useSyncExternalStore` re-running the affected
 /// queries. That is the whole invalidation model a per-table REST API needs, and
 /// it is why no query library is a dependency.
-fn hooks_ts(tables: &[Table]) -> String {
+fn hooks_ts(tables: &[Table], endpoints: &EndpointSet) -> String {
     let mut out = String::from(GENERATED_HEADER);
     out.push_str(
         r#"
@@ -877,16 +924,21 @@ export function useMutation<A>(table: string, fn: (arg: A) => Promise<unknown>):
 "#,
     );
 
-    for table in tables {
+    for table in exposed_tables(tables, endpoints) {
         out.push('\n');
-        out.push_str(&table_hooks(table));
+        out.push_str(&table_hooks(table, endpoints));
     }
     out
 }
 
 /// The hooks for one table: its row type, the list query, and one mutation per
-/// write the REST projection actually offers.
-fn table_hooks(table: &Table) -> String {
+/// write **the app's API actually projects**.
+///
+/// Each hook is emitted only when the client has the method it calls. Asking the
+/// endpoint set rather than re-deriving the rule (a keyless table has no
+/// row-addressed endpoints, an unexposed table has none at all) is what keeps the
+/// two halves of the runtime from disagreeing.
+fn table_hooks(table: &Table, endpoints: &EndpointSet) -> String {
     let name = &table.name;
     let pascal = pascal(name);
     let row = format!("{pascal}Row");
@@ -906,7 +958,6 @@ fn table_hooks(table: &Table) -> String {
         .join("\n");
 
     let list = op_name("list", name);
-    let create = op_name("create", name);
     let mut out = format!(
         r#"// --- {name} ---
 
@@ -919,25 +970,30 @@ export type {row} = {{
 export function use{pascal}(): Query<{row}[]> {{
   return useQuery("{name}", () => api.{list}() as Promise<{row}[]>);
 }}
+"#
+    );
 
+    if has_op(endpoints, "create", name) {
+        let create = op_name("create", name);
+        out.push_str(&format!(
+            r#"
 /** Insert a row into `{name}`. */
 export function useCreate{pascal}(): Mutation<Partial<{row}>> {{
   return useMutation("{name}", (body) => api.{create}(body));
 }}
 "#
-    );
+        ));
+    }
 
-    // Row-addressed operations exist only when the table has a single-column
-    // primary key — the same rule the REST projection applies, so the hooks and
-    // the endpoints cannot disagree about what is addressable.
+    // Row-addressed operations: the API projects these only for a table with a
+    // single-column primary key, so the hooks follow the endpoints rather than
+    // re-deciding it.
     if let Some(pk) = single_pk(table) {
         let pk_ty = table
             .fields
             .iter()
             .find(|f| f.base.name == pk)
             .map_or("string", |f| ts_type(basic_type(f)));
-        let update = op_name("update", name);
-        let delete = op_name("delete", name);
         out.push_str(&format!(
             r#"
 /** One row of `{name}`, selected from the list by its primary key. */
@@ -945,18 +1001,30 @@ export function use{pascal}Row(id: {pk_ty}): Query<{row} | undefined> {{
   const rows = use{pascal}();
   return {{ ...rows, data: rows.data?.find((r) => r.{pk} === id) }};
 }}
-
+"#
+        ));
+        if has_op(endpoints, "update", name) {
+            let update = op_name("update", name);
+            out.push_str(&format!(
+                r#"
 /** Replace a row of `{name}`. */
 export function useUpdate{pascal}(): Mutation<{{ id: {pk_ty}; body: Partial<{row}> }}> {{
   return useMutation("{name}", ({{ id, body }}) => api.{update}(id, body));
 }}
-
+"#
+            ));
+        }
+        if has_op(endpoints, "delete", name) {
+            let delete = op_name("delete", name);
+            out.push_str(&format!(
+                r#"
 /** Delete a row of `{name}`. */
 export function useDelete{pascal}(): Mutation<{pk_ty}> {{
   return useMutation("{name}", (id) => api.{delete}(id));
 }}
 "#
-        ));
+            ));
+        }
     }
     out
 }
@@ -1124,7 +1192,7 @@ mod tests {
     #[test]
     fn hooks_are_typed_per_table_from_the_apps_own_columns() {
         let tables = [tasks()];
-        let hooks = hooks_ts(&tables);
+        let hooks = hooks_ts(&tables, &endpoints(&tables));
         // The row type is this app's columns, with nullability from the schema —
         // the thing an npm package could not have contained (§2.1).
         assert!(hooks.contains("export type TasksRow = {"), "{hooks}");
@@ -1148,7 +1216,7 @@ mod tests {
         // `TS6133`, in generated code the admin never wrote, on their first build.
         // Exporting them is also honest: an app adding a custom endpoint should be
         // able to join this cache rather than build a second one beside it.
-        let empty = hooks_ts(&[]);
+        let empty = hooks_ts(&[], &EndpointSet::new());
         for declaration in ["function useQuery", "function useMutation"] {
             assert!(
                 empty.contains(&format!("export {declaration}")),
@@ -1160,7 +1228,7 @@ mod tests {
         // helpers use it, in every table set — so the check is "is it referenced
         // at all", which is exactly what `noUnusedLocals` asks.
         for tables in [vec![], vec![tasks()]] {
-            let hooks = hooks_ts(&tables);
+            let hooks = hooks_ts(&tables, &endpoints(&tables));
             for line in hooks.lines() {
                 let Some(name) = line
                     .strip_prefix("function ")
@@ -1194,13 +1262,14 @@ mod tests {
         keyless.primary_key.clear();
         keyless.fields.retain(|f| !f.primary_key);
         let tables = [keyless];
-        let hooks = hooks_ts(&tables);
+        let eps = endpoints(&tables);
+        let hooks = hooks_ts(&tables, &eps);
         assert!(hooks.contains("export function useEvents()"));
         assert!(hooks.contains("useCreateEvents"));
         assert!(!hooks.contains("useUpdateEvents"), "{hooks}");
         assert!(!hooks.contains("useDeleteEvents"), "{hooks}");
         // The page for it must not reach for the delete hook either.
-        let page = page_tsx(&tables[0]);
+        let page = page_tsx(&tables[0], &eps);
         assert!(!page.contains("useDeleteEvents"), "{page}");
     }
 
@@ -1212,7 +1281,9 @@ mod tests {
             t.id = TableId("notes".to_owned());
             t
         }];
-        let routes = routes_tsx(&tables);
+        let eps = endpoints(&tables);
+        let exposed = exposed_tables(&tables, &eps);
+        let routes = routes_tsx(&exposed, &eps);
         // The first table owns `/`; later ones get their own path.
         assert!(routes.contains(r#"{ path: "/", label: "Tasks", element: <TasksPage /> }"#));
         assert!(routes.contains(r#"{ path: "/notes", label: "Notes", element: <NotesPage /> }"#));
@@ -1225,7 +1296,8 @@ mod tests {
     fn a_create_form_omits_database_generated_keys() {
         // `id` is `generated by default as identity`: offering an input for it
         // would invite an insert that fights the database for the key.
-        let page = page_tsx(&tasks());
+        let tables = [tasks()];
+        let page = page_tsx(&tables[0], &endpoints(&tables));
         assert!(!page.contains("form.id"), "{page}");
         assert!(page.contains("form.title"), "{page}");
         // A boolean column gets a checkbox, not a text box.

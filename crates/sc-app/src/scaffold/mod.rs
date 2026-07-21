@@ -69,6 +69,7 @@ impl ScaffoldReport {
 /// the project directory already has anything in it.
 pub async fn scaffold_app(cat: &Catalog, app: &Application) -> Result<ScaffoldReport> {
     require_scaffoldable(app)?;
+    require_api_provider(app)?;
     let source = app_source_from_config(&app.framework)?;
     let project = source.build.source_dir.clone();
 
@@ -127,6 +128,32 @@ pub fn require_scaffoldable(app: &Application) -> Result<()> {
     )))
 }
 
+/// A React app must enable at least one API provider.
+///
+/// Its whole data layer is generated from the app's endpoint set: no provider
+/// means an empty `ApiClient`, and the login screen and every hook call methods
+/// that do not exist. Left to run, that surfaces as a wall of TypeScript errors
+/// in generated files — the real report that prompted this check had eleven, none
+/// of which named the actual mistake, and all of which pointed at code the admin
+/// never wrote.
+///
+/// So it is refused **before** anything is generated or installed, in the
+/// admin's own vocabulary: the thing to fix is an empty APIs list on the
+/// application, not a type error in `hooks.ts`.
+pub fn require_api_provider(app: &Application) -> Result<()> {
+    if !app.apis.is_empty() {
+        return Ok(());
+    }
+    Err(Error::config(format!(
+        "application `{}` enables no API provider, so it has no endpoints for its \
+         React client to call — its pages could not read or write anything. Add an \
+         API to the application (the `{}` provider mounted at `/api` is the usual \
+         choice) and try again",
+        app.name,
+        sc_api::REST_PROVIDER
+    )))
+}
+
 /// Rewrite the generated runtime (`src/saltcorn/`) for `app`, leaving every other
 /// file alone.
 ///
@@ -140,6 +167,10 @@ pub async fn emit_react_runtime(
     app: &Application,
     source: &AppSource,
 ) -> Result<Vec<String>> {
+    // Checked here as well as at scaffold time, because this is the path an
+    // application saved before the check existed arrives on — and a build that
+    // fails with the reason beats one that fails with its consequences.
+    require_api_provider(app)?;
     let project = &source.build.source_dir;
     let store = cat.require_file_store(&source.store.0)?;
     let tables = app_tables(app, cat)?;

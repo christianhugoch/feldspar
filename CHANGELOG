@@ -4,15 +4,46 @@ Changes in reverse chronological order.
 
 ## A scaffolded app that would not build, and the tools that should have caught it (TODO §2.6)
 
-Reported from an actual run of the tutorial. **An application with no tables did not build**:
-its generated `hooks.ts` declared the shared `useQuery`/`useMutation` that the per-table hooks
-sit on, nothing called them, and `noUnusedLocals` failed the build with `TS6133` — a TypeScript
-error in code the admin never wrote, on their first Build. Creating the application before its
-data model is an ordinary order to work in, so this was not an edge case.
+Reported from an actual run of the tutorial: a scaffolded application failed its build with
+eleven TypeScript errors in generated files — `Property 'listTasks' does not exist on type
+'ApiClient'`, and similar for `login`, `logout`, `whoami` — none of which named what was
+actually wrong.
 
-Both helpers are now **exported**, which fixes it and is the more honest shape anyway: an app
-that adds a custom endpoint should be able to join the same cache rather than build a second one
-beside it.
+**The cause: the application enabled no API provider.** With an empty `apis` list its endpoint
+set is empty, so the generated client has no methods, while the hooks and the login screen call
+them. The admin's mistake was one empty field in the create form; what they were shown was a
+wall of type errors in code they never wrote, pointing at three files that were all doing
+exactly what they were told.
+
+Three changes, in increasing order of how much they matter:
+
+- **A React app with no API provider is refused up front**, at scaffold *and* at build, in the
+  admin's own vocabulary: "enables no API provider … add the `rest` provider mounted at `/api`".
+  This framework's whole data layer is generated from the app's endpoints, so an app without one
+  cannot work, and it should hear that before npm runs rather than after `tsc`.
+- **A new application now defaults to `rest` at `/api`** in the create form, so the state is
+  hard to reach at all. It is a row like any other; removing it stays one click.
+- **Generation is driven by the endpoint set, not the table list.** Pages, routes and hooks are
+  emitted per *exposed* table, and each hook only when the client actually has the method it
+  calls. The two halves of the runtime used to agree by coincidence — both re-derived "what can
+  this app do?" from the tables, in the same way — and now they agree structurally, because one
+  of them is computed from the other's input.
+
+**A second bug, found while testing the first.** An application with **no tables** — created
+before its data model, an ordinary order to work in — produced a `hooks.ts` whose shared
+`useQuery`/`useMutation` were never called, so `noUnusedLocals` failed with `TS6133`. Both are
+now exported, which is also the more honest shape: an app that adds a custom endpoint should
+join the same cache rather than build a second one beside it. `generate_client` got the same
+treatment — an empty endpoint set now emits a client with no unused helpers instead of three
+dead declarations.
+
+Both bugs were the same bug wearing different clothes: something generated from one source of
+truth, something else from another, kept in agreement only by two pieces of code that reasoned
+alike. That is the shape of every "the generated X calls a Y that does not exist" failure, and
+it is the arrangement that was worth fixing rather than the two symptoms.
+
+Verified against the reporter's own database as well as in tests: `saltcorn build-app myapp
+--database-url …` now takes their real project through install, type-check and bundle.
 
 **Why no test caught it.** Every test around the scaffold either asserted the generated *text*
 or stubbed the toolchain, and the one real `npm install` + `vite build` was behind an opt-in

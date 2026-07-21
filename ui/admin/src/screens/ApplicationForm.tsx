@@ -81,7 +81,11 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   const [config, setConfig] = useState<Record<string, string>>({});
   const [tables, setTables] = useState("");
   const [fileStores, setFileStores] = useState("");
-  const [apis, setApis] = useState<ApiRow[]>([]);
+  // A new application starts with REST at `/api`. An app with no API has no
+  // endpoints, which for a React app means a generated client with no methods and
+  // a project that cannot compile — and for any app means a UI that cannot reach
+  // its data. It is a row like any other, so removing it stays one click.
+  const [apis, setApis] = useState<ApiRow[]>([{ provider: "rest", mount: "/api" }]);
   const [staticDirs, setStaticDirs] = useState<StaticRow[]>([]);
   // Empty by default: a new app takes its framework's policy (§2.2) unless the
   // admin states one. Editing an app fills this in from what was stored.

@@ -54,6 +54,19 @@ pub fn generate_client(set: &EndpointSet) -> String {
     out.push_str("  fetch?: typeof fetch;\n");
     out.push_str("}\n\n");
 
+    // Everything below exists to *make* requests, so an endpoint set with nothing
+    // in it emits none of it. This is not a curiosity: an application that
+    // enables no API provider has an empty set, and a generated file whose
+    // helpers are declared and never called fails the consumer's own type-check
+    // under `noUnusedLocals` — an error in generated code, about generated code,
+    // for a mistake made somewhere else entirely.
+    if set.is_empty() {
+        out.push_str(
+            "export function createClient(_options: ClientOptions = {}): ApiClient {\n             \x20 // This application enables no API provider, so it has no endpoints.\n             \x20 return {};\n             }\n",
+        );
+        return out;
+    }
+
     // A shared error builder so a failed request carries the server's own message
     // (the `{ "error": ... }` body every endpoint returns), not just its status —
     // this is what lets a caller surface, e.g., a failed build's bundler

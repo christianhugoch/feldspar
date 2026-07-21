@@ -68,7 +68,8 @@ pub use react::{
     react_client_path, react_config_spec, react_csp, react_runtime_dir, valid_project_name,
 };
 pub use scaffold::{
-    GeneratedFile, ScaffoldReport, emit_react_runtime, require_scaffoldable, scaffold_app,
+    GeneratedFile, ScaffoldReport, emit_react_runtime, require_api_provider, require_scaffoldable,
+    scaffold_app,
 };
 pub use store::{
     applications_using_file_store, delete_application, list_applications, load_application,

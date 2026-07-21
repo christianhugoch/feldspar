@@ -501,12 +501,28 @@ them.
   + `tsc --noEmit` + `vite build`, asserting the served index is a *bundled* one. It **skips
   only when `npm` is absent**, deliberately not behind an opt-in variable: §2.3's `SC_TEST_NPM`
   gate is why this bug shipped, since an opt-in test is one nobody runs
-- [x] **The bug, found and fixed.** An application with **no tables** — created before its
-  data model, an ordinary order to work in — generated a `hooks.ts` whose shared
-  `useQuery`/`useMutation` were never called, so `noUnusedLocals` failed the build with
-  `TS6133` *in generated code the admin never wrote*. Both are now exported, which is also the
-  honest shape: an app adding a custom endpoint should be able to join the same cache rather
-  than build a second one beside it
+- [x] **Bug 1 — an application with no API provider.** The reported failure: eleven TypeScript
+  errors across `auth.tsx`, `client.ts` and `hooks.ts` (`TS2339: Property 'listTasks' does not
+  exist on type 'ApiClient'`), none of which named the actual mistake — an empty APIs list on
+  the application. With no provider the app's endpoint set is empty, so the generated client
+  has no methods while the hooks and login screen call them. Three changes, in order of how
+  much they matter:
+  - **Refused up front**, at scaffold *and* at build (`require_api_provider`), in the admin's
+    vocabulary: "enables no API provider … add the `rest` provider mounted at `/api`". A React
+    app's entire data layer is generated from its endpoints, so an app without one cannot work
+    and should be told so before npm runs
+  - **New applications default to `rest` at `/api`** in the create form, so the state is hard
+    to reach at all. It is a row like any other; removing it stays one click
+  - **Generation is now driven by the endpoint set, not the table list.** Pages, routes and
+    hooks are emitted per *exposed* table, and each hook only when the client has the method it
+    calls. The two halves of the runtime previously agreed by coincidence — both re-derived
+    "what can this app do?" the same way — and this makes the agreement structural
+- [x] **Bug 2 — an application with no tables.** Its `hooks.ts` declared the shared
+  `useQuery`/`useMutation` that per-table hooks sit on, nothing called them, and
+  `noUnusedLocals` failed the build with `TS6133`. Both are now exported, which is also the
+  honest shape: an app adding a custom endpoint should join the same cache rather than build a
+  second one beside it. `generate_client` gained the same treatment — an empty endpoint set
+  emits a client with no unused helpers rather than three dead declarations
 - [x] Regression guarded at unit level too (`the_runtime_declares_nothing_it_does_not_export`),
   so the fix holds where `npm` is unavailable. It checks the general rule rather than the two
   names: with any table set, every privately-declared thing in the runtime must be referenced
@@ -514,9 +530,20 @@ them.
   covering the argument errors everywhere and the full build where `npm` exists
 
 **The lesson worth keeping.** The scaffold's tests asserted what the generator *wrote*, and
-what it wrote was right; the failure was in what a compiler made of it, for a table set no test
-used. Generated code needs a test that runs the generator's own toolchain over the shapes real
-input takes — and that test has to run by default, or it does not exist.
+what it wrote was right; the failure was in what a compiler made of it, for an application
+shape no test used. Generated code needs a test that runs the generator's own toolchain over
+the shapes real input takes — and that test has to run by default, or it does not exist.
+
+**And the second-order lesson**, which is the more useful one: both bugs were the *same* bug.
+Something was generated from one source of truth (the tables) and something else from another
+(the endpoints), and they were kept in agreement by two pieces of code that happened to reason
+alike. Every "the generated X calls a Y that does not exist" failure has that shape, so the fix
+worth making was not the two symptoms but the arrangement — one value in, everything derived
+from it.
+
+**Verified against the reporter's own database**, not only in tests: `saltcorn build-app myapp
+--database-url …` now runs their app's real project through install, type-check and bundle,
+and reports `built 3 files into …/dist`.
 
 ---
 

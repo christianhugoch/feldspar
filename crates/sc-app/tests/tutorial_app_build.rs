@@ -159,6 +159,58 @@ async fn the_tutorial_app_scaffolds_installs_type_checks_builds_and_serves() -> 
     Ok(())
 }
 
+/// An application that declares tables but **enables no API provider**.
+///
+/// Reported from a real run: the app's endpoint set is then empty, so the
+/// generated client has no methods — while the hooks and the login screen call
+/// them. `tsc` produced eleven errors in generated files, none of which named the
+/// actual mistake (an empty APIs list in the create form), and all of which
+/// pointed at code the admin never wrote.
+///
+/// A React app with no API cannot reach data at all, which is the whole point of
+/// this framework, so the build must say *that* — early, before npm runs.
+#[tokio::test]
+async fn an_app_with_no_api_provider_is_told_so_not_shown_typescript_errors() -> sc_error::Result<()>
+{
+    let db = TestDb::new().await?;
+    let cat = tutorial_catalog(&db).await?;
+    let tmp = TempDir::new("noapi")?;
+    cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+
+    // Exactly the shape that failed: a table, a store, and no `apis` row.
+    let app = Application::new(
+        "Todo",
+        "todo",
+        FrameworkRef::new("react")
+            .with("store", "apps")
+            .with("project", "todo"),
+    )
+    .with_table(TableId("tasks".to_owned()))
+    .with_file_store(FileStoreId("apps".to_owned()));
+
+    let err = scaffold_app(&cat, &app)
+        .await
+        .expect_err("a react app with no API cannot work")
+        .to_string();
+    // The message names the mistake and the fix, in the admin's vocabulary.
+    assert!(err.contains("API"), "{err}");
+    assert!(err.contains("rest"), "should name a provider to add: {err}");
+    assert!(!err.contains("TS2339"), "{err}");
+    // Nothing was written: a project that cannot work is not left behind to be
+    // scaffolded *around* later.
+    assert!(!tmp.path().join("todo/package.json").exists());
+
+    // The same refusal from the build path, which is where an app saved before
+    // this check existed arrives.
+    let source = app_source_from_config(&app.framework)?;
+    let err = build_application(&cat, &app, &source)
+        .await
+        .expect_err("the build cannot succeed either")
+        .to_string();
+    assert!(err.contains("API"), "{err}");
+    Ok(())
+}
+
 /// The same path, for the app shapes an admin produces that the tutorial does
 /// not: no tables at all, a table whose rows are not addressable, and column
 /// types beyond text and boolean.
