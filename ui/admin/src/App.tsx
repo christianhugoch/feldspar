@@ -162,9 +162,16 @@ function Screen({ route }: { route: string }) {
   if (route.startsWith("/file-stores")) {
     return <FileStores />;
   }
-  const filesMatch = route.match(/^\/files\/([^/]+)$/);
+  // `/files/<store>` opens at the root; `/files/<store>/<dir>` opens in a
+  // directory, which is what an application row links to (§2.4).
+  const filesMatch = route.match(/^\/files\/([^/]+)(?:\/(.*))?$/);
   if (filesMatch) {
-    return <FileManager store={decodeURIComponent(filesMatch[1])} />;
+    const dir = (filesMatch[2] ?? "")
+      .split("/")
+      .filter((s) => s.length > 0)
+      .map(decodeURIComponent)
+      .join("/");
+    return <FileManager store={decodeURIComponent(filesMatch[1])} initialDir={dir} />;
   }
   if (route.startsWith("/users")) {
     return <Users />;

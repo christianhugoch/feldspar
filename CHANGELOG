@@ -2,6 +2,45 @@
 
 Changes in reverse chronological order.
 
+## Two frameworks, presented as the different things they are (TODO §2.4)
+
+The admin SPA now offers React and `code` as a radio card each — a name, and a sentence saying
+who it is for — instead of two equal names in a dropdown. Picking React shows two settings and
+picking `code` shows five, which needed no code at all: the spec is the branch.
+
+**The interesting constraint was doing this without the screen knowing which framework is
+which.** Presenting React as the path to take and `code` as the escape hatch is editorial, and
+the obvious implementation — special-case the name `react` in the SPA — would undo §13.3's
+whole arrangement the moment a third framework, or one supplied by a guest language, arrived.
+So the editorial content moved to where the ordering already lived: `FrameworkInfo { name,
+label, description }` in the registry, surfaced by `listFrameworks`. The picker renders what it
+is told, in the order it is told, and a new application starts on whatever is offered first.
+
+**The app row now links into the file manager at the app's source**, because the loop an admin
+actually works in is edit-file → build → view. Where the source *is* comes from the server as a
+derived `source: { store, path }` on the application JSON — a `code` app states it in five
+settings and a `react` app derives it from one, and the screen should know neither. The files
+route grew an optional directory: `/files/<store>/<dir>`.
+
+**A scaffold's outcome reuses the build banner.** The scaffold happens on the create form,
+which navigates away immediately, so a one-shot `notice.ts` hands the message to the list
+screen rather than growing a second banner on a screen about to unmount. To an admin a scaffold
+and a build are the same kind of news about the same app, so they get the same banner —
+including the case where the application was created but its project was not.
+
+**A bug this uncovered, and it would have been quiet.** The form pre-filled the CSP box with
+`default-src: 'self'` and always sent it, so *every* app overrode its framework's default
+policy with the bare baseline — §2.2's react CSP was reachable by API and unreachable from the
+UI that is supposed to be the only configuration path. The box now starts empty, means "no
+opinion", and is omitted from the request when blank.
+
+**Verified live rather than only in tests.** Against a running server: create a React app from
+two fields → 14 files scaffolded → Build → `npm install` + `tsc --noEmit` + `vite build` in
+about three seconds → the app serving on its subdomain with the full React policy
+(`connect-src 'self'`, `img-src 'self' data:`, no `unsafe-*`), deep links resolving to the SPA
+entry point, and its REST API refusing an anonymous caller. That is the tutorial's entire path
+with the SSH session removed — which is what Phase 2 was for.
+
 ## The server writes the app: React scaffolding (TODO §2.3)
 
 Creating a React application now generates its whole project into the file store — on the

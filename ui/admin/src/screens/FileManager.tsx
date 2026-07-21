@@ -53,8 +53,15 @@ function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
-export function FileManager({ store }: { store: string }) {
-  const [dir, setDir] = useState("");
+export function FileManager({
+  store,
+  initialDir = "",
+}: {
+  store: string;
+  /** The directory to open in; `""` is the store root. */
+  initialDir?: string;
+}) {
+  const [dir, setDir] = useState(initialDir);
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -77,8 +84,8 @@ export function FileManager({ store }: { store: string }) {
   );
 
   useEffect(() => {
-    void load("");
-  }, [load]);
+    void load(initialDir);
+  }, [load, initialDir]);
 
   /** Run a mutating action, then refresh — the shape every action here shares. */
   const act = async (what: string, run: () => Promise<unknown>) => {

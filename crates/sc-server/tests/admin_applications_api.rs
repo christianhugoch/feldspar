@@ -278,6 +278,9 @@ async fn applications_are_managed_over_http_and_serve_without_a_restart() -> sc_
     let (_, list) = admin.send("GET", "/api/applications", None).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["csp"]["default-src"], json!(["'self'"]));
+    // A `code` app states its source in five settings; the listing still reports
+    // it in one shape, which is the whole point of deriving it server-side.
+    assert_eq!(list[0]["source"], json!({ "store": "apps", "path": "web" }));
 
     // Saved but unbuilt: the subdomain does not serve the app yet.
     let mut app = Client::new(router.clone(), APP_HOST);
@@ -383,6 +386,25 @@ async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> s
         .collect();
     assert_eq!(names, ["react", "code"]);
 
+    // Each carries the label and the sentence the picker shows. Without these the
+    // admin UI could only distinguish the two by special-casing the name `react`,
+    // which is exactly the per-framework knowledge §13.3 keeps out of the screens.
+    for f in frameworks.as_array().unwrap() {
+        assert!(!f["label"].as_str().unwrap_or_default().is_empty(), "{f}");
+        assert!(
+            f["description"].as_str().unwrap_or_default().len() > 20,
+            "{f}"
+        );
+    }
+    assert_eq!(frameworks[0]["label"], json!("React"));
+    // The escape hatch says so in its own name.
+    assert!(
+        frameworks[1]["label"]
+            .as_str()
+            .unwrap()
+            .contains("bring your own")
+    );
+
     // Two settings, both required — the short form §2.4 renders.
     let react = &frameworks[0];
     let spec = react["config_spec"].as_array().unwrap();
@@ -441,6 +463,12 @@ async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> s
         "{created}"
     );
     assert!(created["scaffold_error"].is_null(), "{created}");
+    // The row says where its source is, derived server-side — which is what lets
+    // the applications list link into the file manager at an app's source with no
+    // framework-specific code in the screen (§2.4).
+    assert_eq!(created["source"]["store"], json!("apps"));
+    assert_eq!(created["source"]["path"], json!("todo"));
+
     let project = tmp.path().join("todo");
     assert!(project.join("package.json").is_file());
     assert!(project.join("src/saltcorn/hooks.ts").is_file());

@@ -220,7 +220,53 @@ pub fn code_config_spec() -> Vec<FormField> {
 /// This is the single place that enumerates them, so a new framework is listed by
 /// adding it here (and to [`framework_config_spec`]).
 pub fn registered_frameworks() -> Vec<String> {
-    vec![REACT_FRAMEWORK.to_owned(), CODE_FRAMEWORK.to_owned()]
+    registered_framework_info()
+        .into_iter()
+        .map(|f| f.name)
+        .collect()
+}
+
+/// How a framework presents itself to an admin choosing one: a human name and a
+/// sentence saying who it is for.
+///
+/// This exists so the admin UI can show two frameworks as the *different
+/// propositions they are* — React the path to take, `code` the escape hatch —
+/// without containing any knowledge of either. The alternative was a screen that
+/// special-cases the name `react`, which would undo §13.3's whole arrangement the
+/// moment a third framework (or one from a guest language) arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkInfo {
+    /// The registry key, as used in a [`FrameworkRef`](crate::FrameworkRef).
+    pub name: String,
+    /// A human-facing name.
+    pub label: String,
+    /// One sentence: what this framework does for the admin, and what it asks of
+    /// them in return.
+    pub description: String,
+}
+
+/// Every registered framework with its presentation, in the order an admin
+/// should be offered them — the single place both the list and the editorial
+/// ordering live.
+pub fn registered_framework_info() -> Vec<FrameworkInfo> {
+    vec![
+        FrameworkInfo {
+            name: REACT_FRAMEWORK.to_owned(),
+            label: "React".to_owned(),
+            description: "Saltcorn creates the project, generates a typed client and \
+                          hooks for your tables, installs its dependencies and builds \
+                          it. Pick a file store and a name."
+                .to_owned(),
+        },
+        FrameworkInfo {
+            name: CODE_FRAMEWORK.to_owned(),
+            label: "Code (bring your own build)".to_owned(),
+            description: "Any bundler, any layout. You create the project and state \
+                          where its source, output and build command are — for a \
+                          project React's conventions do not fit."
+                .to_owned(),
+        },
+    ]
 }
 
 /// The settings the framework registered under `name` declares — the registry

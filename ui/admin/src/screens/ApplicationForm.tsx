@@ -24,6 +24,7 @@ import type {
   ListFrameworksResponse,
 } from "../client";
 import { navigate } from "../App";
+import { setNotice } from "../notice";
 import { SettingsFields, asString, buildConfig, readConfig } from "../settings";
 
 type FrameworkInfo = ListFrameworksResponse[number];
@@ -82,7 +83,9 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   const [fileStores, setFileStores] = useState("");
   const [apis, setApis] = useState<ApiRow[]>([]);
   const [staticDirs, setStaticDirs] = useState<StaticRow[]>([]);
-  const [csp, setCsp] = useState("default-src: 'self'");
+  // Empty by default: a new app takes its framework's policy (§2.2) unless the
+  // admin states one. Editing an app fills this in from what was stored.
+  const [csp, setCsp] = useState("");
 
   // Load the frameworks (always) and, when editing, the app to prefill.
   useEffect(() => {
@@ -150,13 +153,35 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         file_stores: parseNames(fileStores),
         apis: apis.filter((a) => a.provider.trim() || a.mount.trim()),
         static_dirs: staticDirs.filter((d) => d.mount.trim() || d.path.trim()),
-        csp: textToCsp(csp),
+        // An empty box means "no opinion", and is sent as no field at all so the
+        // *framework's* default policy applies (§2.2) — a React app gets the one
+        // fitted to what Vite emits. Sending `default-src 'self'` because a
+        // textarea was pre-filled would silently overrule that.
+        csp: csp.trim() ? textToCsp(csp) : undefined,
         attributes: {},
       };
       if (appId) {
         await api.updateApplication(appId, body);
       } else {
-        await api.createApplication(body);
+        const created = await api.createApplication(body);
+        // Creating a React application also creates its project on the server
+        // (§2.3). That is news the admin should see, and so is a scaffold that
+        // was refused — on an application that was still created, because the row
+        // is valid either way. The list screen owns the banner, so the message is
+        // handed to it rather than shown here on a screen about to unmount.
+        if (created.scaffold_error) {
+          setNotice({
+            ok: false,
+            title: `Application created, but its project was not — ${created.name}`,
+            text: created.scaffold_error,
+          });
+        } else if (created.scaffolded) {
+          setNotice({
+            ok: true,
+            title: `Application created — ${created.name}`,
+            text: `${created.scaffolded}. Build it to install its dependencies and serve it.`,
+          });
+        }
       }
       navigate("/applications");
     } catch (err) {
@@ -224,22 +249,41 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         <Card className="mb-3">
           <Card.Header>Framework</Card.Header>
           <Card.Body>
-            <Form.Group className="mb-3" controlId="appFramework">
-              <Form.Label>Framework</Form.Label>
-              <Form.Select
-                value={frameworkName}
-                onChange={(e) => setFrameworkName(e.target.value)}
-              >
-                {frameworks.map((f) => (
-                  <option key={f.name} value={f.name}>
-                    {f.name}
-                  </option>
-                ))}
-              </Form.Select>
-            </Form.Group>
+            {/* One choice per framework, each with the name and sentence the
+                *server* supplied. Two frameworks are not two equal names in a
+                dropdown — one creates the project for you and the other hands you
+                the paths — and that difference has to reach the admin. It does so
+                as data: the label, the description and the order all come from
+                the registry (§2.2/§2.4), so this screen presents the distinction
+                without knowing which framework is which. The first offered is the
+                one an admin should take, and is what a new application starts on. */}
+            <fieldset className="mb-3">
+              <legend className="form-label">Framework</legend>
+              {frameworks.map((f) => (
+                <Form.Check
+                  key={f.name}
+                  type="radio"
+                  name="framework"
+                  id={`framework-${f.name}`}
+                  className="mb-2"
+                  checked={f.name === frameworkName}
+                  onChange={() => setFrameworkName(f.name)}
+                  label={
+                    <>
+                      <span className="fw-semibold">{f.label || f.name}</span>
+                      {f.description && (
+                        <div className="text-muted small">{f.description}</div>
+                      )}
+                    </>
+                  }
+                />
+              ))}
+            </fieldset>
 
             {/* The framework's own settings, rendered from its config_spec — no
-                framework-specific code lives here. */}
+                framework-specific code lives here. Picking the first framework
+                shows its two settings and picking the other shows five, with no
+                branch in this file: the spec is the branch. */}
             <SettingsFields
               spec={selected?.config_spec ?? []}
               values={config}
@@ -304,7 +348,10 @@ export function ApplicationForm({ appId }: { appId?: string }) {
             value={csp}
             onChange={(e) => setCsp(e.target.value)}
           />
-          <Form.Text muted>One directive per line, e.g. `default-src: 'self'`.</Form.Text>
+          <Form.Text muted>
+            One directive per line, e.g. `default-src: 'self'`. Leave empty to use
+            the framework's own default policy.
+          </Form.Text>
         </Form.Group>
 
         <Button type="submit" disabled={busy}>

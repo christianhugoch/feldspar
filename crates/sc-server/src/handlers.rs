@@ -24,9 +24,9 @@ use bytes::Bytes;
 use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
 use sc_app::{
-    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir,
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, app_source_from_config,
     applications_using_file_store, delete_application, framework_config_spec,
-    framework_default_csp, list_applications, load_application, registered_frameworks,
+    framework_default_csp, list_applications, load_application, registered_framework_info,
     require_scaffoldable, save_application, scaffold_app,
 };
 use sc_auth::{
@@ -699,10 +699,17 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let mut out = Vec::new();
-                for name in registered_frameworks() {
-                    let spec = resolve_options(&catalog, framework_config_spec(&name)?).await?;
+                // In registry order, which is itself editorial: the framework an
+                // admin should take comes first (§2.2), and each carries the
+                // label and sentence the picker shows — so the screen presents
+                // two very different propositions while knowing neither (§2.4).
+                for info in registered_framework_info() {
+                    let spec =
+                        resolve_options(&catalog, framework_config_spec(&info.name)?).await?;
                     out.push(json!({
-                        "name": name,
+                        "name": info.name,
+                        "label": info.label,
+                        "description": info.description,
                         "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
                     }));
                 }
@@ -787,7 +794,29 @@ fn application_json(app: &Application) -> Json {
         "static_dirs": app.static_dirs.iter().map(|d| json!({ "mount": d.mount, "store": d.store.0, "path": d.path })).collect::<Vec<_>>(),
         "csp": csp_json(&app.csp),
         "attributes": Json::Object(app.attributes.clone()),
+        "source": app_source_json(app),
     })
+}
+
+/// Where the app's source lives, as `{ store, path }` — or `null` for a framework
+/// with no source tree.
+///
+/// **Derived here rather than read off the config**, because how a framework
+/// spells its source is the framework's business: `code` states it in `store` +
+/// `source`, `react` derives it from `project`. Resolving it server-side is what
+/// lets the admin UI link into the file manager at an app's source with no
+/// per-framework code in the screen (§2.4). A config that does not resolve is not
+/// an error here: this is a convenience field on a row that is being listed, and
+/// the *reason* it does not resolve is reported where it belongs — on save, or on
+/// build.
+fn app_source_json(app: &Application) -> Json {
+    match app_source_from_config(&app.framework) {
+        Ok(source) => json!({
+            "store": source.store.0,
+            "path": source.build.source_dir,
+        }),
+        Err(_) => Json::Null,
+    }
 }
 
 /// A [`FrameworkRef`] as `{ name, config }`.

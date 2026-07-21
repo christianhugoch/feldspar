@@ -57,9 +57,10 @@ pub use build::{
 };
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
-    CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, InstallSpec, Method,
-    code_config_spec, framework_config_spec, framework_default_csp, registered_frameworks,
-    validate_framework_config, validate_framework_config_structure,
+    CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, FrameworkInfo, InstallSpec,
+    Method, code_config_spec, framework_config_spec, framework_default_csp,
+    registered_framework_info, registered_frameworks, validate_framework_config,
+    validate_framework_config_structure,
 };
 pub use react::{
     CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,

@@ -403,7 +403,7 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("createApplication", Method::Post, api().lit("applications"))
             .input(application_input_schema())
-            .output(application_schema())
+            .output(created_application_schema())
             .auth(AuthRequirement::admin()),
     );
 
@@ -654,10 +654,51 @@ fn application_fields() -> Vec<StructField> {
     ]
 }
 
-/// An application as returned by the API: its id plus [`application_fields`].
+/// An application as returned by the API: its id, [`application_fields`], and
+/// where its source lives.
+///
+/// `source` is **derived, not stored**: the server resolves the framework's
+/// config to a store and a directory (`app_source_from_config`), so the admin UI
+/// can link into the file manager at an app's source without knowing how any
+/// framework spells that — `code` states it in five settings and `react` derives
+/// it from one. `null` for a framework with no source tree.
 fn application_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
     fields.extend(application_fields());
+    fields.push(StructField::new(
+        "source",
+        TypeSchema::optional(app_source_schema()),
+    ));
+    TypeSchema::Struct(fields)
+}
+
+/// Where an application's source lives: a file store and a directory in it.
+fn app_source_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("store", TypeSchema::text()),
+        StructField::new("path", TypeSchema::text()),
+    ])
+}
+
+/// A freshly created application, plus what scaffolding it did (§2.3).
+///
+/// Only `create` carries these: a `react` app's project is generated on its first
+/// save, and the admin should see that it happened — or why it did not — without
+/// a second request. `scaffolded` is a summary line; `scaffold_error` explains a
+/// scaffold that was refused (an occupied directory, an unreachable store) on an
+/// application that was nonetheless created, since the row is valid either way.
+fn created_application_schema() -> TypeSchema {
+    let TypeSchema::Struct(mut fields) = application_schema() else {
+        unreachable!("application_schema is a struct")
+    };
+    fields.push(StructField::new(
+        "scaffolded",
+        TypeSchema::optional(TypeSchema::text()),
+    ));
+    fields.push(StructField::new(
+        "scaffold_error",
+        TypeSchema::optional(TypeSchema::text()),
+    ));
     TypeSchema::Struct(fields)
 }
 
@@ -684,6 +725,12 @@ fn build_result_schema() -> TypeSchema {
 fn framework_info_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("name", TypeSchema::text()),
+        // The editorial half: a human name and a sentence saying who each
+        // framework is for. The registry owns it, so the picker can present two
+        // frameworks as the different propositions they are (§2.4) while staying
+        // free of any knowledge of a particular one.
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
     ])
 }

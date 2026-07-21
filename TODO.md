@@ -412,12 +412,38 @@ name, and those names come from `sc-api`'s `op_name`, which was private. Recompu
 convention in the scaffold would have been a second copy of it, free to drift from the
 endpoints the client is generated with; `op_name` is now public and the scaffold uses it.
 
-### 2.4 Admin SPA (`ui/admin`)
+### 2.4 Admin SPA (`ui/admin`) ✅
 
-- [ ] Framework picker distinguishes the two meaningfully — React as the default path, `code` presented as the generic escape hatch — rather than as two equal names in a dropdown
-- [ ] Picking React shows the short form (store + name); picking `code` shows today's five settings. Both still render from `config_spec` with no framework-specific code in the screen
-- [ ] Scaffold/build outcome surfaced with its log, reusing the existing build banner
-- [ ] From the app row, a link into the file manager at the app's source directory — the loop an admin actually works in is edit-file → build → view
+- [x] The picker is a radio card per framework, each with a name and a sentence, in registry
+  order. **The editorial content comes from the server** (`FrameworkInfo { name, label,
+  description }`, surfaced by `listFrameworks`), which is what makes this possible *without*
+  the screen knowing which framework is which — the alternative, special-casing the name
+  `react` in the SPA, would undo §13.3's arrangement the moment a third framework or a
+  guest-language one arrived. A new application starts on the first framework offered, so
+  "React is the default path" is the registry's ordering rather than a default in the form
+- [x] Short form vs five settings needed **no code at all**: the spec is the branch. A test
+  asserts the two specs differ in length and that both arrive labelled
+- [x] Scaffold outcome surfaced in the existing build banner. The scaffold happens on the
+  *form*, which navigates away immediately, so a one-shot `notice.ts` hands the message to the
+  list — one banner for both, because to an admin a scaffold and a build are the same kind of
+  news about the same app. A refused scaffold is shown as a failure on an application that
+  was nonetheless created, which is exactly what the server reports
+- [x] The app row links into the file manager at the app's source directory. **Where that is
+  comes from the server** as a derived `source: { store, path }` on the application JSON: a
+  `code` app states it in five settings and a `react` app derives it from one, and the screen
+  should know neither. The files route grew an optional directory (`/files/<store>/<dir>`)
+
+**One thing that had to change to make the framework CSP default reachable.** The form
+pre-filled the CSP box with `default-src: 'self'` and always sent it — so every app, React
+included, overrode its framework's default policy with the baseline (§2.2) and no one would
+have noticed. The box now starts empty, means "no opinion", and is omitted from the request
+when blank. Verified against a running server: a React app created from the form comes back
+with the full react policy.
+
+**Verified live, not only in tests.** Against a real server: two fields in the create form →
+14 files scaffolded → Build → `npm install` + `tsc` + `vite build` in ~3s → the app serving on
+`todo.localhost` with its React CSP, deep links resolving, and its API refusing an anonymous
+caller. That is the §2.5 tutorial's whole path, minus the SSH session.
 
 ### 2.5 Documentation
 

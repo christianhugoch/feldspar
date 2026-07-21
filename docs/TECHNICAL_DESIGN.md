@@ -884,6 +884,17 @@ pub trait Framework: Send + Sync {
 }
 ```
 
+**A framework also declares how it presents itself.** The registry carries a `FrameworkInfo`
+per framework — name, human label, and one sentence about who it is for — in the order an
+admin should be offered them. This exists so the admin UI can show two frameworks as the
+genuinely different propositions they are (one creates the project for you; the other hands
+you the paths) while containing no knowledge of either: the alternative is a screen that
+special-cases the name `react`, which stops working the moment a third framework, or one
+supplied by a guest language through `sc-code`, arrives. The same reasoning applies to the
+application's derived `source: { store, path }` in the admin API — the UI links into the file
+manager at an app's source without knowing that `code` states it in five settings while
+`react` derives it from one.
+
 **`config_spec` is what makes "the admin picks a Framework" work.** GOALS requires that
 different frameworks have different settings — a React app needs the file store or
 subdirectory holding its code; a Saltcorn-v1 app needs none of that. The admin UI must render

@@ -17,6 +17,7 @@ import Table from "react-bootstrap/Table";
 import { api, errorMessage } from "../api";
 import type { ListApplicationsResponse } from "../client";
 import { navigate } from "../App";
+import { takeNotice, type Notice } from "../notice";
 
 type AppItem = ListApplicationsResponse[number];
 
@@ -30,17 +31,22 @@ function appUrl(subdomain: string): string {
   return `${window.location.protocol}//${subdomain}.${window.location.host}`;
 }
 
+/** The file-manager route for a directory in a store. */
+function filesUrl(store: string, path: string): string {
+  const dir = path ? `/${path.split("/").map(encodeURIComponent).join("/")}` : "";
+  return `#/files/${encodeURIComponent(store)}${dir}`;
+}
+
 export function Applications() {
   const [apps, setApps] = useState<AppItem[] | null>(null);
   const [status, setStatus] = useState<Record<string, BuildStatus>>({});
   const [error, setError] = useState<string | null>(null);
-  // The most recent build's outcome, surfaced so the bundler's log/diagnostics
-  // are visible rather than buried in a per-row badge.
-  const [outcome, setOutcome] = useState<{
-    ok: boolean;
-    app: string;
-    text: string;
-  } | null>(null);
+  // The most recent outcome, surfaced so a tool's log or diagnostics are visible
+  // rather than buried in a per-row badge. A build fills this in directly; a
+  // scaffold happens on the form, which leaves its message for this screen to
+  // pick up — one banner for both, because to an admin they are the same news
+  // about the same app.
+  const [outcome, setOutcome] = useState<Notice | null>(null);
 
   const load = async () => {
     try {
@@ -52,6 +58,7 @@ export function Applications() {
 
   useEffect(() => {
     void load();
+    setOutcome(takeNotice());
   }, []);
 
   const build = async (app: AppItem) => {
@@ -62,14 +69,14 @@ export function Applications() {
       setStatus((s) => ({ ...s, [app.id]: "built" }));
       setOutcome({
         ok: true,
-        app: app.name,
+        title: `Build succeeded — ${app.name}`,
         text: report.log.trim() || "Build succeeded.",
       });
     } catch (err) {
       setStatus((s) => ({ ...s, [app.id]: "failed" }));
       setOutcome({
         ok: false,
-        app: app.name,
+        title: `Build failed — ${app.name}`,
         text: errorMessage(err, "The build failed."),
       });
     }
@@ -102,9 +109,7 @@ export function Applications() {
           onClose={() => setOutcome(null)}
           dismissible
         >
-          <Alert.Heading className="h6">
-            {outcome.ok ? "Build succeeded" : "Build failed"} — {outcome.app}
-          </Alert.Heading>
+          <Alert.Heading className="h6">{outcome.title}</Alert.Heading>
           <pre className="mb-0 text-break" style={{ whiteSpace: "pre-wrap" }}>
             {outcome.text}
           </pre>
@@ -144,7 +149,21 @@ export function Applications() {
                     {app.subdomain}
                   </a>
                 </td>
-                <td>{app.framework.name}</td>
+                <td>
+                  {app.framework.name}
+                  {app.source && (
+                    // The loop an admin actually works in is edit-file → build →
+                    // view, so the source directory is one click from the row.
+                    // Where an app's source *is* comes from the server (§2.4), so
+                    // this link works the same for a framework that states its
+                    // paths and one that derives them.
+                    <div className="small">
+                      <a href={filesUrl(app.source.store, app.source.path)}>
+                        {app.source.store}/{app.source.path || ""}
+                      </a>
+                    </div>
+                  )}
+                </td>
                 <td>
                   <BuildBadge status={state} />
                 </td>
