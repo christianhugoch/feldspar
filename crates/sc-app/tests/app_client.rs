@@ -171,6 +171,33 @@ async fn an_unknown_api_provider_is_a_configuration_error() -> Result<()> {
 }
 
 #[tokio::test]
+async fn an_api_mounted_at_the_root_is_refused_before_anything_is_built() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+
+    // A provider at `/` claims every path, so the `code` framework's bundle would
+    // never be reached — an app that answers `{"error":"no endpoint for /"}` in a
+    // browser. `app_providers` is what both building and mounting go through, so
+    // this is where an app stored that way is stopped, with the reason.
+    let app = Application::new("Blog", "blog", code_framework())
+        .with_table(TableId("posts".to_owned()))
+        .with_api(ApiConfig::new("rest", "/"));
+    let err = app_providers(&app, &cat)
+        .map(|_| ())
+        .expect_err("a root mount must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("claims every path"), "{msg}");
+    assert!(msg.contains("/api"), "{msg}");
+
+    // The same app on a sub-path is exactly what it meant to be.
+    let ok = Application::new("Blog", "blog", code_framework())
+        .with_table(TableId("posts".to_owned()))
+        .with_api(ApiConfig::new("rest", "/api"));
+    assert_eq!(app_providers(&ok, &cat)?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn two_providers_projecting_the_same_names_collide() -> Result<()> {
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;

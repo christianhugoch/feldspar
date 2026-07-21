@@ -44,7 +44,7 @@ mod react;
 mod scaffold;
 mod store;
 
-pub use api::{app_client, app_endpoints, app_providers, app_tables};
+pub use api::{app_client, app_endpoints, app_providers, app_tables, validate_api_mounts};
 pub use application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir};
 pub use applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
@@ -58,7 +58,7 @@ pub use build::{
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
     CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, FrameworkInfo, InstallSpec,
-    Method, code_config_spec, framework_config_spec, framework_default_csp,
+    Method, code_config_spec, framework_config_spec, framework_default_csp, framework_serves_ui,
     registered_framework_info, registered_frameworks, validate_framework_config,
     validate_framework_config_structure,
 };

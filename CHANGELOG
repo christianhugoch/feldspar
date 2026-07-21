@@ -2,6 +2,35 @@
 
 Changes in reverse chronological order.
 
+## An API mounted at `/` no longer swallows the app it belongs to
+
+Reported from the tutorial again: an app built and mounted correctly, and every page of it —
+starting with `/` — answered `{"error":"no endpoint for /"}`. The app's REST provider was
+mounted at `/`, not `/api`.
+
+That is doing exactly what it was told. A provider's mount claims that path and everything
+beneath it, so a mount of `/` claims the whole app; the router hands `GET /` to the API, which
+has no endpoint there, and the framework's bundle is never reached. The admin gets a JSON 404
+from a request they never thought of as an API request, and nothing anywhere says why. A blank
+mount field normalises to `/`, so the same trap can be fallen into by leaving a field empty.
+
+**The rule belongs to the framework, not the router.** An app whose framework serves a UI has
+paths to lose; an API-only app does not, and `/` is the right mount for it. So `Framework` now
+declares `serves_ui()` — `true` by default, part of the same registry entry as a framework's
+label and config spec, so it can be answered from a stored `FrameworkRef` with no built
+instance to ask. `validate_api_mounts` refuses a root mount only when that answer is `true`,
+and an unregistered framework is assumed to serve a UI (the safe direction: the consequence of
+being wrong is an app that cannot be browsed).
+
+- **On save**, beside the framework-config check, so the admin hears it standing in front of
+  the form: "mounts its `rest` API at `/`, which claims every path and would leave the `react`
+  framework's UI unreachable; mount the API on a sub-path such as `/api`".
+- **On build and on mount**, via `app_providers` — the one path both go through — so an app
+  stored before this check existed fails loudly at boot (logged and skipped, like any app that
+  fails to build) rather than coming up as an app that 404s every request.
+- **The mount field is required** in the admin API rather than defaulted, so a blank one is a
+  400 naming the field instead of silently becoming `/`.
+
 ## A scaffolded app that would not build, and the tools that should have caught it (TODO §2.6)
 
 Reported from an actual run of the tutorial: a scaffolded application failed its build with

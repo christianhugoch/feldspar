@@ -25,6 +25,7 @@ use sc_error::{Error, Result};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
 use serde_json::{Value as Json, json};
 
+use crate::api::validate_api_mounts;
 use crate::application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir};
 use crate::applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
@@ -61,6 +62,10 @@ pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()
     for extra in &app.extra_frameworks {
         validate_framework_config(catalog, extra).await?;
     }
+    // An API mounted at `/` claims every path, so an app with a UI would never
+    // serve it. Same reasoning as the framework config above: caught on save,
+    // where the admin can fix it, rather than at build or serve time.
+    validate_api_mounts(app)?;
 
     if let Some(other) = load_application_by_subdomain(catalog, subdomain).await?
         && other.id != app.id

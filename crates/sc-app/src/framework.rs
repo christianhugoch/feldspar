@@ -163,6 +163,24 @@ pub trait Framework: Send + Sync {
 
     /// The build step for a code framework, or `None` for a build-less framework.
     fn build(&self) -> Option<BuildSpec>;
+
+    /// Whether this framework serves a UI on the app's paths.
+    ///
+    /// `true` for anything that answers requests with pages or assets, which is
+    /// every framework the MVP ships. A headless framework — one that exists only
+    /// so an app can expose its API — answers `false`, and only such an app may
+    /// mount an API at `/` (see
+    /// [`validate_api_mounts`](crate::validate_api_mounts)): a provider mounted
+    /// there claims every path, so it would otherwise swallow the very UI the
+    /// framework is there to serve.
+    ///
+    /// Declared by the framework rather than assumed by the router, because only
+    /// the framework knows whether it has paths to lose. The registry answers the
+    /// same question without an instance
+    /// ([`framework_serves_ui`]), which is what save-time validation uses.
+    fn serves_ui(&self) -> bool {
+        true
+    }
 }
 
 /// The `store` setting: which file store holds the app's source.
@@ -243,6 +261,11 @@ pub struct FrameworkInfo {
     /// One sentence: what this framework does for the admin, and what it asks of
     /// them in return.
     pub description: String,
+    /// Whether this framework serves a UI on the app's paths — see
+    /// [`Framework::serves_ui`]. Part of the registry entry so the question can
+    /// be answered from a stored [`FrameworkRef`](crate::FrameworkRef) alone, at
+    /// save time, with no built instance to ask.
+    pub serves_ui: bool,
 }
 
 /// Every registered framework with its presentation, in the order an admin
@@ -257,6 +280,7 @@ pub fn registered_framework_info() -> Vec<FrameworkInfo> {
                           hooks for your tables, installs its dependencies and builds \
                           it. Pick a file store and a name."
                 .to_owned(),
+            serves_ui: true,
         },
         FrameworkInfo {
             name: CODE_FRAMEWORK.to_owned(),
@@ -265,8 +289,24 @@ pub fn registered_framework_info() -> Vec<FrameworkInfo> {
                           where its source, output and build command are — for a \
                           project React's conventions do not fit."
                 .to_owned(),
+            serves_ui: true,
         },
     ]
+}
+
+/// Whether the framework registered under `name` serves a UI — the registry
+/// lookup behind [`Framework::serves_ui`], for a stored
+/// [`FrameworkRef`](crate::FrameworkRef) with no instance to ask (mirrors
+/// [`framework_config_spec`]/[`framework_default_csp`]).
+///
+/// An unregistered name answers `true`: the consequence of the answer is whether
+/// an API may claim `/`, and assuming there is a UI to protect is the safe
+/// direction to be wrong in.
+pub fn framework_serves_ui(name: &str) -> bool {
+    registered_framework_info()
+        .into_iter()
+        .find(|f| f.name == name)
+        .is_none_or(|f| f.serves_ui)
 }
 
 /// The settings the framework registered under `name` declares — the registry

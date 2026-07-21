@@ -893,9 +893,12 @@ fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
         .iter()
         .map(|v| {
             let o = require_object(v)?;
+            // The mount is required rather than defaulted: an empty one
+            // normalises to `/`, which claims every path — a blank field is far
+            // more likely a slip than a request for that.
             Ok(ApiConfig::new(
                 non_empty_str_field(o, "provider")?,
-                str_field(o, "mount")?,
+                non_empty_str_field(o, "mount")?,
             ))
         })
         .collect::<Result<_>>()?;

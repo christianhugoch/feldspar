@@ -511,6 +511,51 @@ async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> s
 }
 
 #[tokio::test]
+async fn an_api_that_would_swallow_the_apps_ui_is_refused_on_save() -> sc_error::Result<()> {
+    let tmp = TempDir::new("mounts");
+    let (router, catalog, _db) = setup(&tmp).await?;
+    create_user(&catalog, "admin@example.com", "correct-horse", ROLE_ADMIN).await?;
+    let mut admin = Client::new(router, BASE_DOMAIN);
+    admin.login("admin@example.com", "correct-horse").await;
+
+    // A provider at `/` claims every path, so the app would answer its own pages
+    // from an API that has no endpoint there. Refused where the admin is looking
+    // at the form, not discovered in a browser.
+    let mut root = blog_body();
+    root["apis"] = json!([{ "provider": "rest", "mount": "/" }]);
+    let (status, err) = admin.send("POST", "/api/applications", Some(root)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    let message = err["error"].as_str().unwrap_or_default();
+    assert!(message.contains("claims every path"), "{err}");
+    assert!(message.contains("/api"), "{err}");
+
+    // A blank mount normalises to `/`, which is the same trap by accident: the
+    // field is required rather than defaulted.
+    let mut blank = blog_body();
+    blank["apis"] = json!([{ "provider": "rest", "mount": "" }]);
+    let (status, err) = admin.send("POST", "/api/applications", Some(blank)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`mount`"),
+        "{err}"
+    );
+
+    // Nothing was stored by either attempt.
+    let (_, list) = admin.send("GET", "/api/applications", None).await;
+    assert_eq!(list.as_array().unwrap().len(), 0, "{list}");
+
+    // The same app on a sub-path saves.
+    let (status, _) = admin
+        .send("POST", "/api/applications", Some(blog_body()))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    Ok(())
+}
+
+#[tokio::test]
 async fn non_admins_are_rejected_from_every_application_endpoint() -> sc_error::Result<()> {
     let tmp = TempDir::new("authz");
     let (router, catalog, _db) = setup(&tmp).await?;
