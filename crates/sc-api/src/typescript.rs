@@ -88,6 +88,43 @@ pub fn generate_client(set: &EndpointSet) -> String {
     out.push_str("  return new Error(`${op} failed: ${res.status}${detail}`);\n");
     out.push_str("}\n\n");
 
+    // The double-submit CSRF check every mutating request must satisfy (§16).
+    // The session cookie is what authenticates a browser client, so the server
+    // refuses a state-changing request that does not echo the non-`HttpOnly`
+    // CSRF cookie in the header — including `login` itself, which is a POST like
+    // any other. Emitting it here rather than leaving it to each consumer is the
+    // point: a client generated from the server's own endpoint set should be able
+    // to call the server it was generated from.
+    //
+    // Guarded on `document` so the module stays usable where there is none (a
+    // test, a node script); there is no cookie to echo there, and a caller with
+    // its own scheme can still supply `options.fetch`.
+    let _ = write!(
+        out,
+        r#"function csrfToken(): string | undefined {{
+  if (typeof document === "undefined") return undefined;
+  for (const part of document.cookie.split(";")) {{
+    const [name, ...rest] = part.trim().split("=");
+    if (name === "{cookie}") return decodeURIComponent(rest.join("="));
+  }}
+  return undefined;
+}}
+
+function requestHeaders(method: string, hasBody: boolean): Record<string, string> {{
+  const headers: Record<string, string> = {{}};
+  if (hasBody) headers["content-type"] = "application/json";
+  if (method !== "GET" && method !== "HEAD") {{
+    const token = csrfToken();
+    if (token) headers["{header}"] = token;
+  }}
+  return headers;
+}}
+
+"#,
+        cookie = crate::auth::CSRF_COOKIE,
+        header = crate::auth::CSRF_HEADER,
+    );
+
     out.push_str("export function createClient(options: ClientOptions = {}): ApiClient {\n");
     out.push_str("  const baseUrl = options.baseUrl ?? \"\";\n");
     out.push_str("  const doFetch = options.fetch ?? fetch;\n");
@@ -137,8 +174,12 @@ fn emit_method_impl(out: &mut String, ep: &Endpoint) {
         url_template(ep)
     );
     let _ = writeln!(out, "        method: \"{}\",", ep.method.as_str());
+    let _ = writeln!(
+        out,
+        "        headers: requestHeaders(\"{}\", {has_body}),",
+        ep.method.as_str()
+    );
     if has_body {
-        out.push_str("        headers: { \"content-type\": \"application/json\" },\n");
         out.push_str("        body: JSON.stringify(body),\n");
     }
     out.push_str("      });\n");

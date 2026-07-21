@@ -1,14 +1,14 @@
 // The admin SPA's API access, built on the generated typed client (`client.ts`).
 //
-// `createClient` accepts a custom `fetch`, so we inject the two things a browser
-// session needs that the generated client is deliberately agnostic about:
+// The generated client now carries the CSRF double-submit header itself, so a
+// client of the server's endpoint set can call that server unaided — which is
+// what every consumer of it needs, this SPA and a scaffolded app alike.
 //
-//   - `credentials: "same-origin"` so the `sc_session` cookie rides along, and
-//   - the CSRF double-submit header (`x-csrf-token`) echoing the `sc_csrf`
-//     cookie on mutating requests (see `sc-server`'s security module).
-//
-// Keeping this out of the generated client means the generator stays a pure
-// contract emitter and the browser concerns live in one small, hand-written spot.
+// What remains here is `uploadFile`: a POST to a route *outside* the typed
+// endpoint set (raw bytes cannot be described by a `TypeSchema`), and therefore
+// the one request in this SPA that has to satisfy the CSRF contract by hand.
+// `browserFetch` is what does that, and is also what makes the session cookie's
+// journey explicit rather than relying on `fetch`'s default.
 
 import { createClient, type ApiClient } from "./client";
 

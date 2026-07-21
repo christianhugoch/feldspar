@@ -17,6 +17,19 @@ use serde_json::{Value as Json, json};
 use crate::rows::require_object;
 use crate::schema::{StructField, TypeSchema};
 
+/// Name of the CSRF double-submit cookie the server hands every browser client
+/// (non-`HttpOnly`, so the client can read it).
+///
+/// Declared here, below every API surface, because it is part of the **wire
+/// contract** a client of any of them must satisfy: a session cookie
+/// authenticates the request, so a mutating request must also echo this cookie in
+/// [`CSRF_HEADER`] or it is refused. The server enforces it and
+/// [`generate_client`](crate::generate_client) emits code that satisfies it —
+/// naming it twice is how the two drift.
+pub const CSRF_COOKIE: &str = "sc_csrf";
+/// Header a mutating request must echo the [`CSRF_COOKIE`] value in.
+pub const CSRF_HEADER: &str = "x-csrf-token";
+
 /// Email + password, the body of a login (and of first-user creation).
 pub fn credentials_schema() -> TypeSchema {
     TypeSchema::struct_of([

@@ -2,6 +2,36 @@
 
 Changes in reverse chronological order.
 
+## The generated client now satisfies the CSRF contract it was generated from
+
+Reported from the tutorial: the React app's login failed with `403 CSRF token missing or
+invalid`.
+
+The server protects state-changing requests with a double-submit cookie — a mutating request
+must echo the non-`HttpOnly` `sc_csrf` cookie in `x-csrf-token` — and `login` is a `POST` like
+any other. The **admin SPA** satisfied this by wrapping `fetch` in a hand-written transport
+(`ui/admin/src/api.ts`); the generated client itself sent no such header, so every other
+consumer of it — starting with the scaffolded app, which has no such wrapper — could not
+perform a single mutation, beginning with the one that lets it do anything at all.
+
+**A client generated from a server's endpoint set should be able to call that server.** The
+generator now emits the check itself: `requestHeaders(method, hasBody)` adds the token on
+anything but `GET`/`HEAD`, read from `document.cookie`, guarded so the module still runs where
+there is no `document` (a node script, a test) and still overridable through `options.fetch`.
+
+`CSRF_COOKIE`/`CSRF_HEADER` moved down into `sc-api::auth`, where the wire contract is stated,
+and `sc-server` re-exports them: the server enforcing the check and the client satisfying it
+now read the same two names. The admin SPA's transport keeps its copy only for `uploadFile` —
+the one request outside the typed endpoint set, raw bytes being undescribable by a
+`TypeSchema`.
+
+**The test runs the client rather than reading it** (`crates/sc-api/tests/generated_client_csrf.rs`):
+Node executes the generated TypeScript directly, with `document.cookie` and `fetch` stubbed, so
+the assertion is on the headers a real call produced — a mutation carries the decoded token, a
+`GET` does not, and a browserless caller still works. A test that grepped the emitted text
+would pass just as happily on a client that never runs, which is the failure mode this whole
+entry is about.
+
 ## An API mounted at `/` no longer swallows the app it belongs to
 
 Reported from the tutorial again: an app built and mounted correctly, and every page of it —

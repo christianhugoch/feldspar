@@ -23,10 +23,14 @@ use uuid::Uuid;
 
 /// Name of the session cookie (opaque token → [`SessionStore`](sc_auth::SessionStore)).
 pub const SESSION_COOKIE: &str = "sc_session";
-/// Name of the CSRF double-submit cookie (readable by the SPA).
-pub const CSRF_COOKIE: &str = "sc_csrf";
-/// Header the SPA must echo the CSRF cookie value in on mutating requests.
-pub const CSRF_HEADER: &str = "x-csrf-token";
+/// Name of the CSRF double-submit cookie (readable by the SPA), and the header a
+/// mutating request must echo it in.
+///
+/// Both come from `sc-api`, which is where the wire contract is stated: the
+/// server enforces the check here and the generated TypeScript client satisfies
+/// it, and a second spelling of either name is exactly how those two stop
+/// agreeing.
+pub use sc_api::auth::{CSRF_COOKIE, CSRF_HEADER};
 
 /// The strict Content-Security-Policy served with every response. No
 /// `unsafe-inline`: scripts and styles load only from the app's own origin, so

@@ -108,6 +108,25 @@ async function clientError(op: string, res: Response): Promise<Error> {
   return new Error(`${op} failed: ${res.status}${detail}`);
 }
 
+function csrfToken(): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  for (const part of document.cookie.split(";")) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === "sc_csrf") return decodeURIComponent(rest.join("="));
+  }
+  return undefined;
+}
+
+function requestHeaders(method: string, hasBody: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (hasBody) headers["content-type"] = "application/json";
+  if (method !== "GET" && method !== "HEAD") {
+    const token = csrfToken();
+    if (token) headers["x-csrf-token"] = token;
+  }
+  return headers;
+}
+
 export function createClient(options: ClientOptions = {}): ApiClient {
   const baseUrl = options.baseUrl ?? "";
   const doFetch = options.fetch ?? fetch;
@@ -115,6 +134,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async authStatus() {
       const res = await doFetch(`${baseUrl}/api/auth/status`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("authStatus", res);
       return (await res.json()) as AuthStatusResponse;
@@ -122,7 +142,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async createFirstUser(body) {
       const res = await doFetch(`${baseUrl}/api/first-user`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("createFirstUser", res);
@@ -131,7 +151,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async login(body) {
       const res = await doFetch(`${baseUrl}/api/login`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("login", res);
@@ -140,6 +160,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async logout() {
       const res = await doFetch(`${baseUrl}/api/logout`, {
         method: "POST",
+        headers: requestHeaders("POST", false),
       });
       if (!res.ok) throw await clientError("logout", res);
       return;
@@ -147,6 +168,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listTables() {
       const res = await doFetch(`${baseUrl}/api/tables`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listTables", res);
       return (await res.json()) as ListTablesResponse;
@@ -154,7 +176,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async createTable(body) {
       const res = await doFetch(`${baseUrl}/api/tables`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("createTable", res);
@@ -163,6 +185,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listFields(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listFields", res);
       return (await res.json()) as ListFieldsResponse;
@@ -170,7 +193,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async createField(table, body) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("createField", res);
@@ -179,6 +202,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listRows(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listRows", res);
       return (await res.json()) as ListRowsResponse;
@@ -186,7 +210,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async createRow(table, body) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("createRow", res);
@@ -195,7 +219,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async updateRow(table, id, body) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/${id}`, {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("updateRow", res);
@@ -204,6 +228,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async deleteRow(table, id) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/${id}`, {
         method: "DELETE",
+        headers: requestHeaders("DELETE", false),
       });
       if (!res.ok) throw await clientError("deleteRow", res);
       return;
@@ -211,6 +236,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listFileStores() {
       const res = await doFetch(`${baseUrl}/api/file-stores`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listFileStores", res);
       return (await res.json()) as ListFileStoresResponse;
@@ -218,7 +244,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async createFileStore(body) {
       const res = await doFetch(`${baseUrl}/api/file-stores`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("createFileStore", res);
@@ -227,7 +253,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async updateFileStore(id, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("updateFileStore", res);
@@ -236,6 +262,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async deleteFileStore(id) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
         method: "DELETE",
+        headers: requestHeaders("DELETE", false),
       });
       if (!res.ok) throw await clientError("deleteFileStore", res);
       return (await res.json()) as DeleteFileStoreResponse;
@@ -243,6 +270,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listFileStoreBackends() {
       const res = await doFetch(`${baseUrl}/api/file-store-backends`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listFileStoreBackends", res);
       return (await res.json()) as ListFileStoreBackendsResponse;
@@ -250,7 +278,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async browseFiles(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/browse`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("browseFiles", res);
@@ -259,7 +287,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async readFile(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/read`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("readFile", res);
@@ -268,7 +296,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async writeFile(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/write`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("writeFile", res);
@@ -277,7 +305,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async makeDirectory(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/mkdir`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("makeDirectory", res);
@@ -286,7 +314,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async deleteFile(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/delete`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("deleteFile", res);
@@ -295,7 +323,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async renameFile(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/rename`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("renameFile", res);
@@ -304,7 +332,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async getFileMeta(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/meta`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("getFileMeta", res);
@@ -313,7 +341,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async setFileMeta(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/set-meta`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("setFileMeta", res);
@@ -322,6 +350,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listApplications() {
       const res = await doFetch(`${baseUrl}/api/applications`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listApplications", res);
       return (await res.json()) as ListApplicationsResponse;
@@ -329,7 +358,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async createApplication(body) {
       const res = await doFetch(`${baseUrl}/api/applications`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("createApplication", res);
@@ -338,7 +367,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async updateApplication(id, body) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("updateApplication", res);
@@ -347,6 +376,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async deleteApplication(id) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
         method: "DELETE",
+        headers: requestHeaders("DELETE", false),
       });
       if (!res.ok) throw await clientError("deleteApplication", res);
       return (await res.json()) as DeleteApplicationResponse;
@@ -354,6 +384,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async buildApplication(id) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}/build`, {
         method: "POST",
+        headers: requestHeaders("POST", false),
       });
       if (!res.ok) throw await clientError("buildApplication", res);
       return (await res.json()) as BuildApplicationResponse;
@@ -361,6 +392,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listFrameworks() {
       const res = await doFetch(`${baseUrl}/api/frameworks`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listFrameworks", res);
       return (await res.json()) as ListFrameworksResponse;
@@ -368,6 +400,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async listUsers() {
       const res = await doFetch(`${baseUrl}/api/users`, {
         method: "GET",
+        headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listUsers", res);
       return (await res.json()) as ListUsersResponse;
@@ -375,7 +408,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     async createUser(body) {
       const res = await doFetch(`${baseUrl}/api/users`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
       if (!res.ok) throw await clientError("createUser", res);
