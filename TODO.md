@@ -112,15 +112,15 @@ is only an integer inferred from who holds it has nowhere to put one. So a role 
 - [x] `listRoles` now reports the rows (`{ role, name, description, builtin }`, replacing `{ role, label }`); `createRole` / `deleteRole` added; a Roles screen lists/adds/deletes; the Users role field is a pick-list over roles that exist; the table-settings selects show each role's name
 - [x] Tests: 5 in `crates/sc-auth/tests/roles_store.rs` (bootstrap seeds and does not overwrite, round-trip with attributes, a user cannot hold a missing role, a held role cannot be deleted, the table is hidden), the admin-API role flow over HTTP, and two DDL tests for the emitted `REFERENCES`
 
-### 1.4 Enforcement doing observable work (`sc-api`, `sc-server`)
+### 1.4 Enforcement doing observable work (`sc-api`, `sc-server`) ✅
 
 An access rule that is stored but never refused is not an access rule. This is the phase that
 makes the milestone's first claim testable.
 
-- [ ] Application REST provider (`crates/sc-api/src/rest.rs`) already maps `access.min_role_read`/`min_role_write` onto its endpoints' `AuthRequirement` — confirm end to end with a real role, not a unit test on the mapping
-- [ ] **A mounted application's endpoint set is built from the tables as they were at mount time.** Changing a table's access must rebuild or remount the affected applications, or the admin's change silently does nothing until a restart. This is the same "the mount registry is live" rule applications already follow; find the seam in `sc-server/src/apps.rs`
-- [ ] Admin row endpoints stay admin-only. They are the *admin's* view of the data and are not governed by a table's application-facing rules; say so in the endpoint docs so it is not read as an oversight
-- [ ] Integration test with three roles against a real application: a `min_role_read: 80` table is readable by role 80 and rejected for role 100; writes require `min_role_write` separately; an access change takes effect without a restart
+- [x] Application REST provider (`crates/sc-api/src/rest.rs`) already maps `access.min_role_read`/`min_role_write` onto its endpoints' `AuthRequirement` — confirmed end to end with real roles, not a unit test on the mapping. The mapping was correct since the MVP; it had nothing to distinguish until the overlay gave a table any rule but `1`/`1`
+- [x] **The seam: `AppMounts::refresh_table`.** A mounted app builds its providers from the catalog at mount time, so a table's access change reloads the catalog but does not reach the running app until a restart. `refresh_table` re-projects the providers of every mounted app exposing the changed table, live; `updateTable` and `deleteTableSettings` call it. It keeps the existing framework — an access change alters who may reach the data, not a byte served, so no bundler runs — which is the same "the mount registry is live" rule (§13.2) applied to a table change rather than an app edit
+- [x] Admin row endpoints stay admin-only, and the endpoint docs now say why: those roles are the table's *application-facing* access, while `listRows`/`createRow`/… are the admin's own view of the same rows, reached only by role 1 through the SPA — two surfaces onto one set of rows, not an oversight
+- [x] Integration tests with three roles against a real application (`crates/sc-server/tests/table_access_enforcement.rs`, 2): a `min_role_read: 80` table readable by role 80 and rejected for role 100; reads and writes opened separately (80 reads while writes stay admin's, then 40 writes while 80 still cannot); the change taking effect on the **already-mounted** app with no restart, rebuild or fresh login; and forgetting the settings re-closing the running app. Plus a unit test that `refresh_table` is a no-op on an admin-only server
 
 ---
 

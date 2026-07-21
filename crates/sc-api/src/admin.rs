@@ -201,6 +201,14 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // --- row CRUD -----------------------------------------------------------
+    // Every row endpoint here is `admin()`, and that is **not** governed by a
+    // table's `min_role_read`/`min_role_write`. Those rules are the table's
+    // *application-facing* access (§7), enforced by an application's REST
+    // provider (`sc_api::RestProvider`); this is the admin's own view of the
+    // data, reached only by role 1 through the admin SPA. A table an admin
+    // opened to role 80 for its application is still admin-only here — the two
+    // are different surfaces onto the same rows, and reading this as an
+    // oversight would be the mistake.
 
     set.register(
         Endpoint::new(

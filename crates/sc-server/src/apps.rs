@@ -141,6 +141,53 @@ impl AppMounts {
         self.write().remove(subdomain).is_some()
     }
 
+    /// Re-project the API providers of every mounted app that exposes `table`,
+    /// so a change to that table's access rules takes effect **with no restart
+    /// and no rebuild** — the table-side counterpart to the live app remount an
+    /// edit already does (§13.2, "the mount registry is live").
+    ///
+    /// This closes a seam that is otherwise invisible until it bites. A
+    /// provider encodes a table's access rules — [`RestProvider::project`] reads
+    /// `table.access` when it builds the endpoint set (§7) — and it is built
+    /// from the catalog **at mount time**. So a mounted app goes on enforcing
+    /// the rules the table had when it was mounted, and an admin who tightens a
+    /// role watches it save and change nothing until the next restart. That is
+    /// exactly the silent no-op this method exists to prevent, and it is why the
+    /// table-settings handlers call it.
+    ///
+    /// The framework — the built bundle — is left untouched, and deliberately:
+    /// an access change alters *who may reach* an app's data, not a single byte
+    /// the app serves, so re-running the bundler would be wasted work. This
+    /// re-projects the providers against the current catalog and keeps the
+    /// existing framework, which is why it is cheap enough to run on every
+    /// settings save.
+    ///
+    /// A provider that fails to re-project (a table the app declares has since
+    /// been dropped, say) leaves that app on its previous mount and returns the
+    /// error, rather than tearing a working app down over a change to an
+    /// unrelated one — the same "one bad app must not take the others with it"
+    /// rule [`mount_all`] follows.
+    pub fn refresh_table(&self, table: &str) -> Result<()> {
+        let Some(catalog) = self.catalog() else {
+            return Ok(());
+        };
+        // Snapshot the affected mounts under the read lock, then rebuild outside
+        // it: `MountedApp::new` touches the catalog, and holding the registry
+        // lock across that is neither needed nor wise.
+        let affected: Vec<Arc<MountedApp>> = self
+            .read()
+            .values()
+            .filter(|m| m.app.tables.iter().any(|t| t.0 == table))
+            .cloned()
+            .collect();
+        for mounted in affected {
+            let refreshed =
+                MountedApp::new(mounted.app.clone(), mounted.framework.clone(), catalog)?;
+            self.remount(refreshed);
+        }
+        Ok(())
+    }
+
     /// The app served on `subdomain`, as an [`Arc`] the caller holds after the
     /// read lock is released.
     pub fn get(&self, subdomain: &str) -> Option<Arc<MountedApp>> {
@@ -290,6 +337,15 @@ mod tests {
         // Without a configured base domain, no host names an app: a request must
         // not be able to choose its own app via the Host header.
         assert_eq!(subdomain_of("blog.example.com", None), None);
+    }
+
+    #[test]
+    fn refreshing_a_table_on_an_admin_only_server_is_a_no_op() {
+        // No catalog means no apps can be mounted, so there is nothing to
+        // re-project — and the table-settings handlers call this unconditionally,
+        // so it must be a quiet success rather than an error on that server.
+        let apps = AppMounts::none();
+        assert!(apps.refresh_table("posts").is_ok());
     }
 
     #[test]

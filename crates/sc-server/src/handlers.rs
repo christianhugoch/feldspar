@@ -161,8 +161,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("updateTable", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 // The table must exist: this configures a table the admin is
                 // looking at. A row for a table that is *not* there is an
@@ -189,6 +191,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // Saving reloads the catalog, so the table read back here — and
                 // served to the next request — already carries the new rules.
                 save_table_meta(&catalog, &meta).await?;
+                // …but a *mounted application* built its providers from the
+                // table as it was at mount time, so it would go on enforcing the
+                // old rules until a restart. Re-project the providers of any app
+                // exposing this table, live. This is the seam §1.4 is about.
+                apps.refresh_table(&table.name)?;
                 Ok(HandlerResponse::ok(table_json(
                     &catalog.require(&table.name)?,
                 )))
@@ -198,8 +205,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("deleteTableSettings", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 // Addressed by name and looked up in the *rows*, not the
                 // catalog: this is also how an orphan is cleaned up, and an
@@ -209,6 +218,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     Some(meta) => delete_table_meta(&catalog, meta.id).await?,
                     None => false,
                 };
+                // Forgetting reverts the table to the admin-only default; a
+                // mounted app exposing it must pick that up now, not at the next
+                // restart — the same live re-projection `updateTable` does.
+                if deleted {
+                    apps.refresh_table(&name)?;
+                }
                 Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
             }
         }

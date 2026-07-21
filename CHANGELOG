@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## A table's access rules are enforced on an application, and a change reaches a mounted app live
+
+The rules were storable, merged and settable; this is the phase where they do observable work.
+Nothing new is *enforced* — `RestProvider::project` has mapped `min_role_read`/`min_role_write`
+onto its endpoints' auth since the MVP — but until now every table was `1`/`1`, so the mapping
+had nothing to distinguish. With the overlay behind it, an application's REST API now serves a
+`min_role_read: 80` table to role 80 and refuses it to role 100, with reads and writes governed
+separately.
+
+**The seam this phase exists to close** is invisible until it bites. A provider encodes a
+table's access rules, and it is built from the catalog **at mount time**. So a mounted
+application goes on enforcing the rules the table had when it was mounted — an admin who tightens
+a role watches it save (the catalog reloads, §1.2) and watches the running app change *nothing*
+until the next restart. `AppMounts::refresh_table` re-projects the providers of every mounted app
+that exposes the changed table, live, and `updateTable`/`deleteTableSettings` call it. The
+framework — the built bundle — is untouched: an access change alters who may reach an app's data,
+not a byte it serves, so no bundler runs and this is cheap enough for every settings save. It is
+the table-side counterpart to the live app remount an edit already does (§13.2, "the mount
+registry is live").
+
+**The admin's own row endpoints stay admin-only, and that is not an oversight** — the endpoint
+docs now say so. A table's `min_role_read`/`min_role_write` are its *application-facing* access;
+the admin API's `listRows`/`createRow`/… are the admin's own view of the same rows, reached only
+by role 1 through the SPA. A table opened to role 80 for its application is still admin-only in
+the admin UI. Two different surfaces onto one set of rows.
+
+Two end-to-end tests (`crates/sc-server/tests/table_access_enforcement.rs`) drive the whole loop
+at three roles through the real router — configuring on the base domain, observing on the app's
+subdomain, exactly as a deployment is shaped. A default table is admin-only to roles 80 and 100;
+an admin opens reads to 80 and the **already-mounted** app serves role 80 with no restart, no
+rebuild and no fresh login, while writes stay admin's; opening writes to role 40 then lets role
+40 write while role 80, less privileged, still cannot; and forgetting the settings re-closes the
+running app, because a delete that only took hold on the next restart would leave data readable
+that the admin just re-secured.
+
 ## Roles are rows in `_sc_roles`, and `users.role` is a foreign key onto them
 
 A role was a bare integer with a convention attached: `1` meant admin because a constant said
