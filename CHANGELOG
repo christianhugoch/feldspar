@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## The tutorial loses its SSH session (TODO §2.5) — Phase 2 complete
+
+`docs/tutorial-react-todo.md` is rewritten for the React framework. Its old steps 2 and 3 — log
+into the server host, `npm create vite`, `npm install`, `git init`, then fill in five paths that
+have to agree with each other — collapse into one step with two fields, and the document now
+opens by saying what changed: **everything happens in a browser**.
+
+The space that freed went to what an admin now needs instead of shell instructions: a tour of the
+generated project, the `src/saltcorn/` boundary (ours, rewritten every build) against everything
+else (yours, written once), what the typed hooks give you, the `public` flag on a route and why
+its absence is the safe default, and the edit-file → build → view loop through the file manager.
+
+**The generic path is documented separately, and framed as the escape hatch**:
+`docs/tutorial-code-framework.md` covers the `code` framework — when to reach for it (Next.js,
+SvelteKit, an existing project, a bundler that is not Vite), and honestly what you give up by
+doing so: no scaffold, no `npm install`, no hooks, five settings you keep consistent yourself,
+and a shell on the host to create the project. The hand-rolled `useEffect` + `refresh()` client
+usage that used to be *the* way to write a Saltcorn app lives there now, where it reads as a fair
+picture of the difference between the two frameworks. README's pointer names both and says which
+is for which.
+
+**Both tutorials now create the file store in the admin UI**, not on the command line. That has
+been possible since the file-store work landed in Phase 1, but the tutorials still opened with
+`--file-store apps=/srv/apps`, which quietly contradicted the claim above it that everything
+happens in a browser — and made the server's start-up line look like it had more required
+configuration than it does. It is now `saltcorn serve --base-domain localhost` and a **File
+stores → New file store** step, with the flag mentioned once as the scripted-deployment
+alternative. Verified end to end against a server started with *no* `--file-store` at all: create
+the store (directory created on demand, connected with no restart) → create the app → scaffold →
+build → served on its subdomain.
+
+**The tutorial was walked, not written from the code.** Every claim in it was executed against a
+running server: bootstrap → create `tasks` with `title`/`done` → create the application (14 files
+scaffolded, git repository initialised) → Build (`npm install` + `tsc --noEmit` + `vite build`,
+about four seconds) → sign in at `todo.localhost` → create a task through the app's own REST API
+→ find it in the admin's table view. Then the schema-change loop: add a `due` column, rebuild,
+and `TasksRow` grows `due?: string | null` while `pages/Tasks.tsx` — the admin's file — is left
+alone.
+
+§13.3 already describes both frameworks and why there are two; that was written with each phase
+rather than after it. **Phase 2 has no open items.**
+
 ## Two frameworks, presented as the different things they are (TODO §2.4)
 
 The admin SPA now offers React and `code` as a radio card each — a name, and a sentence saying

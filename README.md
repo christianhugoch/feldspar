@@ -197,8 +197,11 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 
 > **Building your first application?**
 > [`docs/tutorial-react-todo.md`](docs/tutorial-react-todo.md) walks through a React
-> to-do app end to end — data model, file store, the `code` framework, building, and
-> the generated typed API client.
+> to-do app end to end, entirely in the browser: the server creates the project,
+> generates a typed client and hooks for your tables, installs its dependencies and
+> builds it. For a project React's conventions do not fit — another bundler, an
+> existing app, Next.js — [`docs/tutorial-code-framework.md`](docs/tutorial-code-framework.md)
+> covers the generic `code` framework, where you bring the project and state its paths.
 
 ### Examples
 

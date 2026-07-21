@@ -445,11 +445,38 @@ with the full react policy.
 `todo.localhost` with its React CSP, deep links resolving, and its API refusing an anonymous
 caller. That is the §2.5 tutorial's whole path, minus the SSH session.
 
-### 2.5 Documentation
+### 2.5 Documentation ✅
 
-- [ ] Rewrite `docs/tutorial-react-todo.md` for the React framework: steps 2 and 3 (SSH in, `npm create vite`, fill in five paths) collapse to "pick React, name it, pick a store". Keep the `code`-framework path documented separately for the generic case
-- [ ] Update `docs/TECHNICAL_DESIGN.md` §13.3 to describe both frameworks and why there are two
-- [ ] CHANGELOG entries as each phase lands
+- [x] `docs/tutorial-react-todo.md` rewritten. The old steps 2 and 3 — SSH in, `npm create
+  vite`, `npm install`, `git init`, then fill in five paths — are now one step with two
+  fields, and the tutorial opens by saying the thing that changed: **everything happens in a
+  browser**. The freed-up space went to what the admin now needs instead: a tour of what was
+  generated, the `src/saltcorn/` boundary, the hooks, the `public` route flag, and the
+  edit-file → build → view loop
+- [x] `docs/tutorial-code-framework.md` (new) keeps the generic path documented, framed as the
+  escape hatch rather than the default: when to reach for it, **what you give up** by doing so,
+  and the hand-rolled `useEffect` + `refresh()` client usage — which now reads as a fair
+  picture of the difference between the two frameworks rather than as the way to write an app
+- [x] §13.3 describes both frameworks and why there are two; that landed with the phases it
+  documents (§2.1 the opinions, §2.2 the conventions, §2.3 scaffolding, §2.4 how a framework
+  presents itself) rather than being written up afterwards
+- [x] CHANGELOG entries landed with each phase
+- [x] README's tutorial pointer now names both documents and says which is for which
+
+- [x] **The file store is created in the admin UI, not on the command line.** Both tutorials
+  still opened with `--file-store apps=/srv/apps`, left over from before Phase 1 made stores
+  storable — which contradicted the sentence above it promising everything happens in a browser.
+  The start-up line is now just `--base-domain`, with a **File stores → New file store** step and
+  the flag mentioned once as the scripted-deployment alternative. Verified against a server
+  started with no `--file-store` at all: store created (directory made on demand, connected with
+  no restart) → app created → scaffolded → built → serving
+
+**The tutorial was walked, not written from the code.** Every claim in it was executed against a
+running server: bootstrap → create `tasks` → create the app (14 files scaffolded) → Build
+(install + type-check + bundle, ~4s) → sign in on `todo.localhost` → create a task through the
+app's own API → see it in the admin's table. Then the schema-change loop: add a `due` column,
+rebuild, and `TasksRow` grows `due?: string | null` while the page — the admin's file — is
+untouched.
 
 ---
 
