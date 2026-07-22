@@ -19,9 +19,9 @@
 //! point, and the UI renders whatever it is handed. A new rich type is a change
 //! *here* ([`builtin_rich_types`]), never in the admin UI.
 //!
-//! §2.1 builds the mechanism; the initial types (`String`, `Integer`, `Email`)
-//! are §2.2, which fills in [`builtin_rich_types`]. Until then the registry is
-//! deliberately empty — a mechanism with nothing in it, not a stub.
+//! §2.1 built the mechanism; §2.2 fills it with the initial types (`String`,
+//! `Integer`, `Email`), which live in [`crate::rich_types`] and are handed to the
+//! registry by [`builtin_rich_types`].
 //!
 //! ## `fieldviews()` is not here
 //!
@@ -76,15 +76,13 @@ pub trait RichType: Send + Sync {
     fn sql_types(&self) -> &[&str];
 }
 
-/// The registered rich types. Empty until §2.2 fills it in — the mechanism is
-/// here, its content is that section.
+/// The registered rich types — the built-ins from [`crate::rich_types`].
 ///
-/// This is the single place rich types are enumerated: a new one is added here
-/// (with its `RichType` impl) and it is immediately listed, spec-resolvable, and
-/// referable by every consumer, with no other change.
+/// That module is the single place a rich type is enumerated: adding one there
+/// makes it immediately listed, spec-resolvable, and referable by every
+/// consumer, with no other change.
 fn builtin_rich_types() -> Vec<Arc<dyn RichType>> {
-    // §2.2 registers `String`, `Integer` and `Email` here.
-    Vec::new()
+    crate::rich_types::builtin_rich_types()
 }
 
 /// The process-wide registry, built once from [`builtin_rich_types`].
@@ -313,16 +311,20 @@ mod tests {
     }
 
     #[test]
-    fn the_builtin_registry_is_empty_until_2_2_and_reports_unknown_types() {
-        // §2.1 ships the mechanism with nothing in it; §2.2 populates it.
-        assert!(registered_rich_types().is_empty());
-        assert!(rich_type("string").is_none());
+    fn the_builtin_registry_lists_2_2s_types_and_reports_unknown_ones() {
+        // §2.2 populated the registry; the mechanism resolves what it holds and
+        // names what it holds when asked for something it does not.
+        let names = registered_rich_types();
+        for expected in ["string", "integer"] {
+            assert!(names.iter().any(|n| n == expected), "missing {expected}");
+        }
+        assert!(rich_type("integer").is_some());
+        assert!(rich_type("nope").is_none());
+        assert!(RichTypeRef::resolve("string").is_ok());
 
-        let err = rich_type_config_spec("string").unwrap_err().to_string();
-        assert!(err.contains("string"), "{err}");
-        assert!(err.contains("no rich types are registered"), "{err}");
-
-        assert!(RichTypeRef::resolve("string").is_err());
+        let err = rich_type_config_spec("nope").unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+        assert!(err.contains("string"), "should name what is registered: {err}");
     }
 
     #[test]

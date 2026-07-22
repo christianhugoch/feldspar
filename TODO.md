@@ -137,16 +137,16 @@ the overlay is only the place the answer is stored.
 - [x] `TypeRef::Rich(RichTypeRef)` variant, with `sql_type()`, `name()` and `validate()` delegating. `RichTypeRef` is a name resolved against the registry (`RichTypeRef::resolve`); identity is the name, which keeps `TypeRef` deriving `PartialEq`/`Eq`. Added `TypeRef::validate_with(value, attrs)` as the attribute-carrying form the write path takes in §2.3
 - [x] Decide how a rich type resolves *back* from introspection. **Resolved as proposed: it does not.** `TypeRef::from_sql_type` keeps returning a basic type; a column is rich only because the `_sc_fields` overlay says so (§3.2). Guessing "this `text` column is an Email" from the DB is exactly the kind of magic that makes a legacy database behave surprisingly
 
-### 2.2 The initial rich types
+### 2.2 The initial rich types ✅
 
 Small on purpose: enough to prove the three things the machinery must do — validate a value,
 declare typed attributes, and constrain what may be stored.
 
-- [ ] `String` over `text` with a `max_length` attribute and optional `options` (a select) — proves attributes drive both validation and the editor
-- [ ] `Integer` over `int8` with `min`/`max` — proves numeric attribute validation
-- [ ] `Email` over `text` — proves validation with no attributes at all
-- [ ] Decide whether `File` is a rich type or a field kind. **Proposed: a kind, not a type.** §6.2 already models it as `DataFieldKind::File`, and it is not a value family — it is a *reference*, like `Key`, whose storage type is `text`. The admin-facing type picker (§3.4) merges kinds and types into one list because that is how an admin thinks, but the model keeps them apart, and `Key` proves the shape already
-- [ ] Unit tests per type: valid and invalid values, attribute validation, `sql_type` round-trip
+- [x] `String` over `text` with a `max_length` attribute, optional `options` (a select), and an optional `regex` pattern (anchored to a full match; matched by the lightweight `regex-lite` crate) — proves attributes drive both validation and the editor (`crates/sc-types/src/rich_types.rs`). **Deviation:** the `Email` type below was dropped in favour of the `regex` attribute on `String`, which subsumes email validation and any other pattern; "validation with no attributes" is still exercised by running either type with an empty attribute bag
+- [x] `Integer` over `int8` with `min`/`max` — proves numeric attribute validation
+- [x] ~~`Email` over `text`~~ — dropped: replaced by `String`'s `regex` attribute (see above)
+- [x] Decide whether `File` is a rich type or a field kind. **Resolved as proposed: a kind, not a type.** §6.2 already models it as `DataFieldKind::File`, and it is not a value family — it is a *reference*, like `Key`, whose storage type is `text`. The admin-facing type picker (§3.4) merges kinds and types into one list because that is how an admin thinks, but the model keeps them apart, and `Key` proves the shape already. No `File` rich type is registered
+- [x] Unit tests per type: valid and invalid values, attribute validation, `sql_type` round-trip
 
 ### 2.3 Validation on the write path (`sc-catalog`, `sc-api`)
 

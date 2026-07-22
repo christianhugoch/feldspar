@@ -101,6 +101,12 @@ bytes = "1"
 # Temporal + decimal backing for the `Value` enum (Date/Time/Timestamp/Decimal).
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
+# Regex engine for the `String` rich type's `regex` attribute (§2.2). `regex-lite`
+# rather than `regex`: a field-validation pattern needs correct matching, not the
+# full crate's SIMD/perf dependency tree (aho-corasick, memchr, regex-automata),
+# which would pull weight into layer 3 for no gain. Same `Regex::new`/`is_match`
+# API for the subset validation uses.
+regex-lite = "0.1"
 
 # --- HTTP server framework ---------------------------------------------------
 #

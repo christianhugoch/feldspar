@@ -2,6 +2,43 @@
 
 Changes in reverse chronological order.
 
+## The initial rich types: String and Integer (§2.2)
+
+The registry from §2.1 was empty; this fills it with two types, small on purpose — between them
+they prove what the machinery must do. They live in `crates/sc-types/src/rich_types.rs` and
+`builtin_rich_types` hands them to the registry, so `registered_rich_types()` now lists them and
+`RichTypeRef::resolve("string")` succeeds.
+
+- **`String`** over `text` — a `max_length`, an optional `options` list, and an optional `regex`
+  pattern. Proves attributes drive validation several ways: a value longer than `max_length` is
+  rejected (counted in characters, so a multi-byte character is one); a non-empty `options` array
+  restricts the value to that set (turning the field into a select, which §3.4's editor will
+  render); and a `regex` pattern must match the **whole** value — the pattern is anchored
+  (`^(?:…)$`), so a validation rule of `\d{3}` rejects `"abc123"` rather than passing it. An empty
+  `options` list or empty `regex` restricts nothing; a pattern that will not compile is the
+  admin's mistake, surfaced by name.
+- **`Integer`** over `int8` — `min`/`max`, independent. Proves numeric attribute validation; the
+  error names the bound and the actual value.
+
+Both treat `null` as a field-level nullability concern (accepted) and reject a value of the wrong
+family — a `String` given an `Int`, an `Integer` given text — naming the kind.
+
+The `regex` attribute is matched by **`regex-lite`**, added to the workspace: a field-validation
+pattern needs correct matching, not the full `regex` crate's SIMD/perf dependency tree, so the
+lighter crate with the same `Regex::new`/`is_match` API is the right weight for layer 3.
+
+**`File` is not a rich type.** §2.2 resolved it as a field *kind* (`DataFieldKind::File`), not a
+type: it is a reference like `Key`, not a value family, and its storage type is `text`. The
+admin-facing type picker (§3.4) will merge kinds and types into one list because that is how an
+admin thinks, but the model keeps them apart.
+
+Tests (4 in `rich_types.rs`): value-family/`max_length`/`options` for `String`, a dedicated
+`regex` test (full-match anchoring, empty pattern, a user-anchored pattern, and a bad pattern
+reported by name), family/range for `Integer`, and each type's `sql_type()` round-tripping through
+a `RichTypeRef` and a `TypeRef::Rich` so it agrees with the column's DDL type at §3.2's merge. The
+§2.1 registry test now asserts both are listed and that an unknown name is still reported by
+naming them.
+
 ## Rich types: the trait and the registry (§2.1)
 
 The type system gains a second kind of type. Until now every column resolved to a `BasicType` —
