@@ -65,6 +65,19 @@ export function buildConfig(
       continue;
     }
     if (raw.trim() === "") continue;
+    if (field.type === "json") {
+      // A `json` setting (a rich type's `options`, a File kind's `mime_allow`)
+      // is entered as JSON text and parsed here, so it reaches the server as the
+      // array/object it declares rather than a string. Invalid JSON is passed
+      // through unchanged, letting the server's validation name the mistake
+      // rather than this form inventing one.
+      try {
+        config[field.name] = JSON.parse(raw);
+      } catch {
+        config[field.name] = raw;
+      }
+      continue;
+    }
     config[field.name] = field.type === "int" ? Number(raw) : raw;
   }
   return config;

@@ -2,6 +2,32 @@
 
 Changes in reverse chronological order.
 
+## Admin SPA: the field editor (§3.4)
+
+`TableDetail.tsx`'s "add field" form becomes type-aware, driven by the `listFieldTypes` endpoint
+(§3.3). The `SQL type` free-text box is replaced by a **pick-list** grouped into basic types, rich
+types and the Key/File kinds — one list assembled from the server's registry. Choosing a type
+renders **its** declared attribute form beneath, using the same shared `SettingsFields` spec-form a
+file-store backend's settings use, so there is **no per-type code** in the screen: a rich type or a
+kind added to the server gets a working form with no change here. The `File` store is a
+server-resolved pick-list of connected stores (its `config_spec` carries the resolved options);
+folder and MIME restrictions are the plain inputs the spec declares. A Key also asks for a "stored
+as" SQL type, since a key's column must match the field it references.
+
+- The shared `buildConfig` (in `settings.tsx`) now coerces a `json`-typed setting by parsing its
+  text as JSON, so a rich type's `options` or a File kind's `mime_allow` reaches the server as the
+  array it declares — additive, and the one place the spec-form vocabulary is interpreted.
+- The fields table gains **Type** and **Kind** columns (the Kind cell naming a `File` field's store
+  and a `Key`'s target), so a mis-pointed field is visible without opening it.
+- The row editor renders a `File` field as a **file picker** over the field's store — a path box
+  plus a "Choose…" modal that browses the store via the existing `browseFiles` endpoint — rather
+  than a free-text path, so every value is a path that exists in the store the field is bound to.
+
+SPA-only: no endpoint or client changes. The editor typechecks (`tsc --noEmit`, the gate the
+`admin_spa_typecheck` test enforces) and the production `vite build` succeeds. Editing an existing
+field's overlay through `updateField` (wired in §3.3) is not surfaced in this screen yet; the §3.4
+scope is the add form, the richer table, and the row-editor file picker.
+
 ## Admin API: creating and editing fields (§3.3)
 
 The field endpoints grow from "add a plain column" to the full overlay-aware surface, so an admin

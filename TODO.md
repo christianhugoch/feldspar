@@ -186,13 +186,14 @@ rich type, and the column's SQL type has to be able to hold it.
 - [x] `listFieldTypes` endpoint (`GET api/field-types`): basic types, registered rich types, and the `Key`/`File` kinds with their `Vec<FormField>` specs (the `File` store resolved to a pick-list); `file_kind_config_spec`/`key_kind_config_spec` live in `sc-catalog` beside the storage
 - [x] Integration tests through HTTP: create a rich `String` field and a `File` field, read both back merged, `updateField` in place, `listFieldTypes` shape, reject an unknown type by name (`crates/sc-server/tests/field_api.rs`, 3). **Deviation:** a `String` field rather than `Email` (§2.2 dropped `Email` for `String`'s `regex` attribute). The generated TS client was regenerated and `TableDetail.tsx`'s create-field call mapped to the new shape (the picker/attribute form is §3.4)
 
-### 3.4 Admin SPA — the field editor (`ui/admin`)
+### 3.4 Admin SPA — the field editor (`ui/admin`) ✅
 
-- [ ] The "add field" form's type input becomes a pick-list assembled from `listFieldTypes`: basic types, rich types, and the `Key`/`File` kinds in one list
-- [ ] Choosing a type renders its declared `FormField` attribute form beneath — driven entirely by the spec, with no per-type branch in the SPA. If a `File` field needs a per-type React branch, the spec is wrong, and the file store's backend form is the precedent that it need not be
-- [ ] `File`: the store is a server-resolved pick-list of connected stores (§1.6's machinery again); folder and MIME restrictions are plain inputs
-- [ ] The fields table shows type, kind and the `File` store, so a mis-pointed field is visible without opening it
-- [ ] The row editor renders a `File` field as a file picker over the field's store, not a free-text path — the admin-side file browse endpoints already exist and are what this reuses
+- [x] The "add field" form's type input becomes a pick-list assembled from `listFieldTypes`: basic types, rich types, and the `Key`/`File` kinds in one list (grouped by category), replacing the SQL-type free-text box (`ui/admin/src/screens/TableDetail.tsx`)
+- [x] Choosing a type renders its declared `FormField` attribute form beneath — driven entirely by the spec via the shared `SettingsFields`, with no per-type branch. `buildConfig` gained `json`-type coercion so a rich type's `options` / a File kind's `mime_allow` reach the server as arrays
+- [x] `File`: the store is a server-resolved pick-list of connected stores (from the kind's resolved `config_spec` options); folder and MIME restrictions are plain inputs. A `Key` also asks for a "stored as" SQL type to match the referenced column
+- [x] The fields table shows type and kind (naming a `File` field's store and a `Key`'s target), so a mis-pointed field is visible without opening it
+- [x] The row editor renders a `File` field as a file picker (a path box plus a "Choose…" modal browsing the store via `browseFiles`) over the field's store, not a free-text path
+- [x] Gate: `tsc --noEmit` (the `admin_spa_typecheck` test) and the production `vite build` both pass. Out of scope here: an inline UI to edit an existing field's overlay via `updateField` (the endpoint exists from §3.3)
 
 ### 3.5 File fields do real work (`sc-catalog`, `sc-files`, `sc-api`)
 
