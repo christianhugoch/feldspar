@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## Rich types: the trait and the registry (§2.1)
+
+The type system gains a second kind of type. Until now every column resolved to a `BasicType` —
+a scalar family with no attributes and only "value of the right family" validation. A `RichType`
+(§6.1) is one Saltcorn understands: it declares typed attributes as `FormField`s (a `max_length`,
+a set of select options), validates a value against *both* the value and those attributes, and
+names the SQL types it can sit on. `sc-types` now defines the `RichType` trait — `fieldviews()`
+deferred, since those are React components (§6.3) and out of this milestone's scope.
+
+Rich types live in a **registry** keyed by name, the same "settings as data" move as
+`registered_backends` (file-store backends) and `registered_frameworks`: `registered_rich_types`,
+`rich_type`, `rich_type_config_spec`. The point is that the admin UI (§3.3's coming
+`listFieldTypes`) can render a field's attribute form for a type it knows nothing about, including
+one arriving later from a plugin. This section builds the mechanism; the initial types (`String`,
+`Integer`, `Email`) are §2.2, which fills in `builtin_rich_types` — until then the registry is
+deliberately empty, and asking it for a type names what is registered rather than inventing one.
+
+`TypeRef` grew a `Rich(RichTypeRef)` variant beside `Basic`. A `RichTypeRef` is a rich type's
+name already resolved against the registry (via `RichTypeRef::resolve`), so `TypeRef::sql_type`,
+`name` and validation delegate to the type without a lookup each time; identity is the name, which
+is what lets `TypeRef` keep deriving `PartialEq`/`Eq` over a trait object. `TypeRef::validate_with`
+is the new form that carries a field's attributes beside the value — the write path switches to it
+in §2.3; the old `validate(value)` stays for basic-only callers and validates a rich value against
+no attributes.
+
+**A rich type is never guessed from the database.** `TypeRef::from_sql_type` still always returns
+a basic type: a column is rich only because the `_sc_fields` overlay (§3.2) says so. Inferring
+"this `text` column is an `Email`" from the schema is exactly the surprising magic v2 avoids, so
+the mapping runs one way only — from an overlay's stored type name to a `RichTypeRef`.
+
+Tests (7 in `crates/sc-types/src/rich.rs`): a test rich type exercises the trait (attributes drive
+validation, non-text rejected, null allowed), `find` resolves by name and misses cleanly,
+`RichTypeRef` delegates and its identity is its name, the empty builtin registry reports unknown
+types by naming what is registered, and every registered type declares at least one SQL type (the
+invariant `RichTypeRef::sql_type` relies on).
+
 ## A table's access rules are enforced on an application, and a change reaches a mounted app live
 
 The rules were storable, merged and settable; this is the phase where they do observable work.

@@ -1,16 +1,21 @@
-//! Type system: basic types, attributes, validation (layer 3).
+//! Type system: basic types, rich types, attributes, validation (layer 3).
 //!
-//! The MVP milestone ships **only basic types** (technical design §6.1): every
-//! database column maps to a [`BasicType`] — one of a fixed set of scalar
+//! Every database column maps to a [`BasicType`] — one of a fixed set of scalar
 //! families mirroring the query layer's [`Value`](sc_query::Value) variants, or
-//! an [`Other`](BasicType::Other) catch-all for unrecognised backend types. This
-//! crate provides three things fields and the server need:
+//! an [`Other`](BasicType::Other) catch-all for unrecognised backend types. On
+//! top of that, a column may be given a **rich type** ([`RichType`], §6.1): one
+//! Saltcorn understands, with typed attributes and validation. This crate
+//! provides the pieces fields and the server need:
 //!
 //! - [`BasicType`] — the `Value`↔Postgres type mapping (resolve a driver
 //!   `sql_type` to a value family and back to a canonical DDL type) plus
 //!   value/type validation.
-//! - [`TypeRef`] — the "rich or basic" type reference a field carries; basic
-//!   only for now, modelled as an enum so rich types slot in later.
+//! - [`RichType`] and the rich-type registry ([`registered_rich_types`],
+//!   [`rich_type_config_spec`]) — a type declares its attributes as `FormField`s
+//!   and validates values against them, and the admin UI renders a form for a
+//!   type it knows nothing about (§6.1, [`rich`]).
+//! - [`TypeRef`] — the "rich or basic" type reference a field carries, modelled
+//!   as an enum so a field can be either.
 //! - [`BaseField`]/[`FormField`] — the shape of a field, and a field in a form
 //!   (§6.2). `FormField` is **also** how every configurable extension point
 //!   declares its settings (§13.3), so the admin UI renders one form for all of
@@ -31,11 +36,15 @@ mod attrs;
 mod basic;
 pub mod catchall;
 mod field;
+mod rich;
 mod type_ref;
 
 pub use attrs::Attrs;
 pub use basic::BasicType;
 pub use field::{BaseField, FormField, OptionsSource, validate_attrs};
+pub use rich::{
+    RichType, RichTypeRef, registered_rich_types, rich_type, rich_type_config_spec,
+};
 pub use type_ref::TypeRef;
 
 #[cfg(test)]

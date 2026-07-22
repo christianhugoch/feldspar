@@ -257,8 +257,10 @@ impl FormField {
         };
 
         let Some(basic) = self.base.type_.as_basic() else {
-            // Unreachable in the MVP (`TypeRef` is basic-only); a rich type would
-            // validate through its own `validate`, not here.
+            // A settings field is always a basic type; a rich type reaching here
+            // would validate through its own `validate` (with attributes), which
+            // this per-key JSON check does not have. Not an error — just not this
+            // function's job.
             return Ok(());
         };
         if !basic.accepts_json(value) {

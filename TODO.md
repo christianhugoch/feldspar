@@ -130,12 +130,12 @@ makes the milestone's first claim testable.
 the field overlay, because "what may a field's attributes contain" is a rich type's question and
 the overlay is only the place the answer is stored.
 
-### 2.1 The trait and the registry
+### 2.1 The trait and the registry ✅
 
-- [ ] `RichType` per §6.1: `name`, `attributes() -> &[FormField]`, `validate(&Value, &Attrs)`, `sql_types()`. `fieldviews()` is **deferred** — §6.3's fieldviews are React components and are out of scope here (see "Explicitly OUT of scope")
-- [ ] Registry of rich types by name, mirroring `registered_backends` / `registered_frameworks`: a name, a spec, a validator. Same reason as there — the admin UI must render a form for a type it knows nothing about, including one arriving later from a plugin
-- [ ] `TypeRef::Rich(RichTypeRef)` variant, with `sql_type()`, `name()` and `validate()` delegating. The enum was written for this; adding the variant must not require touching every field definition
-- [ ] Decide how a rich type resolves *back* from introspection. **Proposed: it does not.** `TypeRef::from_sql_type` keeps returning a basic type; a column is rich only because the `_sc_fields` overlay says so (§3.2). Guessing "this `text` column is an Email" from the DB is exactly the kind of magic that makes a legacy database behave surprisingly
+- [x] `RichType` per §6.1: `name`, `attributes() -> &[FormField]`, `validate(&Value, &Attrs)`, `sql_types()`. `fieldviews()` is **deferred** — §6.3's fieldviews are React components and are out of scope here (see "Explicitly OUT of scope")
+- [x] Registry of rich types by name, mirroring `registered_backends` / `registered_frameworks`: a name, a spec, a validator (`registered_rich_types` / `rich_type` / `rich_type_config_spec` in `crates/sc-types/src/rich.rs`). Same reason as there — the admin UI must render a form for a type it knows nothing about, including one arriving later from a plugin. The concrete types are §2.2's job, so `builtin_rich_types` is empty for now and asking for one names what is registered
+- [x] `TypeRef::Rich(RichTypeRef)` variant, with `sql_type()`, `name()` and `validate()` delegating. `RichTypeRef` is a name resolved against the registry (`RichTypeRef::resolve`); identity is the name, which keeps `TypeRef` deriving `PartialEq`/`Eq`. Added `TypeRef::validate_with(value, attrs)` as the attribute-carrying form the write path takes in §2.3
+- [x] Decide how a rich type resolves *back* from introspection. **Resolved as proposed: it does not.** `TypeRef::from_sql_type` keeps returning a basic type; a column is rich only because the `_sc_fields` overlay says so (§3.2). Guessing "this `text` column is an Email" from the DB is exactly the kind of magic that makes a legacy database behave surprisingly
 
 ### 2.2 The initial rich types
 
