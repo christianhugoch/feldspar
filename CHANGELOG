@@ -2,6 +2,43 @@
 
 Changes in reverse chronological order.
 
+## File fields do real work (§3.5)
+
+The milestone's second claim becomes observable: a column configured as a `File` field validates
+what is written to it, and a store a field points at cannot be deleted out from under it.
+
+- **Write-path validation.** A row written to a `File` field (`rows::validate_file_write`, run in
+  `create_row`/`update_row`) must resolve to a **connected** store — an unresolvable store is a 400
+  naming the store and the field, since a reference into a store that is not there points at
+  nothing — and its path must satisfy the field's folder and MIME rules. The store-independent half
+  of that check is `sc_files::validate_file_path`: the path must be store-relative (no absolute
+  path, no `..`), live under the field's folder when one is set, and carry an allowed MIME type
+  (inferred from the extension via the new `mime_for_path`, backed by `mime_guess`). Null/empty is
+  absence, left to the column's nullability. Errors name the field, because they reach an
+  application's user, not only the admin.
+- **The catalog-level store-delete check does real work.** `file_store_field_references` was
+  written, correct, and inert; §3.2's merge made the catalog's fields carry `File` kinds, so it now
+  finds them and `delete_file_store` refuses to delete a store a field points at, naming the field.
+  No new code — the reference scan already ran; the overlay finally gives it something to find.
+- **The tripwire flipped.** `file_field_references_are_inert_until_the_fields_overlay_exists` is
+  rewritten into its successor, `a_file_field_reference_is_caught_by_the_catalog_delete_check`: the
+  same setup, but the column is made a `File` field by an overlay row and the test now asserts the
+  reference **is** found and the delete refused, then that forgetting the overlay frees the store.
+  The old assertion is deleted, not weakened.
+- **Files are never touched by metadata changes.** Deleting a `File` field's overlay and dropping
+  its table both leave the bytes on disk exactly where they were — the same rule a store delete
+  follows, for the same reason (a store is a connection to data that exists independently of
+  Saltcorn).
+
+`sc-files` gains a `reference` module (`mime_for_path`, `validate_file_path`) and the `mime_guess`
+dependency; `sc-api` gains an `sc-files` dependency for it. Tests: 4 unit in `sc-files`
+(MIME-from-extension, unsafe paths, folder confinement, MIME allow-list), the rewritten tripwire,
+and 4 integration in `crates/sc-api/tests/file_field_write.rs` against real Postgres and a real
+local store — a valid write accepted; a path outside the folder and a disallowed MIME each refused
+naming the field with only the valid row written; a reference into an unresolvable store refused
+naming it; a store delete refused while a field points at it and freed once the field is forgotten;
+and a field-delete and a table-drop each leaving a real file in place.
+
 ## Admin SPA: the field editor (§3.4)
 
 `TableDetail.tsx`'s "add field" form becomes type-aware, driven by the `listFieldTypes` endpoint

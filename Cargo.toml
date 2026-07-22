@@ -107,6 +107,9 @@ rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 # which would pull weight into layer 3 for no gain. Same `Regex::new`/`is_match`
 # API for the subset validation uses.
 regex-lite = "0.1"
+# Extension → MIME mapping for a `File` field's MIME allow-list (§3.5). Already in
+# the tree (tower-http's `fs` feature), pinned here as a first-class dependency.
+mime_guess = "2"
 
 # --- HTTP server framework ---------------------------------------------------
 #

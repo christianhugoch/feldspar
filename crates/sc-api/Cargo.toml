@@ -17,6 +17,9 @@ sc-auth.workspace = true
 sc-db.workspace = true
 sc-query.workspace = true
 sc-types.workspace = true
+# A `File` field's write is validated against its store/folder/MIME rules (§3.5);
+# the store-independent half of that check lives in `sc-files`.
+sc-files.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -18,10 +18,12 @@ mod access;
 mod backend;
 mod def;
 mod local;
+mod reference;
 mod store;
 pub mod xattr;
 
 pub use access::{ROLE_PUBLIC, check_access, effective_min_role, filter_visible};
+pub use reference::{mime_for_path, validate_file_path};
 pub use backend::{
     backend_config_spec, connect_from_def, local_config_spec, registered_backends,
     validate_file_store_config,

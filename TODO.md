@@ -195,15 +195,15 @@ rich type, and the column's SQL type has to be able to hold it.
 - [x] The row editor renders a `File` field as a file picker (a path box plus a "Choose…" modal browsing the store via `browseFiles`) over the field's store, not a free-text path
 - [x] Gate: `tsc --noEmit` (the `admin_spa_typecheck` test) and the production `vite build` both pass. Out of scope here: an inline UI to edit an existing field's overlay via `updateField` (the endpoint exists from §3.3)
 
-### 3.5 File fields do real work (`sc-catalog`, `sc-files`, `sc-api`)
+### 3.5 File fields do real work (`sc-catalog`, `sc-files`, `sc-api`) ✅
 
 The point of the whole milestone's second claim, and where the tripwire is answered.
 
-- [ ] A row written to a `File` field is validated: the path is inside the field's store, under its folder if set, and its MIME type is allowed. An unresolvable store is an error naming the store and the field
-- [ ] Re-enable the catalog-level half of the file-store delete check. `file_store_field_references` is written, correct, and inert; with the overlay it can finally scan `_sc_fields` and refuse to delete a store that a field points at
-- [ ] Rewrite `file_field_references_are_inert_until_the_fields_overlay_exists` into its successor: the same setup, asserting that the reference **is** now found and the delete refused, naming the field. Delete the old assertion rather than weakening it
-- [ ] Deleting a *field* that points at a store, and dropping a table containing one, both leave the bytes alone — the same rule a store delete follows, and for the same reason
-- [ ] Integration test: create a `File` field, write a row with a valid path, reject a path outside the folder, reject a disallowed MIME type, refuse to delete the store while the field exists
+- [x] A row written to a `File` field is validated (`rows::validate_file_write` + `sc_files::validate_file_path`): the path is store-relative and under the field's folder if set, its MIME type (inferred from the extension via `mime_for_path`/`mime_guess`) is allowed, and the store resolves. An unresolvable store is an error naming the store and the field
+- [x] Re-enable the catalog-level half of the file-store delete check. **No new code needed:** `file_store_field_references` already scans the catalog's merged fields, so §3.2's merge made it live; `delete_file_store` now refuses a store a `File` field points at
+- [x] Rewrite `file_field_references_are_inert_until_the_fields_overlay_exists` into its successor (`a_file_field_reference_is_caught_by_the_catalog_delete_check`): the same setup with the column made a `File` field by an overlay, asserting the reference **is** found and the delete refused naming the field, then freed by forgetting the overlay. Old assertion deleted, not weakened
+- [x] Deleting a *field* that points at a store, and dropping a table containing one, both leave the bytes alone — asserted with a real file on disk
+- [x] Integration test: create a `File` field, write a row with a valid path, reject a path outside the folder, reject a disallowed MIME type, refuse to delete the store while the field exists (`crates/sc-api/tests/file_field_write.rs`, 4; plus 4 unit in `sc-files` and the rewritten tripwire)
 
 ---
 

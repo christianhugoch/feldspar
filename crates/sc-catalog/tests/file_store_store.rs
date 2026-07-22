@@ -11,9 +11,9 @@
 use std::sync::Arc;
 
 use sc_catalog::{
-    Catalog, DataField, DataFieldKind, FileStoreId, bootstrap_file_stores, delete_file_store,
-    file_store_field_references, list_file_stores, load_file_store, load_file_store_by_name,
-    save_file_store,
+    Catalog, DataField, DataFieldKind, FieldMeta, FileStoreId, bootstrap_field_meta,
+    bootstrap_file_stores, delete_field_meta, delete_file_store, file_store_field_references,
+    list_file_stores, load_file_store, load_file_store_by_name, save_field_meta, save_file_store,
 };
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
@@ -176,66 +176,69 @@ async fn deleting_removes_the_definition_and_reports_whether_one_existed() -> Re
     Ok(())
 }
 
-/// A `File` field's store reference does **not** survive into the catalog today,
-/// and this test exists to pin that down rather than to paper over it.
-///
-/// `DataFieldKind::File` is modelled (§6.2) but stored nowhere: `create_table`
-/// reloads the cache from introspection, and `Table::from_physical` can only
-/// derive `Plain` or `Key` (from a foreign key) — a column has no way to say "I
-/// am a path in store `uploads`". That needs the `_sc_fields` overlay, which §9
-/// puts out of MVP scope.
-///
-/// So `file_store_field_references` is correct but **inert**: it scans what the
-/// catalog holds, and the catalog holds no File kinds. The application-level
-/// check is the one doing real work right now. When the overlay lands this
-/// assertion flips, and it should fail loudly here so the delete path gets
-/// revisited rather than quietly staying half-enforced.
+/// The successor to the milestone's tripwire. Its ancestor asserted that a
+/// `File` field's store reference was *inert* — modelled but stored nowhere, so
+/// the catalog-level delete check found nothing. The `_sc_fields` overlay (§3.1)
+/// and its merge (§3.2) landed, so the reference is now real, and this asserts
+/// the opposite: the catalog-level check **finds** it and the delete is refused,
+/// naming the field.
 #[tokio::test]
-async fn file_field_references_are_inert_until_the_fields_overlay_exists() -> Result<()> {
+async fn a_file_field_reference_is_caught_by_the_catalog_delete_check() -> Result<()> {
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
     bootstrap_file_stores(&cat).await?;
+    bootstrap_field_meta(&cat).await?;
 
     let def = FileStoreDef::local("uploads", "/srv/uploads");
     save_file_store(&cat, &def).await?;
 
-    // Ask for a table whose `attachment` column is a File field in store
-    // `uploads` …
+    // A plain `attachment` text column…
     cat.create_table(
         "documents",
         &[
             DataField::plain("id", TypeRef::Basic(BasicType::Uuid))
                 .required()
                 .primary_key(),
-            DataField {
-                kind: DataFieldKind::File {
-                    store: FileStoreId("uploads".to_owned()),
-                    folder: None,
-                    mime_allow: Vec::new(),
-                },
-                ..DataField::plain("attachment", TypeRef::Basic(BasicType::Text))
-            },
+            DataField::plain("attachment", TypeRef::Basic(BasicType::Text)),
         ],
     )
     .await?;
 
-    // … and get one whose `attachment` is Plain, because introspection is the
-    // only source of truth for fields in the MVP.
+    // …made a `File` field pointing at `uploads` by an overlay row. This is the
+    // only way a column becomes a File field (§3.2), and it is what the ancestor
+    // test could not do.
+    let meta = FieldMeta::new("documents", "attachment").kind(DataFieldKind::File {
+        store: FileStoreId("uploads".to_owned()),
+        folder: None,
+        mime_allow: Vec::new(),
+    });
+    save_field_meta(&cat, &meta).await?;
+
+    // The merged column is now a File field…
     let documents = cat.require("documents")?;
     let attachment = documents
         .fields
         .iter()
         .find(|f| f.base.name == "attachment")
         .expect("the column exists");
+    assert!(matches!(attachment.kind, DataFieldKind::File { .. }));
+
+    // …so the catalog-level check finds the reference, and the delete is refused,
+    // naming the field. The tripwire has flipped.
     assert_eq!(
-        attachment.kind,
-        DataFieldKind::Plain,
-        "if this now reports File, the `_sc_fields` overlay has landed — make \
-         the delete check below assert the reference is caught"
+        file_store_field_references(&cat, "uploads")?,
+        ["documents.attachment"]
+    );
+    let err = delete_file_store(&cat, def.id, &[]).await.unwrap_err();
+    assert!(matches!(err.repr(), Repr::Invalid(_)), "{err}");
+    assert!(
+        err.to_string().contains("documents.attachment"),
+        "the refusal names the field: {err}"
     );
 
-    // Consequently the catalog-level check finds nothing, and the delete is
-    // allowed. This is the gap, stated plainly.
+    // Forgetting the overlay frees the store to be deleted — the reference was
+    // the overlay's, and nothing else held it.
+    delete_field_meta(&cat, meta.id).await?;
     assert!(file_store_field_references(&cat, "uploads")?.is_empty());
     assert!(delete_file_store(&cat, def.id, &[]).await?);
     Ok(())

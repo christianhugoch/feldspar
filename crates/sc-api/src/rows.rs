@@ -15,7 +15,7 @@
 //! endpoint's [`AuthRequirement`](crate::AuthRequirement) first, so every API
 //! surface goes through the same §7 layer.
 
-use sc_catalog::{Catalog, Table};
+use sc_catalog::{Catalog, DataFieldKind, Table};
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
 use sc_query::{
@@ -46,6 +46,7 @@ pub async fn create_row(catalog: &Catalog, table: &Table, body: &Json) -> Result
     let mut values = Vec::with_capacity(obj.len());
     for (key, json) in obj {
         let value = column_value(table, key, json)?;
+        validate_file_write(catalog, table, key, &value)?;
         columns.push(key.clone());
         values.push(Expr::lit(value));
     }
@@ -70,6 +71,7 @@ pub async fn update_row(catalog: &Catalog, table: &Table, id: &str, body: &Json)
             continue;
         }
         let value = column_value(table, key, json)?;
+        validate_file_write(catalog, table, key, &value)?;
         assignments.push(Assignment::new(key.clone(), Expr::lit(value)));
     }
     if assignments.is_empty() {
@@ -140,6 +142,44 @@ pub fn column_value(table: &Table, column: &str, json: &Json) -> Result<Value> {
         .validate_with(&value, &field.base.attributes)
         .map_err(|e| field_error(column, e))?;
     Ok(value)
+}
+
+/// Validate a value written to a `File` field against its store, folder and MIME
+/// rules (§3.5). A no-op for any field that is not a `File` kind, or a null/empty
+/// value (nullability is a separate check).
+///
+/// The path must resolve to a **connected** store — an unresolvable store is an
+/// error naming the store and the field, because a reference into a store that is
+/// not there points at nothing — and its shape must satisfy the field's folder
+/// and MIME constraints ([`sc_files::validate_file_path`]). The error names the
+/// field, as it is shown to a user of an application, not only the admin.
+fn validate_file_write(catalog: &Catalog, table: &Table, column: &str, value: &Value) -> Result<()> {
+    let Some(field) = table.field(column) else {
+        return Ok(());
+    };
+    let DataFieldKind::File {
+        store,
+        folder,
+        mime_allow,
+    } = &field.kind
+    else {
+        return Ok(());
+    };
+    // A null or empty path is absence, governed by the column's nullability, not
+    // by the file rules.
+    let path = match value {
+        Value::Text(path) if !path.is_empty() => path.as_str(),
+        _ => return Ok(()),
+    };
+
+    if catalog.file_store(&store.0)?.is_none() {
+        return Err(Error::invalid(format!(
+            "`{column}`: file store `{}` is not resolvable",
+            store.0
+        )));
+    }
+    sc_files::validate_file_path(path, folder.as_deref(), mime_allow)
+        .map_err(|e| field_error(column, e))
 }
 
 /// The basic (storage) type a JSON value is coerced through: the type itself for
