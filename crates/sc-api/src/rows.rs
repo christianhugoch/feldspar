@@ -17,10 +17,11 @@
 
 use sc_catalog::{Catalog, Table};
 use sc_db::Row;
-use sc_error::{Error, Result};
+use sc_error::{Error, Repr, Result};
 use sc_query::{
     Assignment, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
 };
+use sc_types::{BasicType, TypeRef};
 use serde_json::{Map, Value as Json, json};
 
 use crate::convert::{json_to_value, value_to_json};
@@ -113,17 +114,54 @@ pub fn row_to_json(row: &Row) -> Json {
     Json::Object(map)
 }
 
-/// Coerce a JSON value for a named column of `table`, rejecting unknown columns.
+/// Coerce a JSON value for a named column of `table`, validating it against the
+/// field's type and attributes, and rejecting unknown columns.
+///
+/// Two steps (§2.3). First the JSON is coerced to a [`Value`] of the column's
+/// **storage** type — the SQL type the column actually has, which a rich type
+/// sits on. Then the value is checked against the field's full
+/// [`TypeRef`](sc_types::TypeRef) *and* its configured attributes via
+/// [`validate_with`](sc_types::TypeRef::validate_with): a basic type checks the
+/// value family; a rich type also enforces its attributes (a `String`'s
+/// `max_length`/`options`/`regex`, an `Integer`'s `min`/`max`).
+///
+/// Both failures are reported as an [`Error::invalid`] (an HTTP 400) **naming the
+/// field**, because this message is shown to a user of an application, not only
+/// to the admin — "`age`: must be at most 120, got 999" lands them on the input
+/// to fix.
 pub fn column_value(table: &Table, column: &str, json: &Json) -> Result<Value> {
     let field = table
         .field(column)
         .ok_or_else(|| Error::invalid(format!("`{}` has no field `{column}`", table.name)))?;
-    let basic = field
-        .base
-        .type_
-        .as_basic()
-        .ok_or_else(|| Error::invalid(format!("field `{column}` has no basic type")))?;
-    json_to_value(basic, json)
+    let type_ = &field.base.type_;
+
+    let value = json_to_value(&storage_type(type_), json).map_err(|e| field_error(column, e))?;
+    type_
+        .validate_with(&value, &field.base.attributes)
+        .map_err(|e| field_error(column, e))?;
+    Ok(value)
+}
+
+/// The basic (storage) type a JSON value is coerced through: the type itself for
+/// a basic field, or the SQL type a rich field sits on (a `String` stores as
+/// `text`, an `Integer` as `int8`).
+fn storage_type(type_: &TypeRef) -> BasicType {
+    match type_.as_basic() {
+        Some(basic) => basic.clone(),
+        None => BasicType::from_sql_type(type_.sql_type()),
+    }
+}
+
+/// Re-raise a value error against a named field, preserving the `Invalid` kind
+/// (so it stays a 400) and prefixing the field name (§2.3). The specific
+/// violation — from either coercion or validation, both `Invalid` — is kept; any
+/// other kind falls back to its full display.
+fn field_error(column: &str, e: Error) -> Error {
+    let detail = match e.repr() {
+        Repr::Invalid(message) => message.clone(),
+        _ => e.to_string(),
+    };
+    Error::invalid(format!("`{column}`: {detail}"))
 }
 
 /// The single primary-key column of `table`, or an error when the table has a

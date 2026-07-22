@@ -2,6 +2,36 @@
 
 Changes in reverse chronological order.
 
+## Rich-type validation on the write path (§2.3)
+
+A row write now validates each value against its field's full type **and** the field's attributes,
+not just the value family. Until now `rows::column_value` — the coercion every API surface's row
+write funnels through (`create_row`/`update_row`, and so an application's REST POST) — took a
+field's `as_basic()` and converted JSON to a `Value`, with no attribute check and an outright
+error for a rich field. It now:
+
+- coerces the JSON through the column's **storage** type (the SQL type a rich type sits on — a
+  `String` over `text`, an `Integer` over `int8`), then
+- validates the value against the field's `TypeRef` and its `Attrs` via the new
+  `TypeRef::validate_with` (§2.1), so a `String`'s `max_length`/`options`/`regex` and an
+  `Integer`'s `min`/`max` are enforced at the write.
+
+Both a coercion failure and a rich-rule violation are reported as an `Invalid` error — which the
+router maps to a **400**, not a 422 — **naming the field**: "`age`: must be at most 120, got 999".
+This message is shown to a user of an application, not only the admin, so it has to say which input
+to fix; `field_error` preserves the `Invalid` kind while prefixing the field name (a plain
+`.context()` would have inherited an Application kind and become a 422). Basic fields are unchanged
+in practice — the added `validate_with` only re-checks the value family JSON coercion already
+guaranteed.
+
+**Test** (`crates/sc-api/tests/rich_type_write_path.rs`, 3, against real Postgres): a `people`
+table given rich fields by hand — `name` a `String` (≤ 5 letters, alphabetic `regex`), `age` an
+`Integer` (0–120) — writes a satisfying row, and rejects a too-long name, a non-alphabetic name,
+an over-max and under-min age, and a non-numeric age, each an `Invalid` (400) naming the field,
+with the offending rows absent from the table afterwards. The test drives `rows::create_row`
+directly — the seam an application POST funnels into — because a rich field cannot yet be
+*configured* through the admin API; §3's overlay closes that loop over literal HTTP.
+
 ## The initial rich types: String and Integer (§2.2)
 
 The registry from §2.1 was empty; this fills it with two types, small on purpose — between them

@@ -148,11 +148,11 @@ declare typed attributes, and constrain what may be stored.
 - [x] Decide whether `File` is a rich type or a field kind. **Resolved as proposed: a kind, not a type.** §6.2 already models it as `DataFieldKind::File`, and it is not a value family — it is a *reference*, like `Key`, whose storage type is `text`. The admin-facing type picker (§3.4) merges kinds and types into one list because that is how an admin thinks, but the model keeps them apart, and `Key` proves the shape already. No `File` rich type is registered
 - [x] Unit tests per type: valid and invalid values, attribute validation, `sql_type` round-trip
 
-### 2.3 Validation on the write path (`sc-catalog`, `sc-api`)
+### 2.3 Validation on the write path (`sc-catalog`, `sc-api`) ✅
 
-- [ ] A row write validates each value against its field's `TypeRef` **and** the field's `Attrs`. Today `validate` takes only a value; the rich path needs the attributes bag beside it
-- [ ] The error names the field and what was violated ("`email`: not a valid email address"), because this one is shown to a user of an application, not only to the admin
-- [ ] Integration test: an application POST that violates a rich type's rule is a 400 naming the field, and the row is not written
+- [x] A row write validates each value against its field's `TypeRef` **and** the field's `Attrs` (`rows::column_value`): coerce JSON through the storage type, then `TypeRef::validate_with(value, &field.attributes)`. This is the caller §2.1's `validate_with` was added for
+- [x] The error names the field and what was violated ("`age`: must be at most 120, got 999"), because this one is shown to a user of an application, not only to the admin. `field_error` keeps the `Invalid` kind (→ 400) while prefixing the field name — a plain `.context()` would have become a 422
+- [x] Integration test: a row write that violates a rich type's rule is a 400 (`Invalid`) naming the field, and the row is not written (`crates/sc-api/tests/rich_type_write_path.rs`, against real Postgres). **Deviation:** driven through `rows::create_row` rather than a literal application POST — a rich field cannot be *configured* through the admin API until §3's overlay, and the REST handler re-fetches its table from the catalog by name, so the catalog cannot yet yield a rich field to an HTTP request. §3.3's admin-API test closes the loop over HTTP
 
 ---
 
