@@ -44,12 +44,13 @@
 use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Update, Value};
-use sc_types::{Attrs, BasicType, TypeRef};
+use sc_types::{Attrs, BasicType, FormField, TypeRef};
 use serde_json::Value as Json;
 use uuid::Uuid;
 
 use crate::catalog::Catalog;
 use crate::field::{DataField, DataFieldKind, FieldId, FileStoreId, TableId};
+use crate::file_stores::QUERY_FILE_STORES;
 use crate::table::Table;
 
 /// Name of the field-overlay table in the primary database.
@@ -87,6 +88,41 @@ const KEY_SUMMARY_FIELD: &str = "summary_field";
 const KEY_STORE: &str = "store";
 const KEY_FOLDER: &str = "folder";
 const KEY_MIME_ALLOW: &str = "mime_allow";
+
+/// The settings a `File` field kind takes, as the same [`FormField`] vocabulary a
+/// rich type's attributes and a framework's config use (§6.2) — so the admin UI
+/// (§3.4) can render the kind's parameter form from a spec it need not understand.
+///
+/// The `store` is a [`server_query`](FormField::server_query) over the connected
+/// stores ([`QUERY_FILE_STORES`]), resolved to a pick-list before the spec
+/// reaches the UI; folder and MIME restrictions are plain inputs. The field names
+/// match the keys [`FieldMeta`] folds a `File` kind's parameters into, so a value
+/// the UI collects under `store` lands where the storage reads it.
+pub fn file_kind_config_spec() -> Vec<FormField> {
+    vec![
+        FormField::new(KEY_STORE, BasicType::Text)
+            .label("File store")
+            .required()
+            .server_query(QUERY_FILE_STORES),
+        FormField::new(KEY_FOLDER, BasicType::Text).label("Folder (optional)"),
+        FormField::new(KEY_MIME_ALLOW, BasicType::Json).label("Allowed MIME types (optional)"),
+    ]
+}
+
+/// The settings a `Key` field kind takes (§6.2), as [`FormField`]s. Mirrors
+/// [`file_kind_config_spec`]; the field names match the keys [`FieldMeta`] folds a
+/// `Key` kind's parameters into.
+pub fn key_kind_config_spec() -> Vec<FormField> {
+    vec![
+        FormField::new(KEY_TARGET_TABLE, BasicType::Text)
+            .label("Target table")
+            .required(),
+        FormField::new(KEY_TARGET_FIELD, BasicType::Text)
+            .label("Target field")
+            .required(),
+        FormField::new(KEY_SUMMARY_FIELD, BasicType::Text).label("Summary field (optional)"),
+    ]
+}
 
 /// Identifies a stored field-overlay row.
 ///

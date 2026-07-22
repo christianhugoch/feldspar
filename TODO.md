@@ -177,14 +177,14 @@ rich type, and the column's SQL type has to be able to hold it.
 - [x] A row for a column that no longer exists (or whose whole table is gone) is kept and reported, as in §1.1
 - [x] Tests: a field with no row is unchanged (compared to `from_physical` in full); a `File` row survives a reload; a type/column mismatch is reported and the table still serves rows (`crates/sc-catalog/tests/field_meta_merge.rs`, 5 integration; plus 8 unit on `apply_field_overlay`)
 
-### 3.3 Admin API — creating and editing fields (`sc-api`, `sc-server`)
+### 3.3 Admin API — creating and editing fields (`sc-api`, `sc-server`) ✅
 
-- [ ] `createField`'s input grows beyond `name`/`sql_type`/`nullable`: a `type` (basic type name **or** registered rich type name), a `kind` with its parameters, `attributes`, `label`, `required`, `unique`. `sql_type` is derived from the type, not asked for — asking the admin for both is how they get to disagree
-- [ ] Creating a field is now **two writes** — the DDL and the overlay row. Decide the failure semantics. **Proposed: DDL first, then the overlay row; if the overlay write fails, the column exists as a plain column and the error says so.** The reverse order would leave an overlay row describing a column that does not exist, which §3.2 has to tolerate anyway but should not be *manufacturing*
-- [ ] `updateField` (`PUT api/tables/{table}/fields/{field}`): overlay-only changes — label, attributes, kind parameters, summary field. Changing a field's *SQL type* is a schema change and is **out of scope**
-- [ ] `listFields` returns the merged field, including type, kind and attributes
-- [ ] `listFieldTypes` endpoint: the registered rich types and kinds with their `Vec<FormField>` specs, so the SPA renders the attribute form for a type it knows nothing about — the same contract `listFrameworks` and the backend registry already have
-- [ ] Integration tests through HTTP: create an `Email` field and a `File` field, read both back merged, reject an unknown type by name
+- [x] `createField`'s input grows beyond `name`/`sql_type`/`nullable`: a `type` (basic type name **or** registered rich type name), a `kind` with its parameters, `attributes`, `label`, `description`, `required`, `unique`. `sql_type` is derived from the type, not asked for
+- [x] Creating a field is now **two writes** — the DDL and the overlay row. **Resolved as proposed: DDL first, then the overlay row; if the overlay write fails, the column exists as a plain column and the error says so.** The overlay row is written only when the field carries overlay-worthy content (rich type, non-plain kind, label/description, attributes)
+- [x] `updateField` (`PUT api/tables/{table}/fields/{field}`): overlay-only changes — label, description, rich type, kind parameters, summary field. Changing a field's *SQL type* is a schema change and is **out of scope**. States the whole overlay each time (like table settings)
+- [x] `listFields` returns the merged field, including type, kind, attributes, label and description; degrades gracefully when `_sc_fields` does not exist
+- [x] `listFieldTypes` endpoint (`GET api/field-types`): basic types, registered rich types, and the `Key`/`File` kinds with their `Vec<FormField>` specs (the `File` store resolved to a pick-list); `file_kind_config_spec`/`key_kind_config_spec` live in `sc-catalog` beside the storage
+- [x] Integration tests through HTTP: create a rich `String` field and a `File` field, read both back merged, `updateField` in place, `listFieldTypes` shape, reject an unknown type by name (`crates/sc-server/tests/field_api.rs`, 3). **Deviation:** a `String` field rather than `Email` (§2.2 dropped `Email` for `String`'s `regex` attribute). The generated TS client was regenerated and `TableDetail.tsx`'s create-field call mapped to the new shape (the picker/attribute form is §3.4)
 
 ### 3.4 Admin SPA — the field editor (`ui/admin`)
 

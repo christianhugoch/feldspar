@@ -296,7 +296,10 @@ function Fields({
     setBusy(true);
     setError(null);
     try {
-      await api.createField(table, { name: name.trim(), sql_type: sqlType.trim(), nullable });
+      // The type picker and attribute form arrive in §3.4; for now the text
+      // input names a basic or rich type, which `createField` derives sql_type
+      // from.
+      await api.createField(table, { name: name.trim(), type: sqlType.trim(), required: !nullable });
       setName("");
       onChange();
     } catch {

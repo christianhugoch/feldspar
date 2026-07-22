@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## Admin API: creating and editing fields (§3.3)
+
+The field endpoints grow from "add a plain column" to the full overlay-aware surface, so an admin
+can give a field a rich type, a kind and attributes from the API.
+
+- **`createField`** no longer takes `sql_type`/`nullable`. It takes a `type` (a basic-type or
+  registered-rich-type name — the SQL type is *derived* from it, so the two can never disagree),
+  an optional `kind` with its parameters, `attributes`, `label`, `description`, `required` and
+  `unique`. An unknown type name is refused by name. Creating a field is now **two writes**: the
+  DDL column first, then the overlay row — and if the overlay write fails, the error says the
+  column exists as a plain column so the half-made state is legible rather than mysterious. The
+  overlay row is written only when the field carries something the column alone does not record (a
+  rich type, a non-plain kind, a label/description, attributes).
+- **`updateField`** (`PUT api/tables/{table}/fields/{field}`) is new: overlay-only edits — label,
+  description, rich type, kind parameters, attributes — reusing the field's existing overlay row.
+  It states the whole overlay (as a table's settings do), so the SPA sends the full set each time.
+  Renaming or retyping the *column* stays out of scope (a schema change).
+- **`listFields`** returns the merged field: `type`, `kind` (with parameters), `attributes`,
+  `label` and `description` alongside the introspected `sql_type`/`nullable`/`unique`. It degrades
+  gracefully on a database with no `_sc_fields` table (no overlay → the field as introspection
+  produced it).
+- **`listFieldTypes`** (`GET api/field-types`) is new: the basic types, the registered rich types
+  (with their attribute `config_spec`), and the `Key`/`File` kinds (with their parameter spec, the
+  `File` store resolved to a pick-list of connected stores) — one list the editor's type picker is
+  assembled from, the same `FormField`-spec contract `listFrameworks` has. `file_kind_config_spec`
+  / `key_kind_config_spec` live in `sc-catalog` beside the storage, so the spec's field names match
+  the keys the overlay folds a kind's parameters into.
+
+The generated admin TS client is regenerated, and `TableDetail.tsx`'s create-field call is mapped
+to the new `type`/`required` shape (the type picker and attribute form are §3.4). Integration
+tests (`crates/sc-server/tests/field_api.rs`, 3, real Postgres): create a rich `String` field and
+a `File` field and read both back merged, edit the `String` field's label/attributes in place, see
+`listFieldTypes` offer basic/rich/kinds with their specs, and an unknown type refused by name with
+no column left behind. The existing `admin_api` field-create call moves to the new shape.
+
 ## Merging the `_sc_fields` overlay onto introspection (§3.2)
 
 The field overlay now reaches the fields the rest of the system sees. `Catalog::reload`, after the

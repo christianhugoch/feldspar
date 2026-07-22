@@ -34,10 +34,12 @@ use sc_auth::{
     authenticate_admin, create_first_user, create_user, delete_role, list_roles, save_role,
 };
 use sc_catalog::{
-    AccessRules, Attrs, Catalog, DataField, FileStoreId, Table, TableId, TableMeta,
-    connect_file_store_def, delete_file_store, delete_table_meta, list_file_stores,
-    load_file_store, load_file_store_by_name, load_table_meta_by_name, orphan_table_meta,
-    resolve_options, save_file_store, save_table_meta,
+    AccessRules, Attrs, Catalog, DataField, DataFieldKind, FIELD_META_TABLE, FieldId, FieldMeta,
+    FileStoreId, Table, TableId, TableMeta, connect_file_store_def, delete_file_store,
+    delete_table_meta, file_kind_config_spec, key_kind_config_spec, list_field_meta_for_table,
+    list_file_stores, load_field_meta_by_field, load_file_store, load_file_store_by_name,
+    load_table_meta_by_name, orphan_table_meta, resolve_options, save_field_meta, save_file_store,
+    save_table_meta,
 };
 use sc_error::{Error, Result};
 use sc_files::{
@@ -45,7 +47,7 @@ use sc_files::{
     effective_min_role, filter_visible, registered_backends,
 };
 use sc_query::{Expr, Projection, Select, Source, Statement};
-use sc_types::{FormField, TypeRef};
+use sc_types::{BasicType, FormField, RichTypeRef, TypeRef, registered_rich_types, rich_type_config_spec};
 use serde_json::{Map, Value as Json, json};
 
 use crate::apps::{AppMounts, build_and_mount};
@@ -303,7 +305,20 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
-                let out: Vec<Json> = table.fields.iter().map(field_json).collect();
+                // Descriptions live only in the overlay row, not the merged field,
+                // so they are looked up alongside — but only when the overlay
+                // table exists at all (a database with no `_sc_fields` behaves as
+                // before the overlay, §9).
+                let metas = if catalog.get(FIELD_META_TABLE)?.is_some() {
+                    list_field_meta_for_table(&catalog, &table.name).await?
+                } else {
+                    Vec::new()
+                };
+                let out: Vec<Json> = table
+                    .fields
+                    .iter()
+                    .map(|f| field_json(f, &description_of(&metas, &f.base.name)))
+                    .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
@@ -314,20 +329,136 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let table = ctx.path_param("table")?.to_owned();
+                let table_name = ctx.path_param("table")?.to_owned();
                 let obj = require_object(&ctx.body)?;
                 let name = non_empty_str_field(obj, "name")?.to_owned();
-                let sql_type = non_empty_str_field(obj, "sql_type")?;
-                let nullable = bool_field(obj, "nullable")?;
-                let mut field = DataField::plain(&name, TypeRef::from_sql_type(sql_type));
-                if !nullable {
-                    field = field.required();
+                let type_name = non_empty_str_field(obj, "type")?.to_owned();
+                let label = optional_str(obj, "label");
+                let description = optional_str(obj, "description");
+                let required = optional_bool(obj, "required")?;
+                let unique = optional_bool(obj, "unique")?;
+                let kind = parse_field_kind(obj)?;
+                let attributes = attributes_field(obj)?;
+
+                // `sql_type` is derived from `type`, never asked for — a rich type
+                // sits on its own storage type. An unknown type is refused by name.
+                let (storage, rich_name) = resolve_field_type(&type_name)?;
+
+                // Two writes, DDL first. The column is created with its storage
+                // type and constraints, and with the kind so a `Key` emits its
+                // foreign key.
+                let mut ddl = DataField::plain(&name, storage);
+                if required {
+                    ddl = ddl.required();
                 }
-                let table = catalog.create_field(&table, &field).await?;
+                if unique {
+                    ddl = ddl.unique();
+                }
+                ddl.kind = kind.clone();
+                catalog.create_field(&table_name, &ddl).await?;
+
+                // Then the overlay row, when the field carries anything the column
+                // alone does not record. If this second write fails the column is
+                // already there as a plain column, and the error says exactly that
+                // rather than leaving a half-made field unexplained.
+                if needs_overlay(&rich_name, &kind, &label, &description, &attributes) {
+                    let mut meta = FieldMeta::new(&table_name, &name)
+                        .label(&label)
+                        .description(&description)
+                        .kind(kind);
+                    meta.type_name = rich_name;
+                    meta.attributes = attributes;
+                    save_field_meta(&catalog, &meta).await.map_err(|e| {
+                        Error::invalid(format!(
+                            "column `{name}` was created, but saving its settings failed: {e}. \
+                             It exists as a plain column; edit or drop it and retry."
+                        ))
+                    })?;
+                }
+
+                let table = catalog.require(&table_name)?;
                 let created = table
                     .field(&name)
                     .ok_or_else(|| Error::msg(format!("field `{name}` missing after create")))?;
-                Ok(HandlerResponse::ok(field_json(created)).with_status(201))
+                Ok(HandlerResponse::ok(field_json(created, &description)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateField", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // The field must exist: this edits a field the admin is looking
+                // at. Overlay-only — nothing here touches the column itself.
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let field_name = ctx.path_param("field")?.to_owned();
+                if table.field(&field_name).is_none() {
+                    return Err(Error::not_found(format!(
+                        "table `{}` has no field `{field_name}`",
+                        table.name
+                    )));
+                }
+                let obj = require_object(&ctx.body)?;
+
+                // Reuse the existing overlay row when there is one, so an edit
+                // updates it rather than hitting the one-row-per-field rule.
+                let existing = load_field_meta_by_field(&catalog, &table.name, &field_name).await?;
+                let mut meta = FieldMeta::new(&table.name, &field_name);
+                if let Some(row) = &existing {
+                    meta = meta.id(row.id);
+                }
+                meta.label = optional_str(obj, "label").trim().to_owned();
+                meta.description = optional_str(obj, "description").trim().to_owned();
+                let type_name = optional_str(obj, "type");
+                meta.type_name = if type_name.is_empty() {
+                    None
+                } else {
+                    // Reject an unknown type name here; whether a known rich type
+                    // fits the column is the merge's to report (§3.2).
+                    resolve_field_type(&type_name)?;
+                    Some(type_name)
+                };
+                meta.kind = parse_field_kind(obj)?;
+                meta.attributes = attributes_field(obj)?;
+
+                save_field_meta(&catalog, &meta).await?;
+                let table = catalog.require(&table.name)?;
+                let updated = table.field(&field_name).ok_or_else(|| {
+                    Error::msg(format!("field `{field_name}` missing after update"))
+                })?;
+                Ok(HandlerResponse::ok(field_json(updated, &meta.description)))
+            }
+        }
+    });
+
+    reg.register("listFieldTypes", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let mut out = Vec::new();
+                // Basic types first (no attributes), then rich types with their
+                // attribute specs, then the Key/File kinds — one list the field
+                // editor assembles its picker from (§3.4).
+                for basic in basic_field_types() {
+                    out.push(field_type_json(basic.name(), "basic", &[]));
+                }
+                for name in registered_rich_types() {
+                    let spec = rich_type_config_spec(&name)?;
+                    out.push(field_type_json(&name, "rich", &spec));
+                }
+                for (name, spec) in [
+                    ("key", key_kind_config_spec()),
+                    ("file", file_kind_config_spec()),
+                ] {
+                    // Resolve any `server_query` (the File store pick-list) to a
+                    // static list before the spec leaves the server.
+                    let resolved = resolve_options(&catalog, spec).await?;
+                    out.push(field_type_json(name, "kind", &resolved));
+                }
+                Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
     });
@@ -907,13 +1038,142 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
 // --- request/response shaping --------------------------------------------------
 
-/// A field (column) as `{ name, sql_type, nullable }`.
-fn field_json(field: &DataField) -> Json {
+/// A field (column) with its `_sc_fields` overlay merged on (§3.2): the
+/// introspected column facts plus the overlay's type, kind, label, description and
+/// attributes. `description` is passed in because it lives only in the overlay
+/// row, not the merged [`DataField`].
+fn field_json(field: &DataField, description: &str) -> Json {
     json!({
         "name": field.base.name,
+        "label": field.base.label,
+        "description": description,
         "sql_type": field.base.type_.sql_type(),
+        "type": field.base.type_.name(),
         "nullable": !field.required,
+        "required": field.required,
+        "unique": field.unique,
+        "kind": field_kind_json(&field.kind),
+        "attributes": Json::Object(field.base.attributes.clone()),
     })
+}
+
+/// A field kind as `{ type, …parameters }` — the wire shape `createField` and
+/// `updateField` accept back.
+fn field_kind_json(kind: &DataFieldKind) -> Json {
+    match kind {
+        DataFieldKind::Plain => json!({ "type": "plain" }),
+        DataFieldKind::Key {
+            target_table,
+            target_field,
+            summary_field,
+        } => json!({
+            "type": "key",
+            "target_table": target_table.0,
+            "target_field": target_field.0,
+            "summary_field": summary_field.as_ref().map(|f| f.0.clone()),
+        }),
+        DataFieldKind::File {
+            store,
+            folder,
+            mime_allow,
+        } => json!({
+            "type": "file",
+            "store": store.0,
+            "folder": folder,
+            "mime_allow": mime_allow,
+        }),
+    }
+}
+
+/// One `listFieldTypes` entry.
+fn field_type_json(name: &str, category: &str, spec: &[FormField]) -> Json {
+    json!({
+        "name": name,
+        "label": name,
+        "category": category,
+        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+    })
+}
+
+/// The basic types offered in the field-type picker — the fixed scalar families
+/// (the `Other` catch-all is not a thing an admin picks).
+fn basic_field_types() -> Vec<BasicType> {
+    use BasicType::{Bool, Bytes, Date, Decimal, Float, Int, Json as JsonT, Text, Time, Timestamp, Uuid};
+    vec![
+        Text, Int, Float, Decimal, Bool, Uuid, Date, Time, Timestamp, JsonT, Bytes,
+    ]
+}
+
+/// Resolve a `type` name from a create/update request into the column's storage
+/// type and, for a rich type, the overlay type name to record. A name that is
+/// neither a registered rich type nor a known basic type is refused (§3.3).
+fn resolve_field_type(name: &str) -> Result<(TypeRef, Option<String>)> {
+    if let Ok(rich) = RichTypeRef::resolve(name) {
+        // The column is the rich type's storage SQL type; the overlay records the
+        // rich type by name.
+        return Ok((TypeRef::from_sql_type(rich.sql_type()), Some(name.to_owned())));
+    }
+    if let Some(basic) = basic_field_types().into_iter().find(|b| b.name() == name) {
+        return Ok((TypeRef::Basic(basic), None));
+    }
+    // Also accept a raw SQL alias (e.g. `int8`, `varchar`) for the basic case.
+    match BasicType::from_sql_type(name) {
+        BasicType::Other(_) => Err(Error::invalid(format!(
+            "unknown field type `{name}`; it is neither a basic type nor a registered rich type"
+        ))),
+        known => Ok((TypeRef::Basic(known), None)),
+    }
+}
+
+/// Whether a created field needs an overlay row: it does when it carries a rich
+/// type, a non-plain kind, a label, a description, or attributes — anything the
+/// column alone does not record.
+fn needs_overlay(
+    rich_name: &Option<String>,
+    kind: &DataFieldKind,
+    label: &str,
+    description: &str,
+    attributes: &Attrs,
+) -> bool {
+    rich_name.is_some()
+        || !matches!(kind, DataFieldKind::Plain)
+        || !label.is_empty()
+        || !description.is_empty()
+        || !attributes.is_empty()
+}
+
+/// Parse the optional `kind` object of a create/update request into a
+/// [`DataFieldKind`], defaulting to `Plain` when absent or null.
+fn parse_field_kind(obj: &Map<String, Json>) -> Result<DataFieldKind> {
+    let Some(value) = obj.get("kind").filter(|v| !v.is_null()) else {
+        return Ok(DataFieldKind::Plain);
+    };
+    let kind = value
+        .as_object()
+        .ok_or_else(|| Error::invalid("`kind` must be an object"))?;
+    match str_field(kind, "type")? {
+        "plain" => Ok(DataFieldKind::Plain),
+        "file" => Ok(DataFieldKind::File {
+            store: FileStoreId(non_empty_str_field(kind, "store")?.to_owned()),
+            folder: optional_present_str(kind, "folder"),
+            mime_allow: string_array_field(kind, "mime_allow")?,
+        }),
+        "key" => Ok(DataFieldKind::Key {
+            target_table: TableId(non_empty_str_field(kind, "target_table")?.to_owned()),
+            target_field: FieldId(non_empty_str_field(kind, "target_field")?.to_owned()),
+            summary_field: optional_present_str(kind, "summary_field").map(FieldId),
+        }),
+        other => Err(Error::invalid(format!("unknown field kind `{other}`"))),
+    }
+}
+
+/// The overlay description for a field, from the metas loaded for its table.
+fn description_of(metas: &[FieldMeta], field: &str) -> String {
+    metas
+        .iter()
+        .find(|m| m.field_name == field)
+        .map(|m| m.description.clone())
+        .unwrap_or_default()
 }
 
 // --- applications: wire shaping ------------------------------------------------
@@ -1515,11 +1775,61 @@ fn non_empty_str_field<'a>(obj: &'a Map<String, Json>, key: &str) -> Result<&'a 
     Ok(value)
 }
 
-/// A required boolean field of an object body.
-fn bool_field(obj: &Map<String, Json>, key: &str) -> Result<bool> {
+/// An optional string field: the value if present and a string, else "". A
+/// present-but-non-string value is treated as absent, which is what an optional
+/// wire field means.
+fn optional_str(obj: &Map<String, Json>, key: &str) -> String {
     obj.get(key)
-        .and_then(Json::as_bool)
-        .ok_or_else(|| Error::invalid(format!("missing or non-boolean field `{key}`")))
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// An optional string field distinguishing "absent/null" (→ `None`) from a
+/// present string (→ `Some`) — for a kind parameter like a folder or summary
+/// field. A present non-string is an error.
+fn optional_present_str(obj: &Map<String, Json>, key: &str) -> Option<String> {
+    match obj.get(key) {
+        Some(Json::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// An optional boolean field, defaulting to `false` when absent or null; a
+/// present non-boolean is an error.
+fn optional_bool(obj: &Map<String, Json>, key: &str) -> Result<bool> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(false),
+        Some(Json::Bool(b)) => Ok(*b),
+        Some(_) => Err(Error::invalid(format!("field `{key}` must be a boolean"))),
+    }
+}
+
+/// An optional JSON-object field read as an [`Attrs`] bag, empty when absent or
+/// null; a present non-object is an error.
+fn attributes_field(obj: &Map<String, Json>) -> Result<Attrs> {
+    match obj.get("attributes") {
+        None | Some(Json::Null) => Ok(Attrs::new()),
+        Some(Json::Object(map)) => Ok(map.clone()),
+        Some(_) => Err(Error::invalid("`attributes` must be an object")),
+    }
+}
+
+/// An optional array-of-strings field, empty when absent or null; a present value
+/// that is not an array of strings is an error.
+fn string_array_field(obj: &Map<String, Json>, key: &str) -> Result<Vec<String>> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(Vec::new()),
+        Some(Json::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| Error::invalid(format!("`{key}` must be an array of strings")))
+            })
+            .collect(),
+        Some(_) => Err(Error::invalid(format!("`{key}` must be an array of strings"))),
+    }
 }
 
 /// A required integer field of an object body.

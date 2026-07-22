@@ -191,13 +191,37 @@ pub fn admin_endpoints() -> EndpointSet {
                 .param("table", ValueType::Text)
                 .lit("fields"),
         )
-        .input(TypeSchema::struct_of([
-            StructField::new("name", TypeSchema::text()),
-            StructField::new("sql_type", TypeSchema::text()),
-            StructField::new("nullable", TypeSchema::bool()),
-        ]))
+        .input(create_field_schema())
         .output(field_schema())
         .auth(AuthRequirement::admin()),
+    );
+
+    // Overlay-only edits: label, description, rich type, kind parameters,
+    // attributes. Renaming or retyping a *column* is a schema change and is out
+    // of scope (§3.3), so this endpoint cannot touch `name`, `required`, `unique`
+    // or the storage SQL type.
+    set.register(
+        Endpoint::new(
+            "updateField",
+            Method::Put,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("fields")
+                .param("field", ValueType::Text),
+        )
+        .input(field_settings_schema())
+        .output(field_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The registered field types (basic, rich) and kinds (Key, File) with their
+    // attribute specs, so the field editor can render a form for a type it knows
+    // nothing about — the same contract `listFrameworks` has (§13.3).
+    set.register(
+        Endpoint::new("listFieldTypes", Method::Get, api().lit("field-types"))
+            .output(TypeSchema::array(field_type_schema()))
+            .auth(AuthRequirement::admin()),
     );
 
     // --- row CRUD -----------------------------------------------------------
@@ -654,12 +678,67 @@ fn role_schema() -> TypeSchema {
     ])
 }
 
-/// A field (column) of a table.
+/// A field (column) of a table, with the `_sc_fields` overlay merged onto it
+/// (§3.2): the introspected `sql_type`/`nullable`/`unique`, plus the overlay's
+/// `type` (a rich type's name, or the basic type's), `kind` (with its
+/// parameters), `label`, `description` and `attributes`.
 fn field_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
         StructField::new("sql_type", TypeSchema::text()),
+        StructField::new("type", TypeSchema::text()),
         StructField::new("nullable", TypeSchema::bool()),
+        StructField::new("required", TypeSchema::bool()),
+        StructField::new("unique", TypeSchema::bool()),
+        // `kind` and `attributes` are opaque JSON: their shape depends on the
+        // field's kind and type, which the API cannot know statically any more
+        // than it can a framework's settings.
+        StructField::new("kind", TypeSchema::json()),
+        StructField::new("attributes", TypeSchema::json()),
+    ])
+}
+
+/// The body accepted when **creating** a field. `type` is a basic-type or
+/// registered-rich-type name — `sql_type` is derived from it, not asked for, so
+/// the two can never disagree (§3.3). Everything past `name`/`type` is optional.
+fn create_field_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("type", TypeSchema::text()),
+        StructField::new("kind", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("attributes", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("label", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("required", TypeSchema::optional(TypeSchema::bool())),
+        StructField::new("unique", TypeSchema::optional(TypeSchema::bool())),
+    ])
+}
+
+/// The body accepted when **editing** a field — the overlay-only subset. No
+/// `name`, `required`, `unique` or storage type: those are the database's, and
+/// changing them is a schema change out of scope for this milestone.
+fn field_settings_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("type", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("kind", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("attributes", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("label", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+    ])
+}
+
+/// One entry of `listFieldTypes`: a basic type, a rich type, or a field kind,
+/// each with the `config_spec` its attribute form is rendered from (empty for a
+/// basic type). `category` lets the editor group them; `name` is what
+/// `createField`/`updateField` take as `type` (basic/rich) or `kind.type` (kind).
+fn field_type_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("category", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
     ])
 }
 

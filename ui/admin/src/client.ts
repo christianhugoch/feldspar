@@ -17,9 +17,12 @@ export type ListRolesResponse = Array<{ role: number; name: string; description:
 export type CreateRoleRequest = { role: number; name: string; description: string };
 export type CreateRoleResponse = { role: number; name: string; description: string; builtin: boolean };
 export type DeleteRoleResponse = { deleted: boolean };
-export type ListFieldsResponse = Array<{ name: string; sql_type: string; nullable: boolean }>;
-export type CreateFieldRequest = { name: string; sql_type: string; nullable: boolean };
-export type CreateFieldResponse = { name: string; sql_type: string; nullable: boolean };
+export type ListFieldsResponse = Array<{ name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; kind: unknown; attributes: unknown }>;
+export type CreateFieldRequest = { name: string; type: string; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null; required?: boolean | null; unique?: boolean | null };
+export type CreateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; kind: unknown; attributes: unknown };
+export type UpdateFieldRequest = { type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null };
+export type UpdateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; kind: unknown; attributes: unknown };
+export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown> }> }>;
 export type ListRowsResponse = Array<unknown>;
 export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
@@ -75,6 +78,8 @@ export interface ApiClient {
   deleteRole(role: number): Promise<DeleteRoleResponse>;
   listFields(table: string): Promise<ListFieldsResponse>;
   createField(table: string, body: CreateFieldRequest): Promise<CreateFieldResponse>;
+  updateField(table: string, field: string, body: UpdateFieldRequest): Promise<UpdateFieldResponse>;
+  listFieldTypes(): Promise<ListFieldTypesResponse>;
   listRows(table: string): Promise<ListRowsResponse>;
   createRow(table: string, body: CreateRowRequest): Promise<CreateRowResponse>;
   updateRow(table: string, id: string, body: UpdateRowRequest): Promise<UpdateRowResponse>;
@@ -262,6 +267,23 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("createField", res);
       return (await res.json()) as CreateFieldResponse;
+    },
+    async updateField(table, field, body) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields/${field}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateField", res);
+      return (await res.json()) as UpdateFieldResponse;
+    },
+    async listFieldTypes() {
+      const res = await doFetch(`${baseUrl}/api/field-types`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listFieldTypes", res);
+      return (await res.json()) as ListFieldTypesResponse;
     },
     async listRows(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {

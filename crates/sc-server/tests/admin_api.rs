@@ -180,12 +180,13 @@ async fn full_admin_api_story() -> sc_error::Result<()> {
         .send(
             "POST",
             "/api/tables/book/fields",
-            Some(json!({ "name": "title", "sql_type": "text", "nullable": false })),
+            Some(json!({ "name": "title", "type": "text", "required": true })),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["name"], json!("title"));
     assert_eq!(body["sql_type"], json!("text"));
+    assert_eq!(body["type"], json!("text"));
     assert_eq!(body["nullable"], json!(false));
 
     let (_, body) = client.send("GET", "/api/tables", None).await;
