@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## Merging the `_sc_fields` overlay onto introspection (§3.2)
+
+The field overlay now reaches the fields the rest of the system sees. `Catalog::reload`, after the
+`_sc_tables` merge, loads every `_sc_fields` row and applies it to the matching column via the new
+`Table::apply_field_overlay`; `bootstrap_field_meta` is wired into `connect_catalog` beside the
+table overlay (deferred from §3.1, as `_sc_tables`'s boot wiring was deferred to §1.2). A field
+nobody configured comes out byte-for-byte as `Table::from_physical` produced it — the zero-setup
+promise, now asserted at the field level by comparing a configured catalog's fields to a bare one.
+
+The merge follows §1.2's precedence rule one level down: the database is the authority on what it
+knows (a column's SQL type, its nullability, whether a foreign key stands behind it), the overlay
+on what it knows (label, rich type, a kind's extra parameters, attributes). Where they would
+contradict, **the merge reports rather than resolves** — it never downgrades a column silently and
+never fails, because a hand-edited database or a restored dump produces exactly these
+contradictions and the table must stay usable:
+
+- A **rich type** applies only if its `sql_types()` includes the column's actual SQL type. `text`
+  configured as `Integer` leaves the column its basic type and records the mismatch; an
+  unregistered type name (a plugin's, perhaps) is recorded too.
+- A **`Key`** overlay's target is the database's whenever the database enforces one: on a column
+  introspection already made a key from a foreign key, the overlay may add only its `summary_field`
+  and can never repoint the reference. On a column with *no* foreign key, the overlay supplies the
+  whole reference — the case the database cannot enforce, such as a key onto a field in another
+  database (a future capability), where the overlay is the only place the target can come from.
+- A **`File`** overlay applies to any column (its storage is `text`, a reference the database does
+  not model), and `label`/`attributes` are applied even when a type or kind issue is also reported.
+
+Unclean merges surface through a new reporting channel mirroring `file_store_error`: the catalog
+holds the last reload's `Vec<FieldMergeIssue>` (table, field, message), rebuilt every reload and
+read by `Catalog::field_overlay_issues()`. A dangling row — its column dropped, or its whole table
+gone — is kept and reported here, as an orphan table overlay is (§1.1). `DataFieldKind::Key`'s
+overlay target is intentionally discarded in favour of the introspected one.
+
+Tests: 8 unit on `apply_field_overlay` (a fitting rich type + attributes apply; a non-fitting or
+unregistered type is reported and the column stays basic; `File` applies anywhere; a `Key` on a
+plain column supplies the whole reference while a `Key` atop a real FK adds only the summary field
+and keeps the DB target; a missing column and a system table are handled) and 5 integration against
+real Postgres (`crates/sc-catalog/tests/field_meta_merge.rs`) — an unconfigured field compared to
+`from_physical` in full, a rich type and a `File` field surviving an unrelated reload, a
+type/column mismatch reported with the table still serving and cleared when the overlay is
+forgotten, a dropped column reported, and a system-table row inserted behind the API ignored.
+
 ## The `_sc_fields` overlay: model & persistence (§3.1)
 
 The field-level twin of `_sc_tables` lands (`crates/sc-catalog/src/field_meta.rs`): a `FieldMeta`

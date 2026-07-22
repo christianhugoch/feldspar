@@ -18,8 +18,9 @@ use sc_error::{Error, Result};
 use sc_files::FileStore;
 
 use crate::field::{DataField, DbId, TableId};
+use crate::field_meta::{FIELD_META_TABLE, list_field_meta};
 use crate::provider::{DriverTableProvider, TableProvider};
-use crate::table::Table;
+use crate::table::{FieldMergeIssue, Table};
 use crate::table_meta::{TABLE_META_TABLE, list_table_meta};
 
 /// The catalog: the connected primary database plus a cache of its tables
@@ -47,6 +48,12 @@ pub struct Catalog {
     /// attempted"; the definition list plus [`file_store`](Self::file_store)
     /// distinguishes those.
     file_store_errors: RwLock<HashMap<String, String>>,
+    /// The `_sc_fields` overlay rows that did not cleanly merge on the last
+    /// [`reload`](Self::reload) (design §3.2) — a dangling row, a rich type that
+    /// does not fit its column, a `Key` with no foreign key behind it. Rebuilt
+    /// every reload from scratch, so it always reflects the current schema and
+    /// overlay; surfaced to the admin UI by [`field_overlay_issues`](Self::field_overlay_issues).
+    field_overlay_issues: RwLock<Vec<FieldMergeIssue>>,
 }
 
 impl Catalog {
@@ -59,6 +66,7 @@ impl Catalog {
             cache: RwLock::new(HashMap::new()),
             file_stores: RwLock::new(HashMap::new()),
             file_store_errors: RwLock::new(HashMap::new()),
+            field_overlay_issues: RwLock::new(Vec::new()),
         };
         catalog.reload().await?;
         Ok(catalog)
@@ -103,14 +111,55 @@ impl Catalog {
             }
         }
 
-        // The DB I/O is done; take the lock only to swap in the new snapshot so
-        // it is never held across an await.
+        // Then the `_sc_fields` overlay, onto the fields the table now has. Same
+        // "only when the table exists" guard and same bootstrapping reason as
+        // above. The merge reports rather than fails, so its issues are collected
+        // here and stored beside the cache.
+        let mut field_issues = Vec::new();
+        if map.contains_key(&TableId(FIELD_META_TABLE.to_owned())) {
+            for meta in list_field_meta(self).await? {
+                match map.get_mut(&TableId(meta.table_name.clone())) {
+                    Some(table) => field_issues.extend(table.apply_field_overlay(&meta)),
+                    // A field overlay whose whole table is gone is a dangling row
+                    // too — kept (like an orphan table overlay) and reported.
+                    None => field_issues.push(FieldMergeIssue {
+                        table: meta.table_name.clone(),
+                        field: meta.field_name.clone(),
+                        message: format!(
+                            "field overlay names table `{}`, which is not in the catalog",
+                            meta.table_name
+                        ),
+                    }),
+                }
+            }
+        }
+
+        // The DB I/O is done; take the locks only to swap in the new snapshots so
+        // they are never held across an await.
         let mut guard = self
             .cache
             .write()
             .map_err(|_| Error::msg("catalog cache lock poisoned"))?;
         *guard = map;
+        drop(guard);
+        let mut issues = self
+            .field_overlay_issues
+            .write()
+            .map_err(|_| Error::msg("catalog field-overlay issue lock poisoned"))?;
+        *issues = field_issues;
         Ok(())
+    }
+
+    /// The `_sc_fields` overlay rows that did not cleanly merge on the last
+    /// [`reload`](Self::reload), for the admin UI to surface (design §3.2). Empty
+    /// when every stored field overlay applied cleanly, which is the ordinary
+    /// case.
+    pub fn field_overlay_issues(&self) -> Result<Vec<FieldMergeIssue>> {
+        let guard = self
+            .field_overlay_issues
+            .read()
+            .map_err(|_| Error::msg("catalog field-overlay issue lock poisoned"))?;
+        Ok(guard.clone())
     }
 
     /// The cached table with the given name, if present.

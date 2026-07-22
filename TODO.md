@@ -166,16 +166,16 @@ declare typed attributes, and constrain what may be stored.
 - [x] Decide how the kind is stored. **Resolved as proposed: a `kind` text discriminant plus the kind's parameters in `attributes`.** On read the parameter keys are lifted back into the structured `DataFieldKind` and the residual is the field's own attributes; those keys are reserved within a field's attributes (harmless — a `File`/`Key` field is basic-typed with no rich attributes)
 - [x] Integration tests: round-trip a `File` field's store/folder/MIME restrictions; an ill-typed `kind` is rejected by name (`crates/sc-catalog/tests/field_meta_store.rs`, 9 total), plus 9 unit tests on the model
 
-### 3.2 Merging fields (`sc-catalog`)
+### 3.2 Merging fields (`sc-catalog`) ✅
 
 The same precedence rule as §1.2, with one genuinely new case: an overlay may say a column is a
 rich type, and the column's SQL type has to be able to hold it.
 
-- [ ] Merge overlay rows onto the fields `Table::from_physical` produced: type (basic → rich), kind (`Plain` → `Key`/`File`), label, attributes
-- [ ] A rich type whose `sql_types()` does not include the column's actual type is a **reported inconsistency**, not a silent downgrade and not a hard failure: the table must stay usable and the admin must be told. `text` → `Integer` is exactly what a hand-edited database produces
-- [ ] `Key` fields: introspection already derives `Key` from a foreign key. The overlay adds only `summary_field` — it must not be able to invent a `Key` that has no foreign key behind it, or a "reference" would exist that the database does not enforce
-- [ ] A row for a column that no longer exists is kept and reported, as in §1.1
-- [ ] Tests: a field with no row is unchanged; a `File` row survives a reload; a type/column mismatch is reported and the table still serves rows
+- [x] Merge overlay rows onto the fields `Table::from_physical` produced: type (basic → rich), kind (`Plain` → `Key`/`File`), label, attributes (`Table::apply_field_overlay`, applied in `Catalog::reload`; `bootstrap_field_meta` wired into `connect_catalog`)
+- [x] A rich type whose `sql_types()` does not include the column's actual type is a **reported inconsistency** (`FieldMergeIssue`, surfaced by `Catalog::field_overlay_issues()`), not a silent downgrade and not a hard failure: the table stays usable and the admin is told. An unregistered type name is reported the same way
+- [x] `Key` fields: the database's target wins whenever it enforces one — atop an introspected foreign key the overlay adds only `summary_field` and cannot repoint the reference. On a column with no FK, the overlay supplies the whole reference: the case the database cannot enforce (a key onto another database, a future capability), where the overlay is the only source of the target
+- [x] A row for a column that no longer exists (or whose whole table is gone) is kept and reported, as in §1.1
+- [x] Tests: a field with no row is unchanged (compared to `from_physical` in full); a `File` row survives a reload; a type/column mismatch is reported and the table still serves rows (`crates/sc-catalog/tests/field_meta_merge.rs`, 5 integration; plus 8 unit on `apply_field_overlay`)
 
 ### 3.3 Admin API — creating and editing fields (`sc-api`, `sc-server`)
 

@@ -55,6 +55,9 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_catalog::bootstrap_table_meta(&catalog)
         .await
         .context("ensuring the table overlay table exists")?;
+    sc_catalog::bootstrap_field_meta(&catalog)
+        .await
+        .context("ensuring the field overlay table exists")?;
     Ok(catalog)
 }
 

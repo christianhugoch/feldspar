@@ -11,9 +11,30 @@
 use std::collections::BTreeSet;
 
 use sc_db::PhysicalTable;
+use sc_types::{RichTypeRef, TypeRef};
 
 use crate::field::{Attrs, DataField, DataFieldKind, DbId, FieldId, TableId};
+use crate::field_meta::FieldMeta;
 use crate::table_meta::{TableMeta, TableMetaId};
+
+/// A way in which a stored `_sc_fields` overlay row did **not** cleanly apply to
+/// the introspected field it names (design §3.2).
+///
+/// The merge never fails and never silently downgrades: a row that cannot be
+/// honoured leaves the field as introspection produced it — still usable — and
+/// records why here, for the admin UI to surface. The two reasons are a dangling
+/// row (the column, or its table, is gone) and a rich type that does not fit the
+/// column's SQL type. Each is exactly what a hand-edited database or a restored
+/// dump can produce, and each is the admin's to fix, not a bug to crash on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldMergeIssue {
+    /// The table the overlay row named.
+    pub table: String,
+    /// The field the overlay row named.
+    pub field: String,
+    /// A human-readable explanation of why the row did not apply.
+    pub message: String,
+}
 
 /// Which kind of provider serves a table's rows (technical design §8.3). The MVP
 /// only has database-backed tables; virtual providers (RSS, IMAP, search, …) add
@@ -157,6 +178,129 @@ impl Table {
         self.overlay = Some(meta.id);
     }
 
+    /// Apply a field overlay row to the matching field of this table (design
+    /// §3.2), returning any way in which it did not cleanly apply.
+    ///
+    /// **Same precedence rule as [`apply_overlay`](Table::apply_overlay), one
+    /// level down:** the database is the authority on what it knows (the column's
+    /// SQL type, its nullability, whether a foreign key stands behind it), and the
+    /// overlay is the authority on what *it* knows (a label, a rich type, a field
+    /// kind's extra parameters, attributes). Where the two would contradict, the
+    /// database wins and the contradiction is *reported*, never resolved by
+    /// downgrading the column or by crashing — the table stays usable.
+    ///
+    /// The rules that make that concrete:
+    ///
+    /// - A **rich type** applies only if its `sql_types()` includes the column's
+    ///   actual SQL type. `text` configured as `Integer` is reported and the
+    ///   column stays its basic type. An unregistered type name is likewise
+    ///   reported (it may belong to a plugin not loaded here).
+    /// - A **`Key`** overlay's target is the database's whenever the database has
+    ///   one: on a column introspection made a key from a foreign key, the
+    ///   overlay may add only its `summary_field` and can never repoint the
+    ///   reference. On a column with *no* foreign key, the overlay supplies the
+    ///   whole reference — the case the database cannot enforce, such as a key
+    ///   onto a field in another database (a future capability), where the
+    ///   overlay is the only place the target can come from.
+    /// - A **`File`** overlay applies to any column (its storage is `text`); it
+    ///   is a reference the database does not model, so there is nothing to
+    ///   contradict.
+    /// - `label` and `attributes` are the overlay's to set and are applied even
+    ///   when a type or kind issue is also reported — the field stays usable and
+    ///   the admin is told what did not take.
+    ///
+    /// A **system table never takes a field overlay**, matching
+    /// [`apply_overlay`](Table::apply_overlay): `save_field_meta` refuses to write
+    /// one, so this only fires on a row inserted behind the API, and the answer is
+    /// to ignore it.
+    pub fn apply_field_overlay(&mut self, meta: &FieldMeta) -> Vec<FieldMergeIssue> {
+        if self.is_system() {
+            return Vec::new();
+        }
+        let mut issues = Vec::new();
+        let Some(idx) = self
+            .fields
+            .iter()
+            .position(|f| f.base.name == meta.field_name)
+        else {
+            issues.push(self.field_issue(meta, "refers to a column that does not exist"));
+            return issues;
+        };
+
+        // Overlay-owned, always applied: a label (empty means "none given") and
+        // the field's own attributes.
+        if !meta.label.is_empty() {
+            self.fields[idx].base.label = meta.label.clone();
+        }
+        self.fields[idx].base.attributes = meta.attributes.clone();
+
+        // A rich type, if it fits the column's SQL type.
+        if let Some(type_name) = &meta.type_name {
+            let column_sql = self.fields[idx].base.type_.sql_type().to_owned();
+            match RichTypeRef::resolve(type_name) {
+                Ok(rich) if rich.rich_type().sql_types().contains(&column_sql.as_str()) => {
+                    self.fields[idx].base.type_ = TypeRef::Rich(rich);
+                }
+                Ok(_) => issues.push(self.field_issue(
+                    meta,
+                    &format!(
+                        "is configured as rich type `{type_name}`, which does not apply to a \
+                         `{column_sql}` column"
+                    ),
+                )),
+                Err(_) => issues.push(self.field_issue(
+                    meta,
+                    &format!("names rich type `{type_name}`, which is not registered"),
+                )),
+            }
+        }
+
+        // A field kind. `File` applies freely; `Plain` changes nothing; `Key`
+        // depends on whether the database enforces the reference.
+        match &meta.kind {
+            DataFieldKind::Plain => {}
+            DataFieldKind::File { .. } => self.fields[idx].kind = meta.kind.clone(),
+            DataFieldKind::Key { summary_field, .. } => {
+                // Read the database's target first, so the assignment below does
+                // not borrow the field it writes.
+                let db_target = match &self.fields[idx].kind {
+                    DataFieldKind::Key {
+                        target_table,
+                        target_field,
+                        ..
+                    } => Some((target_table.clone(), target_field.clone())),
+                    _ => None,
+                };
+                self.fields[idx].kind = match db_target {
+                    // The database enforces this foreign key, so it is the
+                    // authority on the target: the overlay may add only the
+                    // summary field, never repoint the reference.
+                    Some((target_table, target_field)) => DataFieldKind::Key {
+                        target_table,
+                        target_field,
+                        summary_field: summary_field.clone(),
+                    },
+                    // No foreign key behind the column: the overlay supplies the
+                    // whole reference. This is the case the database *cannot*
+                    // enforce — a key onto a field in another database (a future
+                    // capability) — so the overlay is the only place its target
+                    // can come from.
+                    None => meta.kind.clone(),
+                };
+            }
+        }
+        issues
+    }
+
+    /// Build a [`FieldMergeIssue`] naming this table and the overlay's field.
+    fn field_issue(&self, meta: &FieldMeta, what: &str) -> FieldMergeIssue {
+        FieldMergeIssue {
+            table: self.name.clone(),
+            field: meta.field_name.clone(),
+            message: format!("field `{}.{}` {what}", self.name, meta.field_name),
+        }
+    }
+
     /// Whether this is a system table (`_sc_*`), hidden from users (technical
     /// design §9). No such tables exist in the MVP, but the check is defined so
     /// callers can filter consistently.
@@ -181,4 +325,158 @@ fn single_column_fk_target(physical: &PhysicalTable, column: &str) -> Option<(St
             _ => None,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field::FileStoreId;
+    use sc_types::BasicType;
+
+    /// A two-column `books` table: a `text` `title` and a `text` `cover`.
+    fn books() -> Table {
+        Table {
+            id: TableId("books".into()),
+            name: "books".into(),
+            database: DbId::primary(),
+            source: TableSource::Database,
+            fields: vec![
+                DataField::plain("title", TypeRef::Basic(BasicType::Text)),
+                DataField::plain("cover", TypeRef::Basic(BasicType::Text)),
+            ],
+            primary_key: vec![],
+            label: "books".into(),
+            description: String::new(),
+            access: AccessRules::default(),
+            attributes: Attrs::new(),
+            overlay: None,
+        }
+    }
+
+    #[test]
+    fn a_fitting_rich_type_and_attributes_apply() {
+        let mut table = books();
+        let mut meta = FieldMeta::new("books", "title")
+            .label("Title")
+            .rich_type("string");
+        meta.attributes.insert("max_length".into(), 200.into());
+
+        let issues = table.apply_field_overlay(&meta);
+        assert!(issues.is_empty(), "{issues:?}");
+
+        let field = table.field("title").unwrap();
+        assert_eq!(field.base.label, "Title");
+        assert_eq!(field.base.type_.name(), "string");
+        assert_eq!(field.base.attributes.get("max_length"), Some(&200.into()));
+    }
+
+    #[test]
+    fn a_rich_type_that_does_not_fit_the_column_is_reported_and_the_column_stays_basic() {
+        // `text` configured as `Integer` — what a hand-edited database produces.
+        let mut table = books();
+        let meta = FieldMeta::new("books", "title").rich_type("integer");
+
+        let issues = table.apply_field_overlay(&meta);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("integer"), "{:?}", issues[0]);
+        assert!(issues[0].message.contains("text"), "{:?}", issues[0]);
+        // The field is still usable, still its basic type.
+        assert_eq!(
+            table.field("title").unwrap().base.type_,
+            TypeRef::Basic(BasicType::Text)
+        );
+    }
+
+    #[test]
+    fn an_unregistered_rich_type_is_reported() {
+        let mut table = books();
+        let meta = FieldMeta::new("books", "title").rich_type("colour");
+        let issues = table.apply_field_overlay(&meta);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("colour"), "{:?}", issues[0]);
+        assert!(issues[0].message.contains("not registered"), "{:?}", issues[0]);
+    }
+
+    #[test]
+    fn a_file_kind_applies_to_any_column() {
+        let mut table = books();
+        let meta = FieldMeta::new("books", "cover").kind(DataFieldKind::File {
+            store: FileStoreId("uploads".into()),
+            folder: Some("covers".into()),
+            mime_allow: vec![],
+        });
+        let issues = table.apply_field_overlay(&meta);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(matches!(
+            table.field("cover").unwrap().kind,
+            DataFieldKind::File { .. }
+        ));
+    }
+
+    #[test]
+    fn a_key_overlay_on_a_plain_column_supplies_the_whole_reference() {
+        // No foreign key behind the column: the overlay is the only place a
+        // target can come from — the case the database cannot enforce (e.g. a key
+        // into another database). It applies rather than being rejected.
+        let mut table = books();
+        let key = DataFieldKind::Key {
+            target_table: TableId("authors".into()),
+            target_field: FieldId("id".into()),
+            summary_field: Some(FieldId("name".into())),
+        };
+        let meta = FieldMeta::new("books", "title").kind(key.clone());
+        let issues = table.apply_field_overlay(&meta);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(table.field("title").unwrap().kind, key);
+    }
+
+    #[test]
+    fn a_key_overlay_adds_only_the_summary_field_atop_a_real_foreign_key() {
+        // The column already is a key from introspection; the overlay keeps the
+        // database's target and adds only the summary field.
+        let mut table = books();
+        table.fields[0].kind = DataFieldKind::Key {
+            target_table: TableId("authors".into()),
+            target_field: FieldId("id".into()),
+            summary_field: None,
+        };
+        let meta = FieldMeta::new("books", "title").kind(DataFieldKind::Key {
+            // A different target here must be ignored — the database is authority.
+            target_table: TableId("wrong".into()),
+            target_field: FieldId("wrong".into()),
+            summary_field: Some(FieldId("name".into())),
+        });
+
+        let issues = table.apply_field_overlay(&meta);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(
+            table.field("title").unwrap().kind,
+            DataFieldKind::Key {
+                target_table: TableId("authors".into()),
+                target_field: FieldId("id".into()),
+                summary_field: Some(FieldId("name".into())),
+            }
+        );
+    }
+
+    #[test]
+    fn an_overlay_for_a_missing_column_is_reported() {
+        let mut table = books();
+        let meta = FieldMeta::new("books", "ghost").rich_type("string");
+        let issues = table.apply_field_overlay(&meta);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("does not exist"), "{:?}", issues[0]);
+    }
+
+    #[test]
+    fn a_system_table_ignores_a_field_overlay() {
+        let mut table = books();
+        table.name = "_sc_secret".into();
+        let meta = FieldMeta::new("_sc_secret", "title").rich_type("string");
+        assert!(table.apply_field_overlay(&meta).is_empty());
+        assert_eq!(
+            table.field("title").unwrap().base.type_,
+            TypeRef::Basic(BasicType::Text)
+        );
+    }
 }
