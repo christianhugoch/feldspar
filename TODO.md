@@ -158,13 +158,13 @@ declare typed attributes, and constrain what may be stored.
 
 ## Phase 3 — The `_sc_fields` overlay and File fields
 
-### 3.1 Model & persistence (`sc-catalog`)
+### 3.1 Model & persistence (`sc-catalog`) ✅
 
-- [ ] `FieldMeta` value type: id, `table_name`, `field_name`, optional label/description, `TypeRef` (rich type name, if any), field `kind` + its parameters, `Attrs`
-- [ ] `_sc_fields` table + bootstrap; `(table_name, field_name)` is `UNIQUE`
-- [ ] `save_field_meta` / `load_field_meta` / `list_field_meta` / `delete_field_meta`, strict reads as in §1.1
-- [ ] Decide how the kind is stored. **Proposed: a `kind` text discriminant plus the kind's parameters in `attributes`**, rather than a column per kind's parameters: `Key` and `File` have disjoint parameters and more kinds are expected, so per-kind columns would add a nullable column per kind forever. This is §9's own rule ("a value present for many rows gets its own column; a sparse value goes into `attributes`") applied honestly
-- [ ] Integration tests: round-trip a `File` field's store/folder/MIME restrictions; an ill-typed `kind` is rejected by name
+- [x] `FieldMeta` value type (`crates/sc-catalog/src/field_meta.rs`): id, `table_name`, `field_name`, optional label/description, `type_name` (rich type name, if any), field `kind` (a `DataFieldKind`, reused) + its parameters, `Attrs`
+- [x] `_sc_fields` table + bootstrap; `(table_name, field_name)` is `UNIQUE`. **Realised as the composite `PRIMARY KEY (table_name, name)`** — a field name is unique only within its table, and the composite PK the DDL already supports gives real DB-level uniqueness without extending the schema layer for a composite `UNIQUE`. §9 requires `id` present, not that it be the key, so `id` is a required, unique row handle instead
+- [x] `save_field_meta` / `load_field_meta` / `list_field_meta` / `delete_field_meta` (plus `load_field_meta_by_field` and `list_field_meta_for_table` for §3.2's merge), strict reads as in §1.1
+- [x] Decide how the kind is stored. **Resolved as proposed: a `kind` text discriminant plus the kind's parameters in `attributes`.** On read the parameter keys are lifted back into the structured `DataFieldKind` and the residual is the field's own attributes; those keys are reserved within a field's attributes (harmless — a `File`/`Key` field is basic-typed with no rich attributes)
+- [x] Integration tests: round-trip a `File` field's store/folder/MIME restrictions; an ill-typed `kind` is rejected by name (`crates/sc-catalog/tests/field_meta_store.rs`, 9 total), plus 9 unit tests on the model
 
 ### 3.2 Merging fields (`sc-catalog`)
 

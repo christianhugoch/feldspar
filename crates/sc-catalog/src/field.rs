@@ -77,7 +77,13 @@ pub struct DataField {
 }
 
 /// What a [`DataField`] holds beyond a plain scalar (technical design §6.2).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Eq` as well as `PartialEq`: every variant's fields are identifiers and
+/// strings, so two kinds compare exactly. (The enclosing [`DataField`] is only
+/// `PartialEq`, because its [`BaseField`] carries an [`Attrs`] bag — but the kind
+/// itself has no such value, and [`FieldMeta`](crate::FieldMeta) relies on this
+/// to be `Eq`.)
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataFieldKind {
     /// An ordinary scalar column.
     Plain,

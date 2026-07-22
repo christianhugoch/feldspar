@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## The `_sc_fields` overlay: model & persistence (§3.1)
+
+The field-level twin of `_sc_tables` lands (`crates/sc-catalog/src/field_meta.rs`): a `FieldMeta`
+value type and `_sc_fields` table storing what an admin configures *on top of* an introspected
+column — a rich type by name, a label/description, a field kind (`Plain`/`Key`/`File`), and sparse
+attributes — with `save`/`load`/`list`/`delete` and the same strict reads as `_sc_tables` (a
+missing or ill-typed column, or an unknown `kind`, is an `Invalid` naming the field, never a silent
+default). Not yet wired into the boot path or merged onto the catalog's fields — that is §3.2, as
+`_sc_tables`'s merge was §1.2.
+
+Three shape decisions, documented on the module:
+
+- **The natural key is composite, and it is the primary key.** A field name is unique only within
+  its table, so one-overlay-row-per-field is `PRIMARY KEY (table_name, name)` — a real
+  database-level guarantee (the authority under concurrent saves), using the composite-PK the DDL
+  already supports rather than a composite `UNIQUE` it does not. §9 requires an `id` (UUID) column
+  but not that it be the key, so `id` stays as a required, unique row handle that `save`/`load`/
+  `delete` address by, while the pair does the uniqueness work.
+- **A field's kind is a `kind` discriminant plus its parameters in `attributes`.** A `File`'s
+  store/folder/MIME-list and a `Key`'s target are folded into the sparse `attributes` bag under
+  reserved keys, not a column apiece — §9's "a sparse value goes into `attributes`" applied so more
+  kinds never grow the schema. On read the kind's parameter keys are lifted back out into the
+  structured `DataFieldKind` and whatever remains is the field's own rich-type attributes; those
+  key names are reserved within a field's attributes, harmless since a `File`/`Key` field carries a
+  basic type with no rich attributes to collide.
+- **The rich type is a name, not validated here.** The `type` column holds a rich type's name or
+  NULL and is left inert — a type may arrive later from a plugin, and §3.2's merge is where an
+  unknown one is reported. Introspection still never *produces* a rich type (§2.1).
+
+`DataFieldKind` gained `Eq` (all its variants are identifiers and strings), which is what lets
+`FieldMeta` derive `Eq` for the round-trip assertions; the enclosing `DataField` stays `PartialEq`
+only, as its `BaseField` carries an `Attrs` bag.
+
+Tests: 9 unit (schema shape, the composite key, the full column set, `File`/plain round-trips
+through the attributes bag, an unknown kind and a missing `store` each named) and 9 integration
+against real Postgres (`crates/sc-catalog/tests/field_meta_store.rs`) — a `File` overlay
+round-tripping store/folder/MIME by id and by `(table, field)`, a rich type and its attributes
+surviving, an in-place update, a second overlay for one field refused, an ill-typed `kind`
+inserted behind the API refused by name on read, a system-table field and a nameless overlay
+refused, an overlay outliving a dropped column, ordered/scoped listing, and a delete that leaves
+the column in place.
+
 ## Rich-type validation on the write path (§2.3)
 
 A row write now validates each value against its field's full type **and** the field's attributes,
