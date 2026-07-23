@@ -109,8 +109,10 @@ Actually running the formula, for the constructs SQL cannot hold, and as the ref
 implementation the symbolic path is tested against.
 
 - [ ] `deno_core` dependency and a `JsEvaluator` behind a small trait (a deliberate seam:
-  rusty_v8 has no FreeBSD support, and GOALS targets FreeBSD — the trait is where a boa/quickjs
-  alternative would slot in later; noting it costs one trait, solving it is out of scope).
+  it decouples the formula machinery from the engine. rusty_v8 does build on FreeBSD — the
+  ports tree's patches were upstreamed — but upstream publishes no prebuilt static lib for
+  it, so FreeBSD means a from-source V8 build; the trait is also where a lighter engine
+  (boa/quickjs) could slot in if V8's build weight ever becomes a problem).
   A `JsRuntime` is `!Send`, so the evaluator owns a **dedicated thread** holding the runtime,
   fed by a channel — the pattern the code adapters (§15) will reuse. No extensions, no ops:
   the sandbox has no I/O to reach. A watchdog terminates runaway evaluation via the isolate
@@ -266,8 +268,9 @@ the operation flags.
 
 ## Carried past this milestone
 
-- **A second reified engine for platforms without V8** (FreeBSD) — the `JsEvaluator` trait
-  (§3) is the seam; boa or quickjs behind it is the work
+- **A second reified engine behind `JsEvaluator`** (§3) — optional, not required for any
+  target platform (V8 builds everywhere GOALS targets, from source on FreeBSD); worth doing
+  only if V8's build weight or embed size becomes a cost we care about
 - **Code-adapter calculated fields** and the full dependency/trigger design (§6.2) — Phase 7
   is deliberately the expression-only slice
 - **Ownership on files and per-view/page rules** (§7.3's "where applicable") — this
