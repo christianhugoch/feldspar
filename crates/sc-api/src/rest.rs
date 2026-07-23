@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use sc_auth::{User, authenticate};
-use sc_catalog::{Catalog, DataFieldKind, Table, load_file_store_by_name};
+use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table, load_file_store_by_name};
 use sc_error::{Error, Result};
 use sc_expr::{JsEvaluator, Operation};
 use sc_files::{ROLE_PUBLIC, check_access, mime_for_path, validate_file_path};
@@ -350,6 +350,14 @@ impl RestProvider {
                 .map(String::as_str)
                 .ok_or_else(|| Error::invalid("missing path parameter `id`"))
         };
+        // When the database enforces this table's ownership (§6), the runtime
+        // checks below are switched off entirely: every row operation runs in a
+        // caller-context transaction and the generated policies decide. "You no
+        // longer have to check" (GOALS), and joinfields are not refetched — the
+        // policies' correlated subselects do that in the database.
+        if table.rls_enabled {
+            return self.run_rls(route, &table, params, req, cat, user).await;
+        }
         // The caller's role for the path-cumulative file rule. Anonymous is
         // public; the table-level gate (floor or formula) runs separately.
         let role = user.map_or(ROLE_PUBLIC, |u| u.role);
@@ -444,7 +452,7 @@ impl RestProvider {
                         let guard =
                             ownership::write_guard(cat, &table, f, Operation::Update, user)?;
                         ApiResponse::ok(
-                            rows::update_row_guarded(cat, &table, id, body, guard).await?,
+                            rows::update_row_guarded(cat, &table, id, body, guard, None).await?,
                         )
                     }
                 }
@@ -459,7 +467,9 @@ impl RestProvider {
                             .await?;
                         let guard =
                             ownership::write_guard(cat, &table, f, Operation::Delete, user)?;
-                        ApiResponse::ok(rows::delete_row_guarded(cat, &table, id, guard).await?)
+                        ApiResponse::ok(
+                            rows::delete_row_guarded(cat, &table, id, guard, None).await?,
+                        )
                     }
                 }
             }
@@ -554,6 +564,67 @@ impl RestProvider {
         }
         Ok(existing)
     }
+
+    /// Run a row operation on an **RLS-enabled** table (§6): the database's
+    /// policies do all the gating, so there is no formula translation, no
+    /// evaluator, and no fetch-then-check here. Every statement runs through a
+    /// caller-context transaction, and a policy that withholds a row surfaces
+    /// as the same not-found an absent row gets (`run_in_context` maps `42501`).
+    /// The file endpoints still layer the path-cumulative file rule on top.
+    async fn run_rls(
+        &self,
+        route: &TableRoute,
+        table: &Table,
+        params: &Params,
+        req: &ApiRequest,
+        cat: &Catalog,
+        user: Option<&User>,
+    ) -> Result<ApiResponse> {
+        let ctx = ownership::caller_context(user);
+        let body = &req.body;
+        let role = user.map_or(ROLE_PUBLIC, |u| u.role);
+        let id = || -> Result<&str> {
+            params
+                .get("id")
+                .map(String::as_str)
+                .ok_or_else(|| Error::invalid("missing path parameter `id`"))
+        };
+        Ok(match &route.op {
+            RestOp::List => {
+                ApiResponse::ok(rows::list_rows_where(cat, table, None, Some(&ctx)).await?)
+            }
+            RestOp::Create => ApiResponse::with_status(
+                201,
+                rows::create_row_ctx(cat, table, body, Some(&ctx)).await?,
+            ),
+            RestOp::Update => ApiResponse::ok(
+                rows::update_row_guarded(cat, table, id()?, body, None, Some(&ctx)).await?,
+            ),
+            RestOp::Delete => ApiResponse::ok(
+                rows::delete_row_guarded(cat, table, id()?, None, Some(&ctx)).await?,
+            ),
+            RestOp::Download { field } => {
+                download_ctx(cat, table, field, id()?, role, &ctx).await?
+            }
+            RestOp::Upload { field } => {
+                let filename = params
+                    .get("filename")
+                    .map(String::as_str)
+                    .ok_or_else(|| Error::invalid("missing path parameter `filename`"))?;
+                upload_ctx(
+                    cat,
+                    table,
+                    field,
+                    id()?,
+                    filename,
+                    req.raw.clone(),
+                    role,
+                    &ctx,
+                )
+                .await?
+            }
+        })
+    }
 }
 
 /// The rejection a caller below the floor gets when no formula extends access:
@@ -593,8 +664,32 @@ async fn download(
     id: &str,
     role: u8,
 ) -> Result<ApiResponse> {
+    download_inner(cat, table, field, id, role, None).await
+}
+
+/// [`download`] resolving the row's file path through an RLS caller context
+/// (§6), so a file behind a row the policies withhold is a not-found.
+async fn download_ctx(
+    cat: &Catalog,
+    table: &Table,
+    field: &str,
+    id: &str,
+    role: u8,
+    context: &CallerContext,
+) -> Result<ApiResponse> {
+    download_inner(cat, table, field, id, role, Some(context)).await
+}
+
+async fn download_inner(
+    cat: &Catalog,
+    table: &Table,
+    field: &str,
+    id: &str,
+    role: u8,
+    context: Option<&CallerContext>,
+) -> Result<ApiResponse> {
     let (store_name, _, _) = file_field(table, field)?;
-    let path = match rows::read_field(cat, table, field, id).await? {
+    let path = match rows::read_field_ctx(cat, table, field, id, context).await? {
         Value::Text(path) if !path.is_empty() => path,
         // The row exists but references nothing: for the caller that is "no
         // file here", the same not-found an empty shelf gets.
@@ -624,6 +719,7 @@ async fn download(
 /// not a control. The row is updated to reference the stored path, through the
 /// same `update_row` any JSON write takes (so the field's rules are enforced
 /// twice, harmlessly).
+#[allow(clippy::too_many_arguments)]
 async fn upload(
     cat: &Catalog,
     table: &Table,
@@ -632,6 +728,37 @@ async fn upload(
     filename: &str,
     data: Option<bytes::Bytes>,
     role: u8,
+) -> Result<ApiResponse> {
+    upload_inner(cat, table, field, id, filename, data, role, None).await
+}
+
+/// [`upload`] with the row read and write routed through an RLS caller context
+/// (§6): the pre-existence check and the field update both run under the
+/// policies, so a caller cannot upload into a row they may not write.
+#[allow(clippy::too_many_arguments)]
+async fn upload_ctx(
+    cat: &Catalog,
+    table: &Table,
+    field: &str,
+    id: &str,
+    filename: &str,
+    data: Option<bytes::Bytes>,
+    role: u8,
+    context: &CallerContext,
+) -> Result<ApiResponse> {
+    upload_inner(cat, table, field, id, filename, data, role, Some(context)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_inner(
+    cat: &Catalog,
+    table: &Table,
+    field: &str,
+    id: &str,
+    filename: &str,
+    data: Option<bytes::Bytes>,
+    role: u8,
+    context: Option<&CallerContext>,
 ) -> Result<ApiResponse> {
     let (store_name, folder, mime_allow) = file_field(table, field)?;
     let Some(data) = data else {
@@ -649,11 +776,12 @@ async fn upload(
     // Writing into a restricted place is as governed as reading from one.
     check_access(store.as_ref(), floor, &path, role).await?;
 
-    // The row must exist before the bytes land: failing afterwards would leave
-    // an orphaned file no row references.
-    rows::read_field(cat, table, field, id).await?;
+    // The row must exist (and be writable by the caller) before the bytes land:
+    // failing afterwards would leave an orphaned file no row references.
+    rows::read_field_ctx(cat, table, field, id, context).await?;
     store.write(&path, data).await?;
-    let updated = rows::update_row(cat, table, id, &json!({ field: path })).await?;
+    let updated =
+        rows::update_row_guarded(cat, table, id, &json!({ field: path }), None, context).await?;
     Ok(ApiResponse::with_status(201, updated))
 }
 

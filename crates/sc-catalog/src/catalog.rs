@@ -197,6 +197,26 @@ impl Catalog {
         Ok(schema_shape_of(&guard))
     }
 
+    /// Each user field mapped to its SQL type — what the GUC translation
+    /// (`UserEnv::Guc`) casts a `user.x` extraction to when generating RLS
+    /// policies, and what the save-time RLS check uses. The password hash is
+    /// excluded for the same reason [`schema_shape`](Self::schema_shape)
+    /// excludes it: not formula business.
+    pub fn user_field_types(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut map = std::collections::BTreeMap::new();
+        if let Some(users) = self.get(USERS_TABLE)? {
+            for field in &users.fields {
+                if field.base.name != USERS_PASSWORD_COLUMN {
+                    map.insert(
+                        field.base.name.clone(),
+                        field.base.type_.sql_type().to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(map)
+    }
+
     /// The cached table with the given name, if present.
     pub fn get(&self, name: &str) -> Result<Option<Table>> {
         let guard = self

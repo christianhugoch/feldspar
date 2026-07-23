@@ -202,15 +202,24 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let formula = str_field(obj, "ownership_formula")?.trim().to_owned();
                 let rls_enabled = bool_field(obj, "rls_enabled")?;
                 validate_ownership_settings(&catalog, &table.name, &formula, rls_enabled)?;
+                // Whether the *database* is enforcing RLS on this table right
+                // now, before the save — needed to decide, after it, whether to
+                // create, recreate or drop the policies (§6).
+                let was_rls = table.rls_enabled;
                 meta.set_ownership_formula(Some(&formula));
                 meta.set_rls_enabled(rls_enabled);
 
                 // Saving reloads the catalog, so the table read back here — and
                 // served to the next request — already carries the new rules.
                 save_table_meta(&catalog, &meta).await?;
-                // …but a *mounted application* built its providers from the
-                // table as it was at mount time, so it would go on enforcing the
-                // old rules until a restart. Re-project the providers of any app
+                // Bring the database's RLS policies into step with the flag
+                // (§6): enabled → (re)create them from the current formula;
+                // turned off → drop them. Recreate-on-enable is what picks up a
+                // formula edit while RLS stays on.
+                sync_table_rls(&catalog, &table.name, was_rls).await?;
+                // …a *mounted application* built its providers from the table as
+                // it was at mount time, so it would go on enforcing the old
+                // rules until a restart. Re-project the providers of any app
                 // exposing this table, live. This is the seam §1.4 is about.
                 apps.refresh_table(&table.name)?;
                 let rls = catalog.primary().capabilities().row_level_security;
@@ -233,6 +242,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // catalog: this is also how an orphan is cleaned up, and an
                 // orphan by definition has no table to look up.
                 let name = ctx.path_param("table")?.to_owned();
+                // Was the database enforcing RLS on this table? If so, forgetting
+                // its settings must also drop the policies (§6) — otherwise a
+                // FORCE'd table with no context would deny everyone.
+                let was_rls = catalog.get(&name)?.is_some_and(|t| t.rls_enabled);
                 let deleted = match load_table_meta_by_name(&catalog, &name).await? {
                     Some(meta) => delete_table_meta(&catalog, meta.id).await?,
                     None => false,
@@ -241,6 +254,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // mounted app exposing it must pick that up now, not at the next
                 // restart — the same live re-projection `updateTable` does.
                 if deleted {
+                    if was_rls {
+                        sc_catalog::disable_rls(&catalog, &name).await?;
+                    }
                     apps.refresh_table(&name)?;
                 }
                 Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
@@ -504,7 +520,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
                 Ok(HandlerResponse::ok(
-                    rows::list_rows(&catalog, &table).await?,
+                    rows::list_rows_ctx(&catalog, &table, admin_rls_ctx(&table).as_ref()).await?,
                 ))
             }
         }
@@ -516,7 +532,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
-                let row = rows::create_row(&catalog, &table, &ctx.body).await?;
+                let row = rows::create_row_ctx(
+                    &catalog,
+                    &table,
+                    &ctx.body,
+                    admin_rls_ctx(&table).as_ref(),
+                )
+                .await?;
                 Ok(HandlerResponse::ok(row).with_status(201))
             }
         }
@@ -529,7 +551,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
                 let id = ctx.path_param("id")?;
-                let row = rows::update_row(&catalog, &table, id, &ctx.body).await?;
+                let row = rows::update_row_ctx(
+                    &catalog,
+                    &table,
+                    id,
+                    &ctx.body,
+                    admin_rls_ctx(&table).as_ref(),
+                )
+                .await?;
                 Ok(HandlerResponse::ok(row))
             }
         }
@@ -543,7 +572,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let table = catalog.require(ctx.path_param("table")?)?;
                 let id = ctx.path_param("id")?;
                 Ok(HandlerResponse::ok(
-                    rows::delete_row(&catalog, &table, id).await?,
+                    rows::delete_row_ctx(&catalog, &table, id, admin_rls_ctx(&table).as_ref())
+                        .await?,
                 ))
             }
         }
@@ -1845,6 +1875,30 @@ fn user_field_types(catalog: &Catalog) -> Result<BTreeMap<String, String>> {
         }
     }
     Ok(map)
+}
+
+/// The RLS caller context an admin row endpoint runs under: role 1 (which
+/// clears every policy's role floor, so the admin sees and edits every row of a
+/// FORCE'd table) when the table has RLS enabled, and `None` — the ordinary
+/// pooled path — otherwise. The admin API is already admin-only, so no user
+/// object is needed: the role alone opens the policies.
+fn admin_rls_ctx(table: &Table) -> Option<sc_catalog::CallerContext> {
+    table
+        .rls_enabled
+        .then(|| sc_catalog::CallerContext::anonymous(ROLE_ADMIN))
+}
+
+/// Bring the database's RLS policies for `table_name` into step with its saved
+/// `rls_enabled` flag after a settings change (§6): (re)create them from the
+/// current formula when on, drop them when off. `was_rls` is the state before
+/// the save, so policies are only dropped when they actually existed — a plain
+/// role change on a non-RLS table issues no RLS DDL.
+async fn sync_table_rls(catalog: &Catalog, table_name: &str, was_rls: bool) -> Result<()> {
+    match catalog.get(table_name)? {
+        Some(table) if table.rls_enabled => sc_catalog::enable_rls(catalog, &table).await,
+        Some(_) if was_rls => sc_catalog::disable_rls(catalog, table_name).await,
+        _ => Ok(()),
+    }
 }
 
 /// A required role field of an object body: an integer on the `1..=100` scale.

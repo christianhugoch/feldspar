@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use sc_auth::{COL_ID, COL_ROLE, ROLE_PUBLIC, User};
-use sc_catalog::{Catalog, DataFieldKind, Table};
+use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
 use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_expr::{
@@ -49,6 +49,26 @@ pub(crate) fn caller_role(user: Option<&User>) -> u8 {
 /// Whether the caller meets a `min_role` floor (lower role = more privileged).
 pub(crate) fn meets(user: Option<&User>, min_role: u8) -> bool {
     caller_role(user) <= min_role
+}
+
+/// The [`CallerContext`] an RLS transaction (§7.3, §6) runs under: the caller's
+/// role, and — when logged in — their fields as the JSON object the `sc.user`
+/// GUC carries, exactly the shape `UserEnv::Guc`'s
+/// `current_setting('sc.user', …)::jsonb ->> 'x'` reads. Anonymous callers
+/// carry only the role, so the policies' `current_setting('sc.user', true)`
+/// reads `NULL` and `user === null` decides.
+pub(crate) fn caller_context(user: Option<&User>) -> CallerContext {
+    let user_json = user_values(user).map(|map| {
+        let obj: serde_json::Map<String, Json> = map
+            .iter()
+            .map(|(k, v)| (k.clone(), value_to_json(v)))
+            .collect();
+        Json::Object(obj).to_string()
+    });
+    CallerContext {
+        role: caller_role(user),
+        user_json,
+    }
 }
 
 /// The user object as the formula sees it: `id`, `role`, and every extra field
@@ -76,7 +96,7 @@ pub(crate) async fn list_owned_rows(
     let env = UserEnv::Inline(user_values(user));
     match translate(formula, Operation::Read, &env, &shape, &table.name) {
         // The database filters: one query, no V8 in the loop.
-        Ok(pred) => rows::list_rows_where(cat, table, Some(pred)).await,
+        Ok(pred) => rows::list_rows_where(cat, table, Some(pred), None).await,
         // The formula's shape needs JavaScript: fetch rows with their join
         // values projected alongside and let the evaluator decide per row.
         Err(TranslateError::Untranslatable(_)) => {

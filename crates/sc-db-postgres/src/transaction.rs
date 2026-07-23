@@ -63,9 +63,39 @@ impl Transaction for PgTransaction {
         crate::exec::run_query(client, &self.dialect, stmt).await
     }
 
+    async fn set_local(&mut self, name: &str, value: &str) -> Result<()> {
+        let client = self.client()?;
+        // `set_config(name, value, is_local=true)` is the function form of
+        // `SET LOCAL`, and unlike the `SET` statement it takes the setting
+        // *value* as a bind — so it is parameterised, never interpolated. The
+        // setting *name* is a fixed constant from our own code (`sc.role`,
+        // `sc.user`), not user input.
+        client
+            .query("SELECT set_config($1, $2, true)", &[&name, &value])
+            .await
+            .map_err(|e| {
+                Error::database(format!(
+                    "set local `{name}`: {}",
+                    sc_error::format_chain(&e)
+                ))
+            })?;
+        Ok(())
+    }
+
     async fn apply_schema(&mut self, change: &SchemaChange) -> Result<()> {
         let client = self.client()?;
         crate::exec::run_ddl(client, &self.dialect, change).await
+    }
+
+    async fn batch(&mut self, sql: &str) -> Result<()> {
+        let client = self.client()?;
+        client.batch_execute(sql).await.map_err(|e| {
+            Error::database(format!(
+                "batch failed: {}\n  sql: {sql}",
+                sc_error::format_chain(&e)
+            ))
+        })?;
+        Ok(())
     }
 
     async fn commit(self: Box<Self>) -> Result<()> {

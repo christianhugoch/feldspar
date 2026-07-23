@@ -2,6 +2,51 @@
 
 Changes in reverse chronological order.
 
+## Ownership formulae milestone — Postgres row-level security (Phase 6)
+
+The *same* ownership formula can now be enforced by Postgres instead of the application:
+flipping `rls_enabled` swaps the enforcement mechanism, never the outcome.
+
+- **Caller context** (`sc_catalog::run_in_context`): every row operation on an RLS table
+  runs in a transaction that first `SET LOCAL`s `sc.role` and (when logged in) `sc.user` as
+  one JSON GUC — the shape `UserEnv::Guc` reads. New `sc-db` seams, both defaulting to a
+  loud error so a backend cannot silently skip them: `Transaction::set_local` (via
+  `set_config($1,$2,true)`, value bound not interpolated) and `Transaction::batch` (raw
+  multi-statement DDL, for the policies). Admin row endpoints run at `sc.role = 1`, which
+  clears every policy's role floor so the admin viewer works on a FORCE'd table. A path that
+  forgets the GUCs sees **no rows** — a property of the policy shape, proven by a raw-connection
+  probe.
+- **Policy generation** (`sc_catalog::enable_rls`): `ENABLE` then **`FORCE ROW LEVEL
+  SECURITY`** (the server connects as the table owner, whom RLS otherwise exempts), a
+  `DROP POLICY IF EXISTS` per name (idempotent recreate), and four policies from the
+  `UserEnv::Guc` translation with flags folded per operation — SELECT/DELETE `USING`, INSERT
+  `WITH CHECK`, UPDATE both — each carrying the role floor
+  (`NULLIF(current_setting('sc.role',true),'')::int <= floor OR (<formula>)`).
+- **`sc_query::render_policy_expr`**: a new renderer that inlines literals (DDL takes no
+  binds) through the dialect's `quote_literal`, refusing any non-scalar `Value` — the
+  narrow, deliberate exception to "every literal is parameterised", for trusted translated
+  formulas only.
+- **The custom-GUC empty-string fix**: a set-once custom GUC keeps an empty-string default
+  on a reused pooled connection, and `''::jsonb` / `''::int` are hard errors — so both the
+  translator's `current_setting('sc.user', …)` and the role clause are wrapped in
+  `NULLIF(…, '')`, folding unset-or-empty to NULL so the policy fails closed either way.
+- **Enforcement swap**: `RestProvider::run` dispatches to `run_rls` before any §5 check when
+  `rls_enabled` — reads unfiltered, writes unpredicated, all through `run_in_context`. A
+  `USING` denial is zero rows → not-found; a `WITH CHECK` violation (`42501`) is mapped to
+  not-found so denial is unprobeable. Joinfields are not refetched — the policy's correlated
+  subselects do that in the database. The rows layer gained an `Option<&CallerContext>` on
+  its run primitives so one path serves both the pooled and context cases.
+- **Lifecycle**: `sync_table_rls` in the `updateTable` handler creates/recreates or drops
+  policies to match the saved flag (keyed on pre-save state, so a plain role change emits no
+  RLS DDL); `deleteTableSettings` disables a table it was enforcing; a formula edit while RLS
+  stays on regenerates the policies live.
+- **Tests**: `sc-server/tests/rls_enforcement.rs` (3) re-runs §5's owner scenario under RLS
+  (same verdicts, database-enforced, admin bypass through FORCE), the fail-closed probe, and
+  the enable→edit→disable lifecycle with `pg_policies` assertions; `sc-catalog/tests/rls_policies.rs`
+  (2) asserts the primitives directly (four named policies, both `pg_class` flags, idempotent
+  recreate, clean disable, GUC-gated `run_in_context`); plus renderer unit tests for
+  `render_policy_expr`.
+
 ## Ownership formulae milestone — runtime enforcement (Phase 5)
 
 Ownership formulas now govern data access through a real application: **allowed = the

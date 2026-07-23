@@ -17,7 +17,7 @@ mod expr;
 mod statement;
 mod value;
 
-pub use dialect::SqlDialect;
+pub use dialect::{SqlDialect, render_policy_expr};
 pub use expr::{BinOp, CaseArm, ColRef, Expr, InSet, JsonStep, UnOp};
 pub use statement::{
     Assignment, Delete, Insert, Join, JoinKind, Nulls, OrderBy, OrderDir, Projection, Select,

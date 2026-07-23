@@ -15,7 +15,7 @@
 //! endpoint's [`AuthRequirement`](crate::AuthRequirement) first, so every API
 //! surface goes through the same §7 layer.
 
-use sc_catalog::{Catalog, DataFieldKind, Table};
+use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
 use sc_query::{
@@ -28,34 +28,80 @@ use crate::convert::{json_to_value, value_to_json};
 
 /// Every row of `table`, as a JSON array of objects.
 pub async fn list_rows(catalog: &Catalog, table: &Table) -> Result<Json> {
-    list_rows_where(catalog, table, None).await
+    list_rows_where(catalog, table, None, None).await
+}
+
+/// Every row of `table`, optionally through an RLS caller context — the entry
+/// point the admin API uses so its own row viewer works on an RLS-enabled
+/// (FORCE'd) table: role 1 clears every policy's role floor, so an admin sees
+/// and edits everything, while a non-RLS table takes the ordinary path.
+pub async fn list_rows_ctx(
+    catalog: &Catalog,
+    table: &Table,
+    context: Option<&CallerContext>,
+) -> Result<Json> {
+    list_rows_where(catalog, table, None, context).await
+}
+
+/// [`update_row`] optionally through an RLS caller context (admin API).
+pub async fn update_row_ctx(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    body: &Json,
+    context: Option<&CallerContext>,
+) -> Result<Json> {
+    update_row_guarded(catalog, table, id, body, None, context).await
+}
+
+/// [`delete_row`] optionally through an RLS caller context (admin API).
+pub async fn delete_row_ctx(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    context: Option<&CallerContext>,
+) -> Result<Json> {
+    delete_row_guarded(catalog, table, id, None, context).await
 }
 
 /// The rows of `table` matching `filter` (all of them for `None`), as a JSON
 /// array. The filter is how ownership enforcement (§7.3) narrows a read to the
 /// rows a formula grants — ANDed in by the caller as a translated predicate.
+///
+/// `context` routes the read through an RLS caller-context transaction (§7.3)
+/// when the table's ownership is enforced by the database; `None` runs it on a
+/// pooled connection through the provider, as every non-RLS read does.
 pub async fn list_rows_where(
     catalog: &Catalog,
     table: &Table,
     filter: Option<Expr>,
+    context: Option<&CallerContext>,
 ) -> Result<Json> {
     let mut select =
         Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
     if let Some(filter) = filter {
         select = select.filter(filter);
     }
-    let rows: Vec<Row> = catalog
-        .provider(table)
-        .query(&select)
-        .await?
-        .try_collect()
-        .await?;
+    let rows = run_read(catalog, table, &select, context).await?;
     Ok(Json::Array(rows.iter().map(row_to_json).collect()))
 }
 
 /// Insert a row from a JSON object, returning the inserted row (with any
 /// database-generated columns filled in).
 pub async fn create_row(catalog: &Catalog, table: &Table, body: &Json) -> Result<Json> {
+    create_row_ctx(catalog, table, body, None).await
+}
+
+/// [`create_row`] routed through an RLS caller context (§7.3) when one is
+/// given — the insert runs in a transaction with the caller's role/identity
+/// set, so an `INSERT` a policy's `WITH CHECK` rejects surfaces as the same
+/// not-found a missing row gets.
+pub async fn create_row_ctx(
+    catalog: &Catalog,
+    table: &Table,
+    body: &Json,
+    context: Option<&CallerContext>,
+) -> Result<Json> {
     let obj = require_object(body)?;
     let mut columns = Vec::with_capacity(obj.len());
     let mut values = Vec::with_capacity(obj.len());
@@ -70,7 +116,11 @@ pub async fn create_row(catalog: &Catalog, table: &Table, body: &Json) -> Result
     }
     let insert =
         Insert::row(table.name.clone(), columns, values).returning(vec![Projection::all()]);
-    let row = write_one(catalog, table, Statement::from(insert)).await?;
+    let rows = run_write(catalog, table, Statement::from(insert), context).await?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::not_found("the insert was refused"))?;
     Ok(row_to_json(&row))
 }
 
@@ -78,19 +128,21 @@ pub async fn create_row(catalog: &Catalog, table: &Table, body: &Json) -> Result
 /// row. The primary key addresses the row and is not reassignable through the
 /// body.
 pub async fn update_row(catalog: &Catalog, table: &Table, id: &str, body: &Json) -> Result<Json> {
-    update_row_guarded(catalog, table, id, body, None).await
+    update_row_guarded(catalog, table, id, body, None, None).await
 }
 
 /// [`update_row`] with an extra `guard` predicate ANDed into the WHERE —
-/// ownership enforcement's translated formula (§7.3). A row the guard excludes
-/// produces the **same** not-found as a row that is not there: a caller must
-/// not be able to probe which rows exist beyond the ones they may reach.
+/// ownership enforcement's translated formula (§7.3) — and an optional RLS
+/// caller `context`. A row the guard (or a policy) excludes produces the
+/// **same** not-found as a row that is not there: a caller must not be able to
+/// probe which rows exist beyond the ones they may reach.
 pub(crate) async fn update_row_guarded(
     catalog: &Catalog,
     table: &Table,
     id: &str,
     body: &Json,
     guard: Option<Expr>,
+    context: Option<&CallerContext>,
 ) -> Result<Json> {
     let obj = require_object(body)?;
     let pk = single_pk(table)?;
@@ -112,7 +164,7 @@ pub(crate) async fn update_row_guarded(
         filter: Some(guarded_filter(table, &pk, id, guard)?),
         returning: vec![Projection::all()],
     };
-    let rows = write(catalog, table, Statement::from(update)).await?;
+    let rows = run_write(catalog, table, Statement::from(update), context).await?;
     let row = rows
         .into_iter()
         .next()
@@ -123,16 +175,17 @@ pub(crate) async fn update_row_guarded(
 /// Delete the row of `table` whose primary key is `id`. Deleting a row that is
 /// not there is a [`NotFound`](Error::NotFound), not a silent success.
 pub async fn delete_row(catalog: &Catalog, table: &Table, id: &str) -> Result<Json> {
-    delete_row_guarded(catalog, table, id, None).await
+    delete_row_guarded(catalog, table, id, None, None).await
 }
 
-/// [`delete_row`] with an extra `guard` predicate; same probe-free rule as
-/// [`update_row_guarded`].
+/// [`delete_row`] with an extra `guard` predicate and optional RLS `context`;
+/// same probe-free rule as [`update_row_guarded`].
 pub(crate) async fn delete_row_guarded(
     catalog: &Catalog,
     table: &Table,
     id: &str,
     guard: Option<Expr>,
+    context: Option<&CallerContext>,
 ) -> Result<Json> {
     let pk = single_pk(table)?;
     let delete = Delete {
@@ -140,7 +193,7 @@ pub(crate) async fn delete_row_guarded(
         filter: Some(guarded_filter(table, &pk, id, guard)?),
         returning: vec![Projection::expr(Expr::col(pk.clone()))],
     };
-    let rows = write(catalog, table, Statement::from(delete)).await?;
+    let rows = run_write(catalog, table, Statement::from(delete), context).await?;
     if rows.is_empty() {
         return Err(Error::not_found(format!("no row with {pk} = {id}")));
     }
@@ -178,6 +231,18 @@ pub(crate) fn coerce_row_values(
 /// §4). A missing row is a [`NotFound`](Error::not_found), exactly as
 /// [`update_row`] reports one; an unknown column is refused by name.
 pub async fn read_field(catalog: &Catalog, table: &Table, column: &str, id: &str) -> Result<Value> {
+    read_field_ctx(catalog, table, column, id, None).await
+}
+
+/// [`read_field`] routed through an RLS caller context (§7.3) when one is
+/// given, so a cell a policy withholds is a not-found rather than a leak.
+pub(crate) async fn read_field_ctx(
+    catalog: &Catalog,
+    table: &Table,
+    column: &str,
+    id: &str,
+    context: Option<&CallerContext>,
+) -> Result<Value> {
     if table.field(column).is_none() {
         return Err(Error::invalid(format!(
             "`{}` has no field `{column}`",
@@ -188,12 +253,7 @@ pub async fn read_field(catalog: &Catalog, table: &Table, column: &str, id: &str
     let select = Select::from(Source::table(table.name.clone()))
         .columns(vec![Projection::expr(Expr::col(column))])
         .filter(pk_filter(table, &pk, id)?);
-    let rows: Vec<Row> = catalog
-        .provider(table)
-        .query(&select)
-        .await?
-        .try_collect()
-        .await?;
+    let rows = run_read(catalog, table, &select, context).await?;
     let row = rows
         .into_iter()
         .next()
@@ -329,23 +389,54 @@ pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
     Ok(Expr::col(pk).eq(Expr::lit(value)))
 }
 
-/// Run a write statement against the table's provider, collecting `RETURNING` rows.
-async fn write(catalog: &Catalog, table: &Table, statement: Statement) -> Result<Vec<Row>> {
-    catalog
-        .provider(table)
-        .write(&statement)
-        .await?
-        .try_collect()
-        .await
+/// Run a `SELECT`, collecting its rows — through an RLS caller-context
+/// transaction when `context` is given (§7.3), else on a pooled connection via
+/// the table's provider.
+async fn run_read(
+    catalog: &Catalog,
+    table: &Table,
+    select: &Select,
+    context: Option<&CallerContext>,
+) -> Result<Vec<Row>> {
+    match context {
+        Some(context) => {
+            sc_catalog::run_in_context(
+                catalog,
+                context,
+                &Statement::Select(Box::new(select.clone())),
+            )
+            .await
+        }
+        None => {
+            catalog
+                .provider(table)
+                .query(select)
+                .await?
+                .try_collect()
+                .await
+        }
+    }
 }
 
-/// Run a write expected to return exactly one row (an insert with `RETURNING`).
-async fn write_one(catalog: &Catalog, table: &Table, statement: Statement) -> Result<Row> {
-    write(catalog, table, statement)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::msg("write returned no row"))
+/// Run a write statement, collecting `RETURNING` rows — through an RLS
+/// caller-context transaction when `context` is given, else via the provider.
+async fn run_write(
+    catalog: &Catalog,
+    table: &Table,
+    statement: Statement,
+    context: Option<&CallerContext>,
+) -> Result<Vec<Row>> {
+    match context {
+        Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
+        None => {
+            catalog
+                .provider(table)
+                .write(&statement)
+                .await?
+                .try_collect()
+                .await
+        }
+    }
 }
 
 /// A JSON body that must be an object, e.g. a row.

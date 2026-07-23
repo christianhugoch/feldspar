@@ -39,6 +39,14 @@ pub trait SqlDialect {
     /// Postgres renders `$1`, `$2`, …; a `?`-style dialect ignores `position`.
     fn placeholder(&self, position: usize) -> String;
 
+    /// Quote a **string literal** for inlining into SQL text — the escaping half
+    /// of [`render_policy_expr`]. Postgres wraps in single quotes and doubles any
+    /// embedded single quote. Only reached for DDL that cannot bind; ordinary
+    /// rendering always parameterises instead.
+    fn quote_literal(&self, literal: &str) -> String {
+        format!("'{}'", literal.replace('\'', "''"))
+    }
+
     /// Render a statement to a SQL string plus its ordered bind values.
     ///
     /// The returned `Vec<Value>` is exactly the parameters the SQL placeholders
@@ -50,11 +58,34 @@ pub trait SqlDialect {
     }
 }
 
+/// Render an [`Expr`] to a standalone SQL string with **literals inlined** — for
+/// the DDL contexts that cannot take bind parameters, namely a row-level-security
+/// `CREATE POLICY` expression (§7.3) and, later, a `CHECK` constraint.
+///
+/// This is the deliberate exception to the "every literal is parameterised" rule
+/// (see [`SqlDialect`]), and it is a narrow one. It exists only for expressions
+/// built by trusted code — a translated ownership formula, whose literals are the
+/// strings, numbers and booleans an admin typed and which were parsed and
+/// validated first. Even so, every inlined value is quoted through the dialect's
+/// own [`quote_literal`](SqlDialect::quote_literal), and any [`Value`] that is
+/// not a plain scalar (bytes, a uuid, a temporal value — none of which a formula
+/// literal can be) is **refused** rather than guessed at. A [`Param`] has no
+/// value to inline and is likewise refused.
+pub fn render_policy_expr<D: SqlDialect + ?Sized>(dialect: &D, expr: &Expr) -> Result<String> {
+    let mut r = Renderer::new(dialect);
+    r.inline_literals = true;
+    r.expr(expr)?;
+    Ok(r.sql)
+}
+
 /// Accumulates SQL text and bind values while walking the AST.
 struct Renderer<'a, D: ?Sized> {
     dialect: &'a D,
     sql: String,
     binds: Vec<Value>,
+    /// When set, a [`Value`] literal is written into the SQL text (quoted)
+    /// rather than parameterised — the [`render_policy_expr`] DDL mode.
+    inline_literals: bool,
 }
 
 impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
@@ -63,6 +94,7 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
             dialect,
             sql: String::new(),
             binds: Vec::new(),
+            inline_literals: false,
         }
     }
 
@@ -72,11 +104,36 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
 
     /// Append a value to the bind list and emit its placeholder. This is the
     /// only path by which a [`Value`] enters the SQL, guaranteeing literals are
-    /// parameterised.
-    fn bind(&mut self, v: Value) {
+    /// parameterised — except in [`render_policy_expr`]'s inline mode, where the
+    /// value is quoted into the text instead (for DDL that cannot bind).
+    fn bind(&mut self, v: Value) -> Result<()> {
+        if self.inline_literals {
+            let literal = self.inline_literal(&v)?;
+            self.push(&literal);
+            return Ok(());
+        }
         self.binds.push(v);
         let placeholder = self.dialect.placeholder(self.binds.len());
         self.push(&placeholder);
+        Ok(())
+    }
+
+    /// A scalar [`Value`] as inlined SQL text, quoted where it is a string. Any
+    /// non-scalar value is refused — see [`render_policy_expr`].
+    fn inline_literal(&self, v: &Value) -> Result<String> {
+        Ok(match v {
+            Value::Null => "NULL".to_owned(),
+            Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) if f.is_finite() => format!("{f:?}"),
+            Value::Text(s) => self.dialect.quote_literal(s),
+            other => {
+                return Err(sc_error::Error::query(format!(
+                    "cannot inline a {} literal into SQL DDL",
+                    other.kind()
+                )));
+            }
+        })
     }
 
     fn ident(&mut self, ident: &str) {
@@ -137,11 +194,11 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
         }
         if let Some(limit) = s.limit {
             self.push(" LIMIT ");
-            self.bind(Value::Int(limit as i64));
+            self.bind(Value::Int(limit as i64))?;
         }
         if let Some(offset) = s.offset {
             self.push(" OFFSET ");
-            self.bind(Value::Int(offset as i64));
+            self.bind(Value::Int(offset as i64))?;
         }
         Ok(())
     }
@@ -326,10 +383,7 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
                 self.col_ref(c);
                 Ok(())
             }
-            Expr::Lit(v) => {
-                self.bind(v.clone());
-                Ok(())
-            }
+            Expr::Lit(v) => self.bind(v.clone()),
             Expr::Param(i) => {
                 // A pre-bound external parameter: emit a placeholder for the
                 // 1-based position without adding to the collected binds.
@@ -392,8 +446,8 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
                 for step in path {
                     self.push(" -> ");
                     match step {
-                        JsonStep::Field(f) => self.bind(Value::Text(f.clone())),
-                        JsonStep::Index(i) => self.bind(Value::Int(*i)),
+                        JsonStep::Field(f) => self.bind(Value::Text(f.clone()))?,
+                        JsonStep::Index(i) => self.bind(Value::Int(*i))?,
                     }
                 }
                 Ok(())
@@ -707,6 +761,41 @@ mod tests {
              WHERE (\"p\".\"id\" = \"t\".\"publisher\")) IS NOT DISTINCT FROM $1)"
         );
         assert_eq!(binds, vec![Value::Text("ACME".into())]);
+    }
+
+    #[test]
+    fn policy_expr_inlines_literals_and_quotes_strings() {
+        // The DDL exception: a policy predicate has no bind list, so literals
+        // are written into the text — strings quoted, an embedded quote doubled.
+        let expr = Expr::binary(
+            BinOp::IsNotDistinct,
+            Expr::col("owner"),
+            Expr::lit("O'Brien"),
+        );
+        let sql = render_policy_expr(&TestDialect, &expr).unwrap();
+        assert_eq!(sql, "(\"owner\" IS NOT DISTINCT FROM 'O''Brien')");
+
+        // Numbers, bools and null inline bare; no `$1` anywhere.
+        let expr = Expr::binary(
+            BinOp::Or,
+            Expr::col("pages").eq(Expr::lit(100_i64)),
+            Expr::Lit(Value::Null),
+        );
+        let sql = render_policy_expr(&TestDialect, &expr).unwrap();
+        assert_eq!(sql, "((\"pages\" = 100) OR NULL)");
+        assert!(
+            !sql.contains('$'),
+            "a policy expr must not parameterise: {sql}"
+        );
+    }
+
+    #[test]
+    fn policy_expr_refuses_a_non_scalar_literal() {
+        // A formula literal can only be a string/number/bool/null; anything
+        // else (a uuid, bytes) has no safe inline form and is refused rather
+        // than guessed — the DDL would otherwise be malformed or unsafe.
+        let expr = Expr::Lit(Value::Uuid(uuid::Uuid::nil()));
+        assert!(render_policy_expr(&TestDialect, &expr).is_err());
     }
 
     #[test]

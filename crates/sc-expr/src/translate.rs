@@ -621,13 +621,25 @@ impl Translator<'_> {
     }
 }
 
-/// `current_setting('sc.user', true)` — `true` is `missing_ok`, so an unset
-/// GUC is SQL `NULL` rather than an error, and everything built on it fails
-/// closed.
+/// `NULLIF(current_setting('sc.user', true), '')` — the caller's user JSON, or
+/// `NULL` when anonymous.
+///
+/// `true` is `missing_ok`, so a GUC that was never set reads as `NULL`. The
+/// `NULLIF` is the load-bearing part: a *custom* GUC (`sc.user`) that has been
+/// set once on a pooled connection keeps an **empty-string** default on later
+/// transactions that do not set it, and `''::jsonb` is a hard error, not NULL.
+/// Folding `''` to `NULL` makes an unset user read the same whether the
+/// connection is fresh or reused — so the policy fails closed either way.
 fn guc_raw() -> QExpr {
     QExpr::Func {
-        name: "current_setting".into(),
-        args: vec![QExpr::lit(USER_GUC), QExpr::lit(true)],
+        name: "NULLIF".into(),
+        args: vec![
+            QExpr::Func {
+                name: "current_setting".into(),
+                args: vec![QExpr::lit(USER_GUC), QExpr::lit(true)],
+            },
+            QExpr::lit(""),
+        ],
     }
 }
 
@@ -796,13 +808,15 @@ mod tests {
         assert_eq!(
             sql,
             "(\"books\".\"owner\" IS NOT DISTINCT FROM \
-             CAST(jsonb_extract_path_text(CAST(current_setting($1, $2) AS jsonb), $3) AS uuid))"
+             CAST(jsonb_extract_path_text(\
+             CAST(NULLIF(current_setting($1, $2), $3) AS jsonb), $4) AS uuid))"
         );
         assert_eq!(
             binds,
             vec![
                 Value::Text(USER_GUC.into()),
                 Value::Bool(true),
+                Value::Text(String::new()),
                 Value::Text("id".into()),
             ]
         );
@@ -886,7 +900,7 @@ mod tests {
         let (_, binds) = where_sql("user === null", Operation::Read, &logged_in);
         assert_eq!(binds, vec![Value::Bool(false)]);
         let (sql, _) = where_sql("user === null", Operation::Read, &guc(&[]));
-        assert_eq!(sql, "(current_setting($1, $2) IS NULL)");
+        assert_eq!(sql, "(NULLIF(current_setting($1, $2), $3) IS NULL)");
         // Bare `user` as a condition is the logged-in test.
         let (sql, _) = where_sql(
             "user && owner === user.id",
@@ -894,7 +908,7 @@ mod tests {
             &guc(&[("id", "uuid")]),
         );
         assert!(
-            sql.starts_with("((current_setting($1, $2) IS NOT NULL) AND "),
+            sql.starts_with("((NULLIF(current_setting($1, $2), $3) IS NOT NULL) AND "),
             "got: {sql}"
         );
     }

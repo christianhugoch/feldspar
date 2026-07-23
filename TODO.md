@@ -304,41 +304,55 @@ row/user/operation (§7.3 — ownership *extends* access below the role floor, n
   denied for non-owners and anonymous). Floors stay admin-only throughout, so every
   assertion is about the formula and nothing else
 
-## Phase 6 — Postgres row-level security
+## Phase 6 — Postgres row-level security ✅
 
 The same formula, enforced by the database. Flipping `rls_enabled` swaps the enforcement
 mechanism, never the outcome — the phase's tests are §5's scenarios re-run under RLS.
 
-- [ ] **Caller context as GUCs.** Every row operation runs inside a transaction that first
-  issues `SET LOCAL sc.role = '<n>'` and (when logged in) `SET LOCAL sc.user = '<json>'` —
-  one JSON GUC, matching §2's Guc mode, not one GUC per field. This needs the row paths in
-  `sc-api` to run statements through a driver transaction with settings; add the smallest
-  seam `sc-db` allows. Admin endpoints set `sc.role = 1`. A path that forgets the GUC sees
-  **no rows, not all rows** — fail closed is a property of the policy shape, and there is a
-  test proving it
-- [ ] Policy generation: enabling RLS emits `ALTER TABLE … ENABLE ROW LEVEL SECURITY`,
-  **`FORCE ROW LEVEL SECURITY`** (the server connects as the table's owner, which RLS
-  otherwise exempts — without FORCE the policies are decoration), and four policies from §2
-  with `UserEnv::Guc` and the flag folded per operation: SELECT/DELETE with USING, INSERT
-  with WITH CHECK, UPDATE with USING **and** WITH CHECK. Every policy carries the role floor
-  as `current_setting('sc.role', true)::int <= <min_role_op> OR (<formula>)`, so the role
-  side of the access rule moves into the database too
-- [ ] Lifecycle: policies are dropped and recreated when the formula or the access rules
-  change while enabled; disabling drops the policies and the ENABLE/FORCE; a dropped table
-  takes its policies with it (nothing to clean). Enabling with an untranslatable or invalid
-  formula is refused naming the construct (§4 declared this; here it is enforced against
-  the real translator). Formula validation, not trust: the emitted DDL contains no value
-  that did not pass through the `Expr` renderer's quoting
-- [ ] When `rls_enabled` is set, the §5 runtime checks are **switched off** for that table —
-  "you no longer have to check" (GOALS): reads go unfiltered to the database, writes
-  unpredicated (a policy violation surfacing as zero affected rows or a `42501`, mapped to
-  the same not-found/denied the runtime path produces). Joinfields are not refetched; the
-  correlated subselects in the policy do that work
-- [ ] Integration tests (Postgres, real application): §5's scenario suite extracted into a
-  shared harness and run in both modes — same assertions, enforcement swapped; the
-  missing-GUC fail-closed probe; toggling RLS off restores runtime enforcement with no
-  policy debris (`pg_policies` empty for the table); a formula edit while enabled
-  regenerating policies live
+- [x] **Caller context as GUCs.** Every row operation on an RLS table runs through
+  `sc_catalog::run_in_context`, a transaction that first `SET LOCAL`s `sc.role` and (when
+  logged in) `sc.user` as one JSON GUC. The `sc-db` seam is minimal: `Transaction::set_local`
+  (via `set_config($1,$2,true)`, so the *value* is bound, never interpolated) plus
+  `Transaction::batch` for the policy DDL. Admin endpoints run at `sc.role = 1` (`admin_rls_ctx`),
+  which clears every policy's role floor so the admin row viewer works on a FORCE'd table. A
+  path that forgets the GUCs sees **no rows** — proven by a test that queries the table on a
+  raw pooled connection with no context and gets zero rows. **Load-bearing fix found here:**
+  a *custom* GUC keeps an empty-string default on a reused pooled connection, and `''::jsonb`
+  / `''::int` are hard errors — so both the translator's `current_setting('sc.user',…)` and
+  the role clause are wrapped in `NULLIF(…, '')`, folding unset-or-empty to NULL so the
+  policy fails closed on either
+- [x] Policy generation (`sc_catalog::enable_rls`): emits `ENABLE` then **`FORCE ROW LEVEL
+  SECURITY`**, a `DROP POLICY IF EXISTS` per name (idempotent, doubles as recreate), and four
+  policies from the `UserEnv::Guc` translation with the flag folded per operation —
+  SELECT/DELETE `USING`, INSERT `WITH CHECK`, UPDATE both. Each carries the role floor
+  (`NULLIF(current_setting('sc.role',true),'')::int <= floor OR (<formula>)`). The policy
+  predicate is rendered by a new `sc_query::render_policy_expr` that **inlines** literals
+  (DDL takes no binds) via the dialect's `quote_literal`, refusing any non-scalar `Value` —
+  the deliberate, narrow exception to "every literal is parameterised", for trusted
+  translated formulas only
+- [x] Lifecycle: `sync_table_rls` (in the `updateTable` handler) enables/recreates when the
+  saved flag is on and drops when it goes off — keyed on the pre-save state so a plain role
+  change on a non-RLS table issues no RLS DDL; `deleteTableSettings` disables a table it was
+  enforcing. A formula edit while RLS stays on regenerates the four policies live (tested).
+  Enabling with an untranslatable/invalid formula was already refused at save (§4); here the
+  same GUC-mode translation builds the policy, so nothing un-honourable is emitted
+- [x] When `rls_enabled` is set, `RestProvider::run` dispatches to `run_rls` **before** any
+  §5 check: reads go unfiltered to the database, writes unpredicated, every statement through
+  `run_in_context`. A `USING` denial is zero rows → the same not-found; a `WITH CHECK`
+  violation raises `42501` ("row-level security policy"), mapped to not-found so denial is
+  unprobeable. Joinfields are not refetched — the policy's own correlated subselects do that
+  in the database. The rows layer grew an `Option<&CallerContext>` on its run primitives so
+  one code path serves both the pooled (non-RLS) and context (RLS) cases
+- [x] Integration tests: `crates/sc-server/tests/rls_enforcement.rs` (3) re-runs §5's owner
+  scenario under RLS (same verdicts, database-enforced, admin sees all through a FORCE'd
+  table), the missing-GUC fail-closed probe, and the full lifecycle (enable → formula edit
+  regenerates → disable leaves `pg_policies` empty and restores the runtime path); plus
+  `crates/sc-catalog/tests/rls_policies.rs` (2) asserting the storage primitives directly —
+  four named policies with both `pg_class` flags set, idempotent recreate, clean disable, and
+  `run_in_context` gating alice/admin/anonymous by the GUCs. **Deviation from "shared
+  harness":** the RLS scenarios are a focused re-run rather than §5's suite parameterised —
+  the two paths differ in setup (policy DDL, GUC probes) enough that one table of cases would
+  have more branches than the two readable tests it replaced
 
 ## Phase 7 — Calculated fields (stretch)
 

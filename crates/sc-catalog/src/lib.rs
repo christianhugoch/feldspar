@@ -22,6 +22,7 @@ mod field;
 mod field_meta;
 mod file_stores;
 mod provider;
+mod rls;
 mod table;
 mod table_meta;
 
@@ -40,6 +41,7 @@ pub use file_stores::{
     resolve_options, save_file_store,
 };
 pub use provider::{DriverTableProvider, TableProvider};
+pub use rls::{CallerContext, ROLE_GUC, disable_rls, enable_rls, run_in_context};
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
     ATTR_OWNERSHIP_FORMULA, ATTR_RLS_ENABLED, TABLE_META_TABLE, TableMeta, TableMetaId,
