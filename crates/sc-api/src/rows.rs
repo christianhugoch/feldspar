@@ -28,7 +28,22 @@ use crate::convert::{json_to_value, value_to_json};
 
 /// Every row of `table`, as a JSON array of objects.
 pub async fn list_rows(catalog: &Catalog, table: &Table) -> Result<Json> {
-    let select = Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
+    list_rows_where(catalog, table, None).await
+}
+
+/// The rows of `table` matching `filter` (all of them for `None`), as a JSON
+/// array. The filter is how ownership enforcement (§7.3) narrows a read to the
+/// rows a formula grants — ANDed in by the caller as a translated predicate.
+pub async fn list_rows_where(
+    catalog: &Catalog,
+    table: &Table,
+    filter: Option<Expr>,
+) -> Result<Json> {
+    let mut select =
+        Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
+    if let Some(filter) = filter {
+        select = select.filter(filter);
+    }
     let rows: Vec<Row> = catalog
         .provider(table)
         .query(&select)
@@ -63,6 +78,20 @@ pub async fn create_row(catalog: &Catalog, table: &Table, body: &Json) -> Result
 /// row. The primary key addresses the row and is not reassignable through the
 /// body.
 pub async fn update_row(catalog: &Catalog, table: &Table, id: &str, body: &Json) -> Result<Json> {
+    update_row_guarded(catalog, table, id, body, None).await
+}
+
+/// [`update_row`] with an extra `guard` predicate ANDed into the WHERE —
+/// ownership enforcement's translated formula (§7.3). A row the guard excludes
+/// produces the **same** not-found as a row that is not there: a caller must
+/// not be able to probe which rows exist beyond the ones they may reach.
+pub(crate) async fn update_row_guarded(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    body: &Json,
+    guard: Option<Expr>,
+) -> Result<Json> {
     let obj = require_object(body)?;
     let pk = single_pk(table)?;
     let mut assignments = Vec::with_capacity(obj.len());
@@ -80,7 +109,7 @@ pub async fn update_row(catalog: &Catalog, table: &Table, id: &str, body: &Json)
     let update = Update {
         table: table.name.clone(),
         assignments,
-        filter: Some(pk_filter(table, &pk, id)?),
+        filter: Some(guarded_filter(table, &pk, id, guard)?),
         returning: vec![Projection::all()],
     };
     let rows = write(catalog, table, Statement::from(update)).await?;
@@ -94,10 +123,21 @@ pub async fn update_row(catalog: &Catalog, table: &Table, id: &str, body: &Json)
 /// Delete the row of `table` whose primary key is `id`. Deleting a row that is
 /// not there is a [`NotFound`](Error::NotFound), not a silent success.
 pub async fn delete_row(catalog: &Catalog, table: &Table, id: &str) -> Result<Json> {
+    delete_row_guarded(catalog, table, id, None).await
+}
+
+/// [`delete_row`] with an extra `guard` predicate; same probe-free rule as
+/// [`update_row_guarded`].
+pub(crate) async fn delete_row_guarded(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    guard: Option<Expr>,
+) -> Result<Json> {
     let pk = single_pk(table)?;
     let delete = Delete {
         table: table.name.clone(),
-        filter: Some(pk_filter(table, &pk, id)?),
+        filter: Some(guarded_filter(table, &pk, id, guard)?),
         returning: vec![Projection::expr(Expr::col(pk.clone()))],
     };
     let rows = write(catalog, table, Statement::from(delete)).await?;
@@ -105,6 +145,31 @@ pub async fn delete_row(catalog: &Catalog, table: &Table, id: &str) -> Result<Js
         return Err(Error::not_found(format!("no row with {pk} = {id}")));
     }
     Ok(json!({ "deleted": true }))
+}
+
+/// `pk = id`, ANDed with the ownership guard when one applies.
+fn guarded_filter(table: &Table, pk: &str, id: &str, guard: Option<Expr>) -> Result<Expr> {
+    let base = pk_filter(table, pk, id)?;
+    Ok(match guard {
+        Some(guard) => base.and(guard),
+        None => base,
+    })
+}
+
+/// Coerce a whole JSON row body through [`column_value`], keyed by column — the
+/// values an ownership formula is checked against before an insert or update
+/// (§7.3) sees the database. Unknown columns are refused by name, exactly as
+/// the write itself would.
+pub(crate) fn coerce_row_values(
+    table: &Table,
+    body: &Json,
+) -> Result<std::collections::BTreeMap<String, Value>> {
+    let obj = require_object(body)?;
+    let mut values = std::collections::BTreeMap::new();
+    for (key, json) in obj {
+        values.insert(key.clone(), column_value(table, key, json)?);
+    }
+    Ok(values)
 }
 
 /// The stored value of one column of the row addressed by `id` — a single cell,
@@ -259,7 +324,7 @@ pub fn single_pk(table: &Table) -> Result<String> {
 }
 
 /// `pk = <id>`, coercing the path-parameter string to the key column's type.
-fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
+pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
     let value = column_value(table, pk, &Json::String(id.to_owned()))?;
     Ok(Expr::col(pk).eq(Expr::lit(value)))
 }

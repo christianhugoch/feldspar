@@ -28,6 +28,14 @@ mod security;
 mod serve;
 
 pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
+
+/// The server's JavaScript evaluator: the `deno_core`-backed engine ownership
+/// formulas' reified path runs on (§7.3). Constructed once at boot and shared —
+/// `AppMounts::with_evaluator(default_js_evaluator())` — so every provider of
+/// every mount evaluates on one isolate.
+pub fn default_js_evaluator() -> std::sync::Arc<dyn sc_expr::JsEvaluator> {
+    std::sync::Arc::new(sc_expr::DenoEvaluator::new())
+}
 pub use config::{DEFAULT_BIND, ServerConfig};
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,

@@ -12,10 +12,13 @@ rust-version.workspace = true
 # formulas — do not link V8 into their build. `sc-server` (Phase 5) turns it on.
 [features]
 default = ["eval"]
-eval = ["dep:deno_core", "dep:tokio", "dep:async-trait"]
+eval = ["dep:deno_core", "dep:tokio"]
 
 [dependencies]
-async-trait = { workspace = true, optional = true }
+# Required (not `eval`-gated): the `JsEvaluator` trait itself is part of the
+# always-on API — consumers below the server hold `Arc<dyn JsEvaluator>`
+# without linking an engine.
+async-trait = { workspace = true }
 deno_core = { workspace = true, optional = true }
 sc-error = { workspace = true }
 sc-query = { workspace = true }

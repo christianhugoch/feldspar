@@ -44,7 +44,9 @@ mod react;
 mod scaffold;
 mod store;
 
-pub use api::{app_client, app_endpoints, app_providers, app_tables, validate_api_mounts};
+pub use api::{
+    app_client, app_endpoints, app_providers, app_providers_with, app_tables, validate_api_mounts,
+};
 pub use application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir};
 pub use applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,

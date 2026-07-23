@@ -25,7 +25,6 @@
 
 mod analyze;
 mod ast;
-#[cfg(feature = "eval")]
 mod eval;
 mod formula;
 #[cfg(feature = "eval")]
@@ -36,7 +35,8 @@ mod translate;
 pub use analyze::{Analysis, FreeVars, JOIN, JoinPath, OpFlag};
 pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]
-pub use eval::{DenoEvaluator, FormulaCall, JsEvaluator};
+pub use eval::DenoEvaluator;
+pub use eval::{FormulaCall, JsEvaluator};
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
-pub use translate::{Operation, TranslateError, USER_GUC, UserEnv, translate};
+pub use translate::{Operation, TranslateError, USER_GUC, UserEnv, join_path_expr, translate};

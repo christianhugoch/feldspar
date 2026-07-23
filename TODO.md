@@ -246,37 +246,63 @@ implementation the symbolic path is tested against.
   plus 3 unit (accessor round-trip incl. clear-removes-key, `apply_overlay` parse and
   fail-closed paths)
 
-## Phase 5 — Runtime enforcement (no RLS)
+## Phase 5 — Runtime enforcement (no RLS) ✅
 
 The general path, correct on any backend. The access rule becomes:
 **allowed = role meets the operation's `min_role` OR the ownership formula is true** for this
 row/user/operation (§7.3 — ownership *extends* access below the role floor, never narrows it).
 
-- [ ] Endpoint auth: a table with an ownership formula relaxes its REST endpoints'
+- [x] Endpoint auth: a table with an ownership formula relaxes its REST endpoints'
   `AuthRequirement` from `MinRole` to `Public` — the formula decides `user === null`
-  (public may own rows if the admin says so), so the gate moves into the handler. Tables
-  without a formula keep today's behaviour exactly
-- [ ] Reads: callers meeting `min_role_read` get today's unfiltered query; below it, the
-  translated predicate (`UserEnv::Inline`, `_read` folded) is ANDed into the select's WHERE.
-  An untranslatable formula falls back to fetch-then-filter through the reified evaluator,
-  with join values prefetched per §3 (batched, not per-row round-trips)
-- [ ] Writes: update and delete inject the predicate into the statement's WHERE (affected
-  rows 0 → not found/denied — never a distinguishable "exists but forbidden" probe);
-  untranslatable → load the row, evaluate reified, then act. Update checks the formula on
-  the existing row (`_update`) **and** the proposed row (WITH CHECK semantics, mirroring §6
-  exactly — a user must not move a row out of their own ownership). Insert evaluates against
-  the proposed row (`_insert`)
-- [ ] The per-File-field endpoints (download/upload) apply the same rule — they are reads
-  and writes of the row, and the path-cumulative file `min_role` still applies on top
-- [ ] `AppMounts::refresh_table` liveness: saving/clearing a formula re-projects mounted
-  apps, as access changes already do
-- [ ] Integration tests, three roles against a real application (`sc-server`): the classic
-  owner-field formula (`owner === user.id`) granting exactly own rows for read and write
-  below the role floor; a Ⱶ formula (`projectⱵowner === user.id`) granting through the join;
-  an operation-split formula (`_read || owner === user.id`: anyone reads, owners write); a
-  public-granting formula with `user === null`; an at-or-above-floor user unaffected
-  throughout; update-out-of-ownership refused; an untranslatable formula (e.g. a method
-  call) behaving identically through the reified path
+  (public may own rows if the admin says so), so the gate moves into the handler
+  (`RestProvider::project` / `run`, `crates/sc-api/src/rest.rs`; the new
+  `crates/sc-api/src/ownership.rs` is the rule's home). Tables without a formula keep
+  today's behaviour exactly — including a handler-level re-check, so a stale projection
+  can never be wider than the rule. **Wiring that landed here:** the `JsEvaluator` trait
+  un-gated from `sc-expr`'s `eval` feature (only `DenoEvaluator` needs the engine), a
+  `with_evaluator` seam on `RestProvider` / `app_providers_with` / `AppMounts`, and
+  `sc_server::default_js_evaluator()` constructed once at boot — one isolate for the whole
+  server, kept across every `refresh_table` re-projection
+- [x] Reads: callers meeting `min_role_read` get today's unfiltered query; below it, the
+  translated predicate (`UserEnv::Inline`, `_read` folded) is ANDed into the select's WHERE
+  (`rows::list_rows_where`). An untranslatable formula falls back to fetch-then-filter
+  through the reified evaluator, with join values fetched in the **same query** — the
+  translator's correlated subselect, exposed as `sc_expr::join_path_expr` and projected as
+  a column aliased to the Ⱶ-identifier itself, so the evaluator's bindings arrive with the
+  rows (zero extra round trips, better than the planned batching). Projected join columns
+  are stripped before rows reach the wire
+- [x] Writes: update and delete inject the predicate into the statement's WHERE when the
+  formula translates (`update_row_guarded`/`delete_row_guarded`; affected rows 0 → not
+  found/denied — never a distinguishable "exists but forbidden" probe, tested by comparing
+  the denied and absent responses shape-for-shape). **Deviation, deliberate:** the
+  existing-row check runs *reified for every formula*, not only untranslatable ones — the
+  row must be fetched anyway for the WITH-CHECK merge, parity makes the verdicts equal, and
+  one code path beats two; the injected WHERE guard is kept on top for translatable
+  formulas as the belt against a check-to-write race. Update checks the formula on the
+  existing row (`_update`) **and** the merged proposed row (WITH CHECK semantics, mirroring
+  §6 — moving a row out of your own ownership is a 403 naming it). Insert evaluates against
+  the proposed row (`_insert`), with join values for proposed FKs resolved link-by-link
+  (`resolve_join_value` — proposed rows are not in the database to be projected from)
+- [x] The per-File-field endpoints (download/upload) apply the same rule — a download is a
+  read of the row, an upload an update of it (checked on the existing row *and* on the row
+  as it will be, since the formula may read the very field being written), and the
+  path-cumulative file `min_role` still applies on top
+- [x] `AppMounts::refresh_table` liveness: saving/clearing a formula re-projects mounted
+  apps, as access changes already do — and the re-projection keeps the registry's
+  evaluator, so a refresh never silently drops the reified path. Every integration test
+  sets its formulas through the admin API *after* the mount, so liveness is exercised by
+  construction
+- [x] Integration tests, three-plus roles against a real application
+  (`crates/sc-server/tests/ownership_enforcement.rs`, 4): the classic owner formula
+  (`owner === user.email`) granting exactly own rows for list/create/update/delete, denial
+  shape-identical to absence, update-out-of-ownership 403, at-floor admin unaffected, the
+  anonymous null-match corner observed live and closed by `user && …`; the operation-split
+  formula (`_read || …`) opening reads while writes stay owned; the Ⱶ formula run under
+  **both spellings** — `projectⱵowner === user.email` (symbolic) and
+  `[projectⱵowner].some(o => o === user.email)` (reified) — with identical assertions,
+  parity doing production work; and the File endpoints (upload denied/granted, download
+  denied for non-owners and anonymous). Floors stay admin-only throughout, so every
+  assertion is about the formula and nothing else
 
 ## Phase 6 — Postgres row-level security
 

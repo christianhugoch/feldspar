@@ -83,7 +83,10 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // one would make the router refuse to build. With one, every stored app is
     // built and mounted now — a build that fails is logged and skipped, never
     // fatal (§13.2), and can be fixed and rebuilt without a restart.
-    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    // The JS engine ownership formulas evaluate on (§7.3): one isolate for the
+    // whole server, shared by every mounted app's providers.
+    let apps =
+        Arc::new(AppMounts::new(catalog.clone()).with_evaluator(sc_server::default_js_evaluator()));
     if config.base_domain.is_some() {
         mount_all(&apps).await;
     }

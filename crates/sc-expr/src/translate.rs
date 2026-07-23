@@ -175,6 +175,28 @@ pub fn translate(
     tr.predicate(&folded)
 }
 
+/// The correlated-subselect `sc_query::Expr` for one Ⱶ-join identifier on
+/// `table` — the same expression [`translate`] builds inside a predicate,
+/// exposed on its own so the runtime-check path (Phase 5) can *project* join
+/// values: `SELECT *, (…) AS "publisherⱵname" FROM books` fetches the rows and
+/// the values the reified evaluator needs in one query, instead of a round
+/// trip per row per path.
+pub fn join_path_expr(
+    shape: &SchemaShape,
+    table: &str,
+    ident: &str,
+) -> Result<QExpr, TranslateError> {
+    let mut tr = Translator {
+        // The env is irrelevant to a join path (no `user` inside it); Inline
+        // anonymous is the cheapest to construct.
+        env: &UserEnv::Inline(None),
+        shape,
+        table,
+        aliases: 0,
+    };
+    tr.join_value(ident)
+}
+
 /// Fold the operation flags to constants and simplify what the constants
 /// decide. Only **value-exact** simplifications are applied — ones where the
 /// JS value, not just its truthiness, is preserved — because folding runs

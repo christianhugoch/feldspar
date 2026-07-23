@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## Ownership formulae milestone — runtime enforcement (Phase 5)
+
+Ownership formulas now govern data access through a real application: **allowed = the
+caller meets the operation's `min_role` OR the formula grants the row**. Ownership extends
+access below the role floor and never narrows a role's own access; at-floor callers take
+exactly the pre-formula paths.
+
+- **The rule's home is `crates/sc-api/src/ownership.rs`**, driven from the REST provider's
+  dispatch. A table with a formula projects its endpoints as `Public` (the formula decides
+  `user === null`), and the handler enforces floor-or-formula — with a re-check, so a stale
+  projection can never be wider than the rule.
+- **Reads**: below the floor, the translated predicate (`UserEnv::Inline`, `_read` folded)
+  is ANDed into the SELECT — the database filters, no V8 in the loop. An untranslatable
+  formula falls to the reified evaluator, with every Ⱶ-join value fetched **in the same
+  query**: the translator's correlated subselect is exposed as `sc_expr::join_path_expr`
+  and projected as a column aliased to the join identifier itself, so the evaluator's
+  bindings arrive with the rows. Projected join columns are stripped before the wire.
+- **Writes**: the existing row is fetched (with joins) and checked reified for every
+  formula — parity makes the verdict equal to the symbolic one, and the row is needed for
+  the WITH-CHECK merge anyway — then the translated predicate additionally rides in the
+  UPDATE/DELETE's WHERE (`update_row_guarded`/`delete_row_guarded`) as the belt against a
+  check-to-write race. A denied row answers with the **same not-found an absent row gets**
+  (tested shape-for-shape); an update that would move the row out of the caller's
+  ownership is a 403 naming it; an insert is checked against the proposed row (`_insert`),
+  its join values resolved link-by-link since a proposed row cannot be projected from the
+  database. The File endpoints apply the same rule (download = read; upload = update,
+  checked against the row as it will be — the formula may read the field being written).
+- **Wiring**: the `JsEvaluator` trait left `sc-expr`'s `eval` feature gate (only
+  `DenoEvaluator` needs the engine); `RestProvider::with_evaluator`,
+  `sc_app::app_providers_with` and `AppMounts::with_evaluator` thread one shared engine —
+  `sc_server::default_js_evaluator()`, one isolate per server, constructed in the CLI boot
+  — into every mount, and `refresh_table` re-projections keep it. A formula that needs the
+  engine on a server without one **fails closed** with a configuration error.
+- **Tests** (`crates/sc-server/tests/ownership_enforcement.rs`, 4, real app + real router,
+  floors admin-only throughout so the formula is the only path): the owner formula across
+  all four operations with probe-free denial and the 403 ownership-move refusal; the
+  anonymous null-match corner observed live and closed by `user && …`; `_read || …`
+  splitting reads from writes; the Ⱶ formula in translatable and untranslatable spellings
+  with identical assertions (parity doing production work); File upload/download under the
+  rule. Every formula is set through the admin API after mounting, so the live
+  re-projection is exercised by construction.
+
 ## Ownership formulae milestone — storage and the admin surface (Phase 4)
 
 An admin can now write an ownership formula on a table and store the RLS flag; the catalog

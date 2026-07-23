@@ -48,7 +48,20 @@ impl MountedApp {
         framework: Arc<dyn Framework>,
         cat: &Catalog,
     ) -> Result<MountedApp> {
-        let providers = sc_app::app_providers(&app, cat)?;
+        MountedApp::new_with(app, framework, cat, None)
+    }
+
+    /// [`new`](MountedApp::new) with the server's JavaScript evaluator injected
+    /// into the providers, so ownership formulas' reified path (§7.3) has an
+    /// engine. The boot and refresh paths pass the [`AppMounts`]' evaluator;
+    /// a mount without one fails closed on formulas that need it.
+    pub fn new_with(
+        app: Application,
+        framework: Arc<dyn Framework>,
+        cat: &Catalog,
+        evaluator: Option<Arc<dyn sc_expr::JsEvaluator>>,
+    ) -> Result<MountedApp> {
+        let providers = sc_app::app_providers_with(&app, cat, evaluator)?;
         Ok(MountedApp {
             app,
             framework,
@@ -89,6 +102,10 @@ pub struct AppMounts {
     /// `None` only for [`none`](AppMounts::none), the admin-only server that can
     /// never mount an app.
     catalog: Option<Arc<Catalog>>,
+    /// The JavaScript engine ownership formulas' reified path runs on (§7.3),
+    /// shared by every provider of every mount. `None` (tests, admin-only
+    /// servers) fails closed where a formula would need it.
+    evaluator: Option<Arc<dyn sc_expr::JsEvaluator>>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
 }
@@ -103,8 +120,22 @@ impl AppMounts {
     pub fn new(catalog: Arc<Catalog>) -> AppMounts {
         AppMounts {
             catalog: Some(catalog),
+            evaluator: None,
             by_subdomain: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Attach the server's JavaScript evaluator; every later mount and
+    /// re-projection builds its providers with it.
+    pub fn with_evaluator(mut self, evaluator: Arc<dyn sc_expr::JsEvaluator>) -> AppMounts {
+        self.evaluator = Some(evaluator);
+        self
+    }
+
+    /// The evaluator mounts are built with, for callers assembling a
+    /// [`MountedApp`] by hand (tests, custom boot paths).
+    pub fn evaluator(&self) -> Option<Arc<dyn sc_expr::JsEvaluator>> {
+        self.evaluator.clone()
     }
 
     /// Mount an app on its declared subdomain, refusing a collision.
@@ -181,8 +212,12 @@ impl AppMounts {
             .cloned()
             .collect();
         for mounted in affected {
-            let refreshed =
-                MountedApp::new(mounted.app.clone(), mounted.framework.clone(), catalog)?;
+            let refreshed = MountedApp::new_with(
+                mounted.app.clone(),
+                mounted.framework.clone(),
+                catalog,
+                self.evaluator(),
+            )?;
             self.remount(refreshed);
         }
         Ok(())
@@ -244,7 +279,7 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
         app.framework.name.clone(),
         report.bundle.clone(),
     ));
-    let mounted = MountedApp::new(app, framework, catalog)?;
+    let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator())?;
     apps.remount(mounted);
     Ok(report)
 }

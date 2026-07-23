@@ -28,6 +28,7 @@ pub mod rows;
 
 mod admin;
 mod endpoint;
+mod ownership;
 mod provider;
 mod rest;
 mod schema;

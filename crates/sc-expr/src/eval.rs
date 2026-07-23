@@ -32,17 +32,25 @@
 //! boundary except one script string and one boolean result.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "eval")]
 use std::sync::Arc;
+#[cfg(feature = "eval")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "eval")]
 use std::sync::mpsc;
+#[cfg(feature = "eval")]
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use sc_error::{Error, Result};
+#[cfg(feature = "eval")]
+use sc_error::Error;
+use sc_error::Result;
 use sc_query::Value;
 
+#[cfg(feature = "eval")]
 use crate::analyze::OpFlag;
 use crate::formula::Formula;
+#[cfg(feature = "eval")]
 use crate::normalise::{is_join_ident, render_js};
 use crate::translate::Operation;
 
@@ -78,8 +86,10 @@ pub trait JsEvaluator: Send + Sync {
 
 /// How long a single evaluation may run before the watchdog terminates it. A
 /// formula is a pure expression over a handful of values; this is generous.
+#[cfg(feature = "eval")]
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(250);
 
+#[cfg(feature = "eval")]
 enum Job {
     Eval(FormulaCall, tokio::sync::oneshot::Sender<Result<bool>>),
     /// Raw script escape hatch for the watchdog test only: the formula
@@ -90,6 +100,7 @@ enum Job {
     Raw(String, tokio::sync::oneshot::Sender<Result<bool>>),
 }
 
+#[cfg(feature = "eval")]
 /// The `deno_core`-backed [`JsEvaluator`]: one V8 isolate on one thread,
 /// serving evaluations serially. Cheap to share (`Arc` inside); dropping the
 /// last handle shuts the thread down.
@@ -97,6 +108,7 @@ pub struct DenoEvaluator {
     tx: mpsc::Sender<Job>,
 }
 
+#[cfg(feature = "eval")]
 impl DenoEvaluator {
     /// Start the evaluator thread with the default timeout.
     pub fn new() -> DenoEvaluator {
@@ -128,12 +140,14 @@ impl DenoEvaluator {
     }
 }
 
+#[cfg(feature = "eval")]
 impl Default for DenoEvaluator {
     fn default() -> Self {
         DenoEvaluator::new()
     }
 }
 
+#[cfg(feature = "eval")]
 #[async_trait]
 impl JsEvaluator for DenoEvaluator {
     async fn eval(&self, call: FormulaCall) -> Result<bool> {
@@ -147,6 +161,7 @@ impl JsEvaluator for DenoEvaluator {
     }
 }
 
+#[cfg(feature = "eval")]
 /// The dedicated thread: owns the `JsRuntime`, its watchdog, and the job loop.
 fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
     let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions::default());
@@ -222,11 +237,13 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
     // which ends the watchdog thread's loop too.
 }
 
+#[cfg(feature = "eval")]
 enum WatchdogMsg {
     Arm(Instant),
     Disarm,
 }
 
+#[cfg(feature = "eval")]
 fn watchdog_thread(
     rx: mpsc::Receiver<WatchdogMsg>,
     isolate: deno_core::v8::IsolateHandle,
@@ -253,6 +270,7 @@ fn watchdog_thread(
     }
 }
 
+#[cfg(feature = "eval")]
 /// Assemble the self-contained script for one call: every free variable bound
 /// as a `const` from a JSON bindings object, the normalised expression, and a
 /// `!!` truthiness coercion. JSON is (in a V8 this modern) a syntactic subset
@@ -282,6 +300,7 @@ fn build_script(call: &FormulaCall) -> Result<String> {
     ))
 }
 
+#[cfg(feature = "eval")]
 /// The JSON value an identifier binds to, or `None` for a whitelisted global.
 /// An identifier with no binding and no global is an error — a caller bug (it
 /// should have validated and prefetched), reported rather than bound to
@@ -317,6 +336,7 @@ fn binding_for(call: &FormulaCall, ident: &str) -> Result<Option<serde_json::Val
     Err(Error::msg(format!("formula evaluation: `{ident}`: {what}")))
 }
 
+#[cfg(feature = "eval")]
 /// Mirror of the symbolic side's flag folding ([`Operation`] decides each
 /// flag), so both evaluators see identical flag values by construction.
 fn flag_value(op: Operation, flag: OpFlag) -> bool {
@@ -329,6 +349,7 @@ fn flag_value(op: Operation, flag: OpFlag) -> bool {
     }
 }
 
+#[cfg(feature = "eval")]
 /// A SQL [`Value`] as the JSON (hence JS) value the formula sees. The mapping
 /// is chosen to line up with the symbolic side: text-like values (UUIDs,
 /// dates, times) become strings — which is also what their SQL comparisons
@@ -359,6 +380,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
+#[cfg(feature = "eval")]
 #[cfg(test)]
 mod tests {
     use super::*;

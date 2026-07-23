@@ -11,6 +11,10 @@ rust-version.workspace = true
 [dependencies]
 sc-error.workspace = true
 sc-catalog.workspace = true
+# Ownership-formula enforcement (§7.3, Phase 5). Without the `eval` feature:
+# this crate translates formulas and holds an `Arc<dyn JsEvaluator>` seam; the
+# V8 engine behind it is constructed by the server and injected.
+sc-expr.workspace = true
 sc-auth.workspace = true
 # The row layer (`rows`) executes table CRUD for every API surface, so it speaks
 # the query language and the type system directly.

@@ -75,13 +75,31 @@ pub fn app_tables(app: &Application, cat: &Catalog) -> Result<Vec<Table>> {
 /// that check existed fails to build and to mount — with the reason — rather than
 /// coming up as an app that answers every request with a 404 from its API.
 pub fn app_providers(app: &Application, cat: &Catalog) -> Result<Vec<Box<dyn ApiProvider>>> {
+    app_providers_with(app, cat, None)
+}
+
+/// [`app_providers`] with the server's JavaScript evaluator injected — what a
+/// *running* mount uses, so ownership formulas' reified path (§7.3) has an
+/// engine. The evaluator is optional because everything that only needs the
+/// endpoint *shapes* — client generation, endpoint collection, tests — has no
+/// engine and needs none; a provider without one fails closed if a formula
+/// actually requires it.
+pub fn app_providers_with(
+    app: &Application,
+    cat: &Catalog,
+    evaluator: Option<std::sync::Arc<dyn sc_expr::JsEvaluator>>,
+) -> Result<Vec<Box<dyn ApiProvider>>> {
     validate_api_mounts(app)?;
     let tables = app_tables(app, cat)?;
     app.apis
         .iter()
         .map(|api| match api.provider.as_str() {
             REST_PROVIDER => {
-                Ok(Box::new(RestProvider::project(&api.mount, &tables)) as Box<dyn ApiProvider>)
+                let mut provider = RestProvider::project(&api.mount, &tables);
+                if let Some(evaluator) = &evaluator {
+                    provider = provider.with_evaluator(evaluator.clone());
+                }
+                Ok(Box::new(provider) as Box<dyn ApiProvider>)
             }
             other => Err(Error::config(format!(
                 "application `{}` enables unknown API provider `{other}`; \

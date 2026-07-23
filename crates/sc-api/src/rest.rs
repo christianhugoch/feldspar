@@ -31,17 +31,20 @@
 //! is explicitly outside MVP scope, so there is nothing yet to project.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use sc_auth::{User, authenticate};
 use sc_catalog::{Catalog, DataFieldKind, Table, load_file_store_by_name};
 use sc_error::{Error, Result};
+use sc_expr::{JsEvaluator, Operation};
 use sc_files::{ROLE_PUBLIC, check_access, mime_for_path, validate_file_path};
 use sc_query::Value;
 use serde_json::{Value as Json, json};
 
 use crate::auth::{credentials, credentials_schema, user_summary_json, user_summary_schema};
 use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSpec};
+use crate::ownership;
 use crate::provider::{ApiProvider, ApiRequest, ApiResponse};
 use crate::rows;
 use crate::schema::{TypeSchema, ValueType};
@@ -96,6 +99,11 @@ pub struct RestProvider {
     /// Endpoint name → the table operation it runs. Custom routes are absent
     /// here; they resolve through their [`HandlerRef`] instead.
     routes: HashMap<String, TableRoute>,
+    /// The engine behind ownership formulas' reified path (§7.3). Injected by
+    /// the server via [`with_evaluator`](RestProvider::with_evaluator); when
+    /// absent, a formula that needs it **fails closed** with a configuration
+    /// error rather than granting anything.
+    evaluator: Option<Arc<dyn JsEvaluator>>,
 }
 
 impl RestProvider {
@@ -140,8 +148,20 @@ impl RestProvider {
 
         for table in tables {
             let name = &table.name;
-            let read = AuthRequirement::MinRole(table.access.min_role_read);
-            let write = AuthRequirement::MinRole(table.access.min_role_write);
+            // A table with an ownership formula relaxes its endpoints to
+            // Public (§7.3): the formula decides `user === null` — an admin
+            // may grant anonymous callers rows — so the gate moves from the
+            // endpoint's auth into the handler, where the rule becomes
+            // "meets the role floor OR the formula grants the row". A table
+            // without a formula keeps the MinRole gate exactly as before.
+            let (read, write) = if table.ownership.is_some() {
+                (AuthRequirement::Public, AuthRequirement::Public)
+            } else {
+                (
+                    AuthRequirement::MinRole(table.access.min_role_read),
+                    AuthRequirement::MinRole(table.access.min_role_write),
+                )
+            };
             let collection = || path_at(&mount).lit(name);
 
             let mut add = |op: RestOp, ep: Endpoint| {
@@ -245,7 +265,17 @@ impl RestProvider {
             mount,
             endpoints,
             routes,
+            evaluator: None,
         }
+    }
+
+    /// Inject the JavaScript evaluator ownership formulas' reified path runs
+    /// on. The server constructs one engine and shares it across every
+    /// provider; a provider without one still enforces translatable formulas
+    /// symbolically and fails closed on the rest.
+    pub fn with_evaluator(mut self, evaluator: Arc<dyn JsEvaluator>) -> RestProvider {
+        self.evaluator = Some(evaluator);
+        self
     }
 
     /// Add a developer-authored custom route (guest code or SQL, §13.4).
@@ -298,7 +328,12 @@ impl RestProvider {
         }
     }
 
-    /// Run a resolved table operation.
+    /// Run a resolved table operation, enforcing the §7.3 access rule:
+    /// **meets the operation's role floor OR the ownership formula grants the
+    /// row**. Callers at or above the floor take exactly the pre-formula
+    /// paths; everyone else exists only where the formula says so — and a row
+    /// the formula withholds answers with the *same* not-found a missing row
+    /// gets, so nothing about the table's contents can be probed.
     async fn run(
         &self,
         route: &TableRoute,
@@ -315,26 +350,231 @@ impl RestProvider {
                 .map(String::as_str)
                 .ok_or_else(|| Error::invalid("missing path parameter `id`"))
         };
-        // The caller's role for the path-cumulative file rule. The file
-        // endpoints' `MinRole` auth ran before this, so a caller is present
-        // there; anonymous is public everywhere else.
+        // The caller's role for the path-cumulative file rule. Anonymous is
+        // public; the table-level gate (floor or formula) runs separately.
         let role = user.map_or(ROLE_PUBLIC, |u| u.role);
+        let meets_read = ownership::meets(user, table.access.min_role_read);
+        let meets_write = ownership::meets(user, table.access.min_role_write);
+        // The formula, for callers below the floor. Its absence there means
+        // the endpoint was Public only by a stale projection — deny exactly as
+        // the MinRole gate would have.
+        // `Err(())` is "deny as the MinRole gate would" — the response is built
+        // at the call site to keep this closure's error small.
+        let formula = |allowed: bool| -> std::result::Result<Option<&sc_expr::Formula>, ()> {
+            if allowed {
+                Ok(None)
+            } else {
+                match &table.ownership {
+                    Some(f) => Ok(Some(f)),
+                    None => Err(()),
+                }
+            }
+        };
+        let evaluator = self.evaluator.as_ref();
+
         Ok(match &route.op {
-            RestOp::List => ApiResponse::ok(rows::list_rows(cat, &table).await?),
+            RestOp::List => match formula(meets_read) {
+                Err(()) => forbidden(user),
+                Ok(None) => ApiResponse::ok(rows::list_rows(cat, &table).await?),
+                Ok(Some(f)) => ApiResponse::ok(
+                    ownership::list_owned_rows(cat, &table, f, user, evaluator).await?,
+                ),
+            },
             RestOp::Create => {
+                match formula(meets_write) {
+                    Err(()) => return Ok(forbidden(user)),
+                    Ok(None) => {}
+                    // An insert is checked against the proposed row, `_insert`
+                    // folded true (§7.3) — WITH CHECK semantics at runtime.
+                    Ok(Some(f)) => {
+                        let proposed = rows::coerce_row_values(&table, body)?;
+                        if !ownership::row_allowed(
+                            cat,
+                            &table,
+                            f,
+                            Operation::Insert,
+                            user,
+                            evaluator,
+                            &proposed,
+                        )
+                        .await?
+                        {
+                            return Ok(ApiResponse::error(
+                                403,
+                                "this row is outside your ownership",
+                            ));
+                        }
+                    }
+                }
                 ApiResponse::with_status(201, rows::create_row(cat, &table, body).await?)
             }
-            RestOp::Update => ApiResponse::ok(rows::update_row(cat, &table, id()?, body).await?),
-            RestOp::Delete => ApiResponse::ok(rows::delete_row(cat, &table, id()?).await?),
-            RestOp::Download { field } => download(cat, &table, field, id()?, role).await?,
+            RestOp::Update => {
+                let id = id()?;
+                match formula(meets_write) {
+                    Err(()) => return Ok(forbidden(user)),
+                    Ok(None) => ApiResponse::ok(rows::update_row(cat, &table, id, body).await?),
+                    Ok(Some(f)) => {
+                        // USING: granted on the existing row…
+                        let existing = self
+                            .owned_row(cat, &table, f, Operation::Update, user, id)
+                            .await?;
+                        // …and WITH CHECK: granted on the proposed row too, so
+                        // an update cannot move the row out of the caller's
+                        // ownership.
+                        let changes = rows::coerce_row_values(&table, body)?;
+                        let merged = ownership::merged_row(&table, &existing, &changes);
+                        if !ownership::row_allowed(
+                            cat,
+                            &table,
+                            f,
+                            Operation::Update,
+                            user,
+                            evaluator,
+                            &merged,
+                        )
+                        .await?
+                        {
+                            return Ok(ApiResponse::error(
+                                403,
+                                "the update would move this row out of your ownership",
+                            ));
+                        }
+                        // The translated predicate rides in the UPDATE's WHERE
+                        // when it can, closing the check-to-write race.
+                        let guard =
+                            ownership::write_guard(cat, &table, f, Operation::Update, user)?;
+                        ApiResponse::ok(
+                            rows::update_row_guarded(cat, &table, id, body, guard).await?,
+                        )
+                    }
+                }
+            }
+            RestOp::Delete => {
+                let id = id()?;
+                match formula(meets_write) {
+                    Err(()) => return Ok(forbidden(user)),
+                    Ok(None) => ApiResponse::ok(rows::delete_row(cat, &table, id).await?),
+                    Ok(Some(f)) => {
+                        self.owned_row(cat, &table, f, Operation::Delete, user, id)
+                            .await?;
+                        let guard =
+                            ownership::write_guard(cat, &table, f, Operation::Delete, user)?;
+                        ApiResponse::ok(rows::delete_row_guarded(cat, &table, id, guard).await?)
+                    }
+                }
+            }
+            RestOp::Download { field } => {
+                match formula(meets_read) {
+                    Err(()) => return Ok(forbidden(user)),
+                    Ok(None) => {}
+                    // A file read is a read of the row (§7.3); the file's own
+                    // path-cumulative rule still runs inside `download`.
+                    Ok(Some(f)) => {
+                        self.owned_row(cat, &table, f, Operation::Read, user, id()?)
+                            .await?;
+                    }
+                }
+                download(cat, &table, field, id()?, role).await?
+            }
             RestOp::Upload { field } => {
                 let filename = params
                     .get("filename")
                     .map(String::as_str)
                     .ok_or_else(|| Error::invalid("missing path parameter `filename`"))?;
+                match formula(meets_write) {
+                    Err(()) => return Ok(forbidden(user)),
+                    Ok(None) => {}
+                    // An upload updates the row's field: granted on the
+                    // existing row, and on the row as it will be — the formula
+                    // may read the very field being written.
+                    Ok(Some(f)) => {
+                        let id = id()?;
+                        let existing = self
+                            .owned_row(cat, &table, f, Operation::Update, user, id)
+                            .await?;
+                        let (_, folder, _) = file_field(&table, field)?;
+                        let path = upload_path(folder, filename);
+                        let mut changes = std::collections::BTreeMap::new();
+                        changes.insert(field.clone(), Value::Text(path));
+                        let merged = ownership::merged_row(&table, &existing, &changes);
+                        if !ownership::row_allowed(
+                            cat,
+                            &table,
+                            f,
+                            Operation::Update,
+                            user,
+                            evaluator,
+                            &merged,
+                        )
+                        .await?
+                        {
+                            return Ok(ApiResponse::error(
+                                403,
+                                "the upload would move this row out of your ownership",
+                            ));
+                        }
+                    }
+                }
                 upload(cat, &table, field, id()?, filename, req.raw.clone(), role).await?
             }
         })
+    }
+
+    /// The existing row `id`, granted to the caller by the formula for `op` —
+    /// or the **same not-found a missing row gets**, which is what makes
+    /// denial indistinguishable from absence.
+    async fn owned_row(
+        &self,
+        cat: &Catalog,
+        table: &Table,
+        formula: &sc_expr::Formula,
+        op: Operation,
+        user: Option<&User>,
+        id: &str,
+    ) -> Result<std::collections::BTreeMap<String, Value>> {
+        let not_found = || {
+            let pk = rows::single_pk(table)?;
+            Err(Error::not_found(format!("no row with {pk} = {id}")))
+        };
+        let Some(existing) = ownership::fetch_row_values(cat, table, formula, id).await? else {
+            return not_found();
+        };
+        if !ownership::row_allowed(
+            cat,
+            table,
+            formula,
+            op,
+            user,
+            self.evaluator.as_ref(),
+            &existing,
+        )
+        .await?
+        {
+            return not_found();
+        }
+        Ok(existing)
+    }
+}
+
+/// The rejection a caller below the floor gets when no formula extends access:
+/// exactly what the `MinRole` gate answers, per caller state.
+fn forbidden(user: Option<&User>) -> ApiResponse {
+    match user {
+        None => ApiResponse::error(401, "authentication required"),
+        Some(_) => ApiResponse::error(403, "insufficient privilege"),
+    }
+}
+
+/// The store-relative path an upload of `filename` lands at — the same shape
+/// `upload` itself builds, factored so the ownership pre-check sees the row
+/// exactly as it will be written.
+fn upload_path(folder: Option<&str>, filename: &str) -> String {
+    match folder
+        .map(|f| f.trim_matches('/'))
+        .filter(|f| !f.is_empty())
+    {
+        Some(folder) => format!("{folder}/{filename}"),
+        None => filename.to_owned(),
     }
 }
 
@@ -401,13 +641,7 @@ async fn upload(
         ));
     };
 
-    let path = match folder
-        .map(|f| f.trim_matches('/'))
-        .filter(|f| !f.is_empty())
-    {
-        Some(folder) => format!("{folder}/{filename}"),
-        None => filename.to_owned(),
-    };
+    let path = upload_path(folder, filename);
     validate_file_path(&path, folder, mime_allow).map_err(|e| rows::field_error(field, e))?;
 
     let store = cat.require_file_store(store_name)?;

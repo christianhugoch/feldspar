@@ -11,10 +11,11 @@ rust-version.workspace = true
 [dependencies]
 sc-error.workspace = true
 sc-catalog.workspace = true
-# Ownership formulas (§7.3): validation and the RLS translatability check on
-# save. The `eval` feature (the V8 reified evaluator) arrives with Phase 5's
-# runtime enforcement.
-sc-expr.workspace = true
+# Ownership formulas (§7.3): validation, the RLS translatability check on
+# save, and — via `eval` — the V8 engine behind the runtime enforcement's
+# reified path. The server is the one place the engine is constructed
+# (`default_js_evaluator`); everything below holds the trait.
+sc-expr = { workspace = true, features = ["eval"] }
 sc-auth.workspace = true
 sc-files.workspace = true
 sc-app.workspace = true
