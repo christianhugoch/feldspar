@@ -154,6 +154,19 @@ Tags can be created in the admin UI any created entity gave have a tag applied t
 
 Applications can be created in the admin UI. When creating an application, the admin picks the Framework. Different frameworks have different settings, for instance a React application will need a file store or a subdirectory in a filestore to be the react code. The application also is configured with the subdomain on which it is served, any number of APIs that are created under an application, and any number of subdirectories that are served statically.
 
+## Authorization
+
+We will use a similar authorization for table data as in Saltcorn1, but the notion of ownership fields will now be folded into ownership formulae which are more general. Each table may have an ownership formula which is a JavaScript expression in which the following is in scope:
+
+* each field name in the current table, which has the value of the field in the current row
+* the `user` variable which is an object with all user-defined fields of the current user. If no user is logged in, `user` is null 
+* the boolean variables `_read` which is true if and only if the access operation is a select, `_update`, `_insert` and `_delete` for update, insert and delete operations and the general `_write` if the operation is an update, insert or delete.
+* any joinfields on the current table can be used to access a value on the target field using the Claudian half-h (Ⱶ) operator. for instance if we have a table called books which has a publisher field which is a foreign key on to a publisher table which has a name field, then publisherⱵname can be used to access name on the publisher table. The half-h works as optinal chaining, so if the foreign key is null the whole expression is null. Half-h operators can be chained to any depth.
+
+This is optionally translated to row-level security policies with postgres. The table has a rls_enabled field in its json attributes in the metadata, RLS can be enabled in the admin UI. In that case the javascript formula must be translated to an RLS policy and then you no longer have to check. This helps especially as joinfields no longer have to be refetched.
+
+If there are any stored calculated fields, then in the RLS policy translation these will be used as their calculation definitions, not as their sotred values during RLS policy evaluation.
+
 ## Code guidelines
 
 Principles:
@@ -245,4 +258,3 @@ this is MVP - the system is now useful.
 - can you mix react and saltcorn1 applications?
 - how are we creating emails. 
 - auth features beyond device recognition
-- javascript or CEL for table auth formulae
