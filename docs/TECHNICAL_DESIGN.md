@@ -298,12 +298,39 @@ pub trait RichType: Send + Sync {
     fn attributes(&self) -> &[FormField];             // e.g. min/max, select options
     fn validate(&self, v: &Value, attrs: &Attrs) -> Result<()>;
     fn sql_types(&self) -> &[&str];                   // DB types this maps from/to
-    fn fieldviews(&self) -> Vec<Box<dyn FieldView>>;
+    fn fieldviews(&self) -> Vec<Box<dyn FieldView>>;  // deferred until §6.3 ships
 }
 ```
 
-MVP ships **no rich types** — everything is basic — per the milestone. Rich types are added
-incrementally.
+MVP shipped **no rich types** — everything was basic — per the milestone. The tables-and-fields
+milestone then implemented the trait (minus `fieldviews()`, which waits on §6.3's fieldview
+registry) and, with it, the **rich-type registry** (`sc-types::rich`): rich types are registered
+by name — `registered_rich_types()`, `rich_type(name)`, `rich_type_config_spec(name)` — mirroring
+the file-store-backend and framework registries, and for the same reason: the admin UI must
+render an attribute form for a type it knows nothing about, including one a plugin registers
+later, so a type is a name plus a `Vec<FormField>` spec plus a validator, resolved at runtime.
+
+`TypeRef` gained a `Rich(RichTypeRef)` variant. A `RichTypeRef` is a **name** resolved against
+the registry on use (`RichTypeRef::resolve`); identity is the name, which keeps `TypeRef`
+comparable by value. `TypeRef::validate_with(value, attrs)` is the attribute-carrying entry point
+the row-write path calls (§2.3 of the milestone): coerce the JSON through the column's storage
+type, then let the rich type enforce its configured attributes.
+
+Two rich types ship, chosen to prove the three things the machinery must do — validate a value,
+declare typed attributes, and constrain what may be stored:
+
+- **`String`** over `text`, with `max_length`, optional `options` (a select), and an optional
+  anchored `regex`. The regex subsumes the originally planned `Email` type (and any other
+  pattern), so no dedicated `Email` type exists.
+- **`Integer`** over `int8`, with `min`/`max`.
+
+Two boundaries hold the shape steady. **`File` is a field kind, not a rich type**: like `Key`, it
+is a *reference* (a store-relative path stored as `text`), not a value family — the admin-facing
+type picker merges kinds and types into one list because that is how an admin thinks, but the
+model keeps them apart. And **introspection never resolves a column back to a rich type**:
+`TypeRef::from_sql_type` always yields a basic type, and a column is rich only because the
+`_sc_fields` overlay says so (§9) — guessing "this `text` column is an Email" from the database
+is exactly the magic that makes a legacy database behave surprisingly.
 
 ### 6.2 Fields — the `BaseField` / `DataField` / `FormField` split
 
@@ -560,8 +587,8 @@ a sparse value goes into `attributes`.**
 
 | Table | Holds | Notes |
 |---|---|---|
-| `_sc_tables` | overlay metadata for tables | access rules, attributes, provided-table defs; the DB's own tables need no row to be usable |
-| `_sc_fields` | overlay metadata for fields | calculated-field defs, fieldview defaults, attributes |
+| `_sc_tables` | overlay metadata for tables | access rules, label/description, attributes, provided-table defs; the DB's own tables need no row to be usable (§9.1) |
+| `_sc_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
 | `_sc_triggers` | triggers, workflows, agents | workflows are **versioned** so a suspended run finishes on its own version |
 | `_sc_runs` | workflow & agent runs | current context + state, updated after each step |
 | `_sc_run_traces` | per-step context + timing | only when tracing is enabled for that workflow |
@@ -586,6 +613,62 @@ what the MVP can defer. A table exists in the database whether or not `_sc_table
 for it; an application, a trigger or a model does not exist anywhere but its row. So the
 overlay tables can be deferred while their subjects still work (§17), whereas `_sc_applications`
 must arrive with applications themselves — there is nothing to introspect an app *from*.
+
+### 9.1 The merge and precedence rules, as implemented
+
+`_sc_tables` and `_sc_fields` now exist, and the rules below are the ones the code enforces
+(stated on `Table::apply_overlay` / `Table::apply_field_overlay` in `sc-catalog`).
+
+**Precedence.** The database is the authority on everything it knows — columns, types,
+nullability, keys; the overlay is the authority on everything it knows — access rules, label,
+description, rich type, field kind, attributes — **and the two sets do not intersect**. A merge
+with no contested field has no conflict semantics to get wrong. This is a standing constraint on
+what may ever be *added* to the overlay tables, not just a description of today's columns; the
+full-column-list tests are what enforce it.
+
+**No row → today's behaviour exactly.** A table with no overlay row comes out of `Catalog::reload`
+identical to what `Table::from_physical` built, including admin-only
+`AccessRules::default()` — the merge loop can only modify entries the introspection loop already
+created, which is the zero-setup promise in one line of code. Deleting an overlay reverts to that
+default, never to the previous value. `Table.overlay: Option<TableMetaId>` records provenance:
+`None` means "nobody has configured this table", and the id is what lets an edit update the
+existing row instead of racing to create a second.
+
+**Keys.** `_sc_tables.name` is `UNIQUE` — it is the key the merge joins on, and it *is* the §9
+`name` column (the subject's name; the Rust field stays `table_name`). `_sc_fields` has the
+composite `PRIMARY KEY (table_name, name)`, since a field name is unique only within its table;
+`id` remains a required, unique row handle (§9 requires `id` present, not that it be the key).
+
+**Strict reads, refused nonsense.** A missing or ill-typed column is an error naming the table
+and column, never a silent default. Both role columns are `NOT NULL`, and an off-scale role is
+refused — on save and on read alike — rather than clamped, because rounding a role to the nearest
+legal one would silently decide who reaches the data. System (`_sc_*`) tables may not have overlay
+rows: refused on save *and* ignored in the merge, because a restored dump or hand-edited database
+can contain a row the API would not have written.
+
+**Orphans are kept and reported, not deleted.** An overlay row whose table (or column) no longer
+exists survives (`orphan_table_meta`, and the field merge's kept rows): a dropped-and-recreated
+table — a restore, a migration run outside Saltcorn — would otherwise silently lose its access
+rules, and the failure is the confusing kind. Deliberately not enforced on save either: requiring
+the subject to exist would make the row unsavable exactly when an admin is repairing one. The
+admin API lists orphans and can forget them by name.
+
+**Field-specific rules.** The kind is stored as a text discriminant plus its parameters folded
+into `attributes` (lifted back into the structured `DataFieldKind` on read; those keys are
+reserved). A rich type whose `sql_types()` does not include the column's actual type — or a type
+name no longer registered — is a **reported inconsistency** (`FieldMergeIssue`, surfaced by
+`Catalog::field_overlay_issues()`), not a silent downgrade and not a hard failure: the table
+stays usable and the admin is told. For `Key` fields the database's target wins whenever it
+enforces one — atop an introspected foreign key the overlay adds only `summary_field` and cannot
+repoint the reference; on a column with no FK behind it, the overlay supplies the whole
+reference, the case the database cannot enforce.
+
+**Liveness.** Saving or deleting an overlay reloads the catalog cache, exactly as a schema change
+does, and re-projects the API providers of any mounted application exposing the table
+(`AppMounts::refresh_table`, §13.2) — an access or field change reaches a running app with no
+restart. The overlay is only consulted when its table exists in the database: bootstrap creates
+the overlay tables *through* `create_table`, which reloads, so a reload that assumed them present
+could never bootstrap them.
 
 ---
 
@@ -1300,7 +1383,7 @@ admin HTML (the earlier "web 1.0 admin" and `sc-markup` plan are dropped, §12).
 |---|---|
 | Enum `Statement` for select/insert/update/delete | `sc-query` |
 | Postgres driver (host/user/pass/db); run queries | `sc-db`, `sc-db-postgres` |
-| Catalog initialised from a driver; introspect via information_schema; get/create table & field; **no stored metadata beyond information_schema and `_sc_applications`** | `sc-catalog` |
+| Catalog initialised from a driver; introspect via information_schema; get/create table & field; **no stored metadata beyond information_schema and `_sc_applications`** *(true for the MVP; since superseded — see the note below)* | `sc-catalog` |
 | Types: all **basic**, no rich types | `sc-types` |
 | Users: create-first-user flow; login/logout | `sc-auth`, `sc-server` |
 | Endpoint model (typed Rust values) + generated TypeScript API client | `sc-api` |
@@ -1312,15 +1395,25 @@ admin HTML (the earlier "web 1.0 admin" and `sc-markup` plan are dropped, §12).
 | **Applications created and configured in the admin UI**; stored in `_sc_applications`; built and mounted with no process restart | `sc-app`, `sc-api`, `sc-server`, `ui/admin` |
 | Tests against a real Postgres, reinitialised per test | `tests/` |
 
-MVP explicitly excludes: multiple databases, rich types, stored table/field metadata
+MVP explicitly excluded: multiple databases, rich types, stored table/field metadata
 overlay, workflows, agents, models, and the drag-and-drop builder. The system is "useful" at
 the end of the MVP.
 
-Note the one deliberate exception to "no stored metadata": `_sc_applications` is in scope
-because an application has no other definition (§9), while the `_sc_tables`/`_sc_fields`
-overlays stay out because tables and fields work without them. "No stored metadata beyond
+Note the one deliberate exception the MVP made to "no stored metadata": `_sc_applications` was
+in scope because an application has no other definition (§9), while the `_sc_tables`/`_sc_fields`
+overlays stayed out because tables and fields work without them. "No stored metadata beyond
 information_schema" was always a statement about *overlays*, not a ban on the `_sc_*` tables
 whose subjects exist nowhere else.
+
+**Since superseded.** Two post-MVP milestones later, the catalog's stored metadata is:
+`_sc_applications` and `_sc_file_stores` (definitions — their subjects exist nowhere else),
+`_sc_roles` (the authoritative role list, §7.4), and the `_sc_tables`/`_sc_fields` **overlays**
+(§9.1), which is what replaced the "information_schema only" invariant. What the invariant was
+*for* — the zero-setup promise, "point Saltcorn at a legacy database and it just works" — still
+holds, and the merge rule is what carries it now: a table or field with **no overlay row** comes
+out of the catalog exactly as introspection built it, so a newly connected database still needs
+zero metadata rows. The promise was always "zero rows *required*"; it stayed true when rows
+became *possible*.
 
 ---
 

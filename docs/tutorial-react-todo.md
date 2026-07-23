@@ -207,3 +207,10 @@ your own — use the **`code`** framework, which serves any static bundle you ca
 [tutorial-code-framework.md](tutorial-code-framework.md). You create the project and state where
 its source, output and build command are; Saltcorn generates the typed client and serves what
 your bundler emits.
+
+## What next
+
+Your app is admin-only until you say otherwise, and its columns are all plain SQL types. The
+next tutorial opens the `tasks` table to a non-admin role, gives it a **`File` field**, and
+uploads and serves real files from this app — with folder and file-type rules the server
+enforces: [tutorial-file-fields.md](tutorial-file-fields.md).

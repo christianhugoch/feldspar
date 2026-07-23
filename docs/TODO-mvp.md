@@ -1,7 +1,7 @@
 # Saltcorn v2 — MVP Implementation TODO
 
 Ordered, checkable task list for the MVP milestone. Scope and rationale are in
-[docs/GOALS.md](./docs/GOALS.md) (§ Milestones) and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) (§17).
+[docs/GOALS.md](./GOALS.md) (§ Milestones) and [docs/TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md) (§17).
 
 **MVP definition of done:** a single Postgres database, connected as both primary and only
 data store. An admin can create the first user, log in/out, create tables and fields, edit

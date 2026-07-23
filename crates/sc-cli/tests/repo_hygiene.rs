@@ -71,3 +71,77 @@ fn gitignore_covers_rust_and_node() {
         ".gitignore must ignore node_modules/"
     );
 }
+
+/// The markdown documents the documentation set consists of: the top-level
+/// entry points plus everything in `docs/`.
+fn documentation_files(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = ["README.md", "TODO.md", "CLAUDE.md"]
+        .iter()
+        .map(|rel| root.join(rel))
+        .filter(|p| p.is_file())
+        .collect();
+    let docs = root.join("docs");
+    let entries = fs::read_dir(&docs).unwrap_or_else(|e| panic!("missing docs/: {e}"));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "md") {
+            out.push(path);
+        }
+    }
+    assert!(
+        out.iter().any(|p| p.ends_with("docs/TECHNICAL_DESIGN.md")),
+        "the technical design document must be part of the documentation set"
+    );
+    out
+}
+
+/// Every markdown link to a `.md` file, in every document, must resolve to a
+/// file that exists — a tutorial that links a sibling that was renamed or never
+/// written is a broken promise the reader discovers instead of a test.
+///
+/// Only `.md` targets are checked (external URLs, anchors and code snippets that
+/// merely look like links are left alone), which is exactly the class of links
+/// the docs use to refer to each other.
+#[test]
+fn documentation_links_resolve() {
+    let root = workspace_root();
+    for doc in documentation_files(&root) {
+        let text = fs::read_to_string(&doc).unwrap_or_else(|e| panic!("{doc:?}: {e}"));
+        let dir = doc.parent().unwrap_or(&root);
+        // Markdown inline links: `[label](target)`. Scan for `](` and take the
+        // target up to the closing parenthesis.
+        for (idx, _) in text.match_indices("](") {
+            let rest = &text[idx + 2..];
+            let Some(end) = rest.find(')') else { continue };
+            let target = &rest[..end];
+            // Strip a `#fragment`; skip external URLs and non-.md targets.
+            let path_part = target.split('#').next().unwrap_or("");
+            if path_part.contains("://") || !path_part.ends_with(".md") {
+                continue;
+            }
+            let resolved = dir.join(path_part);
+            assert!(
+                resolved.is_file(),
+                "{}: broken link `{target}` (resolved to {resolved:?})",
+                doc.display()
+            );
+        }
+    }
+}
+
+/// The tutorials link to each other, so a reader who finishes one finds the
+/// next: the React tutorial leads to the file-fields tutorial, which leads back.
+#[test]
+fn tutorials_are_cross_linked() {
+    let root = workspace_root();
+    let react = read(&root, "docs/tutorial-react-todo.md");
+    assert!(
+        react.contains("tutorial-file-fields.md"),
+        "the React tutorial should point at the file-fields tutorial as a next step"
+    );
+    let files = read(&root, "docs/tutorial-file-fields.md");
+    assert!(
+        files.contains("tutorial-react-todo.md"),
+        "the file-fields tutorial builds on the React tutorial and should link it"
+    );
+}

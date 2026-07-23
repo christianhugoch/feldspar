@@ -2,6 +2,50 @@
 
 Changes in reverse chronological order.
 
+## Documentation: the design catches up with the overlays (§5)
+
+The milestone's documentation phase — the technical design document now describes what was
+built, and a tutorial walks the whole feature end to end.
+
+- **`docs/TECHNICAL_DESIGN.md` §9.1 (new):** the `_sc_tables`/`_sc_fields` merge and precedence
+  rules as implemented — the database is the authority on what it knows, the overlay on what it
+  knows, and the two sets do not intersect; no row → introspection's answer exactly; the key
+  choices (`name` UNIQUE, the composite field PK); strict reads and refused off-scale roles;
+  system tables never merging a row; orphan rows kept and reported; the field-specific rules
+  (kind as discriminant + parameters, type/column mismatches as reported inconsistencies, the
+  `Key` precedence split); and liveness (saves reload the catalog and re-project mounted apps).
+- **§6.1:** the rich-type registry (`registered_rich_types` / `rich_type` /
+  `rich_type_config_spec`), `TypeRef::Rich` with name-as-identity and `validate_with`, the two
+  shipped types (`String` with `max_length`/`options`/`regex` — subsuming the planned `Email` —
+  and `Integer` with `min`/`max`), and the two boundaries: `File` is a kind, not a rich type,
+  and introspection never resolves a column back to a rich type. `fieldviews()` is marked
+  deferred until §6.3 ships.
+- **§17:** the MVP's "no stored metadata beyond information_schema and `_sc_applications`" line
+  is marked superseded, with a note saying what replaced it (the definitions tables plus the
+  §9.1 overlays) and why the zero-setup promise still holds — a table or field with no overlay
+  row comes out of the catalog exactly as introspection built it, so the promise was always
+  "zero rows *required*", and stayed true when rows became *possible*. The §9 table's
+  `_sc_tables`/`_sc_fields` rows now name what the overlays actually hold.
+- **New tutorial `docs/tutorial-file-fields.md`**, in the style of the existing ones and
+  continuing from the React to-do tutorial: create an `uploads` store, add a Member role and open
+  the table's read/write roles to it, add a `File` field (store, folder, MIME allow-list) from
+  the field-type picker, rebuild the app for the regenerated typed client
+  (`uploadTasksAttachment(id, filename, body)` / `downloadTasksAttachment(id): Promise<Blob>`),
+  upload from an `<input type="file">` and link the bytes by URL, and see both access rules bite
+  — the table's role and a folder's path-cumulative `min_role`, whichever is stricter. Ends with
+  the trip-ups: MIME comes from the extension, apps never choose the path, metadata operations
+  never delete bytes.
+
+Documentation drift is now tested: `repo_hygiene` (`crates/sc-cli/tests/repo_hygiene.rs`) gains
+`documentation_links_resolve` — every markdown link to a `.md` file, in the top-level documents
+and everything under `docs/`, must resolve to a file that exists — and
+`tutorials_are_cross_linked`, asserting the React tutorial points forward to the file-fields
+tutorial (a "What next" section added for it) and the file-fields tutorial links back. The link
+check immediately caught a real break: `docs/TODO-mvp.md` still carried root-relative
+`./docs/…` links from before it was archived into `docs/`, now fixed. Otherwise no code changed
+in this phase; each earlier phase's CHANGELOG entry (already written as it landed) is the
+per-phase record §5 asked for.
+
 ## Application-facing file access (§4)
 
 An application can now serve and accept the bytes behind a `File` field — the first caller that

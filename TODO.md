@@ -223,9 +223,9 @@ admin-only and role 1 clears every rule.
 
 ## Phase 5 — Documentation
 
-- [ ] `docs/TECHNICAL_DESIGN.md`: §9's overlay description gains the merge and precedence rules actually implemented; §6.1 gains the rich-type registry; §17's "no stored metadata beyond information_schema" line is updated to say what replaced it and why the zero-setup promise still holds
-- [ ] A tutorial section, in the style of the existing ones: create a table, set its roles, add a `File` field, upload from an application
-- [ ] CHANGELOG entries as each phase lands
+- [x] `docs/TECHNICAL_DESIGN.md`: §9 gains §9.1 with the merge and precedence rules actually implemented (authority split, no-row-→-introspection, keys, strict reads, system-table refusal, orphans, field-specific rules, liveness); §6.1 gains the rich-type registry, `TypeRef::Rich`, the shipped `String`/`Integer` types and the two boundaries (File is a kind; introspection never resolves rich); §17's "no stored metadata beyond information_schema" line is marked superseded with a note saying what replaced it and why the zero-setup promise still holds ("zero rows *required*" stayed true when rows became *possible*)
+- [x] A tutorial section, in the style of the existing ones: `docs/tutorial-file-fields.md` — create a store and a role, set a table's roles, add a `File` field from the type picker, upload from the application via the regenerated typed client, and watch both the table's rule and a folder's path-cumulative rule bite. Cross-linked from the React tutorial's new "What next" section. Guarded by two new `repo_hygiene` tests: every `.md`-to-`.md` link in the documentation resolves (which caught and fixed stale `./docs/…` links in the archived `TODO-mvp.md`), and the tutorials link each other
+- [x] CHANGELOG entries as each phase lands — each of phases 1–4 already carries its entry, written as it landed; §5's own entry added
 
 ---
 
