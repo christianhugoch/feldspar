@@ -3,8 +3,9 @@ resolver = "3"
 members = [
     # Layer 0 — foundations
     "crates/sc-error",
-    # Layer 1 — query language
+    # Layer 1 — query language, expression language
     "crates/sc-query",
+    "crates/sc-expr",
     # Layer 2 — database
     "crates/sc-db",
     "crates/sc-db-postgres",
@@ -40,6 +41,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 sc-error = { path = "crates/sc-error" }
 sc-query = { path = "crates/sc-query" }
+sc-expr = { path = "crates/sc-expr" }
 sc-db = { path = "crates/sc-db" }
 sc-db-postgres = { path = "crates/sc-db-postgres" }
 sc-types = { path = "crates/sc-types" }
@@ -101,6 +103,15 @@ bytes = "1"
 # Temporal + decimal backing for the `Value` enum (Date/Time/Timestamp/Decimal).
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
+# JavaScript expression parser for ownership formulas (`sc-expr`, TODO Phase 1).
+# swc rather than a hand-rolled parser because the reified evaluator is real V8
+# (`deno_core`): the parser must accept exactly what V8 accepts, and swc is the
+# parser family Deno itself builds on. Parse-only — no transforms, no codegen —
+# and the swc AST never leaves `sc-expr`: it is lowered to the crate's own
+# `Ast` at the parse boundary.
+swc_common = "24"
+swc_ecma_ast = "26"
+swc_ecma_parser = "42"
 # Regex engine for the `String` rich type's `regex` attribute (§2.2). `regex-lite`
 # rather than `regex`: a field-validation pattern needs correct matching, not the
 # full crate's SIMD/perf dependency tree (aho-corasick, memchr, regex-automata),

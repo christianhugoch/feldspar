@@ -403,6 +403,29 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
                 arms,
                 else_result,
             } => self.case(operand.as_deref(), arms, else_result.as_deref()),
+            Expr::Subquery(q) => {
+                self.push("(");
+                self.select(q)?;
+                self.push(")");
+                Ok(())
+            }
+            Expr::Cast { expr, type_name } => {
+                // The type name is structural, but it is the one string in the
+                // AST that is neither quoted as an identifier nor bound as a
+                // value — so refuse anything that could not be a SQL type name
+                // rather than trust the caller entirely.
+                if !is_sql_type_name(type_name) {
+                    return Err(sc_error::Error::query(format!(
+                        "invalid SQL type name in CAST: {type_name:?}"
+                    )));
+                }
+                self.push("CAST(");
+                self.expr(expr)?;
+                self.push(" AS ");
+                self.push(type_name);
+                self.push(")");
+                Ok(())
+            }
         }
     }
 
@@ -477,7 +500,20 @@ fn bin_op(op: BinOp) -> &'static str {
         BinOp::Like => "LIKE",
         BinOp::ILike => "ILIKE",
         BinOp::Concat => "||",
+        BinOp::IsNotDistinct => "IS NOT DISTINCT FROM",
+        BinOp::IsDistinct => "IS DISTINCT FROM",
     }
+}
+
+/// Whether `s` is plausibly a SQL type name: letters, digits, underscores,
+/// spaces (`timestamp with time zone`), a precision list (`numeric(10,2)`) or
+/// an array suffix (`text[]`). Anything else — quotes, semicolons, comment
+/// starts — is refused by the `CAST` renderer.
+fn is_sql_type_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '(' | ')' | ',' | '[' | ']')
+        })
 }
 
 #[cfg(test)]
@@ -629,5 +665,81 @@ mod tests {
     fn empty_projection_is_an_error() {
         let stmt: Statement = Select::from(Source::table("t")).columns(vec![]).into();
         assert!(TestDialect.render(&stmt).is_err());
+    }
+
+    #[test]
+    fn distinct_from_operators_render() {
+        let (sql, binds) = render(Select::from(Source::table("t")).filter(Expr::binary(
+            BinOp::IsNotDistinct,
+            Expr::col("owner"),
+            Expr::lit("u1"),
+        )));
+        assert_eq!(
+            sql,
+            "SELECT * FROM \"t\" WHERE (\"owner\" IS NOT DISTINCT FROM $1)"
+        );
+        assert_eq!(binds, vec![Value::Text("u1".into())]);
+
+        let (sql, _) = render(Select::from(Source::table("t")).filter(Expr::binary(
+            BinOp::IsDistinct,
+            Expr::col("owner"),
+            Expr::lit("u1"),
+        )));
+        assert!(sql.contains("IS DISTINCT FROM"), "got: {sql}");
+    }
+
+    #[test]
+    fn a_scalar_subquery_renders_parenthesised_with_its_binds_in_order() {
+        // WHERE (SELECT p.name FROM publishers AS p WHERE (p.id = t.publisher))
+        //       IS NOT DISTINCT FROM 'ACME'
+        let sub = Select::from(Source::table_as("publishers", "p"))
+            .columns(vec![Projection::expr(Expr::qcol("p", "name"))])
+            .filter(Expr::qcol("p", "id").eq(Expr::qcol("t", "publisher")));
+        let filter = Expr::binary(
+            BinOp::IsNotDistinct,
+            Expr::Subquery(Box::new(sub)),
+            Expr::lit("ACME"),
+        );
+        let (sql, binds) = render(Select::from(Source::table("t")).filter(filter));
+        assert_eq!(
+            sql,
+            "SELECT * FROM \"t\" WHERE ((SELECT \"p\".\"name\" FROM \"publishers\" AS \"p\" \
+             WHERE (\"p\".\"id\" = \"t\".\"publisher\")) IS NOT DISTINCT FROM $1)"
+        );
+        assert_eq!(binds, vec![Value::Text("ACME".into())]);
+    }
+
+    #[test]
+    fn cast_renders_and_refuses_a_type_name_that_is_not_one() {
+        let (sql, _) = render(
+            Select::from(Source::table("t")).filter(
+                Expr::Cast {
+                    expr: Box::new(Expr::col("x")),
+                    type_name: "uuid".into(),
+                }
+                .eq(Expr::lit("y")),
+            ),
+        );
+        assert!(sql.contains("CAST(\"x\" AS uuid)"), "got: {sql}");
+
+        // Compound type names pass; injection-shaped ones do not.
+        for good in ["timestamp with time zone", "numeric(10,2)", "text[]"] {
+            let stmt: Statement = Select::from(Source::table("t"))
+                .filter(Expr::Cast {
+                    expr: Box::new(Expr::col("x")),
+                    type_name: good.into(),
+                })
+                .into();
+            assert!(TestDialect.render(&stmt).is_ok(), "{good} should render");
+        }
+        for bad in ["uuid; DROP TABLE users", "uuid'--", ""] {
+            let stmt: Statement = Select::from(Source::table("t"))
+                .filter(Expr::Cast {
+                    expr: Box::new(Expr::col("x")),
+                    type_name: bad.into(),
+                })
+                .into();
+            assert!(TestDialect.render(&stmt).is_err(), "{bad:?} should refuse");
+        }
     }
 }

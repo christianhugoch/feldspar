@@ -89,6 +89,15 @@ pub enum BinOp {
     ILike,
     /// String concatenation (`||`).
     Concat,
+    /// `IS NOT DISTINCT FROM` — null-safe equality: `NULL` on either side
+    /// compares as a value instead of poisoning the result. Added for ownership
+    /// formulas (§7.3), whose JavaScript `===` is two-valued: `owner === id`
+    /// with a null `owner` must be *false*, and its negation *true*, which
+    /// plain `=` cannot express.
+    IsNotDistinct,
+    /// `IS DISTINCT FROM` — null-safe inequality (the negation of
+    /// [`IsNotDistinct`](BinOp::IsNotDistinct)).
+    IsDistinct,
 }
 
 /// Unary operators supported by the MVP AST.
@@ -193,6 +202,21 @@ pub enum Expr {
         arms: Vec<CaseArm>,
         /// Optional `ELSE` result.
         else_result: Option<Box<Expr>>,
+    },
+    /// A scalar subquery: `(SELECT …)` used as a value. How an ownership
+    /// formula's Ⱶ-joinfield reaches the target table — a correlated subselect
+    /// whose empty result is SQL `NULL`, which is exactly the Ⱶ operator's
+    /// optional-chaining contract.
+    Subquery(Box<crate::Select>),
+    /// `CAST(expr AS type)`. The type name is structural (chosen by code from
+    /// a column's declared type, like a `Func` name), never user data; the
+    /// renderer still refuses a type name that could not be one.
+    Cast {
+        /// The expression being cast.
+        expr: Box<Expr>,
+        /// The SQL type name to cast to (e.g. `uuid`, `timestamp with time
+        /// zone`, `numeric(10,2)`).
+        type_name: String,
     },
 }
 

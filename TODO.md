@@ -33,7 +33,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ---
 
-## Phase 1 — The expression crate (`sc-expr`): parse and analyse
+## Phase 1 — The expression crate (`sc-expr`): parse and analyse ✅
 
 A new workspace crate. It owns the ownership-formula language: parsing JavaScript expressions,
 discovering what a formula refers to, validating that against a table, and (in later phases)
@@ -42,32 +42,50 @@ the two evaluators. It depends on `sc-query` (the translation target) and `sc-er
 `TableShape` view (field names, key targets, user-field names/types), so the crate stays a
 generic library (§1 code guidelines: separate generic crates).
 
-- [ ] Workspace member `crates/sc-expr`. Parse with **`swc_ecma_parser`** (parse-only, no
+- [x] Workspace member `crates/sc-expr`. Parse with **`swc_ecma_parser`** (parse-only, no
   transforms) into its AST, wrapped in our own `Formula` type holding the source and the
   parsed expression. swc rather than a hand-rolled parser because the reified evaluator is
   real V8 (`deno_core`), so the parser must accept exactly what V8 accepts — two grammars for
   one language is a divergence factory; swc is the parser family Deno itself uses. A parse
-  error is an application error naming the position
-- [ ] **The Ⱶ operator is an identifier character, not an operator.** U+2C75 (Latin capital
+  error is an application error naming the position. **Beyond the plan, deliberate:** swc's
+  AST never escapes the crate — `Formula::parse` lowers it into `sc-expr`'s own `Ast`
+  (`src/ast.rs`) at the boundary. Two reasons: a `Formula` lives on cached catalog entries
+  shared across threads, so its tree must be plain owned `Send + Sync` data with no interned
+  atoms; and one owned tree is what both evaluators consume (§1.4's parity needs a single
+  semantic object). Lowering is also where the language is bounded: a formula is a single
+  pure expression, and assignment, `new`, `this`, comma/spread/bitwise/`in`/`**`,
+  function/class expressions and block-bodied arrows are refused **by name**; arrows with
+  simple parameters are kept so `groups.some(g => …)` stays usable reified
+- [x] **The Ⱶ operator is an identifier character, not an operator.** U+2C75 (Latin capital
   letter half H) is Unicode category Lu, so `publisherⱵname` is a *single valid JavaScript
   identifier* — V8 and swc both accept it as-is. That one fact is the design: no
   preprocessing, no syntax extension. The reified path binds a variable literally named
-  `publisherⱵname`; the symbolic path splits identifiers on Ⱶ into a join path. Test this
-  claim directly in both parsers before building on it
-- [ ] Free-variable analysis: walk the AST and collect every unbound identifier, classified
-  into: a field of the table; a Ⱶ-join path (split on Ⱶ, resolved link by link through `Key`
-  fields — `DataFieldKind::Key { target_table, target_field, .. }` — to any depth); `user`;
-  the operation flags `_read`, `_insert`, `_update`, `_delete`, `_write`; or **unknown**,
-  which is a validation error naming the identifier and the table
-- [ ] `Formula::validate(&TableShape)` — the check the admin API runs on save (§4) and the
-  merge runs on load: parses, classifies every free variable, resolves every join path
-  (each link must be a `Key` field; the final segment a field on the target). Member access
-  on `user` is checked against the user table's fields when the shape provides them
-- [ ] Unit tests: identifiers incl. Ⱶ single and chained (`publisherⱵcountryⱶname` — depth),
-  every operation flag, unknown identifier named in the error, a join path through a
-  non-Key field refused, parse errors positioned
+  `publisherⱵname`; the symbolic path splits identifiers on Ⱶ into a join path. Tested
+  against swc (`a_half_h_join_path_is_one_identifier`, single and chained) and confirmed in
+  V8 via node; the in-crate V8 assertion lands with the §3 evaluator
+- [x] Free-variable analysis: walk the AST and collect every unbound identifier (arrow
+  parameters bind; `src/analyze.rs`), classified in `validate` into: a field of the table; a
+  Ⱶ-join path (split on Ⱶ, resolved link by link through `Key` fields to any depth); `user`;
+  the operation flags `_read`, `_insert`, `_update`, `_delete`, `_write`; a **whitelisted JS
+  global** (`Math`, `undefined`, `NaN`, … — added beyond the plan because they exist in the
+  reified engine and rejecting them would refuse legitimate formulas; fields shadow globals,
+  matching the §3 scope binding); or **unknown**, which is a validation error naming the
+  identifier and the table
+- [x] `Formula::validate(&SchemaShape, table)` — the check the admin API runs on save (§4)
+  and the merge runs on load: classifies every free variable, resolves every join path (each
+  link must be a `Key` field; the final segment a field on the target), returns the
+  `Analysis` later phases plan from (fields, resolved paths, flags, user usage). Member
+  access on `user` is checked against the user table's fields when the shape provides them
+  (`SchemaShape::user_fields`; `None` = caller doesn't know, membership unchecked; computed
+  `user[x]` is flagged, not rejected). The shape grew into `SchemaShape` — a *map* of
+  `TableShape`s — because resolving a chained path needs the target tables' fields too
+- [x] Unit tests (24, in-module): identifiers incl. Ⱶ single and chained
+  (`publisherⱵcountryⱵname` — depth), every operation flag, unknown identifier named in the
+  error, a join path through a non-Key field refused (and to a missing target field, and an
+  empty Ⱶ-segment), parse errors positioned (line *and* column, multi-line), every lowering
+  refusal named, arrow scope binding and un-shadowing, `Formula: Send + Sync` asserted
 
-## Phase 2 — Symbolic evaluation: translation to `sc_query::Expr`
+## Phase 2 — Symbolic evaluation: translation to `sc_query::Expr` ✅
 
 The formula becomes a SQL predicate. This single translator serves both consumers: the
 runtime-check path (§5) inlines the current user's values as literals; the RLS path (§6)
@@ -75,33 +93,56 @@ renders user values as `current_setting` GUC reads. The operation flags never re
 all — the translator is invoked *per operation* with the flags folded to constants, so
 `_read || owner === userⱵ…` simply constant-folds.
 
-- [ ] `translate(&Formula, op: Operation, env: &UserEnv, shape: &TableShape) -> Result<Expr>`
-  over the translatable subset: literals (string/number/bool/`null`), field identifiers →
-  `Expr::Col`, `===`/`==`/`!==`/`!=`, ordered comparisons, `&&`/`||`/`!`, parentheses,
-  conditional (`?:`), member access on `user`. Anything else — calls, methods, regex,
-  arithmetic beyond comparison operands — is a clean `Untranslatable` error naming the
-  construct, which §5 catches (fall back to reified) and §6 surfaces (refuse to enable RLS)
-- [ ] **Null semantics are specified once, by the translation.** `===`/`==` render as
+- [x] `translate(&Formula, op: Operation, env: &UserEnv, shape: &SchemaShape, table) ->
+  Result<Expr, TranslateError>` (`crates/sc-expr/src/translate.rs`; the shape argument grew
+  with §1's `SchemaShape`) over the translatable subset: literals (string/number/bool/`null`;
+  integral numbers bind as `Int`), field identifiers → qualified `Expr::Col`,
+  `===`/`==`/`!==`/`!=`, ordered comparisons, `&&`/`||`/`!`, parentheses, conditional (`?:` →
+  searched `CASE`), `??` → `COALESCE`, arithmetic in value position, member access on `user`.
+  Anything else is `TranslateError::Untranslatable` naming the construct, which §5 catches
+  (fall back to reified) and §6 surfaces (refuse to enable RLS). **`TranslateError` is a
+  two-variant error on purpose**: `Untranslatable` (a property of the formula's shape — fall
+  back) vs `Error` (a real mistake, e.g. an unknown identifier — fail), so a typo can never
+  ride the fallback path into V8. A bare non-`user` value as a condition is untranslatable
+  (its truthiness needs its type); bare `user` and boolean `user.x` are translated
+- [x] **Null semantics are specified once, by the translation.** `===`/`==` render as
   `IS NOT DISTINCT FROM` (and `!==`/`!=` as `IS DISTINCT FROM`), because that is JS's
   two-valued equality — `owner === user.id` with a null `owner` is *false*, and its negation
-  *true*, in both worlds. Ordered comparisons keep SQL semantics (null-involving → not
-  granted); JS's `null < 5 === true` coercion is specified *away*, and §1.4's normalisation
-  is what makes the reified evaluator match (see Phase 3). Check whether `IS [NOT] DISTINCT
-  FROM` needs an `sc-query` `BinOp` addition and add it if so
-- [ ] Ⱶ-join paths → **correlated scalar subselects**: `publisherⱵname` on `books` becomes
-  `(SELECT p.name FROM publisher p WHERE p.<target_field> = books.publisher)`, nested per
-  link for deeper chains. Optional-chaining semantics are free: a null FK yields no row
-  yields SQL NULL, which grants nothing — exactly the GOALS contract
-- [ ] `UserEnv` with two modes: **`Inline(&User)`** — `user.x` becomes a literal of the
-  current user's value, `user` (truthiness / `=== null`) becomes a boolean constant — and
-  **`Guc`** — `user.x` becomes `(current_setting('sc.user', true)::jsonb ->> 'x')` cast to
-  the user field's type from the shape, and `user === null` becomes
-  `current_setting('sc.user', true) IS NULL`. A missing GUC is SQL NULL, so the Guc mode
-  **fails closed** by construction
-- [ ] Unit tests: golden SQL per construct through the Postgres dialect renderer; both
-  `UserEnv` modes over the same formulas; flag folding per operation (a `_read ||` formula
-  translating to `TRUE` for select and to the ownership clause for writes); the null cases
-  above pinned; every untranslatable construct named
+  *true*, in both worlds; `x === null` is `IS NULL`. Ordered comparisons keep SQL semantics
+  (null-involving → not granted); JS's `null < 5 === true` coercion is specified *away*, and
+  §1.4's normalisation is what makes the reified evaluator match (see Phase 3). Loose `==`
+  translates as strict — the coercion table is not part of the formula language. **One
+  documented consequence, pinned by test**: an anonymous user's `user.x` is null, so
+  `owner === user.id` *matches null-owner rows* for anonymous callers; a formula that must
+  not grant anonymously writes `user && …` — bare `user` is object-or-null, so its
+  truthiness is exactly the logged-in test (the §8 tutorial calls this out).
+  `sc-query` grew `BinOp::IsNotDistinct`/`IsDistinct` — plus `Expr::Subquery` (scalar
+  subquery, for the bullet below) and `Expr::Cast` (with a renderer-side type-name guard,
+  since the cast type is the one string neither identifier-quoted nor bound), each with
+  renderer tests including an injection-shaped type name refused
+- [x] Ⱶ-join paths → **correlated scalar subselects**: `publisherⱵname` on `books` becomes
+  `(SELECT _sc_j1.name FROM publishers AS _sc_j1 WHERE _sc_j1.id = books.publisher)`, nested
+  per link for deeper chains (golden-tested at depth two). Optional-chaining semantics are
+  free: a null FK yields no row yields SQL NULL, which grants nothing — exactly the GOALS
+  contract. Aliases are `_sc_j<n>` because the `_sc_` prefix is reserved (§9), so an alias
+  can never shadow a real table a correlated reference points at
+- [x] `UserEnv` with two modes: **`Inline(Option<BTreeMap<String, Value>>)`** — `user.x`
+  becomes a literal of the current user's value (always parameterised), `user` (truthiness /
+  `=== null`) becomes a boolean constant — and **`Guc { field_types }`** — `user.x` becomes
+  `CAST(jsonb_extract_path_text(CAST(current_setting('sc.user', true) AS jsonb), 'x') AS
+  <type>)` (the function form rather than `->>`, which the renderer does not spell; the
+  cast is skipped for `text`), and `user === null` becomes `current_setting('sc.user',
+  true) IS NULL`. A missing GUC is SQL NULL, so the Guc mode **fails closed** by
+  construction. The user field→type map rides in the env, not the shape — only Guc mode
+  needs types, and only for the fields the formula touches. `USER_GUC = "sc.user"` is the
+  crate-level constant §6 will set
+- [x] Unit tests (18 on the translator + 3 new renderer tests in `sc-query`): golden SQL per
+  construct through a Postgres-flavoured dialect; both `UserEnv` modes over the same
+  formulas; flag folding per operation (a `_read ||` formula translating to `TRUE` for
+  select and to exactly the ownership clause for writes — the folder only applies
+  **value-exact** simplifications, so it is sound in value position too); the null cases
+  pinned including the anonymous-null-match corner; every untranslatable construct named;
+  unknown identifier asserted to be `Error`, not `Untranslatable`
 
 ## Phase 3 — Reified evaluation on `deno_core`
 

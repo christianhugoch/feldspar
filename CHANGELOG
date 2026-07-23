@@ -2,7 +2,83 @@
 
 Changes in reverse chronological order.
 
-## Documentation: the design catches up with the overlays (§5)
+## Ownership formulae milestone — symbolic evaluation to SQL (Phase 2)
+
+A formula now becomes a `sc_query::Expr` predicate: `translate(&formula, op, env, shape,
+table)` in `sc-expr` (`src/translate.rs`), the single translator both later consumers share —
+Phase 5 ANDs its output into a statement's WHERE, Phase 6 renders it into an RLS policy.
+
+- **The specified semantics live here** (and Phase 3's reified evaluator will render
+  normalised JS from the same AST to match): `===`/`==` → `IS NOT DISTINCT FROM` (JS's
+  two-valued equality; `x === null` → `IS NULL`; loose `==` translated as strict); ordered
+  comparisons keep SQL null semantics; `?:` → searched `CASE`; `??` → `COALESCE`;
+  `&&`/`||`/`!` are boolean and refused in value position (JS yields an operand there).
+  One documented, test-pinned corner: an anonymous user's `user.x` is null, so
+  `owner === user.id` matches null-owner rows — formulas that must not grant anonymously
+  write `user && …` (bare `user` is object-or-null, so its truthiness is the logged-in
+  test — same guard, shorter).
+- **Operation flags never reach SQL**: translation is per-`Operation` (`Read`/`Insert`/
+  `Update`/`Delete`) and a value-exact constant folder resolves `_read`/`_write`/… first —
+  `_read || owner === user.id` is literally `TRUE` for a select and exactly the ownership
+  clause for a write. Arrow parameters shadow flag names in the folder, as in the analyser.
+- **Two user environments**: `UserEnv::Inline(Option<map>)` inlines the current user's
+  values as parameterised literals (not logged in → `user` null, every `user.x` null);
+  `UserEnv::Guc { field_types }` renders `user.x` as
+  `CAST(jsonb_extract_path_text(CAST(current_setting('sc.user', true) AS jsonb), 'x') AS type)`
+  — `current_setting`'s `missing_ok` makes an unset context SQL NULL, so GUC mode fails
+  closed by construction. `USER_GUC = "sc.user"` is the constant Phase 6 will `SET LOCAL`.
+- **Ⱶ-join paths become correlated scalar subselects**, one nested subquery per link
+  (`_sc_j<n>` aliases — the reserved prefix, so an alias can never shadow a user table);
+  a null FK yields no row yields NULL, which grants nothing: the optional-chaining
+  contract for free.
+- **`TranslateError` distinguishes verdicts**: `Untranslatable(construct)` — a shape
+  property; Phase 5 falls back to the reified evaluator, Phase 6 refuses to enable RLS
+  naming it — vs `Error` (unknown identifier, broken path), so a typo can never ride the
+  fallback into V8. `From<TranslateError> for Error` maps both onto `Invalid`.
+- **`sc-query` grew three constructs** the translation needed, each renderer-tested:
+  `BinOp::IsNotDistinct`/`IsDistinct`; `Expr::Subquery` (scalar subquery); `Expr::Cast`
+  with a type-name guard — the cast type is the one string in the AST neither
+  identifier-quoted nor bound, so the renderer refuses anything that could not be a SQL
+  type name (`uuid; DROP TABLE users` is a test).
+- 18 translator unit tests (golden WHERE clauses through a Postgres-flavoured dialect,
+  both envs, folding per operation, the null corners, every untranslatable construct
+  named) + 3 renderer tests in `sc-query`.
+
+## Ownership formulae milestone — `sc-expr`: parse and analyse (Phase 1)
+
+The first phase of the ownership-formulae milestone (TODO Phase 1; GOALS "Authorization"):
+a new workspace crate `sc-expr` owning the JavaScript formula language, below `sc-catalog`
+in the dependency graph — the catalog will describe tables *to* it through a `SchemaShape`
+projection, so the crate stays a generic library.
+
+- **Parsing (`Formula::parse`)** runs `swc_ecma_parser` (the parser family Deno builds on,
+  so the parser and the Phase-3 V8 evaluator can never disagree on grammar) and requires a
+  **single pure expression**: multiple statements, non-expression statements and the empty
+  formula are refused, and parse errors carry the 1-based line/column an admin can act on.
+- **The crate's own `Ast`, lowered at the parse boundary.** swc's types never escape: the
+  lowered tree is plain owned data (`Send + Sync`, tested) fit for cached catalog entries,
+  and it is the one tree both later evaluators will consume — the symbolic translator
+  (Phase 2) and the reified evaluator's normalised rendering (Phase 3), which is what makes
+  evaluator parity provable. Lowering bounds the language: assignment, `new`, `this`,
+  comma/spread/bitwise/`in`/`instanceof`/`**`, function and class expressions, block-bodied
+  or destructuring arrows, BigInt/regex literals and WTF-8 (lone-surrogate) strings are
+  refused **by name**. Arrows with simple parameters are allowed so array methods
+  (`groups.some(g => …)`) stay usable on the reified path.
+- **The Ⱶ join operator is an identifier character, not syntax.** Ⱶ (U+2C75) is Unicode
+  category Lu, so `publisherⱵname` lexes as a *single JavaScript identifier* in swc and V8
+  alike — no preprocessing anywhere. Tested against the real parser, single and chained.
+- **Free-variable analysis** (collected once at parse): every identifier not bound by an
+  arrow parameter, with static `user.x` accesses recorded and computed `user[x]` flagged.
+- **Validation (`Formula::validate`)** classifies every free variable against a
+  `SchemaShape` — a field of the table, a Ⱶ-join path resolved link by link through Key
+  fields to any depth, `user` (with `user.x` checked against the user table's fields when
+  the caller declares them), the five operation flags (`_read`/`_insert`/`_update`/
+  `_delete`/`_write`), or a whitelisted JS global (`Math`, `undefined`, … — fields shadow
+  globals, matching the reified scope to come). Anything else is an `Invalid` error naming
+  the identifier and the table. The result is an `Analysis` the later phases plan from:
+  fields read, resolved join paths, flags used, user usage.
+- 24 unit tests across parsing, lowering refusals, Ⱶ lexing, scope binding and every
+  classification/refusal path in validation.
 
 The milestone's documentation phase — the technical design document now describes what was
 built, and a tutorial walks the whole feature end to end.
