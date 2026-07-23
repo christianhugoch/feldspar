@@ -1272,6 +1272,7 @@ name = "sc-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "rust_decimal",
  "sc-auth",

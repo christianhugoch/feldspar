@@ -43,9 +43,7 @@ mod type_ref;
 pub use attrs::Attrs;
 pub use basic::BasicType;
 pub use field::{BaseField, FormField, OptionsSource, validate_attrs};
-pub use rich::{
-    RichType, RichTypeRef, registered_rich_types, rich_type, rich_type_config_spec,
-};
+pub use rich::{RichType, RichTypeRef, registered_rich_types, rich_type, rich_type_config_spec};
 pub use rich_types::{IntegerType, StringType};
 pub use type_ref::TypeRef;
 

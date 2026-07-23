@@ -394,7 +394,11 @@ mod tests {
         let issues = table.apply_field_overlay(&meta);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("colour"), "{:?}", issues[0]);
-        assert!(issues[0].message.contains("not registered"), "{:?}", issues[0]);
+        assert!(
+            issues[0].message.contains("not registered"),
+            "{:?}",
+            issues[0]
+        );
     }
 
     #[test]
@@ -465,7 +469,11 @@ mod tests {
         let meta = FieldMeta::new("books", "ghost").rich_type("string");
         let issues = table.apply_field_overlay(&meta);
         assert_eq!(issues.len(), 1);
-        assert!(issues[0].message.contains("does not exist"), "{:?}", issues[0]);
+        assert!(
+            issues[0].message.contains("does not exist"),
+            "{:?}",
+            issues[0]
+        );
     }
 
     #[test]

@@ -154,7 +154,9 @@ impl RichTypeRef {
     /// Resolve a rich type name against the registry, erroring if nothing
     /// registers it (naming what does).
     pub fn resolve(name: &str) -> Result<RichTypeRef> {
-        rich_type(name).map(RichTypeRef).ok_or_else(|| unknown_rich_type(name))
+        rich_type(name)
+            .map(RichTypeRef)
+            .ok_or_else(|| unknown_rich_type(name))
     }
 
     /// The type's stable name — the value the overlay persists.
@@ -265,7 +267,10 @@ mod tests {
         assert_eq!(t.attributes().len(), 1);
 
         // No attribute: any text passes.
-        assert!(t.validate(&Value::Text("hello".into()), &Attrs::new()).is_ok());
+        assert!(
+            t.validate(&Value::Text("hello".into()), &Attrs::new())
+                .is_ok()
+        );
         // Non-text is rejected; null is not (nullability is a field concern).
         assert!(t.validate(&Value::Int(1), &Attrs::new()).is_err());
         assert!(t.validate(&Value::Null, &Attrs::new()).is_ok());
@@ -324,7 +329,10 @@ mod tests {
 
         let err = rich_type_config_spec("nope").unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");
-        assert!(err.contains("string"), "should name what is registered: {err}");
+        assert!(
+            err.contains("string"),
+            "should name what is registered: {err}"
+        );
     }
 
     #[test]

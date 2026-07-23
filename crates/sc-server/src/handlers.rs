@@ -47,7 +47,9 @@ use sc_files::{
     effective_min_role, filter_visible, registered_backends,
 };
 use sc_query::{Expr, Projection, Select, Source, Statement};
-use sc_types::{BasicType, FormField, RichTypeRef, TypeRef, registered_rich_types, rich_type_config_spec};
+use sc_types::{
+    BasicType, FormField, RichTypeRef, TypeRef, registered_rich_types, rich_type_config_spec,
+};
 use serde_json::{Map, Value as Json, json};
 
 use crate::apps::{AppMounts, build_and_mount};
@@ -326,8 +328,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("createField", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 let table_name = ctx.path_param("table")?.to_owned();
                 let obj = require_object(&ctx.body)?;
@@ -376,6 +380,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     })?;
                 }
 
+                // A mounted app's REST projection depends on its tables' fields
+                // now — a `File` field contributes download/upload endpoints
+                // (§4) — so a field change re-projects live, exactly as a
+                // table-settings change does.
+                apps.refresh_table(&table_name)?;
+
                 let table = catalog.require(&table_name)?;
                 let created = table
                     .field(&name)
@@ -387,8 +397,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("updateField", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 // The field must exist: this edits a field the admin is looking
                 // at. Overlay-only — nothing here touches the column itself.
@@ -424,6 +436,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 meta.attributes = attributes_field(obj)?;
 
                 save_field_meta(&catalog, &meta).await?;
+                // Re-project any mounted app exposing this table: a field's kind
+                // decides which file endpoints its REST projection carries (§4).
+                apps.refresh_table(&table.name)?;
                 let table = catalog.require(&table.name)?;
                 let updated = table.field(&field_name).ok_or_else(|| {
                     Error::msg(format!("field `{field_name}` missing after update"))
@@ -1098,7 +1113,9 @@ fn field_type_json(name: &str, category: &str, spec: &[FormField]) -> Json {
 /// The basic types offered in the field-type picker — the fixed scalar families
 /// (the `Other` catch-all is not a thing an admin picks).
 fn basic_field_types() -> Vec<BasicType> {
-    use BasicType::{Bool, Bytes, Date, Decimal, Float, Int, Json as JsonT, Text, Time, Timestamp, Uuid};
+    use BasicType::{
+        Bool, Bytes, Date, Decimal, Float, Int, Json as JsonT, Text, Time, Timestamp, Uuid,
+    };
     vec![
         Text, Int, Float, Decimal, Bool, Uuid, Date, Time, Timestamp, JsonT, Bytes,
     ]
@@ -1111,7 +1128,10 @@ fn resolve_field_type(name: &str) -> Result<(TypeRef, Option<String>)> {
     if let Ok(rich) = RichTypeRef::resolve(name) {
         // The column is the rich type's storage SQL type; the overlay records the
         // rich type by name.
-        return Ok((TypeRef::from_sql_type(rich.sql_type()), Some(name.to_owned())));
+        return Ok((
+            TypeRef::from_sql_type(rich.sql_type()),
+            Some(name.to_owned()),
+        ));
     }
     if let Some(basic) = basic_field_types().into_iter().find(|b| b.name() == name) {
         return Ok((TypeRef::Basic(basic), None));
@@ -1828,7 +1848,9 @@ fn string_array_field(obj: &Map<String, Json>, key: &str) -> Result<Vec<String>>
                     .ok_or_else(|| Error::invalid(format!("`{key}` must be an array of strings")))
             })
             .collect(),
-        Some(_) => Err(Error::invalid(format!("`{key}` must be an array of strings"))),
+        Some(_) => Err(Error::invalid(format!(
+            "`{key}` must be an array of strings"
+        ))),
     }
 }
 

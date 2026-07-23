@@ -34,8 +34,10 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use sc_auth::{User, authenticate};
-use sc_catalog::{Catalog, Table};
+use sc_catalog::{Catalog, DataFieldKind, Table, load_file_store_by_name};
 use sc_error::{Error, Result};
+use sc_files::{ROLE_PUBLIC, check_access, mime_for_path, validate_file_path};
+use sc_query::Value;
 use serde_json::{Value as Json, json};
 
 use crate::auth::{credentials, credentials_schema, user_summary_json, user_summary_schema};
@@ -59,6 +61,18 @@ enum RestOp {
     Update,
     /// `DELETE /{table}/{id}` — delete the row with that primary key.
     Delete,
+    /// `GET /{table}/{id}/{field}` — serve the bytes behind the row's `File`
+    /// field (§4).
+    Download {
+        /// The `File` field whose stored path is resolved and served.
+        field: String,
+    },
+    /// `POST /{table}/{id}/{field}/{filename}` — store the raw request body in
+    /// the field's store and folder and point the row's field at it (§4).
+    Upload {
+        /// The `File` field the upload lands in.
+        field: String,
+    },
 }
 
 /// A projected table endpoint: the operation and the table it runs against.
@@ -180,9 +194,51 @@ impl RestProvider {
                 RestOp::Delete,
                 Endpoint::new(op_name("delete", name), Method::Delete, item())
                     .output(TypeSchema::json())
-                    .auth(write)
+                    .auth(write.clone())
                     .handler(HandlerRef::named(op_name("delete", name))),
             );
+
+            // A `File` field's bytes (§4), addressed **by table, row id and
+            // field name** — never by raw store path. The row is what the caller
+            // is allowed to see, and letting an app name an arbitrary path would
+            // make the field's folder restriction advisory. Reads carry the
+            // table's read rule, uploads its write rule; the file's own
+            // path-cumulative `min_role` is enforced on top at request time, so
+            // the stricter of the two always decides.
+            for data_field in &table.fields {
+                if !matches!(data_field.kind, DataFieldKind::File { .. }) {
+                    continue;
+                }
+                let field = &data_field.base.name;
+                let scoped = format!("{name}_{field}");
+                let file_item = || path_at(&mount).lit(name).param("id", id_ty).lit(field);
+                add(
+                    RestOp::Download {
+                        field: field.clone(),
+                    },
+                    Endpoint::new(op_name("download", &scoped), Method::Get, file_item())
+                        .binary_output()
+                        .auth(read.clone())
+                        .handler(HandlerRef::named(op_name("download", &scoped))),
+                );
+                add(
+                    RestOp::Upload {
+                        field: field.clone(),
+                    },
+                    Endpoint::new(
+                        op_name("upload", &scoped),
+                        Method::Post,
+                        // The filename is a path parameter, so it is one
+                        // segment by construction — a nested or traversing
+                        // destination cannot even be expressed in the URL.
+                        file_item().param("filename", ValueType::Text),
+                    )
+                    .binary_input()
+                    .output(TypeSchema::json())
+                    .auth(write.clone())
+                    .handler(HandlerRef::named(op_name("upload", &scoped))),
+                );
+            }
         }
 
         RestProvider {
@@ -247,25 +303,156 @@ impl RestProvider {
         &self,
         route: &TableRoute,
         params: &Params,
-        body: &Json,
+        req: &ApiRequest,
         cat: &Catalog,
+        user: Option<&User>,
     ) -> Result<ApiResponse> {
         let table = cat.require(&route.table)?;
+        let body = &req.body;
         let id = || -> Result<&str> {
             params
                 .get("id")
                 .map(String::as_str)
                 .ok_or_else(|| Error::invalid("missing path parameter `id`"))
         };
-        Ok(match route.op {
+        // The caller's role for the path-cumulative file rule. The file
+        // endpoints' `MinRole` auth ran before this, so a caller is present
+        // there; anonymous is public everywhere else.
+        let role = user.map_or(ROLE_PUBLIC, |u| u.role);
+        Ok(match &route.op {
             RestOp::List => ApiResponse::ok(rows::list_rows(cat, &table).await?),
             RestOp::Create => {
                 ApiResponse::with_status(201, rows::create_row(cat, &table, body).await?)
             }
             RestOp::Update => ApiResponse::ok(rows::update_row(cat, &table, id()?, body).await?),
             RestOp::Delete => ApiResponse::ok(rows::delete_row(cat, &table, id()?).await?),
+            RestOp::Download { field } => download(cat, &table, field, id()?, role).await?,
+            RestOp::Upload { field } => {
+                let filename = params
+                    .get("filename")
+                    .map(String::as_str)
+                    .ok_or_else(|| Error::invalid("missing path parameter `filename`"))?;
+                upload(cat, &table, field, id()?, filename, req.raw.clone(), role).await?
+            }
         })
     }
+}
+
+/// Serve the bytes behind a row's `File` field (§4).
+///
+/// The table's `min_role_read` was enforced as the endpoint's auth before this
+/// ran; here the file's own **path-cumulative** `min_role` (§14.1) is enforced
+/// on top — the stricter of the two decides, never the looser, because both
+/// checks must pass. The projection only routes file endpoints for `File`
+/// fields, but the catalog may have changed under a mounted app, so the current
+/// field is re-checked rather than trusted.
+async fn download(
+    cat: &Catalog,
+    table: &Table,
+    field: &str,
+    id: &str,
+    role: u8,
+) -> Result<ApiResponse> {
+    let (store_name, _, _) = file_field(table, field)?;
+    let path = match rows::read_field(cat, table, field, id).await? {
+        Value::Text(path) if !path.is_empty() => path,
+        // The row exists but references nothing: for the caller that is "no
+        // file here", the same not-found an empty shelf gets.
+        _ => {
+            return Err(Error::not_found(format!(
+                "row {id} has no file in `{field}`"
+            )));
+        }
+    };
+    let store = cat.require_file_store(store_name)?;
+    let floor = store_floor(cat, store_name).await?;
+    check_access(store.as_ref(), floor, &path, role).await?;
+    let bytes = store.read(&path).await?;
+    // Content type by extension, exactly as the field's MIME allow-list is
+    // enforced — the two must agree on what a path is.
+    let content_type =
+        mime_for_path(&path).unwrap_or_else(|| "application/octet-stream".to_owned());
+    Ok(ApiResponse::file(bytes, content_type))
+}
+
+/// Store an upload's bytes behind a row's `File` field (§4).
+///
+/// The table's `min_role_write` was enforced as the endpoint's auth. The bytes
+/// land in the **field's** store and folder — the caller names only a filename,
+/// one path segment by route construction — and the field's MIME restrictions
+/// are applied here, server-side: a client-side accept filter is a convenience,
+/// not a control. The row is updated to reference the stored path, through the
+/// same `update_row` any JSON write takes (so the field's rules are enforced
+/// twice, harmlessly).
+async fn upload(
+    cat: &Catalog,
+    table: &Table,
+    field: &str,
+    id: &str,
+    filename: &str,
+    data: Option<bytes::Bytes>,
+    role: u8,
+) -> Result<ApiResponse> {
+    let (store_name, folder, mime_allow) = file_field(table, field)?;
+    let Some(data) = data else {
+        return Err(Error::invalid(
+            "expected the request body to be the file's bytes, sent with its own \
+             content type (not application/json)",
+        ));
+    };
+
+    let path = match folder
+        .map(|f| f.trim_matches('/'))
+        .filter(|f| !f.is_empty())
+    {
+        Some(folder) => format!("{folder}/{filename}"),
+        None => filename.to_owned(),
+    };
+    validate_file_path(&path, folder, mime_allow).map_err(|e| rows::field_error(field, e))?;
+
+    let store = cat.require_file_store(store_name)?;
+    let floor = store_floor(cat, store_name).await?;
+    // Writing into a restricted place is as governed as reading from one.
+    check_access(store.as_ref(), floor, &path, role).await?;
+
+    // The row must exist before the bytes land: failing afterwards would leave
+    // an orphaned file no row references.
+    rows::read_field(cat, table, field, id).await?;
+    store.write(&path, data).await?;
+    let updated = rows::update_row(cat, table, id, &json!({ field: path })).await?;
+    Ok(ApiResponse::with_status(201, updated))
+}
+
+/// The `File` kind parameters of `field` on `table`: its store name, folder and
+/// MIME allow-list. A field that is not (or is no longer) a `File` is a
+/// not-found — the endpoint's own existence is what claimed otherwise.
+fn file_field<'t>(
+    table: &'t Table,
+    field: &str,
+) -> Result<(&'t str, Option<&'t str>, &'t [String])> {
+    let found = table
+        .field(field)
+        .ok_or_else(|| Error::not_found(format!("`{}` has no field `{field}`", table.name)))?;
+    match &found.kind {
+        DataFieldKind::File {
+            store,
+            folder,
+            mime_allow,
+        } => Ok((store.0.as_str(), folder.as_deref(), mime_allow.as_slice())),
+        _ => Err(Error::not_found(format!(
+            "`{}.{field}` is not a File field",
+            table.name
+        ))),
+    }
+}
+
+/// The store-wide access floor from the store's stored definition, `None` for a
+/// store with no definition row (an ephemeral `--file-store`) — the same answer
+/// the admin file endpoints resolve.
+async fn store_floor(cat: &Catalog, store: &str) -> Result<Option<u8>> {
+    Ok(load_file_store_by_name(cat, store)
+        .await?
+        .and_then(|def| def.min_role))
 }
 
 /// Captured path parameters.
@@ -312,7 +499,7 @@ impl ApiProvider for RestProvider {
                 user.map_or(Json::Null, user_summary_json),
             )),
             HandlerRef::Named(_) => match self.routes.get(&endpoint.name) {
-                Some(route) => self.run(route, &params, &req.body, cat).await,
+                Some(route) => self.run(route, &params, &req, cat, user).await,
                 // A named handler with no projected table route: the set was
                 // extended with a route this provider cannot run.
                 None => Ok(ApiResponse::error(
@@ -392,7 +579,7 @@ pub fn op_name(op: &str, table: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_catalog::{AccessRules, DataField, DbId, TableId, TableSource};
+    use sc_catalog::{AccessRules, DataField, DbId, FileStoreId, TableId, TableSource};
     use sc_types::{BasicType, TypeRef};
 
     /// A table named `name` with an `id` primary key and a `title` text column.
@@ -413,6 +600,20 @@ mod tests {
             attributes: Default::default(),
             overlay: None,
         }
+    }
+
+    /// `table(name, access)` with a `cover` column configured as a `File` field
+    /// into store `uploads`, folder `covers`.
+    fn table_with_file_field(name: &str, access: AccessRules) -> Table {
+        let mut t = table(name, access);
+        let mut cover = DataField::plain("cover", TypeRef::Basic(BasicType::Text));
+        cover.kind = DataFieldKind::File {
+            store: FileStoreId("uploads".to_owned()),
+            folder: Some("covers".to_owned()),
+            mime_allow: vec!["image/png".to_owned()],
+        };
+        t.fields.push(cover);
+        t
     }
 
     /// A table with no primary key at all.
@@ -496,6 +697,72 @@ mod tests {
         assert!(p.endpoints().find("createLogs").is_some());
         assert!(p.endpoints().find("updateLogs").is_none());
         assert!(p.endpoints().find("deleteLogs").is_none());
+    }
+
+    #[test]
+    fn a_file_field_projects_download_and_upload_endpoints() {
+        let access = AccessRules {
+            min_role_read: 80,
+            min_role_write: 40,
+        };
+        let p = RestProvider::project("/api", &[table_with_file_field("posts", access)]);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4 + 2);
+
+        // Addressed by table, row id and field name — never by raw store path.
+        let download = p.endpoints().find("downloadPostsCover").unwrap();
+        assert_eq!(download.method, Method::Get);
+        assert_eq!(download.path.pattern(), "/api/posts/{id}/cover");
+        assert!(download.binary_output, "a download serves bytes, not JSON");
+        assert!(!download.binary_input);
+        // Reads carry the table's read rule (the path-cumulative file rule is
+        // enforced at request time, on top).
+        assert_eq!(download.auth, AuthRequirement::MinRole(80));
+
+        // The upload's filename is a path parameter: one segment by
+        // construction, so a traversing destination cannot be expressed.
+        let upload = p.endpoints().find("uploadPostsCover").unwrap();
+        assert_eq!(upload.method, Method::Post);
+        assert_eq!(upload.path.pattern(), "/api/posts/{id}/cover/{filename}");
+        assert!(upload.binary_input, "an upload takes bytes, not JSON");
+        // Uploads carry the table's write rule.
+        assert_eq!(upload.auth, AuthRequirement::MinRole(40));
+    }
+
+    #[test]
+    fn a_keyless_table_gets_no_file_endpoints() {
+        // No row addressing ⇒ no way to say whose file it is.
+        let mut t = keyless("logs");
+        let mut attachment = DataField::plain("attachment", TypeRef::Basic(BasicType::Text));
+        attachment.kind = DataFieldKind::File {
+            store: FileStoreId("uploads".to_owned()),
+            folder: None,
+            mime_allow: vec![],
+        };
+        t.fields.push(attachment);
+        let p = RestProvider::project("/api", &[t]);
+        assert!(p.endpoints().find("downloadLogsAttachment").is_none());
+        assert!(p.endpoints().find("uploadLogsAttachment").is_none());
+    }
+
+    #[test]
+    fn the_generated_client_types_file_endpoints_as_binary() {
+        let p = RestProvider::project(
+            "/api",
+            &[table_with_file_field("posts", AccessRules::default())],
+        );
+        let ts = crate::generate_client(p.endpoints());
+        // A download resolves to a Blob; an upload takes what fetch can send raw.
+        assert!(
+            ts.contains("downloadPostsCover(id: number): Promise<Blob>"),
+            "{ts}"
+        );
+        assert!(
+            ts.contains("uploadPostsCover(id: number, filename: string, body: BodyInit)"),
+            "{ts}"
+        );
+        // The upload body goes out unencoded, with no JSON content type.
+        assert!(!ts.contains("export type UploadPostsCoverRequest"));
+        assert!(ts.contains("return await res.blob();"));
     }
 
     #[test]

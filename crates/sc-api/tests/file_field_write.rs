@@ -50,7 +50,9 @@ fn temp_store_dir(tag: &str) -> (std::path::PathBuf, String) {
 /// Build a `documents` table with a `cover` column, made a `File` field
 /// (store `uploads`, folder `covers`, PNG only) by an overlay. Returns the merged
 /// table and the overlay id.
-async fn documents_with_cover(cat: &Catalog) -> Result<(sc_catalog::Table, sc_catalog::FieldMetaId)> {
+async fn documents_with_cover(
+    cat: &Catalog,
+) -> Result<(sc_catalog::Table, sc_catalog::FieldMetaId)> {
     cat.create_table(
         "documents",
         &[
@@ -95,14 +97,23 @@ async fn a_file_field_validates_store_folder_and_mime_on_write() -> Result<()> {
         .await
         .expect_err("outside the folder");
     assert!(matches!(outside.repr(), Repr::Invalid(_)), "{outside:?}");
-    assert!(outside.to_string().contains("cover"), "names the field: {outside}");
-    assert!(outside.to_string().contains("covers"), "names the folder: {outside}");
+    assert!(
+        outside.to_string().contains("cover"),
+        "names the field: {outside}"
+    );
+    assert!(
+        outside.to_string().contains("covers"),
+        "names the folder: {outside}"
+    );
 
     // A disallowed MIME type (a GIF where only PNG is allowed).
     let wrong_mime = rows::create_row(&cat, &table, &json!({ "cover": "covers/a.gif" }))
         .await
         .expect_err("disallowed mime");
-    assert!(matches!(wrong_mime.repr(), Repr::Invalid(_)), "{wrong_mime:?}");
+    assert!(
+        matches!(wrong_mime.repr(), Repr::Invalid(_)),
+        "{wrong_mime:?}"
+    );
     assert!(wrong_mime.to_string().contains("cover"), "{wrong_mime}");
     assert!(
         wrong_mime.to_string().contains("image/gif"),
@@ -162,7 +173,10 @@ async fn a_store_cannot_be_deleted_while_a_field_points_at_it() -> Result<()> {
     let err = delete_file_store(&cat, def.id, &[])
         .await
         .expect_err("a field still points at the store");
-    assert!(err.to_string().contains("documents.cover"), "names the field: {err}");
+    assert!(
+        err.to_string().contains("documents.cover"),
+        "names the field: {err}"
+    );
 
     // Forget the field overlay and the store is free to delete.
     delete_field_meta(&cat, meta_id).await?;

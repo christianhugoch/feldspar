@@ -56,7 +56,10 @@ pub fn validate_file_path(path: &str, folder: Option<&str>, mime_allow: &[String
         )));
     }
 
-    if let Some(folder) = folder.map(|f| f.trim_matches('/')).filter(|f| !f.is_empty()) {
+    if let Some(folder) = folder
+        .map(|f| f.trim_matches('/'))
+        .filter(|f| !f.is_empty())
+    {
         let prefix = format!("{folder}/");
         if !path.starts_with(&prefix) {
             return Err(Error::invalid(format!(
@@ -67,7 +70,9 @@ pub fn validate_file_path(path: &str, folder: Option<&str>, mime_allow: &[String
 
     if !mime_allow.is_empty() {
         let mime = mime_for_path(path);
-        let allowed = mime.as_deref().is_some_and(|m| mime_allow.iter().any(|a| a == m));
+        let allowed = mime
+            .as_deref()
+            .is_some_and(|m| mime_allow.iter().any(|a| a == m));
         if !allowed {
             return Err(Error::invalid(format!(
                 "file `{path}` has MIME type `{}`, which is not allowed (allowed: {})",

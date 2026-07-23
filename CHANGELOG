@@ -2,6 +2,53 @@
 
 Changes in reverse chronological order.
 
+## Application-facing file access (§4)
+
+An application can now serve and accept the bytes behind a `File` field — the first caller that
+makes the path-cumulative `min_role` enforcement do observable work outside the admin, where role 1
+clears every rule.
+
+- **Addressing is by table, row id and field name**, never by raw store path: the REST projection
+  gains `GET {mount}/{table}/{id}/{field}` (download) and
+  `POST {mount}/{table}/{id}/{field}/{filename}` (upload) per `File` field, on tables with a
+  single-column primary key. The row is what the caller is allowed to see; letting an app name an
+  arbitrary path would have made the field's folder restriction advisory. The filename is a single
+  path parameter, so a nested or traversing destination cannot even be expressed in the URL.
+- **Downloads run at the stricter of two rules, never the looser.** The table's `min_role_read` is
+  the endpoint's `MinRole` auth (as for row reads); on top, at request time, the file's own
+  path-cumulative `min_role` is enforced by the same `sc_files::check_access` the admin file
+  manager uses, seeded with the store's floor from its `_sc_file_stores` definition. Both checks
+  must pass, so whichever is stricter decides. Bytes are served under the extension-derived MIME
+  type — the same derivation the field's allow-list is enforced with.
+- **Uploads run at the table's `min_role_write`, into the field's store and folder, with the MIME
+  restrictions applied server-side** (`validate_file_path`; the declared `Content-Type` is not the
+  control — a client-side accept filter is a convenience). The path-cumulative rule governs the
+  write too. The row must exist before the bytes land (a failed update would orphan a file), and
+  the row is then pointed at the stored path through the same `update_row` a JSON write takes, so
+  the field's rules are enforced twice, harmlessly.
+- **The endpoint model learned about bytes.** `Endpoint` gains `binary_input`/`binary_output`,
+  `ApiRequest` a `raw` bytes body (set by the transport when the content type is not JSON),
+  `ApiResponse` a boxed `RawBody` (bytes + content type) the server serves as-is. The generated
+  TypeScript client types a download as `Promise<Blob>` (`res.blob()`) and an upload's body as
+  `BodyInit`, sent unencoded with no JSON content type — no named Request/Response types for
+  binary bodies, since `Blob`/`BodyInit` are the platform's own names for them. `rows` gains
+  `read_field` (one cell by primary key), which resolves a `File` field's stored path.
+- **Field changes re-project mounted apps live.** A mounted app's REST projection now depends on
+  its tables' *fields* (a `File` field contributes endpoints), so `createField`/`updateField` call
+  `AppMounts::refresh_table` exactly as the table-settings handlers do — an admin adds a `File`
+  field and the running app grows its download/upload endpoints with no restart.
+
+Tests: 4 new unit tests in `sc-api` (the projection's file endpoints and their auth mapping, no
+file endpoints on keyless tables, the binary client shapes) and the Phase 4 integration test
+`crates/sc-server/tests/app_file_access.rs` — three roles against a mounted app: an editor's
+upload lands in the field's folder and updates the row; a reader's upload is refused at the write
+rule; a disallowed MIME type is a 400 naming the field and type with nothing written; a `..`
+filename is refused; and the same file is then served to one caller and refused to another twice
+over, with the **table's** rule decisive against a logged-in visitor and the **directory's**
+`min_role` decisive against a reader the table admits. Also gave
+`crates/sc-catalog/tests/field_meta_merge.rs` the standard test-file clippy allowances it was
+missing, so `cargo clippy --all-targets -D warnings` passes again.
+
 ## File fields do real work (§3.5)
 
 The milestone's second claim becomes observable: a column configured as a `File` field validates

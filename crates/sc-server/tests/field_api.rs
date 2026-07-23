@@ -19,9 +19,7 @@ use sc_auth::SessionStore;
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
-use sc_server::{
-    AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router,
-};
+use sc_server::{AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -163,7 +161,11 @@ async fn create_read_and_edit_a_rich_field_and_a_file_field() -> sc_error::Resul
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["type"], json!("string"));
-    assert_eq!(body["sql_type"], json!("text"), "derived from the rich type");
+    assert_eq!(
+        body["sql_type"],
+        json!("text"),
+        "derived from the rich type"
+    );
     assert_eq!(body["attributes"]["max_length"], json!(200));
 
     // A `File` field: a plain text column plus a File kind pointing at a store,
@@ -187,7 +189,10 @@ async fn create_read_and_edit_a_rich_field_and_a_file_field() -> sc_error::Resul
     // Both read back merged through `listFields`.
     let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
     assert_eq!(field(&fields, "title")["type"], json!("string"));
-    assert_eq!(field(&fields, "title")["attributes"]["max_length"], json!(200));
+    assert_eq!(
+        field(&fields, "title")["attributes"]["max_length"],
+        json!(200)
+    );
     assert_eq!(field(&fields, "cover")["kind"]["type"], json!("file"));
     assert_eq!(field(&fields, "cover")["kind"]["folder"], json!("covers"));
 
@@ -267,7 +272,10 @@ async fn an_unknown_type_is_refused_by_name() -> sc_error::Result<()> {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body["error"].as_str().unwrap_or_default().contains("wibble"),
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wibble"),
         "the error names the unknown type: {body}"
     );
 

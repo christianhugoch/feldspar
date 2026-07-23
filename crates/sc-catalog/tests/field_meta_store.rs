@@ -109,7 +109,8 @@ async fn a_rich_type_and_its_attributes_round_trip() -> Result<()> {
     // whole, since a plain field reserves no attribute keys.
     let mut meta = FieldMeta::new("books", "title").rich_type("string");
     meta.attributes.insert("max_length".into(), json!(120));
-    meta.attributes.insert("regex".into(), json!("^[A-Za-z ]+$"));
+    meta.attributes
+        .insert("regex".into(), json!("^[A-Za-z ]+$"));
     save_field_meta(&cat, &meta).await?;
 
     let loaded = load_field_meta_by_field(&cat, "books", "title")
@@ -142,7 +143,11 @@ async fn saving_again_updates_in_place_rather_than_inserting() -> Result<()> {
     save_field_meta(&cat, &meta).await?;
 
     let all = list_field_meta(&cat).await?;
-    assert_eq!(all.len(), 1, "the id already existed, so this was an update");
+    assert_eq!(
+        all.len(),
+        1,
+        "the id already existed, so this was an update"
+    );
     assert_eq!(all[0].label, "Jacket");
     assert_eq!(
         all[0].kind,
@@ -170,7 +175,10 @@ async fn a_field_cannot_have_two_overlays() -> Result<()> {
     let clash = FieldMeta::new("books", "cover").rich_type("string");
     let err = save_field_meta(&cat, &clash).await.unwrap_err();
     assert!(matches!(err.repr(), Repr::Invalid(_)), "{err}");
-    assert!(err.to_string().contains("books.cover"), "should name it: {err}");
+    assert!(
+        err.to_string().contains("books.cover"),
+        "should name it: {err}"
+    );
 
     // The original is untouched — still a File field.
     let stored = load_field_meta_by_field(&cat, "books", "cover")
@@ -203,12 +211,16 @@ async fn an_ill_typed_kind_is_rejected_by_name_on_read() -> Result<()> {
     let err = list_field_meta(&cat).await.unwrap_err();
     let message = err.to_string();
     assert!(message.contains("blob"), "names the bad kind: {message}");
-    assert!(message.contains("books.cover"), "names the field: {message}");
+    assert!(
+        message.contains("books.cover"),
+        "names the field: {message}"
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn a_system_table_field_is_not_configurable_and_a_nameless_overlay_is_refused() -> Result<()> {
+async fn a_system_table_field_is_not_configurable_and_a_nameless_overlay_is_refused() -> Result<()>
+{
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
     bootstrap_field_meta(&cat).await?;
@@ -247,7 +259,10 @@ async fn an_overlay_outlives_the_column_it_overlays() -> Result<()> {
     cat.reload().await?;
 
     let stored = load_field_meta_by_field(&cat, "books", "cover").await?;
-    assert!(stored.is_some(), "the overlay survives its column being dropped");
+    assert!(
+        stored.is_some(),
+        "the overlay survives its column being dropped"
+    );
     Ok(())
 }
 

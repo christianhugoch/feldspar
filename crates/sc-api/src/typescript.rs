@@ -24,12 +24,14 @@ pub fn generate_client(set: &EndpointSet) -> String {
     out.push_str("// Regenerate with the sc-api TypeScript generator (design §13.1).\n\n");
 
     // --- per-endpoint request/response type declarations --------------------
+    // Binary bodies get no named type: the client speaks `BodyInit` (upload) and
+    // `Blob` (download) directly, which are the platform's own names for them.
     for ep in set {
         let pascal = to_pascal_case(&ep.name);
-        if !ep.input.is_empty() {
+        if !ep.input.is_empty() && !ep.binary_input {
             let _ = writeln!(out, "export type {pascal}Request = {};", ts_type(&ep.input));
         }
-        if !ep.output.is_empty() {
+        if !ep.output.is_empty() && !ep.binary_output {
             let _ = writeln!(
                 out,
                 "export type {pascal}Response = {};",
@@ -147,10 +149,16 @@ fn method_signature(ep: &Endpoint) -> String {
         .params()
         .map(|(name, ty)| format!("{name}: {}", ty.ts_type()))
         .collect();
-    if !ep.input.is_empty() {
+    if ep.binary_input {
+        // An upload takes whatever `fetch` can send raw: a `Blob`/`File` from an
+        // `<input type=file>`, an `ArrayBuffer`, a string.
+        params.push("body: BodyInit".to_owned());
+    } else if !ep.input.is_empty() {
         params.push(format!("body: {pascal}Request"));
     }
-    let ret = if ep.output.is_empty() {
+    let ret = if ep.binary_output {
+        "Blob".to_owned()
+    } else if ep.output.is_empty() {
         "void".to_owned()
     } else {
         format!("{pascal}Response")
@@ -162,7 +170,7 @@ fn method_signature(ep: &Endpoint) -> String {
 fn emit_method_impl(out: &mut String, ep: &Endpoint) {
     let pascal = to_pascal_case(&ep.name);
     let mut param_names: Vec<String> = ep.path.params().map(|(n, _)| n.to_owned()).collect();
-    let has_body = !ep.input.is_empty();
+    let has_body = ep.binary_input || !ep.input.is_empty();
     if has_body {
         param_names.push("body".to_owned());
     }
@@ -174,12 +182,18 @@ fn emit_method_impl(out: &mut String, ep: &Endpoint) {
         url_template(ep)
     );
     let _ = writeln!(out, "        method: \"{}\",", ep.method.as_str());
+    // A binary body goes out as-is with no JSON content type — `fetch` derives
+    // one from a `Blob` itself — so `hasBody` is false for the header helper
+    // (which only decides the JSON content type; CSRF rides on the method).
     let _ = writeln!(
         out,
-        "        headers: requestHeaders(\"{}\", {has_body}),",
-        ep.method.as_str()
+        "        headers: requestHeaders(\"{}\", {}),",
+        ep.method.as_str(),
+        has_body && !ep.binary_input
     );
-    if has_body {
+    if ep.binary_input {
+        out.push_str("        body,\n");
+    } else if has_body {
         out.push_str("        body: JSON.stringify(body),\n");
     }
     out.push_str("      });\n");
@@ -188,7 +202,9 @@ fn emit_method_impl(out: &mut String, ep: &Endpoint) {
         "      if (!res.ok) throw await clientError(\"{}\", res);",
         ep.name
     );
-    if ep.output.is_empty() {
+    if ep.binary_output {
+        out.push_str("      return await res.blob();\n");
+    } else if ep.output.is_empty() {
         out.push_str("      return;\n");
     } else {
         let _ = writeln!(out, "      return (await res.json()) as {pascal}Response;");

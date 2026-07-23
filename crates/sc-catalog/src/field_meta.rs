@@ -369,8 +369,8 @@ pub async fn list_field_meta(catalog: &Catalog) -> Result<Vec<FieldMeta>> {
 /// Every overlay for the fields of `table`, ordered by field name — what §3.2's
 /// merge loads for one table.
 pub async fn list_field_meta_for_table(catalog: &Catalog, table: &str) -> Result<Vec<FieldMeta>> {
-    let select =
-        Select::from(Source::table(FIELD_META_TABLE)).filter(Expr::col(COL_TABLE).eq(Expr::lit(table)));
+    let select = Select::from(Source::table(FIELD_META_TABLE))
+        .filter(Expr::col(COL_TABLE).eq(Expr::lit(table)));
     let mut metas: Vec<FieldMeta> = rows(catalog, select)
         .await?
         .iter()
@@ -453,10 +453,19 @@ fn attributes_for_storage(meta: &FieldMeta) -> Attrs {
             target_field,
             summary_field,
         } => {
-            obj.insert(KEY_TARGET_TABLE.to_owned(), Json::String(target_table.0.clone()));
-            obj.insert(KEY_TARGET_FIELD.to_owned(), Json::String(target_field.0.clone()));
+            obj.insert(
+                KEY_TARGET_TABLE.to_owned(),
+                Json::String(target_table.0.clone()),
+            );
+            obj.insert(
+                KEY_TARGET_FIELD.to_owned(),
+                Json::String(target_field.0.clone()),
+            );
             if let Some(summary) = summary_field {
-                obj.insert(KEY_SUMMARY_FIELD.to_owned(), Json::String(summary.0.clone()));
+                obj.insert(
+                    KEY_SUMMARY_FIELD.to_owned(),
+                    Json::String(summary.0.clone()),
+                );
             }
         }
         DataFieldKind::File {
@@ -573,10 +582,22 @@ fn take_string_array(
             .into_iter()
             .map(|item| match item {
                 Json::String(s) => Ok(s),
-                other => Err(bad_param(table, field, key, "an array of strings", Some(&other))),
+                other => Err(bad_param(
+                    table,
+                    field,
+                    key,
+                    "an array of strings",
+                    Some(&other),
+                )),
             })
             .collect(),
-        Some(other) => Err(bad_param(table, field, key, "an array of strings", Some(&other))),
+        Some(other) => Err(bad_param(
+            table,
+            field,
+            key,
+            "an array of strings",
+            Some(&other),
+        )),
     }
 }
 
@@ -708,7 +729,13 @@ mod tests {
             .collect();
         assert_eq!(pk, [COL_TABLE, COL_NAME]);
         // And id, though required and unique, is not part of that key.
-        assert!(!fields.iter().find(|f| f.base.name == COL_ID).unwrap().primary_key);
+        assert!(
+            !fields
+                .iter()
+                .find(|f| f.base.name == COL_ID)
+                .unwrap()
+                .primary_key
+        );
     }
 
     #[test]
@@ -762,10 +789,12 @@ mod tests {
         assert_eq!(stored.get(KEY_STORE), Some(&Json::String("uploads".into())));
         assert_eq!(stored.get(KEY_FOLDER), Some(&Json::String("covers".into())));
 
-        let (kind, residual) =
-            kind_and_attributes(KIND_FILE, stored, "books", "cover").unwrap();
+        let (kind, residual) = kind_and_attributes(KIND_FILE, stored, "books", "cover").unwrap();
         assert_eq!(kind, file);
-        assert!(residual.is_empty(), "no attributes beyond the kind's params");
+        assert!(
+            residual.is_empty(),
+            "no attributes beyond the kind's params"
+        );
     }
 
     #[test]
@@ -776,8 +805,7 @@ mod tests {
         meta.attributes.insert("max".into(), Json::from(120));
 
         let stored = attributes_for_storage(&meta);
-        let (kind, residual) =
-            kind_and_attributes(KIND_PLAIN, stored, "people", "age").unwrap();
+        let (kind, residual) = kind_and_attributes(KIND_PLAIN, stored, "people", "age").unwrap();
         assert_eq!(kind, DataFieldKind::Plain);
         assert_eq!(residual, meta.attributes);
     }
@@ -787,7 +815,10 @@ mod tests {
         let err = kind_and_attributes("blob", Attrs::new(), "books", "cover").unwrap_err();
         let message = err.to_string();
         assert!(message.contains("blob"), "names the bad kind: {message}");
-        assert!(message.contains("books.cover"), "names the field: {message}");
+        assert!(
+            message.contains("books.cover"),
+            "names the field: {message}"
+        );
     }
 
     #[test]

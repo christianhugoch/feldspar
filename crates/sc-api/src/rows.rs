@@ -107,6 +107,38 @@ pub async fn delete_row(catalog: &Catalog, table: &Table, id: &str) -> Result<Js
     Ok(json!({ "deleted": true }))
 }
 
+/// The stored value of one column of the row addressed by `id` — a single cell,
+/// for a caller that needs it for something other than serving the row (an
+/// application's file endpoints resolve a `File` field's stored path this way,
+/// §4). A missing row is a [`NotFound`](Error::not_found), exactly as
+/// [`update_row`] reports one; an unknown column is refused by name.
+pub async fn read_field(catalog: &Catalog, table: &Table, column: &str, id: &str) -> Result<Value> {
+    if table.field(column).is_none() {
+        return Err(Error::invalid(format!(
+            "`{}` has no field `{column}`",
+            table.name
+        )));
+    }
+    let pk = single_pk(table)?;
+    let select = Select::from(Source::table(table.name.clone()))
+        .columns(vec![Projection::expr(Expr::col(column))])
+        .filter(pk_filter(table, &pk, id)?);
+    let rows: Vec<Row> = catalog
+        .provider(table)
+        .query(&select)
+        .await?
+        .try_collect()
+        .await?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::not_found(format!("no row with {pk} = {id}")))?;
+    row.values()
+        .first()
+        .cloned()
+        .ok_or_else(|| Error::msg("single-column select returned no column"))
+}
+
 /// A row as a JSON object keyed by column name, values in natural JSON.
 pub fn row_to_json(row: &Row) -> Json {
     let mut map = Map::with_capacity(row.len());
@@ -153,7 +185,12 @@ pub fn column_value(table: &Table, column: &str, json: &Json) -> Result<Value> {
 /// not there points at nothing — and its shape must satisfy the field's folder
 /// and MIME constraints ([`sc_files::validate_file_path`]). The error names the
 /// field, as it is shown to a user of an application, not only the admin.
-fn validate_file_write(catalog: &Catalog, table: &Table, column: &str, value: &Value) -> Result<()> {
+fn validate_file_write(
+    catalog: &Catalog,
+    table: &Table,
+    column: &str,
+    value: &Value,
+) -> Result<()> {
     let Some(field) = table.field(column) else {
         return Ok(());
     };
@@ -196,7 +233,7 @@ fn storage_type(type_: &TypeRef) -> BasicType {
 /// (so it stays a 400) and prefixing the field name (§2.3). The specific
 /// violation — from either coercion or validation, both `Invalid` — is kept; any
 /// other kind falls back to its full display.
-fn field_error(column: &str, e: Error) -> Error {
+pub(crate) fn field_error(column: &str, e: Error) -> Error {
     let detail = match e.repr() {
         Repr::Invalid(message) => message.clone(),
         _ => e.to_string(),

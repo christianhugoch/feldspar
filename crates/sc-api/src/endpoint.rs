@@ -222,6 +222,16 @@ pub struct Endpoint {
     pub input: TypeSchema,
     /// The response value schema.
     pub output: TypeSchema,
+    /// The request body is raw bytes — a file upload — rather than the JSON
+    /// `input` describes (§4). The generated client takes a `BodyInit` and sends
+    /// it unencoded; the transport hands the provider the unparsed body.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary_input: bool,
+    /// The response body is raw bytes — a file download — rather than the JSON
+    /// `output` describes (§4). The generated client resolves to a `Blob`; the
+    /// transport writes the provider's bytes with their own content type.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary_output: bool,
     /// The authorization required to call it.
     pub auth: AuthRequirement,
     /// The handler that runs it.
@@ -241,6 +251,8 @@ impl Endpoint {
             path,
             input: TypeSchema::empty(),
             output: TypeSchema::empty(),
+            binary_input: false,
+            binary_output: false,
             auth: AuthRequirement::LoggedIn,
             handler,
         }
@@ -261,6 +273,18 @@ impl Endpoint {
     /// Set the authorization requirement.
     pub fn auth(mut self, auth: AuthRequirement) -> Endpoint {
         self.auth = auth;
+        self
+    }
+
+    /// Mark the request body as raw bytes (a file upload).
+    pub fn binary_input(mut self) -> Endpoint {
+        self.binary_input = true;
+        self
+    }
+
+    /// Mark the response body as raw bytes (a file download).
+    pub fn binary_output(mut self) -> Endpoint {
+        self.binary_output = true;
         self
     }
 

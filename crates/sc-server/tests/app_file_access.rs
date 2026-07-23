@@ -1,0 +1,487 @@
+//! Phase 4 end-to-end integration test: an application serves and accepts the
+//! bytes behind a `File` field, at the **stricter** of the table's rules and the
+//! file's own path-cumulative `min_role` (design §4, §7, §14.1).
+//!
+//! What is asserted, through the real router with real roles:
+//!
+//! - a `File` field's bytes are addressed **by table, row id and field name**
+//!   (`GET /api/posts/{id}/attachment`), never by raw store path;
+//! - reads run at the table's `min_role_read` **and** the path-cumulative file
+//!   rule — each is decisive in one case below: the table's rule refuses a
+//!   visitor the directory would admit, and the directory's rule refuses a
+//!   reader the table would admit, for the **same file**;
+//! - uploads run at the table's `min_role_write`, land in the field's store and
+//!   folder, and the field's MIME restrictions are applied server-side — a
+//!   client-side accept filter is a convenience, not a control;
+//! - the file endpoints appear on the **already-mounted** app when the admin
+//!   creates the `File` field, with no restart — the same live re-projection a
+//!   table-settings change gets (§13.2).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use sc_app::{
+    ApiConfig, Application, CodeFramework, FrameworkRef, app_source_from_config, build_application,
+};
+use sc_auth::{ROLE_ADMIN, ROLE_PUBLIC, Role, SessionStore, create_user, save_role};
+use sc_catalog::{Catalog, FileStoreId, TableId};
+use sc_db::DatabaseDriver;
+use sc_db_postgres::PgDriver;
+use sc_files::{FileMeta, FileStore, LocalFileStore};
+use sc_server::{
+    AppMounts, CSRF_COOKIE, CSRF_HEADER, MountedApp, ServerConfig, admin_handlers,
+    build_router_with_apps,
+};
+use sc_test_harness::TestDb;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+const BASE_DOMAIN: &str = "example.com";
+const APP_HOST: &str = "blog.example.com";
+
+/// A scratch directory removed when the guard drops.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!(
+            "sc-server-filefield-{}-{tag}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// A cookie-carrying client addressing one host, echoing CSRF on mutations —
+/// and able to send and receive **raw bytes**, which is what this phase adds to
+/// the app API.
+struct Client {
+    router: Router,
+    host: String,
+    cookies: HashMap<String, String>,
+}
+
+impl Client {
+    fn new(router: Router, host: &str) -> Client {
+        Client {
+            router,
+            host: host.to_owned(),
+            cookies: HashMap::new(),
+        }
+    }
+
+    async fn raw(
+        &mut self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: Option<Vec<u8>>,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, &self.host);
+        if !self.cookies.is_empty() {
+            let jar = self
+                .cookies
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            builder = builder.header(header::COOKIE, jar);
+        }
+        if method != "GET" && method != "HEAD" {
+            if let Some(csrf) = self.cookies.get(CSRF_COOKIE) {
+                builder = builder.header(CSRF_HEADER, csrf);
+            }
+        }
+        if let Some(ct) = content_type {
+            builder = builder.header(header::CONTENT_TYPE, ct);
+        }
+        let request = builder.body(Body::from(body.unwrap_or_default())).unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        for raw in headers.get_all(header::SET_COOKIE) {
+            if let Ok(text) = raw.to_str() {
+                let pair = text.split(';').next().unwrap_or("");
+                if let Some((name, value)) = pair.split_once('=') {
+                    if value.is_empty() {
+                        self.cookies.remove(name);
+                    } else {
+                        self.cookies.insert(name.to_owned(), value.to_owned());
+                    }
+                }
+            }
+        }
+        let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        (status, headers, bytes.to_vec())
+    }
+
+    async fn send(&mut self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let payload = body
+            .as_ref()
+            .map(|b| serde_json::to_vec(b).unwrap())
+            .map(|bytes| (Some("application/json"), Some(bytes)))
+            .unwrap_or((None, None));
+        let (status, _, bytes) = self.raw(method, path, payload.0, payload.1).await;
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, value)
+    }
+
+    /// Upload raw bytes under their own content type, reading a JSON answer.
+    async fn upload(
+        &mut self,
+        path: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> (StatusCode, Value) {
+        let (status, _, body) = self
+            .raw("POST", path, Some(content_type), Some(bytes.to_vec()))
+            .await;
+        let value = if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap_or(Value::Null)
+        };
+        (status, value)
+    }
+
+    /// Download raw bytes, returning the served content type alongside them.
+    async fn download(&mut self, path: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+        let (status, headers, bytes) = self.raw("GET", path, None, None).await;
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        (status, content_type, bytes)
+    }
+
+    /// Load the SPA (a safe GET) to obtain the CSRF cookie, then log in — the
+    /// order a browser follows before it may mutate anything.
+    async fn login(&mut self, email: &str, password: &str) -> StatusCode {
+        self.raw("GET", "/", None, None).await;
+        let (status, _) = self
+            .send(
+                "POST",
+                "/api/login",
+                Some(json!({ "email": email, "password": password })),
+            )
+            .await;
+        status
+    }
+}
+
+/// The app's source tree: a git repo whose stand-in bundler emits an SPA.
+fn write_app_source(root: &Path) {
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let web = root.join("web");
+    std::fs::create_dir_all(web.join("src")).unwrap();
+    let script = web.join("build.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         set -e\n\
+         test -f src/client.ts\n\
+         mkdir -p dist/assets\n\
+         printf '<!doctype html><div id=root></div>' > dist/index.html\n\
+         cp src/client.ts dist/assets/client.js\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn code_framework() -> FrameworkRef {
+    FrameworkRef::new("code")
+        .with("store", "apps")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh")
+        .with("client", "web/src/client.ts")
+}
+
+fn blog_app() -> Application {
+    Application::new("Blog", "blog", code_framework())
+        .with_table(TableId("posts".to_owned()))
+        .with_file_store(FileStoreId("apps".to_owned()))
+        .with_api(ApiConfig::new("rest", "/api"))
+}
+
+/// Build and mount the app, bootstrap every platform table, and return a router
+/// serving both the admin (base domain) and the app — plus the `uploads` store
+/// the `File` field will point at, held directly so the test can set
+/// per-directory rules on it.
+async fn setup(
+    tmp: &TempDir,
+) -> sc_error::Result<(Router, Arc<Catalog>, Arc<LocalFileStore>, TestDb)> {
+    let db = TestDb::new().await?;
+    db.client()
+        .await?
+        .batch_execute(
+            "DO $$ DECLARE r record; BEGIN \
+               FOR r IN SELECT table_schema FROM information_schema.tables \
+               WHERE table_name = 'users' AND table_type = 'BASE TABLE' LOOP \
+                 EXECUTE format('DROP TABLE IF EXISTS %I.users CASCADE', r.table_schema); \
+               END LOOP; END $$; \
+             CREATE TABLE posts (\
+               id bigint generated by default as identity primary key, \
+               title text not null)",
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+
+    let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
+    let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
+    sc_auth::bootstrap(&catalog).await?;
+    // The overlays and the store-definition table have to exist for the admin
+    // to configure through, just as `connect_catalog` bootstraps them on the
+    // real boot path: `_sc_tables` for the roles, `_sc_fields` for the `File`
+    // field, `_sc_file_stores` for the store's own access floor.
+    sc_catalog::bootstrap_table_meta(&catalog).await?;
+    sc_catalog::bootstrap_field_meta(&catalog).await?;
+    sc_catalog::bootstrap_file_stores(&catalog).await?;
+
+    write_app_source(tmp.path());
+    catalog.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+
+    // The store the `File` field references — distinct from the app-source store.
+    let uploads_dir = tmp.path().join("uploads-store");
+    std::fs::create_dir_all(&uploads_dir).map_err(sc_error::Error::from)?;
+    let uploads = Arc::new(LocalFileStore::new("uploads", &uploads_dir)?);
+    catalog.connect_file_store(uploads.clone())?;
+
+    let source = app_source_from_config(&code_framework())?;
+    let report = build_application(&catalog, &blog_app(), &source).await?;
+    let framework = Arc::new(CodeFramework::new("code", report.bundle));
+    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    apps.mount(MountedApp::new(blog_app(), framework, &catalog)?)?;
+
+    let config = ServerConfig {
+        base_domain: Some(BASE_DOMAIN.to_owned()),
+        ..ServerConfig::default()
+    };
+    let router = build_router_with_apps(
+        &sc_api::admin_endpoints(),
+        admin_handlers(catalog.clone(), apps.clone()),
+        Arc::new(SessionStore::default()),
+        &config,
+        apps,
+    )?;
+    Ok((router, catalog, uploads, db))
+}
+
+#[tokio::test]
+async fn a_file_fields_bytes_are_served_at_the_stricter_of_table_and_path_rules()
+-> sc_error::Result<()> {
+    let tmp = TempDir::new("serve");
+    let (router, catalog, uploads, _db) = setup(&tmp).await?;
+
+    // Four roles: admin, editor (40), reader (80), visitor (100 — the public
+    // built-in, but logged in, so the table check rather than authentication is
+    // what refuses them).
+    create_user(&catalog, "admin@example.com", "admin-pw", ROLE_ADMIN).await?;
+    save_role(&catalog, &Role::new(40, "Editor")).await?;
+    save_role(&catalog, &Role::new(80, "Reader")).await?;
+    create_user(&catalog, "editor@example.com", "editor-pw", 40).await?;
+    create_user(&catalog, "reader@example.com", "reader-pw", 80).await?;
+    create_user(&catalog, "visitor@example.com", "visitor-pw", ROLE_PUBLIC).await?;
+
+    // The admin opens the table: reads to 80, writes to 40.
+    let mut admin = Client::new(router.clone(), BASE_DOMAIN);
+    assert_eq!(
+        admin.login("admin@example.com", "admin-pw").await,
+        StatusCode::OK
+    );
+    let (status, _) = admin
+        .send(
+            "PUT",
+            "/api/tables/posts",
+            Some(json!({
+                "label": "",
+                "description": "",
+                "min_role_read": 80,
+                "min_role_write": 40,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The admin creates the `File` field — on a table of an **already-mounted**
+    // app, so the download/upload endpoints must appear live (§13.2), exactly as
+    // an access change takes effect live.
+    let (status, body) = admin
+        .send(
+            "POST",
+            "/api/tables/posts/fields",
+            Some(json!({
+                "name": "attachment",
+                "type": "text",
+                "kind": { "type": "file", "store": "uploads", "folder": "docs",
+                          "mime_allow": ["text/plain"] }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // The editor (40) writes a row and uploads into its `File` field.
+    let mut editor = Client::new(router.clone(), APP_HOST);
+    assert_eq!(
+        editor.login("editor@example.com", "editor-pw").await,
+        StatusCode::OK
+    );
+    let (status, created) = editor
+        .send("POST", "/api/posts", Some(json!({ "title": "hello" })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_i64().unwrap();
+
+    let (status, updated) = editor
+        .upload(
+            &format!("/api/posts/{id}/attachment/notes.txt"),
+            "text/plain",
+            b"attached words",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{updated}");
+    // The bytes landed in the field's store **and folder** — the caller named
+    // only a filename — and the row now references the stored path.
+    assert_eq!(updated["attachment"], json!("docs/notes.txt"));
+    assert_eq!(
+        &uploads.read("docs/notes.txt").await?[..],
+        b"attached words"
+    );
+
+    // --- uploads run at the table's write rule --------------------------------
+    let mut reader = Client::new(router.clone(), APP_HOST);
+    assert_eq!(
+        reader.login("reader@example.com", "reader-pw").await,
+        StatusCode::OK
+    );
+    let (status, _) = reader
+        .upload(
+            &format!("/api/posts/{id}/attachment/sneaky.txt"),
+            "text/plain",
+            b"nope",
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "min_role_write 40 excludes role 80"
+    );
+
+    // --- MIME restrictions are enforced server-side ---------------------------
+    let (status, body) = editor
+        .upload(
+            &format!("/api/posts/{id}/attachment/evil.html"),
+            "text/plain", // the *declared* content type is not the control
+            b"<script>alert(1)</script>",
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("attachment"), "names the field: {message}");
+    assert!(message.contains("text/html"), "names the type: {message}");
+    // Nothing was written and the row still references the first upload.
+    assert!(uploads.read("docs/evil.html").await.is_err());
+
+    // A traversing filename cannot escape the folder either.
+    let (status, _) = editor
+        .upload(
+            &format!("/api/posts/{id}/attachment/.."),
+            "text/plain",
+            b"x",
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // --- downloads: the table's rule is decisive for the visitor --------------
+    let path = format!("/api/posts/{id}/attachment");
+
+    let (status, content_type, bytes) = reader.download(&path).await;
+    assert_eq!(status, StatusCode::OK, "role 80 clears min_role_read 80");
+    assert_eq!(content_type.as_deref(), Some("text/plain"));
+    assert_eq!(&bytes[..], b"attached words");
+
+    let mut visitor = Client::new(router.clone(), APP_HOST);
+    assert_eq!(
+        visitor.login("visitor@example.com", "visitor-pw").await,
+        StatusCode::OK
+    );
+    let (status, _, _) = visitor.download(&path).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "nothing on the file's path restricts it, so the refusal is the table's"
+    );
+
+    // Anonymous callers are refused before any rule is consulted.
+    let mut anon = Client::new(router.clone(), APP_HOST);
+    let (status, _, _) = anon.download(&path).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // --- the directory's rule is decisive for the reader ----------------------
+    // Restrict the *folder* to role 40. The table still admits the reader (80);
+    // the path-cumulative rule now does not — the same file is served to the
+    // editor and refused to the reader, so the stricter rule decided.
+    uploads
+        .set_meta(
+            "docs",
+            &FileMeta {
+                min_role: Some(40),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let (status, _, _) = reader.download(&path).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the folder's min_role 40 refuses role 80 even though the table admits it"
+    );
+    let (status, _, bytes) = editor.download(&path).await;
+    assert_eq!(status, StatusCode::OK, "role 40 clears the folder's rule");
+    assert_eq!(&bytes[..], b"attached words");
+
+    // A row with no file is a plain not-found, for a caller every rule admits.
+    let (status, created) = editor
+        .send("POST", "/api/posts", Some(json!({ "title": "empty" })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let empty_id = created["id"].as_i64().unwrap();
+    let (status, _, _) = editor
+        .download(&format!("/api/posts/{empty_id}/attachment"))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    Ok(())
+}

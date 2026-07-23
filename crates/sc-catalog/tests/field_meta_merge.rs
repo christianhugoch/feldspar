@@ -8,6 +8,7 @@
 //! contradict the column (a `text` configured as `Integer`, a `Key` with no
 //! foreign key behind it), and the merge must **report** the contradiction while
 //! leaving the field usable, never downgrade silently and never fail.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
 
@@ -169,7 +170,11 @@ async fn an_overlay_for_a_dropped_column_is_reported_but_the_table_is_fine() -> 
 
     let issues = cat.field_overlay_issues()?;
     assert_eq!(issues.len(), 1, "{issues:?}");
-    assert!(issues[0].message.contains("does not exist"), "{:?}", issues[0]);
+    assert!(
+        issues[0].message.contains("does not exist"),
+        "{:?}",
+        issues[0]
+    );
     // The table is otherwise intact.
     assert_eq!(cat.require("books")?.fields.len(), 3);
     Ok(())

@@ -15,6 +15,7 @@
 //! and a provider stays testable without a socket.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::Result;
@@ -39,6 +40,10 @@ pub struct ApiRequest {
     pub query: HashMap<String, String>,
     /// The parsed JSON request body ([`Json::Null`] when there was none).
     pub body: Json,
+    /// The raw, unparsed request body, set by the transport when the caller sent
+    /// something other than JSON — a file upload's bytes (§4). `None` for every
+    /// JSON request, so a provider that never asks for bytes never sees them.
+    pub raw: Option<Bytes>,
 }
 
 impl ApiRequest {
@@ -49,6 +54,7 @@ impl ApiRequest {
             path: path.into(),
             query: HashMap::new(),
             body: Json::Null,
+            raw: None,
         }
     }
 
@@ -66,6 +72,13 @@ impl ApiRequest {
     /// Set a query parameter, returning `self` for chaining.
     pub fn query(mut self, key: impl Into<String>, value: impl Into<String>) -> ApiRequest {
         self.query.insert(key.into(), value.into());
+        self
+    }
+
+    /// Attach a raw (non-JSON) body — an upload's bytes — returning `self` for
+    /// chaining.
+    pub fn raw(mut self, bytes: impl Into<Bytes>) -> ApiRequest {
+        self.raw = Some(bytes.into());
         self
     }
 }
@@ -90,6 +103,16 @@ pub enum SessionAction {
     End,
 }
 
+/// A raw-bytes response body — a file download — with the content type the
+/// transport should serve it under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawBody {
+    /// The bytes to serve.
+    pub bytes: Bytes,
+    /// The `Content-Type` to serve them with, e.g. `image/png`.
+    pub content_type: String,
+}
+
 /// A provider's response: an HTTP status, a JSON body, and any session change.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApiResponse {
@@ -97,6 +120,10 @@ pub struct ApiResponse {
     pub status: u16,
     /// The JSON response body.
     pub body: Json,
+    /// A raw-bytes body (a file download, §4). When set, the transport serves
+    /// these bytes with their content type and `body` is ignored. Boxed so the
+    /// download case does not widen every response that is not one.
+    pub raw: Option<Box<RawBody>>,
     /// The session change for the transport to apply, if any.
     pub session: SessionAction,
 }
@@ -107,6 +134,7 @@ impl ApiResponse {
         ApiResponse {
             status: 200,
             body,
+            raw: None,
             session: SessionAction::Keep,
         }
     }
@@ -116,6 +144,20 @@ impl ApiResponse {
         ApiResponse {
             status,
             body,
+            raw: None,
+            session: SessionAction::Keep,
+        }
+    }
+
+    /// A `200 OK` serving raw bytes under `content_type` — a file download.
+    pub fn file(bytes: impl Into<Bytes>, content_type: impl Into<String>) -> ApiResponse {
+        ApiResponse {
+            status: 200,
+            body: Json::Null,
+            raw: Some(Box::new(RawBody {
+                bytes: bytes.into(),
+                content_type: content_type.into(),
+            })),
             session: SessionAction::Keep,
         }
     }
@@ -125,6 +167,7 @@ impl ApiResponse {
         ApiResponse {
             status,
             body: serde_json::json!({ "error": message.into() }),
+            raw: None,
             session: SessionAction::Keep,
         }
     }
@@ -134,6 +177,7 @@ impl ApiResponse {
         ApiResponse {
             status: 200,
             body,
+            raw: None,
             session: SessionAction::Start(user),
         }
     }
@@ -143,6 +187,7 @@ impl ApiResponse {
         ApiResponse {
             status: 200,
             body,
+            raw: None,
             session: SessionAction::End,
         }
     }

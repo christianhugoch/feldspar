@@ -310,7 +310,7 @@ async fn dispatch(
     // An application claims the whole of its subdomain, so this comes first: on
     // `blog.example.com` every path is the blog's, not the admin's.
     if let Some(app) = resolve_app(&state, &headers) {
-        return dispatch_app(&state, &app, method, &uri, jar, &body).await;
+        return dispatch_app(&state, &app, method, &uri, &headers, jar, &body).await;
     }
 
     match state.routes.at(uri.path()) {
@@ -368,6 +368,7 @@ async fn dispatch_app(
     app: &MountedApp,
     method: axum::http::Method,
     uri: &Uri,
+    headers: &axum::http::HeaderMap,
     jar: CookieJar,
     body: &Bytes,
 ) -> Response {
@@ -409,30 +410,59 @@ async fn dispatch_app(
             None => None,
         };
 
-        let parsed_body = if body.is_empty() {
-            Value::Null
-        } else {
-            match serde_json::from_slice(body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return with_csp(
-                        json_error(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
-                        &csp,
-                    );
-                }
+        // The declared content type decides how the body reaches the provider:
+        // JSON (or an unlabelled body, which every JSON caller before file
+        // uploads existed sent) is parsed as before; anything else — a file
+        // upload's bytes — is handed over raw and unparsed (§4).
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let is_json = content_type.is_empty() || content_type.starts_with("application/json");
+        let mut parsed_body = Value::Null;
+        let mut raw_body = None;
+        if !body.is_empty() {
+            if is_json {
+                parsed_body = match serde_json::from_slice(body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return with_csp(
+                            json_error(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+                            &csp,
+                        );
+                    }
+                };
+            } else {
+                raw_body = Some(body.clone());
             }
-        };
+        }
 
         let req = ApiRequest {
             method: api_method,
             path: path.to_owned(),
             query: parse_query(uri),
             body: parsed_body,
+            raw: raw_body,
         };
 
         // The provider enforces the endpoint's auth itself (§7), so unlike the
         // admin path there is no separate check here.
         return match provider.handle(req, catalog, user.as_ref()).await {
+            // A raw-bytes response — a file download (§4) — goes out as-is under
+            // its own content type; there is no JSON body and no session change
+            // a download could carry.
+            Ok(sc_api::ApiResponse {
+                raw: Some(raw),
+                status,
+                ..
+            }) => {
+                let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                let mut out = (status, raw.bytes).into_response();
+                if let Ok(ct) = HeaderValue::from_str(&raw.content_type) {
+                    out.headers_mut().insert(header::CONTENT_TYPE, ct);
+                }
+                with_csp(out, &csp)
+            }
             // A provider's response is shaped exactly like a handler's — body,
             // status, session change — so it goes out through the same
             // `apply_response`: an app's `login` sets its session cookie the very

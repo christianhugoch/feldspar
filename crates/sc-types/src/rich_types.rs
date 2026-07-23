@@ -94,7 +94,10 @@ impl RichType for StringType {
             return Ok(()); // null — a field-level (nullability) concern, not ours.
         };
 
-        if let Some(max) = attrs.get(ATTR_MAX_LENGTH).and_then(serde_json::Value::as_i64) {
+        if let Some(max) = attrs
+            .get(ATTR_MAX_LENGTH)
+            .and_then(serde_json::Value::as_i64)
+        {
             let len = s.chars().count() as i64;
             if len > max {
                 return Err(Error::invalid(format!(
@@ -104,7 +107,10 @@ impl RichType for StringType {
         }
 
         // `options`, when a non-empty array, restricts the value to that set.
-        if let Some(options) = attrs.get(ATTR_OPTIONS).and_then(serde_json::Value::as_array) {
+        if let Some(options) = attrs
+            .get(ATTR_OPTIONS)
+            .and_then(serde_json::Value::as_array)
+        {
             if !options.is_empty() && !options.iter().any(|o| o.as_str() == Some(s)) {
                 let allowed = options
                     .iter()
@@ -228,7 +234,9 @@ fn as_text(value: &Value) -> Result<Option<&str>> {
 fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
     let anchored = format!("^(?:{pattern})$");
     let re = regex_lite::Regex::new(&anchored).map_err(|e| {
-        Error::invalid(format!("`{pattern}` is not a valid regular expression: {e}"))
+        Error::invalid(format!(
+            "`{pattern}` is not a valid regular expression: {e}"
+        ))
     })?;
     Ok(re.is_match(value))
 }
@@ -329,7 +337,10 @@ mod tests {
         assert!(t.validate(&Value::Int(10), &ranged).is_ok());
         let low = t.validate(&Value::Int(0), &ranged).unwrap_err().to_string();
         assert!(low.contains('1'), "{low}");
-        let high = t.validate(&Value::Int(11), &ranged).unwrap_err().to_string();
+        let high = t
+            .validate(&Value::Int(11), &ranged)
+            .unwrap_err()
+            .to_string();
         assert!(high.contains("10"), "{high}");
 
         // min and max are independent — either alone is respected.
