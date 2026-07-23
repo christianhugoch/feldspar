@@ -61,8 +61,8 @@ generic library (§1 code guidelines: separate generic crates).
   identifier* — V8 and swc both accept it as-is. That one fact is the design: no
   preprocessing, no syntax extension. The reified path binds a variable literally named
   `publisherⱵname`; the symbolic path splits identifiers on Ⱶ into a join path. Tested
-  against swc (`a_half_h_join_path_is_one_identifier`, single and chained) and confirmed in
-  V8 via node; the in-crate V8 assertion lands with the §3 evaluator
+  against swc (`a_half_h_join_path_is_one_identifier`, single and chained); the in-crate V8
+  assertion landed with §3 (`a_half_h_identifier_binds_in_v8`)
 - [x] Free-variable analysis: walk the AST and collect every unbound identifier (arrow
   parameters bind; `src/analyze.rs`), classified in `validate` into: a field of the table; a
   Ⱶ-join path (split on Ⱶ, resolved link by link through `Key` fields to any depth); `user`;
@@ -144,35 +144,58 @@ all — the translator is invoked *per operation* with the flags folded to const
   pinned including the anonymous-null-match corner; every untranslatable construct named;
   unknown identifier asserted to be `Error`, not `Untranslatable`
 
-## Phase 3 — Reified evaluation on `deno_core`
+## Phase 3 — Reified evaluation on `deno_core` ✅
 
 Actually running the formula, for the constructs SQL cannot hold, and as the reference
 implementation the symbolic path is tested against.
 
-- [ ] `deno_core` dependency and a `JsEvaluator` behind a small trait (a deliberate seam:
-  it decouples the formula machinery from the engine. rusty_v8 does build on FreeBSD — the
-  ports tree's patches were upstreamed — but upstream publishes no prebuilt static lib for
-  it, so FreeBSD means a from-source V8 build; the trait is also where a lighter engine
-  (boa/quickjs) could slot in if V8's build weight ever becomes a problem).
-  A `JsRuntime` is `!Send`, so the evaluator owns a **dedicated thread** holding the runtime,
-  fed by a channel — the pattern the code adapters (§15) will reuse. No extensions, no ops:
-  the sandbox has no I/O to reach. A watchdog terminates runaway evaluation via the isolate
-  handle (`terminate_execution`) after a timeout; a terminated or throwing formula **denies**
-  (fail closed) and logs an application error
-- [ ] Scope binding: one call evaluates a formula against a row — each field name bound to
-  the row's value, `user` to the user's field object (or `null`), the five flags to the
-  operation, and each Ⱶ-identifier the analysis found bound to its **prefetched** join value.
-  The evaluator does not do I/O; the caller (§5) fetches join values, because only it has a
-  catalog. Result is coerced by JS truthiness to a bool
-- [ ] **Evaluate the normalisation, not the raw source.** The evaluator renders JS *from the
-  analysed AST*, wrapping ordered comparisons in null guards so their semantics match §2's
-  specification. This is what turns "the two evaluators should agree" from aspiration into
-  a provable property — both consume one AST with one specified semantics
-- [ ] **Parity tests, the gate for everything after this phase**: for every translatable
-  construct, evaluate formula × row × user matrices (including nulls throughout) both
-  reified and via the translated `Expr` executed against real Postgres, and assert
-  agreement. Plus evaluator unit tests: sandboxing (no `Deno`, no `fetch`), timeout
-  termination, a thrown error denying, truthiness coercion
+- [x] `deno_core` dependency (0.408) and a `JsEvaluator` behind a small trait
+  (`crates/sc-expr/src/eval.rs`; a deliberate seam: it decouples the formula machinery from
+  the engine. rusty_v8 does build on FreeBSD — the ports tree's patches were upstreamed —
+  but upstream publishes no prebuilt static lib for it, so FreeBSD means a from-source V8
+  build; the trait is also where a lighter engine (boa/quickjs) could slot in if V8's build
+  weight ever becomes a problem). A `JsRuntime` is `!Send`, so `DenoEvaluator` owns a
+  **dedicated thread** holding the runtime, fed by a channel (async callers await a oneshot)
+  — the pattern the code adapters (§15) will reuse. No extensions, no ops, and `globalThis.
+  Deno` (deno_core's own plumbing) deleted at setup: the sandbox test asserts `Deno`/`fetch`/
+  `require`/`process` are gone at the V8 level **and** that they are refused a layer earlier
+  — an identifier outside the formula vocabulary never reaches V8 at all, because the binder
+  errors on it. A watchdog thread terminates runaway evaluation via the isolate handle
+  (`terminate_execution`, then `cancel_terminate_execution` so the isolate recovers) after a
+  timeout (default 250ms); a terminated or throwing formula is an `Err`, and the trait
+  contract says **`Err` is deny** — the §5 caller logs it as an application error
+- [x] Scope binding: one call (`FormulaCall`) evaluates a formula against a row — each field
+  name bound to the row's value, `user` to the user's field object (or `null`), the five
+  flags to the operation (through the same fold table as the translator, by construction),
+  and each Ⱶ-identifier bound to its **prefetched** join value. The evaluator does not do
+  I/O; the caller (§5) fetches join values, because only it has a catalog — and a join value
+  the caller *failed* to prefetch is a named error, not a silent `undefined`. Result is
+  coerced by JS truthiness (`!!`) to a bool. Values ride into the script as one JSON literal
+  (JSON is syntactic JS), never string-concatenated — an injection-shaped value staying a
+  value is a test, asserted against the same isolate's globals afterwards
+- [x] **Evaluate the normalisation, not the raw source.** The evaluator renders JS *from the
+  analysed AST* (`src/normalise.rs`, a pure function unit-tested without V8): ordered
+  comparisons **and arithmetic** are null-guarded to `null` via single-evaluation IIFEs (JS
+  would coerce `null` to `0`; guarding to `null` rather than `false` keeps even the value
+  identical to SQL's), `==`/`!=` render strict, and `user.x` renders as
+  `(user === null ? null : user.x)` so an anonymous user reads as null instead of throwing.
+  `!`/`&&`/`||`/`?:`/`??` render **natively** — JS's two-valued logic is the spec, and §2's
+  translator was adjusted to meet it where the two differ: `!P` translates as
+  `P IS DISTINCT FROM TRUE` (SQL `NOT NULL` is `NULL` where JS `!null` is `true`), pinned by
+  a golden test and a parity case. Native logic also means untranslatable formulas keep
+  ordinary short-circuit behaviour on the fallback path
+- [x] **Parity tests, the gate for everything after this phase**
+  (`crates/sc-expr/tests/parity.rs`): for every translatable construct, formula × row × user
+  matrices (nulls throughout — including the anonymous null-match corner *and* the `user &&`
+  guard closing it, `!(pages < 100)` on a null row, null FKs at join depth one and two) both
+  reified and via the translated `Expr` executed against real Postgres — each case asserting
+  **three ways**: evaluators agree *and* match the expected verdict, so both drifting wrong
+  together still fails. GUC mode runs against a real `set_config` session, with the
+  missing-GUC case failing closed. Plus 10 evaluator unit tests: sandboxing (both layers),
+  timeout termination and isolate recovery, a thrown formula denying, an unbound join value
+  named, truthiness coercion, flags per operation, the Ⱶ-in-V8 assertion (closing Phase 1's
+  deferred claim), and the untranslatable class (`user.groups.some(g => g === dept)`)
+  actually running
 
 ## Phase 4 — Storage and the admin surface
 

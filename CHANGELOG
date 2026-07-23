@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## Ownership formulae milestone — reified evaluation on deno_core (Phase 3)
+
+Formulas now actually run: `sc-expr` gains the second evaluator — a real V8 isolate via
+`deno_core` 0.408 — and the parity suite proving it agrees with Phase 2's symbolic
+translation.
+
+- **`JsEvaluator` trait + `DenoEvaluator`** (`crates/sc-expr/src/eval.rs`): a `JsRuntime` is
+  `!Send`, so the evaluator owns a dedicated thread holding the isolate, fed jobs over a
+  channel (async callers await a oneshot) — the pattern the §15 code adapters will reuse.
+  The trait is the engine seam; its contract is explicit: `Ok(bool)` is the verdict, `Err`
+  (throw, timeout, unbound variable) **must be treated as deny**.
+- **Sandbox, two layers.** The isolate has no extensions, no ops, and `globalThis.Deno`
+  deleted at setup — `Deno`/`fetch`/`require`/`process` are asserted absent at the V8 level.
+  One layer up, an identifier outside the formula vocabulary (fields, Ⱶ-joins, `user`,
+  flags, whitelisted globals) is refused by the binder and never reaches V8 at all.
+- **Watchdog**: a per-evaluator thread armed per call terminates runaway JS through the
+  isolate's thread-safe handle (default 250ms) and the isolate recovers
+  (`cancel_terminate_execution`) — tested with a raw `while(true)` (the formula language
+  itself cannot express a loop, which is a feature).
+- **The normalised rendering** (`src/normalise.rs`, pure, unit-tested without V8): the
+  evaluator runs JS rendered *from the shared AST*, not the admin's source. `==`/`!=`
+  render strict; ordered comparisons and arithmetic are null-guarded to `null` via
+  single-evaluation IIFEs (JS coerces `null` to `0`; `null` rather than `false` keeps even
+  the value identical to SQL's); `user.x` renders as `(user === null ? null : user.x)`;
+  `!`/`&&`/`||`/`?:`/`??` render natively — two-valued JS logic *is* the spec, and the
+  Phase 2 translator was adjusted at the one point the logics differ: **`!P` now translates
+  as `P IS DISTINCT FROM TRUE`** (SQL `NOT NULL` is `NULL` where JS `!null` is `true`),
+  with a golden test.
+- **Binding**: a `FormulaCall` binds row fields, prefetched Ⱶ-join values (the evaluator
+  does no I/O — an unprefetched join value is a named error, not `undefined`), `user` as an
+  object or `null`, and the five flags through the same fold table as the translator.
+  Values enter the script as one JSON literal — never concatenated — and an
+  injection-shaped value staying a value is a test.
+- **The parity suite** (`tests/parity.rs`, real Postgres × real V8): formula × row × user
+  matrices over the whole translatable subset, each case asserted three ways (evaluators
+  agree *and* match the expected verdict). Null corners throughout: the anonymous
+  null-match and the `user && …` guard closing it, `!(pages < 100)` on a null row, null
+  FKs at join depth one and two, flags per operation, GUC mode against a real
+  `set_config` session with the missing-GUC case failing closed.
+- 20 new unit tests (10 evaluator + 8 renderer + 2 translator) and the 2-test parity
+  suite; the Ⱶ-in-V8 assertion closes the claim Phase 1 deferred.
+
 ## Ownership formulae milestone — symbolic evaluation to SQL (Phase 2)
 
 A formula now becomes a `sc_query::Expr` predicate: `translate(&formula, op, env, shape,

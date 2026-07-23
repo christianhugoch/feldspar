@@ -25,12 +25,15 @@
 
 mod analyze;
 mod ast;
+mod eval;
 mod formula;
+mod normalise;
 mod shape;
 mod translate;
 
 pub use analyze::{Analysis, FreeVars, JOIN, JoinPath, OpFlag};
 pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
+pub use eval::{DenoEvaluator, FormulaCall, JsEvaluator};
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
 pub use translate::{Operation, TranslateError, USER_GUC, UserEnv, translate};

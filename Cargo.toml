@@ -112,6 +112,12 @@ rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 swc_common = "24"
 swc_ecma_ast = "26"
 swc_ecma_parser = "42"
+# The reified formula evaluator (TODO Phase 3): a real V8 isolate via deno_core,
+# so a formula runs under exactly the engine whose grammar swc parses. Built
+# with no extensions and no ops — the sandbox has no I/O to reach. Pulls the
+# prebuilt static rusty_v8 lib on the big platforms; FreeBSD builds V8 from
+# source (upstream carries the ports patches but publishes no binary).
+deno_core = "0.408"
 # Regex engine for the `String` rich type's `regex` attribute (§2.2). `regex-lite`
 # rather than `regex`: a field-validation pattern needs correct matching, not the
 # full crate's SIMD/perf dependency tree (aho-corasick, memchr, regex-automata),

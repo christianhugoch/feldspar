@@ -24,10 +24,13 @@
 //! - **Ordered comparisons keep SQL semantics**: a null operand grants nothing.
 //!   JS's `null < 5 === true` coercion is specified away; the normalised
 //!   rendering wraps ordered comparisons in null guards to match.
-//! - **`&&`/`||`/`!` are boolean here.** In a predicate position that agrees
-//!   with JS truthiness; in a *value* position (`x === (a && b)`) JS returns an
-//!   operand, not a boolean, so that is refused as untranslatable rather than
-//!   silently wrong.
+//! - **The logic is two-valued, as JS's is.** `&&`/`||`/`?:` line up with
+//!   `AND`/`OR`/`CASE` as they are (a null predicate is falsy on both sides),
+//!   but `!` does not: JS `!null` is `true` while SQL `NOT NULL` is `NULL`. So
+//!   `!P` translates as `P IS DISTINCT FROM TRUE` — "not provenly true" — which
+//!   is exactly JS `!` over a two-valued-with-null predicate. In a *value*
+//!   position (`x === (a && b)`) JS returns an operand, not a boolean, so that
+//!   is refused as untranslatable rather than silently wrong.
 //! - **A bare value as a condition** (`vip && …` where `vip` is a field) needs
 //!   the field's type to decide truthiness, which the translator does not have —
 //!   untranslatable, with a message suggesting the explicit comparison. The two
@@ -284,7 +287,7 @@ impl Translator<'_> {
             Ast::Unary {
                 op: UnaryOp::Not,
                 expr,
-            } => Ok(QExpr::unary(QUnOp::Not, self.predicate(expr)?)),
+            } => Ok(not_pred(self.predicate(expr)?)),
             Ast::Binary { op, l, r } => match op {
                 BinaryOp::And => Ok(self.predicate(l)?.and(self.predicate(r)?)),
                 BinaryOp::Or => Ok(self.predicate(l)?.or(self.predicate(r)?)),
@@ -374,7 +377,7 @@ impl Translator<'_> {
             Ast::Member { .. } => untranslatable("property access on something other than `user`"),
             Ast::Unary { op, expr } => match op {
                 UnaryOp::Neg => Ok(QExpr::unary(QUnOp::Neg, self.value(expr)?)),
-                UnaryOp::Not => Ok(QExpr::unary(QUnOp::Not, self.predicate(expr)?)),
+                UnaryOp::Not => Ok(not_pred(self.predicate(expr)?)),
                 UnaryOp::Pos => untranslatable("unary `+` (numeric coercion)"),
                 UnaryOp::TypeOf => untranslatable("`typeof`"),
             },
@@ -608,6 +611,14 @@ fn guc_raw() -> QExpr {
 
 fn is_user(ast: &Ast) -> bool {
     matches!(ast, Ast::Ident(name) if name == "user")
+}
+
+/// JS `!` over a predicate that may be SQL `NULL`: `P IS DISTINCT FROM TRUE`.
+/// Plain `NOT NULL` would be `NULL` (deny), where JS `!null` is `true` (grant)
+/// — the one spot where SQL's three-valued logic and JS's two-valued logic
+/// part ways, resolved in JS's favour because the formula language is JS.
+fn not_pred(p: QExpr) -> QExpr {
+    QExpr::binary(QBinOp::IsDistinct, p, QExpr::lit(true))
 }
 
 /// A JS number literal as a SQL value: integral f64s (the common case — row
@@ -898,6 +909,17 @@ mod tests {
         let (sql, binds) = where_sql("pages >= 100", Operation::Read, &env);
         assert_eq!(sql, "(\"books\".\"pages\" >= $1)");
         assert_eq!(binds, vec![Value::Int(100)]);
+    }
+
+    #[test]
+    fn negation_is_two_valued_not_three_valued() {
+        // JS `!null` is `true`; SQL `NOT NULL` is `NULL`. `!P` therefore
+        // renders as `P IS DISTINCT FROM TRUE`, so a null-paged row *is*
+        // granted by `!(pages < 100)` — on both evaluators.
+        let env = UserEnv::Inline(None);
+        let (sql, binds) = where_sql("!(pages < 100)", Operation::Read, &env);
+        assert_eq!(sql, "((\"books\".\"pages\" < $1) IS DISTINCT FROM $2)");
+        assert_eq!(binds, vec![Value::Int(100), Value::Bool(true)]);
     }
 
     #[test]

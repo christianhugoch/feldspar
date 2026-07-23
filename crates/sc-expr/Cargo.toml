@@ -8,12 +8,19 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+deno_core = { workspace = true }
 sc-error = { workspace = true }
 sc-query = { workspace = true }
 serde_json = { workspace = true }
 swc_common = { workspace = true }
 swc_ecma_ast = { workspace = true }
 swc_ecma_parser = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+sc-test-harness = { workspace = true }
+tokio-postgres = { workspace = true }
 
 [lints]
 workspace = true
