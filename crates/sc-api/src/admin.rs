@@ -623,6 +623,17 @@ fn table_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("name", TypeSchema::text())];
     fields.extend(table_settings_fields());
     fields.push(StructField::new("configured", TypeSchema::bool()));
+    // Why the stored ownership formula is not in effect, when it is not — a
+    // stored formula can stop validating when the schema changes under it
+    // (fail closed, §7.3), and the admin fixes it where they typed it.
+    fields.push(StructField::new(
+        "ownership_error",
+        TypeSchema::optional(TypeSchema::text()),
+    ));
+    // Whether the backend can enforce RLS at all (`DbCapabilities`). The SPA
+    // renders the RLS toggle only when this is true — a toggle that can only
+    // ever be refused is not a setting, it is a trap.
+    fields.push(StructField::new("rls_available", TypeSchema::bool()));
     TypeSchema::Struct(fields)
 }
 
@@ -634,6 +645,14 @@ fn table_settings_fields() -> Vec<StructField> {
         StructField::new("description", TypeSchema::text()),
         StructField::new("min_role_read", TypeSchema::int()),
         StructField::new("min_role_write", TypeSchema::int()),
+        // The ownership formula source (§7.3); empty means "none". Validated
+        // on save: an unknown identifier or a broken Ⱶ-path is a 400 naming
+        // it, and nothing is written.
+        StructField::new("ownership_formula", TypeSchema::text()),
+        // Stored and surfaced in this phase; §6 makes it enforce. Refused on
+        // save when the backend cannot do RLS or the formula cannot become a
+        // policy.
+        StructField::new("rls_enabled", TypeSchema::bool()),
     ]
 }
 

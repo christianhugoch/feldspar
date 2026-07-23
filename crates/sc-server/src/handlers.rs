@@ -30,16 +30,17 @@ use sc_app::{
     require_scaffoldable, save_application, scaffold_app,
 };
 use sc_auth::{
-    COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, any_user_exists,
-    authenticate_admin, create_first_user, create_user, delete_role, list_roles, save_role,
+    COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE,
+    User, any_user_exists, authenticate_admin, create_first_user, create_user, delete_role,
+    list_roles, save_role,
 };
 use sc_catalog::{
-    AccessRules, Attrs, Catalog, DataField, DataFieldKind, FIELD_META_TABLE, FieldId, FieldMeta,
-    FileStoreId, Table, TableId, TableMeta, connect_file_store_def, delete_file_store,
-    delete_table_meta, file_kind_config_spec, key_kind_config_spec, list_field_meta_for_table,
-    list_file_stores, load_field_meta_by_field, load_file_store, load_file_store_by_name,
-    load_table_meta_by_name, orphan_table_meta, resolve_options, save_field_meta, save_file_store,
-    save_table_meta,
+    ATTR_OWNERSHIP_FORMULA, AccessRules, Attrs, Catalog, DataField, DataFieldKind,
+    FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId, Table, TableId, TableMeta,
+    connect_file_store_def, delete_file_store, delete_table_meta, file_kind_config_spec,
+    key_kind_config_spec, list_field_meta_for_table, list_file_stores, load_field_meta_by_field,
+    load_file_store, load_file_store_by_name, load_table_meta_by_name, orphan_table_meta,
+    resolve_options, save_field_meta, save_file_store, save_table_meta,
 };
 use sc_error::{Error, Result};
 use sc_files::{
@@ -136,11 +137,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |_ctx| {
             let catalog = catalog.clone();
             async move {
+                let rls = catalog.primary().capabilities().row_level_security;
                 let tables = catalog.tables()?;
                 let out: Vec<Json> = tables
                     .iter()
                     .filter(|t| !t.is_system())
-                    .map(table_json)
+                    .map(|t| table_json(t, rls))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -158,7 +160,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .required()
                     .primary_key();
                 let table = catalog.create_table(name, &[id]).await?;
-                Ok(HandlerResponse::ok(table_json(&table)).with_status(201))
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(table_json(&table, rls)).with_status(201))
             }
         }
     });
@@ -192,6 +195,16 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     min_role_write: role_field(obj, "min_role_write")?,
                 };
 
+                // Ownership settings (§7.3): validated before anything is
+                // written — an unknown identifier, a broken Ⱶ-path or an
+                // un-honourable RLS flag is a 400 naming the problem, and the
+                // stored configuration is untouched.
+                let formula = str_field(obj, "ownership_formula")?.trim().to_owned();
+                let rls_enabled = bool_field(obj, "rls_enabled")?;
+                validate_ownership_settings(&catalog, &table.name, &formula, rls_enabled)?;
+                meta.set_ownership_formula(Some(&formula));
+                meta.set_rls_enabled(rls_enabled);
+
                 // Saving reloads the catalog, so the table read back here — and
                 // served to the next request — already carries the new rules.
                 save_table_meta(&catalog, &meta).await?;
@@ -200,8 +213,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // old rules until a restart. Re-project the providers of any app
                 // exposing this table, live. This is the seam §1.4 is about.
                 apps.refresh_table(&table.name)?;
+                let rls = catalog.primary().capabilities().row_level_security;
                 Ok(HandlerResponse::ok(table_json(
                     &catalog.require(&table.name)?,
+                    rls,
                 )))
             }
         }
@@ -248,6 +263,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                             "description": meta.description,
                             "min_role_read": meta.access.min_role_read,
                             "min_role_write": meta.access.min_role_write,
+                            "ownership_formula": meta.ownership_formula().unwrap_or(""),
+                            "rls_enabled": meta.rls_enabled(),
                         })
                     })
                     .collect();
@@ -1738,7 +1755,7 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
 /// `configured` is the overlay's *presence*, not its content. A table an admin
 /// deliberately set to admin-only and one nobody has ever opened both report
 /// `1`/`1`; only the first has a row, and only the first can be "forgotten".
-fn table_json(table: &Table) -> Json {
+fn table_json(table: &Table, rls_available: bool) -> Json {
     json!({
         "name": table.name,
         "label": table.label,
@@ -1746,7 +1763,88 @@ fn table_json(table: &Table) -> Json {
         "min_role_read": table.access.min_role_read,
         "min_role_write": table.access.min_role_write,
         "configured": table.overlay.is_some(),
+        // The live formula's source — or, when the stored source failed to
+        // parse/validate at merge time, still that source (from attributes) so
+        // the admin edits what they typed, with `ownership_error` saying what
+        // is wrong and `ownership` granting nothing meanwhile (fail closed).
+        "ownership_formula": table.ownership.as_ref().map(|f| f.source().to_owned())
+            .or_else(|| table.attributes.get(ATTR_OWNERSHIP_FORMULA)
+                .and_then(Json::as_str).map(str::to_owned))
+            .unwrap_or_default(),
+        "ownership_error": table.ownership_error,
+        "rls_enabled": table.rls_enabled,
+        "rls_available": rls_available,
     })
+}
+
+/// Validate a table's ownership settings before anything is written (§7.3):
+/// the formula must parse and validate against the current schema, and
+/// enabling RLS additionally requires a backend that can enforce it and a
+/// formula the symbolic translator can turn into policies — §6 owns making the
+/// flag *do* something, but a flag that can never be honoured must be refused
+/// at the moment the admin can still fix it.
+fn validate_ownership_settings(
+    catalog: &Catalog,
+    table: &str,
+    source: &str,
+    rls_enabled: bool,
+) -> Result<()> {
+    if source.is_empty() {
+        if rls_enabled {
+            return Err(Error::invalid(
+                "row-level security needs an ownership formula to enforce; \
+                 set a formula or disable RLS",
+            ));
+        }
+        return Ok(());
+    }
+    let formula = sc_expr::Formula::parse(source)?;
+    let shape = catalog.schema_shape()?;
+    formula.validate(&shape, table)?;
+    if rls_enabled {
+        if !catalog.primary().capabilities().row_level_security {
+            return Err(Error::invalid(
+                "the connected database does not support row-level security",
+            ));
+        }
+        // Policies are per-operation; the formula must translate for all four
+        // under the GUC environment the policies will use.
+        let env = sc_expr::UserEnv::Guc {
+            field_types: user_field_types(catalog)?,
+        };
+        for op in [
+            sc_expr::Operation::Read,
+            sc_expr::Operation::Insert,
+            sc_expr::Operation::Update,
+            sc_expr::Operation::Delete,
+        ] {
+            if let Err(e) = sc_expr::translate(&formula, op, &env, &shape, table) {
+                return Err(Error::invalid(format!(
+                    "cannot enable row-level security: {e}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The user table's fields mapped to their SQL types — what the GUC
+/// translation casts `user.x` extractions to. The password hash is excluded
+/// for the same reason `Catalog::schema_shape` excludes it: not formula
+/// business.
+fn user_field_types(catalog: &Catalog) -> Result<BTreeMap<String, String>> {
+    let mut map = BTreeMap::new();
+    if let Some(users) = catalog.get(USERS_TABLE)? {
+        for field in &users.fields {
+            if field.base.name != COL_PASSWORD_HASH {
+                map.insert(
+                    field.base.name.clone(),
+                    field.base.type_.sql_type().to_owned(),
+                );
+            }
+        }
+    }
+    Ok(map)
 }
 
 /// A required role field of an object body: an integer on the `1..=100` scale.
@@ -1859,4 +1957,11 @@ fn int_field(obj: &Map<String, Json>, key: &str) -> Result<i64> {
     obj.get(key)
         .and_then(Json::as_i64)
         .ok_or_else(|| Error::invalid(format!("missing or non-integer field `{key}`")))
+}
+
+/// A required boolean field of an object body.
+fn bool_field(obj: &Map<String, Json>, key: &str) -> Result<bool> {
+    obj.get(key)
+        .and_then(Json::as_bool)
+        .ok_or_else(|| Error::invalid(format!("missing or non-boolean field `{key}`")))
 }

@@ -7,16 +7,23 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# The reified evaluator (Phase 3) rides behind the `eval` feature so that
+# consumers which only parse/validate/translate — `sc-catalog` merging stored
+# formulas — do not link V8 into their build. `sc-server` (Phase 5) turns it on.
+[features]
+default = ["eval"]
+eval = ["dep:deno_core", "dep:tokio", "dep:async-trait"]
+
 [dependencies]
-async-trait = { workspace = true }
-deno_core = { workspace = true }
+async-trait = { workspace = true, optional = true }
+deno_core = { workspace = true, optional = true }
 sc-error = { workspace = true }
 sc-query = { workspace = true }
 serde_json = { workspace = true }
 swc_common = { workspace = true }
 swc_ecma_ast = { workspace = true }
 swc_ecma_parser = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 sc-test-harness = { workspace = true }

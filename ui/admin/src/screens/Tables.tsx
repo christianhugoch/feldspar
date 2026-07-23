@@ -10,6 +10,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
+import Badge from "react-bootstrap/Badge";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
 import InputGroup from "react-bootstrap/InputGroup";
@@ -142,6 +143,23 @@ export function Tables() {
                   </>
                 ) : (
                   t.name
+                )}
+                {/* Ownership marks: the roles alone no longer tell the whole
+                    access story for a table with a formula, so say so here. */}
+                {t.ownership_formula && !t.ownership_error && (
+                  <Badge bg="info" text="dark" className="ms-2" title={t.ownership_formula}>
+                    formula
+                  </Badge>
+                )}
+                {t.ownership_error && (
+                  <Badge bg="warning" text="dark" className="ms-2" title={t.ownership_error}>
+                    formula error
+                  </Badge>
+                )}
+                {t.rls_enabled && (
+                  <Badge bg="secondary" className="ms-2">
+                    RLS
+                  </Badge>
                 )}
               </td>
               <td>{roleLabel(t.min_role_read, roles)}</td>

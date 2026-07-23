@@ -41,7 +41,10 @@ rust-version = "1.85"
 [workspace.dependencies]
 sc-error = { path = "crates/sc-error" }
 sc-query = { path = "crates/sc-query" }
-sc-expr = { path = "crates/sc-expr" }
+# `default-features = false` at the workspace level so members choose: the
+# catalog takes the parse/validate/translate half only; the server adds
+# `features = ["eval"]` for the V8-backed reified evaluator.
+sc-expr = { path = "crates/sc-expr", default-features = false }
 sc-db = { path = "crates/sc-db" }
 sc-db-postgres = { path = "crates/sc-db-postgres" }
 sc-types = { path = "crates/sc-types" }

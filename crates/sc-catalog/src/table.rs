@@ -103,6 +103,22 @@ pub struct Table {
     /// that saving a change updates the existing row instead of racing to create
     /// a second one for the same table.
     pub overlay: Option<TableMetaId>,
+    /// The table's ownership formula (§7.3), parsed at merge time and — when it
+    /// passed the catalog-wide validation in [`Catalog::reload`] — ready for
+    /// the evaluators. `None` when no formula is stored **or** when the stored
+    /// one failed to parse or validate: a broken formula **grants nothing**
+    /// (fail closed), and [`ownership_error`](Table::ownership_error) says why.
+    ///
+    /// [`Catalog::reload`]: crate::Catalog::reload
+    pub ownership: Option<sc_expr::Formula>,
+    /// Why the stored ownership formula is not in effect, when it is not — a
+    /// parse or validation failure reported on the table itself, so the admin
+    /// UI can show it exactly where the formula is edited. `None` when there is
+    /// no formula or the formula is live.
+    pub ownership_error: Option<String>,
+    /// Whether row-level security is enabled for this table (§7.3; enforcement
+    /// is Phase 6's — until then the flag is stored and surfaced, not acted on).
+    pub rls_enabled: bool,
 }
 
 impl Table {
@@ -141,6 +157,9 @@ impl Table {
             access: AccessRules::default(),
             attributes: Attrs::new(),
             overlay: None,
+            ownership: None,
+            ownership_error: None,
+            rls_enabled: false,
         }
     }
 
@@ -176,6 +195,27 @@ impl Table {
         self.access = meta.access.clone();
         self.attributes = meta.attributes.clone();
         self.overlay = Some(meta.id);
+        self.rls_enabled = meta.rls_enabled();
+
+        // Parse the stored ownership formula here; *validate* it in
+        // `Catalog::reload`, which sees the whole schema (a Ⱶ-path crosses
+        // tables, so one table cannot check its own formula). A source that
+        // does not parse fails closed now: no formula, and the reason on the
+        // table for the admin UI to show.
+        match meta.ownership_formula().map(sc_expr::Formula::parse) {
+            None => {
+                self.ownership = None;
+                self.ownership_error = None;
+            }
+            Some(Ok(formula)) => {
+                self.ownership = Some(formula);
+                self.ownership_error = None;
+            }
+            Some(Err(e)) => {
+                self.ownership = None;
+                self.ownership_error = Some(e.to_string());
+            }
+        }
     }
 
     /// Apply a field overlay row to the matching field of this table (design
@@ -350,7 +390,48 @@ mod tests {
             access: AccessRules::default(),
             attributes: Attrs::new(),
             overlay: None,
+            ownership: None,
+            ownership_error: None,
+            rls_enabled: false,
         }
+    }
+
+    #[test]
+    fn an_overlay_with_an_ownership_formula_parses_it() {
+        let mut table = books();
+        let mut meta = TableMeta::new("books");
+        meta.set_ownership_formula(Some("title === user.id"));
+        meta.set_rls_enabled(true);
+        table.apply_overlay(&meta);
+        assert_eq!(
+            table.ownership.as_ref().map(|f| f.source()),
+            Some("title === user.id")
+        );
+        assert!(table.ownership_error.is_none());
+        assert!(table.rls_enabled);
+
+        // Clearing the formula clears it on the next merge too.
+        meta.set_ownership_formula(None);
+        meta.set_rls_enabled(false);
+        table.apply_overlay(&meta);
+        assert!(table.ownership.is_none());
+        assert!(!table.rls_enabled);
+    }
+
+    #[test]
+    fn an_unparseable_stored_formula_fails_closed_with_the_reason() {
+        // What a hand-edited attributes blob can hold. The formula grants
+        // nothing (None) and the reason rides on the table for the admin UI.
+        let mut table = books();
+        let mut meta = TableMeta::new("books");
+        meta.attributes.insert(
+            crate::table_meta::ATTR_OWNERSHIP_FORMULA.into(),
+            serde_json::Value::String("owner === ((".into()),
+        );
+        table.apply_overlay(&meta);
+        assert!(table.ownership.is_none());
+        let err = table.ownership_error.as_deref().unwrap();
+        assert!(err.contains("parse error"), "got: {err}");
     }
 
     #[test]

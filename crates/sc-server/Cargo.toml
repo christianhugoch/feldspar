@@ -11,6 +11,10 @@ rust-version.workspace = true
 [dependencies]
 sc-error.workspace = true
 sc-catalog.workspace = true
+# Ownership formulas (§7.3): validation and the RLS translatability check on
+# save. The `eval` feature (the V8 reified evaluator) arrives with Phase 5's
+# runtime enforcement.
+sc-expr.workspace = true
 sc-auth.workspace = true
 sc-files.workspace = true
 sc-app.workspace = true

@@ -42,8 +42,9 @@ pub use file_stores::{
 pub use provider::{DriverTableProvider, TableProvider};
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
-    TABLE_META_TABLE, TableMeta, TableMetaId, bootstrap_table_meta, delete_table_meta,
-    list_table_meta, load_table_meta, load_table_meta_by_name, orphan_table_meta, save_table_meta,
+    ATTR_OWNERSHIP_FORMULA, ATTR_RLS_ENABLED, TABLE_META_TABLE, TableMeta, TableMetaId,
+    bootstrap_table_meta, delete_table_meta, list_table_meta, load_table_meta,
+    load_table_meta_by_name, orphan_table_meta, save_table_meta,
 };
 
 #[cfg(test)]

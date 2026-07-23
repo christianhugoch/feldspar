@@ -197,27 +197,54 @@ implementation the symbolic path is tested against.
   deferred claim), and the untranslatable class (`user.groups.some(g => g === dept)`)
   actually running
 
-## Phase 4 — Storage and the admin surface
+## Phase 4 — Storage and the admin surface ✅
 
-- [ ] `ownership_formula` (string) and `rls_enabled` (bool) live in `TableMeta.attributes`
+- [x] `ownership_formula` (string) and `rls_enabled` (bool) live in `TableMeta.attributes`
   — GOALS names attributes for `rls_enabled` explicitly, and both are sparse (§9's rule);
-  typed accessors on `TableMeta`, no new columns. The merged `Table` exposes
-  `ownership: Option<Formula>` parsed at merge time
-- [ ] `updateTable` accepts and **validates** the formula via `Formula::validate` — an
-  unknown identifier, bad join path or parse error is a 400 naming the problem, nothing
-  written. A formula already stored that fails validation at merge time (a field was
-  dropped; a restored dump) is a **reported issue** in the §3.2 style (`field_overlay_issues`
-  precedent) and **grants nothing** until repaired — fail closed, table stays min_role-only
-- [ ] `table_schema()` grows `ownership_formula` and `rls_enabled`; `updateTable` refuses
-  `rls_enabled: true` when the backend lacks `DbCapabilities::row_level_security` or the
-  formula does not translate (§6 owns making it true *work*)
-- [ ] Admin SPA (`ui/admin` `TableDetail.tsx` settings card): a formula textarea with the
-  server's validation error surfaced inline, and an RLS toggle rendered only when the
-  capability is advertised; the table list marks tables with a formula. Regenerate the TS
-  client; `tsc --noEmit` and `vite build` gates as before
-- [ ] Tests: round-trip through the HTTP surface; each invalid-formula shape refused with
-  nothing written; the merge-time issue reported and failing closed (integration, real
-  Postgres)
+  typed accessors on `TableMeta` (`crates/sc-catalog/src/table_meta.rs`; clearing removes
+  the key, so an untouched table has no residue), no new columns. The merged `Table`
+  exposes `ownership: Option<Formula>` parsed at merge time, plus `ownership_error` and
+  `rls_enabled`. **Prerequisite landed here:** `sc-expr` grew an `eval` cargo feature so
+  `sc-catalog` links the parse/validate/translate half only — V8 stays out of every crate
+  below the server. **Validation is a two-step merge:** `apply_overlay` *parses* (a broken
+  source fails closed immediately); `Catalog::reload` *validates* after every table has
+  merged, because a Ⱶ-path crosses tables — which is also where `Catalog::schema_shape()`
+  was born, the catalog-to-`sc-expr` projection §5/§6 will reuse (user fields from the
+  `users` table minus `password_hash`, which is not formula business)
+- [x] `updateTable` accepts and **validates** the formula via `Formula::validate` — an
+  unknown identifier, bad join path, parse error or unknown `user.x` is a 400 naming the
+  problem, nothing written (each shape tested, with the stored formula asserted unchanged
+  after every refusal). A formula already stored that fails validation at merge time (a
+  field was dropped; a restored dump) is reported and **grants nothing** until repaired —
+  fail closed, table stays min_role-only. **Deviation from the §3.2-style issue list,
+  deliberate:** the report rides on the `Table` itself (`ownership_error`) rather than in a
+  catalog-level list, because unlike a field issue it has exactly one home — the settings
+  card where the formula is edited — and the SPA gets it for free in every table response
+- [x] `table_schema()` grows `ownership_formula` and `rls_enabled` (settings, in and out)
+  plus two output-only fields: `ownership_error` (the fail-closed report) and
+  `rls_available` (the backend capability — the SPA renders the RLS toggle only when it is
+  true; a toggle that can only ever be refused is a trap, not a setting). `updateTable`
+  refuses `rls_enabled: true` when the backend lacks
+  `DbCapabilities::row_level_security`, when there is no formula to enforce, or when the
+  formula does not translate under the GUC env **for all four operations** (§6 owns making
+  it true *work*; the flag is stored-but-inert until then). The settings fields stay
+  required-not-optional, so the nine existing settings `PUT`s in tests state them too
+- [x] Admin SPA (`ui/admin` `TableDetail.tsx` settings card): a formula textarea (monospace,
+  `owner === user.id` placeholder) with the server's validation message surfaced inline
+  (the save error now shows what the server said, not a generic sentence), a warning
+  banner when a *stored* formula is not in effect (`ownership_error`), and an RLS switch
+  rendered only when `rls_available`; the table list (`Tables.tsx`) badges tables with a
+  formula (`formula` / `formula error` / `RLS`, tooltips carrying the detail). TS client
+  regenerated via `emit_admin_client` (sync test green); `tsc --noEmit` and `vite build`
+  both pass
+- [x] Tests: 3 integration over HTTP (`crates/sc-server/tests/ownership_settings_api.rs`) —
+  round-trip through save and listing; five invalid-formula shapes refused by name with the
+  stored formula asserted unchanged after each; the RLS flag refused for an untranslatable
+  formula (which stores fine *without* the flag — the §5 fallback is for it), for no
+  formula, and accepted for a translatable one; schema drift (`DROP COLUMN` behind the
+  server's back) failing closed with the reason on the table and the repair clearing it —
+  plus 3 unit (accessor round-trip incl. clear-removes-key, `apply_overlay` parse and
+  fail-closed paths)
 
 ## Phase 5 — Runtime enforcement (no RLS)
 

@@ -14,6 +14,11 @@ sc-query.workspace = true
 sc-db.workspace = true
 sc-types.workspace = true
 sc-files.workspace = true
+# Ownership formulas (§7.3): the catalog parses and validates a table's stored
+# formula at merge time. The workspace dep defaults `sc-expr`'s features off,
+# which keeps V8 (the `eval` feature) out of this crate's build — the catalog
+# only ever parses, validates and describes; evaluation happens in the server.
+sc-expr = { workspace = true }
 async-trait.workspace = true
 # The `_sc_file_stores` JSON columns (a backend's settings, sparse attributes).
 serde_json.workspace = true

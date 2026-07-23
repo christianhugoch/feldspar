@@ -1124,6 +1124,9 @@ mod tests {
             access: AccessRules::default(),
             attributes: Default::default(),
             overlay: None,
+            ownership: None,
+            ownership_error: None,
+            rls_enabled: false,
         }
     }
 

@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## Ownership formulae milestone — storage and the admin surface (Phase 4)
+
+An admin can now write an ownership formula on a table and store the RLS flag; the catalog
+merges, validates and fails closed; the SPA edits it all. Enforcement is Phases 5/6 — this
+phase makes the configuration real, validated, and visible.
+
+- **Storage** (`sc-catalog`): `ownership_formula` and `rls_enabled` live in
+  `TableMeta.attributes` (sparse, per §9; GOALS names attributes for `rls_enabled`
+  explicitly) behind typed accessors — clearing removes the key, so an untouched table has
+  no residue. The merged `Table` gains `ownership: Option<Formula>`, `ownership_error` and
+  `rls_enabled`.
+- **The merge validates in two steps**: `apply_overlay` *parses* the stored source (a
+  broken one fails closed on the spot); `Catalog::reload` *validates* after all tables have
+  merged — a Ⱶ-path crosses tables, so no table can check its own formula. A formula that
+  stops validating (schema drift, a restored dump) **grants nothing** and the reason rides
+  on the table itself as `ownership_error` — one home, the settings card — rather than in a
+  catalog-level issue list. New `Catalog::schema_shape()` is the catalog→`sc-expr`
+  projection (user fields from `users` minus `password_hash`), reused by save-time
+  validation and by Phases 5/6.
+- **`sc-expr` grew an `eval` cargo feature** (default on; workspace default off): the
+  catalog links the parse/validate/translate half only, keeping V8 out of every crate below
+  the server.
+- **Admin API**: `updateTable` accepts `ownership_formula` + `rls_enabled` (required, like
+  the other settings — a save states the whole configuration), validates before writing
+  (parse, identifiers, Ⱶ-paths, `user.x` against the user table), and refuses
+  `rls_enabled: true` when the backend lacks `DbCapabilities::row_level_security`, when
+  there is no formula, or when the formula does not translate under the GUC environment for
+  all four operations — a flag that could never be honoured is refused while the admin can
+  still fix it (§6 makes the stored flag enforce). `table_schema()` adds those two plus
+  output-only `ownership_error` and `rls_available`; orphan listings carry the formula
+  fields too.
+- **Admin SPA**: the table settings card gains a monospace formula textarea with the
+  server's validation message inline, a warning banner when a stored formula is not in
+  effect, and an RLS switch rendered only when the backend advertises the capability. The
+  tables list badges `formula` / `formula error` / `RLS`. TS client regenerated; `tsc` and
+  `vite build` pass.
+- **Tests**: 3 HTTP integration tests (round-trip; five invalid shapes refused by name with
+  nothing written; RLS-flag refusals and acceptance; `DROP COLUMN` schema drift failing
+  closed and repairable) + 3 unit tests on the accessors and the merge's parse/fail-closed
+  paths. The nine pre-existing settings `PUT`s across the test suite now state the new
+  required fields.
+
 ## Ownership formulae milestone — reified evaluation on deno_core (Phase 3)
 
 Formulas now actually run: `sc-expr` gains the second evaluator — a real V8 isolate via

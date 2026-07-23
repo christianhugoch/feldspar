@@ -101,6 +101,9 @@ fn generated_app_rest_client_type_checks() -> std::io::Result<()> {
         access: AccessRules::default(),
         attributes: Default::default(),
         overlay: None,
+        ownership: None,
+        ownership_error: None,
+        rls_enabled: false,
     };
     let provider = RestProvider::project("/api", &[posts]);
     let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));

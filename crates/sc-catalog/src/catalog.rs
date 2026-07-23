@@ -134,6 +134,28 @@ impl Catalog {
             }
         }
 
+        // Ownership formulas were *parsed* by `apply_overlay`; validation needs
+        // the whole schema (a Ⱶ-path crosses tables), so it runs here, after
+        // every table has merged. A formula that fails validation is cleared —
+        // it **grants nothing** (fail closed) — and the reason is left on the
+        // table for the admin UI, exactly like a field-overlay issue: reported,
+        // never fatal, the table stays usable at its `min_role`s.
+        let shape = schema_shape_of(&map);
+        let mut ownership_errors: Vec<(TableId, String)> = Vec::new();
+        for (id, table) in &map {
+            if let Some(formula) = &table.ownership
+                && let Err(e) = formula.validate(&shape, &table.name)
+            {
+                ownership_errors.push((id.clone(), e.to_string()));
+            }
+        }
+        for (id, message) in ownership_errors {
+            if let Some(table) = map.get_mut(&id) {
+                table.ownership = None;
+                table.ownership_error = Some(message);
+            }
+        }
+
         // The DB I/O is done; take the locks only to swap in the new snapshots so
         // they are never held across an await.
         let mut guard = self
@@ -160,6 +182,19 @@ impl Catalog {
             .read()
             .map_err(|_| Error::msg("catalog field-overlay issue lock poisoned"))?;
         Ok(guard.clone())
+    }
+
+    /// The catalog described as an `sc_expr` [`SchemaShape`] — what formula
+    /// validation and translation (§7.3) see: every table's fields, each Key
+    /// field's target, and the user object's fields. This is the projection
+    /// that keeps `sc-expr` below the catalog in the dependency graph: the
+    /// catalog describes tables *to* it, never the other way around.
+    pub fn schema_shape(&self) -> Result<sc_expr::SchemaShape> {
+        let guard = self
+            .cache
+            .read()
+            .map_err(|_| Error::msg("catalog cache lock poisoned"))?;
+        Ok(schema_shape_of(&guard))
     }
 
     /// The cached table with the given name, if present.
@@ -341,4 +376,45 @@ impl Catalog {
         names.sort();
         Ok(names)
     }
+}
+
+/// The user table's name and its password column. These mirror `sc-auth`'s
+/// constants — that crate sits *above* this one in the layering, so the names
+/// are restated here rather than imported. Both are design constants (§7.1:
+/// users live in a table called `users`; the hash column is not deletable), not
+/// configuration.
+const USERS_TABLE: &str = "users";
+const USERS_PASSWORD_COLUMN: &str = "password_hash";
+
+/// Project a table cache into the [`sc_expr::SchemaShape`] formula validation
+/// and translation consume: field names, Key targets, and the user object's
+/// fields — everything the user table has except the password hash, which a
+/// formula has no business reading (`sc-auth` never exposes it on a `User`
+/// either, so a formula naming it would bind nothing and always deny).
+fn schema_shape_of(map: &HashMap<TableId, Table>) -> sc_expr::SchemaShape {
+    let mut shape = sc_expr::SchemaShape::new();
+    for table in map.values() {
+        let mut table_shape = sc_expr::TableShape::new();
+        for field in &table.fields {
+            table_shape = match &field.kind {
+                crate::field::DataFieldKind::Key {
+                    target_table,
+                    target_field,
+                    ..
+                } => table_shape.key_field(&field.base.name, &target_table.0, &target_field.0),
+                _ => table_shape.field(&field.base.name),
+            };
+        }
+        shape = shape.table(&table.name, table_shape);
+    }
+    if let Some(users) = map.get(&TableId(USERS_TABLE.to_owned())) {
+        shape = shape.user_fields(
+            users
+                .fields
+                .iter()
+                .map(|f| f.base.name.as_str())
+                .filter(|name| *name != USERS_PASSWORD_COLUMN),
+        );
+    }
+    shape
 }

@@ -169,6 +169,8 @@ function Settings({
   const [description, setDescription] = useState("");
   const [read, setRead] = useState(1);
   const [write, setWrite] = useState(1);
+  const [formula, setFormula] = useState("");
+  const [rls, setRls] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -180,6 +182,8 @@ function Settings({
     setDescription(settings?.description ?? "");
     setRead(settings?.min_role_read ?? 1);
     setWrite(settings?.min_role_write ?? 1);
+    setFormula(settings?.ownership_formula ?? "");
+    setRls(settings?.rls_enabled ?? false);
     setSaved(false);
   }, [settings]);
 
@@ -193,11 +197,15 @@ function Settings({
         description: description.trim(),
         min_role_read: read,
         min_role_write: write,
+        ownership_formula: formula.trim(),
+        rls_enabled: rls,
       });
       setSaved(true);
       onChange();
-    } catch {
-      setError("Could not save the settings.");
+    } catch (err) {
+      // The server's validation message names what to fix — an unknown
+      // identifier, a broken Ⱶ-path, a formula RLS cannot enforce.
+      setError(err instanceof Error ? err.message : "Could not save the settings.");
     } finally {
       setBusy(false);
     }
@@ -269,6 +277,42 @@ function Settings({
               />
             </Col>
           </Row>
+          <Form.Group className="mb-3" controlId="tableOwnershipFormula">
+            <Form.Label>Ownership formula</Form.Label>
+            <Form.Control
+              as="textarea"
+              rows={2}
+              className="font-monospace"
+              value={formula}
+              placeholder="owner === user.id"
+              onChange={(e) => setFormula(e.target.value)}
+            />
+            <Form.Text muted>
+              A JavaScript expression over the row&apos;s fields, <code>user</code>, the
+              operation flags (<code>_read</code>, <code>_write</code>, …) and Ⱶ-joinfields.
+              Rows it grants are reachable below the roles above. Blank means roles only.
+            </Form.Text>
+            {settings?.ownership_error && (
+              <Alert variant="warning" className="py-2 mt-2 mb-0">
+                Stored formula is not in effect (it grants nothing):{" "}
+                {settings.ownership_error}
+              </Alert>
+            )}
+          </Form.Group>
+          {settings?.rls_available && (
+            <Form.Group className="mb-3" controlId="tableRlsEnabled">
+              <Form.Check
+                type="switch"
+                label="Enforce with database row-level security"
+                checked={rls}
+                onChange={(e) => setRls(e.target.checked)}
+              />
+              <Form.Text muted>
+                The formula becomes Postgres RLS policies enforced by the database itself.
+                Needs a formula the database can evaluate.
+              </Form.Text>
+            </Form.Group>
+          )}
           <div className="d-flex gap-2 mt-2">
             <Button type="submit" size="sm" disabled={busy}>
               Save settings

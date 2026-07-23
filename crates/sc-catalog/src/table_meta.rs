@@ -66,6 +66,11 @@ pub const COL_MIN_ROLE_WRITE: &str = "min_role_write";
 /// The sparse per-table values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
+/// Attribute key holding the table's ownership formula source (§7.3).
+pub const ATTR_OWNERSHIP_FORMULA: &str = "ownership_formula";
+/// Attribute key holding the RLS flag (GOALS: attributes, not a column).
+pub const ATTR_RLS_ENABLED: &str = "rls_enabled";
+
 /// Identifies a stored table-overlay row.
 ///
 /// Distinct from [`TableId`](crate::TableId), which is a table's *name* and is
@@ -156,6 +161,56 @@ impl TableMeta {
     pub fn id(mut self, id: TableMetaId) -> TableMeta {
         self.id = id;
         self
+    }
+
+    // --- ownership formula & RLS (§7.3, TODO Phase 4) -----------------------
+    //
+    // Both live in `attributes` rather than as columns: they are sparse (§9's
+    // rule — most tables have neither), and GOALS names attributes for
+    // `rls_enabled` explicitly. The typed accessors below are the only places
+    // that spell the keys.
+
+    /// The table's ownership formula source, if one is set. Storage-neutral:
+    /// validation happens in the API on save and in the merge on load.
+    pub fn ownership_formula(&self) -> Option<&str> {
+        self.attributes
+            .get(ATTR_OWNERSHIP_FORMULA)
+            .and_then(Json::as_str)
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Set or clear the ownership formula (`None` — or an empty string —
+    /// removes the key rather than storing an empty formula).
+    pub fn set_ownership_formula(&mut self, formula: Option<&str>) {
+        match formula.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(source) => {
+                self.attributes
+                    .insert(ATTR_OWNERSHIP_FORMULA.into(), Json::String(source.into()));
+            }
+            None => {
+                self.attributes.remove(ATTR_OWNERSHIP_FORMULA);
+            }
+        }
+    }
+
+    /// Whether row-level security is enabled for this table (GOALS: "the table
+    /// has a rls_enabled field in its json attributes"). Absent means false.
+    pub fn rls_enabled(&self) -> bool {
+        self.attributes
+            .get(ATTR_RLS_ENABLED)
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Set or clear the RLS flag (`false` removes the key — absence is the
+    /// false state, so a table that never touched RLS has no residue).
+    pub fn set_rls_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.attributes
+                .insert(ATTR_RLS_ENABLED.into(), Json::Bool(true));
+        } else {
+            self.attributes.remove(ATTR_RLS_ENABLED);
+        }
     }
 }
 
@@ -580,6 +635,29 @@ mod tests {
         assert_eq!(meta.access, AccessRules::default());
         assert_eq!(meta.access.min_role_read, 1);
         assert_eq!(meta.access.min_role_write, 1);
+    }
+
+    #[test]
+    fn ownership_attributes_round_trip_through_their_accessors() {
+        let mut meta = TableMeta::new("books");
+        assert_eq!(meta.ownership_formula(), None);
+        assert!(!meta.rls_enabled());
+
+        meta.set_ownership_formula(Some("  owner === user.id  "));
+        assert_eq!(meta.ownership_formula(), Some("owner === user.id"));
+        meta.set_rls_enabled(true);
+        assert!(meta.rls_enabled());
+
+        // Clearing removes the keys entirely — absence is the false state, so
+        // a table that never touched either carries no residue in attributes.
+        meta.set_ownership_formula(None);
+        meta.set_rls_enabled(false);
+        assert!(meta.attributes.is_empty(), "{:?}", meta.attributes);
+
+        // An empty or blank formula is a clear, not an empty formula.
+        meta.set_ownership_formula(Some("   "));
+        assert_eq!(meta.ownership_formula(), None);
+        assert!(meta.attributes.is_empty());
     }
 
     #[test]
