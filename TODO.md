@@ -475,16 +475,16 @@ flags** — so it may read the row's own fields, Ⱶ-join paths and Ↄ-aggregat
 
 ## Phase 9 — Documentation
 
-- [ ] `docs/TECHNICAL_DESIGN.md`: §7.3 rewritten as implemented (the access rule, the two
+- [x] `docs/TECHNICAL_DESIGN.md`: §7.3 rewritten as implemented (the access rule, the two
   evaluators, parity as a tested property, fail-closed rules, the GUC scheme, FORCE, the
   enforcement swap, the Ↄ aggregation block landing with Phase 7); §18.4 resolved —
   JavaScript, with the reasoning recorded; `sc-expr`
   added to §2's crate map
-- [ ] A tutorial in the established style (`docs/tutorial-ownership.md`): a two-user app,
+- [x] A tutorial in the established style (`docs/tutorial-ownership.md`): a two-user app,
   an owner formula, a Ⱶ formula through a join, then flipping on RLS and watching `psql`
   show the policies — cross-linked from the existing tutorials (the hygiene test enforces
-  resolution, `tutorials_are_cross_linked` may need its list extended)
-- [ ] CHANGELOG entries as each phase lands
+  resolution, `tutorials_are_cross_linked` extended to require the ownership tutorial's links)
+- [x] CHANGELOG entries as each phase lands
 
 ---
 

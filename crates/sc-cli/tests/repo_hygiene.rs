@@ -130,7 +130,8 @@ fn documentation_links_resolve() {
 }
 
 /// The tutorials link to each other, so a reader who finishes one finds the
-/// next: the React tutorial leads to the file-fields tutorial, which leads back.
+/// next: the React tutorial leads to the file-fields tutorial, which leads back
+/// and on to the ownership tutorial, which builds on it.
 #[test]
 fn tutorials_are_cross_linked() {
     let root = workspace_root();
@@ -143,5 +144,14 @@ fn tutorials_are_cross_linked() {
     assert!(
         files.contains("tutorial-react-todo.md"),
         "the file-fields tutorial builds on the React tutorial and should link it"
+    );
+    assert!(
+        files.contains("tutorial-ownership.md"),
+        "the file-fields tutorial should point at the ownership tutorial as a next step"
+    );
+    let ownership = read(&root, "docs/tutorial-ownership.md");
+    assert!(
+        ownership.contains("tutorial-file-fields.md"),
+        "the ownership tutorial builds on the file-fields tutorial and should link it"
     );
 }

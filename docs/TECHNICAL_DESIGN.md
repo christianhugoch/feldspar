@@ -58,6 +58,8 @@ saltcorn/
 │  │   ├─ sc-db-postgres/         #    Postgres driver (MVP)
 │  │   └─ sc-db-sqlite/           #    SQLite driver (later; embedded/mobile)
 │  ├─ sc-types/                   # 3. type system: RichType, BasicType, attributes, validation
+│  ├─ sc-expr/                    # 3. ownership-formula language: parse/analyse/validate,
+│  │                              #    symbolic (→ sc-query::Expr) + reified (deno_core) eval
 │  ├─ sc-catalog/                 # 4. Catalog, Table, Field, TableProvider trait, cache
 │  ├─ sc-auth/                    # 5. User, Role, authz (ACL/RLS), sessions, OAuth2 provider
 │  ├─ sc-code/                    # 5. code adapters (JS via a JS engine, Python via CPython)
@@ -96,6 +98,14 @@ Notes:
 - `sc-error` sits below everything and defines the single `Error`/`Result` convention so
   principle 5 is mechanically enforced (no `unwrap()` in library code; errors carry
   context).
+- **`sc-expr`** is a generic library that depends only on `sc-query` (its translation target)
+  and `sc-error` — deliberately *not* on `sc-catalog`, which describes tables to it through a
+  small `SchemaShape` view. It owns the ownership-formula and calculated-field language
+  (§7.3): one JavaScript expression, parsed once, evaluated two ways — **symbolically** into
+  `sc-query::Expr` and **reified** in a V8 (`deno_core`) isolate. The V8 dependency is behind
+  an `eval` cargo feature, so `sc-catalog` and everything else below the server link only the
+  parse/validate/translate half; the `JsEvaluator` trait (the reified seam) is constructed
+  once at server boot.
 
 ### 2.1 Extension points (traits) at a glance
 
@@ -483,19 +493,96 @@ pub struct User {
 ### 7.3 Authorization
 
 Separate permissions for **read, create, update, delete** (v1 had a coarser model). Per
-table (and per view/page/file where applicable) a minimum role governs each operation;
-ownership (by key-to-user field or by formula) grants row-level access to users who do not
-meet the table-wide minimum role. This is the v1 model with per-CRUD granularity.
+table (and per File-field endpoint) a minimum role governs each operation; **ownership**
+grants row-level access to users who do *not* meet the table-wide minimum role. Ownership is
+expressed as an **ownership formula** — a JavaScript expression, stored in the table's
+`attributes`, over the row's fields, the current `user`, the operation flags
+(`_read`/`_insert`/`_update`/`_delete`/`_write`), Ⱶ-joinfields (below) and Ↄ-aggregations
+(below). This is implemented; the paragraphs that follow describe the system as built.
 
-Enforcement strategy is chosen from `DbCapabilities`:
+**The access rule.** For an operation on a row:
 
-- If the database supports **row-level security**, authz is pushed down to RLS policies
-  generated from the table's access rules.
-- Otherwise, `sc-catalog` applies **runtime checks** by injecting the ownership/role
-  predicate into the `Expr` filter of every query.
+> **allowed = the caller's role meets the operation's `min_role` OR the ownership formula
+> evaluates true** for this row / user / operation.
 
-Beyond roles, GOALS asks for **access-control lists / an ACL language**; this is layered on
-top of the role model and is expressed as formulas (JavaScript or CEL — see Open Questions).
+Ownership *extends* access below the role floor; it never narrows it. A caller who already
+meets `min_role` is unaffected by the formula (and by RLS, through a role-floor clause in
+every policy). A table with no formula behaves exactly as the plain role model does.
+
+**One language, parsed once, evaluated two ways.** The formula lives in the `sc-expr` crate
+(§2). A single parse (via `swc_ecma_parser`, the parser family Deno uses, so the grammar is
+exactly V8's) is lowered into `sc-expr`'s own owned AST and evaluated two ways from that one
+object:
+
+- **Symbolically** — translated to `sc-query::Expr`, i.e. a SQL predicate. This is what an
+  injected `WHERE` clause (runtime checks) and an RLS policy both are.
+- **Reified** — actually run, in a V8 (`deno_core`) isolate on a dedicated thread, for the
+  constructs SQL cannot hold (`user.groups.some(g => …)`), and as the *reference*
+  implementation.
+
+**Parity is a tested property, not a hope.** For every translatable construct, matrices of
+formula × row × user are evaluated *both* ways — reified in the isolate, and via the
+translated `Expr` executed against real Postgres — and each case asserts three things:
+the two evaluators agree *and* both match the expected verdict (so both drifting wrong
+together still fails the test). Null handling is specified once, by the translation, and the
+reified path is normalised to meet it: `===`/`==` render as `IS NOT DISTINCT FROM` (JS's
+two-valued equality — `owner === user.id` on a null `owner` is *false*), ordered comparisons
+and arithmetic are null-guarded so JS's `null → 0` coercion cannot diverge from SQL, and
+`user.x` on an anonymous (null) user reads as null rather than throwing.
+
+**Fail closed, everywhere.** A stored formula that no longer validates at load time (a field
+was dropped, a dump restored) grants nothing and the table stays `min_role`-only, with the
+reason reported on the `Table`. An anonymous caller's `user` is null, so a formula that must
+not grant anonymously is written `user && …` (bare `user` is object-or-null, so its
+truthiness is exactly the logged-in test). Under RLS a missing GUC is SQL NULL, so an
+un-set caller context sees no rows by construction. A denial is always shaped identically to
+absence — affected-rows 0, mapped to not-found — so "exists but forbidden" is never a probe.
+
+**Enforcement strategy is chosen from `DbCapabilities`**, and the *same formula* produces the
+*same verdicts* either way — flipping between them swaps the mechanism, never the outcome
+(the RLS tests are the runtime-check scenarios re-run):
+
+- **Runtime checks** (any backend). For reads below the role floor, the translated predicate
+  is ANDed into the `SELECT`'s `WHERE`; joinfields ride in as correlated columns projected in
+  the same query (zero extra round trips) and are stripped before rows reach the wire. Writes
+  inject the predicate into the `UPDATE`/`DELETE` `WHERE` and additionally run a reified check
+  on the existing row and, for updates/inserts, on the merged proposed row (WITH CHECK
+  semantics — moving a row out of your own ownership is refused). An **untranslatable** formula
+  falls back to fetch-then-filter through the reified evaluator.
+- **Postgres row-level security** (`DbCapabilities::row_level_security`; opt-in per table via
+  `rls_enabled`). `sc-catalog` emits `ENABLE` + **`FORCE ROW LEVEL SECURITY`** and four
+  policies — SELECT/DELETE `USING`, INSERT `WITH CHECK`, UPDATE both — from the *same*
+  translation under a **GUC** user-env: `user.x` becomes a read of `current_setting('sc.user',
+  true)` (a JSON GUC) and the role floor a read of `sc.role`. Every row operation runs inside a
+  transaction that `SET LOCAL`s those two GUCs (the value is bound via `set_config`, never
+  interpolated); admin endpoints run at `sc.role = 1` so the row viewer works on a FORCE'd
+  table. Reads go unfiltered and writes unpredicated to the database — the policy does the
+  work, including the joinfield subselects, so nothing is refetched. Enabling RLS is refused at
+  save time if the formula does not translate under the GUC env for all four operations, so a
+  policy is never emitted for a formula the database cannot honour. `USER_GUC = "sc.user"` and
+  the role GUC are wrapped in `NULLIF(…, '')` so an unset-or-empty custom GUC folds to NULL and
+  the policy fails closed.
+
+**The Ⱶ operator is an identifier character, not an operator.** U+2C75 (Latin capital letter
+half H, category Lu) is a valid JavaScript identifier character, so `publisherⱵname` is a
+*single* identifier that V8 and swc both accept unchanged — no preprocessing, no syntax
+extension. The reified path binds a variable literally named `publisherⱵname`; the symbolic
+path splits on Ⱶ into a **join path** rendered as correlated scalar subselects
+(`(SELECT _sc_j1.name FROM publishers _sc_j1 WHERE _sc_j1.id = books.publisher)`), nested per
+link to any depth, resolving link-by-link through `Key` fields. A null FK yields no row yields
+SQL NULL, granting nothing — optional-chaining semantics for free.
+
+**Non-stored calculated fields** (§6.2) reuse this whole machinery over the same scope
+**minus `user` and the operation flags**: an expression computed on read, dependency-ordered
+so one calc field may read another. A calc-field reference inside an ownership formula is
+**inlined** as its defining expression, transitively, before translation — so a calc field is
+usable in ownership formulae and in RLS policies alike (an untranslatable inlined definition
+refuses RLS, naming the construct). Because a calc field can hold no `user`/flags, inlining can
+never smuggle them into a policy. *Stored* calculated fields, and the tamper-safe inlining of a
+stored field's *value* into a policy, are deferred to their own milestone.
+
+Beyond roles, GOALS asks for **access-control lists / an ACL language** for views, pages and
+actions; that layer above the table/File-field ownership implemented here is future work.
 
 **Formula aggregations — the Claudian antisigma (`Ↄ`).** Formulas aggregate over
 *incoming* keys; the design is decided and recorded in [AGG_EXPRS.md](./AGG_EXPRS.md)
@@ -1463,9 +1550,17 @@ These are deliberately not settled here; they need prototyping or a product deci
    Likely an `Action` plus a transport abstraction, but the renderer story under the new CSP
    markup model needs design.
 3. **Auth features** beyond new-device recognition (step-up auth, passkeys, etc.).
-4. **Formula language for table auth** — JavaScript vs **CEL** for ownership/ACL formulas.
-   CEL is sandboxed and language-neutral; JavaScript maximises v1 compatibility. This choice
-   also affects the ACL language in §7.3.
+4. **Formula language for table auth — RESOLVED: JavaScript.** The choice between JavaScript
+   and CEL for ownership/ACL formulas is settled, and §7.3 is built on it. JavaScript wins
+   because it is evaluated *two ways from one parse* — reified in a real V8 isolate and
+   symbolically translated to a SQL predicate — and the reified engine being V8 means the
+   parser must accept exactly what V8 accepts; one language, parsed once (via swc, Deno's
+   parser family), beats maintaining two grammars. It also aligns with v1 compatibility,
+   calculated fields and the future JS code adapter (§15), which all want JavaScript anyway.
+   CEL's sandboxing advantage is answered by bounding the language at lowering time (a single
+   pure expression; assignment, `new`, `this`, function/class expressions and a long list of
+   constructs refused by name) and running the reified path in a no-extensions, no-ops
+   `deno_core` isolate with a watchdog. **The question is closed, not deferred.**
 5. **Server-rendered v1 views under strict CSP.** With the `sc-markup` symbolic-HTML model
    dropped (§12), how the Saltcorn-v1 view/page experience renders CSP-safe HTML — server
    templates with externalised JS, or React-rendered views driven by the builder — is an open

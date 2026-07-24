@@ -192,3 +192,10 @@ same file, admitted by one rule and refused by the other: whichever is stricter 
 - **Admin row edits get a picker.** In the admin UI's row editor, a `File` field is a path box
   with a **Choose…** button browsing the field's store — the same reference, chosen instead of
   uploaded.
+
+## What next
+
+This tutorial opened the whole `tasks` table to the Member role. The next one closes it again
+and hands each user back exactly the rows they *own*, through a one-line JavaScript **ownership
+formula** — then pushes that same formula into Postgres as row-level-security policies you can
+read in `psql`: [tutorial-ownership.md](tutorial-ownership.md).

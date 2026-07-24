@@ -2,6 +2,29 @@
 
 Changes in reverse chronological order.
 
+## Documentation for ownership formulae & RLS (Phase 9)
+
+The ownership-formula milestone is written up where the design and the tutorials live.
+
+- **`docs/TECHNICAL_DESIGN.md` §7.3 rewritten as implemented**: the access rule
+  (`allowed = role meets min_role OR formula true`, ownership only widening below the floor),
+  the one-language/two-evaluators design (symbolic → `sc-query::Expr`, reified → `deno_core`),
+  **parity as a tested property**, the fail-closed rules (invalid stored formula, anonymous
+  `user`, missing GUC), the `Ⱶ` join-path mechanism, non-stored calc fields inlined into
+  ownership/RLS, and the enforcement swap — runtime `WHERE` injection vs Postgres RLS with the
+  `sc.user`/`sc.role` GUC scheme, `FORCE ROW LEVEL SECURITY` and the four generated policies.
+- **§18.4 resolved**: the JavaScript-vs-CEL open question is closed in favour of **JavaScript**,
+  with the reasoning recorded (evaluated two ways from one parse; the reified engine being V8
+  means the parser must accept exactly what V8 accepts; v1/calc-field/code-adapter alignment).
+- **`sc-expr` added to the §2 crate map** (layer 3, depends only on `sc-query`/`sc-error`, V8
+  behind the `eval` feature) with a note on why it does not depend on `sc-catalog`.
+- **New tutorial `docs/tutorial-ownership.md`** in the established browser-first style: a
+  two-user app, an `owner === user.email` formula, the same rule through a `Ⱶ`-join
+  (`projectⱵowner === user.email`), then flipping on RLS and reading the generated policies in
+  `psql` (the forced four, the translated `SELECT` qual, the fail-closed `count(*) → 0` on a
+  raw connection). Cross-linked from `tutorial-file-fields.md`; the `tutorials_are_cross_linked`
+  hygiene test extended to require the new links.
+
 ## Non-stored calculated fields (Phase 8)
 
 A field can now be a **non-stored calculated field** — no column on disk, only an `sc-expr`
