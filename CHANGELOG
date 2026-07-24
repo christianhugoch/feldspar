@@ -2,6 +2,29 @@
 
 Changes in reverse chronological order.
 
+## Formula aggregations — design decided (proposal G)
+
+Design work only, no implementation yet.
+
+- **docs/AGG_EXPRS.md** (new): design for aggregation over *incoming* keys in formula
+  expressions, for both ownership formulae and calculated fields. Seven proposals (A–G)
+  were developed and the file then condensed to the decided design plus a summary of the
+  rejected alternatives. Decision:
+  **proposal G** — relation identifiers spelled with the Claudian antisigma
+  (`order_linesↃorder`; U+2183 is, like Ⱶ, category Lu and a valid JS identifier
+  character) holding arrays of child rows, aggregated by a curated method chain: native
+  `filter`/`map`/`some`/`every`/`length`/`includes`/`join`; invented
+  `sum`/`min`/`max`/`avg`/`distinct` with an optional selector (constant field-name string
+  or arrow) and ordered `maxBy`/`minBy` (null keys ignored, primary-key tie-break,
+  optional-chaining member access); `reduce` and everything ambient-ordered, positional or
+  effectful refused by name. One null/empty semantics table as the evaluator-parity
+  contract; chains translate to single correlated subqueries (`some`/`every` →
+  `EXISTS`/`NOT EXISTS`), so RLS-mode ownership via share tables costs no refetch.
+- **docs/TECHNICAL_DESIGN.md**: §7.3 gains the aggregation block; §6.2's calculated-fields
+  paragraph now names both traversal directions (Ⱶ out, Ↄ in).
+- **TODO.md**: new Phase 7 (formula aggregations) with implementation items; calculated
+  fields renumbered to Phase 8, documentation to Phase 9.
+
 ## Ownership formulae milestone — Postgres row-level security (Phase 6)
 
 The *same* ownership formula can now be enforced by Postgres instead of the application:

@@ -26,8 +26,10 @@ JavaScript anyway; one expression language, parsed once, beats two.
 
 One deliberate exclusion, from the user: the GOALS line on **stored calculated fields being
 inlined into RLS policies** cannot land at the start of this milestone because calculated
-fields do not exist yet. Phase 7 brings calculated fields in as a stretch goal, and the RLS
-inlining is its last item — inside this milestone if Phase 7 lands, carried otherwise.
+fields do not exist yet. Phase 8 brings calculated fields in as a stretch goal, and the RLS
+inlining is its last item — inside this milestone if Phase 8 lands, carried otherwise.
+Phase 7 (formula aggregations, [docs/AGG_EXPRS.md](./docs/AGG_EXPRS.md) proposal G) extends
+the formula language over incoming keys for both ownership formulae and calculated fields.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -354,17 +356,68 @@ mechanism, never the outcome — the phase's tests are §5's scenarios re-run un
   the two paths differ in setup (policy DDL, GUC probes) enough that one table of cases would
   have more branches than the two readable tests it replaced
 
-## Phase 7 — Calculated fields (stretch)
+## Phase 7 — Formula aggregations (proposal G)
+
+Decided in [docs/AGG_EXPRS.md](./docs/AGG_EXPRS.md): aggregation over *incoming* keys as
+**proposal G** — relation identifiers spelled with the Claudian antisigma
+(`order_linesↃorder`, child table Ↄ key field; U+2183, category Lu, a valid JS identifier
+character exactly like Ⱶ) holding the array of child rows, aggregated by a **curated
+method chain**: native `filter`/`map`/`some`/`every`/`length`/`includes`/`join`; invented
+`sum`/`min`/`max`/`avg`/`distinct` (optional selector: constant field-name string or
+arrow) and the ordered `maxBy`/`minBy`; `reduce` and everything ambient-ordered,
+positional or effectful refused by name. Available in **ownership formulae** (full scope —
+predicates may use `user` and the flags) and in **calculated fields** (Phase 8, same
+language minus `user`/flags). AGG_EXPRS.md's semantics table is the parity contract.
+
+- [ ] `sc-expr` analysis: an `INVERSE` companion to `JOIN` (`'Ↄ'`, U+2183); identifiers
+  containing Ↄ classified as relation identifiers, resolved child-table → key-field against
+  incoming keys; `SchemaShape::incoming(table)` derived from the child tables' `KeyShape`s
+  (callers include candidate child tables in the shape, no parallel index);
+  `Analysis` gains `AggUse { child_table, key_field, value_fields, filter_fields }` —
+  prefetch plan now, stored-calc trigger dependencies later. Ↄ joins Ⱶ as a character
+  refused in table and field names where names are validated
+- [ ] Chain validation: the curated grammar — relation, `.filter(arrow)*`, optional
+  `.map(arrow)`, one terminal method; selector argument a **constant** string literal
+  naming a child field (a computed string is refused — a field *name* must never blur with
+  a String field's *value*) or an arrow over the child row; arrow bodies are ordinary
+  formula expressions with the parent scope available and forward Ⱶ-paths resolving
+  against the child table; everything outside the set refused by name with the alternative
+  ("`reduce` is not available in formulas — use `sum()`")
+- [ ] Symbolic translation: one correlated subquery per chain — filters into `WHERE`, the
+  selector or `map` as the aggregated expression; `length` → `count(*)`, `sum` →
+  `coalesce(sum(…), 0)`, `some`/`every` → `EXISTS`/`NOT EXISTS (… WHERE (p) IS NOT TRUE)`,
+  `includes` → `= ANY`, `join` → `string_agg`, `distinct` → `DISTINCT`, `maxBy`/`minBy` →
+  `WHERE key IS NOT NULL ORDER BY key DESC, pk DESC LIMIT 1` selecting the accessed member
+  (member access on a `maxBy`/`minBy` result is optional-chaining by definition — the
+  normalised rendering emits `?.`)
+- [ ] Reified evaluation: the prelude defines the seven invented methods on the isolate's
+  `Array.prototype`, implementing the semantics table (null values ignored; empty relation:
+  `sum` `0`, `avg`/`min`/`max`/`maxBy`/`minBy` `null`, `some` `false`, `every` `true`;
+  `maxBy` tie-break by primary key so both evaluators pick the same row); host prefetch
+  batched — one child query per relation for all parent rows in scope, grouped by key
+  value, never per-row — bound as arrays under the relation identifier
+- [ ] Ownership formulae: aggregations in the runtime-enforcement path (Phase 5's WHERE
+  injection) and in RLS policies (Phase 6); RLS enablement detects policy-reference cycles
+  (documents ↔ shares) and refuses, naming the cycle — Postgres would otherwise raise
+  `infinite recursion detected in policy` at query time
+- [ ] Tests: per-method parity property over the semantics table (translator vs `deno_core`,
+  including empty/null/tie cases); a `sharesↃdocument.some(…)` ownership formula enforced
+  identically under runtime checks and RLS in the Phase 5/6 harnesses; validation errors:
+  unknown child field in a selector string, non-constant selector, `reduce`, ambiguous or
+  unresolvable relation identifier, Ↄ in a proposed field name
+
+## Phase 8 — Calculated fields (stretch)
 
 In-milestone if capacity allows (the user flagged it *may* land now), carried otherwise.
 Expression-defined calculated fields only — code-adapter calculation (§6.2's full vision)
 stays out; the dependency machinery it needs is a milestone of its own. Everything here
-reuses `sc-expr` as-is: a calculated field is a formula over the same scope minus `user` and
+reuses `sc-expr` as-is, including Phase 7's Ↄ-aggregations: a calculated field is a formula
+over the same scope minus `user` and
 the operation flags.
 
 - [ ] `DataFieldKind::Calc { expression, stored }` in the `_sc_fields` overlay (kind
   discriminant + parameters in attributes, per §3.1's pattern), validated like ownership
-  formulas: fields and Ⱶ-paths, no `user`, no flags. Dependencies **between** calculated
+  formulas: fields, Ⱶ-paths and Ↄ-aggregation chains, no `user`, no flags. Dependencies **between** calculated
   fields on the same table resolved topologically at merge time; a cycle is a reported
   issue naming the fields
 - [ ] Non-stored: computed on read — translatable expressions projected into the SELECT as
@@ -373,7 +426,8 @@ the operation flags.
 - [ ] Stored: a real column, recomputed in Rust on this row's insert/update (write path,
   not DB triggers — the recursion-limit trigger design waits for the calc-fields milestone
   proper). Staleness through joinfield changes on the *target* table is documented, not
-  chased. Backfill on definition change
+  chased — likewise child-table writes under a Ↄ-aggregation (the `AggUse`-driven trigger
+  design waits with it). Backfill on definition change
 - [ ] **The GOALS RLS line, last**: policy translation inlines a stored calculated field's
   *defining expression* wherever the ownership formula references it — the stored value is
   never trusted inside a policy. Enabling RLS with a formula referencing a stored calc
@@ -383,11 +437,12 @@ the operation flags.
   behaviour proven by granting via a calc field whose stored value has been tampered with
   directly in SQL — the policy must follow the definition, not the tampered value
 
-## Phase 8 — Documentation
+## Phase 9 — Documentation
 
 - [ ] `docs/TECHNICAL_DESIGN.md`: §7.3 rewritten as implemented (the access rule, the two
   evaluators, parity as a tested property, fail-closed rules, the GUC scheme, FORCE, the
-  enforcement swap); §18.4 resolved — JavaScript, with the reasoning recorded; `sc-expr`
+  enforcement swap, the Ↄ aggregation block landing with Phase 7); §18.4 resolved —
+  JavaScript, with the reasoning recorded; `sc-expr`
   added to §2's crate map
 - [ ] A tutorial in the established style (`docs/tutorial-ownership.md`): a two-user app,
   an owner formula, a Ⱶ formula through a join, then flipping on RLS and watching `psql`
@@ -402,7 +457,7 @@ the operation flags.
 - **A second reified engine behind `JsEvaluator`** (§3) — optional, not required for any
   target platform (V8 builds everywhere GOALS targets, from source on FreeBSD); worth doing
   only if V8's build weight or embed size becomes a cost we care about
-- **Code-adapter calculated fields** and the full dependency/trigger design (§6.2) — Phase 7
+- **Code-adapter calculated fields** and the full dependency/trigger design (§6.2) — Phase 8
   is deliberately the expression-only slice
 - **Ownership on files and per-view/page rules** (§7.3's "where applicable") — this
   milestone covers table rows and the File-field endpoints that read/write them

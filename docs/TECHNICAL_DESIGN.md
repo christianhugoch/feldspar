@@ -402,8 +402,11 @@ types, which have no attributes.
 `sc-catalog`, because its `Key`/`File` kinds reference catalog identifiers and it bridges to
 `Column`/`ColumnDef` — that is the only part of the split that ever needed layer 4.
 
-**Calculated fields.** Defined either by a simple expression (which may traverse foreign
-keys in both directions) or by guest code via a code adapter. Dependency handling per GOALS:
+**Calculated fields.** Defined either by a simple expression — which may traverse foreign
+keys in both directions: outgoing via Ⱶ-joinfields, incoming via the Ↄ aggregation chains
+of §7.3 (decided in [AGG_EXPRS.md](./AGG_EXPRS.md), proposal G; calculated-field
+expressions use the same aggregation language without `user` and the operation flags) —
+or by guest code via a code adapter. Dependency handling per GOALS:
 
 - If **no** calculated field uses a code adapter, calculation is implemented as ordinary
   triggers with a recursion limit.
@@ -493,6 +496,38 @@ Enforcement strategy is chosen from `DbCapabilities`:
 
 Beyond roles, GOALS asks for **access-control lists / an ACL language**; this is layered on
 top of the role model and is expressed as formulas (JavaScript or CEL — see Open Questions).
+
+**Formula aggregations — the Claudian antisigma (`Ↄ`).** Formulas aggregate over
+*incoming* keys; the design is decided and recorded in [AGG_EXPRS.md](./AGG_EXPRS.md)
+(proposal G), and it is available both in ownership formulae and in calculated-field
+expressions (§6.2 — the same language minus `user` and the operation flags). A **relation
+identifier** spelled with the Claudian antisigma — `order_linesↃorder`, child table Ↄ key
+field; U+2183 is category Lu and therefore a valid JavaScript identifier character exactly
+like Ⱶ, and like Ⱶ it is refused in table and field names — denotes the array of child
+rows whose key points at the current row. Aggregation is a **curated method chain** on it:
+
+```js
+order_linesↃorder.filter(r => r.status === "shipped").sum("qty")
+sharesↃdocument.some(s => s.shared_with === user.id && (_read || s.can_write))
+readingsↃsensor.maxBy("ts").temp
+```
+
+Kept native: `filter`, `map`, `some`, `every`, `length`, `includes`, `join`. Invented:
+`sum`/`min`/`max`/`avg`/`distinct`, each taking an optional **selector** (a constant
+field-name string or an arrow over the child row), and the ordered pair `maxBy`/`minBy`
+(selector required; rows with a null key ignored; ties broken by the child's primary key;
+member access on the result is optional-chaining by definition). `reduce` and everything
+ambient-ordered, positional or effectful is refused by name, with the error naming the
+alternative. Null/empty semantics are AGG_EXPRS.md's table, which is the **parity
+contract**: symbolically a chain is one correlated subquery (`some`/`every` are
+`EXISTS`/`NOT EXISTS` — under RLS, aggregation-based ownership costs no refetch);
+reified, a prelude defines the invented methods on the isolate's `Array.prototype` and the
+host binds prefetched child rows, batched per relation, never per row. Analysis yields
+`AggUse` records (child table, key field, fields read) — the prefetch plan today, and the
+recomputation-trigger dependencies for stored calculated fields later. Enabling RLS on a
+formula whose aggregation reaches a table whose own policy reaches back is refused with
+the cycle named — Postgres would otherwise raise `infinite recursion detected in policy`
+at query time.
 
 ### 7.4 Roles (`_sc_roles`)
 
