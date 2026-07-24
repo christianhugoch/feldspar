@@ -44,7 +44,8 @@ ordered `latest(rel, r => r.created_at, r => r.status)` — the value of the thi
 the child row maximizing the second (Saltcorn 1's Latest aggregation; SQL `ORDER BY … DESC
 LIMIT 1` subquery).
 
-These names join the whitelisted-globals rule that already exists in `analyze.rs`: a field
+In the function-based proposals (A–C) these names join the whitelisted-globals rule that
+already exists in `analyze.rs`: a field
 named `sum` shadows the aggregation function, and a formula that then calls `sum(…)` fails
 validation with an error naming the collision. (If we ever find that intolerable, the
 escape hatch is namespacing — `Agg.sum(…)` — but the flat names read far better and field
@@ -52,8 +53,8 @@ names colliding with five short verbs will be rare.)
 
 ## Naming the incoming relation
 
-All three proposals need to say "the order_lines rows whose `order` key points at this
-row". The natural spelling reuses the join character in mirror image:
+Every expression-level proposal (all but E, which has no expression syntax) needs to say
+"the order_lines rows whose `order` key points at this row". The natural spelling reuses the join character in mirror image:
 
 ```
 order_linesⱵorder        // child table Ⱶ key field — "order_lines via order"
@@ -194,6 +195,122 @@ not like a formula; and the options-object variant opens object literals in a la
 deliberately refuses them. This proposal is the fallback if the identifier-based ones prove
 untenable, not a contender on style.
 
+The remaining proposals drop the premise the first three share — that an aggregation is a
+call to a function named after it.
+
+## Proposal D — aggregation as property access
+
+No aggregation functions at all: a relation identifier is an array of child rows, a static
+member access with a child *field* name plucks that field into an array of values, and the
+aggregate is a **property read** on the result. The expression is a left-to-right pipeline:
+
+```js
+order_linesⱵorder.length                                       // count — native, for free
+order_linesⱵorder.qty.sum
+order_linesⱵorder.filter(r => r.status === "shipped").qty.sum
+order_linesⱵorder.map(r => r.qty * r.price).sum                // expression values need .map
+sharesⱵdocument.some(s => s.shared_with === user.id)           // native array method
+```
+
+The validated grammar:
+
+```
+AggExpr := Rel ( '.' field | '.map(' Arrow ')' )? '.' aggprop
+         | Rel '.some(' Arrow ')' | Rel '.every(' Arrow ')' | Rel '.length'
+Rel     := RelIdent ( '.filter(' Arrow ')' )*
+aggprop := sum | avg | min | max | count
+```
+
+`filter`, `some`, `every`, `map` and `length` are JavaScript's own; only the four
+aggregate properties are invented. On the reified path relations are bound wrapped in a
+prelude `Proxy` (or a subclassed Array with getters): plucking is a property trap,
+`sum`/`avg`/`min`/`max` are getters implementing the semantics table, and the native
+methods just work. Symbolically the whole chain renders as one correlated subquery, same
+as B.
+
+**For**: reads as a data pipeline, arguably the most fluent of all the options; no free
+functions competing with field names in the top-level scope; `count`, `some` and `every`
+come out as *actual* JavaScript rather than lookalikes.
+
+**Against**: a property read that computes an aggregate is magic — an admin who knows JS
+cannot predict `.sum` from JS knowledge, and `Array.prototype` has no such property, so
+the reified path needs the heaviest prelude machinery of any proposal (Proxy traps rather
+than plain functions). Field names collide with the invented properties and the array
+methods — a child field named `sum`, `map` or `length` is unreachable by pluck and must be
+a validation error naming the clash. And the moment the value is an expression, `.map(…)`
+reintroduces the arrow, at which point B said the same thing with less mechanism.
+
+## Proposal E — declarative aggregation fields (no expression syntax at all)
+
+Move aggregation out of the expression language entirely. An **Aggregation** is a kind of
+calculated field, configured structurally in the admin UI — no formula syntax involved:
+
+- child table and key field (dropdowns, populated from the catalog's incoming keys);
+- the aggregate operation (dropdown from the aggregation set);
+- a value formula — an ordinary formula validated against the *child* table;
+- an optional restriction formula, likewise over the child table.
+
+Expressions then reference the aggregation by its field name like any other field, and the
+expression language never learns about aggregation:
+
+```js
+// order_total: Aggregation { from: order_lines by order, sum, value: qty * price,
+//                            where: status === "shipped" }
+order_total > 1000
+
+// shared_with_me: Aggregation { from: shares by document, some,
+//                               where: shared_with === user.id }
+owner === user.id || shared_with_me         // the ownership formula
+```
+
+Correlation to the parent is implicit in the key; when a restriction needs a *parent*
+value, the child's own forward Ⱶ-path back through the key already expresses it with no
+new mechanism: `qty > orderⱵminimum_qty`. A restriction that references `user` (the share
+example) makes the field's value viewer-dependent, so such a field must be non-stored —
+enforce that at save time. In RLS translation an aggregation field inlines as its
+definition — the same rule GOALS already states for stored calculated fields.
+
+**For**: zero new expression syntax — no new identifier class, no grammar for the
+translator to pattern-match, and requirement R4 (relation naming) evaporates because the
+child table and key are dropdown selections, not spellings. The most discoverable option
+by far for non-programmer admins, and the aggregation is defined once and reusable across
+formulas and views. Static analyzability is by construction: the config *is* the
+`AggUse` record.
+
+**Against**: friction — a one-off aggregation in a single formula now requires creating a
+field first, and heavily-aggregating tables grow a long field list; reading a formula
+means chasing the indirection to the field definition. Composition still works
+(`order_total / line_count` is a formula over two aggregation fields) but is wordy.
+
+Note that E is **complementary, not competing**: it can coexist with any of A–D, and its
+admin UI could even be a builder that *generates* the expression form rather than a
+parallel representation — one semantics, two entry points.
+
+## Proposal F — native array methods only
+
+The purist version of D: relations are arrays and **only** JavaScript's own
+`Array.prototype` is available — nothing invented at all:
+
+```js
+order_linesⱵorder.length
+order_linesⱵorder.filter(r => r.status === "shipped").length
+sharesⱵdocument.some(s => s.shared_with === user.id)
+order_linesⱵorder.map(r => r.qty).reduce((a, b) => a + b, 0)          // sum
+order_linesⱵorder.map(r => r.qty).reduce((a, b) => Math.max(a, b), -Infinity)  // max
+```
+
+**For**: nothing to teach, whitelist or shadow — it is exactly the JavaScript it looks
+like, and the reified path is plain arrays with no prelude at all.
+
+**Against**: `sum`, `min`, `max` and especially `avg` via `reduce` are hostile to the
+non-programmer admin this product serves; the symbolic translator would have to recognise
+*idioms* — specific `reduce` lambdas — which is a brittle allowlist with unreadable
+"untranslatable" errors one character outside it; and JS coercion diverges from the
+semantics table (`null + 3` is `3` in a reduce, while SQL `sum` ignores nulls), so the
+two evaluators disagree in exactly the code the admin wrote by hand. Rejected as a primary
+design — but its readable subset (`.length`, `.filter`, `.some`, `.every`) is worth
+admitting inside whichever proposal wins, and B and D already do.
+
 ---
 
 ## Semantics (common to all proposals)
@@ -254,8 +371,12 @@ rather than a parallel index that could drift.
 
 ## Recommendation
 
-Proposal **B**, with Proposal A's three-segment path form kept as lowering-time sugar for
-the bare-field case, and the bare-table-name shorthand for unambiguous single-key
-relations. Decide the Ⱶ-vs-Ɥ question (one character for both directions vs. a dedicated
+Proposal **B** for the expression language, with Proposal A's three-segment path form kept
+as lowering-time sugar for the bare-field case, and the bare-table-name shorthand for
+unambiguous single-key relations. Among the non-function designs, D is the strongest but
+its computed-property magic and Proxy prelude buy fluency B mostly has anyway; F fails the
+non-programmer admin; **E is worth adopting regardless** — as the admin-UI entry point
+that generates or wraps the B form, giving dropdown discoverability without a second
+semantics. Decide the Ⱶ-vs-Ɥ question (one character for both directions vs. a dedicated
 inverse character) before first release, since it is a migration to change; the
 recommendation here is single-character Ⱶ with hard validation errors on ambiguity.
