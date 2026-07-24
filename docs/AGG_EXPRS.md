@@ -54,64 +54,66 @@ names colliding with five short verbs will be rare.)
 ## Naming the incoming relation
 
 Every expression-level proposal (all but E, which has no expression syntax) needs to say
-"the order_lines rows whose `order` key points at this row". The natural spelling reuses the join character in mirror image:
+"the order_lines rows whose `order` key points at this row". The chosen spelling uses the
+**Claudian antisigma**. Ⱶ, the forward-join character, is one of the three Claudian
+letters; the antisigma `Ↄ` is another — U+2183 ROMAN NUMERAL REVERSED ONE HUNDRED, the
+codepoint used for the Claudian antisigma, which is (like Ⱶ) Unicode category Lu and
+therefore a valid JavaScript identifier character, verified against V8:
 
 ```
-order_linesⱵorder        // child table Ⱶ key field — "order_lines via order"
+order_linesↃorder        // child table Ↄ key field — "order_lines via order"
 ```
 
-A forward path starts with a *field of the current table*; an inverse relation starts with
-a *table name*. The two can only collide when a field name equals a table name **and** the
-rest of the segments resolve both ways — and even then, the syntactic position
-disambiguates: an inverse relation is only legal in an aggregation-argument position, where
-a forward path (a scalar) is meaningless. Resolution rule: in an aggregation argument, try
-inverse resolution first; anywhere else, forward only; if a genuine ambiguity remains
-(both readings resolve in the same position), validation fails and names the identifier —
-never a silent pick.
+The reversed C marks the reversed join. Forward paths keep Ⱶ exclusively, so the direction
+is visible in the source and the resolver never guesses: an identifier containing Ↄ is an
+inverse relation, one containing only Ⱶ is a forward path. R4 is thereby satisfied by
+construction — no position-dependent resolution, no ambiguity rules; the only requirement
+is that Ↄ joins Ⱶ as a character refused in table and field names. In a three-segment
+value path (proposal A) the antisigma marks only the direction-reversing hop; the final
+segment is field selection on the child row, which keeps Ⱶ: `order_linesↃorderⱵqty` —
+"order_lines by order, take qty".
 
-Two refinements worth considering:
+Two refinements considered:
 
-- **Shorthand**: when exactly one key field of `order_lines` targets the current table and
-  no field of the current table is named `order_lines`, allow the bare table name:
-  `sum(order_lines, r => r.qty)`. The long form is only *required* when the child table has
-  two keys to the parent (`messages` with `from_user` and `to_user`).
-- **A distinct character for the inverse hop**: U+A78D LATIN CAPITAL LETTER TURNED H — `Ɥ`
-  — is, like Ⱶ, Unicode category Lu and therefore a valid JS identifier character
-  (verified against V8). The inverse relation would then be spelled `order_linesⱵorder`
-  with Ɥ in place of Ⱶ: `order_linesꞍorder`, leaving Ⱶ exclusively for forward paths.
-  A turned H for the turned-around join is a nice mnemonic and makes
-  the direction visible in the source, at the cost of a second special character to teach
-  and to type. Recommendation: **stay with Ⱶ for both directions** and rely on position +
-  the ambiguity error; reserve Ɥ as the disambiguation escape hatch only if practice shows
-  collisions are common. (Decide before shipping; retrofitting the character is a
-  formula-rewriting migration.)
+- **Shorthand**: when exactly one key field of `order_lines` targets the current table,
+  allow the bare table name: `sum(order_lines, r => r.qty)`. The long form is only
+  *required* when the child table has two keys to the parent (`messages` with `from_user`
+  and `to_user`). With the antisigma this costs the self-announcing spelling, so the
+  resolver must fall back to position (a bare table name is only legal in an
+  aggregation-argument position, and a field of the same name wins) — the shorthand is
+  optional sugar, droppable if that rule proves confusing.
+- **Reusing Ⱶ for both directions** (rejected): tersest, but requires position-dependent
+  resolution — inverse-first inside aggregation arguments — plus hard validation errors
+  whenever a field name coincides with a child table name and both readings resolve. A
+  dedicated turned-H (`Ɥ`, U+A78D) was also considered; the antisigma wins on Claudian
+  pedigree and on visual distance from Ⱶ.
 
 ---
 
 ## Proposal A — aggregate a reverse value path
 
 The terse form: the first argument is a single identifier spelling
-`childtable Ⱶ keyfield Ⱶ valuefield`, denoting the multiset of that field's values over the
+`childtable Ↄ keyfield Ⱶ valuefield`, denoting the multiset of that field's values over the
 child rows; an optional second argument is a predicate arrow over the child row.
 
 ```js
-count(order_linesⱵorder)                                   // two segments: just the rows
-sum(order_linesⱵorderⱵqty)                                 // three: aggregate this field
-sum(order_linesⱵorderⱵqty, r => r.status === "shipped")    // restricted
-avg(order_linesⱵorderⱵprice) > 100
+count(order_linesↃorder)                                   // two segments: just the rows
+sum(order_linesↃorderⱵqty)                                 // three: aggregate this field
+sum(order_linesↃorderⱵqty, r => r.status === "shipped")    // restricted
+avg(order_linesↃorderⱵprice) > 100
 ```
 
-Analysis: inside an aggregation call, a first-argument identifier is split on Ⱶ and
-resolved inverse-first (table, key field on that table targeting the current table, then a
-field of that table). Outside an aggregation call the identifier fails validation — the
-multiset is not a value.
+Analysis: an identifier containing Ↄ is split on Ↄ and then Ⱶ, and resolved as child
+table, key field on that table targeting the current table, then a field of that table.
+Outside an aggregation-argument position the identifier fails validation — the multiset is
+not a value.
 
 SQL: `(SELECT coalesce(sum(l.qty), 0) FROM order_lines l WHERE l.order = orders.id AND
 l.status = 'shipped')`. Reified path: the host prefetches the child rows, binds them, and a
 prelude in the rendered script defines the aggregation functions.
 
 **For**: mirrors the forward joinfield syntax exactly — admins who know `publisherⱵname`
-read `sum(order_linesⱵorderⱵqty)` instantly; the common case is the tersest of all three
+read `sum(order_linesↃorderⱵqty)` instantly; the common case is the tersest of all three
 proposals.
 
 **Against**: the aggregated value must be a bare field — `sum` of `qty * price` is
@@ -121,19 +123,19 @@ appears, child *rows* enter the picture anyway (`r => r.status === …`), so the
 ends up with two notions — paths-as-value-multisets and rows-in-arrows — where one would
 do.
 
-## Proposal B — relation identifiers are arrays of child rows *(recommended)*
+## Proposal B — relation identifiers are arrays of child rows
 
-One concept: `order_linesⱵorder` names, in any aggregation-argument position, the array of
+One concept: `order_linesↃorder` names, in any aggregation-argument position, the array of
 child rows. Aggregations are ordinary functions over it; the value being aggregated is an
 arrow over the child row; the restriction is `.filter()` with a predicate arrow — exactly
 the JS an admin would guess.
 
 ```js
-count(order_linesⱵorder)
-sum(order_linesⱵorder, r => r.qty * r.price)
-sum(order_linesⱵorder.filter(r => r.status === "shipped"), r => r.qty)
-avg(order_linesⱵorder.filter(r => r.qty > minimum_qty), r => r.price)   // parent field in scope
-some(sharesⱵdocument, s => s.shared_with === user.id)
+count(order_linesↃorder)
+sum(order_linesↃorder, r => r.qty * r.price)
+sum(order_linesↃorder.filter(r => r.status === "shipped"), r => r.qty)
+avg(order_linesↃorder.filter(r => r.qty > minimum_qty), r => r.price)   // parent field in scope
+some(sharesↃdocument, s => s.shared_with === user.id)
 ```
 
 The validated grammar (what the symbolic translator and the prefetch analysis accept) is
@@ -157,7 +159,7 @@ Evaluation:
   child columns) lands inside the aggregate function. `some`/`every` render as
   `EXISTS` / `NOT EXISTS (… WHERE (pred) IS NOT TRUE)`.
 - **Reified**: no grammar knowledge needed at all. The host prefetches the child rows
-  (batched per relation, not per row), binds `order_linesⱵorder` as a real JSON array, and
+  (batched per relation, not per row), binds `order_linesↃorder` as a real JSON array, and
   the script prelude defines `sum`/`avg`/… as real functions with the null semantics
   below. `.filter` is just `Array.prototype.filter`. The fallback evaluator is therefore
   trivially faithful — the same property the crate already leans on for method calls.
@@ -165,9 +167,9 @@ Evaluation:
 **For**: full expressiveness (aggregate any expression of the child row); one concept
 instead of two; reads as plain JavaScript; the strict grammar keeps everything translatable
 and prefetchable *today*, while leaving a natural loosening later (arbitrary array methods
-on relation arrays — `order_linesⱵorder.map(…).sort(…)` — could be admitted for non-stored,
+on relation arrays — `order_linesↃorder.map(…).sort(…)` — could be admitted for non-stored,
 reified-only contexts without any syntax change). Proposal A's terse form can even be kept
-as pure sugar: `sum(order_linesⱵorderⱵqty)` ⇒ `sum(order_linesⱵorder, r => r.qty)` —
+as pure sugar: `sum(order_linesↃorderⱵqty)` ⇒ `sum(order_linesↃorder, r => r.qty)` —
 desugared at lowering time, so downstream phases see only one form.
 
 **Against**: the common case is wordier than A; the translator must pattern-match the
@@ -205,11 +207,11 @@ member access with a child *field* name plucks that field into an array of value
 aggregate is a **property read** on the result. The expression is a left-to-right pipeline:
 
 ```js
-order_linesⱵorder.length                                       // count — native, for free
-order_linesⱵorder.qty.sum
-order_linesⱵorder.filter(r => r.status === "shipped").qty.sum
-order_linesⱵorder.map(r => r.qty * r.price).sum                // expression values need .map
-sharesⱵdocument.some(s => s.shared_with === user.id)           // native array method
+order_linesↃorder.length                                       // count — native, for free
+order_linesↃorder.qty.sum
+order_linesↃorder.filter(r => r.status === "shipped").qty.sum
+order_linesↃorder.map(r => r.qty * r.price).sum                // expression values need .map
+sharesↃdocument.some(s => s.shared_with === user.id)           // native array method
 ```
 
 The validated grammar:
@@ -292,11 +294,11 @@ The purist version of D: relations are arrays and **only** JavaScript's own
 `Array.prototype` is available — nothing invented at all:
 
 ```js
-order_linesⱵorder.length
-order_linesⱵorder.filter(r => r.status === "shipped").length
-sharesⱵdocument.some(s => s.shared_with === user.id)
-order_linesⱵorder.map(r => r.qty).reduce((a, b) => a + b, 0)          // sum
-order_linesⱵorder.map(r => r.qty).reduce((a, b) => Math.max(a, b), -Infinity)  // max
+order_linesↃorder.length
+order_linesↃorder.filter(r => r.status === "shipped").length
+sharesↃdocument.some(s => s.shared_with === user.id)
+order_linesↃorder.map(r => r.qty).reduce((a, b) => a + b, 0)          // sum
+order_linesↃorder.map(r => r.qty).reduce((a, b) => Math.max(a, b), -Infinity)  // max
 ```
 
 **For**: nothing to teach, whitelist or shadow — it is exactly the JavaScript it looks
@@ -310,6 +312,93 @@ semantics table (`null + 3` is `3` in a reduce, while SQL `sum` ignores nulls), 
 two evaluators disagree in exactly the code the admin wrote by hand. Rejected as a primary
 design — but its readable subset (`.length`, `.filter`, `.some`, `.every`) is worth
 admitting inside whichever proposal wins, and B and D already do.
+
+## Proposal G — a curated method set (F, evolved)
+
+Keep F's shape — relations are arrays, everything is a left-to-right method chain, no free
+functions in scope — but *curate* the method set instead of inheriting `Array.prototype`
+wholesale. Subtract what has no straightforward SQL rendering, `reduce` above all; add as
+**methods** the few aggregates JavaScript lacks: `sum`, `min`, `max`, `avg`, `distinct`.
+Every aggregate is still a call (none of D's computed-property magic), and none is a free
+function competing with field names in the top-level scope (B's shadowing rule becomes
+unnecessary).
+
+Each added method takes an **optional selector argument** saying what to aggregate: either
+a **constant string literal** naming a child field, or an **arrow** over the child row.
+With no selector, the method aggregates the values it is called on (the output of a
+`map`). This makes the common case short without losing the general one:
+
+```js
+order_linesↃorder.length
+order_linesↃorder.sum("qty")                                     // common case: field name
+order_linesↃorder.filter(r => r.status === "shipped").sum("qty")
+order_linesↃorder.sum(r => r.qty * r.price)                      // arrow for expressions
+order_linesↃorder.avg("price") > 100
+order_linesↃorder.distinct("product").length                     // count distinct
+order_linesↃorder.map(r => r.qty).sum()                          // selector-less still works
+sharesↃdocument.some(s => s.shared_with === user.id)
+sharesↃdocument.map(s => s.shared_with).includes(user.id)        // membership: = ANY (…)
+tagsↃpost.map(t => t.name).join(", ")                            // string_agg
+```
+
+The string form must be a compile-time **constant** — a plain string literal, not a
+template, concatenation or variable — for two reasons: validation must resolve it to a
+child field at save time (R2), and anything dynamic would blur the line between a field
+*name* and the run-time *value* of a String field, an ambiguity the language must not
+admit. A string that names no field of the child table is a validation error naming the
+table. The native methods keep their native signatures untouched — `join(sep)` stays
+exactly `Array.prototype.join`, so value selection for it goes through `map` — the
+selector belongs only to the methods we invented.
+
+The method set:
+
+| kept (native JS) | added | removed from F |
+|---|---|---|
+| `filter(pred)`, `map(arrow)`, `some(pred)`, `every(pred)`, `length`, `includes(x)`, `join(sep)` | `sum(sel?)`, `min(sel?)`, `max(sel?)`, `avg(sel?)`, `distinct(sel?)` — `sel` a constant field-name string or an arrow | `reduce`, `sort`, `reverse`, `slice`, `find`, `findIndex`, `indexOf`, `at`, `flat`, `flatMap`, `concat`, `forEach`, everything else |
+
+The removal criterion is mechanical: out goes anything ordering-dependent or positional
+(SQL relations are sets until a terminal `ORDER BY`; `sort`, `slice`, `at`), anything
+whose callback is folded state rather than a per-row expression (`reduce`), anything
+effectful (`forEach`), and anything returning a row *object* into further computation
+(`find`). A curated method outside the set fails validation with a message naming the
+alternative ("`reduce` is not available in formulas — use `sum()`").
+
+Translation is uniform because the chain is: `filter` predicates fold into `WHERE`, the
+value expression comes from the selector (a field-name string is a column reference, an
+arrow translates like any formula arrow) or from a preceding `map`, `distinct` becomes
+`DISTINCT`, and the terminal method
+picks the SQL form — `length` → `count(*)`, `sum(…)` → `coalesce(sum(…), 0)`,
+`some`/`every` → `EXISTS` / `NOT EXISTS`, `includes(x)` → `x = ANY (SELECT …)`,
+`join(sep)` → `string_agg(…, sep)` (unordered — accept nondeterministic order, or add an
+ordered variant later). The reified path is the lightest of any invented-syntax proposal:
+the prelude defines the five added methods on `Array.prototype` inside the isolate (the
+sandbox is wholly ours) and everything else is genuinely native. The added methods
+implement the semantics table, which repairs F's null-divergence exactly where F broke it
+— the hand-written `reduce` is gone, so no user-visible code embeds JS coercion.
+
+**Is this set complete?** Against SQL's aggregate repertoire: `count` is `length`,
+`count(DISTINCT …)` is `distinct().length`, `bool_or`/`bool_and` are `some`/`every`,
+membership is `includes`, `string_agg` is `join`, and `sum`/`avg`/`min`/`max` are direct.
+That covers every aggregation Saltcorn 1's view builder offers except the ordered ones —
+Latest chiefly — which need an ordering-aware pair such as `maxBy(sel)`/`minBy(sel)`
+(taking the same selector forms)
+returning a child *row* (`readingsↃsensor.maxBy("ts").temp` → `ORDER BY … DESC LIMIT
+1` subquery); that reintroduces rows-as-results, so it is deliberately deferred rather
+than included. Statistical aggregates (`stddev`, `percentile_cont`) are similarly
+deferrable additions to the same shape. Verdict: the twelve methods above are reasonably
+complete for launch, with `maxBy`/`minBy` the first extension when Latest is missed.
+
+**For**: F's honesty (the chain is real JavaScript, method by method) with B's
+expressiveness; the antisigma relation identifier plus curated methods means nothing in
+the formula is position-dependent or shadowable; validation errors are per-method and
+concrete.
+
+**Against**: the invented methods now have a signature to teach (selector string vs.
+arrow vs. selector-less after `map` — three spellings of the same thing, though each is
+the obvious one for its case); the constant-string rule needs a good error message when
+someone computes a field name; patching `Array.prototype` in the prelude is a (contained,
+sandbox-local) global modification; and the curation boundary is a list the docs must
+teach, where F could at least say "it's just JavaScript".
 
 ---
 
@@ -337,7 +426,7 @@ path matches by construction.
 
 ```js
 owner === user.id
-  || some(sharesⱵdocument, s => s.shared_with === user.id && (_read || s.can_write))
+  || some(sharesↃdocument, s => s.shared_with === user.id && (_read || s.can_write))
 ```
 
 Under RLS translation the operation flags constant-fold per policy as they already do, and
@@ -371,12 +460,21 @@ rather than a parallel index that could drift.
 
 ## Recommendation
 
-Proposal **B** for the expression language, with Proposal A's three-segment path form kept
-as lowering-time sugar for the bare-field case, and the bare-table-name shorthand for
-unambiguous single-key relations. Among the non-function designs, D is the strongest but
-its computed-property magic and Proxy prelude buy fluency B mostly has anyway; F fails the
-non-programmer admin; **E is worth adopting regardless** — as the admin-UI entry point
-that generates or wraps the B form, giving dropdown discoverability without a second
-semantics. Decide the Ⱶ-vs-Ɥ question (one character for both directions vs. a dedicated
-inverse character) before first release, since it is a migration to change; the
-recommendation here is single-character Ⱶ with hard validation errors on ambiguity.
+Relation naming is settled: the Claudian antisigma (`childↃkey`, reserved character,
+self-announcing direction) in every expression-level proposal.
+
+The live choice is between the two finalists, **B** (aggregation as free functions:
+`sum(order_linesↃorder.filter(p), r => r.qty)`) and **G** (aggregation as curated array
+methods: `order_linesↃorder.filter(p).sum("qty")`). They share everything
+below the syntax — the antisigma relation identifiers, the semantics table, the `AggUse`
+analysis, one-subquery translation, prefetch-and-prelude reified evaluation — so the
+decision is genuinely about surface: with the selector argument the two are equally terse
+in the common case; B reads like a formula, while G is method-chained JavaScript with no
+free functions to shadow and per-method validation errors. A's three-segment path form (`sum(order_linesↃorderⱵqty)`) remains available as
+lowering-time sugar under B. The superseded proposals: C (strings fight the language),
+D (computed properties are magic; G keeps its pipeline without them), F (raw `reduce`
+fails the non-programmer and the translator — G is its repaired form).
+
+**E is worth adopting regardless of the B/G choice** — as the admin-UI entry point that
+generates or wraps the expression form, giving dropdown discoverability without a second
+semantics.
