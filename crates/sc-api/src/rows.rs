@@ -18,6 +18,7 @@
 use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
+use sc_expr::{CalcFields, Formula, TranslateError, UserEnv, translate_value};
 use sc_query::{
     Assignment, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
 };
@@ -77,8 +78,9 @@ pub async fn list_rows_where(
     filter: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<Json> {
-    let mut select =
-        Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
+    let mut columns = vec![Projection::all()];
+    columns.extend(calc_projections(catalog, table)?);
+    let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
     if let Some(filter) = filter {
         select = select.filter(filter);
     }
@@ -103,6 +105,7 @@ pub async fn create_row_ctx(
     context: Option<&CallerContext>,
 ) -> Result<Json> {
     let obj = require_object(body)?;
+    reject_calc_writes(table, obj)?;
     let mut columns = Vec::with_capacity(obj.len());
     let mut values = Vec::with_capacity(obj.len());
     for (key, json) in obj {
@@ -114,8 +117,9 @@ pub async fn create_row_ctx(
     if columns.is_empty() {
         return Err(Error::invalid("no fields to insert"));
     }
-    let insert =
-        Insert::row(table.name.clone(), columns, values).returning(vec![Projection::all()]);
+    let mut returning = vec![Projection::all()];
+    returning.extend(calc_projections(catalog, table)?);
+    let insert = Insert::row(table.name.clone(), columns, values).returning(returning);
     let rows = run_write(catalog, table, Statement::from(insert), context).await?;
     let row = rows
         .into_iter()
@@ -145,6 +149,7 @@ pub(crate) async fn update_row_guarded(
     context: Option<&CallerContext>,
 ) -> Result<Json> {
     let obj = require_object(body)?;
+    reject_calc_writes(table, obj)?;
     let pk = single_pk(table)?;
     let mut assignments = Vec::with_capacity(obj.len());
     for (key, json) in obj {
@@ -158,11 +163,13 @@ pub(crate) async fn update_row_guarded(
     if assignments.is_empty() {
         return Err(Error::invalid("no fields to update"));
     }
+    let mut returning = vec![Projection::all()];
+    returning.extend(calc_projections(catalog, table)?);
     let update = Update {
         table: table.name.clone(),
         assignments,
         filter: Some(guarded_filter(table, &pk, id, guard)?),
-        returning: vec![Projection::all()],
+        returning,
     };
     let rows = run_write(catalog, table, Statement::from(update), context).await?;
     let row = rows
@@ -271,6 +278,59 @@ pub fn row_to_json(row: &Row) -> Json {
         map.insert(name.clone(), value_to_json(value));
     }
     Json::Object(map)
+}
+
+/// The parsed calc-field expressions of `table` (Phase 8), keyed by field name.
+/// Re-parses the stored source, which validated cleanly at merge time.
+fn calc_map(table: &Table) -> CalcFields {
+    table
+        .calc_fields()
+        .filter_map(|f| {
+            let expr = f.calc_expression()?;
+            Formula::parse(expr).ok().map(|fm| (f.base.name.clone(), fm))
+        })
+        .collect()
+}
+
+/// Extra `SELECT` projections that compute `table`'s non-stored calculated
+/// fields on read (Phase 8), each aliased to its field name and in dependency
+/// order (a calc field that reads another inlines it, so the SQL is
+/// self-contained). A calc field whose inlined expression does not translate to
+/// SQL is **skipped** — computing it needs the reified evaluator, a read-path
+/// fallback not yet wired here (a genuinely untranslatable calc expression is
+/// the rare case; the built-in field/Ⱶ/Ↄ forms all translate).
+fn calc_projections(catalog: &Catalog, table: &Table) -> Result<Vec<Projection>> {
+    let calc = calc_map(table);
+    if calc.is_empty() {
+        return Ok(Vec::new());
+    }
+    let shape = catalog.schema_shape()?;
+    let env = UserEnv::Inline(None);
+    let mut out = Vec::new();
+    for field in table.calc_fields() {
+        let Some(formula) = calc.get(&field.base.name) else {
+            continue;
+        };
+        match translate_value(formula, &env, &shape, &table.name, &calc) {
+            Ok(expr) => out.push(Projection::expr_as(expr, field.base.name.clone())),
+            Err(TranslateError::Untranslatable(_)) => {}
+            Err(TranslateError::Error(e)) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+/// Refuse a write that names a non-stored calculated field — it has no column
+/// (Phase 8). Called by insert and update before building the statement.
+fn reject_calc_writes(table: &Table, columns: &Map<String, Json>) -> Result<()> {
+    for key in columns.keys() {
+        if table.field(key).is_some_and(|f| f.is_calc()) {
+            return Err(Error::invalid(format!(
+                "`{key}` is a calculated field and cannot be written"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Coerce a JSON value for a named column of `table`, validating it against the

@@ -1144,6 +1144,10 @@ fn field_kind_json(kind: &DataFieldKind) -> Json {
             "folder": folder,
             "mime_allow": mime_allow,
         }),
+        DataFieldKind::Calc { expression } => json!({
+            "type": "calc",
+            "expression": expression,
+        }),
     }
 }
 
@@ -1838,17 +1842,24 @@ fn validate_ownership_settings(
             ));
         }
         // Policies are per-operation; the formula must translate for all four
-        // under the GUC environment the policies will use.
+        // under the GUC environment the policies will use — with any calculated
+        // field the formula names inlined as its definition (Phase 8), so an
+        // untranslatable calc definition is refused here by name rather than at
+        // enable-DDL time.
         let env = sc_expr::UserEnv::Guc {
             field_types: user_field_types(catalog)?,
         };
+        let calc = catalog
+            .get(table)?
+            .map(|t| t.calc_formulas())
+            .unwrap_or_default();
         for op in [
             sc_expr::Operation::Read,
             sc_expr::Operation::Insert,
             sc_expr::Operation::Update,
             sc_expr::Operation::Delete,
         ] {
-            if let Err(e) = sc_expr::translate(&formula, op, &env, &shape, table) {
+            if let Err(e) = sc_expr::translate_with_calc(&formula, op, &env, &shape, table, &calc) {
                 return Err(Error::invalid(format!(
                     "cannot enable row-level security: {e}"
                 )));

@@ -41,4 +41,7 @@ pub use eval::DenoEvaluator;
 pub use eval::{FormulaCall, JsEvaluator};
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
-pub use translate::{Operation, TranslateError, USER_GUC, UserEnv, join_path_expr, translate};
+pub use translate::{
+    CalcFields, Operation, TranslateError, USER_GUC, UserEnv, join_path_expr, translate,
+    translate_value, translate_with_calc,
+};

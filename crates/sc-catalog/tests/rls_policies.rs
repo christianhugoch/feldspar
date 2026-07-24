@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use sc_catalog::{
-    Catalog, CallerContext, TableMeta, bootstrap_table_meta, disable_rls, enable_rls,
-    run_in_context, save_table_meta,
+    Catalog, CallerContext, DataFieldKind, FieldMeta, TableMeta, bootstrap_field_meta,
+    bootstrap_table_meta, disable_rls, enable_rls, run_in_context, save_field_meta, save_table_meta,
 };
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
@@ -144,6 +144,79 @@ async fn run_in_context_sets_the_caller_gucs_a_policy_reads() -> Result<()> {
     let anon = CallerContext::anonymous(100);
     let rows = run_in_context(&catalog, &anon, &select).await?;
     assert!(rows.is_empty());
+    Ok(())
+}
+
+/// The `USING`/`WITH CHECK` expression Postgres stores for a policy.
+async fn policy_qual(db: &TestDb, table: &str, policy: &str) -> String {
+    let client = db.client().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT qual FROM pg_policies WHERE tablename = $1 AND policyname = $2",
+            &[&table, &policy],
+        )
+        .await
+        .unwrap();
+    row.get::<_, Option<String>>(0).unwrap_or_default()
+}
+
+async fn add_calc(catalog: &Catalog, table: &str, name: &str, expr: &str) -> Result<()> {
+    save_field_meta(
+        catalog,
+        &FieldMeta::new(table, name).kind(DataFieldKind::Calc {
+            expression: expr.into(),
+        }),
+    )
+    .await
+}
+
+/// An ownership formula that names a non-stored calculated field has that
+/// field's *definition* inlined into the generated policy (Phase 8) — there is
+/// no `is_public` column, so the policy must reference `secret` directly.
+#[tokio::test]
+async fn a_calc_field_is_inlined_into_the_generated_policy() -> Result<()> {
+    let db = TestDb::new().await?;
+    db.client()
+        .await?
+        .batch_execute("CREATE TABLE docs (id bigint primary key, secret bigint)")
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    let catalog = catalog(&db).await?;
+    bootstrap_field_meta(&catalog).await?;
+    catalog.reload().await?;
+    add_calc(&catalog, "docs", "is_public", "secret === 0").await?;
+    configure_formula(&catalog, "docs", "is_public").await?;
+
+    let docs = catalog.require("docs")?;
+    enable_rls(&catalog, &docs).await?;
+
+    let qual = policy_qual(&db, "docs", "sc_owner_select").await;
+    assert!(qual.contains("secret"), "definition not inlined: {qual}");
+    assert!(!qual.contains("is_public"), "calc column referenced: {qual}");
+    Ok(())
+}
+
+/// Enabling RLS with a formula that names a calc field whose definition does not
+/// translate is refused (Phase 8) — the untranslatable construct surfaces as the
+/// reason, rather than emitting a policy that would fail at query time.
+#[tokio::test]
+async fn enabling_rls_refuses_an_untranslatable_calc_definition() -> Result<()> {
+    let db = TestDb::new().await?;
+    db.client()
+        .await?
+        .batch_execute("CREATE TABLE docs (id bigint primary key, tags text)")
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    let catalog = catalog(&db).await?;
+    bootstrap_field_meta(&catalog).await?;
+    catalog.reload().await?;
+    // A method call has no SQL form: the calc field is valid but untranslatable.
+    add_calc(&catalog, "docs", "tagged", "tags.includes(\"x\")").await?;
+    configure_formula(&catalog, "docs", "tagged").await?;
+
+    let docs = catalog.require("docs")?;
+    let err = enable_rls(&catalog, &docs).await.unwrap_err().to_string();
+    assert!(err.contains("translated") || err.contains("function call"), "got: {err}");
     Ok(())
 }
 

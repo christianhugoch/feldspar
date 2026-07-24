@@ -134,6 +134,15 @@ impl Catalog {
             }
         }
 
+        // Calculated fields (Phase 8) are validated and dependency-ordered here,
+        // after every field overlay has merged and before ownership validation —
+        // an ownership formula may reference a calc field, so the calc fields
+        // must have settled first. Invalid ones are dropped (fail closed) and
+        // reported like any other field-overlay issue. The shape passed in still
+        // contains them, so a calc field reading another resolves.
+        let calc_shape = schema_shape_of(&map);
+        field_issues.extend(crate::calc::merge_calc_fields(&mut map, &calc_shape));
+
         // Ownership formulas were *parsed* by `apply_overlay`; validation needs
         // the whole schema (a Ⱶ-path crosses tables), so it runs here, after
         // every table has merged. A formula that fails validation is cleared —

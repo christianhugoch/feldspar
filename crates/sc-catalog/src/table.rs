@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use sc_db::PhysicalTable;
-use sc_types::{RichTypeRef, TypeRef};
+use sc_types::{BaseField, BasicType, RichTypeRef, TypeRef};
 
 use crate::field::{Attrs, DataField, DataFieldKind, DbId, FieldId, TableId};
 use crate::field_meta::FieldMeta;
@@ -258,13 +258,32 @@ impl Table {
             return Vec::new();
         }
         let mut issues = Vec::new();
-        let Some(idx) = self
+        let existing = self
             .fields
             .iter()
-            .position(|f| f.base.name == meta.field_name)
-        else {
-            issues.push(self.field_issue(meta, "refers to a column that does not exist"));
-            return issues;
+            .position(|f| f.base.name == meta.field_name);
+        let idx = match (existing, &meta.kind) {
+            // A calculated field has no column: the overlay *introduces* it as a
+            // virtual field (Phase 8). Its expression is validated catalog-wide
+            // in `Catalog::reload`, like an ownership formula.
+            (None, DataFieldKind::Calc { .. }) => {
+                self.fields.push(virtual_calc_field(meta));
+                return issues;
+            }
+            // A calc overlay whose name collides with a real column would shadow
+            // it — refused, the column stays as introspected.
+            (Some(_), DataFieldKind::Calc { .. }) => {
+                issues.push(self.field_issue(
+                    meta,
+                    "is a calculated field but a real column of that name exists",
+                ));
+                return issues;
+            }
+            (Some(idx), _) => idx,
+            (None, _) => {
+                issues.push(self.field_issue(meta, "refers to a column that does not exist"));
+                return issues;
+            }
         };
 
         // Overlay-owned, always applied: a label (empty means "none given") and
@@ -299,6 +318,9 @@ impl Table {
         // depends on whether the database enforces the reference.
         match &meta.kind {
             DataFieldKind::Plain => {}
+            // Handled above (a calc overlay on an existing column is refused), so
+            // this is unreachable — named for exhaustiveness.
+            DataFieldKind::Calc { .. } => {}
             DataFieldKind::File { .. } => self.fields[idx].kind = meta.kind.clone(),
             DataFieldKind::Key { summary_field, .. } => {
                 // Read the database's target first, so the assignment below does
@@ -351,6 +373,61 @@ impl Table {
     /// The field with the given name, if present.
     pub fn field(&self, name: &str) -> Option<&DataField> {
         self.fields.iter().find(|f| f.base.name == name)
+    }
+
+    /// This table's non-stored calculated fields (Phase 8), in dependency order
+    /// — each after the calc fields it reads, as [`Catalog::reload`] left them.
+    /// The read path fills them in this order; the write path refuses them.
+    ///
+    /// [`Catalog::reload`]: crate::Catalog::reload
+    pub fn calc_fields(&self) -> impl Iterator<Item = &DataField> {
+        self.fields.iter().filter(|f| f.is_calc())
+    }
+
+    /// This table's calc-field expressions parsed into a map, for the translator
+    /// to **inline** where an ownership formula (or another calc field) names one
+    /// (Phase 8). The sources validated at merge time, so a re-parse cannot fail
+    /// in practice; a stray failure simply omits that field from the map.
+    pub fn calc_formulas(&self) -> sc_expr::CalcFields {
+        self.calc_fields()
+            .filter_map(|f| {
+                let expr = f.calc_expression()?;
+                sc_expr::Formula::parse(expr)
+                    .ok()
+                    .map(|formula| (f.base.name.clone(), formula))
+            })
+            .collect()
+    }
+}
+
+/// A virtual [`DataField`] for a non-stored calculated overlay: no column, no
+/// key, not required. Its declared type is the overlay's rich type when one is
+/// given (a calc field has no column to check `sql_types()` against, so it is
+/// taken as-is) and `Text` otherwise — the value's real type comes from the
+/// expression at read time.
+fn virtual_calc_field(meta: &FieldMeta) -> DataField {
+    let type_ = match &meta.type_name {
+        Some(name) => RichTypeRef::resolve(name)
+            .map(TypeRef::Rich)
+            .unwrap_or(TypeRef::Basic(BasicType::Text)),
+        None => TypeRef::Basic(BasicType::Text),
+    };
+    let label = if meta.label.is_empty() {
+        meta.field_name.clone()
+    } else {
+        meta.label.clone()
+    };
+    DataField {
+        base: BaseField {
+            name: meta.field_name.clone(),
+            label,
+            type_,
+            attributes: meta.attributes.clone(),
+        },
+        required: false,
+        unique: false,
+        primary_key: false,
+        kind: meta.kind.clone(),
     }
 }
 

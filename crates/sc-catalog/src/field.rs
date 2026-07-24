@@ -108,6 +108,17 @@ pub enum DataFieldKind {
         /// Allowed MIME types (empty = any).
         mime_allow: Vec<String>,
     },
+    /// A **non-stored calculated field** (TODO Phase 8): no column on disk, only
+    /// an `sc-expr` expression computed on read over the row's own fields,
+    /// Ⱶ-join paths, Ↄ-aggregations and *other calculated fields on the same
+    /// table* (never `user`/operation flags — a calc field has no caller). Such
+    /// a field exists purely in the overlay: [`Table::apply_field_overlay`] adds
+    /// it as a virtual field (there is no introspected column to overlay), and it
+    /// emits no DDL — it is not writable.
+    Calc {
+        /// The JavaScript expression, validated at merge time.
+        expression: String,
+    },
 }
 
 impl DataField {
@@ -145,6 +156,19 @@ impl DataField {
     pub fn primary_key(mut self) -> DataField {
         self.primary_key = true;
         self
+    }
+
+    /// This field's calculated-field expression, if it is one (Phase 8).
+    pub fn calc_expression(&self) -> Option<&str> {
+        match &self.kind {
+            DataFieldKind::Calc { expression } => Some(expression),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a non-stored calculated field.
+    pub fn is_calc(&self) -> bool {
+        matches!(self.kind, DataFieldKind::Calc { .. })
     }
 
     /// The column definition this field emits when the table or column is

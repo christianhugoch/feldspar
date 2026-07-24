@@ -17,6 +17,7 @@
 //! `_sc_fields` overlay, virtual and materialised providers, and cross-process
 //! cache invalidation over a bus.
 
+mod calc;
 mod catalog;
 mod field;
 mod field_meta;
@@ -29,7 +30,7 @@ mod table_meta;
 pub use catalog::Catalog;
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
 pub use field_meta::{
-    FIELD_META_TABLE, FieldMeta, FieldMetaId, KIND_FILE, KIND_KEY, KIND_PLAIN,
+    FIELD_META_TABLE, FieldMeta, FieldMetaId, KIND_CALC, KIND_FILE, KIND_KEY, KIND_PLAIN,
     bootstrap_field_meta, delete_field_meta, file_kind_config_spec, key_kind_config_spec,
     list_field_meta, list_field_meta_for_table, load_field_meta, load_field_meta_by_field,
     save_field_meta,

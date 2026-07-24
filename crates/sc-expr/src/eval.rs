@@ -80,8 +80,15 @@ pub struct FormulaCall {
 /// **must be treated as deny** — fail closed.
 #[async_trait]
 pub trait JsEvaluator: Send + Sync {
-    /// Evaluate one formula against one row/user/operation.
+    /// Evaluate one formula against one row/user/operation, coercing the result
+    /// to a boolean verdict (the ownership-formula use).
     async fn eval(&self, call: FormulaCall) -> Result<bool>;
+
+    /// Evaluate one formula to its **value** (as JSON), for a non-stored
+    /// calculated field (Phase 8). Same binding and normalisation as
+    /// [`eval`](JsEvaluator::eval); the caller decodes the JSON into a column
+    /// value. `Err` still means the formula could not be evaluated.
+    async fn eval_value(&self, call: FormulaCall) -> Result<serde_json::Value>;
 }
 
 /// How long a single evaluation may run before the watchdog terminates it. A
@@ -184,12 +191,26 @@ const AGG_PRELUDE: &str = r#"
 #[cfg(feature = "eval")]
 enum Job {
     Eval(FormulaCall, tokio::sync::oneshot::Sender<Result<bool>>),
+    /// Evaluate to the formula's **value** (as JSON), for calculated fields
+    /// (Phase 8) — the same binding and normalisation, but the script returns
+    /// `JSON.stringify(expr)` instead of `!!(expr)`.
+    EvalValue(
+        FormulaCall,
+        tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
+    ),
     /// Raw script escape hatch for the watchdog test only: the formula
     /// language cannot express an infinite loop (no statements, no named
     /// recursion), which is a feature — but it leaves the timeout otherwise
     /// untestable.
     #[cfg(test)]
     Raw(String, tokio::sync::oneshot::Sender<Result<bool>>),
+}
+
+/// How the reply for a finished job is sent — a bool verdict or a JSON value.
+#[cfg(feature = "eval")]
+enum Pending {
+    Bool(tokio::sync::oneshot::Sender<Result<bool>>),
+    Value(tokio::sync::oneshot::Sender<Result<serde_json::Value>>),
 }
 
 #[cfg(feature = "eval")]
@@ -251,6 +272,16 @@ impl JsEvaluator for DenoEvaluator {
             .await
             .map_err(|_| Error::msg("formula evaluator dropped the reply"))?
     }
+
+    async fn eval_value(&self, call: FormulaCall) -> Result<serde_json::Value> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Job::EvalValue(call, reply_tx))
+            .map_err(|_| Error::msg("formula evaluator thread is gone"))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::msg("formula evaluator dropped the reply"))?
+    }
 }
 
 #[cfg(feature = "eval")]
@@ -295,16 +326,25 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
     }
 
     while let Ok(job) = rx.recv() {
-        let (script, reply) = match job {
-            Job::Eval(call, reply) => match build_script(&call) {
-                Ok(script) => (script, reply),
+        // Build the script (with the right result wrapper) and remember how to
+        // reply. A build error goes straight back on the matching channel.
+        let (script, pending) = match job {
+            Job::Eval(call, reply) => match build_script(&call, false) {
+                Ok(script) => (script, Pending::Bool(reply)),
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
+            },
+            Job::EvalValue(call, reply) => match build_script(&call, true) {
+                Ok(script) => (script, Pending::Value(reply)),
                 Err(e) => {
                     let _ = reply.send(Err(e));
                     continue;
                 }
             },
             #[cfg(test)]
-            Job::Raw(script, reply) => (script, reply),
+            Job::Raw(script, reply) => (script, Pending::Bool(reply)),
         };
 
         timed_out.store(false, Ordering::SeqCst);
@@ -312,27 +352,47 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
         let outcome = runtime.execute_script("sc_formula.js", script);
         let _ = watchdog_tx.send(WatchdogMsg::Disarm);
 
-        let result = match outcome {
+        match outcome {
             Ok(global) => {
                 deno_core::scope!(scope, &mut runtime);
                 let local = deno_core::v8::Local::new(scope, global);
-                // The script ends in `!!(…)`, so the result is a boolean.
-                Ok(local.is_true())
+                match pending {
+                    // A `!!(…)` script yields a boolean.
+                    Pending::Bool(reply) => {
+                        let _ = reply.send(Ok(local.is_true()));
+                    }
+                    // A `JSON.stringify(…)` script yields a JSON string (or
+                    // `undefined`, which reads as null).
+                    Pending::Value(reply) => {
+                        let value = if local.is_string() {
+                            let text = local.to_rust_string_lossy(scope);
+                            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+                        } else {
+                            serde_json::Value::Null
+                        };
+                        let _ = reply.send(Ok(value));
+                    }
+                }
             }
             Err(e) => {
-                if timed_out.load(Ordering::SeqCst) {
+                let err = if timed_out.load(Ordering::SeqCst) {
                     // Termination poisons the isolate until cancelled; restore
                     // it so the next evaluation runs clean.
                     runtime.v8_isolate().cancel_terminate_execution();
-                    Err(Error::invalid(format!(
-                        "formula evaluation timed out after {timeout:?}"
-                    )))
+                    Error::invalid(format!("formula evaluation timed out after {timeout:?}"))
                 } else {
-                    Err(Error::invalid(format!("formula evaluation failed: {e}")))
+                    Error::invalid(format!("formula evaluation failed: {e}"))
+                };
+                match pending {
+                    Pending::Bool(reply) => {
+                        let _ = reply.send(Err(err));
+                    }
+                    Pending::Value(reply) => {
+                        let _ = reply.send(Err(err));
+                    }
                 }
             }
-        };
-        let _ = reply.send(result);
+        }
     }
     // rx closed: last DenoEvaluator handle dropped. watchdog_tx drops here,
     // which ends the watchdog thread's loop too.
@@ -374,10 +434,11 @@ fn watchdog_thread(
 #[cfg(feature = "eval")]
 /// Assemble the self-contained script for one call: every free variable bound
 /// as a `const` from a JSON bindings object, the normalised expression, and a
-/// `!!` truthiness coercion. JSON is (in a V8 this modern) a syntactic subset
-/// of JS, so embedding `serde_json`'s output as the argument literal is safe —
-/// no value ever touches string concatenation un-escaped.
-fn build_script(call: &FormulaCall) -> Result<String> {
+/// `!!` truthiness coercion (or, in `value_mode`, `JSON.stringify`). JSON is (in
+/// a V8 this modern) a syntactic subset of JS, so embedding `serde_json`'s
+/// output as the argument literal is safe — no value ever touches string
+/// concatenation un-escaped.
+fn build_script(call: &FormulaCall, value_mode: bool) -> Result<String> {
     let free = call.formula.free_vars();
     let mut bindings = serde_json::Map::new();
     let mut consts = String::new();
@@ -396,10 +457,19 @@ fn build_script(call: &FormulaCall) -> Result<String> {
     let args = serde_json::to_string(&serde_json::Value::Object(bindings))
         .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
     let expr = render_js(call.formula.ast());
+    // Value mode returns the JSON text of the result (calc fields); bool mode
+    // returns the `!!` verdict (ownership). `JSON.stringify(undefined)` is
+    // `undefined`, which the reader maps to null.
+    let ret = if value_mode {
+        format!("JSON.stringify({expr})")
+    } else {
+        format!("!!({expr})")
+    };
     Ok(format!(
-        "(function(__b) {{ \"use strict\";\n{consts}return !!({expr});\n}})({args})"
+        "(function(__b) {{ \"use strict\";\n{consts}return {ret};\n}})({args})"
     ))
 }
+
 
 #[cfg(feature = "eval")]
 /// The JSON value an identifier binds to, or `None` for a whitelisted global.
@@ -731,6 +801,34 @@ mod tests {
         let c = call("linesↃorder.length > 0", Operation::Read);
         let err = eval(c).await.unwrap_err().to_string();
         assert!(err.contains("linesↃorder") && err.contains("not prefetched"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn eval_value_returns_the_computed_value_for_a_calc_field() {
+        use serde_json::json;
+        let ev = DenoEvaluator::new();
+        // Arithmetic over two fields → a number.
+        let c = with_row(
+            call("pages * 2 + 1", Operation::Read),
+            &[("pages", Value::Int(10))],
+        );
+        assert_eq!(ev.eval_value(c).await.unwrap(), json!(21));
+        // A string expression.
+        let c = with_row(
+            call("title", Operation::Read),
+            &[("title", Value::Text("hi".into()))],
+        );
+        assert_eq!(ev.eval_value(c).await.unwrap(), json!("hi"));
+        // An aggregation value (relation prefetched as an array).
+        let c = with_relation(
+            call("linesↃorder.sum(\"qty\")", Operation::Read),
+            "linesↃorder",
+            json!([{ "id": 1, "qty": 2 }, { "id": 2, "qty": 3 }]),
+        );
+        assert_eq!(ev.eval_value(c).await.unwrap(), json!(5));
+        // A null-valued expression reads back as JSON null.
+        let c = with_row(call("owner", Operation::Read), &[("owner", Value::Null)]);
+        assert_eq!(ev.eval_value(c).await.unwrap(), serde_json::Value::Null);
     }
 
     #[tokio::test]

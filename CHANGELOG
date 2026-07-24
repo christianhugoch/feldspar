@@ -2,6 +2,47 @@
 
 Changes in reverse chronological order.
 
+## Non-stored calculated fields (Phase 8)
+
+A field can now be a **non-stored calculated field** — no column on disk, only an `sc-expr`
+expression (`pages * 2`, `publisherⱵname`, `reviewsↃbook.length`, or another calc field)
+computed on read. It reuses the whole formula machinery, including Phase 7's Ↄ-aggregations,
+over the calc scope: the row's own fields, Ⱶ-join paths, Ↄ-aggregations and *other calc
+fields on the same table* — never `user` or the operation flags.
+
+- **Storage** (`sc-catalog`): `DataFieldKind::Calc { expression }`, a `calc` discriminant in
+  the `_sc_fields` overlay with the expression under a reserved key. The merge introduces it
+  as a *virtual* field (there is no column to overlay) and refuses one whose name collides
+  with a real column.
+- **Validation + ordering** (`sc-catalog::calc`, at `Catalog::reload`): each expression is
+  validated like an ownership formula but with **no `user`/flags**; a Kahn sort over the
+  same-table dependency graph orders the fields (so one may read another) and detects cycles.
+  A cycle, an invalid expression, or a dependency on an invalid one **drops** the field (fail
+  closed) and reports a `FieldMergeIssue`; the survivors are left in dependency order.
+- **Read** (`sc-api::rows`): the read and insert/update-`RETURNING` `SELECT`s project each
+  calc field's value expression, aliased to its name, in dependency order — a calc field
+  reading an earlier one **inlines** that one's expression, so the SQL is self-contained.
+  Calc fields are **not writable**: a write naming one is refused by name.
+- **Ownership + RLS** (`sc-expr::translate_value` / `translate_with_calc`, threading a
+  `CalcFields` map): a calc-field reference inside an ownership formula is inlined as its
+  defining expression, transitively, in value and predicate position, before `translate` —
+  in both the runtime `Inline` env and the RLS `Guc` policy. An untranslatable inlined
+  definition refuses RLS at save and at `enable_rls`, naming the construct; the runtime path
+  falls back to the reified evaluator.
+- **Reified value evaluation** (`sc-expr::eval`): `JsEvaluator` gains `eval_value`, returning
+  the formula's value as JSON (`JSON.stringify` in the isolate) rather than a boolean verdict
+  — the reference the calc parity tests check the SQL projection against.
+- **sc-query**: `translate_value` reuses the existing `Expr` tree; no new variant.
+- **Tests**: calc ordering + cycle units; end-to-end read of plain/Ⱶ/Ↄ/calc-to-calc values,
+  the write refusal and fail-closed cycle (`sc-api` `calc_fields.rs`); SQL-vs-reified value
+  parity (`sc-expr` `parity_calc.rs`); an ownership formula through a calc field enforced at
+  runtime (`sc-server`) and inlined into an RLS policy, with an untranslatable calc definition
+  refused (`sc-catalog` `rls_policies.rs`).
+- **Out of scope, carried** (unchanged from the plan): stored calculated fields and the
+  tamper-safe inlining of a stored field's *value* into a policy (they need the write-path
+  recompute and triggers); the reified read-path fallback for a genuinely *untranslatable*
+  calc expression (the `eval_value` machinery is in place; the built-in forms all translate).
+
 ## Formula aggregations — implemented (Phase 7)
 
 Ownership formulae (and, once they land, calculated fields) can now aggregate over

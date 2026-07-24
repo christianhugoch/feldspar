@@ -80,6 +80,8 @@ pub const KIND_PLAIN: &str = "plain";
 pub const KIND_KEY: &str = "key";
 /// The `kind` discriminant for a file-reference field.
 pub const KIND_FILE: &str = "file";
+/// The `kind` discriminant for a non-stored calculated field (Phase 8).
+pub const KIND_CALC: &str = "calc";
 
 // Reserved keys a kind's parameters occupy within the `attributes` bag.
 const KEY_TARGET_TABLE: &str = "target_table";
@@ -88,6 +90,7 @@ const KEY_SUMMARY_FIELD: &str = "summary_field";
 const KEY_STORE: &str = "store";
 const KEY_FOLDER: &str = "folder";
 const KEY_MIME_ALLOW: &str = "mime_allow";
+const KEY_EXPRESSION: &str = "expression";
 
 /// The settings a `File` field kind takes, as the same [`FormField`] vocabulary a
 /// rich type's attributes and a framework's config use (§6.2) — so the admin UI
@@ -438,6 +441,7 @@ fn kind_discriminant(kind: &DataFieldKind) -> &'static str {
         DataFieldKind::Plain => KIND_PLAIN,
         DataFieldKind::Key { .. } => KIND_KEY,
         DataFieldKind::File { .. } => KIND_FILE,
+        DataFieldKind::Calc { .. } => KIND_CALC,
     }
 }
 
@@ -481,6 +485,9 @@ fn attributes_for_storage(meta: &FieldMeta) -> Attrs {
                 let list = mime_allow.iter().map(|m| Json::String(m.clone())).collect();
                 obj.insert(KEY_MIME_ALLOW.to_owned(), Json::Array(list));
             }
+        }
+        DataFieldKind::Calc { expression } => {
+            obj.insert(KEY_EXPRESSION.to_owned(), Json::String(expression.clone()));
         }
     }
     obj
@@ -533,10 +540,13 @@ fn kind_and_attributes(
             folder: take_optional_text(&mut attrs, KEY_FOLDER, table, field)?,
             mime_allow: take_string_array(&mut attrs, KEY_MIME_ALLOW, table, field)?,
         },
+        KIND_CALC => DataFieldKind::Calc {
+            expression: take_text(&mut attrs, KEY_EXPRESSION, table, field)?,
+        },
         other => {
             return Err(Error::invalid(format!(
                 "{FIELD_META_TABLE} row for `{table}.{field}`: `{other}` is not a known field \
-                 kind (expected {KIND_PLAIN}, {KIND_KEY} or {KIND_FILE})"
+                 kind (expected {KIND_PLAIN}, {KIND_KEY}, {KIND_FILE} or {KIND_CALC})"
             )));
         }
     };

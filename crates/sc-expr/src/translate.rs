@@ -150,6 +150,16 @@ fn untranslatable<T>(what: impl Into<String>) -> Result<T, TranslateError> {
     Err(TranslateError::Untranslatable(what.into()))
 }
 
+/// A table's non-stored calculated fields (Phase 8), by name — what the
+/// translator **inlines** wherever an ownership formula (or another calc field)
+/// names one. A calc field has no column, so a reference to it must expand to
+/// its defining expression; the expansion is transitive and terminates because
+/// the catalog orders calc fields acyclically.
+pub type CalcFields = BTreeMap<String, Formula>;
+
+/// The empty calc map, for the translation entry points that inline nothing.
+static EMPTY_CALC: CalcFields = BTreeMap::new();
+
 /// Translate `formula` into a boolean `sc_query::Expr` over `table`, for one
 /// operation, under one user environment. The result is what Phase 5 ANDs into
 /// a statement's WHERE and Phase 6 renders into an RLS policy.
@@ -163,6 +173,20 @@ pub fn translate(
     shape: &SchemaShape,
     table: &str,
 ) -> Result<QExpr, TranslateError> {
+    translate_with_calc(formula, op, env, shape, table, &CalcFields::new())
+}
+
+/// [`translate`] with the table's calculated fields available to inline (Phase
+/// 8): a reference to a calc field in the ownership formula expands to the calc
+/// field's defining expression, transitively.
+pub fn translate_with_calc(
+    formula: &Formula,
+    op: Operation,
+    env: &UserEnv,
+    shape: &SchemaShape,
+    table: &str,
+    calc: &CalcFields,
+) -> Result<QExpr, TranslateError> {
     if !shape.tables.contains_key(table) {
         return Err(TranslateError::Error(Error::invalid(format!(
             "formula on `{table}`: unknown table `{table}`"
@@ -175,8 +199,37 @@ pub fn translate(
         table,
         aliases: 0,
         child_scopes: Vec::new(),
+        calc,
     };
     tr.predicate(&folded)
+}
+
+/// Translate a calc field's `formula` in **value** position to an
+/// `sc_query::Expr` — the column expression the read path projects into a
+/// `SELECT` (Phase 8). Calc fields carry no operation flags and no `user`, so no
+/// folding and no operation is needed; a reference to another calc field is
+/// inlined via `calc`.
+pub fn translate_value(
+    formula: &Formula,
+    env: &UserEnv,
+    shape: &SchemaShape,
+    table: &str,
+    calc: &CalcFields,
+) -> Result<QExpr, TranslateError> {
+    if !shape.tables.contains_key(table) {
+        return Err(TranslateError::Error(Error::invalid(format!(
+            "formula on `{table}`: unknown table `{table}`"
+        ))));
+    }
+    let mut tr = Translator {
+        env,
+        shape,
+        table,
+        aliases: 0,
+        child_scopes: Vec::new(),
+        calc,
+    };
+    tr.value(formula.ast())
 }
 
 /// The correlated-subselect `sc_query::Expr` for one Ⱶ-join identifier on
@@ -198,6 +251,7 @@ pub fn join_path_expr(
         table,
         aliases: 0,
         child_scopes: Vec::new(),
+        calc: &EMPTY_CALC,
     };
     tr.join_value(ident)
 }
@@ -302,6 +356,8 @@ struct Translator<'a> {
     /// cannot start with it (§9 reserves the prefix), so an alias can never
     /// shadow a real table a correlated column reference points at.
     aliases: usize,
+    /// The table's calc fields, inlined where named (Phase 8).
+    calc: &'a CalcFields,
     /// Active child-row scopes, innermost last: an aggregation arrow's parameter
     /// bound to the aliased child table it ranges over (Phase 7). While one is
     /// on the stack, `param.field` resolves to a child column instead of failing.
@@ -358,6 +414,14 @@ impl Translator<'_> {
                 else_result: Some(Box::new(self.predicate(alt)?)),
             }),
             Ast::Ident(name) if name == "user" => Ok(self.user_truthy()),
+            // A bare calc field as a condition inlines to its expression in
+            // predicate position (Phase 8) — a boolean calc field is usable
+            // where any bare boolean field is not, because its definition is
+            // known.
+            Ast::Ident(name) if self.calc.contains_key(name) => {
+                let ast = self.calc[name].ast();
+                self.predicate(ast)
+            }
             Ast::Member { obj, prop, .. } if is_user(obj) => match prop {
                 MemberProp::Static(field) => self.user_field_truthy(field),
                 MemberProp::Computed(_) => untranslatable("computed access on `user`"),
@@ -486,6 +550,13 @@ impl Translator<'_> {
             return untranslatable(
                 "the `user` object itself has no SQL value (compare one of its fields)",
             );
+        }
+        // A calc field has no column: inline its defining expression in value
+        // position (Phase 8), transitively. Checked before the plain-field case
+        // because a calc field *is* present in the shape as a field.
+        if let Some(formula) = self.calc.get(name) {
+            let ast = formula.ast();
+            return self.value(ast);
         }
         if let Some(table_shape) = self.shape.tables.get(self.table)
             && table_shape.fields.contains_key(name)
@@ -1514,6 +1585,47 @@ mod tests {
         );
         assert!(sql.contains("jsonb_extract_path_text"), "got: {sql}");
         assert!(sql.contains("SELECT count(*) FROM \"reviews\""), "got: {sql}");
+    }
+
+    fn calc_of(pairs: &[(&str, &str)]) -> CalcFields {
+        pairs
+            .iter()
+            .map(|(name, src)| (name.to_string(), Formula::parse(src).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_calc_field_reference_is_inlined_into_an_ownership_formula() {
+        // The formula names calc field `big`, which has no column: it must
+        // expand to its defining expression, not become `books.big`.
+        let calc = calc_of(&[("big", "pages > 100")]);
+        let formula = Formula::parse("owner === user.id || big").unwrap();
+        let env = inline_user(&[("id", Value::Text("u1".into()))]);
+        let pred =
+            translate_with_calc(&formula, Operation::Read, &env, &shape(), "books", &calc).unwrap();
+        let stmt: Statement = Select::from(Source::table("books")).filter(pred).into();
+        let (sql, _) = Pg.render(&stmt).unwrap();
+        assert!(sql.contains("\"books\".\"pages\" > "), "not inlined: {sql}");
+        assert!(!sql.contains("\"big\""), "calc column leaked: {sql}");
+    }
+
+    #[test]
+    fn translate_value_inlines_calc_to_calc_transitively() {
+        // gross = pages + tax, tax = pages * 2 → gross expands to
+        // pages + (pages * 2), with no reference to `tax` or `gross`.
+        let calc = calc_of(&[("tax", "pages * 2"), ("gross", "pages + tax")]);
+        let gross = Formula::parse("pages + tax").unwrap();
+        let value =
+            translate_value(&gross, &UserEnv::Inline(None), &shape(), "books", &calc).unwrap();
+        let stmt: Statement = Select::from(Source::table("books"))
+            .columns(vec![Projection::expr(value)])
+            .into();
+        let (sql, _) = Pg.render(&stmt).unwrap();
+        assert!(
+            sql.contains("(\"books\".\"pages\" + (\"books\".\"pages\" * "),
+            "not transitively inlined: {sql}"
+        );
+        assert!(!sql.contains("\"tax\""), "calc column leaked: {sql}");
     }
 
     #[test]

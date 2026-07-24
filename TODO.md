@@ -436,46 +436,42 @@ field's expression is a formula over the same scope **minus `user` and the opera
 flags** — so it may read the row's own fields, Ⱶ-join paths and Ↄ-aggregation chains, and
 *other calculated fields on the same table*.
 
-- [ ] `DataFieldKind::Calc { expression }` in the `_sc_fields` overlay (kind discriminant +
-  the expression string in attributes, per §3.1's pattern; no `stored` parameter — every
-  calc field is non-stored). Validated like ownership formulas, minus `user`/flags: plain
-  fields, Ⱶ-paths and Ↄ-aggregation chains resolve; `user` or an operation flag is refused
-  by name (a calc field has no caller and no operation). A reference to another calc field
-  on the same table resolves against that field's own expression
-- [ ] **Topological order across calc fields on the same table**, at merge time: a calc
-  field may read another (`gross = net + tax`, `tax = net * rate`), so the merge builds the
-  dependency graph over the table's calc fields and orders them; a cycle is a reported issue
-  naming the fields (fail closed — a table with a calc-field cycle exposes none of them).
-  The order is what read-time evaluation and SQL projection both follow
-- [ ] **Computed whenever data is retrieved from a user-defined table** — the read path
-  (the `rows` layer / `RestProvider`, wherever a user table's rows leave the store) fills in
-  each calc field before rows reach the wire, in topological order. Translatable expressions
-  are projected into the `SELECT` as SQL (a calc field referencing an earlier one inlines
-  that one's expression, so the SQL is self-contained — no dependence on a stored value);
-  untranslatable ones are evaluated **reified per row after fetch**, with Ⱶ-join values and
-  Ↄ-relation child rows prefetched exactly as ownership enforcement already does (§5/§7),
-  and earlier calc fields already present in the row when a later one evaluates. Calc fields
-  are **not writable**: an insert/update naming one is refused by name on the write path
-- [ ] **Non-stored calc fields usable in ownership formulae, including RLS.** A calc field
-  has no column, so a reference to one inside an ownership formula is **inlined as its
-  defining expression** wherever it is named — transitively, so a calc field that reads
-  another expands to a self-contained expression (the topological order above is what makes
-  the expansion terminate). This is the *mechanical* counterpart of the stored-field GOALS
-  line, without the tamper angle: there is no stored value to distrust, only an expression to
-  substitute. The inlining happens **before** `translate`, in both envs — runtime
-  `Inline` (§5's WHERE injection) and RLS `Guc` (§6's policy). If the inlined definition does
-  not translate under the GUC env, **enabling RLS is refused**, naming the field (same rule
-  §4 already applies to the whole formula); on the runtime path an untranslatable definition
-  falls back to the reified evaluator, which computes the calc field into the row first. A
-  calc field that reads `user`/flags is impossible by the item above (they are refused in a
-  calc expression), so inlining one into an ownership formula never smuggles them in twice
-- [ ] Tests: topological order across dependent calc fields and cycle reporting (fail
-  closed); non-stored parity — the SQL-projected value and the reified value agree, piggy-
-  backing §3's harness — over a plain-field expression, a Ⱶ-join expression, an
-  Ↄ-aggregation expression, and a calc-field-depending-on-a-calc-field; an ownership formula
-  that **references a calc field** granting identically under runtime checks and (when the
-  definition translates) RLS, with an untranslatable calc definition refused at RLS-enable
-  time by name; the write-path refusal when a request names a calc field
+- [x] `DataFieldKind::Calc { expression }` in the `_sc_fields` overlay (kind discriminant
+  `calc` + the expression under the reserved `expression` key, per §3.1's pattern; no
+  `stored` parameter). The merge (`Table::apply_field_overlay`) *introduces* it as a virtual
+  field — there is no column to overlay — and refuses a calc overlay whose name collides with
+  a real column. Validated (`calc.rs`, at reload) like ownership formulas, minus `user`/flags:
+  a `user` or operation-flag use is refused by name. A reference to another calc field on the
+  same table resolves against that field (it is in the shape) and drives the ordering below
+- [x] **Topological order across calc fields on the same table**, at merge time
+  (`calc::merge_calc_fields`): a Kahn sort over the dependency graph orders the survivors and
+  detects cycles; a cycle, an invalid expression, or a dependency on an invalid field drops
+  the field (fail closed — `Table::calc_fields()` exposes only the survivors, in order) and
+  reports a [`FieldMergeIssue`]. The order is what read-time projection and inlining follow
+- [x] **Computed whenever data is retrieved from a user-defined table** — the `rows` layer
+  (`list_rows_where`, and the insert/update `RETURNING`) projects each calc field's inlined
+  value expression into the `SELECT`, aliased to its name, in dependency order (a calc field
+  reading an earlier one inlines that one's expression, so the SQL is self-contained). Calc
+  fields are **not writable**: an insert/update naming one is refused by name
+  (`reject_calc_writes`). **Deviation:** the *reified* fallback for a genuinely untranslatable
+  calc expression is **not** wired into the read path (the `eval_value` machinery for it is
+  built and unit-tested, but the read layer skips such a field for now) — every built-in form
+  (plain, Ⱶ, Ↄ, calc-to-calc) translates, so this only bites a hand-written untranslatable
+  expression; carried as a follow-up
+- [x] **Non-stored calc fields usable in ownership formulae, including RLS.** The translator
+  (`sc-expr::translate_with_calc` / `translate_value`, threading a `CalcFields` map) **inlines**
+  a calc-field reference as its defining expression, transitively, in both value and predicate
+  position — before `translate`, in both the runtime `Inline` env (§5 WHERE injection) and the
+  RLS `Guc` env (§6 policy). An untranslatable inlined definition **refuses RLS** at save
+  (`validate_ownership_settings`) and at `enable_rls`, naming the construct; the runtime path
+  falls back to the reified evaluator. `user`/flags cannot appear in a calc field (refused
+  above), so inlining never smuggles them in
+- [x] Tests: topological order + cycle reporting (`calc.rs` units + `sc-api` `calc_fields.rs`
+  fail-closed); non-stored parity — SQL-projected vs reified agree (`sc-expr`
+  `parity_calc.rs`) over plain / Ⱶ / Ↄ / calc-to-calc; an ownership formula **referencing a
+  calc field** granting identically under runtime checks (`sc-server` `ownership_enforcement.rs`)
+  and inlined into an RLS policy, with an untranslatable calc definition refused at enable
+  (`sc-catalog` `rls_policies.rs`); the write-path refusal (`calc_fields.rs`)
 
 ## Phase 9 — Documentation
 

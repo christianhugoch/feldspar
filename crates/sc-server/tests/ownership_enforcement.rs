@@ -37,7 +37,9 @@ use sc_app::{
     ApiConfig, Application, CodeFramework, FrameworkRef, app_source_from_config, build_application,
 };
 use sc_auth::{ROLE_ADMIN, Role, SessionStore, create_user, save_role};
-use sc_catalog::{Catalog, FileStoreId, TableId};
+use sc_catalog::{
+    Catalog, DataFieldKind, FieldMeta, FileStoreId, TableId, save_field_meta,
+};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_files::LocalFileStore;
@@ -548,6 +550,66 @@ async fn an_aggregation_formula_grants_over_a_child_relation() -> sc_error::Resu
         .send("PUT", "/api/posts/1", Some(json!({ "title": "hijack" })))
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_ownership_formula_grants_through_a_calc_field() -> sc_error::Result<()> {
+    // A calc field `is_published = project !== null` has no column; the
+    // ownership formula `owner === user.email || is_published` inlines its
+    // definition (Phase 8), so a post is reachable if the caller owns it *or* it
+    // is published — enforced through the runtime WHERE injection.
+    let tmp = TempDir::new("calc");
+    let (router, catalog, db) = setup(&tmp).await?;
+    db.client()
+        .await?
+        .batch_execute(
+            "INSERT INTO projects (id, owner) VALUES (1, 'admin@example.com'); \
+             INSERT INTO posts (id, title, owner, project) VALUES \
+             (1, 'alice-only', 'alice@example.com', NULL), \
+             (2, 'published', 'bob@example.com', 1), \
+             (3, 'bob-only', 'bob@example.com', NULL)",
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+
+    // The calc field is created directly through the catalog (there is no admin
+    // calc-field endpoint yet); the ownership formula is set through the API,
+    // which re-projects the mount over the now-current catalog.
+    save_field_meta(
+        &catalog,
+        &FieldMeta::new("posts", "is_published").kind(DataFieldKind::Calc {
+            expression: "project !== null".into(),
+        }),
+    )
+    .await?;
+    catalog.reload().await?;
+
+    let mut admin = Client::new(router.clone(), BASE_DOMAIN);
+    assert_eq!(admin.login("admin@example.com", "admin-pw").await, StatusCode::OK);
+    let mut alice = Client::new(router.clone(), APP_HOST);
+    assert_eq!(alice.login(ALICE, "alice-pw").await, StatusCode::OK);
+    let mut bob = Client::new(router.clone(), APP_HOST);
+    assert_eq!(bob.login(BOB, "bob-pw").await, StatusCode::OK);
+
+    set_formula(&mut admin, "owner === user.email || is_published").await;
+
+    // alice: her own post + the published one.
+    let (status, list) = alice.send("GET", "/api/posts", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(titles(&list), vec!["alice-only", "published"]);
+    // bob: his two posts (one of which is also the published one).
+    let (_, list) = bob.send("GET", "/api/posts", None).await;
+    assert_eq!(titles(&list), vec!["bob-only", "published"]);
+
+    // The computed calc field also rides out on the read.
+    let published = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["title"] == json!("published"))
+        .unwrap();
+    assert_eq!(published["is_published"], json!(true));
     Ok(())
 }
 
