@@ -25,11 +25,15 @@ because v1 compatibility, calculated fields and the future JS code adapter (§15
 JavaScript anyway; one expression language, parsed once, beats two.
 
 One deliberate exclusion, from the user: the GOALS line on **stored calculated fields being
-inlined into RLS policies** cannot land at the start of this milestone because calculated
-fields do not exist yet. Phase 8 brings calculated fields in as a stretch goal, and the RLS
-inlining is its last item — inside this milestone if Phase 8 lands, carried otherwise.
-Phase 7 (formula aggregations, [docs/AGG_EXPRS.md](./docs/AGG_EXPRS.md) proposal G) extends
-the formula language over incoming keys for both ownership formulae and calculated fields.
+inlined into RLS policies** cannot land in this milestone at all — it needs stored
+calculated fields, which need the write-path recompute and trigger machinery of their own
+milestone. Phase 8 is therefore scoped down to **non-stored calculated fields** as a stretch
+goal — computed on read, dependency-ordered so one can read another, and usable inside
+ownership formulae (including RLS) by inlining their defining expression. Stored fields, and
+the *tamper-safe* inlining of a stored field's value into a policy, are carried past the
+milestone. Phase 7 (formula aggregations,
+[docs/AGG_EXPRS.md](./docs/AGG_EXPRS.md) proposal G) extends the formula language over
+incoming keys for both ownership formulae and calculated fields.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -417,36 +421,61 @@ language minus `user`/flags). AGG_EXPRS.md's semantics table is the parity contr
   generation is exercised by the cycle test's `enable_rls`; a full RLS read/write scenario
   is a follow-up)
 
-## Phase 8 — Calculated fields (stretch)
+## Phase 8 — Non-stored calculated fields (stretch)
 
 In-milestone if capacity allows (the user flagged it *may* land now), carried otherwise.
-Expression-defined calculated fields only — code-adapter calculation (§6.2's full vision)
-stays out; the dependency machinery it needs is a milestone of its own. Everything here
-reuses `sc-expr` as-is, including Phase 7's Ↄ-aggregations: a calculated field is a formula
-over the same scope minus `user` and
-the operation flags.
+**Non-stored calculated fields only** — a calculated field is an expression computed *on
+read*, never a column on disk. Stored calculated fields (a real recomputed column) and the
+GOALS line on inlining a stored field's definition into RLS policies both move out of this
+milestone entirely (see "Carried past this milestone"): they need the write-path recompute
+and trigger machinery, which is a milestone of its own. Code-adapter calculation (§6.2's
+full vision) likewise stays out.
 
-- [ ] `DataFieldKind::Calc { expression, stored }` in the `_sc_fields` overlay (kind
-  discriminant + parameters in attributes, per §3.1's pattern), validated like ownership
-  formulas: fields, Ⱶ-paths and Ↄ-aggregation chains, no `user`, no flags. Dependencies **between** calculated
-  fields on the same table resolved topologically at merge time; a cycle is a reported
-  issue naming the fields
-- [ ] Non-stored: computed on read — translatable expressions projected into the SELECT as
-  SQL; untranslatable evaluated reified per row after fetch. Not writable, refused by name
-  on the write path
-- [ ] Stored: a real column, recomputed in Rust on this row's insert/update (write path,
-  not DB triggers — the recursion-limit trigger design waits for the calc-fields milestone
-  proper). Staleness through joinfield changes on the *target* table is documented, not
-  chased — likewise child-table writes under a Ↄ-aggregation (the `AggUse`-driven trigger
-  design waits with it). Backfill on definition change
-- [ ] **The GOALS RLS line, last**: policy translation inlines a stored calculated field's
-  *defining expression* wherever the ownership formula references it — the stored value is
-  never trusted inside a policy. Enabling RLS with a formula referencing a stored calc
-  field whose definition is untranslatable is refused
-- [ ] Tests: topological order and cycle reporting; non-stored parity (SQL projection vs
-  reified) piggybacking §3's harness; stored recompute and backfill; the RLS-inlining
-  behaviour proven by granting via a calc field whose stored value has been tampered with
-  directly in SQL — the policy must follow the definition, not the tampered value
+Everything here reuses `sc-expr` as-is, including Phase 7's Ↄ-aggregations: a calculated
+field's expression is a formula over the same scope **minus `user` and the operation
+flags** — so it may read the row's own fields, Ⱶ-join paths and Ↄ-aggregation chains, and
+*other calculated fields on the same table*.
+
+- [ ] `DataFieldKind::Calc { expression }` in the `_sc_fields` overlay (kind discriminant +
+  the expression string in attributes, per §3.1's pattern; no `stored` parameter — every
+  calc field is non-stored). Validated like ownership formulas, minus `user`/flags: plain
+  fields, Ⱶ-paths and Ↄ-aggregation chains resolve; `user` or an operation flag is refused
+  by name (a calc field has no caller and no operation). A reference to another calc field
+  on the same table resolves against that field's own expression
+- [ ] **Topological order across calc fields on the same table**, at merge time: a calc
+  field may read another (`gross = net + tax`, `tax = net * rate`), so the merge builds the
+  dependency graph over the table's calc fields and orders them; a cycle is a reported issue
+  naming the fields (fail closed — a table with a calc-field cycle exposes none of them).
+  The order is what read-time evaluation and SQL projection both follow
+- [ ] **Computed whenever data is retrieved from a user-defined table** — the read path
+  (the `rows` layer / `RestProvider`, wherever a user table's rows leave the store) fills in
+  each calc field before rows reach the wire, in topological order. Translatable expressions
+  are projected into the `SELECT` as SQL (a calc field referencing an earlier one inlines
+  that one's expression, so the SQL is self-contained — no dependence on a stored value);
+  untranslatable ones are evaluated **reified per row after fetch**, with Ⱶ-join values and
+  Ↄ-relation child rows prefetched exactly as ownership enforcement already does (§5/§7),
+  and earlier calc fields already present in the row when a later one evaluates. Calc fields
+  are **not writable**: an insert/update naming one is refused by name on the write path
+- [ ] **Non-stored calc fields usable in ownership formulae, including RLS.** A calc field
+  has no column, so a reference to one inside an ownership formula is **inlined as its
+  defining expression** wherever it is named — transitively, so a calc field that reads
+  another expands to a self-contained expression (the topological order above is what makes
+  the expansion terminate). This is the *mechanical* counterpart of the stored-field GOALS
+  line, without the tamper angle: there is no stored value to distrust, only an expression to
+  substitute. The inlining happens **before** `translate`, in both envs — runtime
+  `Inline` (§5's WHERE injection) and RLS `Guc` (§6's policy). If the inlined definition does
+  not translate under the GUC env, **enabling RLS is refused**, naming the field (same rule
+  §4 already applies to the whole formula); on the runtime path an untranslatable definition
+  falls back to the reified evaluator, which computes the calc field into the row first. A
+  calc field that reads `user`/flags is impossible by the item above (they are refused in a
+  calc expression), so inlining one into an ownership formula never smuggles them in twice
+- [ ] Tests: topological order across dependent calc fields and cycle reporting (fail
+  closed); non-stored parity — the SQL-projected value and the reified value agree, piggy-
+  backing §3's harness — over a plain-field expression, a Ⱶ-join expression, an
+  Ↄ-aggregation expression, and a calc-field-depending-on-a-calc-field; an ownership formula
+  that **references a calc field** granting identically under runtime checks and (when the
+  definition translates) RLS, with an untranslatable calc definition refused at RLS-enable
+  time by name; the write-path refusal when a request names a calc field
 
 ## Phase 9 — Documentation
 
@@ -468,6 +497,10 @@ the operation flags.
 - **A second reified engine behind `JsEvaluator`** (§3) — optional, not required for any
   target platform (V8 builds everywhere GOALS targets, from source on FreeBSD); worth doing
   only if V8's build weight or embed size becomes a cost we care about
+- **Stored calculated fields** (a real recomputed column) and the GOALS line on **inlining a
+  stored calc field's defining expression into RLS policies** — both need the write-path
+  recompute and the child-write/joinfield recomputation triggers, a milestone of its own.
+  Phase 8 is deliberately the *non-stored*, read-time slice
 - **Code-adapter calculated fields** and the full dependency/trigger design (§6.2) — Phase 8
   is deliberately the expression-only slice
 - **Ownership on files and per-view/page rules** (§7.3's "where applicable") — this
