@@ -66,6 +66,28 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
             }
             out.push(')');
         }
+        // Member access on a `maxBy`/`minBy` result: the row is `null` when the
+        // relation is empty, and reading a field must then yield `null` (SQL's
+        // empty-subquery `NULL`), not JS `?.`'s `undefined` — otherwise
+        // `.field === null` would disagree with the symbolic side. A single-eval
+        // IIFE folds a missing row to `null`.
+        Ast::Member { obj, prop, .. } if is_ordered_selection_call(obj) => {
+            out.push_str("((__o) => __o == null ? null : __o");
+            match prop {
+                MemberProp::Static(p) => {
+                    out.push('.');
+                    out.push_str(p);
+                }
+                MemberProp::Computed(e) => {
+                    out.push('[');
+                    render(e, locals, out);
+                    out.push(']');
+                }
+            }
+            out.push_str(")(");
+            render(obj, locals, out);
+            out.push(')');
+        }
         Ast::Member {
             obj,
             prop,
@@ -211,6 +233,17 @@ fn is_free_user(ast: &Ast, locals: &[String]) -> bool {
     matches!(ast, Ast::Ident(name) if name == "user" && !locals.iter().any(|l| l == name))
 }
 
+/// Whether `ast` is a `…​.maxBy(…)` / `…​.minBy(…)` call — whose result is a
+/// child row or `null`, so any member access on it must optional-chain.
+fn is_ordered_selection_call(ast: &Ast) -> bool {
+    matches!(
+        ast,
+        Ast::Call { callee, .. }
+            if matches!(&**callee, Ast::Member { prop: MemberProp::Static(m), .. }
+                if m == "maxBy" || m == "minBy")
+    )
+}
+
 /// A string literal, JSON-escaped — JSON string syntax is valid JS.
 fn render_str(s: &str, out: &mut String) {
     match serde_json::to_string(s) {
@@ -337,6 +370,31 @@ mod tests {
         assert_eq!(
             js("publisherⱵname === 'ACME'"),
             "(publisherⱵname === \"ACME\")"
+        );
+    }
+
+    #[test]
+    fn relation_chains_render_natively_for_the_prelude() {
+        // The relation identifier and the curated methods render verbatim; the
+        // prelude on Array.prototype supplies the invented ones.
+        assert_eq!(
+            js("linesↃorder.sum(\"qty\") === 5"),
+            "(linesↃorder.sum(\"qty\") === 5)"
+        );
+        assert_eq!(
+            js("linesↃorder.some(r => r.ok)"),
+            "linesↃorder.some(((r) => r.ok))"
+        );
+    }
+
+    #[test]
+    fn maxby_member_access_is_folded_to_null_not_undefined() {
+        // `.status` on a `maxBy` result reads null when the relation is empty
+        // (an IIFE guard), matching SQL's empty-subquery NULL rather than JS
+        // optional chaining's `undefined`.
+        assert_eq!(
+            js("linesↃorder.maxBy(\"qty\").status === null"),
+            "(((__o) => __o == null ? null : __o.status)(linesↃorder.maxBy(\"qty\")) === null)"
         );
     }
 }

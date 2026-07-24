@@ -39,8 +39,24 @@ impl PgParam<'_> {
             // `accepts` gate that the concrete `ToSql` impls apply.
             Value::Null => Ok(IsNull::Yes),
             Value::Bool(v) => v.to_sql_checked(ty, out),
-            Value::Int(v) => v.to_sql_checked(ty, out),
-            Value::Float(v) => v.to_sql_checked(ty, out),
+            // An integer literal reaches a placeholder whose inferred type is
+            // whatever the surrounding expression wants: it may be a narrower
+            // integer (`int2`/`int4`) or `numeric` — the latter is common when a
+            // formula compares against an aggregate (`sum(x) > 100`), since
+            // `sum` widens to `numeric`. `i64::to_sql` only accepts `int8`, so
+            // coerce to the target rather than error the whole query.
+            Value::Int(v) => match *ty {
+                Type::INT2 => (*v as i16).to_sql_checked(ty, out),
+                Type::INT4 => (*v as i32).to_sql_checked(ty, out),
+                Type::NUMERIC => Decimal::from(*v).to_sql_checked(ty, out),
+                _ => v.to_sql_checked(ty, out),
+            },
+            Value::Float(v) => match *ty {
+                Type::NUMERIC => Decimal::try_from(*v)
+                    .map_err(BoxError::from)
+                    .and_then(|d| d.to_sql_checked(ty, out)),
+                _ => v.to_sql_checked(ty, out),
+            },
             Value::Text(v) => v.to_sql_checked(ty, out),
             Value::Bytes(v) => v.to_sql_checked(ty, out),
             Value::Json(v) => v.to_sql_checked(ty, out),
@@ -138,4 +154,24 @@ pub fn decode(row: &PgRow, idx: usize) -> Result<Value> {
 fn get<'a, T: FromSql<'a>>(row: &'a PgRow, idx: usize) -> Result<T> {
     row.try_get::<usize, T>(idx)
         .map_err(|e| Error::database(format!("decode column {idx}: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An integer literal whose placeholder Postgres infers as `numeric`
+    /// (comparing against `sum(…)`, say) must encode, not error — the whole
+    /// point of the per-target coercion.
+    #[test]
+    fn an_int_encodes_into_a_numeric_placeholder() {
+        let mut out = BytesMut::new();
+        // Plain `i64::to_sql` refuses NUMERIC; `PgParam` coerces to Decimal.
+        assert!(PgParam(&Value::Int(100)).to_sql_checked(&Type::NUMERIC, &mut out).is_ok());
+        assert!(PgParam(&Value::Int(7)).to_sql_checked(&Type::INT4, &mut out).is_ok());
+        assert!(PgParam(&Value::Int(7)).to_sql_checked(&Type::INT2, &mut out).is_ok());
+        assert!(PgParam(&Value::Float(2.5)).to_sql_checked(&Type::NUMERIC, &mut out).is_ok());
+        // The int8 path still works.
+        assert!(PgParam(&Value::Int(9)).to_sql_checked(&Type::INT8, &mut out).is_ok());
+    }
 }

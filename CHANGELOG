@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## Formula aggregations — implemented (Phase 7)
+
+Ownership formulae (and, once they land, calculated fields) can now aggregate over
+*incoming* keys: `order_linesↃorder.sum("qty")`, `sharesↃdocument.some(s => s.shared_with
+=== user.email)`. An inverse-relation identifier is spelled with the Claudian antisigma `Ↄ`
+(U+2183, category Lu — one valid JS identifier, exactly like the forward-join `Ⱶ`), and is
+aggregated by the curated method chain from `docs/AGG_EXPRS.md`. The whole thing is one
+parse feeding both evaluators, and their agreement is a tested property.
+
+- **sc-expr `agg.rs`** (new): parses a chain from the lowered AST (`filter*`, optional
+  `map`/`distinct`, one terminal, and the member read of a `maxBy`/`minBy` row), checks it
+  against the curated grammar — `reduce`/`sort`/`slice`/`find`/… refused by name with the
+  alternative, a computed selector refused, an unknown child field named — and resolves the
+  relation against the child table's Key. `Analysis` gains `agg_uses`
+  (`AggUse { child_table, key_field, value_fields, filter_fields }`), the prefetch plan now
+  and the stored-calc trigger dependencies later; `SchemaShape` gains `incoming(table)` and
+  a per-table `primary_key`.
+- **Symbolic translation** (`translate.rs`): one correlated subquery per chain — `length`
+  → `count(*)`, `sum` → `coalesce(sum(…), 0)`, `avg`/`min`/`max` bare, `some`/`every` →
+  `count(*) > 0` / `= 0` over the (negated) predicate, `includes` → `x IN (SELECT …)`,
+  `join` → `coalesce(string_agg(…), '')`, `distinct` → `count(DISTINCT …)`, `maxBy`/`minBy`
+  → `ORDER BY key, pk LIMIT 1` selecting the accessed member. Filters fold into the
+  `WHERE`; arrow bodies translate in a child-row scope (`r.qty` → the child column,
+  `r.fkⱵx` → a nested join subquery). Serves both the runtime `Inline` env and the RLS
+  `Guc` env unchanged.
+- **sc-query**: a new `Expr::Agg { func, distinct, args }` (the `count(*)` / `DISTINCT`
+  shape a plain `Func` cannot spell).
+- **Reified evaluation** (`eval.rs` prelude, `normalise.rs`): the seven invented methods are
+  defined on `Array.prototype` inside the isolate, implementing the semantics table (null
+  ignored; empty relation `sum` 0, `avg`/`min`/`max`/`maxBy`/`minBy` null; `maxBy` tie-break
+  by the child's `id`). Relation identifiers render verbatim (bound to a prefetched array);
+  a member read of a `maxBy`/`minBy` result is folded to `null` (not `?.`'s `undefined`) so
+  it matches SQL's empty-subquery `NULL`.
+- **Enforcement**: aggregations flow through the Phase 5 runtime WHERE-injection (reads) and
+  the write path's reified check now prefetches each relation's child rows
+  (`resolve_agg_relation`); RLS policies (Phase 6) generate the same correlated subqueries.
+  **RLS-enablement cycle detection** (`sc_catalog::rls`): a policy that queries a child
+  table whose policy queries back is refused at enable time, naming the cycle, instead of
+  letting Postgres raise "infinite recursion detected in policy" at query time.
+- **sc-db-postgres**: `PgParam` now coerces an integer/float bind into a `numeric` (or
+  narrower integer) placeholder — an ownership formula comparing against `sum(…)`/`avg(…)`
+  lands its literal in a `numeric`-typed parameter, which the strict encoder would otherwise
+  reject.
+- **Tests**: per-method parity over the semantics table (`tests/parity_agg.rs`, translator
+  vs `deno_core`, incl. empty/null/tie cases); translator golden SQL and reified prelude
+  unit tests; validation-error unit tests; an end-to-end aggregation ownership formula
+  enforced through the real router (`commentsↃpost.some(…)`); and the RLS cycle refusal.
+- **Known gaps, carried**: an *untranslatable* aggregation on the read path (fetch-then-
+  filter) does not yet prefetch relations, and a child row's own Ⱶ-join inside a reified
+  arrow (`r.fkⱵx`) is not prefetched — both translate fine, so the SQL path covers them.
+
 ## Formula aggregations — design decided (proposal G)
 
 Design work only, no implementation yet.

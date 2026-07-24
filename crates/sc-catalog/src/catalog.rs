@@ -425,6 +425,12 @@ fn schema_shape_of(map: &HashMap<TableId, Table>) -> sc_expr::SchemaShape {
                 _ => table_shape.field(&field.base.name),
             };
         }
+        // A single-column primary key lets aggregations over this table as a
+        // child (Phase 7) count rows and break `maxBy`/`minBy` ties; a composite
+        // or absent key leaves it unset, so those simply do not translate.
+        if let [pk] = table.primary_key.as_slice() {
+            table_shape = table_shape.primary_key(pk);
+        }
         shape = shape.table(&table.name, table_shape);
     }
     if let Some(users) = map.get(&TableId(USERS_TABLE.to_owned())) {

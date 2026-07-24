@@ -415,6 +415,30 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
                 self.push(")");
                 Ok(())
             }
+            Expr::Agg {
+                func,
+                distinct,
+                args,
+            } => {
+                // Both the name and (structurally) the shape come from code.
+                self.push(func);
+                self.push("(");
+                if *distinct {
+                    self.push("DISTINCT ");
+                }
+                if args.is_empty() {
+                    self.push("*");
+                } else {
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        self.expr(a)?;
+                    }
+                }
+                self.push(")");
+                Ok(())
+            }
             Expr::In { e, set } => {
                 self.push("(");
                 self.expr(e)?;
@@ -761,6 +785,27 @@ mod tests {
              WHERE (\"p\".\"id\" = \"t\".\"publisher\")) IS NOT DISTINCT FROM $1)"
         );
         assert_eq!(binds, vec![Value::Text("ACME".into())]);
+    }
+
+    #[test]
+    fn aggregate_calls_render_count_star_and_distinct() {
+        // count(*), sum(x) and count(DISTINCT x) — the shapes a plain Func
+        // cannot spell.
+        let count = Expr::Agg {
+            func: "count".into(),
+            distinct: false,
+            args: vec![],
+        };
+        let (sql, _) = render(Select::from(Source::table("t")).filter(count.eq(Expr::lit(0_i64))));
+        assert!(sql.contains("(count(*) = $1)"), "got: {sql}");
+
+        let distinct = Expr::Agg {
+            func: "count".into(),
+            distinct: true,
+            args: vec![Expr::col("x")],
+        };
+        let (sql, _) = render(Select::from(Source::table("t")).filter(distinct.eq(Expr::lit(1_i64))));
+        assert!(sql.contains("count(DISTINCT \"x\")"), "got: {sql}");
     }
 
     #[test]

@@ -89,6 +89,98 @@ pub trait JsEvaluator: Send + Sync {
 #[cfg(feature = "eval")]
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// The aggregation prelude (Phase 7): the invented methods on `Array.prototype`
+/// the curated chain uses, implementing the [semantics
+/// table](../../../docs/AGG_EXPRS.md). Native `filter`/`map`/`some`/`every`/
+/// `length`/`includes`/`join` are genuinely native and need nothing here.
+///
+/// Every method is non-enumerable (so `for…in`/`JSON` see nothing new), null
+/// values are ignored, and the empty-relation defaults are `sum` `0`,
+/// `avg`/`min`/`max`/`maxBy`/`minBy` `null`. `maxBy`/`minBy` break selector
+/// ties by the child row's `id` — the host prefetch always exposes the primary
+/// key under its own name, and the symbolic side's `ORDER BY key, pk` matches
+/// (both are the production path for these; reified is the parity reference).
+#[cfg(feature = "eval")]
+const AGG_PRELUDE: &str = r#"
+(() => {
+  const A = Array.prototype;
+  const def = (name, fn) =>
+    Object.defineProperty(A, name, { value: fn, enumerable: false, writable: true, configurable: true });
+  // Resolve a selector: absent → the element itself, a string → a field, a
+  // function → its result. A null/undefined row yields null.
+  const pick = (row, sel) => {
+    if (sel === undefined || sel === null) return row;
+    if (typeof sel === "function") return sel(row);
+    return row == null ? null : row[sel];
+  };
+  // Non-null selector values.
+  const vals = (arr, sel) => {
+    const out = [];
+    for (const row of arr) {
+      const v = pick(row, sel);
+      if (v !== null && v !== undefined) out.push(v);
+    }
+    return out;
+  };
+  def("sum", function (sel) {
+    let t = 0;
+    for (const v of vals(this, sel)) t += v;
+    return t;
+  });
+  def("avg", function (sel) {
+    const vs = vals(this, sel);
+    if (vs.length === 0) return null;
+    let t = 0;
+    for (const v of vs) t += v;
+    return t / vs.length;
+  });
+  def("min", function (sel) {
+    const vs = vals(this, sel);
+    if (vs.length === 0) return null;
+    let m = vs[0];
+    for (const v of vs) if (v < m) m = v;
+    return m;
+  });
+  def("max", function (sel) {
+    const vs = vals(this, sel);
+    if (vs.length === 0) return null;
+    let m = vs[0];
+    for (const v of vs) if (v > m) m = v;
+    return m;
+  });
+  def("distinct", function (sel) {
+    const seen = new Set();
+    const out = [];
+    for (const v of vals(this, sel)) {
+      if (!seen.has(v)) {
+        seen.add(v);
+        out.push(v);
+      }
+    }
+    return out;
+  });
+  const by = (arr, sel, dir) => {
+    let best = null, bestKey = null;
+    for (const row of arr) {
+      const k = pick(row, sel);
+      if (k === null || k === undefined) continue;
+      if (best === null) { best = row; bestKey = k; continue; }
+      let cmp = 0;
+      if (k > bestKey) cmp = 1; else if (k < bestKey) cmp = -1;
+      else {
+        const id = row == null ? null : row.id;
+        const bid = best == null ? null : best.id;
+        if (id > bid) cmp = 1; else if (id < bid) cmp = -1;
+      }
+      if (cmp === dir) { best = row; bestKey = k; }
+    }
+    return best;
+  };
+  def("maxBy", function (sel) { return by(this, sel, 1); });
+  def("minBy", function (sel) { return by(this, sel, -1); });
+})();
+"#;
+
 #[cfg(feature = "eval")]
 enum Job {
     Eval(FormulaCall, tokio::sync::oneshot::Sender<Result<bool>>),
@@ -177,6 +269,15 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
         // A failed setup leaves `Deno.core` visible but harmless; evaluation
         // still works, so serve rather than die. The sandbox test would flag
         // it loudly on any platform where this happens.
+    }
+
+    // The aggregation prelude (Phase 7): the invented `Array.prototype` methods
+    // the curated chain relies on, implementing the semantics table. A failure
+    // here means aggregation formulas throw (deny) rather than silently doing
+    // the wrong thing; ordinary formulas are unaffected.
+    if runtime.execute_script("sc_agg.js", AGG_PRELUDE).is_err() {
+        // As above: serve rather than die; a parity test would catch a real
+        // regression on any platform where the prelude failed to install.
     }
 
     // The watchdog: armed per evaluation with a deadline; on expiry it
@@ -326,9 +427,11 @@ fn binding_for(call: &FormulaCall, ident: &str) -> Result<Option<serde_json::Val
     if crate::analyze::GLOBALS.contains(&ident) {
         return Ok(None);
     }
-    // A join identifier the caller failed to prefetch is the likeliest way
-    // here; name it precisely.
-    let what = if is_join_ident(ident) {
+    // A join or relation identifier the caller failed to prefetch is the
+    // likeliest way here; name it precisely.
+    let what = if crate::agg::is_relation_ident(ident) {
+        "relation was not prefetched"
+    } else if is_join_ident(ident) {
         "join value was not prefetched"
     } else {
         "no value was bound"
@@ -563,6 +666,71 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    /// A relation identifier binds to a prefetched JSON array of child rows.
+    fn with_relation(mut c: FormulaCall, ident: &str, rows: serde_json::Value) -> FormulaCall {
+        c.row.insert(ident.to_string(), Value::Json(rows));
+        c
+    }
+
+    #[tokio::test]
+    async fn aggregation_prelude_implements_the_semantics_table() {
+        let rel = "linesↃorder";
+        let rows = serde_json::json!([
+            {"id": 1, "qty": 2, "status": "shipped"},
+            {"id": 2, "qty": 3, "status": "pending"},
+            {"id": 3, "qty": null, "status": "shipped"},
+        ]);
+        let cases: &[(&str, bool)] = &[
+            ("linesↃorder.length === 3", true),
+            ("linesↃorder.sum(\"qty\") === 5", true), // null ignored
+            ("linesↃorder.filter(r => r.status === \"shipped\").length === 2", true),
+            ("linesↃorder.some(r => r.qty > 2)", true),
+            ("linesↃorder.every(r => r.qty > 0)", false), // null qty fails
+            ("linesↃorder.map(r => r.status).includes(\"pending\")", true),
+            ("linesↃorder.distinct(\"status\").length === 2", true),
+            ("linesↃorder.maxBy(\"qty\").id === 2", true),
+        ];
+        for (src, expect) in cases {
+            let c = with_relation(call(src, Operation::Read), rel, rows.clone());
+            assert_eq!(eval(c).await.unwrap(), *expect, "{src}");
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregation_empty_relation_defaults() {
+        let rel = "linesↃorder";
+        let empty = serde_json::json!([]);
+        for (src, expect) in [
+            ("linesↃorder.length === 0", true),
+            ("linesↃorder.sum(\"qty\") === 0", true),
+            ("linesↃorder.avg(\"qty\") === null", true),
+            ("linesↃorder.some(r => r.qty > 0)", false),
+            ("linesↃorder.every(r => r.qty > 0)", true),
+        ] {
+            let c = with_relation(call(src, Operation::Read), rel, empty.clone());
+            assert_eq!(eval(c).await.unwrap(), expect, "{src}");
+        }
+    }
+
+    #[tokio::test]
+    async fn maxby_member_access_is_null_safe_on_an_empty_relation() {
+        // `.reviewer` on an empty `maxBy` must read null (optional chaining),
+        // not throw — mirroring the symbolic `LIMIT 1` subquery.
+        let c = with_relation(
+            call("linesↃorder.maxBy(\"qty\").status === null", Operation::Read),
+            "linesↃorder",
+            serde_json::json!([]),
+        );
+        assert!(eval(c).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_unprefetched_relation_is_a_named_error() {
+        let c = call("linesↃorder.length > 0", Operation::Read);
+        let err = eval(c).await.unwrap_err().to_string();
+        assert!(err.contains("linesↃorder") && err.contains("not prefetched"), "got: {err}");
     }
 
     #[tokio::test]

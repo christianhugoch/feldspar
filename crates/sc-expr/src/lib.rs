@@ -23,6 +23,7 @@
 //!   construct, which the runtime path answers by falling back to the reified
 //!   evaluator — Phase 3, on `deno_core`, consuming this same [`Ast`].
 
+mod agg;
 mod analyze;
 mod ast;
 mod eval;
@@ -32,6 +33,7 @@ mod normalise;
 mod shape;
 mod translate;
 
+pub use agg::{AggUse, INVERSE};
 pub use analyze::{Analysis, FreeVars, JOIN, JoinPath, OpFlag};
 pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]

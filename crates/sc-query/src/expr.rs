@@ -179,6 +179,20 @@ pub enum Expr {
         /// Argument expressions.
         args: Vec<Expr>,
     },
+    /// An aggregate call: `func([DISTINCT] args…)`, or `func(*)` when `args` is
+    /// empty. The one shape a plain [`Func`](Expr::Func) cannot spell, added for
+    /// formula aggregations over incoming keys (§7.3, Phase 7): `count(*)`,
+    /// `count(DISTINCT x)`, `sum(x)`, `string_agg(x, sep)`. `func` is
+    /// structural (chosen by code, like a `Func` name), never user data.
+    Agg {
+        /// Aggregate function name (`count`, `sum`, `avg`, `min`, `max`,
+        /// `string_agg`).
+        func: String,
+        /// Whether the arguments are de-duplicated (`DISTINCT`).
+        distinct: bool,
+        /// Argument expressions; empty renders as `*` (only valid for `count`).
+        args: Vec<Expr>,
+    },
     /// An `IN` test.
     In {
         /// The expression being tested.

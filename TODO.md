@@ -369,42 +369,53 @@ positional or effectful refused by name. Available in **ownership formulae** (fu
 predicates may use `user` and the flags) and in **calculated fields** (Phase 8, same
 language minus `user`/flags). AGG_EXPRS.md's semantics table is the parity contract.
 
-- [ ] `sc-expr` analysis: an `INVERSE` companion to `JOIN` (`'Ↄ'`, U+2183); identifiers
+- [x] `sc-expr` analysis: an `INVERSE` companion to `JOIN` (`'Ↄ'`, U+2183); identifiers
   containing Ↄ classified as relation identifiers, resolved child-table → key-field against
   incoming keys; `SchemaShape::incoming(table)` derived from the child tables' `KeyShape`s
   (callers include candidate child tables in the shape, no parallel index);
   `Analysis` gains `AggUse { child_table, key_field, value_fields, filter_fields }` —
-  prefetch plan now, stored-calc trigger dependencies later. Ↄ joins Ⱶ as a character
-  refused in table and field names where names are validated
-- [ ] Chain validation: the curated grammar — relation, `.filter(arrow)*`, optional
-  `.map(arrow)`, one terminal method; selector argument a **constant** string literal
-  naming a child field (a computed string is refused — a field *name* must never blur with
-  a String field's *value*) or an arrow over the child row; arrow bodies are ordinary
-  formula expressions with the parent scope available and forward Ⱶ-paths resolving
-  against the child table; everything outside the set refused by name with the alternative
-  ("`reduce` is not available in formulas — use `sum()`")
-- [ ] Symbolic translation: one correlated subquery per chain — filters into `WHERE`, the
+  prefetch plan now, stored-calc trigger dependencies later. **Not done:** refusing Ↄ (or
+  Ⱶ) in table/field names — the catalog has no central name-character validation yet, so
+  this is deferred to when one exists (a formula referencing an Ↄ-bearing name simply fails
+  to resolve, so it is fail-closed, not unsafe)
+- [x] Chain validation: the curated grammar — relation, `.filter(arrow)*`, optional
+  `.map(arrow)`/`.distinct(sel?)`, one terminal method; selector argument a **constant**
+  string literal naming a child field (a computed string is refused) or an arrow over the
+  child row; arrow bodies are ordinary formula expressions with the parent scope available
+  and forward Ⱶ-paths resolving against the child table; everything outside the set refused
+  by name with the alternative ("`reduce` is not available in formulas — use `sum()`").
+  `agg.rs` + `analyze.rs::walk_aggregations`
+- [x] Symbolic translation: one correlated subquery per chain — filters into `WHERE`, the
   selector or `map` as the aggregated expression; `length` → `count(*)`, `sum` →
-  `coalesce(sum(…), 0)`, `some`/`every` → `EXISTS`/`NOT EXISTS (… WHERE (p) IS NOT TRUE)`,
-  `includes` → `= ANY`, `join` → `string_agg`, `distinct` → `DISTINCT`, `maxBy`/`minBy` →
-  `WHERE key IS NOT NULL ORDER BY key DESC, pk DESC LIMIT 1` selecting the accessed member
-  (member access on a `maxBy`/`minBy` result is optional-chaining by definition — the
-  normalised rendering emits `?.`)
-- [ ] Reified evaluation: the prelude defines the seven invented methods on the isolate's
+  `coalesce(sum(…), 0)`, `some`/`every` → `count(*) > 0` / `= 0` over the (negated)
+  predicate (an `EXISTS`-equivalent that needs no new `Expr` variant), `includes` →
+  `x IN (SELECT …)` (`= ANY`), `join` → `coalesce(string_agg(…), '')`, `distinct` →
+  `count(DISTINCT …)` via the new `Expr::Agg`, `maxBy`/`minBy` →
+  `WHERE key IS NOT NULL ORDER BY key DESC, pk DESC LIMIT 1` selecting the accessed member.
+  Child-scope member access (`r.qty`, `r.fkⱵx`) resolves in a per-arrow scope
+- [x] Reified evaluation: the prelude defines the seven invented methods on the isolate's
   `Array.prototype`, implementing the semantics table (null values ignored; empty relation:
   `sum` `0`, `avg`/`min`/`max`/`maxBy`/`minBy` `null`, `some` `false`, `every` `true`;
-  `maxBy` tie-break by primary key so both evaluators pick the same row); host prefetch
-  batched — one child query per relation for all parent rows in scope, grouped by key
-  value, never per-row — bound as arrays under the relation identifier
-- [ ] Ownership formulae: aggregations in the runtime-enforcement path (Phase 5's WHERE
-  injection) and in RLS policies (Phase 6); RLS enablement detects policy-reference cycles
-  (documents ↔ shares) and refuses, naming the cycle — Postgres would otherwise raise
-  `infinite recursion detected in policy` at query time
-- [ ] Tests: per-method parity property over the semantics table (translator vs `deno_core`,
-  including empty/null/tie cases); a `sharesↃdocument.some(…)` ownership formula enforced
-  identically under runtime checks and RLS in the Phase 5/6 harnesses; validation errors:
-  unknown child field in a selector string, non-constant selector, `reduce`, ambiguous or
-  unresolvable relation identifier, Ↄ in a proposed field name
+  `maxBy` tie-break by the child `id` so both evaluators pick the same row). The reified
+  member read of a `maxBy`/`minBy` result is folded to `null` (not `?.`'s `undefined`) to
+  match SQL. **Deviation:** the *host prefetch* binds per relation from a single child query
+  (`resolve_agg_relation`) rather than the planned cross-parent batching — correct, one
+  query per relation per row rather than per page; batching is a later optimisation
+- [x] Ownership formulae: aggregations in the runtime-enforcement path (Phase 5's WHERE
+  injection for reads, the write path's reified check with relation prefetch) and in RLS
+  policies (Phase 6, via the same GUC-mode translation); RLS enablement detects
+  policy-reference cycles (documents ↔ shares) over aggregation + Ⱶ-join references and
+  refuses, naming the cycle. **Not done:** an *untranslatable* aggregation on the read
+  fetch-then-filter fallback does not prefetch relations (all the built-in aggregations
+  translate, so this only bites a genuinely untranslatable chain)
+- [x] Tests: per-method parity over the semantics table (`tests/parity_agg.rs`, translator
+  vs `deno_core`, empty/null/tie cases); a `commentsↃpost.some(…)` ownership formula
+  enforced end-to-end through the real router (Phase 5); the RLS cycle refusal
+  (`documentsↃdocument`/`sharesↃdocument` in `rls_policies.rs`); validation errors — unknown
+  child field in a selector string, non-constant selector, `reduce`, unresolvable relation.
+  **Not done:** an end-to-end `sharesↃdocument.some(…)` under *RLS enforcement* (the policy
+  generation is exercised by the cycle test's `enable_rls`; a full RLS read/write scenario
+  is a follow-up)
 
 ## Phase 8 — Calculated fields (stretch)
 

@@ -141,6 +141,11 @@ pub(crate) fn enable_rls_sql(catalog: &Catalog, table: &Table) -> Result<String>
     })?;
     let dialect = catalog.primary().dialect();
     let shape = catalog.schema_shape()?;
+    // A policy on `table` that queries a child table (a Ↄ-aggregation, Phase 7)
+    // whose own policy queries back would make Postgres raise "infinite
+    // recursion detected in policy" at query time — refuse at enablement,
+    // naming the cycle, instead (principle 5, no silent failures).
+    check_no_policy_cycle(catalog, table, &shape)?;
     let env = UserEnv::Guc {
         field_types: catalog.user_field_types()?,
     };
@@ -181,6 +186,84 @@ pub(crate) fn disable_rls_sql(catalog: &Catalog, table_name: &str) -> String {
         "ALTER TABLE {ident} DISABLE ROW LEVEL SECURITY;\n"
     ));
     out
+}
+
+/// Refuse to enable RLS on `table` if doing so would close a policy-reference
+/// cycle among RLS-enforced tables.
+///
+/// Only RLS-enabled tables carry policies, so those are the graph's nodes (with
+/// `table` treated as about-to-be-enabled). An edge `A → B` means A's policy
+/// *queries* B — through a Ↄ-aggregation or a Ⱶ-join path — and thus would run
+/// B's policy. A cycle reachable from `table` back to `table` is what Postgres
+/// reports as infinite recursion; here it is a named, refused error with the
+/// standard fix in the message.
+fn check_no_policy_cycle(catalog: &Catalog, table: &Table, shape: &SchemaShape) -> Result<()> {
+    let tables = catalog.tables()?;
+    // The nodes: every RLS-enforced table, plus `table` being enabled now.
+    let enforced: std::collections::BTreeMap<String, Table> = tables
+        .into_iter()
+        .filter(|t| t.rls_enabled || t.name == table.name)
+        .map(|t| (t.name.clone(), t))
+        .collect();
+
+    // References restricted to enforced tables (a reference to an unenforced
+    // table cannot recurse — it has no policy).
+    let refs_of = |t: &Table| -> Result<Vec<String>> {
+        let Some(formula) = &t.ownership else {
+            return Ok(Vec::new());
+        };
+        let analysis = formula.validate(shape, &t.name)?;
+        let mut out: Vec<String> = analysis
+            .agg_uses
+            .iter()
+            .map(|a| a.child_table.clone())
+            .collect();
+        // A Ⱶ-join path's first segment resolves to the table it queries.
+        for path in &analysis.join_paths {
+            if let Some(first) = path.segments.first()
+                && let Some(ts) = shape.tables.get(&t.name)
+                && let Some(fs) = ts.fields.get(first)
+                && let Some(key) = &fs.key
+            {
+                out.push(key.target_table.clone());
+            }
+        }
+        out.retain(|name| enforced.contains_key(name) && *name != t.name);
+        out.sort();
+        out.dedup();
+        Ok(out)
+    };
+
+    // DFS from `table`; a path back to it is a cycle. `table`'s own references
+    // are the starting edges.
+    let start = refs_of(&enforced[&table.name])?;
+    let mut stack: Vec<(String, Vec<String>)> = vec![(table.name.clone(), start)];
+    let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut path = vec![table.name.clone()];
+    while let Some((_here, refs)) = stack.last_mut() {
+        let Some(next) = refs.pop() else {
+            stack.pop();
+            path.pop();
+            continue;
+        };
+        if next == table.name {
+            path.push(next);
+            return Err(Error::invalid(format!(
+                "cannot enable row-level security on `{}`: its policy would query a table \
+                 whose policy queries back, a cycle ({}) Postgres would reject as infinite \
+                 recursion. Exempt the child table from RLS, or use a SECURITY DEFINER helper.",
+                table.name,
+                path.join(" → ")
+            )));
+        }
+        if !visited.insert(next.clone()) {
+            continue;
+        }
+        let next_refs = refs_of(&enforced[&next])?;
+        path.push(next.clone());
+        stack.push((next, next_refs));
+    }
+    Ok(())
 }
 
 /// The four SQL commands an RLS table needs a policy for, and the [`Operation`]

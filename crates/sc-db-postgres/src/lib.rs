@@ -20,3 +20,4 @@ mod value;
 
 pub use dialect::PgDialect;
 pub use driver::PgDriver;
+pub use value::PgParam;

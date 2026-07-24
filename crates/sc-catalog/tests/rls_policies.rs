@@ -146,3 +146,44 @@ async fn run_in_context_sets_the_caller_gucs_a_policy_reads() -> Result<()> {
     assert!(rows.is_empty());
     Ok(())
 }
+
+/// A Ↄ-aggregation policy that queries a child table whose own policy queries
+/// back is refused at enablement, naming the cycle (Phase 7) — Postgres would
+/// otherwise raise "infinite recursion detected in policy" at query time.
+#[tokio::test]
+async fn enabling_rls_refuses_a_policy_reference_cycle() -> Result<()> {
+    let db = TestDb::new().await?;
+    db.client()
+        .await?
+        .batch_execute(
+            "CREATE TABLE documents (id bigint primary key, owner text); \
+             CREATE TABLE shares (id bigint primary key, \
+                 document bigint references documents(id), shared_with text)",
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    let catalog = catalog(&db).await?;
+    catalog.reload().await?;
+
+    // documents' policy queries shares (an aggregation); enabling it alone is
+    // fine because shares has no policy yet.
+    configure_formula(
+        &catalog,
+        "documents",
+        "owner === user.email || sharesↃdocument.some(s => s.shared_with === user.email)",
+    )
+    .await?;
+    catalog.reload().await?;
+    let documents = catalog.require("documents")?;
+    enable_rls(&catalog, &documents).await?;
+
+    // shares' policy queries documents back (a Ⱶ-join). Enabling it would close
+    // the cycle shares → documents → shares, so it is refused by name.
+    configure_formula(&catalog, "shares", "documentⱵowner === user.email").await?;
+    catalog.reload().await?;
+    let shares = catalog.require("shares")?;
+    let err = enable_rls(&catalog, &shares).await.unwrap_err().to_string();
+    assert!(err.contains("cycle"), "got: {err}");
+    assert!(err.contains("shares") && err.contains("documents"), "got: {err}");
+    Ok(())
+}

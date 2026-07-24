@@ -32,8 +32,8 @@ use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
 use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_expr::{
-    Formula, FormulaCall, JsEvaluator, Operation, TranslateError, UserEnv, join_path_expr,
-    translate,
+    AggUse, Formula, FormulaCall, INVERSE, JsEvaluator, Operation, TranslateError, UserEnv,
+    join_path_expr, translate,
 };
 use sc_query::{Expr, Projection, Select, Source, Value};
 use serde_json::{Map, Value as Json};
@@ -137,7 +137,67 @@ pub(crate) async fn row_allowed(
             values.insert(path.ident.clone(), value);
         }
     }
+    // Aggregations over incoming keys (Phase 7): the reified evaluator does no
+    // I/O, so prefetch each relation's child rows and bind them under the
+    // relation identifier (`childↃkey`) — the array the prelude aggregates.
+    for agg in &analysis.agg_uses {
+        let ident = format!("{}{}{}", agg.child_table, INVERSE, agg.key_field);
+        if !values.contains_key(&ident) {
+            let rows = resolve_agg_relation(cat, &shape, agg, &values).await?;
+            values.insert(ident, rows);
+        }
+    }
     Ok(allowed(evaluator, formula, op, user, &values).await)
+}
+
+/// Fetch the child rows an aggregation ranges over, as a JSON array bound under
+/// the relation identifier for the reified evaluator. The correlation is the
+/// parent's own value in the column the child key targets; a null there (or no
+/// matching children) is the empty relation.
+async fn resolve_agg_relation(
+    cat: &Catalog,
+    shape: &sc_expr::SchemaShape,
+    agg: &AggUse,
+    values: &BTreeMap<String, Value>,
+) -> Result<Value> {
+    let empty = Value::Json(Json::Array(Vec::new()));
+    // The parent column the child key references (the correlation target).
+    let Some(parent_field) = shape
+        .tables
+        .get(&agg.child_table)
+        .and_then(|t| t.fields.get(&agg.key_field))
+        .and_then(|f| f.key.as_ref())
+        .map(|k| k.target_field.clone())
+    else {
+        return Ok(empty);
+    };
+    let parent_value = values.get(&parent_field).cloned().unwrap_or(Value::Null);
+    if parent_value.is_null() {
+        return Ok(empty);
+    }
+    let child = cat.require(&agg.child_table)?;
+    let select = Select::from(Source::table(child.name.clone()))
+        .columns(vec![Projection::all()])
+        .filter(Expr::col(agg.key_field.clone()).eq(Expr::lit(parent_value)));
+    let fetched: Vec<Row> = cat
+        .provider(&child)
+        .query(&select)
+        .await?
+        .try_collect()
+        .await?;
+    let rows: Vec<Json> = fetched
+        .iter()
+        .map(|row| {
+            let obj: Map<String, Json> = row
+                .columns()
+                .iter()
+                .zip(row.values().iter())
+                .map(|(name, value)| (name.clone(), value_to_json(value)))
+                .collect();
+            Json::Object(obj)
+        })
+        .collect();
+    Ok(Value::Json(Json::Array(rows)))
 }
 
 /// The translated guard predicate for a write, when the formula is

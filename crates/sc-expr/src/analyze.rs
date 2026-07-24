@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 
 use sc_error::{Error, Result};
 
+use crate::agg::{self, AggUse, INVERSE};
 use crate::ast::{Ast, MemberProp};
 use crate::formula::Formula;
 use crate::shape::SchemaShape;
@@ -181,6 +182,10 @@ pub struct Analysis {
     pub user_props: BTreeSet<String>,
     /// True when `user` is indexed dynamically (`user[x]`).
     pub user_dynamic: bool,
+    /// Every aggregation over an incoming key (Phase 7), resolved against the
+    /// shape — the prefetch plan now, the stored-calc trigger dependencies
+    /// later.
+    pub agg_uses: BTreeSet<AggUse>,
 }
 
 impl Formula {
@@ -201,6 +206,10 @@ impl Formula {
             user_dynamic: free.user_dynamic,
             ..Analysis::default()
         };
+        // Aggregations first: an inverse-relation identifier is only meaningful
+        // as the root of a curated chain, so the whole chain is validated here
+        // and its relation identifier is *skipped* in the free-variable loop.
+        walk_aggregations(self.ast(), shape, table, &mut analysis)?;
         for ident in &free.idents {
             if let Some(flag) = OpFlag::from_ident(ident) {
                 analysis.flags.insert(flag);
@@ -210,6 +219,8 @@ impl Formula {
                 // Field names win over globals, matching the reified scope
                 // where row fields are bound over JavaScript's own globals.
                 analysis.fields.insert(ident.clone());
+            } else if ident.contains(INVERSE) {
+                // An inverse relation, validated by `walk_aggregations` above.
             } else if ident.contains(JOIN) {
                 analysis
                     .join_paths
@@ -231,6 +242,60 @@ impl Formula {
             }
         }
         Ok(analysis)
+    }
+}
+
+/// Walk `ast` collecting and validating every aggregation chain. At each node
+/// that reads as a chain (rooted at an inverse-relation identifier) the chain is
+/// resolved and field-checked and its [`AggUse`] recorded; the walk then
+/// descends only into the chain's *sub-expressions* (arrow bodies, value
+/// arguments — parent-scope syntax that may hold further aggregations), not its
+/// method spine. Non-chain nodes are walked child by child.
+fn walk_aggregations(
+    ast: &Ast,
+    shape: &SchemaShape,
+    table: &str,
+    analysis: &mut Analysis,
+) -> Result<()> {
+    if let Some(chain) = agg::parse_chain(ast) {
+        let chain = chain?;
+        let rel = chain.resolve(shape, table)?;
+        chain.validate_fields(shape, &rel)?;
+        analysis.agg_uses.insert(chain.agg_use(&rel));
+        // Descend into the parent-scope sub-expressions the chain carries.
+        for sub in chain.sub_expressions() {
+            walk_aggregations(sub, shape, table, analysis)?;
+        }
+        return Ok(());
+    }
+    for child in child_nodes(ast) {
+        walk_aggregations(child, shape, table, analysis)?;
+    }
+    Ok(())
+}
+
+/// The direct sub-expressions of a node, for the aggregation walk.
+fn child_nodes(ast: &Ast) -> Vec<&Ast> {
+    match ast {
+        Ast::Ident(_) | Ast::Str(_) | Ast::Num(_) | Ast::Bool(_) | Ast::Null => Vec::new(),
+        Ast::Member { obj, prop, .. } => {
+            let mut v = vec![&**obj];
+            if let MemberProp::Computed(e) = prop {
+                v.push(e);
+            }
+            v
+        }
+        Ast::Call { callee, args, .. } => {
+            let mut v = vec![&**callee];
+            v.extend(args.iter());
+            v
+        }
+        Ast::Unary { expr, .. } => vec![expr],
+        Ast::Binary { l, r, .. } => vec![l, r],
+        Ast::Cond { test, cons, alt } => vec![test, cons, alt],
+        Ast::Array(elems) => elems.iter().collect(),
+        Ast::Template { exprs, .. } => exprs.iter().collect(),
+        Ast::Arrow { body, .. } => vec![body],
     }
 }
 
