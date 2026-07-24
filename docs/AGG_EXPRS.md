@@ -42,7 +42,9 @@ Scalar aggregations: `count`, `sum`, `avg`, `min`, `max`. Boolean quantifiers: `
 Extensions that fit the same shapes later: `countDistinct`, `arrayAgg`, `stringAgg`, and an
 ordered `latest(rel, r => r.created_at, r => r.status)` — the value of the third arrow for
 the child row maximizing the second (Saltcorn 1's Latest aggregation; SQL `ORDER BY … DESC
-LIMIT 1` subquery).
+LIMIT 1` subquery). Proposal G folds `countDistinct` (`distinct().length`) and
+`stringAgg` (`join`) into its method set and includes the ordered selection as
+`maxBy`/`minBy`.
 
 In the function-based proposals (A–C) these names join the whitelisted-globals rule that
 already exists in `analyze.rs`: a field
@@ -318,7 +320,8 @@ admitting inside whichever proposal wins, and B and D already do.
 Keep F's shape — relations are arrays, everything is a left-to-right method chain, no free
 functions in scope — but *curate* the method set instead of inheriting `Array.prototype`
 wholesale. Subtract what has no straightforward SQL rendering, `reduce` above all; add as
-**methods** the few aggregates JavaScript lacks: `sum`, `min`, `max`, `avg`, `distinct`.
+**methods** the few aggregates JavaScript lacks: `sum`, `min`, `max`, `avg`, `distinct`,
+and the ordered pair `maxBy`/`minBy` for latest-row selection.
 Every aggregate is still a call (none of D's computed-property magic), and none is a free
 function competing with field names in the top-level scope (B's shadowing rule becomes
 unnecessary).
@@ -336,6 +339,8 @@ order_linesↃorder.sum(r => r.qty * r.price)                      // arrow for 
 order_linesↃorder.avg("price") > 100
 order_linesↃorder.distinct("product").length                     // count distinct
 order_linesↃorder.map(r => r.qty).sum()                          // selector-less still works
+readingsↃsensor.maxBy("ts").temp                                 // the latest reading's temp
+salesↃstore.filter(s => s.paid).maxBy("date").customerⱵname      // latest row, joinfield out
 sharesↃdocument.some(s => s.shared_with === user.id)
 sharesↃdocument.map(s => s.shared_with).includes(user.id)        // membership: = ANY (…)
 tagsↃpost.map(t => t.name).join(", ")                            // string_agg
@@ -354,14 +359,36 @@ The method set:
 
 | kept (native JS) | added | removed from F |
 |---|---|---|
-| `filter(pred)`, `map(arrow)`, `some(pred)`, `every(pred)`, `length`, `includes(x)`, `join(sep)` | `sum(sel?)`, `min(sel?)`, `max(sel?)`, `avg(sel?)`, `distinct(sel?)` — `sel` a constant field-name string or an arrow | `reduce`, `sort`, `reverse`, `slice`, `find`, `findIndex`, `indexOf`, `at`, `flat`, `flatMap`, `concat`, `forEach`, everything else |
+| `filter(pred)`, `map(arrow)`, `some(pred)`, `every(pred)`, `length`, `includes(x)`, `join(sep)` | `sum(sel?)`, `min(sel?)`, `max(sel?)`, `avg(sel?)`, `distinct(sel?)`, `maxBy(sel)`, `minBy(sel)` — `sel` a constant field-name string or an arrow (required for `maxBy`/`minBy`) | `reduce`, `sort`, `reverse`, `slice`, `find`, `findIndex`, `indexOf`, `at`, `flat`, `flatMap`, `concat`, `forEach`, everything else |
 
 The removal criterion is mechanical: out goes anything ordering-dependent or positional
-(SQL relations are sets until a terminal `ORDER BY`; `sort`, `slice`, `at`), anything
-whose callback is folded state rather than a per-row expression (`reduce`), anything
-effectful (`forEach`), and anything returning a row *object* into further computation
-(`find`). A curated method outside the set fails validation with a message naming the
-alternative ("`reduce` is not available in formulas — use `sum()`").
+whose ordering is *ambient* rather than named (SQL relations are sets; `sort`, `slice`,
+`at`, and `find`, which means "first match" in an order SQL does not have — `maxBy` stays
+because it *names* its order), anything whose callback is folded state rather than a
+per-row expression (`reduce`), and anything
+effectful (`forEach`). A curated method outside the set fails validation with a message
+naming the alternative ("`reduce` is not available in formulas — use `sum()`").
+
+**The ordered pair — getting the latest row.** "The latest reading's temperature" is
+ordered selection, not a fold, and it is the one place a *row* is a result: `maxBy(sel)` /
+`minBy(sel)` return the child row with the greatest / least selector value. The result
+exists only to be member-accessed — a child field or a forward Ⱶ-path — and the grammar
+enforces exactly that: `readingsↃsensor.maxBy("ts").temp`. Three rules make it total and
+deterministic:
+
+- rows whose selector value is `null` are ignored, consistent with every other aggregate;
+- ties on the selector break by the child's primary key, so both evaluators pick the
+  *same* row: SQL orders by `ts DESC, id DESC` (ascending for `minBy`) and the prelude
+  implements the identical comparison;
+- an empty relation yields `null`, and member access on a `maxBy`/`minBy` result is
+  *defined* as optional chaining — the normalised rendering emits `?.`, mirroring the
+  Ⱶ-path contract, so `.temp` and `?.temp` both mean "null when there is no row".
+
+Translation is one subquery, selecting the accessed field rather than an aggregate:
+`(SELECT r.temp FROM readings r WHERE r.sensor = sensors.id AND r.ts IS NOT NULL ORDER BY
+r.ts DESC, r.id DESC LIMIT 1)`. If `maxBy` reads too programmer-ish for the audience,
+`latest(sel)` / `earliest(sel)` are candidate aliases for date keys — but two names for
+one method is documentation surface, so the working choice is one name each.
 
 Translation is uniform because the chain is: `filter` predicates fold into `WHERE`, the
 value expression comes from the selector (a field-name string is a column reference, an
@@ -378,15 +405,11 @@ implement the semantics table, which repairs F's null-divergence exactly where F
 
 **Is this set complete?** Against SQL's aggregate repertoire: `count` is `length`,
 `count(DISTINCT …)` is `distinct().length`, `bool_or`/`bool_and` are `some`/`every`,
-membership is `includes`, `string_agg` is `join`, and `sum`/`avg`/`min`/`max` are direct.
-That covers every aggregation Saltcorn 1's view builder offers except the ordered ones —
-Latest chiefly — which need an ordering-aware pair such as `maxBy(sel)`/`minBy(sel)`
-(taking the same selector forms)
-returning a child *row* (`readingsↃsensor.maxBy("ts").temp` → `ORDER BY … DESC LIMIT
-1` subquery); that reintroduces rows-as-results, so it is deliberately deferred rather
-than included. Statistical aggregates (`stddev`, `percentile_cont`) are similarly
-deferrable additions to the same shape. Verdict: the twelve methods above are reasonably
-complete for launch, with `maxBy`/`minBy` the first extension when Latest is missed.
+membership is `includes`, `string_agg` is `join`, `sum`/`avg`/`min`/`max` are direct, and
+the ordered selections — Saltcorn 1's Latest chiefly — are `maxBy`/`minBy`. That covers
+every aggregation Saltcorn 1's view builder offers. Statistical aggregates (`stddev`,
+`percentile_cont`) remain deferrable additions to the same shape. Verdict: the fourteen
+methods above are reasonably complete for launch.
 
 **For**: F's honesty (the chain is real JavaScript, method by method) with B's
 expressiveness; the antisigma relation identifier plus curated methods means nothing in
@@ -414,6 +437,7 @@ Both evaluators must agree; this table *is* the spec, and the parity tests exten
 | `min`, `max` | ignored | `null` | bare |
 | `some` | predicate `null` → row does not satisfy | `false` | `EXISTS` |
 | `every` | predicate `null` → row fails it | `true` | `NOT EXISTS (… WHERE (p) IS NOT TRUE)` |
+| `maxBy`, `minBy` | rows with `null` key ignored | `null` | `WHERE key IS NOT NULL ORDER BY key DESC, pk DESC LIMIT 1` (`ASC` for `minBy`) |
 
 `sum` of an empty set is `0`, not SQL's `NULL` — the JS-programmer expectation
 (`[].reduce((a,b)=>a+b, 0)`), and it avoids the `total * rate` null-poisoning footgun; the
