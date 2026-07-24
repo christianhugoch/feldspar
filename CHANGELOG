@@ -2,6 +2,27 @@
 
 Changes in reverse chronological order.
 
+## Admin UI: define calculated fields
+
+The admin table editor can now create a **non-stored calculated field** — the storage and
+enforcement (Phase 8) existed but there was no way to define one from the UI.
+
+- **Admin SPA** (`ui/admin` `TableDetail.tsx`): the "add field" form gains a **Calculated**
+  checkbox. When checked, it swaps the Key/attribute/nullable inputs for a monospace **Formula**
+  textarea (placeholder `pages * 2`), and the type picker — restricted to value types, no
+  Key/File kinds — becomes the computed value's *display* type. The field is sent as a `calc`
+  kind carrying the expression. Calc fields are listed with their expression (`calc: pages * 2`)
+  and, because writing one is refused, are shown but never offered as inputs in the row editor.
+- **`createField` handler** (`sc-server`): `parse_field_kind` accepts `{ type: "calc",
+  expression }`, and the create path branches on it — a calc field is **virtual**, so no column
+  DDL is run; only the `_sc_fields` overlay row is written. The expression is validated up front
+  (`validate_calc_field`, like an ownership formula but refusing `user`/flags), so a broken
+  formula is a 400 naming the field rather than a silently-dropped overlay.
+- **Tests**: `sc-server` `field_api.rs` creates a calc field end-to-end through the router —
+  asserts it is computed on read (`pages * 2` → 200), that no `double_pages` **column** exists
+  in `information_schema`, that writing the calc field is refused, and that a bad expression and
+  a `user`-using expression are each refused by name with nothing created.
+
 ## Documentation for ownership formulae & RLS (Phase 9)
 
 The ownership-formula milestone is written up where the design and the tutorials live.

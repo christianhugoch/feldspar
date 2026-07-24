@@ -379,38 +379,57 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
                 // `sql_type` is derived from `type`, never asked for — a rich type
                 // sits on its own storage type. An unknown type is refused by name.
+                // The chosen type is the calc field's *display* type; its stored
+                // value type comes from the expression at read time.
                 let (storage, rich_name) = resolve_field_type(&type_name)?;
 
-                // Two writes, DDL first. The column is created with its storage
-                // type and constraints, and with the kind so a `Key` emits its
-                // foreign key.
-                let mut ddl = DataField::plain(&name, storage);
-                if required {
-                    ddl = ddl.required();
-                }
-                if unique {
-                    ddl = ddl.unique();
-                }
-                ddl.kind = kind.clone();
-                catalog.create_field(&table_name, &ddl).await?;
-
-                // Then the overlay row, when the field carries anything the column
-                // alone does not record. If this second write fails the column is
-                // already there as a plain column, and the error says exactly that
-                // rather than leaving a half-made field unexplained.
-                if needs_overlay(&rich_name, &kind, &label, &description, &attributes) {
+                if let DataFieldKind::Calc { expression } = &kind {
+                    // A calculated field is **virtual**: no column, so no DDL. Validate
+                    // the expression up front (so a broken formula is a 400 naming the
+                    // problem, not a silently-dropped overlay row), then write only the
+                    // overlay that introduces the field. `save_field_meta` reloads the
+                    // catalog, so the merge — which orders calc fields and fail-closes
+                    // an invalid one — runs before the response is built.
+                    validate_calc_field(&catalog, &table_name, &name, expression)?;
                     let mut meta = FieldMeta::new(&table_name, &name)
                         .label(&label)
                         .description(&description)
                         .kind(kind);
                     meta.type_name = rich_name;
                     meta.attributes = attributes;
-                    save_field_meta(&catalog, &meta).await.map_err(|e| {
-                        Error::invalid(format!(
-                            "column `{name}` was created, but saving its settings failed: {e}. \
-                             It exists as a plain column; edit or drop it and retry."
-                        ))
-                    })?;
+                    save_field_meta(&catalog, &meta).await?;
+                } else {
+                    // Two writes, DDL first. The column is created with its storage
+                    // type and constraints, and with the kind so a `Key` emits its
+                    // foreign key.
+                    let mut ddl = DataField::plain(&name, storage);
+                    if required {
+                        ddl = ddl.required();
+                    }
+                    if unique {
+                        ddl = ddl.unique();
+                    }
+                    ddl.kind = kind.clone();
+                    catalog.create_field(&table_name, &ddl).await?;
+
+                    // Then the overlay row, when the field carries anything the column
+                    // alone does not record. If this second write fails the column is
+                    // already there as a plain column, and the error says exactly that
+                    // rather than leaving a half-made field unexplained.
+                    if needs_overlay(&rich_name, &kind, &label, &description, &attributes) {
+                        let mut meta = FieldMeta::new(&table_name, &name)
+                            .label(&label)
+                            .description(&description)
+                            .kind(kind);
+                        meta.type_name = rich_name;
+                        meta.attributes = attributes;
+                        save_field_meta(&catalog, &meta).await.map_err(|e| {
+                            Error::invalid(format!(
+                                "column `{name}` was created, but saving its settings failed: {e}. \
+                                 It exists as a plain column; edit or drop it and retry."
+                            ))
+                        })?;
+                    }
                 }
 
                 // A mounted app's REST projection depends on its tables' fields
@@ -1234,6 +1253,11 @@ fn parse_field_kind(obj: &Map<String, Json>) -> Result<DataFieldKind> {
             target_field: FieldId(non_empty_str_field(kind, "target_field")?.to_owned()),
             summary_field: optional_present_str(kind, "summary_field").map(FieldId),
         }),
+        // A non-stored calculated field (Phase 8): a virtual field with no
+        // column, only an `sc-expr` expression computed on read.
+        "calc" => Ok(DataFieldKind::Calc {
+            expression: non_empty_str_field(kind, "expression")?.to_owned(),
+        }),
         other => Err(Error::invalid(format!("unknown field kind `{other}`"))),
     }
 }
@@ -1865,6 +1889,28 @@ fn validate_ownership_settings(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Validate a calculated field's expression before it is stored, so a broken
+/// formula is a 400 that names the problem rather than an overlay row the merge
+/// silently drops. It is validated like an ownership formula (§7.3) but over the
+/// calc scope: **no `user` and no operation flags** (a calc field has no
+/// caller). The field is not in the schema yet, so a self-reference reads as an
+/// unknown identifier — which is correct, since a field reading itself is a
+/// cycle the merge would drop anyway.
+fn validate_calc_field(catalog: &Catalog, table: &str, field: &str, expression: &str) -> Result<()> {
+    let formula = sc_expr::Formula::parse(expression)
+        .map_err(|e| Error::invalid(format!("calculated field `{field}`: {e}")))?;
+    let shape = catalog.schema_shape()?;
+    let analysis = formula
+        .validate(&shape, table)
+        .map_err(|e| Error::invalid(format!("calculated field `{field}`: {e}")))?;
+    if analysis.uses_user || !analysis.flags.is_empty() {
+        return Err(Error::invalid(format!(
+            "calculated field `{field}`: a calculated field cannot use `user` or the operation flags"
+        )));
     }
     Ok(())
 }

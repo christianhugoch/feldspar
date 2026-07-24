@@ -291,3 +291,128 @@ async fn an_unknown_type_is_refused_by_name() -> sc_error::Result<()> {
     );
     Ok(())
 }
+
+/// A **calculated field**: created with no column (a virtual overlay field), an
+/// `sc-expr` expression under a `calc` kind, computed on read, not writable, and
+/// with a broken expression refused up front.
+#[tokio::test]
+async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+
+    // A real column the calc field reads.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({ "name": "pages", "type": "int8" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // The calc field: no storage type of its own matters — `pages * 2` computed
+    // on read. `type` names only how the value is displayed.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({
+                "name": "double_pages",
+                "type": "int8",
+                "kind": { "type": "calc", "expression": "pages * 2" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["kind"]["type"], json!("calc"));
+    assert_eq!(body["kind"]["expression"], json!("pages * 2"));
+
+    // It reads back merged, and is *not* a real column: `information_schema` has
+    // `pages` but no `double_pages`.
+    let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
+    assert_eq!(field(&fields, "double_pages")["kind"]["type"], json!("calc"));
+    let cols = _db
+        .client()
+        .await?
+        .query(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'book'",
+            &[],
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    let names: Vec<String> = cols.iter().map(|r| r.get::<_, String>(0)).collect();
+    assert!(names.iter().any(|n| n == "pages"), "pages is a column: {names:?}");
+    assert!(
+        !names.iter().any(|n| n == "double_pages"),
+        "the calc field is virtual, not a column: {names:?}"
+    );
+
+    // Computed on read: insert a row with pages = 100, and the calc field is 200.
+    let (status, row) = client
+        .send(
+            "POST",
+            "/api/tables/book/rows",
+            Some(json!({ "pages": 100 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let (_, rows) = client.send("GET", "/api/tables/book/rows", None).await;
+    let first = &rows.as_array().unwrap()[0];
+    assert_eq!(first["double_pages"], json!(200), "computed on read: {first}");
+
+    // A calc field is not writable: naming it on a write is refused.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/rows",
+            Some(json!({ "pages": 5, "double_pages": 999 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A broken expression is a 400 naming the field, and writes no overlay.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({
+                "name": "bad_calc",
+                "type": "int8",
+                "kind": { "type": "calc", "expression": "nonexistent_col + 1" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("bad_calc"),
+        "the error names the field: {body}"
+    );
+
+    // Using `user` in a calc field is refused (no caller in the calc scope).
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({
+                "name": "mine",
+                "type": "int8",
+                "kind": { "type": "calc", "expression": "pages === user.id" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("user"),
+        "the error mentions `user`: {body}"
+    );
+
+    // Neither invalid field was created.
+    let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
+    for missing in ["bad_calc", "mine"] {
+        assert!(
+            fields.as_array().unwrap().iter().all(|f| f["name"] != json!(missing)),
+            "`{missing}` must not exist"
+        );
+    }
+
+    Ok(())
+}

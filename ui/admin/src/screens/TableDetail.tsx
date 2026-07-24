@@ -36,6 +36,7 @@ type FieldKind = {
   store?: string;
   folder?: string | null;
   target_table?: string;
+  expression?: string;
 } | null;
 
 /** The store a `File` field points at, or `null` for any other kind. */
@@ -44,12 +45,18 @@ function fileStoreOf(field: FieldInfo): string | null {
   return kind && kind.type === "file" ? (kind.store ?? "") : null;
 }
 
+/** Whether a field is a non-stored calculated field (no column, computed on read). */
+function isCalc(field: FieldInfo): boolean {
+  return (field.kind as FieldKind)?.type === "calc";
+}
+
 /** A one-line description of a field's kind for the fields table. */
 function kindLabel(kind: unknown): string {
   const k = kind as FieldKind;
   if (!k || !k.type || k.type === "plain") return "—";
   if (k.type === "file") return `file → ${k.store || "?"}`;
   if (k.type === "key") return `key → ${k.target_table || "?"}`;
+  if (k.type === "calc") return `calc: ${k.expression || "?"}`;
   return k.type;
 }
 
@@ -386,6 +393,11 @@ function Fields({
   const [name, setName] = useState("");
   const [typeName, setTypeName] = useState("");
   const [nullable, setNullable] = useState(true);
+  // A calculated field is virtual — no column, only an expression computed on
+  // read (design §7.3 / Phase 8). When checked, the type picker names the
+  // value's *display* type and `expression` holds the formula.
+  const [calculated, setCalculated] = useState(false);
+  const [expression, setExpression] = useState("");
   // Attribute-form values (rich type attributes, or a kind's parameters),
   // keyed by spec-field name. Reset whenever the chosen type changes.
   const [attrs, setAttrs] = useState<Record<string, string>>({});
@@ -400,6 +412,9 @@ function Fields({
     () => (fieldTypes ?? []).filter((t) => t.category === "basic"),
     [fieldTypes],
   );
+  // A calc field has no column, so a kind (Key/File) makes no sense for it —
+  // the picker offers only value types (basic + rich) while it is checked.
+  const typeCategories = calculated ? ["basic", "rich"] : ["basic", "rich", "kind"];
 
   // Default the picker to the first type once the list loads.
   useEffect(() => {
@@ -413,14 +428,31 @@ function Fields({
     setAttrs({});
   }, [typeName]);
 
+  // Turning on "calculated" while a kind is selected would leave an invalid
+  // pairing; fall back to the first value type.
+  useEffect(() => {
+    if (calculated && selected?.category === "kind") {
+      setTypeName(basicTypes[0]?.name ?? "");
+    }
+  }, [calculated, selected, basicTypes]);
+
   const add = async (e: FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !selected) return;
+    if (calculated && !expression.trim()) {
+      setError("A calculated field needs a formula.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const body: CreateFieldRequest = { name: name.trim(), type: selected.name, required: !nullable };
-      if (selected.category === "kind") {
+      if (calculated) {
+        // Virtual field: no column, never nullable, no storage kind. The chosen
+        // type stays as the value's display type; the expression is the field.
+        body.required = false;
+        body.kind = { type: "calc", expression: expression.trim() };
+      } else if (selected.category === "kind") {
         // A kind carries its parameters in `kind`, and needs a storage type:
         // text for a File, the chosen SQL type for a Key.
         body.type = selected.name === "file" ? "text" : keyStorage;
@@ -430,6 +462,7 @@ function Fields({
       }
       await api.createField(table, body);
       setName("");
+      setExpression("");
       setAttrs({});
       onChange();
     } catch (err) {
@@ -472,9 +505,9 @@ function Fields({
             <Form.Control value={name} onChange={(e) => setName(e.target.value)} />
           </Form.Group>
           <Form.Group className="mb-2" controlId="fieldType">
-            <Form.Label>Type</Form.Label>
+            <Form.Label>{calculated ? "Value type" : "Type"}</Form.Label>
             <Form.Select value={typeName} onChange={(e) => setTypeName(e.target.value)}>
-              {["basic", "rich", "kind"].map((category) => {
+              {typeCategories.map((category) => {
                 const items = (fieldTypes ?? []).filter((t) => t.category === category);
                 if (items.length === 0) return null;
                 return (
@@ -488,40 +521,74 @@ function Fields({
                 );
               })}
             </Form.Select>
+            {calculated && (
+              <Form.Text muted>
+                How the computed value is shown. Its real type comes from the expression.
+              </Form.Text>
+            )}
           </Form.Group>
 
-          {/* A Key needs a storage type matching the column it references. */}
-          {selected?.name === "key" && (
-            <Form.Group className="mb-2" controlId="fieldKeyStorage">
-              <Form.Label>Stored as</Form.Label>
-              <Form.Select value={keyStorage} onChange={(e) => setKeyStorage(e.target.value)}>
-                {basicTypes.map((t) => (
-                  <option key={t.name} value={t.name}>
-                    {t.label}
-                  </option>
-                ))}
-              </Form.Select>
-              <Form.Text muted>Match the type of the field this key references.</Form.Text>
-            </Form.Group>
-          )}
-
-          {/* The chosen type's own attributes / a kind's parameters, rendered
-              from its spec — no per-type code lives here. */}
-          <SettingsFields
-            spec={selected?.config_spec ?? []}
-            values={attrs}
-            onChange={(key, v) => setAttrs((a) => ({ ...a, [key]: v }))}
-            idPrefix="field-attr"
-          />
-
           <Form.Check
-            className="mb-3"
-            id="fieldNullable"
+            className="mb-2"
+            id="fieldCalculated"
             type="checkbox"
-            label="Nullable"
-            checked={nullable}
-            onChange={(e) => setNullable(e.target.checked)}
+            label="Calculated (computed on read, no stored column)"
+            checked={calculated}
+            onChange={(e) => setCalculated(e.target.checked)}
           />
+
+          {calculated ? (
+            <Form.Group className="mb-3" controlId="fieldExpression">
+              <Form.Label>Formula</Form.Label>
+              <Form.Control
+                as="textarea"
+                rows={2}
+                className="font-monospace"
+                value={expression}
+                placeholder="pages * 2"
+                onChange={(e) => setExpression(e.target.value)}
+              />
+              <Form.Text muted>
+                A JavaScript expression over the row&apos;s fields, Ⱶ-joinfields, Ↄ-aggregations
+                and other calculated fields — never <code>user</code> or the operation flags.
+              </Form.Text>
+            </Form.Group>
+          ) : (
+            <>
+              {/* A Key needs a storage type matching the column it references. */}
+              {selected?.name === "key" && (
+                <Form.Group className="mb-2" controlId="fieldKeyStorage">
+                  <Form.Label>Stored as</Form.Label>
+                  <Form.Select value={keyStorage} onChange={(e) => setKeyStorage(e.target.value)}>
+                    {basicTypes.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </Form.Select>
+                  <Form.Text muted>Match the type of the field this key references.</Form.Text>
+                </Form.Group>
+              )}
+
+              {/* The chosen type's own attributes / a kind's parameters, rendered
+                  from its spec — no per-type code lives here. */}
+              <SettingsFields
+                spec={selected?.config_spec ?? []}
+                values={attrs}
+                onChange={(key, v) => setAttrs((a) => ({ ...a, [key]: v }))}
+                idPrefix="field-attr"
+              />
+
+              <Form.Check
+                className="mb-3"
+                id="fieldNullable"
+                type="checkbox"
+                label="Nullable"
+                checked={nullable}
+                onChange={(e) => setNullable(e.target.checked)}
+              />
+            </>
+          )}
           <Button type="submit" size="sm" disabled={busy || !name.trim() || !selected}>
             Add field
           </Button>
@@ -548,10 +615,11 @@ function Rows({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Columns to show and edit: every declared field. `id` is server-generated,
-  // so it is shown in the table but never an editable input.
+  // Columns to show and edit: every declared field. `id` is server-generated
+  // and a calc field is computed on read (writing one is refused), so both are
+  // shown in the table but never editable inputs.
   const editable = useMemo(
-    () => (fields ?? []).filter((f) => f.name !== "id"),
+    () => (fields ?? []).filter((f) => f.name !== "id" && !isCalc(f)),
     [fields],
   );
   const columns = useMemo(() => {
