@@ -94,6 +94,13 @@ pub async fn validate_trigger(
         (false, None) => {}
     }
 
+    // The timing, for the kinds that have one — and the *absence* of timing for
+    // the kinds that do not, because a setting that is silently dropped is one
+    // the admin believes is in effect. `Schedule::of` is the one reading of a
+    // stored trigger's timing, so what is refused here and what the scheduler
+    // computes cannot disagree.
+    crate::Schedule::of(trigger).map_err(|e| problem(e.to_string()))?;
+
     // Everything the spec cannot express: that a named table exists and can be
     // addressed by primary key, that a configured formula parses and resolves in
     // the scope this event gives it. Only the action knows what its own settings

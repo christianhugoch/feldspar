@@ -29,6 +29,49 @@ type TriggerItem = ListTriggersResponse[number];
  * its configuration names one. Deliberately generic — the screen knows no
  * action's settings, so it shows the `table` setting when there is one rather
  * than reaching into a particular action's shape. */
+/** Days as the server numbers them: 0 = Monday … 6 = Sunday. */
+const DAYS = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+];
+
+/** A periodic trigger's timing in words, or `null` for a kind that has none.
+ *
+ * Read from the same three fields the form writes, so what the list says and
+ * what the scheduler does come from one description. Everything is UTC (§10.2's
+ * decision 6), and the label says so — an admin who reads "03:00" and assumes
+ * local time is an admin whose nightly job runs at the wrong hour. */
+function scheduleSummary(trigger: TriggerItem): string | null {
+  const minute = trigger.minute ?? 0;
+  const hour = trigger.hour ?? 0;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  switch (trigger.when) {
+    case "often":
+      return "every 5 minutes";
+    case "hourly":
+      return `at :${pad(minute)} past the hour`;
+    case "daily":
+      return `at ${pad(hour)}:${pad(minute)} UTC`;
+    case "weekly":
+      return `${DAYS[trigger.day_of_week ?? 0]} at ${pad(hour)}:${pad(minute)} UTC`;
+    default:
+      return null;
+  }
+}
+
+/** The last run as a local, readable time — or a dash for one that has never
+ * run, which for a scheduled trigger is itself worth seeing. */
+function lastRun(trigger: TriggerItem): string {
+  if (!trigger.last_run_at) return "—";
+  const at = new Date(trigger.last_run_at);
+  return Number.isNaN(at.getTime()) ? trigger.last_run_at : at.toLocaleString();
+}
+
 function targetSummary(trigger: TriggerItem): string {
   const config = trigger.configuration;
   if (!config || typeof config !== "object") return trigger.action;
@@ -111,6 +154,7 @@ export function Triggers() {
             <th>Name</th>
             <th>Event</th>
             <th>Runs</th>
+            <th>Last run</th>
             <th>Status</th>
             <th className="text-end">Actions</th>
           </tr>
@@ -118,7 +162,7 @@ export function Triggers() {
         <tbody>
           {triggers?.length === 0 && (
             <tr>
-              <td colSpan={5} className="text-muted">
+              <td colSpan={6} className="text-muted">
                 No triggers yet.
               </td>
             </tr>
@@ -136,6 +180,9 @@ export function Triggers() {
                 {trigger.channel && (
                   <div className="text-muted small">on {trigger.channel}</div>
                 )}
+                {scheduleSummary(trigger) && (
+                  <div className="text-muted small">{scheduleSummary(trigger)}</div>
+                )}
                 {trigger.only_if && (
                   <div className="text-muted small font-monospace text-break">
                     if {trigger.only_if}
@@ -143,6 +190,12 @@ export function Triggers() {
                 )}
               </td>
               <td className="text-break">{targetSummary(trigger)}</td>
+              {/* Only a periodic trigger has a schedule to have missed, so it is
+                  the only one where "when did this last run?" is a question the
+                  list can answer usefully. */}
+              <td className="small">
+                {scheduleSummary(trigger) ? lastRun(trigger) : ""}
+              </td>
               <td>
                 <StatusCell trigger={trigger} />
               </td>

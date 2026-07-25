@@ -2,6 +2,81 @@
 
 Changes in reverse chronological order.
 
+## The periodic scheduler
+
+Phase 8. `often`, `hourly`, `daily` and `weekly` triggers stop being event kinds nothing watches:
+one tokio task wakes on the minute boundary, asks each periodic trigger whether it is due, and
+fires the ones that are through the **same `run_trigger`** every other direct run goes through — so
+a scheduled run has the same `only_if`, the same cascade bound and the same action as any other.
+
+### Four kinds, no cron
+
+`Schedule` (in `sc-action`) resolves a trigger's kind plus three sparse attributes — `minute`,
+`hour`, `day_of_week` — into when it fires. A cron string would be a second language to learn, to
+validate and to render a form for; a trigger that genuinely needs "every third Tuesday" is one
+whose *action* should decide that.
+
+- **Everything is UTC** (decision 6). A server-side schedule has no user to have a timezone, and a
+  local one would mean an hour that happens twice a year and an hour that does not happen at all.
+  The form says UTC on the inputs, and the arithmetic needs no timezone database to be right.
+- **`Schedule::of` is the validator too**, called on save *and* on load, so what the admin is
+  refused and what the scheduler computes cannot drift apart. Out of range is refused by name; so
+  is a timing value on a kind that has no use for it (an `hour` on an `hourly` trigger, anything on
+  a `login` one) — the same rule a channel on a channel-less event gets, because a setting the
+  server silently drops is one the admin believes is in effect. An unset value is 0, so a `daily`
+  nobody configured runs at midnight rather than refusing to be saved.
+
+### The clock is a parameter
+
+`Scheduler::tick(now)` takes the time; the task loop is the only place `Utc::now()` is read. That
+is what lets the tests drive a week of schedule in a millisecond instead of waiting for it, and it
+is why the due-time rules are asserted against a table of instants.
+
+Three decisions worth their lines:
+
+- **A fresh trigger's clock starts now, never at the epoch** — otherwise every newly created
+  trigger would be overdue by decades and fire the moment it was saved.
+- **A missed run catches up exactly once.** `last_run_at` is persisted, so a server that was down
+  over a nightly job's hour comes up and runs it once — not once per missed day, and not never.
+  That falls out of the rule (`next_due(last_run) <= now`) rather than being special-cased.
+- **A slow action is skipped, not queued.** Each firing runs in its own task, so one slow action
+  delays neither the clock nor another trigger, and an occurrence that comes round while the last
+  one is still running is dropped: five queued copies of a report nobody read is worse than one
+  late one.
+
+**Disabling is not downtime**, and the two behave differently on purpose: a disabled trigger's
+clock still advances, so switching a nightly report off for a week and back on on Tuesday morning
+runs it *tonight* rather than immediately. Nobody chooses downtime, so that one is caught up;
+switching a trigger off is a decision to skip those runs.
+
+### `last_run_at` is the scheduler's, not the admin's
+
+A new nullable `_sc_triggers` column — reaching existing databases through Phase 7's additive
+bootstrap — that `save_trigger` deliberately **never writes**. Only `record_trigger_run` does, as
+one targeted `UPDATE`. That is what makes "an admin editing a trigger's action at 3pm cannot
+thereby claim the daily job ran at 3pm, or that it never ran" true by construction rather than by
+everyone remembering. The time recorded is the tick's, not the completion's, so a job that takes
+twenty minutes does not drift twenty minutes later every day.
+
+### Admin API and SPA
+
+`minute`, `hour` and `day_of_week` on the trigger contract (null on the kinds that have none, and
+refused on them), `last_run_at` on the read shape only, and the regenerated client. The trigger
+form shows exactly the timing inputs the chosen kind takes — a day picker showing day *names* over
+the server's 0 = Monday numbering — and the list gains a "last run" column plus a plain-English
+schedule under the event ("at 03:30 UTC", "Sunday at 09:00 UTC").
+
+### Tests
+
+Unit: the due-time rules as a table of (schedule, last run, now, due?) including hour, day, month
+and year rollovers, plus the timing refusals. Integration (`sc-action/tests/scheduler.rs`, 5 tests
+against a real database, driving the clock): an `often` and a `daily` trigger firing exactly when
+they should and not before; the run landing on the row at the time it was *due*; the
+catch-up-once-at-startup case through a second scheduler over the same database (which is what a
+restart is); the overlap skip, with an action slow enough that the next two occurrences really do
+arrive mid-run; and a disabled trigger neither firing nor replaying. Plus the admin-API round trip
+of the timing, and an edit that does not disturb the recorded last run.
+
 ## Applications expose triggers as API endpoints
 
 Phase 7. A server-side action becomes callable from outside because an **application said so**:

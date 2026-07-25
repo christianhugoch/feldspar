@@ -111,6 +111,12 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // event means.
     sc_server::fire_startup(&catalog, &triggers).await;
 
+    // The clock's turn: from here a periodic trigger fires on its own schedule,
+    // and one whose run was missed while the process was down catches up — once —
+    // on the first tick. Held for the lifetime of `serve`; the task ends with the
+    // process.
+    let (_scheduler, _scheduler_task) = sc_server::start_scheduler(&catalog, &triggers);
+
     let sessions = Arc::new(SessionStore::default());
     eprintln!("saltcorn: listening on http://{}", config.addr);
     let handlers = admin_handlers(catalog, apps.clone());

@@ -14,6 +14,7 @@
 //! What is *not* here: validation (see [`validate`](crate::validate), which
 //! [`save_trigger`] calls) and caching (see [`Triggers`](crate::Triggers)).
 
+use chrono::{DateTime, Utc};
 use sc_catalog::{Catalog, DataField, Table};
 use sc_db::Row;
 use sc_error::{Error, Result};
@@ -52,6 +53,16 @@ pub const COL_CONFIGURATION: &str = "configuration";
 pub const COL_MIN_ROLE: &str = "min_role";
 /// The sparse per-trigger values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
+/// When the scheduler last fired this trigger, or NULL for one it never has.
+///
+/// A column rather than an attribute, and one [`save_trigger`] deliberately does
+/// **not** write: it is the scheduler's bookkeeping, not part of the definition
+/// the admin edits, so an edit at 3pm must not be able to claim the daily job ran
+/// at 3pm (or that it never ran). Only [`record_trigger_run`] writes it.
+///
+/// It arrived after `_sc_triggers` did, so it is nullable and reaches existing
+/// databases through the additive bootstrap (`Catalog::bootstrap_table`).
+pub const COL_LAST_RUN_AT: &str = "last_run_at";
 
 /// The fields of the `_sc_triggers` table, in declaration order.
 ///
@@ -78,6 +89,9 @@ fn trigger_fields() -> Vec<DataField> {
         DataField::plain(COL_CONFIGURATION, json()).required(),
         DataField::plain(COL_MIN_ROLE, int()),
         DataField::plain(COL_ATTRIBUTES, json()).required(),
+        // Nullable, and necessarily so: it is reconciled onto tables that
+        // already have rows, and "never run" is its honest value for those.
+        DataField::plain(COL_LAST_RUN_AT, TypeRef::Basic(BasicType::Timestamp)),
     ]
 }
 
@@ -88,8 +102,8 @@ fn trigger_fields() -> Vec<DataField> {
 /// startup, after the [`Catalog`] is initialised and before loading triggers. An
 /// existing table is reconciled additively
 /// ([`bootstrap_table`](sc_catalog::Catalog::bootstrap_table)), which is how
-/// Phase 8's periodic-timing columns will reach a database that already has
-/// triggers in it.
+/// [`last_run_at`](COL_LAST_RUN_AT) reaches a database that already has triggers
+/// in it.
 pub async fn bootstrap_triggers(catalog: &Catalog) -> Result<Table> {
     catalog
         .bootstrap_table(TRIGGERS_TABLE, &trigger_fields())
@@ -146,6 +160,29 @@ pub async fn save_trigger(
         );
         run(catalog, Statement::from(insert)).await
     }
+}
+
+/// Record that the scheduler fired `id` at `at` — the only writer of
+/// [`last_run_at`](COL_LAST_RUN_AT).
+///
+/// One targeted `UPDATE` of one column, rather than [`save_trigger`] with a
+/// mutated trigger, for two reasons: it cannot lose an edit an admin made while
+/// the run was in flight, and it does not re-validate a trigger that has just
+/// demonstrably run.
+///
+/// This is what makes a run missed while the server was down fire **once** at the
+/// next start rather than being lost or repeated per missed period — the whole
+/// purpose of persisting it.
+pub async fn record_trigger_run(catalog: &Catalog, id: TriggerId, at: DateTime<Utc>) -> Result<()> {
+    let update = sc_query::Update::new(
+        TRIGGERS_TABLE,
+        vec![Assignment::new(
+            COL_LAST_RUN_AT.to_owned(),
+            Expr::Lit(Value::Timestamp(at)),
+        )],
+    )
+    .filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
+    run(catalog, Statement::from(update)).await
 }
 
 /// Load the trigger with this id, if it exists.
@@ -288,7 +325,18 @@ fn trigger_from_row(row: &Row) -> Result<Trigger> {
         configuration: object(row, COL_CONFIGURATION)?,
         min_role,
         attributes: object(row, COL_ATTRIBUTES)?,
+        last_run_at: last_run_at(row)?,
     })
+}
+
+/// The last-run instant: NULL, or a column the additive bootstrap has not added
+/// yet, both mean "never run".
+fn last_run_at(row: &Row) -> Result<Option<DateTime<Utc>>> {
+    match row.get(COL_LAST_RUN_AT) {
+        Some(Value::Timestamp(t)) => Ok(Some(*t)),
+        Some(Value::Null) | None => Ok(None),
+        other => Err(bad_column(COL_LAST_RUN_AT, "a timestamp", other)),
+    }
 }
 
 /// A required text column.
@@ -391,7 +439,19 @@ mod tests {
     fn columns_and_values_stay_in_step() {
         let t = Trigger::new("t", EventKind::Insert, "insert_row").on("books");
         assert_eq!(trigger_columns().len(), trigger_values(&t).len());
-        assert_eq!(trigger_columns().len(), trigger_fields().len());
+        // Every declared field is a written column **except** `last_run_at`,
+        // which only the scheduler writes — so an admin's save cannot silently
+        // claim a scheduled trigger ran, or that it never did.
+        let written: Vec<String> = trigger_columns();
+        let declared: Vec<String> = trigger_fields()
+            .iter()
+            .map(|f| f.base.name.clone())
+            .collect();
+        assert_eq!(written.len() + 1, declared.len());
+        assert!(!written.contains(&COL_LAST_RUN_AT.to_owned()));
+        for column in &written {
+            assert!(declared.contains(column), "{column} is not a column");
+        }
     }
 
     #[test]

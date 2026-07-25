@@ -36,24 +36,62 @@ type TriggerItem = ListTriggersResponse[number];
  * registry: nothing can add one at runtime, which is exactly the difference from
  * the action list beside it (which *is* loaded from the server). The labels are
  * this screen's editorial job. */
-const EVENT_KINDS: { value: string; label: string; table: boolean }[] = [
-  { value: "insert", label: "A row is inserted", table: true },
-  { value: "update", label: "A row is updated", table: true },
-  { value: "delete", label: "A row is deleted", table: true },
-  { value: "none", label: "Only when something asks (no event)", table: false },
-  { value: "login", label: "A user signs in", table: false },
-  { value: "startup", label: "The server starts up", table: false },
-  { value: "error", label: "An error is reported", table: false },
-  { value: "often", label: "Every five minutes", table: false },
-  { value: "hourly", label: "Once an hour", table: false },
-  { value: "daily", label: "Once a day", table: false },
-  { value: "weekly", label: "Once a week", table: false },
+const EVENT_KINDS: {
+  value: string;
+  label: string;
+  table: boolean;
+  /** Which timing inputs this kind takes — exactly the attributes the server's
+   * `Schedule::of` reads for it. A kind that does not take one *refuses* it on
+   * save, so offering it would be offering a field that cannot be saved. */
+  timing: TimingField[];
+}[] = [
+  { value: "insert", label: "A row is inserted", table: true, timing: [] },
+  { value: "update", label: "A row is updated", table: true, timing: [] },
+  { value: "delete", label: "A row is deleted", table: true, timing: [] },
+  {
+    value: "none",
+    label: "Only when something asks (no event)",
+    table: false,
+    timing: [],
+  },
+  { value: "login", label: "A user signs in", table: false, timing: [] },
+  { value: "startup", label: "The server starts up", table: false, timing: [] },
+  { value: "error", label: "An error is reported", table: false, timing: [] },
+  { value: "often", label: "Every five minutes", table: false, timing: [] },
+  { value: "hourly", label: "Once an hour", table: false, timing: ["minute"] },
+  { value: "daily", label: "Once a day", table: false, timing: ["hour", "minute"] },
+  {
+    value: "weekly",
+    label: "Once a week",
+    table: false,
+    timing: ["day_of_week", "hour", "minute"],
+  },
+];
+
+/** The three timing inputs a periodic trigger can have. */
+type TimingField = "minute" | "hour" | "day_of_week";
+
+/** Days as the server numbers them: 0 = Monday … 6 = Sunday. The admin sees the
+ * name, so the convention only has to be consistent. */
+const DAYS = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
 ];
 
 /** Whether a kind is about a table row — which is what decides whether the table
  * picker and the `only_if` field apply at all. */
 function isTableEvent(kind: string): boolean {
   return EVENT_KINDS.find((k) => k.value === kind)?.table ?? false;
+}
+
+/** The timing inputs a kind takes; empty for everything that is not periodic. */
+function timingFields(kind: string): TimingField[] {
+  return EVENT_KINDS.find((k) => k.value === kind)?.timing ?? [];
 }
 
 export function TriggerForm({ triggerId }: { triggerId?: string }) {
@@ -72,6 +110,13 @@ export function TriggerForm({ triggerId }: { triggerId?: string }) {
   const [config, setConfig] = useState<Record<string, string>>({});
   const [minRole, setMinRole] = useState("");
   const [enabled, setEnabled] = useState(true);
+  // The periodic timing, held as strings so an empty box stays empty rather than
+  // becoming a 0 the admin did not type.
+  const [timing, setTiming] = useState<Record<TimingField, string>>({
+    minute: "",
+    hour: "",
+    day_of_week: "",
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -102,6 +147,12 @@ export function TriggerForm({ triggerId }: { triggerId?: string }) {
           setConfig(readConfig(existing.configuration));
           setMinRole(existing.min_role == null ? "" : String(existing.min_role));
           setEnabled(existing.enabled);
+          setTiming({
+            minute: existing.minute == null ? "" : String(existing.minute),
+            hour: existing.hour == null ? "" : String(existing.hour),
+            day_of_week:
+              existing.day_of_week == null ? "" : String(existing.day_of_week),
+          });
         } else {
           setActionName(actionList[0]?.name ?? "");
         }
@@ -118,6 +169,16 @@ export function TriggerForm({ triggerId }: { triggerId?: string }) {
   const action = actions?.find((a) => a.name === actionName);
   const spec = action?.config_spec ?? [];
   const tableEvent = isTableEvent(when);
+  const timingUsed = timingFields(when);
+
+  /** One timing value for the save: null unless this kind uses it *and* the box
+   * has something in it. Same rule the table and `only_if` follow — what is not
+   * on the screen is not part of the save — and it matters more here, because
+   * the server refuses a timing value on a kind that has no use for it. */
+  const timingValue = (field: TimingField): number | null =>
+    timingUsed.includes(field) && timing[field].trim() !== ""
+      ? Number(timing[field])
+      : null;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -137,6 +198,9 @@ export function TriggerForm({ triggerId }: { triggerId?: string }) {
         configuration: buildConfig(spec, config),
         min_role: minRole.trim() === "" ? null : Number(minRole),
         enabled,
+        minute: timingValue("minute"),
+        hour: timingValue("hour"),
+        day_of_week: timingValue("day_of_week"),
       };
       if (triggerId) {
         await api.updateTrigger(triggerId, body);
@@ -252,6 +316,71 @@ export function TriggerForm({ triggerId }: { triggerId?: string }) {
                 </Col>
               )}
             </Row>
+
+            {timingUsed.length > 0 && (
+              <Row>
+                {timingUsed.includes("day_of_week") && (
+                  <Col md={4}>
+                    <Form.Group className="mb-3" controlId="triggerDayOfWeek">
+                      <Form.Label>Day</Form.Label>
+                      <Form.Select
+                        value={timing.day_of_week}
+                        onChange={(e) =>
+                          setTiming((t) => ({ ...t, day_of_week: e.target.value }))
+                        }
+                      >
+                        {DAYS.map((day, index) => (
+                          <option key={day} value={String(index)}>
+                            {day}
+                          </option>
+                        ))}
+                      </Form.Select>
+                    </Form.Group>
+                  </Col>
+                )}
+                {timingUsed.includes("hour") && (
+                  <Col md={4}>
+                    <Form.Group className="mb-3" controlId="triggerHour">
+                      <Form.Label>Hour (UTC)</Form.Label>
+                      <Form.Control
+                        type="number"
+                        min={0}
+                        max={23}
+                        placeholder="0"
+                        value={timing.hour}
+                        onChange={(e) =>
+                          setTiming((t) => ({ ...t, hour: e.target.value }))
+                        }
+                      />
+                    </Form.Group>
+                  </Col>
+                )}
+                {timingUsed.includes("minute") && (
+                  <Col md={4}>
+                    <Form.Group className="mb-3" controlId="triggerMinute">
+                      <Form.Label>Minute past the hour</Form.Label>
+                      <Form.Control
+                        type="number"
+                        min={0}
+                        max={59}
+                        placeholder="0"
+                        value={timing.minute}
+                        onChange={(e) =>
+                          setTiming((t) => ({ ...t, minute: e.target.value }))
+                        }
+                      />
+                    </Form.Group>
+                  </Col>
+                )}
+                <Col xs={12}>
+                  <Form.Text muted>
+                    Schedules are in <strong>UTC</strong>, so they mean the same
+                    instant wherever the server runs and are not moved by daylight
+                    saving. An empty box is 0.
+                  </Form.Text>
+                </Col>
+              </Row>
+            )}
 
             {tableEvent && (
               <Form.Group className="mb-0" controlId="triggerOnlyIf">

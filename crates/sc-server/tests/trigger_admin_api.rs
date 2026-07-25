@@ -314,6 +314,36 @@ async fn a_refusal_names_what_is_wrong_and_stores_nothing() -> sc_error::Result<
             },
             &["nope"],
         ),
+        // Out-of-range timing on a periodic trigger.
+        (
+            {
+                let mut b = trigger_body(
+                    "t",
+                    "daily",
+                    "insert_row",
+                    json!({ "table": "audit", "values": { "title": "\"x\"" } }),
+                );
+                b["hour"] = json!(24);
+                b
+            },
+            &["hour", "0 and 23"],
+        ),
+        // Timing on a kind that has none: refused rather than silently dropped,
+        // because a setting an admin can see but the server ignores is worse
+        // than one it refuses.
+        (
+            {
+                let mut b = trigger_body(
+                    "t",
+                    "hourly",
+                    "insert_row",
+                    json!({ "table": "audit", "values": { "title": "\"x\"" } }),
+                );
+                b["hour"] = json!(3);
+                b
+            },
+            &["hourly", "hour"],
+        ),
         // …and the `only_if`, read in the event's scope.
         (
             {
@@ -350,6 +380,81 @@ async fn a_refusal_names_what_is_wrong_and_stores_nothing() -> sc_error::Result<
         // Nothing was stored: a refused save leaves the admin's list as it was.
         assert!(server.client.triggers().await.is_empty(), "{message}");
     }
+    Ok(())
+}
+
+/// Phase 8: the periodic timing round-trips through the admin API, and
+/// `last_run_at` travels the other way only.
+#[tokio::test]
+async fn a_periodic_triggers_timing_round_trips_and_its_last_run_is_read_only()
+-> sc_error::Result<()> {
+    let mut server = setup().await?;
+    let mut body = trigger_body(
+        "nightly",
+        "weekly",
+        "insert_row",
+        json!({ "table": "audit", "values": { "title": "\"nightly\"" } }),
+    );
+    body["day_of_week"] = json!(6);
+    body["hour"] = json!(3);
+    body["minute"] = json!(30);
+    // A client that tries to write the scheduler's record: accepted as a body,
+    // ignored as a field. History is not something an edit gets to rewrite.
+    body["last_run_at"] = json!("2020-01-01T00:00:00Z");
+
+    let (status, created) = server
+        .client
+        .send("POST", "/api/triggers", Some(body.clone()))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("an id").to_owned();
+    assert_eq!(created["day_of_week"], json!(6));
+    assert_eq!(created["hour"], json!(3));
+    assert_eq!(created["minute"], json!(30));
+    assert_eq!(created["last_run_at"], Value::Null);
+
+    // Read back from storage, not echoed from the request.
+    let listed = server.client.triggers().await;
+    assert_eq!(listed[0]["when"], json!("weekly"));
+    assert_eq!(listed[0]["day_of_week"], json!(6));
+    assert_eq!(listed[0]["minute"], json!(30));
+    assert_eq!(listed[0]["last_run_at"], Value::Null);
+
+    // The scheduler records a run…
+    let trigger_id = sc_action::TriggerId(uuid::Uuid::parse_str(&id).unwrap());
+    let ran_at = chrono::DateTime::parse_from_rfc3339("2026-07-19T03:30:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    sc_action::record_trigger_run(&server.catalog, trigger_id, ran_at).await?;
+    server.dispatcher.reload(&server.catalog).await?;
+    let listed = server.client.triggers().await;
+    assert!(
+        listed[0]["last_run_at"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("2026-07-19T03:30")),
+        "{}",
+        listed[0]
+    );
+
+    // …and an ordinary edit does not disturb it. This is why `last_run_at` is a
+    // column the save path does not write: an admin changing the hour at 3pm
+    // must not thereby tell the scheduler the job ran at 3pm, or never ran.
+    body["hour"] = json!(4);
+    let (status, updated) = server
+        .client
+        .send("PUT", &format!("/api/triggers/{id}"), Some(body))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["hour"], json!(4));
+    let listed = server.client.triggers().await;
+    assert_eq!(listed[0]["hour"], json!(4));
+    assert!(
+        listed[0]["last_run_at"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("2026-07-19T03:30")),
+        "the edit must not have lost the last run: {}",
+        listed[0]
+    );
     Ok(())
 }
 

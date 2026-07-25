@@ -47,6 +47,8 @@ mod action;
 mod dispatch;
 mod event;
 mod registry;
+mod schedule;
+mod scheduler;
 mod scope;
 mod store;
 mod trigger;
@@ -57,13 +59,15 @@ pub use action::{Action, ActionContext, ConfigCheck};
 pub use dispatch::{TriggerDispatcher, TriggerRun, fire_trigger};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use registry::ActionRegistry;
+pub use schedule::{ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, OFTEN_MINUTES, Schedule, day_name};
+pub use scheduler::Scheduler;
 pub use scope::{
     EVENT_SCOPE, EventBindings, action_shape, check_formula, config_str, event_formula_value,
     formula_map, optional_formula, required_formula, typed_value,
 };
 pub use store::{
     TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers, load_trigger,
-    load_trigger_by_name, save_trigger,
+    load_trigger_by_name, record_trigger_run, save_trigger,
 };
 pub use trigger::{ATTR_ENABLED, Trigger, TriggerId};
 pub use triggers::{TriggerIssue, Triggers};

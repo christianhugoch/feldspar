@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use sc_action::{TriggerDispatcher, bootstrap_triggers};
+use sc_action::{Scheduler, TriggerDispatcher, bootstrap_triggers};
 use sc_catalog::Catalog;
 use sc_core_actions::builtin_actions;
 use sc_error::{Context, Result};
@@ -50,6 +50,27 @@ pub async fn install_triggers(
     }
     catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
     Ok(dispatcher)
+}
+
+/// Start the periodic scheduler: the one task that fires `often`/`hourly`/
+/// `daily`/`weekly` triggers (§10.2).
+///
+/// Started **only by `serve`**, for the same reason the dispatcher is installed
+/// only there: a `build-app` or an admin script must not start firing scheduled
+/// jobs because it happened to open the same database.
+///
+/// The first tick lands on the next minute boundary, which is also when a run
+/// missed while the server was down is caught up — once, from the persisted
+/// `last_run_at`. The returned handle is the caller's to abort; dropping it
+/// leaves the task running for the life of the process, which is what a server
+/// wants.
+pub fn start_scheduler(
+    catalog: &Arc<Catalog>,
+    dispatcher: &Arc<TriggerDispatcher>,
+) -> (Arc<Scheduler>, tokio::task::JoinHandle<()>) {
+    let scheduler = Arc::new(Scheduler::new(Arc::clone(catalog), Arc::clone(dispatcher)));
+    let handle = scheduler.start();
+    (scheduler, handle)
 }
 
 /// Fire the **`startup`** event: the server is up (§10.2).

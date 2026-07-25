@@ -635,25 +635,47 @@ question.
   column, insert a row the way the previous release would, boot, read it back) and the projection
   unit tests in `sc-api`.
 
-## Phase 8 — The periodic scheduler
+## Phase 8 — The periodic scheduler ✅
 
-- [ ] Timing configuration in the trigger's attributes, validated on save: `often` (every five
+- [x] Timing configuration in the trigger's attributes, validated on save: `often` (every five
   minutes, no configuration), `hourly` (minute past the hour), `daily` (hh:mm), `weekly`
-  (day-of-week + hh:mm) — all UTC (decision 6), refused when out of range.
-- [ ] `Scheduler` — one tokio task started at boot, waking on the minute boundary, computing
-  which triggers are due from their configuration and last run, and firing them through the same
-  dispatch path as every other event. Overlapping runs of one trigger are skipped rather than
-  queued (a slow action must not stack up), and a firing error is logged without stopping the
-  scheduler.
-- [ ] `last_run_at` persisted on the trigger row, so a run missed while the server was down
-  fires **once** at startup rather than being lost or fired N times; a fresh trigger's first due
-  time is computed from now, not from the epoch.
-- [ ] Admin SPA: the timing inputs for each periodic kind, and the last-run time shown in the
-  list.
-- [ ] Tests: a unit test of the due-time computation over a table of (kind, config, now,
-  last_run) cases including day/week rollovers and DST-free UTC arithmetic; an integration test
-  driving the scheduler's clock so an `often` and a `daily` trigger fire exactly when they
-  should; the catch-up-once-at-startup case; the overlap skip.
+  (day-of-week + hh:mm) — all UTC (decision 6), refused when out of range. It landed as
+  `Schedule::of`, which is **the validator and the reader in one function**, called on save and on
+  load, so what the admin is refused and what the scheduler computes cannot drift apart. Two rules
+  settled while writing it: a timing value on a kind with no use for it is **refused** rather than
+  ignored (an `hour` on an `hourly` trigger, anything at all on a `login` one — the same rule a
+  channel on a channel-less event gets), and an unset value is 0, so a `daily` nobody configured
+  runs at midnight rather than refusing to be saved.
+- [x] `Scheduler` — one tokio task started at boot (`sc_server::start_scheduler`, from `serve`
+  only, so a `build-app` never starts firing jobs), waking on the minute boundary, computing which
+  triggers are due and firing them through `run_trigger` — the same path the admin's Run button and
+  an app's endpoint take. Each firing runs in **its own task**, so one slow action delays neither
+  the clock nor another trigger, and an occurrence that arrives while the last one is still running
+  is dropped rather than queued. A firing error is reported and the run still recorded: a trigger
+  whose action throws must not retry every minute for ever.
+  **The clock is a parameter** (`tick(now)`), and the task loop is the only place `Utc::now()` is
+  read — which is what lets the tests drive a week of schedule in a millisecond.
+- [x] `last_run_at` persisted on the trigger row, so a run missed while the server was down fires
+  **once** at startup rather than being lost or fired N times; a fresh trigger's first due time is
+  computed from now, not from the epoch. It is a **column `save_trigger` never writes** (only
+  `record_trigger_run` does, as one targeted `UPDATE`): it is the scheduler's bookkeeping, not part
+  of the definition, so an admin editing a trigger at 3pm cannot thereby claim the daily job ran at
+  3pm — or that it never ran. The recorded time is the tick's, not the completion's, so a slow job
+  does not drift later every day.
+  **Disabling is not downtime**, and they behave differently on purpose: a disabled trigger's clock
+  still advances (switching a nightly report off for a week and back on runs it tonight, not
+  immediately), while downtime — which nobody chose — is caught up once.
+- [x] Admin SPA: the timing inputs for each periodic kind (exactly the ones that kind takes, with a
+  day picker showing names over the server's 0 = Monday numbering, and UTC said on the field), the
+  schedule in words under the event in the list, and the last-run time beside it.
+- [x] Tests: the due-time computation as a table of (schedule, last run, now, due?) covering hour,
+  day, month and year rollovers plus the timing refusals; and 5 integration tests driving the
+  clock (`sc-action/tests/scheduler.rs`) — an `often` and a `daily` firing exactly when they should,
+  the run landing on the row at the time it was due, the catch-up-once case through a *second*
+  scheduler over the same database (which is what a restart is), the overlap skip with an action
+  slow enough that the next two occurrences really arrive mid-run, and a disabled trigger neither
+  firing nor replaying. Plus the admin-API round trip of the timing and an edit that does not
+  disturb the recorded last run.
 
 ## Phase 9 — Documentation
 

@@ -38,14 +38,21 @@ mod tests {
     use bytes::Bytes;
 
     /// Create a `LocalFileStore` rooted at a fresh unique temp directory.
+    ///
+    /// The counter is what makes it *unique*: the timestamp alone can repeat
+    /// between two tests starting in the same clock tick on different threads,
+    /// and two tests sharing a store root fail on each other's files — rarely,
+    /// and therefore confusingly.
     fn temp_store() -> (std::path::PathBuf, LocalFileStore) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let base = std::env::temp_dir().join(format!(
-            "sc-files-test-{}-{:?}",
+            "sc-files-test-{}-{:?}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&base).unwrap();
         let store = LocalFileStore::new("test", &base).unwrap();

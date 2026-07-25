@@ -1072,6 +1072,13 @@ fn trigger_schema() -> TypeSchema {
         "error",
         TypeSchema::optional(TypeSchema::text()),
     ));
+    // Read-only, and absent from the input shape below: when a periodic trigger
+    // last fired is the scheduler's record of what happened, not a field an
+    // admin sets. The list shows it; nothing posts it back.
+    fields.push(StructField::new(
+        "last_run_at",
+        TypeSchema::optional(TypeSchema::timestamp()),
+    ));
     TypeSchema::Struct(fields)
 }
 
@@ -1097,6 +1104,13 @@ fn trigger_fields() -> Vec<StructField> {
         StructField::new("configuration", TypeSchema::json()),
         StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
         StructField::new("enabled", TypeSchema::bool()),
+        // The periodic timing (§10.2), null on the kinds that have none. Three
+        // flat fields rather than a nested object: each is one number, each is
+        // one input in the form, and a kind that does not use one refuses it —
+        // so a nested shape would only add a level to say the same thing.
+        StructField::new("minute", TypeSchema::optional(TypeSchema::int())),
+        StructField::new("hour", TypeSchema::optional(TypeSchema::int())),
+        StructField::new("day_of_week", TypeSchema::optional(TypeSchema::int())),
     ]
 }
 

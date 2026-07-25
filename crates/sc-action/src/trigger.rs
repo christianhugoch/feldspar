@@ -12,6 +12,7 @@
 //! hard to reason about. Two triggers on the same event is how you get two
 //! things done today.
 
+use chrono::{DateTime, Utc};
 use sc_types::Attrs;
 use serde_json::Value as Json;
 use uuid::Uuid;
@@ -75,9 +76,18 @@ pub struct Trigger {
     /// **admin-only** (the safe reading: a trigger nobody has thought about the
     /// access of is not public), which Phase 7's endpoint projection applies.
     pub min_role: Option<u8>,
-    /// Sparse per-trigger values (§9): [`ATTR_ENABLED`], and Phase 8's periodic
-    /// timing and `last_run_at`.
+    /// Sparse per-trigger values (§9): [`ATTR_ENABLED`] and the periodic timing
+    /// ([`Schedule`](crate::Schedule)).
     pub attributes: Attrs,
+    /// When the scheduler last fired this trigger, for a periodic one (§10.2).
+    ///
+    /// **Not part of the admin's definition**, which is why it is a field of its
+    /// own rather than an attribute and why [`save_trigger`](crate::save_trigger)
+    /// never writes it: it is the scheduler's bookkeeping, written only by
+    /// [`record_trigger_run`](crate::record_trigger_run). An admin editing a
+    /// trigger's action at 3pm must not thereby tell the scheduler the daily job
+    /// ran at 3pm — or, worse, that it never ran at all.
+    pub last_run_at: Option<DateTime<Utc>>,
 }
 
 impl Trigger {
@@ -106,6 +116,7 @@ impl Trigger {
             configuration: Attrs::new(),
             min_role: None,
             attributes: Attrs::new(),
+            last_run_at: None,
         }
     }
 
@@ -142,6 +153,13 @@ impl Trigger {
     /// Set the role floor for running this trigger through an API.
     pub fn min_role(mut self, role: u8) -> Trigger {
         self.min_role = Some(role);
+        self
+    }
+
+    /// Set a timing attribute (see [`Schedule`](crate::Schedule)), returning
+    /// `self` for chaining.
+    pub fn timing(mut self, key: impl Into<String>, value: u32) -> Trigger {
+        self.attributes.insert(key.into(), Json::from(value));
         self
     }
 

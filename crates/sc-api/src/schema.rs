@@ -186,4 +186,10 @@ impl TypeSchema {
     pub fn json() -> TypeSchema {
         TypeSchema::Value(ValueType::Json)
     }
+
+    /// Shortcut for `Value(Timestamp)` — an instant, carried on the wire as an
+    /// RFC 3339 string (which is why it types as `string` in the client).
+    pub fn timestamp() -> TypeSchema {
+        TypeSchema::Value(ValueType::Timestamp)
+    }
 }

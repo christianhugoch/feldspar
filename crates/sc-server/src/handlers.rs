@@ -22,7 +22,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use sc_action::{
-    EventKind, Trigger, TriggerId, delete_trigger, list_triggers, load_trigger, save_trigger,
+    ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, EventKind, Trigger, TriggerId, delete_trigger,
+    list_triggers, load_trigger, save_trigger,
 };
 use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
@@ -1939,7 +1940,15 @@ fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
         "configuration": Json::Object(trigger.configuration.clone().into_iter().collect()),
         "min_role": trigger.min_role,
         "enabled": trigger.is_enabled(),
+        // The timing, read back the way it was posted: absent is null, not 0, so
+        // "never set" and "set to midnight" stay distinguishable in the form.
+        "minute": trigger.attributes.get(ATTR_MINUTE),
+        "hour": trigger.attributes.get(ATTR_HOUR),
+        "day_of_week": trigger.attributes.get(ATTR_DAY_OF_WEEK),
         "error": problem,
+        // The scheduler's record, RFC 3339 — what the list shows so an admin can
+        // see that a nightly job is actually running.
+        "last_run_at": trigger.last_run_at.map(|t| t.to_rfc3339()),
     })
 }
 
@@ -1993,6 +2002,20 @@ fn trigger_from_body(id: TriggerId, body: &Json) -> Result<Trigger> {
     if obj.get("enabled").and_then(Json::as_bool) == Some(false) {
         trigger.set_enabled(false);
     }
+    // The periodic timing (§10.2). A null or absent value is *not* stored, which
+    // is what keeps the attributes sparse (§9) and what lets `Schedule::of`
+    // refuse a value on a kind that has no use for it — a form posts null for an
+    // input it did not show, exactly as it does for `channel`.
+    for key in [ATTR_MINUTE, ATTR_HOUR, ATTR_DAY_OF_WEEK] {
+        if let Some(value) = obj.get(key).filter(|v| !v.is_null()) {
+            let n = value
+                .as_u64()
+                .ok_or_else(|| Error::invalid(format!("field `{key}` must be a whole number")))?;
+            trigger.attributes.insert(key.to_owned(), json!(n));
+        }
+    }
+    // `last_run_at` is deliberately not read: it is the scheduler's record of
+    // what happened, and an edit must not be able to rewrite history.
     Ok(trigger)
 }
 
