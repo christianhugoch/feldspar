@@ -276,6 +276,9 @@ fn typed_bindings(catalog: &Catalog, event: &Event) -> EventBindings {
         let table = match ambient {
             Ambient::User => users.as_ref(),
             Ambient::Row | Ambient::Old => event_table.as_ref(),
+            // A payload has no columns behind it — whatever its sender put in it
+            // is read as its own JSON shape.
+            Ambient::Payload => None,
         };
         typed_value(table, field, json)
     })

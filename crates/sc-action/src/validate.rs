@@ -146,20 +146,31 @@ pub async fn validate_trigger(
 }
 
 /// The schema shape a trigger's formulas are validated and evaluated against:
-/// the catalog's shape plus `row`/`old` in scope, carrying the event's table's
-/// fields (decision 7).
+/// the catalog's shape, `payload`, and — for a table event — `row`/`old`
+/// carrying the event's table's fields (decision 7).
 ///
 /// `table` is the event's channel — `None` for an event that has no row, which
 /// leaves `row`/`old` **out of scope** rather than in scope and empty, so a
 /// formula naming `row` on a `login` trigger gets the unknown-identifier error it
 /// deserves instead of silently reading null.
 ///
+/// `payload` is in scope for **every** kind, and with no field set: nothing
+/// declares what a posted body or an error envelope contains, so `payload.x`
+/// resolves and reads null when it is not there. That is the opposite rule from
+/// `row.x`, and deliberately: a row has columns to be checked against, and a
+/// payload has whatever its sender put in it. Without it the events that carry
+/// *only* a payload — `none`, `error` — would have nothing a built-in action
+/// could read, which would make "the posted body becomes the event payload" true
+/// of nothing but `run_js_code`.
+///
 /// One function, so validation and evaluation cannot drift into disagreeing about
 /// what is in scope — a formula accepted on save and then unbound at fire time
 /// would be the worst of both. Its callers are this module (an `only_if`) and the
 /// built-in actions, whose configuration is formulas in the same scope.
 pub fn trigger_shape(catalog: &Catalog, table: Option<&str>) -> Result<SchemaShape> {
-    let shape = catalog.schema_shape()?;
+    let shape = catalog
+        .schema_shape()?
+        .ambient_fields(Ambient::Payload, None::<[String; 0]>);
     let Some(table) = table else {
         return Ok(shape);
     };

@@ -106,6 +106,15 @@ pub struct AppMounts {
     /// shared by every provider of every mount. `None` (tests, admin-only
     /// servers) fails closed where a formula would need it.
     evaluator: Option<Arc<dyn sc_expr::JsEvaluator>>,
+    /// The trigger dispatcher, for the events a *request* raises rather than a
+    /// row write: a successful login, and an error becoming a response (§10.2).
+    ///
+    /// It rides here for the same reason the catalog and the evaluator do — this
+    /// is the handle the router and the admin handlers both already hold, so a
+    /// server-wide service put here reaches both without a new parameter on
+    /// either. `None` is a process with no triggers installed, where nothing
+    /// fires: a test, or the admin-only server.
+    triggers: Option<Arc<sc_action::TriggerDispatcher>>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
 }
@@ -121,6 +130,7 @@ impl AppMounts {
         AppMounts {
             catalog: Some(catalog),
             evaluator: None,
+            triggers: None,
             by_subdomain: RwLock::new(HashMap::new()),
         }
     }
@@ -136,6 +146,18 @@ impl AppMounts {
     /// [`MountedApp`] by hand (tests, custom boot paths).
     pub fn evaluator(&self) -> Option<Arc<dyn sc_expr::JsEvaluator>> {
         self.evaluator.clone()
+    }
+
+    /// Attach the trigger dispatcher, so the events a request raises — a login,
+    /// an error — reach the triggers listening for them.
+    pub fn with_triggers(mut self, triggers: Arc<sc_action::TriggerDispatcher>) -> AppMounts {
+        self.triggers = Some(triggers);
+        self
+    }
+
+    /// The trigger dispatcher, if this server has one.
+    pub fn triggers(&self) -> Option<&Arc<sc_action::TriggerDispatcher>> {
+        self.triggers.as_ref()
     }
 
     /// Mount an app on its declared subdomain, refusing a collision.

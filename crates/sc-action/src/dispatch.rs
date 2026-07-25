@@ -1,11 +1,24 @@
 //! Dispatch: turning one event into the runs of the triggers that listen for it
-//! (design §10.2, TODO Phase 4).
+//! (design §10.2, TODO Phases 4 and 5).
 //!
-//! This is the other side of the [emit seam](sc_catalog::TableEvents): the row
-//! layer says *a write happened*, and [`TriggerDispatcher`] decides what that
-//! means. It is installed into the catalog once at boot, so the layering stays
-//! one-way — nothing below layer 6 names a trigger, and the writer above it names
-//! only the catalog.
+//! For a **table write** this is the other side of the [emit
+//! seam](sc_catalog::TableEvents): the row layer says *a write happened*, and
+//! [`TriggerDispatcher`] decides what that means. It is installed into the
+//! catalog once at boot, so the layering stays one-way — nothing below layer 6
+//! names a trigger, and the writer above it names only the catalog.
+//!
+//! Every **other** event is raised by something that already sits above this
+//! crate and can simply hold the dispatcher: a successful login and an error
+//! becoming a response are fired by the server (one place each, so no handler has
+//! to remember to), `startup` by the boot path, and a `none` trigger by whoever
+//! asks for it ([`run_trigger`](TriggerDispatcher::run_trigger)). Those need no
+//! seam — the seam exists for the row layer's sake, not for the layering's.
+//!
+//! Three entry points, differing only in what happens to a failure:
+//! [`dispatch`](TriggerDispatcher::dispatch) returns every outcome,
+//! [`fire`](TriggerDispatcher::fire) reports them (nobody is waiting), and
+//! [`run_trigger`](TriggerDispatcher::run_trigger) returns the one result
+//! (somebody is).
 //!
 //! ## What one dispatch does
 //!
@@ -35,7 +48,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use sc_catalog::{Catalog, TableEvents, TableWrite, WriteOp, prefetch_bindings};
+use sc_catalog::{CallerContext, Catalog, TableEvents, TableWrite, WriteOp, prefetch_bindings};
 use sc_error::{Error, Result};
 use sc_expr::{Ambient, Formula, JsEvaluator, Operation, value_from_json};
 use sc_query::Value;
@@ -164,6 +177,114 @@ impl TriggerDispatcher {
         }
         runs
     }
+
+    /// Fire `event` and **report** each trigger's failure rather than returning
+    /// it — the fire-and-forget form every event that is not a request uses
+    /// (login, startup, error, and the row layer's writes through
+    /// [`emit`](TableEvents::emit)).
+    ///
+    /// The caller of a login is being logged in, and the caller of an error is
+    /// already being told about a different failure; neither has any use for "and
+    /// also your audit trigger is misconfigured", and neither should be made to
+    /// fail for it. So the failure goes where a server-side failure goes, which
+    /// is the log until §16's error log exists.
+    ///
+    /// **The `error` event is guarded against re-entrancy here**, and here only,
+    /// so it cannot be bypassed by firing one another way: while this task is
+    /// dispatching an error event, another error event on the same task is
+    /// dropped. A misconfigured trigger must not become an infinite loop at the
+    /// worst possible moment — which is precisely when an error event fires.
+    pub async fn fire(&self, catalog: &Catalog, event: &Event) {
+        if event.kind != EventKind::Error {
+            self.report(catalog, event).await;
+            return;
+        }
+        if HANDLING_ERROR.try_with(|()| ()).is_ok() {
+            // Already inside an error event's dispatch on this task: the error
+            // this one describes came from handling the last one.
+            return;
+        }
+        HANDLING_ERROR
+            .scope((), async { self.report(catalog, event).await })
+            .await;
+    }
+
+    /// [`dispatch`](TriggerDispatcher::dispatch), logging what failed.
+    async fn report(&self, catalog: &Catalog, event: &Event) {
+        for run in self.dispatch(catalog, event).await {
+            if let Err(e) = run.outcome {
+                eprintln!(
+                    "saltcorn: trigger `{}` on the {} event: {}",
+                    run.trigger,
+                    event.kind,
+                    sc_error::format_chain(&e)
+                );
+            }
+        }
+    }
+
+    /// Run **one trigger by name**, with `payload` as the event's payload, and
+    /// return what its action returned.
+    ///
+    /// This is the `none` event's whole story — a trigger with no intrinsic
+    /// occurrence runs when something asks it to — and it is the same call the
+    /// admin's "run this now" button and an application's exposed trigger
+    /// endpoint make. Unlike [`fire`](TriggerDispatcher::fire), the failure is
+    /// **returned**: someone asked, so someone is waiting for the answer.
+    ///
+    /// The event is built from the trigger's own kind, so what a directly-run
+    /// trigger sees matches what it would see when it fired by itself, minus what
+    /// only the occurrence can supply: run a table trigger this way and there is
+    /// no row, which its `only_if` will say so about rather than guess.
+    /// `Json::Null` comes back when an `only_if` declines.
+    pub async fn run_trigger(
+        &self,
+        catalog: &Catalog,
+        name: &str,
+        payload: Json,
+        caller: Option<&CallerContext>,
+    ) -> Result<Json> {
+        let triggers = self.triggers()?;
+        // `require` distinguishes "no such trigger" from "stored but not usable,
+        // and here is why" — the second is the answer the asker needs.
+        let trigger = triggers.require(name)?;
+        // Disabled means disabled however it is asked. `require` resolves one
+        // (that is how it stays fixable), so the check belongs here: an admin who
+        // switched a trigger off and then pressed Run expects the switch to win.
+        if !trigger.is_enabled() {
+            return Err(Error::invalid(format!("trigger `{name}` is disabled")));
+        }
+        let mut event = Event::new(trigger.when).payload(payload);
+        if let Some(channel) = &trigger.channel {
+            event = event.on(channel.clone());
+        }
+        if let Some(caller) = caller {
+            event = event
+                .caller(caller.role, caller.user.clone())
+                .chained(caller.chain.clone());
+        }
+        let result = fire_trigger(
+            catalog,
+            &self.registry,
+            self.evaluator.as_ref(),
+            trigger,
+            &event,
+        )
+        .await?;
+        Ok(result.unwrap_or(Json::Null))
+    }
+}
+
+tokio::task_local! {
+    /// Set for the duration of an error event's dispatch, so an error raised
+    /// while handling one does not fire another (see
+    /// [`fire`](TriggerDispatcher::fire)).
+    ///
+    /// A **task**-local rather than a flag on the dispatcher: the guard is about
+    /// this error's own handling, and a shared flag would drop a genuinely
+    /// unrelated error that happened to overlap with it. Two requests failing at
+    /// once are two errors, and both deserve their event.
+    static HANDLING_ERROR: ();
 }
 
 #[async_trait::async_trait]
@@ -181,20 +302,9 @@ impl TableEvents for TriggerDispatcher {
     }
 
     async fn emit(&self, catalog: &Catalog, write: TableWrite<'_>) -> Result<()> {
-        let event = table_event(&write);
-        for run in self.dispatch(catalog, &event).await {
-            if let Err(e) = run.outcome {
-                // The write has committed; this is all that can be done about a
-                // trigger that failed, until §16's error log exists to put it in.
-                eprintln!(
-                    "saltcorn: trigger `{}` on {} of `{}`: {}",
-                    run.trigger,
-                    write.op,
-                    write.table.name,
-                    sc_error::format_chain(&e)
-                );
-            }
-        }
+        // The write has committed, so a trigger that failed is reported rather
+        // than returned — the same rule every non-request event follows.
+        self.fire(catalog, &table_event(&write)).await;
         Ok(())
     }
 }
@@ -294,9 +404,10 @@ async fn only_if_selects(
     // predicate reads and what a prefetch correlates on agree with the database.
     let bindings = crate::scope::EventBindings::with_values(event, |ambient, field, json| {
         match ambient {
-            // The caller is not typed here: it never correlates a prefetch, and
-            // typing it would mean naming the users table from this crate.
-            Ambient::User => value_from_json(json),
+            // Neither the caller nor the payload is typed here: neither ever
+            // correlates a prefetch (and the payload has no columns to be typed
+            // against at all).
+            Ambient::User | Ambient::Payload => value_from_json(json),
             Ambient::Row | Ambient::Old => typed_value(Some(&table), field, json),
         }
     });

@@ -262,6 +262,10 @@ async fn upload(
         }
     };
 
+    // Kept for the `error` event, which needs to say where it happened and to
+    // whom; the originals move into the handler's context below.
+    let (store_for_event, path_for_event) = (store_name.clone(), path.clone());
+    let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: Some(bytes),
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
@@ -270,8 +274,18 @@ async fn upload(
         user,
     };
     match handler(ctx).await {
-        Ok(resp) => apply_response(&state, jar, session_token, resp),
-        Err(e) => error_response(&e, Audience::Admin),
+        Ok(resp) => apply_response(&state, jar, session_token, resp).await,
+        Err(e) => {
+            error_out(
+                &state,
+                &e,
+                Audience::Admin,
+                "POST",
+                &format!("/upload/{store_for_event}/{path_for_event}"),
+                caller.as_ref(),
+            )
+            .await
+        }
     }
 }
 
@@ -477,10 +491,22 @@ async fn dispatch_app(
                         status: resp.status,
                         session: resp.session,
                     },
-                ),
+                )
+                .await,
                 &csp,
             ),
-            Err(e) => with_csp(error_response(&e, Audience::App), &csp),
+            Err(e) => with_csp(
+                error_out(
+                    state,
+                    &e,
+                    Audience::App,
+                    api_method.as_str(),
+                    path,
+                    user.as_ref(),
+                )
+                .await,
+                &csp,
+            ),
         };
     }
 
@@ -506,7 +532,10 @@ async fn dispatch_app(
             }
             with_csp(out, &csp)
         }
-        Err(e) => with_csp(error_response(&e, Audience::App), &csp),
+        Err(e) => with_csp(
+            error_out(state, &e, Audience::App, api_method.as_str(), path, None).await,
+            &csp,
+        ),
     }
 }
 
@@ -573,6 +602,9 @@ async fn handle_api(
         }
     };
 
+    // As above: the event reports the route and the caller, and both move into
+    // the handler's context.
+    let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: None,
         path_params,
@@ -582,8 +614,18 @@ async fn handle_api(
     };
 
     match handler(ctx).await {
-        Ok(resp) => apply_response(state, jar, session_token, resp),
-        Err(e) => error_response(&e, Audience::Admin),
+        Ok(resp) => apply_response(state, jar, session_token, resp).await,
+        Err(e) => {
+            error_out(
+                state,
+                &e,
+                Audience::Admin,
+                ep.method.as_str(),
+                uri.path(),
+                caller.as_ref(),
+            )
+            .await
+        }
     }
 }
 
@@ -604,7 +646,12 @@ fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<Response>
 
 /// Turn a [`HandlerResponse`] into an HTTP response, applying its session action
 /// (start/end) to the cookie jar and the store.
-fn apply_response(
+///
+/// This is also where the **`login` event** is raised (§10.2), because it is the
+/// one place a session actually starts: the admin API's login and an
+/// application's own both come through here, so a trigger that records logins
+/// sees both without either handler knowing triggers exist.
+async fn apply_response(
     state: &AppState,
     jar: CookieJar,
     session_token: Option<String>,
@@ -613,13 +660,18 @@ fn apply_response(
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
     let jar = match resp.session {
         SessionAction::Keep => jar,
-        SessionAction::Start(user) => match state.sessions.login(user) {
-            Ok(token) => jar.add(build_cookie(
-                SESSION_COOKIE,
-                token,
-                true,
-                state.secure_cookies,
-            )),
+        SessionAction::Start(user) => match state.sessions.login(user.clone()) {
+            Ok(token) => {
+                // After the session exists, not before: an event that says
+                // someone logged in must not fire for a login that then failed.
+                fire_login(state, &user).await;
+                jar.add(build_cookie(
+                    SESSION_COOKIE,
+                    token,
+                    true,
+                    state.secure_cookies,
+                ))
+            }
             Err(e) => {
                 log_failure("could not start session", &e);
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "could not start session");
@@ -734,6 +786,49 @@ fn error_response(err: &Error, audience: Audience) -> Response {
         Audience::App => err.to_string(),
     };
     json_error(status, message)
+}
+
+/// Raise the **`error` event** (§16) for an error that is about to become a
+/// response, then map it to that response.
+///
+/// Every `Error` that reaches a client goes through here, and only those: a 404
+/// for an unrouted path or a 401 from the auth gate is a *rejection*, not a
+/// failure, and firing an alerting trigger for every probe of a wrong URL would
+/// make the event useless for the thing it is for.
+///
+/// The event never changes the response and never fails the request — the caller
+/// is already being told something went wrong, and a misconfigured trigger must
+/// not turn that into something worse. Re-entrancy is guarded inside the
+/// dispatcher, so an error raised while handling this one does not fire another.
+async fn error_out(
+    state: &AppState,
+    err: &Error,
+    audience: Audience,
+    method: &str,
+    path: &str,
+    user: Option<&User>,
+) -> Response {
+    if let (Some(triggers), Some(catalog)) = (state.apps.triggers(), state.apps.catalog()) {
+        let caller = sc_api::caller_context(user);
+        let event = sc_action::Event::error(err.kind(), err.to_string(), method, path)
+            .caller(caller.role, caller.user);
+        triggers.fire(catalog, &event).await;
+    }
+    error_response(err, audience)
+}
+
+/// Raise the **`login` event** for a session that has just started.
+///
+/// The user object is built exactly as every other caller's is
+/// ([`sc_api::caller_context`]), so `user.email` means the same thing in a login
+/// trigger's action as it does in an insert trigger's.
+async fn fire_login(state: &AppState, user: &User) {
+    let (Some(triggers), Some(catalog)) = (state.apps.triggers(), state.apps.catalog()) else {
+        return;
+    };
+    let caller = sc_api::caller_context(Some(user));
+    let event = sc_action::Event::login(caller.role, caller.user.unwrap_or(Value::Null));
+    triggers.fire(catalog, &event).await;
 }
 
 /// Who will read an error message, which decides how much of it to send.

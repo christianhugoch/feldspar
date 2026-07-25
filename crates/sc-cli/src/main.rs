@@ -88,16 +88,28 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // dispatcher, whose `only_if` formulas and action configuration are the same
     // language evaluated the same way.
     let evaluator = sc_server::default_js_evaluator();
-    let apps = Arc::new(AppMounts::new(catalog.clone()).with_evaluator(evaluator.clone()));
-    if config.base_domain.is_some() {
-        mount_all(&apps).await;
-    }
 
     // Triggers: the built-in actions, the stored trigger set, and the dispatcher
     // installed into the catalog — after which a row write raises an event.
     // Before it, nothing observes writes, which is what keeps `build-app` and
-    // every other command from firing anything.
-    sc_server::install_triggers(&catalog, evaluator).await?;
+    // every other command from firing anything. It comes before the mounts
+    // because the mount registry carries the dispatcher: an app's login and its
+    // errors raise events through the same router the admin API's do.
+    let triggers = sc_server::install_triggers(&catalog, evaluator.clone()).await?;
+
+    let apps = Arc::new(
+        AppMounts::new(catalog.clone())
+            .with_evaluator(evaluator)
+            .with_triggers(triggers.clone()),
+    );
+    if config.base_domain.is_some() {
+        mount_all(&apps).await;
+    }
+
+    // Everything is up — catalog, file stores, applications, triggers — and the
+    // listener has not been announced yet, which is exactly what the `startup`
+    // event means.
+    sc_server::fire_startup(&catalog, &triggers).await;
 
     let sessions = Arc::new(SessionStore::default());
     eprintln!("saltcorn: listening on http://{}", config.addr);

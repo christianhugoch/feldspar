@@ -23,7 +23,7 @@
 //! [`MAX_DEPTH`], naming the whole chain. A depth counter alone would have caught
 //! the loop but left the admin to find it; the chain *is* the diagnosis.
 
-use sc_error::{Error, Result};
+use sc_error::{Error, ErrorKind, Result};
 use serde_json::{Map, Value as Json};
 
 /// The least-restrictive role: everyone, including anonymous callers.
@@ -199,6 +199,51 @@ impl Event {
             user: None,
             chain: Vec::new(),
         }
+    }
+
+    /// The **`login`** event: a caller authenticated successfully.
+    ///
+    /// The user *is* the event — there is no row and no payload — so this is
+    /// [`caller`](Event::caller) under a name that says which occurrence it is.
+    /// Fired for an admin login and for an application's own, because both are
+    /// "someone signed in" and a trigger that records logins must see both.
+    pub fn login(role: u8, user: Json) -> Event {
+        Event::new(EventKind::Login).caller(role, Some(user))
+    }
+
+    /// The **`startup`** event: the server finished coming up. No caller, no
+    /// channel, nothing to carry — it happened, once.
+    pub fn startup() -> Event {
+        Event::new(EventKind::Startup)
+    }
+
+    /// The **`error`** event: an [`Error`] became a response (§16).
+    ///
+    /// The payload is written out here rather than assembled at the call site
+    /// because it is a **wire contract**: an error trigger's formulas read
+    /// `payload.kind` and `payload.message`, and a `fetch` action posts the whole
+    /// object to whatever is on the other end. It must not change silently.
+    ///
+    /// - `kind` — `"application"` or `"system"`, the existing [`ErrorKind`]
+    ///   split: the first is a caller's mistake, the second is the server's, and
+    ///   an alerting trigger almost always wants only the second.
+    /// - `message` — what the caller was told.
+    /// - `method`/`path` — where it happened, which is the difference between an
+    ///   alert someone can act on and one they cannot.
+    ///
+    /// The caller (role and user) is set by [`caller`](Event::caller) on top, as
+    /// for every other event.
+    pub fn error(kind: ErrorKind, message: impl Into<String>, method: &str, path: &str) -> Event {
+        let kind = match kind {
+            ErrorKind::Application => "application",
+            ErrorKind::System => "system",
+        };
+        Event::new(EventKind::Error).payload(serde_json::json!({
+            "kind": kind,
+            "message": message.into(),
+            "method": method,
+            "path": path,
+        }))
     }
 
     /// Set the channel — the table name, for a table event.

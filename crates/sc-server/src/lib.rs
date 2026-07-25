@@ -45,4 +45,4 @@ pub use handlers::admin_handlers;
 pub use router::{BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, build_router, build_router_with_apps};
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::serve;
-pub use triggers::install_triggers;
+pub use triggers::{fire_startup, install_triggers};

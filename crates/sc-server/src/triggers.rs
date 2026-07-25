@@ -51,3 +51,17 @@ pub async fn install_triggers(
     catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
     Ok(dispatcher)
 }
+
+/// Fire the **`startup`** event: the server is up (§10.2).
+///
+/// Called once, after the catalog, the file stores, the applications *and* the
+/// triggers are all up and before the listener is announced — so a startup
+/// trigger's action finds a server that works, and anything it writes is visible
+/// to the first request rather than racing it.
+///
+/// Reports rather than fails, like every other fire-and-forget event: a
+/// misconfigured startup trigger must not be the reason a server refuses to
+/// boot, which is the one moment nobody can fix it from the admin UI.
+pub async fn fire_startup(catalog: &Arc<Catalog>, dispatcher: &Arc<TriggerDispatcher>) {
+    dispatcher.fire(catalog, &sc_action::Event::startup()).await;
+}

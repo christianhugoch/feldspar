@@ -15,6 +15,10 @@
 //! - `user`, `row` and `old` are **ambient**: the caller and the event's rows, in
 //!   scope exactly where the event has them. A `login` trigger's action gets
 //!   `user` and no `row`, and naming `row` there is an error, not a null.
+//! - `payload` is ambient too, and in scope for **every** kind: it is what a
+//!   directly-run trigger was posted and what an error event carries, and it has
+//!   no declared fields because nothing declares what a sender put in it — so
+//!   `payload.x` resolves and reads null where there is none.
 //! - **Bare identifiers are the row the formula ranges over**, which for a
 //!   formula that only reads the event is *nothing*: those are validated against
 //!   [`EVENT_SCOPE`], an empty table, so `title` where `row.title` was meant is
@@ -194,6 +198,22 @@ impl EventBindings {
                     .then(|| object(Ambient::Old, &event.old_row_object())),
             );
         }
+        // `payload` is in scope for **every** kind, because every event has the
+        // field (null where there is nothing to say) — and because the events
+        // that carry one are exactly the ones with nothing else to read: a
+        // directly-run trigger's posted body, an error's `{kind, message, …}`.
+        //
+        // Only an *object* payload binds as one. A body that is an array or a
+        // scalar reads as null in a formula, which is the honest answer for a
+        // scope whose whole vocabulary is `payload.x`; `run_js_code` gets the
+        // payload as it is, and is the tool for one that is not an object.
+        ambient.insert(
+            Ambient::Payload,
+            event
+                .payload
+                .as_object()
+                .map(|obj| object(Ambient::Payload, obj)),
+        );
         let user = event
             .user
             .as_ref()
@@ -320,8 +340,48 @@ mod tests {
         // naming `row` gets `unknown identifier` instead of a silent null.
         let login = Event::new(EventKind::Login).caller(1, Some(json!({ "email": "a@b.c" })));
         let bindings = EventBindings::of(&login);
-        assert!(bindings.ambient.is_empty());
+        assert!(!bindings.ambient.contains_key(&Ambient::Row));
+        assert!(!bindings.ambient.contains_key(&Ambient::Old));
+        // `payload` is the exception, and is in scope for every kind — see
+        // `the_payload_is_in_scope_for_every_kind_and_only_as_an_object`.
+        assert_eq!(bindings.ambient.len(), 1);
         assert!(bindings.user.is_some());
+    }
+
+    #[test]
+    fn the_payload_is_in_scope_for_every_kind_and_only_as_an_object() {
+        // Every event has a payload field, so `payload` is always bound — null
+        // where there is nothing to say, which is what lets an `insert_row` on a
+        // `login` trigger name it without knowing which events carry one.
+        let login = Event::new(EventKind::Login);
+        let bindings = EventBindings::of(&login);
+        assert!(bindings.ambient.contains_key(&Ambient::Payload));
+        assert!(
+            bindings.ambient[&Ambient::Payload].is_none(),
+            "in scope, null"
+        );
+
+        // An object binds field by field — the shape a posted body and an error
+        // envelope both have.
+        let called = Event::new(EventKind::None).payload(json!({ "n": 5, "who": "a@b.c" }));
+        let bindings = EventBindings::of(&called);
+        assert_eq!(
+            bindings.ambient[&Ambient::Payload]
+                .as_ref()
+                .and_then(|p| p.get("n")),
+            Some(&Value::Int(5))
+        );
+
+        // A payload that is *not* an object has no `payload.x` to offer, so it
+        // reads null rather than pretending: `run_js_code` is the tool for one.
+        for body in [json!([1, 2]), json!("plain text"), json!(7)] {
+            let event = Event::new(EventKind::None).payload(body.clone());
+            let bindings = EventBindings::of(&event);
+            assert!(
+                bindings.ambient[&Ambient::Payload].is_none(),
+                "bound as an object: {body}"
+            );
+        }
     }
 
     #[test]

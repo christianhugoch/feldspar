@@ -2,7 +2,7 @@
 //!
 //! Collection is pure syntax and happens once at parse time: every identifier
 //! not bound by an arrow parameter is free, and member accesses on an **ambient
-//! object** ([`Ambient`] — `user`, `row`, `old`) are recorded so `user.x` can be
+//! object** ([`Ambient`] — `user`, `row`, `old`, `payload`) are recorded so `user.x` can be
 //! checked against the user table and `row.x` against the triggering table.
 //! Classification — is this identifier a field, a Ⱶ-join path, an ambient
 //! object, an operation flag, a whitelisted global, or a mistake — needs a
@@ -66,11 +66,16 @@ pub enum Ambient {
     Row,
     /// `old` — that row as it was before an update; null on any other event.
     Old,
+    /// `payload` — the event's free-form detail: a directly-run trigger's posted
+    /// body, an error event's `{kind, message, …}`. Null where the event has
+    /// none, and **fieldless**: unlike `row` and `user`, nothing declares what is
+    /// in it, so `payload.anything` resolves and reads null when it is not there.
+    Payload,
 }
 
 impl Ambient {
     /// Every ambient object, in scope-declaration order.
-    pub const ALL: [Ambient; 3] = [Ambient::User, Ambient::Row, Ambient::Old];
+    pub const ALL: [Ambient; 4] = [Ambient::User, Ambient::Row, Ambient::Old, Ambient::Payload];
 
     /// The identifier this object is spelled with.
     pub fn as_str(self) -> &'static str {
@@ -78,6 +83,7 @@ impl Ambient {
             Ambient::User => "user",
             Ambient::Row => "row",
             Ambient::Old => "old",
+            Ambient::Payload => "payload",
         }
     }
 

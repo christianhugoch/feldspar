@@ -487,23 +487,58 @@ question.
   refusal message naming the whole chain; and a throwing `run_js_code` trigger that costs
   neither the write, nor the request, nor the second trigger on the same event.
 
-## Phase 5 — The other events: none, login, startup, error
+## Phase 5 — The other events: none, login, startup, error ✅
 
-- [ ] **`none`** — no intrinsic event: runnable by name through `sc-action`'s `run_trigger`,
+- [x] **`none`** — no intrinsic event: runnable by name through `sc-action`'s `run_trigger`,
   which Phase 6 (admin) and Phase 7 (API) both call. The posted body becomes the event payload;
   the action's result is the response.
-- [ ] **`login`** — fired from the login handler on a successful authentication (admin login and
+  It is a method on the dispatcher (which holds the trigger set, the registry and the engine —
+  the three things running one needs) and it **returns** the failure where `fire` reports it:
+  somebody asked, so somebody is waiting. `Triggers::require` already distinguishes "no such
+  trigger" from "stored but not usable, and here is why"; **disabled** was the case it did not
+  cover, and now does — a trigger an admin switched off does not run however it is asked.
+- [x] **`login`** — fired from the login handler on a successful authentication (admin login and
   an application's own `login` endpoint), carrying the user.
-- [ ] **`startup`** — fired once by `sc-cli`/`sc-server` after the catalog, applications and
-  triggers are up, before the listener is announced ready.
-- [ ] **`error`** — fired where an `Error` becomes a response, carrying `kind`
+  Fired from **one** place rather than two: `router::apply_response`, which is where a session
+  actually starts, and which both the admin API's login and an app's own go through. No handler
+  has to remember to raise it, and the two cannot drift.
+- [x] **`startup`** — fired once by `sc-cli`/`sc-server` after the catalog, applications and
+  triggers are up, before the listener is announced ready (`sc_server::fire_startup`).
+- [x] **`error`** — fired where an `Error` becomes a response, carrying `kind`
   (`application`/`system`, from the existing `ErrorKind` split), the message, and the route/user
   context. **Re-entrancy is guarded**: an error raised while handling an error event does not
   fire another, or a misconfigured trigger becomes an infinite loop at the worst moment. The
   `_sc_errors` log itself (§16) is *not* in this milestone — the event is.
-- [ ] Tests: a login trigger recording logins; a startup trigger observed to have run once the
+  - The funnel is `error_response`'s four call sites, and **only** those: a 404 for an unrouted
+    path or a 401 from the auth gate is a *rejection*, not a failure, and an alerting trigger
+    that fired on every probe of a wrong URL would be useless for what it is for.
+  - The guard is a **task-local**, not a flag on the dispatcher: it is about one error's own
+    handling, and a shared flag would drop a genuinely concurrent unrelated error. It lives
+    inside `fire`, so it cannot be bypassed by raising an error event some other way.
+- [x] **`payload` had to become part of the formula scope** — not in the plan, and the phase does
+  not work without it. `row`/`old`/`user` were the whole ambient vocabulary, so a `none` trigger
+  could not read the body it was posted and an error trigger could not write the message to a
+  table: "the posted body becomes the event payload" was true of nothing but `run_js_code`. So
+  `sc-expr` gained `Ambient::Payload` and `trigger_shape` declares it for **every** kind, with
+  **no field set** — nothing declares what a sender put in a payload, so `payload.x` resolves and
+  reads null when it is not there, which is the opposite of `row.x` and deliberately so. A
+  payload that is not an object (an array, a scalar) binds as null in a formula; `run_js_code`
+  gets it as it is, and is the tool for one.
+- [x] Tests: a login trigger recording logins; a startup trigger observed to have run once the
   server is up; an error trigger firing for a forced application error *and* a forced system
   error, with the re-entrancy guard asserted by a trigger whose action itself throws.
+  **Done** in two places, because the guard and the events are asserted at different levels.
+  `sc-server/tests/other_events.rs` (5 tests through the real router): a login trigger recording
+  `user.email` for a real sign-in and *not* for a rejected one; a startup trigger that fires only
+  when the boot path fires it; an error trigger seeing a forced **application** error (a table
+  that is not there) and a forced **system** one (a NOT NULL violation the API cannot foresee),
+  with the path and the caller, and **no** row for an unauthenticated request, which is a
+  rejection rather than a failure; a throwing error trigger that costs neither the response, nor
+  the recording trigger beside it, nor a second error event; and a `none` trigger run by name
+  with its payload, refusing an unknown name and a disabled one differently.
+  `sc-action/tests/error_reentrancy.rs` (2 tests) pins the guard itself with a purpose-built
+  action that raises an error event *from inside* one — which no built-in action can do — and it
+  fails (5 runs, not 1) with the guard removed.
 
 ## Phase 6 — Admin API and admin SPA
 
