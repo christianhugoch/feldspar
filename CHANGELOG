@@ -2,6 +2,66 @@
 
 Changes in reverse chronological order.
 
+## Triggers in the admin API and the admin SPA
+
+Phase 6. Triggers stop being something only a test can create: six endpoints on the existing typed
+`Endpoint` machinery, the regenerated client, and two screens.
+
+### Endpoints
+
+`listTriggers`, `createTrigger`, `updateTrigger`, `deleteTrigger`, `runTrigger`, `listActions`.
+Four decisions worth their lines:
+
+- **The list is the stored rows, not the live set.** A trigger that fails validation is dropped
+  from the live set — and listing the live set would make it vanish from the one screen that
+  exists to repair it. Each row carries `error: string | null` from the live set's issues, the
+  same shape a file store's "defined but not connected" takes.
+- **Every mutation reloads the live set**, so "what the list shows is what will fire" is true of
+  the screen the admin is looking at, not of the next restart. The API test asserts exactly that:
+  it creates a trigger over HTTP, writes a row through the *other* admin endpoint, and checks the
+  trigger fired.
+- **`runTrigger` is addressed by id and resolved to a name.** The row is what the admin clicked; a
+  rename must not make the button run somebody else's trigger. The posted body is the event's
+  payload, the admin is the caller, and an action that fails comes back as an **error** — a 200
+  carrying a hidden failure is precisely what a "test this now" button exists to prevent.
+- **`listActions`** reports each action's name, description and `config_spec` in the same
+  `FormField` vocabulary a framework's and a file-store backend's settings use, which is what lets
+  the trigger form render a configuration form for an action it has never heard of.
+
+The dispatcher reaches the handlers through `AppMounts` — already threaded into both the router and
+`admin_handlers` in Phase 5 — so no signature changed. A server assembled without one refuses these
+endpoints by name rather than answering with an empty list, which would make a save look like it
+worked.
+
+### SPA
+
+- **`Triggers.tsx`** — name, event (with its channel and `only_if` beneath it), what it runs, and a
+  status badge: Enabled, Off, or **Not usable** with the reason. Run is offered only for a `none`
+  trigger, because every other kind needs an occurrence to say anything about; the result (or the
+  action's error) is shown inline.
+- **`TriggerForm.tsx`** — event picker, table picker and `only_if` shown **only** for table events
+  (the other kinds have no row, so offering them and then refusing the save would be worse than not
+  offering), action picker, and the action's settings rendered from `config_spec`. No action's
+  settings are known to this screen.
+- Nav entry beside Tables and Applications; `tsc --noEmit` and `vite build` pass.
+
+### Two fixes in the shared settings renderer
+
+Both were latent bugs for any `json` setting, and an action that always has one (`insert_row`'s
+field→formula map) is what surfaced them:
+
+- `readConfig` now **stringifies** an object rather than dropping it — editing a trigger would
+  otherwise blank its `values` map on save.
+- A `json` field renders as a monospace textarea rather than a one-line text input.
+
+### Tests
+
+`sc-server/tests/trigger_admin_api.rs`, 5 tests over the real router: the round trip (create →
+fires → rename and switch off → does not fire → delete → deleting twice is a not-found); five save
+refusals each naming what is wrong with nothing stored; a trigger whose table is dropped underneath
+it staying listed with its reason; `runTrigger`'s result and its error; and `listActions`
+describing all five built-ins.
+
 ## The other events: `none`, `login`, `startup`, `error`
 
 Phase 5. A trigger no longer has to be about a row: something signing in, the server coming up, a

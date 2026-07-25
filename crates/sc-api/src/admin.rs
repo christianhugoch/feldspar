@@ -601,6 +601,79 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // --- triggers -----------------------------------------------------------
+    // A trigger is one event bound to one configured action (§10.2), stored in
+    // `_sc_triggers`. These endpoints are the row ⇄ live-set path the SPA
+    // drives: every save is validated and the live set is reloaded, so what the
+    // list shows is what will fire.
+
+    set.register(
+        Endpoint::new("listTriggers", Method::Get, api().lit("triggers"))
+            .output(TypeSchema::array(trigger_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("createTrigger", Method::Post, api().lit("triggers"))
+            .input(trigger_input_schema())
+            .output(trigger_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateTrigger",
+            Method::Put,
+            api().lit("triggers").param("id", ValueType::Uuid),
+        )
+        .input(trigger_input_schema())
+        .output(trigger_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteTrigger",
+            Method::Delete,
+            api().lit("triggers").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Run one trigger now — the admin's "test this now". The posted body is the
+    // event's payload and the action's result comes back; an action that fails
+    // comes back as an **error**, not a 200 carrying a failure nobody reads.
+    set.register(
+        Endpoint::new(
+            "runTrigger",
+            Method::Post,
+            api()
+                .lit("triggers")
+                .param("id", ValueType::Uuid)
+                .lit("run"),
+        )
+        .input(TypeSchema::json())
+        .output(TypeSchema::struct_of([StructField::new(
+            "result",
+            TypeSchema::json(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- actions ------------------------------------------------------------
+    // The registered actions with the settings each declares, so the trigger
+    // form renders a configuration form for an action it knows nothing about
+    // (§13.3) — the same move the framework and file-store pickers make.
+    set.register(
+        Endpoint::new("listActions", Method::Get, api().lit("actions"))
+            .output(TypeSchema::array(action_info_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
     set
 }
 
@@ -979,6 +1052,59 @@ fn build_result_schema() -> TypeSchema {
         StructField::new("built", TypeSchema::bool()),
         StructField::new("git_repo", TypeSchema::bool()),
         StructField::new("log", TypeSchema::text()),
+    ])
+}
+
+/// One stored trigger: what fires it, what it runs, and whether it is usable.
+///
+/// `error` is the part that makes a broken trigger fixable rather than merely
+/// absent, exactly as a file store's is: a trigger whose table was dropped or
+/// whose action a removed plugin provided is **not in the live set** and will not
+/// fire, but it is still stored, still listed and still editable — and the reason
+/// is the only thing that says what to fix.
+fn trigger_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(trigger_fields());
+    fields.push(StructField::new(
+        "error",
+        TypeSchema::optional(TypeSchema::text()),
+    ));
+    TypeSchema::Struct(fields)
+}
+
+/// The body accepted when creating or updating a trigger: the same fields minus
+/// the id (server-assigned on create, taken from the path on update) and minus
+/// `error` (which is the server's answer, not the admin's input).
+fn trigger_input_schema() -> TypeSchema {
+    TypeSchema::Struct(trigger_fields())
+}
+
+/// The editable half of a trigger, shared by the read and write shapes.
+fn trigger_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // The event kind, as the lowercase word it is stored under
+        // (`insert`, `login`, …).
+        StructField::new("when", TypeSchema::text()),
+        // The table, for a table event; null for every other kind.
+        StructField::new("channel", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("only_if", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("action", TypeSchema::text()),
+        StructField::new("configuration", TypeSchema::json()),
+        StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+        StructField::new("enabled", TypeSchema::bool()),
+    ]
+}
+
+/// A registered action and the settings it declares — name, one-line
+/// description, and its `config_spec` in the same [`form_field_schema`]
+/// vocabulary a framework's and a file-store backend's settings use.
+fn action_info_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
     ])
 }
 

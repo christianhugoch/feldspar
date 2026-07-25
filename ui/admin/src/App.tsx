@@ -21,6 +21,8 @@ import { Login } from "./screens/Login";
 import { Roles } from "./screens/Roles";
 import { Tables } from "./screens/Tables";
 import { TableDetail } from "./screens/TableDetail";
+import { Triggers } from "./screens/Triggers";
+import { TriggerForm } from "./screens/TriggerForm";
 import { Users } from "./screens/Users";
 
 /** The authenticated user, as reported by `authStatus` / `login`. */
@@ -114,6 +116,9 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
             >
               Applications
             </Nav.Link>
+            <Nav.Link href="#/triggers" active={route.startsWith("/triggers")}>
+              Triggers
+            </Nav.Link>
             <Nav.Link
               href="#/file-stores"
               active={route.startsWith("/file-stores") || route.startsWith("/files")}
@@ -155,6 +160,16 @@ function Screen({ route }: { route: string }) {
   }
   if (route.startsWith("/applications")) {
     return <Applications />;
+  }
+  if (route === "/triggers/new") {
+    return <TriggerForm />;
+  }
+  const triggerEditMatch = route.match(/^\/triggers\/([^/]+)\/edit$/);
+  if (triggerEditMatch) {
+    return <TriggerForm triggerId={decodeURIComponent(triggerEditMatch[1])} />;
+  }
+  if (route.startsWith("/triggers")) {
+    return <Triggers />;
   }
   if (route === "/file-stores/new") {
     return <FileStoreForm />;

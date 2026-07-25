@@ -35,12 +35,24 @@ export function asString(value: unknown): string {
   return "";
 }
 
+/** Read one stored config value as the text the form edits it as.
+ *
+ * A `json` setting — a rich type's `options`, a File kind's `mime_allow`, an
+ * `insert_row` action's field→formula map — is stored as an object or an array
+ * and edited as JSON text, so it is stringified rather than dropped. (`asString`
+ * yields "" for those, which is right for a one-line summary and wrong for a
+ * form that has to hand the value back unchanged.) */
+export function configText(value: unknown): string {
+  if (value !== null && typeof value === "object") return JSON.stringify(value, null, 2);
+  return asString(value);
+}
+
 /** Read a stored config bag (an `unknown`) into the string map the form edits. */
 export function readConfig(raw: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   if (raw && typeof raw === "object") {
     for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-      out[key] = asString(value);
+      out[key] = configText(value);
     }
   }
   return out;
@@ -140,6 +152,27 @@ export function SettingField({
           checked={value === "true"}
           onChange={(e) => onChange(e.target.checked ? "true" : "false")}
         />
+      </Form.Group>
+    );
+  }
+  if (field.type === "json") {
+    // JSON text, so it gets room and a monospace face: these are objects and
+    // arrays (an action's field→formula map, a MIME allow-list), not words.
+    return (
+      <Form.Group className="mb-3" controlId={controlId}>
+        <Form.Label>
+          {field.label}
+          {field.required && <span className="text-danger"> *</span>}
+        </Form.Label>
+        <Form.Control
+          as="textarea"
+          rows={4}
+          className="font-monospace"
+          value={value}
+          required={field.required}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <Form.Text muted>JSON.</Form.Text>
       </Form.Group>
     );
   }

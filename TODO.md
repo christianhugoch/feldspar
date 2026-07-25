@@ -540,23 +540,53 @@ question.
   action that raises an error event *from inside* one — which no built-in action can do — and it
   fails (5 runs, not 1) with the guard removed.
 
-## Phase 6 — Admin API and admin SPA
+## Phase 6 — Admin API and admin SPA ✅
 
-- [ ] Admin endpoints on the existing typed `Endpoint` machinery: `listTriggers`,
+- [x] Admin endpoints on the existing typed `Endpoint` machinery: `listTriggers`,
   `createTrigger`, `updateTrigger`, `deleteTrigger`, `runTrigger` (admin-only "test this now",
   returning the action's result or its error), and `listActions` (each action's name,
   description and `config_spec`, so the SPA renders the configuration form from the server's
   description rather than a hard-coded one). Regenerate the checked-in TS client (the drift test
   is the gate).
-- [ ] Admin SPA: a `Triggers.tsx` list (name, event, channel, action, validity badge) and a
+  Settled in the writing:
+  - **`listTriggers` lists the stored rows, not the live set.** A trigger that fails validation
+    is dropped from the live set, and listing the live set would make it vanish from the one
+    screen that exists to repair it. Each row carries `error: string | null` from the live set's
+    issues — the same shape a file store's "defined but not connected" takes, for the same
+    reason.
+  - **Every mutation reloads the live set**, so "what the list shows is what will fire" is true
+    of the screen the admin is looking at rather than of the next restart.
+  - **`runTrigger` is addressed by id, then resolved to a name**: the row is what the admin
+    clicked, and a rename must not make the button run somebody else's trigger.
+  - The dispatcher reaches the handlers through `AppMounts` (already threaded into both the
+    router and `admin_handlers` in Phase 5), so no signature changed. A server assembled without
+    one refuses these endpoints by name rather than answering with an empty list, which would
+    make a save look like it worked.
+- [x] Admin SPA: a `Triggers.tsx` list (name, event, channel, action, validity badge) and a
   `TriggerForm.tsx` editor — event picker, table picker shown only for table events, `only_if`
   textarea (monospace, with the server's validation message surfaced inline, as the ownership
   formula card does), action picker, and the action's config form rendered from `config_spec`;
   a **Run** button for a `none` trigger showing the result; the periodic timing inputs land in
   Phase 8. Navigation entry alongside Tables/Applications; `tsc --noEmit` and `vite build` pass.
-- [ ] Tests: HTTP round-trip create/list/update/delete; each save refusal surfaced by name with
+  Two fixes to the *shared* settings renderer fell out of it, both of which were latent bugs for
+  any `json` setting and are now exercised by an action that always has one: `readConfig`
+  stringifies an object rather than dropping it (editing a trigger would otherwise blank its
+  `values` map), and a `json` field renders as a monospace textarea rather than a one-line input.
+  The event kinds are hard-coded in the form — they are a fixed enum of the trigger model, not a
+  registry, which is exactly the difference from the action list beside them.
+- [x] Tests: HTTP round-trip create/list/update/delete; each save refusal surfaced by name with
   nothing stored; `runTrigger` returning the action's result and an action error reported as an
   error (not a 200 with a hidden failure).
+  **Done** (`sc-server/tests/trigger_admin_api.rs`, 5 tests over the real router): the round trip,
+  which does not stop at reading the row back — it writes a row through the *other* admin endpoint
+  and asserts the trigger it just created **fired**, then switches it off and asserts it does not;
+  five refusals (unknown action, a table event with no table, an unknown event kind, a field the
+  target table does not have, an `only_if` that does not resolve) each naming what is wrong with
+  nothing stored; a trigger whose table is dropped underneath it staying listed with its reason;
+  `runTrigger` returning the action's result with the admin as the event's caller, a throwing
+  action coming back as an error naming the trigger, and an unknown id as a not-found; and
+  `listActions` describing all five built-ins in the `FormField` vocabulary, with `fetch`'s
+  `method` carrying its options and default so the form renders a picker.
 
 ## Phase 7 — Applications and APIs pick triggers
 

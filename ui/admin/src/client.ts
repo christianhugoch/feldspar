@@ -62,6 +62,15 @@ export type ListFrameworksResponse = Array<{ name: string; label: string; descri
 export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
 export type CreateUserRequest = { email: string; password: string; role: number };
 export type CreateUserResponse = { id: string; email: string; role: number };
+export type ListTriggersResponse = Array<{ id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean; error?: string | null }>;
+export type CreateTriggerRequest = { name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean };
+export type CreateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean; error?: string | null };
+export type UpdateTriggerRequest = { name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean };
+export type UpdateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean; error?: string | null };
+export type DeleteTriggerResponse = { deleted: boolean };
+export type RunTriggerRequest = unknown;
+export type RunTriggerResponse = { result: unknown };
+export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown> }> }>;
 
 export interface ApiClient {
   authStatus(): Promise<AuthStatusResponse>;
@@ -105,6 +114,12 @@ export interface ApiClient {
   listFrameworks(): Promise<ListFrameworksResponse>;
   listUsers(): Promise<ListUsersResponse>;
   createUser(body: CreateUserRequest): Promise<CreateUserResponse>;
+  listTriggers(): Promise<ListTriggersResponse>;
+  createTrigger(body: CreateTriggerRequest): Promise<CreateTriggerResponse>;
+  updateTrigger(id: string, body: UpdateTriggerRequest): Promise<UpdateTriggerResponse>;
+  deleteTrigger(id: string): Promise<DeleteTriggerResponse>;
+  runTrigger(id: string, body: RunTriggerRequest): Promise<RunTriggerResponse>;
+  listActions(): Promise<ListActionsResponse>;
 }
 
 export interface ClientOptions {
@@ -499,6 +514,57 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("createUser", res);
       return (await res.json()) as CreateUserResponse;
+    },
+    async listTriggers() {
+      const res = await doFetch(`${baseUrl}/api/triggers`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listTriggers", res);
+      return (await res.json()) as ListTriggersResponse;
+    },
+    async createTrigger(body) {
+      const res = await doFetch(`${baseUrl}/api/triggers`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createTrigger", res);
+      return (await res.json()) as CreateTriggerResponse;
+    },
+    async updateTrigger(id, body) {
+      const res = await doFetch(`${baseUrl}/api/triggers/${id}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateTrigger", res);
+      return (await res.json()) as UpdateTriggerResponse;
+    },
+    async deleteTrigger(id) {
+      const res = await doFetch(`${baseUrl}/api/triggers/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteTrigger", res);
+      return (await res.json()) as DeleteTriggerResponse;
+    },
+    async runTrigger(id, body) {
+      const res = await doFetch(`${baseUrl}/api/triggers/${id}/run`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("runTrigger", res);
+      return (await res.json()) as RunTriggerResponse;
+    },
+    async listActions() {
+      const res = await doFetch(`${baseUrl}/api/actions`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listActions", res);
+      return (await res.json()) as ListActionsResponse;
     },
   };
 }

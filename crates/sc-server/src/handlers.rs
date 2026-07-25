@@ -21,6 +21,9 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
+use sc_action::{
+    EventKind, Trigger, TriggerId, delete_trigger, list_triggers, load_trigger, save_trigger,
+};
 use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
 use sc_app::{
@@ -936,6 +939,152 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     // --- applications -------------------------------------------------------
 
+    // --- triggers -----------------------------------------------------------
+    // The row ⇄ live-set path (§10.2). Every mutation goes through
+    // `save_trigger`/`delete_trigger` — which validate against the *same*
+    // registry the dispatcher runs — and then reloads the live set, so the list
+    // an admin is looking at is the set that will fire.
+
+    reg.register("listTriggers", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                // The **stored** rows, not the live set: a trigger that fails
+                // validation is dropped from the live set and would otherwise
+                // vanish from the screen that exists to repair it. Its reason
+                // comes from the live set's issues, alongside it.
+                let stored = list_triggers(&catalog).await?;
+                let dispatcher = triggers_of(&apps)?;
+                let issues = dispatcher.triggers()?;
+                let out: Vec<Json> = stored
+                    .iter()
+                    .map(|t| {
+                        let problem = issues
+                            .issues()
+                            .iter()
+                            .find(|i| i.trigger == t.name)
+                            .map(|i| i.problem.clone());
+                        trigger_json(t, problem)
+                    })
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createTrigger", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let trigger = trigger_from_body(TriggerId::new(), &ctx.body)?;
+                save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
+                dispatcher.reload(&catalog).await?;
+                Ok(HandlerResponse::ok(trigger_json(&trigger, None)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateTrigger", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let id = parse_trigger_id(ctx.path_param("id")?)?;
+                if load_trigger(&catalog, id).await?.is_none() {
+                    return Err(Error::not_found(format!("no trigger with id {id}")));
+                }
+                // The id is the path's, not the body's — the row's identity is
+                // not something a payload gets to reassign.
+                let trigger = trigger_from_body(id, &ctx.body)?;
+                save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
+                dispatcher.reload(&catalog).await?;
+                Ok(HandlerResponse::ok(trigger_json(&trigger, None)))
+            }
+        }
+    });
+
+    reg.register("deleteTrigger", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let id = parse_trigger_id(ctx.path_param("id")?)?;
+                if !delete_trigger(&catalog, id).await? {
+                    return Err(Error::not_found(format!("no trigger with id {id}")));
+                }
+                dispatcher.reload(&catalog).await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    reg.register("runTrigger", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let id = parse_trigger_id(ctx.path_param("id")?)?;
+                // By id, then by name: the row is what the admin clicked, and
+                // resolving it here means a rename cannot make the button run
+                // somebody else's trigger.
+                let trigger = load_trigger(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no trigger with id {id}")))?;
+                // The posted body is the event's payload, and the caller is the
+                // admin who pressed the button. A failing action comes back as
+                // an error — a 200 carrying a hidden failure is the thing a
+                // "test this now" button exists to prevent.
+                let caller = admin_caller(ctx.user.as_ref());
+                let result = dispatcher
+                    .run_trigger(&catalog, &trigger.name, ctx.body.clone(), Some(&caller))
+                    .await?;
+                Ok(HandlerResponse::ok(json!({ "result": result })))
+            }
+        }
+    });
+
+    reg.register("listActions", {
+        let apps = apps.clone();
+        move |_ctx| {
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let out: Vec<Json> = dispatcher
+                    .registry()
+                    .all()
+                    .map(|action| {
+                        json!({
+                            "name": action.name(),
+                            "description": action.description(),
+                            "config_spec": action
+                                .config_spec()
+                                .iter()
+                                .map(form_field_json)
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
     reg.register("listApplications", {
         let catalog = catalog.clone();
         move |_ctx| {
@@ -1719,6 +1868,97 @@ fn parse_file_store_id(raw: &str) -> Result<FileStoreDefId> {
     uuid::Uuid::parse_str(raw)
         .map(FileStoreDefId)
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid file store id")))
+}
+
+/// The trigger dispatcher this server was built with, or a configuration error.
+///
+/// Fails loudly rather than answering with an empty list: a process that never
+/// installed triggers (a test, an admin-only server assembled by hand) cannot
+/// list, save or run one, and pretending there are none would make a save look
+/// like it worked.
+fn triggers_of(apps: &AppMounts) -> Result<Arc<sc_action::TriggerDispatcher>> {
+    apps.triggers().cloned().ok_or_else(|| {
+        Error::config(
+            "this server has no trigger dispatcher installed, so triggers cannot be managed",
+        )
+    })
+}
+
+/// One stored trigger as JSON, with the reason it is not usable when there is
+/// one (§10.2 — a broken trigger stays listed and editable).
+fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
+    json!({
+        "id": trigger.id.0,
+        "name": trigger.name,
+        "description": trigger.description,
+        "when": trigger.when.as_str(),
+        "channel": trigger.channel,
+        "only_if": trigger.only_if,
+        "action": trigger.action,
+        "configuration": Json::Object(trigger.configuration.clone().into_iter().collect()),
+        "min_role": trigger.min_role,
+        "enabled": trigger.is_enabled(),
+        "error": problem,
+    })
+}
+
+/// A trigger from a request body, under the id the caller's route decided.
+///
+/// Only the shape is checked here — that the fields are present and of the right
+/// kind. Whether the *values* mean anything (the event exists, the table exists,
+/// the action is registered and configured the way it declares, the `only_if`
+/// resolves) is `validate_trigger`'s, called by `save_trigger`, so there is one
+/// authority for it and the admin gets the same message the loader would.
+fn trigger_from_body(id: TriggerId, body: &Json) -> Result<Trigger> {
+    let obj = require_object(body)?;
+    let when = EventKind::parse(non_empty_str_field(obj, "when")?)?;
+    let mut trigger = Trigger::with_id(
+        id,
+        non_empty_str_field(obj, "name")?,
+        when,
+        non_empty_str_field(obj, "action")?,
+    )
+    .description(optional_str(obj, "description"));
+    // Absent, null, or blank are all "no channel" — a form posts the empty
+    // string for a picker it did not show.
+    if let Some(channel) = obj.get("channel").and_then(Json::as_str)
+        && !channel.trim().is_empty()
+    {
+        trigger = trigger.on(channel.trim());
+    }
+    if let Some(only_if) = obj.get("only_if").and_then(Json::as_str)
+        && !only_if.trim().is_empty()
+    {
+        trigger = trigger.only_if(only_if.trim());
+    }
+    if let Some(config) = obj.get("configuration") {
+        let Json::Object(config) = config else {
+            return Err(Error::invalid("field `configuration` must be an object"));
+        };
+        trigger = trigger.configuration(config.clone().into_iter().collect());
+    }
+    if let Some(min_role) = obj.get("min_role").filter(|v| !v.is_null()) {
+        let raw = min_role
+            .as_i64()
+            .ok_or_else(|| Error::invalid("field `min_role` must be a number"))?;
+        trigger = trigger.min_role(u8::try_from(raw).map_err(|_| {
+            Error::invalid(format!(
+                "`min_role` must be a role between 1 and 100, got {raw}"
+            ))
+        })?);
+    }
+    // Absent means enabled, as the stored attribute does: a trigger is created
+    // to run.
+    if obj.get("enabled").and_then(Json::as_bool) == Some(false) {
+        trigger.set_enabled(false);
+    }
+    Ok(trigger)
+}
+
+fn parse_trigger_id(raw: &str) -> Result<TriggerId> {
+    uuid::Uuid::parse_str(raw)
+        .map(TriggerId)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid trigger id")))
 }
 
 fn parse_app_id(raw: &str) -> Result<AppId> {
