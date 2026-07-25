@@ -20,12 +20,16 @@
 //!
 //! An action's writes are the *admin's*, not the caller's: a trigger is
 //! server-side configuration, and an audit row a user may not insert is the
-//! archetype of what a trigger exists to write. So on an RLS-enforced table the
-//! statement runs in a caller context at [`ROLE_ADMIN`] (which clears every
-//! policy's role floor, exactly as the admin API's own row editor does), still
-//! carrying the event's user so a policy that reads `user` sees who caused it.
-//! Off an RLS table there is nothing to set, and the write takes the ordinary
-//! pooled path.
+//! archetype of what a trigger exists to write. So every write runs as a caller
+//! at [`ROLE_ADMIN`] (which clears every policy's role floor, exactly as the
+//! admin API's own row editor does), still carrying the event's user so a policy
+//! that reads `user` sees who caused it.
+//!
+//! On an RLS-enforced table that caller becomes the `SET LOCAL` GUCs the policies
+//! read; off one it sets nothing and the write takes the ordinary pooled path,
+//! but it still travels — because the **event** this write raises has to say who
+//! caused it, and it carries the **chain** of triggers that led here, which is
+//! what lets `Event::firing` see how deep a cascade already is (§10.2).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -90,6 +94,9 @@ pub(crate) struct Scope<'a> {
     catalog: &'a Catalog,
     /// The caller, for the authority a write runs under.
     user_json: Option<&'a Json>,
+    /// The triggers that led here, including this one — what a write this action
+    /// makes carries, so the event it raises knows how deep it is.
+    chain: Vec<String>,
     evaluator: &'a Arc<dyn JsEvaluator>,
     shape: SchemaShape,
     /// `row`/`old` and the caller, typed against their own columns.
@@ -112,6 +119,7 @@ impl<'a> Scope<'a> {
             trigger: ctx.trigger,
             catalog: ctx.catalog,
             user_json: event.user.as_ref(),
+            chain: ctx.chain.clone(),
             evaluator: ctx.evaluator()?,
             shape: action_shape(ctx.catalog, channel)?,
             bindings: typed_bindings(ctx.catalog, event),
@@ -204,13 +212,17 @@ impl<'a> Scope<'a> {
         Ok(out)
     }
 
-    /// The authority a write on `table` runs under: none off an RLS table, and
-    /// admin-in-the-caller's-name on one (see the module docs).
-    pub(crate) fn authority(&self, table: &Table) -> Option<CallerContext> {
-        table.rls_enabled.then(|| CallerContext {
-            role: ROLE_ADMIN,
-            user_json: self.user_json.map(Json::to_string),
-        })
+    /// The caller an action's write runs as: **admin, in the event's user's
+    /// name**, carrying the chain of triggers that led here.
+    ///
+    /// One context for every write, not only for the RLS ones it started as. The
+    /// role and the user are what the policies read on an RLS table (see the
+    /// module docs) — and off one they are what the *event* this write raises
+    /// reports as its caller, which is the same question answered for the same
+    /// write. The chain is what bounds the cascade: an event raised by this write
+    /// carries it, so `Event::firing` can see how deep it already is.
+    pub(crate) fn authority(&self) -> CallerContext {
+        CallerContext::new(ROLE_ADMIN, self.user_json.cloned()).chained(self.chain.clone())
     }
 
     /// Whether the predicate selects one fetched row — the reified half of
@@ -236,7 +248,7 @@ impl<'a> Scope<'a> {
         table: &Table,
         filter: Option<Expr>,
     ) -> Result<Vec<BTreeMap<String, Value>>> {
-        rows::select_values(self.catalog, table, filter, self.authority(table).as_ref()).await
+        rows::select_values(self.catalog, table, filter, Some(&self.authority())).await
     }
 
     /// An action failure attributed to the trigger and the setting that caused it.

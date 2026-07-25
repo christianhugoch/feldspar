@@ -84,12 +84,20 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // built and mounted now — a build that fails is logged and skipped, never
     // fatal (§13.2), and can be fixed and rebuilt without a restart.
     // The JS engine ownership formulas evaluate on (§7.3): one isolate for the
-    // whole server, shared by every mounted app's providers.
-    let apps =
-        Arc::new(AppMounts::new(catalog.clone()).with_evaluator(sc_server::default_js_evaluator()));
+    // whole server, shared by every mounted app's providers — and by the trigger
+    // dispatcher, whose `only_if` formulas and action configuration are the same
+    // language evaluated the same way.
+    let evaluator = sc_server::default_js_evaluator();
+    let apps = Arc::new(AppMounts::new(catalog.clone()).with_evaluator(evaluator.clone()));
     if config.base_domain.is_some() {
         mount_all(&apps).await;
     }
+
+    // Triggers: the built-in actions, the stored trigger set, and the dispatcher
+    // installed into the catalog — after which a row write raises an event.
+    // Before it, nothing observes writes, which is what keeps `build-app` and
+    // every other command from firing anything.
+    sc_server::install_triggers(&catalog, evaluator).await?;
 
     let sessions = Arc::new(SessionStore::default());
     eprintln!("saltcorn: listening on http://{}", config.addr);

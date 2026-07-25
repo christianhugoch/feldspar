@@ -236,7 +236,7 @@ missing or wrong-shaped column is an error naming the trigger and the column, no
   that `require` says "not usable" rather than "not found", and that the row is still stored so
   repairing the table brings it back.
 
-## Phase 3 — The elementary actions
+## Phase 3 — The elementary actions ✅
 
 Deliberately few (GOALS: "the number of built-in actions should be minimal"); control flow is
 the workflow engine's job, not an action's. Every action's configuration value that references
@@ -411,28 +411,81 @@ question.
   with the engine serving the next run *and* the next formula; the blank and absent body refused on
   save; and a missing engine failing by name rather than skipping.
 
-## Phase 4 — Table events: insert, update, delete
+## Phase 4 — Table events: insert, update, delete ✅
 
-- [ ] **The emit seam.** `sc-catalog` defines a small `TableEvents` trait (one `async` method
-  taking table name, operation, new row, old row and the caller) and a `Catalog` holds an
+- [x] **The emit seam.** `sc-catalog` defines a small `TableEvents` trait and a `Catalog` holds an
   optional `Arc<dyn TableEvents>`, installed once at boot with `sc-action`'s dispatcher. This
   inverts the layering cleanly — the catalog knows *that* writes are observable, `sc-action`
   knows *what* observing means — and costs no signature churn on the eight `rows` entry points.
-- [ ] **The caller travels with every write.** `CallerContext` (role + user JSON) is built for
-  *every* row write, not only for RLS tables, so an event knows who caused it; RLS keeps using
-  it for its GUCs, unchanged.
-- [ ] Emit from `rows::create_row_ctx` / `update_row_guarded` / `delete_row_guarded` after the
+  Settled in the writing:
+  - The trait has **two** methods, not one: `emit(&Catalog, TableWrite)` *and* a synchronous
+    `observes(table, op)`. The predicate is what makes GOALS' "a lookup, not a query" true —
+    the row layer asks it before doing any work for the feature, which is what lets an update
+    fetch its pre-image only when something will read it. Without it, every update on every
+    table would pay a `SELECT` for a feature it does not use.
+  - The write travels as a **struct** (`TableWrite`: table, op, row, old row, caller) rather than
+    five parameters, and rows travel as **JSON** — the shape an event carries to a formula, to an
+    action's configuration and over the wire to a `fetch`, so it is converted once.
+  - `WriteOp` is its own three-variant enum rather than `sc_expr::Operation`, which also has a
+    `Read`: a read is not a write, and a type that cannot say otherwise is one less state to
+    handle at every match.
+  - `emit` takes `&Catalog` so the dispatcher does not hold one — the catalog holds the
+    dispatcher, and a handle in each direction would be a cycle that never drops.
+- [x] **The caller travels with every write.** `CallerContext` (role + user + **chain**) is built
+  for *every* row write, not only for RLS tables, so an event knows who caused it; RLS keeps
+  using it for its GUCs, unchanged. Three consequences:
+  - It moved out of `rls.rs` into `caller.rs`, because it is no longer about RLS: it answers
+    "whose authority, which user, what led here" about one write.
+  - `user_json: Option<String>` became `user: Option<Json>` — the object is what an event and a
+    formula want, and only the GUC wants the text, so the stringify moved to the one caller.
+  - **The table now decides the caller-context transaction, not the caller.** It used to be
+    "whenever a context is given", which only worked while a context meant RLS; passing one on
+    an ordinary table must not silently wrap the write in a transaction and a `SET LOCAL` no
+    policy will ever read. Pinned by a unit test, because both halves fail silently.
+- [x] Emit from `rows::create_row_ctx` / `update_row_guarded` / `delete_row_guarded` after the
   statement succeeds — the three sites decision 2 names. Update carries **both** rows (the
   action and the only-if see `old_row`), delete carries the row as it was.
-- [ ] Dispatch: look up triggers for `(kind, table)`, evaluate `only_if` reified against the row
+  The delete's `RETURNING` grew from the primary key to the whole row for exactly that reason —
+  the event's copy is the only one anyone will ever get — and deliberately without the calc
+  projections, which are correlated subqueries and have no good answer against a row being
+  deleted in the same statement. The update's pre-image is a separate read, taken only when
+  `observes_writes` says something is listening; there is no transaction around the pair,
+  because dispatch is after-commit by design.
+- [x] Dispatch: look up triggers for `(kind, table)`, evaluate `only_if` reified against the row
   (bindings from the Phase 2 prefetch; an evaluator error is an application error and the
   trigger does **not** run — the same fail-closed contract ownership has), then run the action
   with the depth incremented.
-- [ ] Integration tests through the real router: an insert trigger writing an audit row; an
+  - `TriggerDispatcher` holds the registry, the live `Triggers` behind an `RwLock` (so Phase 6's
+    save can swap it in while events fire) and the engine. `dispatch` returns a `TriggerRun` per
+    trigger — `Ok(Some(result))` ran, `Ok(None)` the `only_if` declined, `Err` failed — so the
+    emit path can log per-trigger failures and a test can assert on them. **One trigger's
+    failure is one trigger's failure**: the next still runs, and none of it reaches the write.
+  - The `only_if`'s bindings are typed by their columns, which is what makes a Ⱶ-path prefetch
+    work at all: it correlates on the row's own key value, and a `uuid` compared as text is a
+    SQL error rather than a mismatch. That needed `json_to_value`, so the JSON⇄`Value` bridge
+    **moved down from `sc-api::convert` to `sc-types::json`** (re-exported, so no call site
+    changed) and `sc_action::typed_value` is now the one reading both this and the row actions
+    use.
+  - `sc_server::install_triggers` is the boot wiring: bootstrap `_sc_triggers`, register the
+    built-in actions, load and validate the stored set (reporting the ones that are not usable,
+    as a file store that will not connect is), install the dispatcher. Until it is called
+    nothing observes a write, which is what keeps `build-app`, the tests and any admin script
+    from firing anything.
+- [x] Integration tests through the real router: an insert trigger writing an audit row; an
   update trigger seeing `old_row`; a delete trigger; an `only_if` that gates firing (fires for
   matching rows, silent for others) including one using a Ⱶ-join path; the depth limit stopping
   a self-feeding trigger with the chain named; a failing action logged without failing the
   request or losing the write.
+  **Done** (`sc-server/tests/table_triggers.rs`, 7 tests over the real router, a real database and
+  the real V8 engine, every row written and read as an HTTP request): the audit row carrying the
+  event's row *and its caller* (which only reaches it because the caller travels with every
+  write), with update and delete on the same table staying silent because the match is by
+  `(kind, table)`; `old.title` and `row.title` in one formula; a delete audited after the row is
+  gone; `pages > 100` firing for one row and passing over the other in silence rather than as an
+  error; `authorⱵtier === "gold"` walking the Key link; the self-feeding trigger stopping at
+  exactly `MAX_DEPTH` firings with the request that started it still returning 201, plus the
+  refusal message naming the whole chain; and a throwing `run_js_code` trigger that costs
+  neither the write, nor the request, nor the second trigger on the same event.
 
 ## Phase 5 — The other events: none, login, startup, error
 

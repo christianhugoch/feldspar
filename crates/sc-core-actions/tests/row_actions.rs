@@ -473,10 +473,7 @@ async fn an_actions_writes_carry_admin_authority_on_an_rls_table() -> Result<()>
     enable_rls(&catalog, &secrets).await?;
 
     // The policies decide: a caller who owns nothing here sees nothing.
-    let outsider = CallerContext {
-        role: 100,
-        user_json: Some(json!({ "email": "nobody@example.com" }).to_string()),
-    };
+    let outsider = CallerContext::new(100, Some(json!({ "email": "nobody@example.com" })));
     let visible = rows::list_rows_ctx(&catalog, &secrets, Some(&outsider)).await?;
     assert_eq!(visible.as_array().map(Vec::len), Some(0), "{visible}");
 
@@ -512,10 +509,7 @@ async fn an_actions_writes_carry_admin_authority_on_an_rls_table() -> Result<()>
     // Read back through an admin context, because the table is `FORCE`d: a read
     // with no caller context at all sees nothing here, policies applying to the
     // table's owner too. (That is why the action sets one.)
-    let admin = CallerContext {
-        role: 1,
-        user_json: None,
-    };
+    let admin = CallerContext::anonymous(1);
     let remaining = rows::list_rows_ctx(&catalog, &secrets, Some(&admin)).await?;
     let ids: Vec<Json> = remaining
         .as_array()

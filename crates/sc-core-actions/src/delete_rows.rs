@@ -64,11 +64,11 @@ impl Action for DeleteRows {
             .matching_rows(&table, &predicate, &[], Operation::Delete)
             .await?;
 
-        let authority = scope.authority(&table);
+        let authority = scope.authority();
         let mut ids = Vec::with_capacity(matched.len());
         for values in &matched {
             let (id, id_json) = row_id(&table, &pk, values)?;
-            rows::delete_row_ctx(ctx.catalog, &table, &id, authority.as_ref()).await?;
+            rows::delete_row_ctx(ctx.catalog, &table, &id, Some(&authority)).await?;
             ids.push(id_json);
         }
         Ok(json!({ "deleted": ids.len(), "ids": ids }))

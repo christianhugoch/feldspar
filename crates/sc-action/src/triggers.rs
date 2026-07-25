@@ -47,6 +47,17 @@ impl Triggers {
         Triggers::default()
     }
 
+    /// A set assembled from triggers that are already known good — how a test
+    /// pins matching without a database, and nothing else: the production path is
+    /// [`load`](Triggers::load), which is where validation happens.
+    #[cfg(test)]
+    pub(crate) fn of(triggers: Vec<Trigger>) -> Triggers {
+        Triggers {
+            triggers,
+            issues: Vec::new(),
+        }
+    }
+
     /// Load and validate every stored trigger.
     ///
     /// A catalog with no `_sc_triggers` table yields an empty set rather than an
@@ -142,10 +153,7 @@ mod tests {
     /// A set assembled directly, to test matching without a database (loading is
     /// integration-tested, where a catalog exists).
     fn triggers(list: Vec<Trigger>) -> Triggers {
-        Triggers {
-            triggers: list,
-            issues: Vec::new(),
-        }
+        Triggers::of(list)
     }
 
     #[test]

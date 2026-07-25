@@ -48,6 +48,14 @@ pub struct Catalog {
     /// attempted"; the definition list plus [`file_store`](Self::file_store)
     /// distinguishes those.
     file_store_errors: RwLock<HashMap<String, String>>,
+    /// Who observes row writes (§10.2's emit seam), installed once at boot with
+    /// `sc-action`'s trigger dispatcher — `None` in a process that has none (a
+    /// build tool, a test), where every write is simply unobserved.
+    ///
+    /// The catalog holds it because it is what the row layer (layer 8) and
+    /// `sc-action` (layer 6) both already have: the write cannot name the
+    /// dispatcher without inverting the layering, and this is the inversion.
+    table_events: RwLock<Option<Arc<dyn crate::events::TableEvents>>>,
     /// The `_sc_fields` overlay rows that did not cleanly merge on the last
     /// [`reload`](Self::reload) (design §3.2) — a dangling row, a rich type that
     /// does not fit its column, a `Key` with no foreign key behind it. Rebuilt
@@ -67,6 +75,7 @@ impl Catalog {
             file_stores: RwLock::new(HashMap::new()),
             file_store_errors: RwLock::new(HashMap::new()),
             field_overlay_issues: RwLock::new(Vec::new()),
+            table_events: RwLock::new(None),
         };
         catalog.reload().await?;
         Ok(catalog)
@@ -377,6 +386,57 @@ impl Catalog {
             .map_err(|_| Error::msg("catalog file-store error registry lock poisoned"))?;
         guard.remove(name);
         Ok(())
+    }
+
+    /// Install the listener for row writes — `sc-action`'s trigger dispatcher,
+    /// once, at boot (§10.2's emit seam).
+    ///
+    /// Replaces any previous one rather than refusing: a process installs exactly
+    /// one, and a test that installs a second means the second.
+    pub fn set_table_events(&self, events: Arc<dyn crate::events::TableEvents>) -> Result<()> {
+        let mut guard = self
+            .table_events
+            .write()
+            .map_err(|_| Error::msg("catalog table-events lock poisoned"))?;
+        *guard = Some(events);
+        Ok(())
+    }
+
+    /// Whether anything listens for `op` on `table` — the question the row layer
+    /// asks **before** doing any work for the feature, so a write nobody observes
+    /// pays one lock and one lookup rather than a query.
+    ///
+    /// A poisoned lock reads as "nobody listens": this is asked on the write
+    /// path, where the honest answer to "is the listener registry broken" is to
+    /// let the write proceed unobserved rather than to fail it.
+    pub fn observes_writes(&self, table: &str, op: crate::events::WriteOp) -> bool {
+        match self.listener() {
+            Ok(Some(events)) => events.observes(table, op),
+            _ => false,
+        }
+    }
+
+    /// Hand one committed write to the listener, if there is one.
+    ///
+    /// An `Err` is the *dispatch* failing, never the write — which has already
+    /// happened by the time this is called (decision 1: after commit). The caller
+    /// reports it and returns the row.
+    pub async fn emit_write(&self, write: crate::events::TableWrite<'_>) -> Result<()> {
+        match self.listener()? {
+            Some(events) => events.emit(self, write).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The installed listener, **cloned out of the lock**: dispatch runs actions,
+    /// which write rows, which come back here — so the guard must not be held
+    /// across the await.
+    fn listener(&self) -> Result<Option<Arc<dyn crate::events::TableEvents>>> {
+        let guard = self
+            .table_events
+            .read()
+            .map_err(|_| Error::msg("catalog table-events lock poisoned"))?;
+        Ok(guard.clone())
     }
 
     /// The connected file store with the given name, if any.

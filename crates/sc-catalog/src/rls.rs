@@ -21,35 +21,13 @@ use sc_error::{Context, Error, Result};
 use sc_expr::{Formula, Operation, SchemaShape, USER_GUC, UserEnv};
 use sc_query::{SqlDialect, Statement, render_policy_expr};
 
+use crate::caller::CallerContext;
 use crate::catalog::Catalog;
 use crate::table::Table;
 
 /// The GUC carrying the caller's role number on the 1–100 scale. Policies read
 /// `current_setting('sc.role', true)::int`; the runtime `SET LOCAL`s it.
 pub const ROLE_GUC: &str = "sc.role";
-
-/// The caller as an RLS transaction sees it: a role always, and the user's
-/// fields as a JSON object when logged in (matching [`UserEnv::Guc`]'s
-/// `current_setting('sc.user', …)::jsonb`).
-#[derive(Debug, Clone)]
-pub struct CallerContext {
-    /// The caller's role (public when anonymous).
-    pub role: u8,
-    /// The logged-in user's fields as a JSON object string, or `None` when
-    /// anonymous — in which case `sc.user` is left unset and the policies'
-    /// `current_setting('sc.user', true)` reads `NULL`.
-    pub user_json: Option<String>,
-}
-
-impl CallerContext {
-    /// A context for `role` with no user (anonymous).
-    pub fn anonymous(role: u8) -> CallerContext {
-        CallerContext {
-            role,
-            user_json: None,
-        }
-    }
-}
 
 /// Run `stmt` inside a transaction that first sets the caller-context GUCs,
 /// returning the statement's rows. This is the one path an RLS table's row
@@ -67,8 +45,8 @@ pub async fn run_in_context(
 ) -> Result<Vec<Row>> {
     let mut tx = catalog.primary().begin().await?;
     tx.set_local(ROLE_GUC, &context.role.to_string()).await?;
-    if let Some(user_json) = &context.user_json {
-        tx.set_local(USER_GUC, user_json).await?;
+    if let Some(user_json) = context.user_json() {
+        tx.set_local(USER_GUC, &user_json).await?;
     }
     let outcome = match tx.query(stmt).await {
         Ok(stream) => stream.try_collect().await,

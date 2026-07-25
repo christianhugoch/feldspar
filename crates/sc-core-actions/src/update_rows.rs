@@ -86,7 +86,7 @@ impl Action for UpdateRows {
             .matching_rows(&table, &predicate, &bound, Operation::Update)
             .await?;
 
-        let authority = scope.authority(&table);
+        let authority = scope.authority();
         let mut ids = Vec::with_capacity(matched.len());
         for values in &matched {
             let mut body = Map::with_capacity(assignments.len());
@@ -102,7 +102,7 @@ impl Action for UpdateRows {
                 &table,
                 &id,
                 &Json::Object(body),
-                authority.as_ref(),
+                Some(&authority),
             )
             .await?;
             ids.push(id_json);

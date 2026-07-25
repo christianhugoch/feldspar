@@ -386,6 +386,11 @@ impl RestProvider {
             }
         };
         let evaluator = self.evaluator.as_ref();
+        // The caller, travelling with every write so the event it raises knows
+        // who caused it (§10.2). On this path it sets no GUCs — the table is not
+        // RLS-enforced, and `rows` routes by the table, not by the context's
+        // presence — it is identity, not authority.
+        let caller = ownership::caller_context(user);
 
         Ok(match &route.op {
             RestOp::List => match formula(meets_read) {
@@ -421,13 +426,18 @@ impl RestProvider {
                         }
                     }
                 }
-                ApiResponse::with_status(201, rows::create_row(cat, &table, body).await?)
+                ApiResponse::with_status(
+                    201,
+                    rows::create_row_ctx(cat, &table, body, Some(&caller)).await?,
+                )
             }
             RestOp::Update => {
                 let id = id()?;
                 match formula(meets_write) {
                     Err(()) => return Ok(forbidden(user)),
-                    Ok(None) => ApiResponse::ok(rows::update_row(cat, &table, id, body).await?),
+                    Ok(None) => ApiResponse::ok(
+                        rows::update_row_ctx(cat, &table, id, body, Some(&caller)).await?,
+                    ),
                     Ok(Some(f)) => {
                         // USING: granted on the existing row…
                         let existing = self
@@ -459,7 +469,8 @@ impl RestProvider {
                         let guard =
                             ownership::write_guard(cat, &table, f, Operation::Update, user)?;
                         ApiResponse::ok(
-                            rows::update_row_guarded(cat, &table, id, body, guard, None).await?,
+                            rows::update_row_guarded(cat, &table, id, body, guard, Some(&caller))
+                                .await?,
                         )
                     }
                 }
@@ -468,14 +479,16 @@ impl RestProvider {
                 let id = id()?;
                 match formula(meets_write) {
                     Err(()) => return Ok(forbidden(user)),
-                    Ok(None) => ApiResponse::ok(rows::delete_row(cat, &table, id).await?),
+                    Ok(None) => {
+                        ApiResponse::ok(rows::delete_row_ctx(cat, &table, id, Some(&caller)).await?)
+                    }
                     Ok(Some(f)) => {
                         self.owned_row(cat, &table, f, Operation::Delete, user, id)
                             .await?;
                         let guard =
                             ownership::write_guard(cat, &table, f, Operation::Delete, user)?;
                         ApiResponse::ok(
-                            rows::delete_row_guarded(cat, &table, id, guard, None).await?,
+                            rows::delete_row_guarded(cat, &table, id, guard, Some(&caller)).await?,
                         )
                     }
                 }
@@ -532,7 +545,17 @@ impl RestProvider {
                         }
                     }
                 }
-                upload(cat, &table, field, id()?, filename, req.raw.clone(), role).await?
+                upload_ctx(
+                    cat,
+                    &table,
+                    field,
+                    id()?,
+                    filename,
+                    req.raw.clone(),
+                    role,
+                    &caller,
+                )
+                .await?
             }
         })
     }
@@ -726,22 +749,11 @@ async fn download_inner(
 /// not a control. The row is updated to reference the stored path, through the
 /// same `update_row` any JSON write takes (so the field's rules are enforced
 /// twice, harmlessly).
-#[allow(clippy::too_many_arguments)]
-async fn upload(
-    cat: &Catalog,
-    table: &Table,
-    field: &str,
-    id: &str,
-    filename: &str,
-    data: Option<bytes::Bytes>,
-    role: u8,
-) -> Result<ApiResponse> {
-    upload_inner(cat, table, field, id, filename, data, role, None).await
-}
-
-/// [`upload`] with the row read and write routed through an RLS caller context
-/// (§6): the pre-existence check and the field update both run under the
-/// policies, so a caller cannot upload into a row they may not write.
+///
+/// The caller travels with it: on an RLS table it is the authority the
+/// pre-existence check and the field update both run under, so a caller cannot
+/// upload into a row they may not write; on any table it is who the update event
+/// reports as its cause.
 #[allow(clippy::too_many_arguments)]
 async fn upload_ctx(
     cat: &Catalog,

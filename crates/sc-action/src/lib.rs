@@ -42,6 +42,7 @@
 //! catalog holds (Phase 4), never by calling in here.
 
 mod action;
+mod dispatch;
 mod event;
 mod registry;
 mod scope;
@@ -51,11 +52,12 @@ mod triggers;
 mod validate;
 
 pub use action::{Action, ActionContext, ConfigCheck};
+pub use dispatch::{TriggerDispatcher, TriggerRun, fire_trigger};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use registry::ActionRegistry;
 pub use scope::{
     EVENT_SCOPE, EventBindings, action_shape, check_formula, config_str, event_formula_value,
-    formula_map, optional_formula, required_formula,
+    formula_map, optional_formula, required_formula, typed_value,
 };
 pub use store::{
     TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers, load_trigger,

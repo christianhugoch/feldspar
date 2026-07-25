@@ -74,7 +74,7 @@ impl Action for InsertRow {
             ctx.catalog,
             &table,
             &Json::Object(body),
-            scope.authority(&table).as_ref(),
+            Some(&scope.authority()),
         )
         .await
     }

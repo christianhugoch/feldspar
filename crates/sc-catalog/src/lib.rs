@@ -18,7 +18,9 @@
 //! cache invalidation over a bus.
 
 mod calc;
+mod caller;
 mod catalog;
+mod events;
 mod field;
 mod field_meta;
 mod file_stores;
@@ -28,7 +30,9 @@ mod rls;
 mod table;
 mod table_meta;
 
+pub use caller::CallerContext;
 pub use catalog::Catalog;
+pub use events::{TableEvents, TableWrite, WriteOp};
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
 pub use field_meta::{
     FIELD_META_TABLE, FieldMeta, FieldMetaId, KIND_CALC, KIND_FILE, KIND_KEY, KIND_PLAIN,
@@ -44,7 +48,7 @@ pub use file_stores::{
 };
 pub use prefetch::prefetch_bindings;
 pub use provider::{DriverTableProvider, TableProvider};
-pub use rls::{CallerContext, ROLE_GUC, disable_rls, enable_rls, run_in_context};
+pub use rls::{ROLE_GUC, disable_rls, enable_rls, run_in_context};
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
     ATTR_OWNERSHIP_FORMULA, ATTR_RLS_ENABLED, TABLE_META_TABLE, TableMeta, TableMetaId,

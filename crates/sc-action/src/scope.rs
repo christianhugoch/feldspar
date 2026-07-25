@@ -24,14 +24,14 @@
 
 use std::collections::BTreeMap;
 
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, Table};
 use sc_error::{Error, Result};
 use sc_expr::{
     Ambient, AmbientValues, Formula, FormulaCall, Operation, SchemaShape, TableShape,
     value_from_json,
 };
 use sc_query::Value;
-use sc_types::Attrs;
+use sc_types::{Attrs, BasicType, TypeRef, json_to_value};
 use serde_json::{Map, Value as Json};
 
 use crate::action::ActionContext;
@@ -221,6 +221,40 @@ impl EventBindings {
             user: self.user.clone(),
             ambient: self.ambient.clone(),
         }
+    }
+}
+
+/// One value read as the type of the **column** it belongs to, where the table
+/// has one — and as its own JSON shape where it does not (a calculated field, a
+/// value the column could not hold, a row from a table since dropped, which is
+/// the event's problem to report rather than this conversion's).
+///
+/// Reified evaluation cannot tell the difference: the evaluator renders every
+/// binding back through `value_to_json`. It matters for everything *around* the
+/// evaluation that reaches SQL — a `where` predicate translated with `user.id`
+/// inlined against a `uuid` column, and the [`prefetch`] a Ⱶ-path needs, which
+/// correlates on the row's own key value. A uuid compared as text is a SQL error,
+/// not a mismatch, so this is what makes those two paths work at all.
+///
+/// [`prefetch`]: sc_catalog::prefetch_bindings
+pub fn typed_value(table: Option<&Table>, field: &str, json: &Json) -> Value {
+    let Some(type_) = table
+        .and_then(|t| t.field(field))
+        .map(|f| &f.base.type_)
+        .filter(|_| !json.is_null())
+    else {
+        return value_from_json(json);
+    };
+    json_to_value(&storage_type(type_), json).unwrap_or_else(|_| value_from_json(json))
+}
+
+/// The basic (storage) type a JSON value is coerced through: the type itself for
+/// a basic field, or the SQL type a rich field sits on (a `String` stores as
+/// `text`, an `Integer` as `int8`).
+fn storage_type(type_: &TypeRef) -> BasicType {
+    match type_.as_basic() {
+        Some(basic) => basic.clone(),
+        None => BasicType::from_sql_type(type_.sql_type()),
     }
 }
 

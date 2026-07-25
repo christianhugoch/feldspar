@@ -126,10 +126,10 @@ async fn run_in_context_sets_the_caller_gucs_a_policy_reads() -> Result<()> {
     ));
 
     // Alice's context: only her row is visible through the SELECT policy.
-    let alice = CallerContext {
-        role: 80,
-        user_json: Some(r#"{"email":"alice@example.com"}"#.to_owned()),
-    };
+    let alice = CallerContext::new(
+        80,
+        Some(serde_json::json!({ "email": "alice@example.com" })),
+    );
     let rows = run_in_context(&catalog, &alice, &select).await?;
     assert_eq!(rows.len(), 1);
 

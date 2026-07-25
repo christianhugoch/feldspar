@@ -539,7 +539,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
                 Ok(HandlerResponse::ok(
-                    rows::list_rows_ctx(&catalog, &table, admin_rls_ctx(&table).as_ref()).await?,
+                    rows::list_rows_ctx(&catalog, &table, Some(&admin_caller(ctx.user.as_ref())))
+                        .await?,
                 ))
             }
         }
@@ -555,7 +556,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     &catalog,
                     &table,
                     &ctx.body,
-                    admin_rls_ctx(&table).as_ref(),
+                    Some(&admin_caller(ctx.user.as_ref())),
                 )
                 .await?;
                 Ok(HandlerResponse::ok(row).with_status(201))
@@ -575,7 +576,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     &table,
                     id,
                     &ctx.body,
-                    admin_rls_ctx(&table).as_ref(),
+                    Some(&admin_caller(ctx.user.as_ref())),
                 )
                 .await?;
                 Ok(HandlerResponse::ok(row))
@@ -591,8 +592,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let table = catalog.require(ctx.path_param("table")?)?;
                 let id = ctx.path_param("id")?;
                 Ok(HandlerResponse::ok(
-                    rows::delete_row_ctx(&catalog, &table, id, admin_rls_ctx(&table).as_ref())
-                        .await?,
+                    rows::delete_row_ctx(
+                        &catalog,
+                        &table,
+                        id,
+                        Some(&admin_caller(ctx.user.as_ref())),
+                    )
+                    .await?,
                 ))
             }
         }
@@ -1945,15 +1951,18 @@ fn user_field_types(catalog: &Catalog) -> Result<BTreeMap<String, String>> {
     Ok(map)
 }
 
-/// The RLS caller context an admin row endpoint runs under: role 1 (which
-/// clears every policy's role floor, so the admin sees and edits every row of a
-/// FORCE'd table) when the table has RLS enabled, and `None` — the ordinary
-/// pooled path — otherwise. The admin API is already admin-only, so no user
-/// object is needed: the role alone opens the policies.
-fn admin_rls_ctx(table: &Table) -> Option<sc_catalog::CallerContext> {
-    table
-        .rls_enabled
-        .then(|| sc_catalog::CallerContext::anonymous(ROLE_ADMIN))
+/// The caller an admin row endpoint runs as: **role 1** — which clears every
+/// policy's role floor, so the admin's own row editor sees and edits every row of
+/// a FORCE'd table — carrying the signed-in admin's fields.
+///
+/// It used to be `None` off an RLS table, because a caller context meant only
+/// "route this through a policy transaction". It no longer does: `rows` decides
+/// that from the table, and the context is *who is writing* — which the table
+/// event a write raises has to report (§10.2). The role is explicit rather than
+/// the user's own for the reason it always was: this endpoint is admin-only, and
+/// the row editor must work on a FORCE'd table.
+fn admin_caller(user: Option<&sc_auth::User>) -> sc_catalog::CallerContext {
+    sc_api::caller_context_at(ROLE_ADMIN, user)
 }
 
 /// Bring the database's RLS policies for `table_name` into step with its saved

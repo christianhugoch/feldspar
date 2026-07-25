@@ -51,24 +51,33 @@ pub(crate) fn meets(user: Option<&User>, min_role: u8) -> bool {
     caller_role(user) <= min_role
 }
 
-/// The [`CallerContext`] an RLS transaction (§7.3, §6) runs under: the caller's
-/// role, and — when logged in — their fields as the JSON object the `sc.user`
-/// GUC carries, exactly the shape `UserEnv::Guc`'s
+/// The [`CallerContext`] a row operation runs under: the caller's role, and —
+/// when logged in — their fields as the JSON object the `sc.user` GUC carries,
+/// exactly the shape `UserEnv::Guc`'s
 /// `current_setting('sc.user', …)::jsonb ->> 'x'` reads. Anonymous callers
 /// carry only the role, so the policies' `current_setting('sc.user', true)`
 /// reads `NULL` and `user === null` decides.
-pub(crate) fn caller_context(user: Option<&User>) -> CallerContext {
-    let user_json = user_values(user).map(|map| {
+///
+/// It travels with **every** write, not only with the RLS ones it was built for:
+/// off an RLS table it sets nothing and decides nothing, and is simply who the
+/// table event reports as the cause (§10.2).
+pub fn caller_context(user: Option<&User>) -> CallerContext {
+    caller_context_at(caller_role(user), user)
+}
+
+/// [`caller_context`] at an **explicit** role — what the admin API's row
+/// endpoints use: [`ROLE_ADMIN`](sc_auth::ROLE_ADMIN) clears every policy's role
+/// floor, so the admin's own row editor works on a FORCE'd table, while the user
+/// object still says which admin did it.
+pub fn caller_context_at(role: u8, user: Option<&User>) -> CallerContext {
+    let fields = user_values(user).map(|map| {
         let obj: serde_json::Map<String, Json> = map
             .iter()
             .map(|(k, v)| (k.clone(), value_to_json(v)))
             .collect();
-        Json::Object(obj).to_string()
+        Json::Object(obj)
     });
-    CallerContext {
-        role: caller_role(user),
-        user_json,
-    }
+    CallerContext::new(role, fields)
 }
 
 /// The user object as the formula sees it: `id`, `role`, and every extra field

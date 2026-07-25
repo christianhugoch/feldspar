@@ -2,6 +2,88 @@
 
 Changes in reverse chronological order.
 
+## Table events: a row write now fires the triggers that listen for it
+
+Phase 4. Inserting, updating or deleting a row through **any** API surface raises an event, and
+the triggers stored in `_sc_triggers` run against it. The parts have been in place since Phases
+1–3; this is the wire between them, and it runs in the direction the layering demands — the row
+layer (layer 8) raises an event through a seam the **catalog** holds, and never names the
+dispatcher (layer 6).
+
+### The emit seam (`sc-catalog`)
+
+- **`TableEvents`**, with two methods rather than one. `emit(&Catalog, TableWrite)` handles a
+  committed write; `observes(table, op)` is a **synchronous predicate** the row layer asks
+  *first*. That second one is the whole reason the feature is free for the writes that do not use
+  it: it is what lets an update fetch its pre-image only when something will read it, so a
+  deployment with no triggers pays one map lookup per write instead of a `SELECT` (GOALS: firing
+  an event is a lookup, not a query).
+- **`TableWrite`** carries the table, the op, the row, the pre-image and the caller — as a struct,
+  and with rows as **JSON**, which is the shape an event hands to a formula, to an action's
+  configuration and over the wire to a `fetch`.
+- **`WriteOp`** is its own three-variant enum, not `sc_expr::Operation`: a read is not a write,
+  and a type that cannot say otherwise is one more state at every match.
+- `Catalog::set_table_events` installs the listener once at boot; `emit` takes `&Catalog` so the
+  dispatcher does not hold one back (a handle each way is a cycle that never drops).
+
+### The caller travels with every write
+
+- **`CallerContext` moved out of `rls.rs`** into `caller.rs`, because it stopped being about RLS.
+  It answers three questions about one write: whose authority (`role`), which user (`user`), and
+  **what led here** (`chain` — the trigger names whose actions caused it, which is what bounds a
+  cascade). `user_json: Option<String>` became `user: Option<Json>`; only the GUC wants text, so
+  the stringify moved to the one caller that does.
+- **The table now decides the caller-context transaction, not the caller.** The rule used to be
+  "run in a policy transaction whenever a context is given", which was only right while a context
+  meant RLS. Now every write carries one, so an ordinary table must not be wrapped in a
+  transaction and a `SET LOCAL` no policy will ever read. Both halves of that fail silently, so
+  it has a unit test.
+- The REST provider and the admin row endpoints now pass a caller on every write. The admin one
+  still runs at role 1 — the row editor has to work on a `FORCE`d table — but carries the
+  signed-in admin's fields, so an event says *which* admin.
+
+### Dispatch (`sc-action`)
+
+- **`TriggerDispatcher`**: the registry, the live `Triggers` behind an `RwLock` (so Phase 6's save
+  can swap the set in while events fire), and the engine. It implements `TableEvents`.
+- One dispatch, per matched trigger in name order: check the depth (`Event::firing` — past
+  `MAX_DEPTH` it does not run and the error names the whole chain), evaluate the `only_if`, run
+  the action with the chain that firing returned. `dispatch` returns a `TriggerRun` each —
+  `Ok(Some(result))` ran, `Ok(None)` the `only_if` declined, `Err` failed — so the emit path can
+  report failures and a test can assert on them.
+- **One trigger's failure is one trigger's failure.** The next trigger still runs, and none of it
+  reaches the write, which committed before dispatch began (decision 1). A request that inserted a
+  row gets its row back even when the audit trigger it fired is misconfigured. Reporting is
+  stderr until §16's error log exists.
+- An **`only_if` evaluator error means the trigger does not run** — the fail-closed contract an
+  ownership formula has, for the same reason: "could not decide" is not "yes".
+
+### One consequence worth its own note: the JSON⇄`Value` bridge moved down
+
+An `only_if` reads the event's row, which arrives as JSON and must be typed **by its columns**
+before a Ⱶ-path prefetch can correlate on it — a `uuid` key compared as text is a SQL error, not a
+mismatch. That is a fact about types and values, not about an API, so `json_to_value` and
+`value_to_json` moved from `sc-api::convert` to **`sc-types::json`** (layer 3). `sc_api::convert`
+re-exports both, so no call site changed. `sc_action::typed_value` is now the single reading both
+the dispatcher and the row actions use.
+
+### Boot and tests
+
+- **`sc_server::install_triggers`** is the wiring: bootstrap `_sc_triggers`, register the built-in
+  actions, load and validate the stored set (reporting each unusable trigger, as a file store that
+  will not connect is), install the dispatcher. Called from `saltcorn serve`. Until it is called
+  **nothing observes a write**, which is what keeps `build-app`, the test suite and any admin
+  script from firing anything.
+- **`sc-server/tests/table_triggers.rs`** — 7 tests over the real router, a real database and the
+  real V8 engine, with every row written and read as an HTTP request: the audit row carrying the
+  event's row and its caller; update and delete staying silent on a table whose only trigger is an
+  insert one; `old.title` and `row.title` in one formula; a delete audited after the row is gone;
+  `pages > 100` firing for one row and passing over the other in silence; `authorⱵtier === "gold"`
+  walking the Key link; the self-feeding trigger stopping at exactly `MAX_DEPTH` firings with the
+  request that started it still returning 201 and the refusal naming the whole chain; and a
+  throwing trigger that costs neither the write, nor the request, nor the second trigger on the
+  same event.
+
 ## `run_js_code`: the last core action, and a third method on the JS engine
 
 The escape hatch for the computation an elementary action cannot anticipate — and the **last item

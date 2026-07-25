@@ -15,7 +15,7 @@
 //! endpoint's [`AuthRequirement`](crate::AuthRequirement) first, so every API
 //! surface goes through the same §7 layer.
 
-use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
+use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table, TableWrite, WriteOp};
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
 use sc_expr::{CalcFields, Env, Formula, TranslateError, UserEnv, translate_value};
@@ -158,7 +158,9 @@ pub async fn create_row_ctx(
         .into_iter()
         .next()
         .ok_or_else(|| Error::not_found("the insert was refused"))?;
-    Ok(row_to_json(&row))
+    let row = row_to_json(&row);
+    emit(catalog, table, WriteOp::Insert, &row, None, context).await;
+    Ok(row)
 }
 
 /// Update the row of `table` whose primary key is `id`, returning the updated
@@ -196,6 +198,15 @@ pub(crate) async fn update_row_guarded(
     if assignments.is_empty() {
         return Err(Error::invalid("no fields to update"));
     }
+    // The pre-image, for the event's `old_row` — read **only when something
+    // listens** (§10.2's emit seam), so an update on a table with no update
+    // trigger costs exactly what it always did. There is no transaction around
+    // the pair: dispatch is after-commit by design (decision 1), and a row that
+    // changed in between is a race the event reports rather than prevents.
+    let old_row = match catalog.observes_writes(&table.name, WriteOp::Update) {
+        true => read_row(catalog, table, &pk, id, context).await?,
+        false => None,
+    };
     let mut returning = vec![Projection::all()];
     returning.extend(calc_projections(catalog, table)?);
     let update = Update {
@@ -209,7 +220,9 @@ pub(crate) async fn update_row_guarded(
         .into_iter()
         .next()
         .ok_or_else(|| Error::not_found(format!("no row with {pk} = {id}")))?;
-    Ok(row_to_json(&row))
+    let row = row_to_json(&row);
+    emit(catalog, table, WriteOp::Update, &row, old_row, context).await;
+    Ok(row)
 }
 
 /// Delete the row of `table` whose primary key is `id`. Deleting a row that is
@@ -231,13 +244,72 @@ pub(crate) async fn delete_row_guarded(
     let delete = Delete {
         table: table.name.clone(),
         filter: Some(guarded_filter(table, &pk, id, guard)?),
-        returning: vec![Projection::expr(Expr::col(pk.clone()))],
+        // The whole row, not just the key: a delete event carries the row **as it
+        // was**, which is the only copy of it anyone will ever get. No calc
+        // projections — those are correlated subqueries, and correlating them
+        // against a row being deleted in the same statement is a question with no
+        // good answer.
+        returning: vec![Projection::all()],
     };
     let rows = run_write(catalog, table, Statement::from(delete), context).await?;
-    if rows.is_empty() {
+    let Some(row) = rows.first() else {
         return Err(Error::not_found(format!("no row with {pk} = {id}")));
-    }
+    };
+    let row = row_to_json(row);
+    emit(catalog, table, WriteOp::Delete, &row, None, context).await;
     Ok(json!({ "deleted": true }))
+}
+
+/// Raise the event one committed write is (§10.2), if anything is listening.
+///
+/// Two properties this function exists to hold, both of them in the TODO's words:
+///
+/// - **A write nobody observes pays nothing.** The `observes_writes` lookup comes
+///   first, so the row is not even cloned for a table with no trigger on it.
+/// - **A failing trigger does not fail the request or lose the write.** The write
+///   has already committed by the time this runs, so an error here is *reported*
+///   and the row still goes back to the caller. The dispatcher reports each
+///   trigger's own failure; what reaches here is dispatch itself failing.
+async fn emit(
+    catalog: &Catalog,
+    table: &Table,
+    op: WriteOp,
+    row: &Json,
+    old_row: Option<Json>,
+    caller: Option<&CallerContext>,
+) {
+    if !catalog.observes_writes(&table.name, op) {
+        return;
+    }
+    let write = TableWrite {
+        table,
+        op,
+        row: row.clone(),
+        old_row,
+        caller,
+    };
+    if let Err(e) = catalog.emit_write(write).await {
+        eprintln!(
+            "saltcorn: dispatching the {op} event for `{}`: {}",
+            table.name,
+            sc_error::format_chain(&e)
+        );
+    }
+}
+
+/// One row by primary key, as the JSON an event carries — the pre-image an
+/// update's `old_row` needs. `None` when no such row (or none the caller may
+/// see, which for an event is the same thing: the update will not match either).
+async fn read_row(
+    catalog: &Catalog,
+    table: &Table,
+    pk: &str,
+    id: &str,
+    context: Option<&CallerContext>,
+) -> Result<Option<Json>> {
+    let filter = pk_filter(table, pk, id)?;
+    let rows = list_rows_where(catalog, table, Some(filter), context).await?;
+    Ok(rows.as_array().and_then(|rows| rows.first()).cloned())
 }
 
 /// `pk = id`, ANDed with the ownership guard when one applies.
@@ -489,16 +561,29 @@ pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
     Ok(Expr::col(pk).eq(Expr::lit(value)))
 }
 
+/// Whether this statement runs inside a caller-context transaction: **the table
+/// decides**, not the caller.
+///
+/// It used to be "whenever a context was given", which worked only while the
+/// context existed for RLS alone. Now the caller travels with every write (an
+/// event has to say who caused it), so a `Some` on an ordinary table must not
+/// silently wrap it in a transaction and a `SET LOCAL` no policy will ever read.
+/// A context is still *required* to reach the policies: without one they see
+/// `NULL` and deny, which is the fail-closed shape §7.3 depends on.
+fn in_context<'a>(table: &Table, context: Option<&'a CallerContext>) -> Option<&'a CallerContext> {
+    context.filter(|_| table.rls_enabled)
+}
+
 /// Run a `SELECT`, collecting its rows — through an RLS caller-context
-/// transaction when `context` is given (§7.3), else on a pooled connection via
-/// the table's provider.
+/// transaction on an RLS table (§7.3), else on a pooled connection via the
+/// table's provider.
 async fn run_read(
     catalog: &Catalog,
     table: &Table,
     select: &Select,
     context: Option<&CallerContext>,
 ) -> Result<Vec<Row>> {
-    match context {
+    match in_context(table, context) {
         Some(context) => {
             sc_catalog::run_in_context(
                 catalog,
@@ -519,14 +604,14 @@ async fn run_read(
 }
 
 /// Run a write statement, collecting `RETURNING` rows — through an RLS
-/// caller-context transaction when `context` is given, else via the provider.
+/// caller-context transaction on an RLS table, else via the provider.
 async fn run_write(
     catalog: &Catalog,
     table: &Table,
     statement: Statement,
     context: Option<&CallerContext>,
 ) -> Result<Vec<Row>> {
-    match context {
+    match in_context(table, context) {
         Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
         None => {
             catalog
@@ -543,4 +628,43 @@ async fn run_write(
 pub fn require_object(body: &Json) -> Result<&Map<String, Json>> {
     body.as_object()
         .ok_or_else(|| Error::invalid("expected a JSON object body"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sc_catalog::DbId;
+    use sc_db::PhysicalTable;
+
+    fn table(rls_enabled: bool) -> Table {
+        let mut table = Table::from_physical(
+            DbId::primary(),
+            &PhysicalTable {
+                name: "books".into(),
+                schema: None,
+                columns: Vec::new(),
+                primary_key: vec!["id".into()],
+                foreign_keys: Vec::new(),
+            },
+        );
+        table.rls_enabled = rls_enabled;
+        table
+    }
+
+    /// The rule the caller context changed meaning under: it is *who is writing*
+    /// (every write has one, so an event can say who caused it), and whether the
+    /// statement runs in a GUC transaction is the **table's** business.
+    ///
+    /// Worth its own test because both halves are silent failures. Routing an
+    /// ordinary write through a policy transaction costs a transaction and a
+    /// `SET LOCAL` no policy will ever read; *not* routing an RLS one leaves the
+    /// GUCs unset, which every generated policy reads as no access — the
+    /// fail-closed shape §7.3 depends on.
+    #[test]
+    fn the_table_decides_the_caller_context_transaction_not_the_caller() {
+        let caller = CallerContext::anonymous(1);
+        assert!(in_context(&table(true), Some(&caller)).is_some());
+        assert!(in_context(&table(false), Some(&caller)).is_none());
+        assert!(in_context(&table(true), None).is_none());
+    }
 }
