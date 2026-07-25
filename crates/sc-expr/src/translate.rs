@@ -51,7 +51,7 @@ use sc_query::{
 };
 
 use crate::agg::{self, Arrow, Chain, Relation, Selector, Terminal};
-use crate::analyze::{GLOBALS, JOIN, OpFlag};
+use crate::analyze::{Ambient, GLOBALS, JOIN, OpFlag};
 use crate::ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 use crate::formula::Formula;
 use crate::shape::SchemaShape;
@@ -161,76 +161,140 @@ pub type CalcFields = BTreeMap<String, Formula>;
 /// The empty calc map, for the translation entry points that inline nothing.
 static EMPTY_CALC: CalcFields = BTreeMap::new();
 
+/// The ambient objects *other than* `user`, inlined as literals: `row` and `old`
+/// (decision 7 — a trigger's formula sees the triggering row ambiently).
+///
+/// The key's presence is scope, and the `Option` inside is null-or-values —
+/// exactly the distinction [`UserEnv::Inline`] draws for an anonymous caller. So
+/// `old` present-and-`None` on an insert makes `old.x` null and `old === null`
+/// true, while `old` *absent* means the formula was never allowed to name it.
+pub type AmbientValues = BTreeMap<Ambient, Option<BTreeMap<String, Value>>>;
+
+/// The empty ambient map, for the ownership/calc translations that have no
+/// triggering row.
+static EMPTY_AMBIENT: AmbientValues = BTreeMap::new();
+
+/// Everything a translation resolves against beyond the schema: the caller, the
+/// ambient objects, and the calc fields to inline.
+///
+/// One env rather than three trailing parameters, because the three grew
+/// together and every caller that needs one of the extras still has to spell the
+/// others. `Env::new(&user_env)` is the ownership/RLS case unchanged; a trigger
+/// adds `.with_ambient(…)`, a table with calc fields `.with_calc(…)`.
+#[derive(Debug, Clone, Copy)]
+pub struct Env<'a> {
+    user: &'a UserEnv,
+    ambient: &'a AmbientValues,
+    calc: &'a CalcFields,
+}
+
+impl<'a> Env<'a> {
+    /// The caller's environment, with no ambient row and nothing to inline.
+    pub fn new(user: &'a UserEnv) -> Env<'a> {
+        Env {
+            user,
+            ambient: &EMPTY_AMBIENT,
+            calc: &EMPTY_CALC,
+        }
+    }
+
+    /// Put the triggering event's `row`/`old` in scope, inlined as literals.
+    pub fn with_ambient(mut self, ambient: &'a AmbientValues) -> Env<'a> {
+        self.ambient = ambient;
+        self
+    }
+
+    /// Make the table's calculated fields available to inline (Phase 8).
+    pub fn with_calc(mut self, calc: &'a CalcFields) -> Env<'a> {
+        self.calc = calc;
+        self
+    }
+
+    /// Whether an ambient object is in scope here: `user` always is, `row`/`old`
+    /// exactly when the caller put them in the ambient map (even with a null
+    /// value — `old` on an insert is in scope *and* null).
+    fn in_scope(&self, ambient: Ambient) -> bool {
+        ambient == Ambient::User || self.ambient.contains_key(&ambient)
+    }
+
+    /// The inlined values of an ambient object — `user`'s from [`UserEnv`],
+    /// `row`/`old`'s from the ambient map.
+    ///
+    /// `None` is null, and covers three cases the translator treats alike: an
+    /// anonymous caller, an object that is null for this event (`old` on an
+    /// insert), and an object out of scope entirely. The third cannot reach here
+    /// on a validated formula — validation refuses the name — and treating it as
+    /// null rather than panicking keeps the translator total.
+    fn values(&self, ambient: Ambient) -> Option<&'a BTreeMap<String, Value>> {
+        match ambient {
+            Ambient::User => match self.user {
+                UserEnv::Inline(values) => values.as_ref(),
+                // GUC mode has no inlined values; callers route through
+                // `Translator::guc_types` before asking.
+                UserEnv::Guc { .. } => None,
+            },
+            other => self.ambient.get(&other)?.as_ref(),
+        }
+    }
+}
+
+impl<'a> From<&'a UserEnv> for Env<'a> {
+    fn from(user: &'a UserEnv) -> Env<'a> {
+        Env::new(user)
+    }
+}
+
 /// Translate `formula` into a boolean `sc_query::Expr` over `table`, for one
-/// operation, under one user environment. The result is what Phase 5 ANDs into
-/// a statement's WHERE and Phase 6 renders into an RLS policy.
+/// operation, in one environment. The result is what Phase 5 ANDs into a
+/// statement's WHERE and Phase 6 renders into an RLS policy.
 ///
 /// The caller is expected to have run [`Formula::validate`]; an invalid formula
 /// still fails here (as [`TranslateError::Error`]), just with less polish.
 pub fn translate(
     formula: &Formula,
     op: Operation,
-    env: &UserEnv,
+    env: &Env<'_>,
     shape: &SchemaShape,
     table: &str,
 ) -> Result<QExpr, TranslateError> {
-    translate_with_calc(formula, op, env, shape, table, &CalcFields::new())
-}
-
-/// [`translate`] with the table's calculated fields available to inline (Phase
-/// 8): a reference to a calc field in the ownership formula expands to the calc
-/// field's defining expression, transitively.
-pub fn translate_with_calc(
-    formula: &Formula,
-    op: Operation,
-    env: &UserEnv,
-    shape: &SchemaShape,
-    table: &str,
-    calc: &CalcFields,
-) -> Result<QExpr, TranslateError> {
-    if !shape.tables.contains_key(table) {
-        return Err(TranslateError::Error(Error::invalid(format!(
-            "formula on `{table}`: unknown table `{table}`"
-        ))));
-    }
+    let mut tr = translator(env, shape, table)?;
     let folded = fold(formula.ast(), op, &mut Vec::new());
-    let mut tr = Translator {
-        env,
-        shape,
-        table,
-        aliases: 0,
-        child_scopes: Vec::new(),
-        calc,
-    };
     tr.predicate(&folded)
 }
 
 /// Translate a calc field's `formula` in **value** position to an
 /// `sc_query::Expr` — the column expression the read path projects into a
-/// `SELECT` (Phase 8). Calc fields carry no operation flags and no `user`, so no
-/// folding and no operation is needed; a reference to another calc field is
-/// inlined via `calc`.
+/// `SELECT` (Phase 8), and the value an action's configuration formula computes
+/// (Phase 3). Value position carries no operation flags, so no folding and no
+/// operation is needed.
 pub fn translate_value(
     formula: &Formula,
-    env: &UserEnv,
+    env: &Env<'_>,
     shape: &SchemaShape,
     table: &str,
-    calc: &CalcFields,
 ) -> Result<QExpr, TranslateError> {
+    let mut tr = translator(env, shape, table)?;
+    tr.value(formula.ast())
+}
+
+/// The translator both entry points build, with the one check they share.
+fn translator<'a>(
+    env: &'a Env<'a>,
+    shape: &'a SchemaShape,
+    table: &'a str,
+) -> Result<Translator<'a>, TranslateError> {
     if !shape.tables.contains_key(table) {
         return Err(TranslateError::Error(Error::invalid(format!(
             "formula on `{table}`: unknown table `{table}`"
         ))));
     }
-    let mut tr = Translator {
+    Ok(Translator {
         env,
         shape,
         table,
         aliases: 0,
         child_scopes: Vec::new(),
-        calc,
-    };
-    tr.value(formula.ast())
+    })
 }
 
 /// The correlated-subselect `sc_query::Expr` for one Ⱶ-join identifier on
@@ -244,15 +308,15 @@ pub fn join_path_expr(
     table: &str,
     ident: &str,
 ) -> Result<QExpr, TranslateError> {
+    // The env is irrelevant to a join path (no ambient object inside it);
+    // anonymous-and-empty is the cheapest to construct.
+    let user = UserEnv::Inline(None);
     let mut tr = Translator {
-        // The env is irrelevant to a join path (no `user` inside it); Inline
-        // anonymous is the cheapest to construct.
-        env: &UserEnv::Inline(None),
+        env: &Env::new(&user),
         shape,
         table,
         aliases: 0,
         child_scopes: Vec::new(),
-        calc: &EMPTY_CALC,
     };
     tr.join_value(ident)
 }
@@ -350,15 +414,13 @@ fn fold(ast: &Ast, op: Operation, locals: &mut Vec<String>) -> Ast {
 }
 
 struct Translator<'a> {
-    env: &'a UserEnv,
+    env: &'a Env<'a>,
     shape: &'a SchemaShape,
     table: &'a str,
     /// Counter for join-subquery aliases. Prefixed `_sc_` because user tables
     /// cannot start with it (§9 reserves the prefix), so an alias can never
     /// shadow a real table a correlated column reference points at.
     aliases: usize,
-    /// The table's calc fields, inlined where named (Phase 8).
-    calc: &'a CalcFields,
     /// Active child-row scopes, innermost last: an aggregation arrow's parameter
     /// bound to the aliased child table it ranges over (Phase 7). While one is
     /// on the stack, `param.field` resolves to a child column instead of failing.
@@ -373,7 +435,7 @@ struct ChildScope {
     table: String,
 }
 
-impl Translator<'_> {
+impl<'a> Translator<'a> {
     // ---- predicates --------------------------------------------------------
 
     /// Translate `ast` in boolean (predicate) position.
@@ -414,19 +476,26 @@ impl Translator<'_> {
                 }],
                 else_result: Some(Box::new(self.predicate(alt)?)),
             }),
-            Ast::Ident(name) if name == "user" => Ok(self.user_truthy()),
+            Ast::Ident(name) if self.ambient_named(name).is_some() => {
+                Ok(self.ambient_truthy(self.ambient_named(name).unwrap_or(Ambient::User)))
+            }
             // A bare calc field as a condition inlines to its expression in
             // predicate position (Phase 8) — a boolean calc field is usable
             // where any bare boolean field is not, because its definition is
             // known.
-            Ast::Ident(name) if self.calc.contains_key(name) => {
-                let ast = self.calc[name].ast();
+            Ast::Ident(name) if self.env.calc.contains_key(name) => {
+                let ast = self.env.calc[name].ast();
                 self.predicate(ast)
             }
-            Ast::Member { obj, prop, .. } if is_user(obj) => match prop {
-                MemberProp::Static(field) => self.user_field_truthy(field),
-                MemberProp::Computed(_) => untranslatable("computed access on `user`"),
-            },
+            Ast::Member { obj, prop, .. } if self.ambient_of(obj).is_some() => {
+                let amb = self.ambient_of(obj).unwrap_or(Ambient::User);
+                match prop {
+                    MemberProp::Static(field) => self.ambient_field_truthy(amb, field),
+                    MemberProp::Computed(_) => {
+                        untranslatable(format!("computed access on `{amb}`"))
+                    }
+                }
+            }
             Ast::Ident(_) => untranslatable(
                 "a bare value as a condition (write an explicit comparison, \
                  e.g. `x === true` or `x !== null`)",
@@ -448,9 +517,10 @@ impl Translator<'_> {
             // `null === null` is true; folded rather than sent to SQL.
             (Ast::Null, Ast::Null) => Ok(QExpr::lit(!negated)),
             (Ast::Null, other) | (other, Ast::Null) => {
-                if is_user(other) {
-                    // `user === null`: "not logged in", in each env's terms.
-                    let is_null = self.user_is_null();
+                if let Some(amb) = self.ambient_of(other) {
+                    // `user === null`: "not logged in" — and `old === null`:
+                    // "this is not an update", in each env's terms.
+                    let is_null = self.ambient_is_null(amb);
                     return Ok(if negated {
                         QExpr::unary(QUnOp::Not, is_null)
                     } else {
@@ -459,8 +529,14 @@ impl Translator<'_> {
                 }
                 Ok(QExpr::unary(null_op, self.value(other)?))
             }
-            _ if is_user(l) || is_user(r) => {
-                untranslatable("comparing the `user` object itself (compare one of its fields)")
+            _ if self.ambient_of(l).or(self.ambient_of(r)).is_some() => {
+                let amb = self
+                    .ambient_of(l)
+                    .or(self.ambient_of(r))
+                    .unwrap_or(Ambient::User);
+                untranslatable(format!(
+                    "comparing the `{amb}` object itself (compare one of its fields)"
+                ))
             }
             _ => Ok(QExpr::binary(distinct_op, self.value(l)?, self.value(r)?)),
         }
@@ -486,10 +562,15 @@ impl Translator<'_> {
             Ast::Bool(b) => Ok(QExpr::lit(*b)),
             Ast::Null => Ok(QExpr::Lit(Value::Null)),
             Ast::Ident(name) => self.ident_value(name),
-            Ast::Member { obj, prop, .. } if is_user(obj) => match prop {
-                MemberProp::Static(field) => Ok(self.user_field(field)),
-                MemberProp::Computed(_) => untranslatable("computed access on `user`"),
-            },
+            Ast::Member { obj, prop, .. } if self.ambient_of(obj).is_some() => {
+                let amb = self.ambient_of(obj).unwrap_or(Ambient::User);
+                match prop {
+                    MemberProp::Static(field) => Ok(self.ambient_field(amb, field)),
+                    MemberProp::Computed(_) => {
+                        untranslatable(format!("computed access on `{amb}`"))
+                    }
+                }
+            }
             Ast::Member { obj, prop, .. } => match self.child_alias_of(obj) {
                 Some((alias, table)) => match prop {
                     MemberProp::Static(field) if field.contains(JOIN) => {
@@ -498,7 +579,7 @@ impl Translator<'_> {
                     MemberProp::Static(field) => Ok(QExpr::qcol(alias, field.clone())),
                     MemberProp::Computed(_) => untranslatable("computed access on a child row"),
                 },
-                None => untranslatable("property access on something other than `user`"),
+                None => untranslatable("property access on something other than an ambient object"),
             },
             Ast::Unary { op, expr } => match op {
                 UnaryOp::Neg => Ok(QExpr::unary(QUnOp::Neg, self.value(expr)?)),
@@ -555,7 +636,7 @@ impl Translator<'_> {
         // A calc field has no column: inline its defining expression in value
         // position (Phase 8), transitively. Checked before the plain-field case
         // because a calc field *is* present in the shape as a field.
-        if let Some(formula) = self.calc.get(name) {
+        if let Some(formula) = self.env.calc.get(name) {
             let ast = formula.ast();
             return self.value(ast);
         }
@@ -914,53 +995,85 @@ impl Translator<'_> {
         });
     }
 
-    // ---- the user environment ---------------------------------------------
+    // ---- the ambient objects ----------------------------------------------
+    //
+    // `user`, `row` and `old` share one set of semantics (object-or-null, members
+    // inlined as literals), so they share one set of methods. Only `user` has a
+    // second rendering — the GUC read an RLS policy needs, because a policy
+    // outlives the request that set it; `row`/`old` are inline-only, since a
+    // policy has no triggering event.
 
-    /// Bare `user` as a condition: object-or-null, so truthy ⇔ logged in.
-    fn user_truthy(&self) -> QExpr {
-        match self.env {
-            UserEnv::Inline(user) => QExpr::lit(user.is_some()),
-            UserEnv::Guc { .. } => QExpr::unary(QUnOp::IsNotNull, guc_raw()),
+    /// The in-scope ambient object an *expression* names, if it names one.
+    ///
+    /// Scope is what makes this safe on a table that happens to have a field
+    /// called `row`: outside a trigger's formula no such object is in scope, so
+    /// the identifier stays the field it always was.
+    fn ambient_of(&self, ast: &Ast) -> Option<Ambient> {
+        match ast {
+            Ast::Ident(name) => self.ambient_named(name),
+            _ => None,
         }
     }
 
-    /// `user === null`.
-    fn user_is_null(&self) -> QExpr {
-        match self.env {
-            UserEnv::Inline(user) => QExpr::lit(user.is_none()),
-            UserEnv::Guc { .. } => QExpr::unary(QUnOp::IsNull, guc_raw()),
+    /// [`ambient_of`](Translator::ambient_of) for a bare identifier.
+    fn ambient_named(&self, name: &str) -> Option<Ambient> {
+        Ambient::from_ident(name).filter(|amb| self.env.in_scope(*amb))
+    }
+
+    /// The user field→type map when this object renders as a **GUC read** rather
+    /// than as literals: `user` under [`UserEnv::Guc`], and nothing else.
+    fn guc_types(&self, ambient: Ambient) -> Option<&'a BTreeMap<String, String>> {
+        match (ambient, self.env.user) {
+            (Ambient::User, UserEnv::Guc { field_types }) => Some(field_types),
+            _ => None,
         }
     }
 
-    /// `user.x` as a value.
-    fn user_field(&self, field: &str) -> QExpr {
-        match self.env {
-            UserEnv::Inline(user) => {
-                let value = user
-                    .as_ref()
-                    .and_then(|u| u.get(field).cloned())
-                    .unwrap_or(Value::Null);
-                QExpr::Lit(value)
-            }
-            UserEnv::Guc { field_types } => {
-                let text = QExpr::Func {
-                    name: "jsonb_extract_path_text".into(),
-                    args: vec![
-                        QExpr::Cast {
-                            expr: Box::new(guc_raw()),
-                            type_name: "jsonb".into(),
-                        },
-                        QExpr::lit(field),
-                    ],
-                };
-                match field_types.get(field).map(String::as_str) {
-                    None | Some("text") => text,
-                    Some(type_name) => QExpr::Cast {
-                        expr: Box::new(text),
-                        type_name: type_name.into(),
-                    },
-                }
-            }
+    /// Bare `user`/`row`/`old` as a condition: object-or-null, so truthy ⇔
+    /// present (for `user`, ⇔ logged in).
+    fn ambient_truthy(&self, ambient: Ambient) -> QExpr {
+        match self.guc_types(ambient) {
+            Some(_) => QExpr::unary(QUnOp::IsNotNull, guc_raw()),
+            None => QExpr::lit(self.env.values(ambient).is_some()),
+        }
+    }
+
+    /// `user === null` (and the same for `row`/`old`).
+    fn ambient_is_null(&self, ambient: Ambient) -> QExpr {
+        match self.guc_types(ambient) {
+            Some(_) => QExpr::unary(QUnOp::IsNull, guc_raw()),
+            None => QExpr::lit(self.env.values(ambient).is_none()),
+        }
+    }
+
+    /// `user.x` / `row.x` / `old.x` as a value: a literal from the inlined
+    /// values (null when the object is null or has no such field), or the cast
+    /// JSON extraction from the GUC for an RLS policy's `user`.
+    fn ambient_field(&self, ambient: Ambient, field: &str) -> QExpr {
+        let Some(field_types) = self.guc_types(ambient) else {
+            let value = self
+                .env
+                .values(ambient)
+                .and_then(|vals| vals.get(field).cloned())
+                .unwrap_or(Value::Null);
+            return QExpr::Lit(value);
+        };
+        let text = QExpr::Func {
+            name: "jsonb_extract_path_text".into(),
+            args: vec![
+                QExpr::Cast {
+                    expr: Box::new(guc_raw()),
+                    type_name: "jsonb".into(),
+                },
+                QExpr::lit(field),
+            ],
+        };
+        match field_types.get(field).map(String::as_str) {
+            None | Some("text") => text,
+            Some(type_name) => QExpr::Cast {
+                expr: Box::new(text),
+                type_name: type_name.into(),
+            },
         }
     }
 
@@ -968,26 +1081,25 @@ impl Translator<'_> {
     /// is knowable: inline, the actual value decides; in GUC mode only a field
     /// the env declares boolean (null-safe `IS NOT DISTINCT FROM TRUE`, so a
     /// missing user or field is false, as JS truthiness of `undefined` is).
-    fn user_field_truthy(&self, field: &str) -> Result<QExpr, TranslateError> {
-        match self.env {
-            UserEnv::Inline(user) => {
-                let truthy = user
-                    .as_ref()
-                    .and_then(|u| u.get(field))
-                    .is_some_and(js_truthy);
-                Ok(QExpr::lit(truthy))
-            }
-            UserEnv::Guc { field_types } => match field_types.get(field).map(String::as_str) {
-                Some("boolean") | Some("bool") => Ok(QExpr::binary(
-                    QBinOp::IsNotDistinct,
-                    self.user_field(field),
-                    QExpr::lit(true),
-                )),
-                _ => untranslatable(format!(
-                    "`user.{field}` as a condition (only boolean user fields \
-                     are; write an explicit comparison)"
-                )),
-            },
+    fn ambient_field_truthy(&self, ambient: Ambient, field: &str) -> Result<QExpr, TranslateError> {
+        let Some(field_types) = self.guc_types(ambient) else {
+            let truthy = self
+                .env
+                .values(ambient)
+                .and_then(|vals| vals.get(field))
+                .is_some_and(js_truthy);
+            return Ok(QExpr::lit(truthy));
+        };
+        match field_types.get(field).map(String::as_str) {
+            Some("boolean") | Some("bool") => Ok(QExpr::binary(
+                QBinOp::IsNotDistinct,
+                self.ambient_field(ambient, field),
+                QExpr::lit(true),
+            )),
+            _ => untranslatable(format!(
+                "`{ambient}.{field}` as a condition (only boolean user fields \
+                 are; write an explicit comparison)"
+            )),
         }
     }
 }
@@ -1012,10 +1124,6 @@ fn guc_raw() -> QExpr {
             QExpr::lit(""),
         ],
     }
-}
-
-fn is_user(ast: &Ast) -> bool {
-    matches!(ast, Ast::Ident(name) if name == "user")
 }
 
 /// An aggregate call `func([DISTINCT] args)`.
@@ -1183,11 +1291,103 @@ mod tests {
         }
     }
 
+    /// One ambient object's test values: its fields, or `None` for an object
+    /// that is in scope but null (`old` on an insert).
+    type AmbientCase<'a> = (Ambient, Option<&'a [(&'a str, Value)]>);
+
+    /// An ambient `row`/`old` map from a list of [`AmbientCase`]s.
+    fn ambient(entries: &[AmbientCase<'_>]) -> AmbientValues {
+        entries
+            .iter()
+            .map(|(amb, fields)| {
+                (
+                    *amb,
+                    fields.map(|fs| fs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()),
+                )
+            })
+            .collect()
+    }
+
+    /// [`where_sql`] with the triggering event's ambient objects in scope.
+    fn where_sql_ambient(
+        src: &str,
+        env: &UserEnv,
+        ambient: &AmbientValues,
+    ) -> (String, Vec<Value>) {
+        let formula = Formula::parse(src).unwrap();
+        let pred = translate(
+            &formula,
+            Operation::Read,
+            &Env::new(env).with_ambient(ambient),
+            &shape(),
+            "books",
+        )
+        .unwrap();
+        let stmt: Statement = Select::from(Source::table("books")).filter(pred).into();
+        let (sql, binds) = Pg.render(&stmt).unwrap();
+        let clause = sql
+            .strip_prefix("SELECT * FROM \"books\" WHERE ")
+            .unwrap_or_else(|| panic!("unexpected statement shape: {sql}"))
+            .to_string();
+        (clause, binds)
+    }
+
+    #[test]
+    fn an_ambient_row_member_inlines_as_a_literal() {
+        // The event's row is *not* the table being filtered: `owner` is a column
+        // of `books`, `row.owner` is a value from the triggering row (decision 7).
+        let anon = UserEnv::Inline(None);
+        let amb = ambient(&[(
+            Ambient::Row,
+            Some(&[("owner", Value::Text("alice".into()))]),
+        )]);
+        let (sql, binds) = where_sql_ambient("owner === row.owner", &anon, &amb);
+        assert_eq!(sql, "(\"books\".\"owner\" IS NOT DISTINCT FROM $1)");
+        assert_eq!(binds, vec![Value::Text("alice".into())]);
+    }
+
+    #[test]
+    fn an_ambient_object_that_is_null_reads_as_null_and_compares_as_such() {
+        let anon = UserEnv::Inline(None);
+        // `old` in scope but null — an insert. `old.x` is NULL, and `old === null`
+        // is true, exactly as an anonymous `user` behaves.
+        let amb = ambient(&[(Ambient::Old, None)]);
+        let (sql, binds) = where_sql_ambient("title === old.title", &anon, &amb);
+        assert_eq!(sql, "(\"books\".\"title\" IS NOT DISTINCT FROM $1)");
+        assert_eq!(binds, vec![Value::Null]);
+        // Constants bind rather than render as keywords (every literal is
+        // parameterised), so the verdict is in the bind.
+        let (_, binds) = where_sql_ambient("old === null", &anon, &amb);
+        assert_eq!(binds, vec![Value::Bool(true)]);
+        let (_, binds) = where_sql_ambient("old", &anon, &amb);
+        assert_eq!(binds, vec![Value::Bool(false)]);
+        // With values, the same formulas invert.
+        let amb = ambient(&[(Ambient::Old, Some(&[("title", Value::Text("a".into()))]))]);
+        let (sql, binds) = where_sql_ambient("title === old.title", &anon, &amb);
+        assert_eq!(sql, "(\"books\".\"title\" IS NOT DISTINCT FROM $1)");
+        assert_eq!(binds, vec![Value::Text("a".into())]);
+        let (_, binds) = where_sql_ambient("old === null", &anon, &amb);
+        assert_eq!(binds, vec![Value::Bool(false)]);
+    }
+
+    #[test]
+    fn an_out_of_scope_ambient_name_stays_a_field_reference() {
+        // No ambient map: `row` is not in scope, so a formula naming it is
+        // translated as an identifier — and on a table with no such field that is
+        // the unknown-identifier *error*, never a silent null.
+        let anon = UserEnv::Inline(None);
+        let err = err_of("owner === row.owner", Operation::Read, &anon);
+        assert!(
+            matches!(&err, TranslateError::Untranslatable(w) if w.contains("other than an ambient object")),
+            "got: {err:?}"
+        );
+    }
+
     /// Translate `src` on `books` and render it as the WHERE clause of a
     /// `SELECT * FROM books`, returning the clause text and its binds.
     fn where_sql(src: &str, op: Operation, env: &UserEnv) -> (String, Vec<Value>) {
         let formula = Formula::parse(src).unwrap();
-        let pred = translate(&formula, op, env, &shape(), "books").unwrap();
+        let pred = translate(&formula, op, &Env::new(env), &shape(), "books").unwrap();
         let stmt: Statement = Select::from(Source::table("books")).filter(pred).into();
         let (sql, binds) = Pg.render(&stmt).unwrap();
         let clause = sql
@@ -1199,7 +1399,7 @@ mod tests {
 
     fn err_of(src: &str, op: Operation, env: &UserEnv) -> TranslateError {
         let formula = Formula::parse(src).unwrap();
-        translate(&formula, op, env, &shape(), "books").unwrap_err()
+        translate(&formula, op, &Env::new(env), &shape(), "books").unwrap_err()
     }
 
     #[test]
@@ -1626,8 +1826,14 @@ mod tests {
         let calc = calc_of(&[("big", "pages > 100")]);
         let formula = Formula::parse("owner === user.id || big").unwrap();
         let env = inline_user(&[("id", Value::Text("u1".into()))]);
-        let pred =
-            translate_with_calc(&formula, Operation::Read, &env, &shape(), "books", &calc).unwrap();
+        let pred = translate(
+            &formula,
+            Operation::Read,
+            &Env::new(&env).with_calc(&calc),
+            &shape(),
+            "books",
+        )
+        .unwrap();
         let stmt: Statement = Select::from(Source::table("books")).filter(pred).into();
         let (sql, _) = Pg.render(&stmt).unwrap();
         assert!(sql.contains("\"books\".\"pages\" > "), "not inlined: {sql}");
@@ -1640,8 +1846,9 @@ mod tests {
         // pages + (pages * 2), with no reference to `tax` or `gross`.
         let calc = calc_of(&[("tax", "pages * 2"), ("gross", "pages + tax")]);
         let gross = Formula::parse("pages + tax").unwrap();
+        let anon = UserEnv::Inline(None);
         let value =
-            translate_value(&gross, &UserEnv::Inline(None), &shape(), "books", &calc).unwrap();
+            translate_value(&gross, &Env::new(&anon).with_calc(&calc), &shape(), "books").unwrap();
         let stmt: Statement = Select::from(Source::table("books"))
             .columns(vec![Projection::expr(value)])
             .into();

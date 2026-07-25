@@ -152,48 +152,89 @@ is all an action needs and keeps the crate below the API layer that will call in
   because `Catalog` cannot be built without a database, and the alternative — a catalog-free
   mirror of the accessors — would have tested a copy of the code instead of the code.
 
-## Phase 2 — `_sc_triggers`: the trigger model, storage and validation
+## Phase 2 — `_sc_triggers`: the trigger model, storage and validation ✅
 
 The trigger is stored metadata with nothing to introspect it from, so its row *is* its
 definition — the `_sc_applications` / `_sc_file_stores` pattern, strict reads included (a
 missing or wrong-shaped column is an error naming the trigger and the column, not a default).
 
-- [ ] `Trigger` (pure data, `sc-action`): `id: TriggerId` (UUID, §9), `name` (unique — it is
+- [x] `Trigger` (pure data, `sc-action`): `id: TriggerId` (UUID, §9), `name` (unique — it is
   what an application, an API path and a "run" button reference), `description`, `when:
   EventKind`, `channel: Option<String>`, `only_if: Option<String>`, `action: String`,
-  `configuration: Attrs`, `min_role: Option<u8>` (who may run it through an API),
-  `attributes: Attrs` (sparse: the periodic timing of Phase 8, `enabled`, `last_run_at`).
-- [ ] `_sc_triggers` table + `bootstrap_triggers` (idempotent, §9 columns: `id`, `name`,
+  `configuration: Attrs`, `min_role: Option<u8>` (`None` = admin-only, the safe reading of "the
+  access was never thought about"), `attributes: Attrs` (sparse: `enabled`, and Phase 8's periodic
+  timing and `last_run_at`). Built fluently; `is_enabled`/`set_enabled` follow `TableMeta`'s
+  sparse-accessor rule — enabling *removes* the key rather than storing `true`, so an untouched
+  trigger carries no residue.
+- [x] `_sc_triggers` table + `bootstrap_triggers` (idempotent, §9 columns: `id`, `name`,
   `description`, `attributes`), plus `save_trigger` / `load_trigger` / `load_trigger_by_name` /
-  `list_triggers` / `delete_trigger`, each mirroring `file_stores.rs`.
-- [ ] **Validation on save**, so a broken trigger is refused at the boundary rather than
-  discovered at fire time: the action name resolves in the registry; the configuration validates
-  against its `config_spec`; a table event names a channel that is a real table (and a non-table
-  event names none); the `only_if` formula parses and validates against that table's shape with
-  `user` allowed and the operation flags **refused by name** (decision 3) — the `calc.rs`
-  "validate like an ownership formula, minus …" pattern, generalised so there is one validator
-  with a scope policy rather than three near-copies.
-- [ ] `Triggers` — the cached registry: `Triggers::load(&catalog)` builds it, `reload()` refreshes
-  it after a save/delete, and lookup is by `(kind, channel)` for events and by name for direct
-  runs. A stored trigger that fails validation at load is **dropped with a reported issue** and
-  never fires (fail closed, as an invalid ownership formula grants nothing), exposed for the
-  admin UI to surface.
-- [ ] **`sc-expr`: ambient objects, generalising `UserEnv`** (decision 7). One inlined ambient
-  object becomes a named set — `user`, `row`, `old` — across validation (each object's members
-  checked against its table's fields, an unknown one named), the symbolic translator (each
-  member inlines as a literal, exactly as `user.x` does today; `old.x` is null when there is no
-  old row) and the reified binder (each object bound, or `null`). The `Guc` env is untouched:
-  RLS policies have no triggering row, so only `user` has a GUC. Parity tests extended over the
-  new objects, since parity is the gate everything downstream stands on.
-- [ ] **Move the reified-binding prefetch down into `sc-catalog`** (`prefetch.rs`): the Ⱶ-join
-  and Ↄ-relation resolution that `sc-api::ownership` built for the write path is exactly what
-  an `only_if` evaluation needs, and `sc-action` sits below `sc-api`. One implementation, two
-  callers; `sc-api` keeps its ownership logic and calls the moved helper.
-- [ ] Tests: round-trip a trigger through the store (including strict-read refusals for a
-  mangled column); each validation refusal by name (unknown action, bad config, table event
-  with no channel / a missing table, non-table event with a channel, an `only_if` naming an
-  unknown field, an `only_if` using `_insert`); an invalid stored trigger dropped from the
-  registry with its issue reported.
+  `list_triggers` / `delete_trigger`, each mirroring `file_stores.rs` — including the
+  name-clash check that names the other trigger before the `UNIQUE` constraint can, and the
+  strict row reader. The event column is `event` rather than v1's `when_trigger` (`when` is a SQL
+  keyword; the renderer would quote it, but a column nobody has to think twice about is better).
+  A cleared optional field (`""` from an emptied form) stores as NULL, so "cleared" and "never
+  set" read back identically. **Deviation:** `delete_trigger` has no reference check — unlike a
+  file store, an app exposing a deleted trigger fails to mount *naming it* (Phase 7), and
+  blocking the delete would leave an admin unable to remove a trigger they no longer want.
+- [x] **Validation on save** (`validate.rs`), so a broken trigger is refused at the boundary
+  rather than discovered at fire time: the action name resolves in the registry (whose error
+  lists the alternatives); the configuration validates against its `config_spec`; `min_role` is
+  on the 1–100 scale; a table event names a channel that is a real table and a non-table event
+  names none (**both** directions — a `login` trigger given a table is a misunderstanding worth
+  naming, not a channel silently ignored); the `only_if` formula parses and validates against
+  that table's shape with `user`/`row`/`old` allowed and the operation flags **refused by name**
+  (decision 3). An `only_if` on a *channel-less* event is refused too: there is no row to test,
+  and accepting a condition that can never be true is worse than saying so (a caller-only
+  condition on `login` needs a table-less scope — a later phase's).
+- [x] `Triggers` — the cached live set: `Triggers::load(&catalog, &registry)` builds it,
+  `reload()` refreshes it in place after a save/delete, and lookup is by `(kind, channel)` for
+  events (`for_event`/`matching`) and by name for direct runs. A stored trigger that fails
+  validation at load is **dropped with a reported issue** and never fires (fail closed, as an
+  invalid ownership formula grants nothing), exposed via `issues()` for the admin UI. Two things
+  that fell out of writing it: a *disabled* trigger is filtered at match time rather than
+  dropped at load, so it stays listed and editable (that is how it gets re-enabled); and
+  `require()` distinguishes "never defined" (`NotFound`) from "defined but not usable" — the
+  latter carrying the reason, because the two call for different fixes.
+- [x] **`sc-expr`: ambient objects, generalising `UserEnv`** (decision 7). One inlined ambient
+  object became a named set — the new `Ambient` enum (`user`/`row`/`old`) — across free-variable
+  collection (`ambient_props`/`ambient_dynamic` keyed by object), validation (each object's
+  members checked against its declared fields, an unknown one named), the symbolic translator
+  (one set of `ambient_*` methods where there were four `user_*` ones; members inline as
+  literals) and the reified binder (each in-scope object bound as an object or `null`). The
+  `Guc` env is untouched: a policy has no triggering row, so only `user` has a GUC rendering, and
+  that asymmetry is now explicit (`Translator::guc_types`).
+  **Scope is declared, not assumed:** `SchemaShape.ambient` maps object → its fields, `user` is
+  always present (`Default`), `row`/`old` only where a trigger's shape declares them — so an
+  ownership formula naming `row` still gets `unknown identifier`, and a table with a field
+  *called* `row` keeps that field everywhere except inside a trigger formula (the same shadowing
+  `user` has always had, now pinned by a test).
+  **Beyond the plan, deliberate:** `translate_with_calc` is gone. The three trailing parameters
+  that had accumulated (user env, ambient values, calc fields) became one `Env` — so there is now
+  one `translate` and one `translate_value` instead of three entry points, and the ambient values
+  had a place to live rather than a fourth parameter. Parity extended
+  (`symbolic_and_reified_agree_on_the_ambient_objects`, 10 cases): `row.x` against a column,
+  `old` null on an insert (null member *and* `old === null` true), the "field just changed"
+  only-if, a null field of a present object, and all three objects in one formula.
+- [x] **Move the reified-binding prefetch down into `sc-catalog`** (`prefetch.rs`,
+  `prefetch_bindings`): the Ⱶ-join and Ↄ-relation resolution `sc-api::ownership` built for the
+  write path is exactly what an `only_if` evaluation needs, and `sc-action` sits below `sc-api`.
+  One implementation, two callers — and the drift it prevents would have been *silent*, a path
+  that resolves in one crate and binds null in the other. **Small correctness gain in the move:**
+  the child rows an aggregation binds now go through `sc_expr::value_to_json` (the JS mapping the
+  evaluator's own bindings use) rather than `sc-api`'s wire mapping, so a `Decimal` child field
+  binds as a number rather than a string — which is what the translated SQL compares.
+- [x] Tests: 32 in `sc-action` (23 unit + 9 integration over two files) and 99 + 6 in `sc-expr`.
+  The store round-trip includes an in-place update that *clears* the optional fields, listing
+  order, and delete-twice; the strict read is exercised by writing an unknown event straight into
+  the column and asserting the error names the trigger and the value. **Eleven save refusals in
+  one table-driven test**, each asserting the words the admin sees *and* that nothing was stored:
+  unknown action, missing required setting, table event with no table, a table that does not
+  exist, a non-table event given a table, an unparseable `only_if`, an unknown field, an unknown
+  `old.x`, an operation flag, an `only_if` with no row to test, and an empty name — plus the
+  out-of-range `min_role` and the duplicate name. The cache test drops `books` *behind the
+  server's back* and asserts the trigger leaves the live set with `no table named` as its issue,
+  that `require` says "not usable" rather than "not found", and that the row is still stored so
+  repairing the table brings it back.
 
 ## Phase 3 — The elementary actions
 

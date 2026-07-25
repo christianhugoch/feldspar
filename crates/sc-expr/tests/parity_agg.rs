@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 
 use sc_db_postgres::PgParam;
 use sc_expr::{
-    DenoEvaluator, Formula, FormulaCall, JsEvaluator, Operation, SchemaShape, TableShape, UserEnv,
-    translate,
+    DenoEvaluator, Env, Formula, FormulaCall, JsEvaluator, Operation, SchemaShape, TableShape,
+    UserEnv, translate,
 };
 use sc_query::{Expr as QExpr, Select, Source, SqlDialect, Statement, Value};
 use sc_test_harness::TestDb;
@@ -138,8 +138,14 @@ async fn check(
     let user_map = user.map(|u| u.iter().map(|(k, v)| (k.to_string(), v.clone())).collect());
 
     let env = UserEnv::Inline(user_map.clone());
-    let pred = translate(&formula, Operation::Read, &env, &shape(), "orders")
-        .unwrap_or_else(|e| panic!("{src}: translate: {e}"));
+    let pred = translate(
+        &formula,
+        Operation::Read,
+        &Env::new(&env),
+        &shape(),
+        "orders",
+    )
+    .unwrap_or_else(|e| panic!("{src}: translate: {e}"));
     let symbolic = sql_verdict(client, pred).await;
 
     let reified = ev
@@ -148,6 +154,7 @@ async fn check(
             op: Operation::Read,
             row: relation_binding(lines),
             user: user_map,
+            ambient: Default::default(),
         })
         .await
         .unwrap_or_else(|e| panic!("{src}: reified: {e}"));

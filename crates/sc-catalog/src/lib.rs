@@ -22,6 +22,7 @@ mod catalog;
 mod field;
 mod field_meta;
 mod file_stores;
+mod prefetch;
 mod provider;
 mod rls;
 mod table;
@@ -41,6 +42,7 @@ pub use file_stores::{
     file_store_field_references, list_file_stores, load_file_store, load_file_store_by_name,
     resolve_options, save_file_store,
 };
+pub use prefetch::prefetch_bindings;
 pub use provider::{DriverTableProvider, TableProvider};
 pub use rls::{CallerContext, ROLE_GUC, disable_rls, enable_rls, run_in_context};
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};

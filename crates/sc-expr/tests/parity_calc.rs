@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use sc_db_postgres::PgParam;
 use sc_expr::{
-    CalcFields, DenoEvaluator, Formula, FormulaCall, JsEvaluator, Operation, SchemaShape,
+    CalcFields, DenoEvaluator, Env, Formula, FormulaCall, JsEvaluator, Operation, SchemaShape,
     TableShape, UserEnv, translate_value,
 };
 use sc_query::{Expr as QExpr, Projection, Select, Source, SqlDialect, Statement, Value};
@@ -88,8 +88,14 @@ fn bindings(extra: &[(&str, Value)]) -> BTreeMap<String, Value> {
 /// The symbolic value: project `(expr)::text` for book 1 and read it back.
 async fn sql_value(client: &tokio_postgres::Client, calc: &CalcFields, src: &str) -> String {
     let formula = Formula::parse(src).unwrap();
-    let value = translate_value(&formula, &UserEnv::Inline(None), &shape(), "books", calc)
-        .unwrap_or_else(|e| panic!("{src}: translate_value: {e}"));
+    let user = UserEnv::Inline(None);
+    let value = translate_value(
+        &formula,
+        &Env::new(&user).with_calc(calc),
+        &shape(),
+        "books",
+    )
+    .unwrap_or_else(|e| panic!("{src}: translate_value: {e}"));
     let as_text = QExpr::Cast {
         expr: Box::new(value),
         type_name: "text".into(),
@@ -113,6 +119,7 @@ async fn reified_value(ev: &DenoEvaluator, src: &str, extra: &[(&str, Value)]) -
             op: Operation::Read,
             row: bindings(extra),
             user: None,
+            ambient: Default::default(),
         })
         .await
         .unwrap_or_else(|e| panic!("{src}: eval_value: {e}"));

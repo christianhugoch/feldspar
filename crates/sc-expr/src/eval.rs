@@ -26,8 +26,9 @@
 //!
 //! One evaluation binds, by name: every row field the formula reads, every
 //! Ⱶ-join identifier (to its **prefetched** value — the evaluator does no
-//! I/O; only the caller has a catalog), `user` (an object of the user's
-//! fields, or `null`), and the five operation flags from the [`Operation`].
+//! I/O; only the caller has a catalog), each in-scope [`Ambient`] object
+//! (`user`, and a trigger's `row`/`old` — an object of its fields, or `null`),
+//! and the five operation flags from the [`Operation`].
 //! Values are embedded as JSON in the script text, so nothing crosses the JS
 //! boundary except one script string and one boolean result.
 
@@ -48,11 +49,11 @@ use sc_error::Result;
 use sc_query::Value;
 
 #[cfg(feature = "eval")]
-use crate::analyze::OpFlag;
+use crate::analyze::{Ambient, OpFlag};
 use crate::formula::Formula;
 #[cfg(feature = "eval")]
 use crate::normalise::{is_join_ident, render_js};
-use crate::translate::Operation;
+use crate::translate::{AmbientValues, Operation};
 
 /// One formula evaluation: the formula, the operation, and the values in
 /// scope. Owned data, sent across the evaluator's thread boundary.
@@ -68,7 +69,19 @@ pub struct FormulaCall {
     pub row: BTreeMap<String, Value>,
     /// The current user's fields, or `None` when nobody is logged in
     /// (`user` binds to `null`).
+    ///
+    /// This is the [`Ambient::User`] object; it keeps its own field because
+    /// every caller has a caller, while `row`/`old` exist only for a trigger.
     pub user: Option<BTreeMap<String, Value>>,
+    /// The other ambient objects in scope — the triggering event's `row` and
+    /// `old` (decision 7). An entry present with `None` binds to `null` (`old`
+    /// on an insert); an absent entry is not bound at all, so naming it is the
+    /// "no value was bound" error rather than a silent `undefined`.
+    ///
+    /// Deliberately **not** the same as [`row`](FormulaCall::row), which is the
+    /// *bare* scope: the fields of the row the formula ranges over, bound as
+    /// top-level identifiers.
+    pub ambient: AmbientValues,
 }
 
 /// The evaluator seam. `DenoEvaluator` is the implementation; the trait exists
@@ -479,16 +492,26 @@ fn binding_for(call: &FormulaCall, ident: &str) -> Result<Option<serde_json::Val
     if let Some(flag) = OpFlag::from_ident(ident) {
         return Ok(Some(serde_json::Value::Bool(flag_value(call.op, flag))));
     }
-    if ident == "user" {
-        return Ok(Some(match &call.user {
-            None => serde_json::Value::Null,
-            Some(fields) => serde_json::Value::Object(
-                fields
-                    .iter()
-                    .map(|(k, v)| (k.clone(), value_to_json(v)))
-                    .collect(),
-            ),
-        }));
+    // An ambient object binds to its fields as one object, or to `null`. `user`
+    // is always in scope; `row`/`old` only when the caller supplied them, so an
+    // unsupplied one falls through to the "nothing was bound" error below rather
+    // than reading as `undefined`.
+    if let Some(ambient) = Ambient::from_ident(ident) {
+        let values = match ambient {
+            Ambient::User => Some(call.user.as_ref()),
+            other => call.ambient.get(&other).map(Option::as_ref),
+        };
+        if let Some(values) = values {
+            return Ok(Some(match values {
+                None => serde_json::Value::Null,
+                Some(fields) => serde_json::Value::Object(
+                    fields
+                        .iter()
+                        .map(|(k, v)| (k.clone(), value_to_json(v)))
+                        .collect(),
+                ),
+            }));
+        }
     }
     if let Some(v) = call.row.get(ident) {
         return Ok(Some(value_to_json(v)));
@@ -521,7 +544,6 @@ fn flag_value(op: Operation, flag: OpFlag) -> bool {
     }
 }
 
-#[cfg(feature = "eval")]
 /// A SQL [`Value`] as the JSON (hence JS) value the formula sees. The mapping
 /// is chosen to line up with the symbolic side: text-like values (UUIDs,
 /// dates, times) become strings — which is also what their SQL comparisons
@@ -531,7 +553,7 @@ fn flag_value(op: Operation, flag: OpFlag) -> bool {
 /// precision (JS numbers are f64); a non-finite float and a `Decimal` beyond
 /// f64 become `null`; `Bytes` has no JS literal and becomes `null` (a formula
 /// over a bytea column is not a supported thing).
-fn value_to_json(v: &Value) -> serde_json::Value {
+pub fn value_to_json(v: &Value) -> serde_json::Value {
     use serde_json::Value as J;
     match v {
         Value::Null => J::Null,
@@ -563,6 +585,7 @@ mod tests {
             op,
             row: BTreeMap::new(),
             user: None,
+            ambient: AmbientValues::new(),
         }
     }
 

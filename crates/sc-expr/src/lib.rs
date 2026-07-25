@@ -34,14 +34,14 @@ mod shape;
 mod translate;
 
 pub use agg::{AggUse, INVERSE};
-pub use analyze::{Analysis, FreeVars, JOIN, JoinPath, OpFlag};
+pub use analyze::{Ambient, AmbientUse, Analysis, FreeVars, JOIN, JoinPath, OpFlag};
 pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;
-pub use eval::{FormulaCall, JsEvaluator};
+pub use eval::{FormulaCall, JsEvaluator, value_to_json};
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
 pub use translate::{
-    CalcFields, Operation, TranslateError, USER_GUC, UserEnv, join_path_expr, translate,
-    translate_value, translate_with_calc,
+    AmbientValues, CalcFields, Env, Operation, TranslateError, USER_GUC, UserEnv, join_path_expr,
+    translate, translate_value,
 };

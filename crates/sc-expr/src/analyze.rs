@@ -1,14 +1,15 @@
 //! Free-variable analysis and validation against a [`SchemaShape`].
 //!
 //! Collection is pure syntax and happens once at parse time: every identifier
-//! not bound by an arrow parameter is free, and member accesses on `user` are
-//! recorded so `user.x` can be checked against the user table. Classification —
-//! is this identifier a field, a Ⱶ-join path, `user`, an operation flag, a
-//! whitelisted global, or a mistake — needs a shape, so it happens in
-//! [`Formula::validate`], which the admin API calls on save and the catalog
-//! merge calls on load.
+//! not bound by an arrow parameter is free, and member accesses on an **ambient
+//! object** ([`Ambient`] — `user`, `row`, `old`) are recorded so `user.x` can be
+//! checked against the user table and `row.x` against the triggering table.
+//! Classification — is this identifier a field, a Ⱶ-join path, an ambient
+//! object, an operation flag, a whitelisted global, or a mistake — needs a
+//! shape, so it happens in [`Formula::validate`], which the admin API calls on
+//! save and the catalog merge calls on load.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sc_error::{Error, Result};
 
@@ -40,6 +41,59 @@ pub(crate) const GLOBALS: &[&str] = &[
     "JSON",
     "Date",
 ];
+
+/// An **ambient object**: an identifier that binds to an object-or-null which
+/// the formula does not *range over*.
+///
+/// The scope rule the whole formula language follows is that bare identifiers
+/// name fields of the row a formula is about; everything else it can see is
+/// ambient and spelled as an object. `user` was the first (§7.3) and is always in
+/// scope, because every formula has a caller. `row` and `old` are the triggering
+/// event's row and its pre-update state, in scope only where a
+/// [`SchemaShape`](crate::SchemaShape) declares them — a trigger's `only_if` or
+/// an action's configuration — so an ownership formula naming `row` is still the
+/// unknown identifier it always was.
+///
+/// All three share one set of semantics, which is why they are one enum rather
+/// than three special cases: object-or-null, member access null-guarded (a null
+/// object yields null, never a throw), and members checked against the fields of
+/// whatever table the object stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Ambient {
+    /// `user` — the caller's fields, or null when nobody is logged in.
+    User,
+    /// `row` — the row the triggering event is about.
+    Row,
+    /// `old` — that row as it was before an update; null on any other event.
+    Old,
+}
+
+impl Ambient {
+    /// Every ambient object, in scope-declaration order.
+    pub const ALL: [Ambient; 3] = [Ambient::User, Ambient::Row, Ambient::Old];
+
+    /// The identifier this object is spelled with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Ambient::User => "user",
+            Ambient::Row => "row",
+            Ambient::Old => "old",
+        }
+    }
+
+    /// The ambient object an identifier names, if it names one. Whether it is
+    /// *in scope* is a separate question the shape answers
+    /// ([`SchemaShape::declares_ambient`](crate::SchemaShape::declares_ambient)).
+    pub fn from_ident(name: &str) -> Option<Ambient> {
+        Ambient::ALL.into_iter().find(|a| a.as_str() == name)
+    }
+}
+
+impl std::fmt::Display for Ambient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// The operation-flag variables (§ GOALS Authorization): which access operation
 /// a formula is being evaluated for.
@@ -74,13 +128,14 @@ impl OpFlag {
 /// The free variables of a formula, collected once at parse time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FreeVars {
-    /// Every free identifier, `user` and flags included.
+    /// Every free identifier, ambient objects and flags included.
     pub idents: BTreeSet<String>,
-    /// Property names statically accessed on `user` (`user.id` → `id`).
-    pub user_props: BTreeSet<String>,
-    /// True when `user` is indexed with a computed expression (`user[x]`),
-    /// which membership checks cannot see through.
-    pub user_dynamic: bool,
+    /// Property names statically accessed on each ambient object
+    /// (`user.id` → `User` ↦ `id`).
+    pub ambient_props: BTreeMap<Ambient, BTreeSet<String>>,
+    /// Ambient objects indexed with a computed expression (`user[x]`), which
+    /// membership checks cannot see through.
+    pub ambient_dynamic: BTreeSet<Ambient>,
 }
 
 /// Collect the free variables of a lowered AST.
@@ -100,17 +155,19 @@ fn walk(ast: &Ast, locals: &mut Vec<String>, out: &mut FreeVars) {
         }
         Ast::Str(_) | Ast::Num(_) | Ast::Bool(_) | Ast::Null => {}
         Ast::Member { obj, prop, .. } => {
-            // `user.x` is recorded for validation; `user` itself is still a
-            // free identifier like any other.
+            // `user.x` / `row.x` is recorded for validation; the object itself is
+            // still a free identifier like any other.
             if let Ast::Ident(name) = &**obj
-                && name == "user"
+                && let Some(amb) = Ambient::from_ident(name)
                 && !locals.iter().any(|l| l == name)
             {
                 match prop {
                     MemberProp::Static(p) => {
-                        out.user_props.insert(p.clone());
+                        out.ambient_props.entry(amb).or_default().insert(p.clone());
                     }
-                    MemberProp::Computed(_) => out.user_dynamic = true,
+                    MemberProp::Computed(_) => {
+                        out.ambient_dynamic.insert(amb);
+                    }
                 }
             }
             walk(obj, locals, out);
@@ -176,36 +233,84 @@ pub struct Analysis {
     pub join_paths: BTreeSet<JoinPath>,
     /// Operation flags used.
     pub flags: BTreeSet<OpFlag>,
-    /// Whether `user` appears at all.
-    pub uses_user: bool,
-    /// Property names statically accessed on `user`.
-    pub user_props: BTreeSet<String>,
-    /// True when `user` is indexed dynamically (`user[x]`).
-    pub user_dynamic: bool,
+    /// The ambient objects the formula reads, with what it reads from each. An
+    /// object absent from the map is one the formula never names.
+    pub ambient: BTreeMap<Ambient, AmbientUse>,
     /// Every aggregation over an incoming key (Phase 7), resolved against the
     /// shape — the prefetch plan now, the stored-calc trigger dependencies
     /// later.
     pub agg_uses: BTreeSet<AggUse>,
 }
 
+/// What a formula reads from one ambient object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AmbientUse {
+    /// Property names statically accessed (`user.id` → `id`) — the set validated
+    /// against the object's fields.
+    pub props: BTreeSet<String>,
+    /// True when the object is indexed dynamically (`user[x]`), which membership
+    /// checks cannot see through. Recorded, not rejected: it is legitimate
+    /// reified and simply untranslatable symbolically.
+    pub dynamic: bool,
+}
+
+impl Analysis {
+    /// Whether the formula names `ambient` at all.
+    pub fn uses(&self, ambient: Ambient) -> bool {
+        self.ambient.contains_key(&ambient)
+    }
+
+    /// The properties the formula reads from `ambient` (empty when unused).
+    pub fn ambient_props(&self, ambient: Ambient) -> impl Iterator<Item = &str> {
+        self.ambient
+            .get(&ambient)
+            .into_iter()
+            .flat_map(|use_| use_.props.iter().map(String::as_str))
+    }
+
+    /// The first ambient object used that is **not** in `allowed` — what a caller
+    /// with a narrower scope refuses by name.
+    ///
+    /// A calculated field allows none of them, an ownership formula only `user`,
+    /// a trigger formula all three; each is one call rather than three copies of
+    /// the same walk.
+    pub fn ambient_outside(&self, allowed: &[Ambient]) -> Option<Ambient> {
+        self.ambient
+            .keys()
+            .copied()
+            .find(|amb| !allowed.contains(amb))
+    }
+}
+
 impl Formula {
     /// Check every free variable of this formula against `shape`, classifying
-    /// each as a field of `table`, a Ⱶ-join path, `user`, an operation flag or
-    /// a global — anything else is an error naming the identifier and the
-    /// table. The admin API runs this on save; the catalog merge runs it on
-    /// load (an already-stored formula that stops validating is reported and
-    /// grants nothing).
+    /// each as a field of `table`, a Ⱶ-join path, an in-scope [`Ambient`] object,
+    /// an operation flag or a global — anything else is an error naming the
+    /// identifier and the table. The admin API runs this on save; the catalog
+    /// merge runs it on load (an already-stored formula that stops validating is
+    /// reported and grants nothing).
+    ///
+    /// Which ambient objects are in scope is the shape's to declare: `user`
+    /// always is, `row`/`old` only where a trigger's shape says so, so a formula
+    /// naming `row` in an ownership setting is refused as the unknown identifier
+    /// it is rather than quietly evaluating to null.
     pub fn validate(&self, shape: &SchemaShape, table: &str) -> Result<Analysis> {
         let table_shape = shape
             .tables
             .get(table)
             .ok_or_else(|| invalid(table, format_args!("unknown table `{table}`")))?;
         let free = self.free_vars();
-        let mut analysis = Analysis {
-            user_props: free.user_props.clone(),
-            user_dynamic: free.user_dynamic,
-            ..Analysis::default()
-        };
+        let mut analysis = Analysis::default();
+        for (amb, props) in &free.ambient_props {
+            if shape.declares_ambient(*amb) {
+                analysis.ambient.entry(*amb).or_default().props = props.clone();
+            }
+        }
+        for amb in &free.ambient_dynamic {
+            if shape.declares_ambient(*amb) {
+                analysis.ambient.entry(*amb).or_default().dynamic = true;
+            }
+        }
         // Aggregations first: an inverse-relation identifier is only meaningful
         // as the root of a curated chain, so the whole chain is validated here
         // and its relation identifier is *skipped* in the free-variable loop.
@@ -213,8 +318,10 @@ impl Formula {
         for ident in &free.idents {
             if let Some(flag) = OpFlag::from_ident(ident) {
                 analysis.flags.insert(flag);
-            } else if ident == "user" {
-                analysis.uses_user = true;
+            } else if let Some(amb) =
+                Ambient::from_ident(ident).filter(|amb| shape.declares_ambient(*amb))
+            {
+                analysis.ambient.entry(amb).or_default();
             } else if table_shape.fields.contains_key(ident) {
                 // Field names win over globals, matching the reified scope
                 // where row fields are bound over JavaScript's own globals.
@@ -231,12 +338,19 @@ impl Formula {
                 return Err(invalid(table, format_args!("unknown identifier `{ident}`")));
             }
         }
-        if let Some(user_fields) = &shape.user_fields {
-            for prop in &free.user_props {
-                if !user_fields.contains(prop) {
+        // Every ambient member checked against the fields of whatever the object
+        // stands for, where the caller has declared them. An undeclared field set
+        // means "the caller does not know", which skips the check rather than
+        // rejecting every access.
+        for (amb, use_) in &analysis.ambient {
+            let Some(fields) = shape.ambient_field_set(*amb) else {
+                continue;
+            };
+            for prop in &use_.props {
+                if !fields.contains(prop) {
                     return Err(invalid(
                         table,
-                        format_args!("`user.{prop}`: the user has no field `{prop}`"),
+                        format_args!("`{amb}.{prop}`: `{amb}` has no field `{prop}`"),
                     ));
                 }
             }
@@ -379,6 +493,85 @@ mod tests {
         Formula::parse(src).unwrap().validate(&shape(), "books")
     }
 
+    /// The shape a trigger's formula is validated against: `row`/`old` in scope
+    /// with the triggering table's fields (decision 7).
+    fn trigger_shape() -> SchemaShape {
+        let event_fields = ["id", "title", "pages", "owner"];
+        shape()
+            .ambient_fields(Ambient::Row, Some(event_fields))
+            .ambient_fields(Ambient::Old, Some(event_fields))
+    }
+
+    fn validate_trigger(src: &str) -> Result<Analysis> {
+        Formula::parse(src)
+            .unwrap()
+            .validate(&trigger_shape(), "books")
+    }
+
+    #[test]
+    fn ambient_row_and_old_are_in_scope_only_where_declared() {
+        // Declared: classified as ambient objects, with their properties recorded
+        // and the bare field scope untouched.
+        let a = validate_trigger("title !== old.title && row.owner === user.id").unwrap();
+        assert_eq!(a.fields, BTreeSet::from(["title".to_string()]));
+        assert!(a.uses(Ambient::Old) && a.uses(Ambient::Row) && a.uses(Ambient::User));
+        assert_eq!(a.ambient_props(Ambient::Old).collect::<Vec<_>>(), ["title"]);
+        assert_eq!(a.ambient_props(Ambient::Row).collect::<Vec<_>>(), ["owner"]);
+
+        // Undeclared (an ownership formula's shape): the same identifier is the
+        // unknown identifier it always was — not a silent null.
+        let err = validate("row.owner === user.id").unwrap_err().to_string();
+        assert!(err.contains("unknown identifier `row`"), "got: {err}");
+        assert!(!validate("old !== null").is_ok());
+    }
+
+    #[test]
+    fn an_unknown_ambient_member_is_refused_by_name() {
+        let err = validate_trigger("old.shoe_size === 1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`old.shoe_size`"), "got: {err}");
+        assert!(err.contains("has no field `shoe_size`"), "got: {err}");
+        // `user`'s check is the same one, worded the same way.
+        let err = validate_trigger("user.shoe_size === 1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`user.shoe_size`"), "got: {err}");
+    }
+
+    #[test]
+    fn ambient_outside_the_allowed_set_is_reported_for_the_caller_to_refuse() {
+        let a = validate_trigger("row.title === title").unwrap();
+        // A calc field allows no ambient object at all; an ownership formula only
+        // `user`; a trigger formula all three.
+        assert_eq!(a.ambient_outside(&[]), Some(Ambient::Row));
+        assert_eq!(a.ambient_outside(&[Ambient::User]), Some(Ambient::Row));
+        assert_eq!(a.ambient_outside(&Ambient::ALL), None);
+        let user_only = validate("owner === user.id").unwrap();
+        assert_eq!(user_only.ambient_outside(&[Ambient::User]), None);
+        assert_eq!(user_only.ambient_outside(&[]), Some(Ambient::User));
+    }
+
+    #[test]
+    fn an_ambient_object_shadows_a_field_of_the_same_name_where_it_is_in_scope() {
+        // A table with a field called `row` keeps it in an ownership formula…
+        let with_row_field = SchemaShape::new().table("t", TableShape::new().field("row"));
+        let a = Formula::parse("row === 1")
+            .unwrap()
+            .validate(&with_row_field, "t")
+            .unwrap();
+        assert_eq!(a.fields, BTreeSet::from(["row".to_string()]));
+        assert!(!a.uses(Ambient::Row));
+        // …and loses it to the ambient object inside a trigger formula, which is
+        // the same rule `user` has always had. Documented, not accidental.
+        let shadowed = with_row_field.ambient_fields(Ambient::Row, None::<Vec<String>>);
+        let a = Formula::parse("row === 1")
+            .unwrap()
+            .validate(&shadowed, "t")
+            .unwrap();
+        assert!(a.fields.is_empty() && a.uses(Ambient::Row));
+    }
+
     #[test]
     fn fields_user_and_flags_classify() {
         let a = validate("_read || (owner === user.id && title !== '')").unwrap();
@@ -387,8 +580,11 @@ mod tests {
             BTreeSet::from(["owner".to_string(), "title".to_string()])
         );
         assert_eq!(a.flags, BTreeSet::from([OpFlag::Read]));
-        assert!(a.uses_user);
-        assert_eq!(a.user_props, BTreeSet::from(["id".to_string()]));
+        assert!(a.uses(Ambient::User));
+        assert_eq!(
+            a.ambient_props(Ambient::User).collect::<Vec<_>>(),
+            vec!["id"]
+        );
         assert!(a.join_paths.is_empty());
     }
 
@@ -462,19 +658,18 @@ mod tests {
         assert!(err.contains("no field `shoe_size`"), "got: {err}");
         // With user fields undeclared, the same formula passes — the caller
         // said it does not know, so nothing can be contradicted.
-        let mut unknowing = shape();
-        unknowing.user_fields = None;
+        let unknowing = shape().ambient_fields(Ambient::User, None::<Vec<String>>);
         let a = Formula::parse("owner === user.shoe_size")
             .unwrap()
             .validate(&unknowing, "books")
             .unwrap();
-        assert!(a.uses_user);
+        assert!(a.uses(Ambient::User));
     }
 
     #[test]
     fn dynamic_user_access_is_recorded_not_rejected() {
         let a = validate("owner === user[title]").unwrap();
-        assert!(a.user_dynamic);
+        assert!(a.ambient[&Ambient::User].dynamic);
         // The computed index is itself a free variable and classified.
         assert!(a.fields.contains("title"));
     }

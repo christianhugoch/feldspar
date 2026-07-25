@@ -1883,7 +1883,13 @@ fn validate_ownership_settings(
             sc_expr::Operation::Update,
             sc_expr::Operation::Delete,
         ] {
-            if let Err(e) = sc_expr::translate_with_calc(&formula, op, &env, &shape, table, &calc) {
+            if let Err(e) = sc_expr::translate(
+                &formula,
+                op,
+                &sc_expr::Env::new(&env).with_calc(&calc),
+                &shape,
+                table,
+            ) {
                 return Err(Error::invalid(format!(
                     "cannot enable row-level security: {e}"
                 )));
@@ -1912,7 +1918,7 @@ fn validate_calc_field(
     let analysis = formula
         .validate(&shape, table)
         .map_err(|e| Error::invalid(format!("calculated field `{field}`: {e}")))?;
-    if analysis.uses_user || !analysis.flags.is_empty() {
+    if analysis.uses(sc_expr::Ambient::User) || !analysis.flags.is_empty() {
         return Err(Error::invalid(format!(
             "calculated field `{field}`: a calculated field cannot use `user` or the operation flags"
         )));

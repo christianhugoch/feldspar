@@ -2,6 +2,69 @@
 
 Changes in reverse chronological order.
 
+## Actions & triggers: `_sc_triggers`, ambient objects, and the live trigger set (Phase 2)
+
+The trigger itself (TODO Phase 2): what it is, where it is stored, everything that can be wrong
+with it, and the cached set an event will be matched against. Two of the six pieces are changes to
+crates *below* `sc-action`, because the formula language had to learn one thing first.
+
+- **`sc-expr`: `user` generalised into ambient objects** (TODO decision 7). The new `Ambient` enum
+  (`user`/`row`/`old`) replaces the `user`-shaped special cases throughout: free-variable
+  collection records properties per object, validation checks each object's members against its
+  declared fields (`` `old.shoe_size`: `old` has no field `shoe_size` ``), the translator has one
+  set of `ambient_*` methods where it had four `user_*` ones, and the reified binder binds each
+  in-scope object as an object or `null`. The `Guc` env is untouched — an RLS policy has no
+  triggering row, so only `user` has a GUC rendering, now explicit in one place
+  (`Translator::guc_types`).
+- **Scope is declared, not assumed.** `SchemaShape.ambient` maps each object to its fields; `user`
+  is always in scope (every formula has a caller), `row`/`old` only where a trigger's shape
+  declares them. So an ownership formula naming `row` still gets `unknown identifier` rather than
+  silently reading null, and a table with a field *called* `row` keeps that field everywhere
+  except inside a trigger's formula — the same shadowing `user` has always had, now pinned by a
+  test. `old` in scope but **null** (an insert) is distinct from `old` out of scope, exactly as
+  `UserEnv::Inline(None)` is distinct from no user env.
+- **One `Env` instead of three trailing parameters.** `translate_with_calc` is gone: the user env,
+  the ambient values and the calc fields became `Env::new(&user).with_ambient(…).with_calc(…)`, so
+  `sc-expr` exposes one `translate` and one `translate_value` where it had three entry points.
+- **Parity extended over the new objects** (`symbolic_and_reified_agree_on_the_ambient_objects`,
+  10 cases): `row.x` compared against a column of the filtered table, `old` null on an insert
+  (null member *and* `old === null` true), the "this field just changed" only-if, a null field of
+  a present object, and all three objects in one formula. Parity is the gate the trigger
+  machinery stands on, so the new scope had to pass it before anything used it.
+- **`sc-catalog::prefetch_bindings`**: the Ⱶ-join and Ↄ-relation resolution that `sc-api`'s
+  ownership checks built for the write path moved down a layer, because a trigger's `only_if`
+  needs exactly the same bindings and `sc-action` sits below `sc-api`. One implementation, two
+  callers — the drift it prevents would have been silent (a path that resolves in one crate and
+  binds null in the other). The moved code now uses `sc_expr::value_to_json`, the JS mapping the
+  evaluator's own bindings use, so a `Decimal` child field binds as a number rather than a string:
+  a small parity fix that came out of the move.
+- **`Trigger` + `_sc_triggers`** (`sc-action`): the §9 storage pattern — id/name/description/
+  attributes, `name` UNIQUE (it is what an app, an API path and a Run button reference), strict
+  reads, a name-clash check that names the other trigger before the constraint can, and NULL for a
+  cleared optional field so "cleared" and "never set" read alike. `enabled` is a sparse attribute
+  whose accessor removes the key when enabling.
+- **Validation, in one place, on save** — and the same function again on load. The action resolves
+  in the registry and its configuration validates against the spec it declares; `min_role` is on
+  the 1–100 scale; a table event names a real table and a non-table event names none (both
+  directions: a `login` trigger given a table is a misunderstanding worth naming); an `only_if`
+  parses and validates with `user`/`row`/`old` in scope and the **operation flags refused by
+  name** — the trigger's own event *is* the operation. An `only_if` on a channel-less event is
+  refused: there is no row to test, and accepting a condition that can never be true is worse than
+  saying so.
+- **`Triggers`, the cached live set**: loaded and validated once, `reload()`ed after a save,
+  matched by `(kind, channel)`. A stored trigger that no longer validates is **dropped with its
+  reason kept** (`issues()`) rather than firing on a guess — fail closed, as an invalid ownership
+  formula grants nothing. A *disabled* trigger is filtered at match time instead, so it stays
+  listed and editable; and `require()` separates "never defined" (`NotFound`) from "defined but
+  not usable", which carries the reason, because those call for different fixes.
+- **Tests**: 32 in `sc-action` (23 unit + 9 integration), 99 + 6 in `sc-expr`. The headline is a
+  table-driven test of **eleven save refusals**, each asserting the words the admin sees *and*
+  that nothing was stored; the strict reader is exercised by writing an unknown event straight
+  into the column; and the cache test drops the trigger's table behind the server's back, then
+  asserts the trigger leaves the live set with `no table named books` as its issue, that
+  `require` reports "not usable" rather than "not found", and that the row survives so repairing
+  the table brings the trigger back.
+
 ## Repo hygiene: the CI gates go green under the current stable toolchain
 
 No behaviour changed; both fixes are toolchain drift the workspace had accumulated.

@@ -16,9 +16,11 @@
 //!   the value identical to SQL's in value position too (`(a < b) === (c < d)`
 //!   matches `IS NOT DISTINCT FROM` exactly). The IIFE evaluates operands once
 //!   and adds no scope leakage.
-//! - **`user.x` is null-safe**: `(user === null ? null : user.x)`, because
-//!   `user` *is* null when nobody is logged in and raw JS would throw. Null in,
-//!   null out — the same answer both `UserEnv`s give.
+//! - **An ambient object's members are null-safe**: `user.x` renders as
+//!   `(user === null ? null : user.x)`, because `user` *is* null when nobody is
+//!   logged in and raw JS would throw. Null in, null out — the same answer both
+//!   `UserEnv`s give. `row`/`old` (decision 7) get the same guard, which is what
+//!   makes `old.x` on an insert null rather than a thrown `TypeError`.
 //! - **`!`, `&&`, `||`, `?:`, `??` render natively.** JS logic is two-valued
 //!   over truthiness (with `null` falsy), and the translator was written to
 //!   that spec: `!P` is SQL `P IS DISTINCT FROM TRUE`, `AND`/`OR`/`CASE`/
@@ -29,7 +31,7 @@
 //! Everything else renders as written. The renderer is a pure function of the
 //! AST, unit-testable without V8 in the loop.
 
-use crate::analyze::JOIN;
+use crate::analyze::{Ambient, JOIN};
 use crate::ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 
 /// Render the normalised JavaScript for `ast`. The result is an expression
@@ -49,10 +51,15 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
         Ast::Num(n) => render_num(*n, out),
         Ast::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Ast::Null => out.push_str("null"),
-        Ast::Member { obj, prop, .. } if is_free_user(obj, locals) => {
-            // `user` is object-or-null by contract; the guard makes a missing
-            // user read as null rather than throw. The `?.` flag is subsumed.
-            out.push_str("(user === null ? null : user");
+        Ast::Member { obj, prop, .. } if free_ambient(obj, locals).is_some() => {
+            // An ambient object (`user`/`row`/`old`) is object-or-null by
+            // contract; the guard makes a null one read as null rather than
+            // throw. The `?.` flag is subsumed.
+            let name = free_ambient(obj, locals).map_or("user", Ambient::as_str);
+            out.push('(');
+            out.push_str(name);
+            out.push_str(" === null ? null : ");
+            out.push_str(name);
             match prop {
                 MemberProp::Static(p) => {
                     out.push('.');
@@ -228,9 +235,18 @@ fn guarded(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>, out: &mut Strin
     out.push_str("))");
 }
 
-/// `user`, unshadowed by an arrow parameter.
-fn is_free_user(ast: &Ast, locals: &[String]) -> bool {
-    matches!(ast, Ast::Ident(name) if name == "user" && !locals.iter().any(|l| l == name))
+/// The ambient object this expression names, unshadowed by an arrow parameter.
+///
+/// Every ambient object gets the same null guard, and it is applied on syntax
+/// alone: the normaliser has no shape, so it cannot know whether `row` is in
+/// scope here. Guarding one that is not costs nothing — a *field* called `row`
+/// is a scalar, and `(row === null ? null : row.x)` is the same `null` its
+/// member access would have produced anyway.
+fn free_ambient(ast: &Ast, locals: &[String]) -> Option<Ambient> {
+    match ast {
+        Ast::Ident(name) if !locals.iter().any(|l| l == name) => Ambient::from_ident(name),
+        _ => None,
+    }
 }
 
 /// Whether `ast` is a `…​.maxBy(…)` / `…​.minBy(…)` call — whose result is a

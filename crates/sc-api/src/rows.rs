@@ -18,7 +18,7 @@
 use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
-use sc_expr::{CalcFields, Formula, TranslateError, UserEnv, translate_value};
+use sc_expr::{CalcFields, Env, Formula, TranslateError, UserEnv, translate_value};
 use sc_query::{
     Assignment, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
 };
@@ -313,7 +313,12 @@ fn calc_projections(catalog: &Catalog, table: &Table) -> Result<Vec<Projection>>
         let Some(formula) = calc.get(&field.base.name) else {
             continue;
         };
-        match translate_value(formula, &env, &shape, &table.name, &calc) {
+        match translate_value(
+            formula,
+            &Env::new(&env).with_calc(&calc),
+            &shape,
+            &table.name,
+        ) {
             Ok(expr) => out.push(Projection::expr_as(expr, field.base.name.clone())),
             Err(TranslateError::Untranslatable(_)) => {}
             Err(TranslateError::Error(e)) => return Err(e),

@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 
 use sc_expr::{
-    DenoEvaluator, Formula, FormulaCall, JsEvaluator, Operation, SchemaShape, TableShape, UserEnv,
-    translate,
+    Ambient, AmbientValues, DenoEvaluator, Env, Formula, FormulaCall, JsEvaluator, Operation,
+    SchemaShape, TableShape, UserEnv, translate,
 };
 use sc_query::{Expr as QExpr, Select, Source, SqlDialect, Statement, Value};
 use sc_test_harness::TestDb;
@@ -163,7 +163,7 @@ async fn check(
     set_row(client, &row).await;
 
     let env = UserEnv::Inline(user.map(user_map));
-    let pred = translate(&formula, op, &env, &shape(), "books")
+    let pred = translate(&formula, op, &Env::new(&env), &shape(), "books")
         .unwrap_or_else(|e| panic!("{src}: translate: {e}"));
     let symbolic = sql_verdict(client, pred).await;
 
@@ -173,6 +173,7 @@ async fn check(
             op,
             row: row.bindings(),
             user: user.map(user_map),
+            ambient: Default::default(),
         })
         .await
         .unwrap_or_else(|e| panic!("{src}: reified: {e}"));
@@ -503,7 +504,7 @@ async fn guc_mode_matches_reified_against_a_real_setting() {
         };
         set_row(client, &row).await;
         let formula = Formula::parse(src).expect(src);
-        let pred = translate(&formula, Operation::Read, &env, &shape, "books")
+        let pred = translate(&formula, Operation::Read, &Env::new(&env), &shape, "books")
             .unwrap_or_else(|e| panic!("{src}: translate: {e}"));
         let symbolic = sql_verdict(client, pred).await;
         let reified = ev
@@ -512,10 +513,182 @@ async fn guc_mode_matches_reified_against_a_real_setting() {
                 op: Operation::Read,
                 row: row.bindings(),
                 user: user.map(user_map),
+                ambient: Default::default(),
             })
             .await
             .unwrap_or_else(|e| panic!("{src}: reified: {e}"));
         assert_eq!(symbolic, reified, "{src} (guc, user={:?})", user.is_some());
         assert_eq!(symbolic, expect, "{src} (guc, user={:?})", user.is_some());
+    }
+}
+
+/// Parity over the **ambient objects** `row` and `old` (decision 7): the
+/// triggering event's row, inlined as literals symbolically and bound as an
+/// object reified.
+///
+/// This is the gate the trigger machinery stands on. The cases that matter are
+/// the null ones, because they are where JS and SQL diverge if nobody specifies
+/// them: an object that is in scope but **null** (`old` on an insert) must read
+/// as null rather than throw in V8, and as SQL `NULL` rather than a missing
+/// binding — and `old === null` must be *true* on both sides.
+#[tokio::test]
+async fn symbolic_and_reified_agree_on_the_ambient_objects() {
+    let db = TestDb::new().await.expect("test db");
+    let client = db.client().await.expect("client");
+    create_schema(&client).await;
+    let ev = DenoEvaluator::new();
+
+    // `row`/`old` in scope with the same fields the table has — a trigger on
+    // `books` whose formula also filters `books`.
+    let shape = shape()
+        .ambient_fields(Ambient::Row, Some(["owner", "pages", "title"]))
+        .ambient_fields(Ambient::Old, Some(["owner", "pages", "title"]));
+
+    // (formula, the row in the table, ambient row, ambient old, expected)
+    #[allow(clippy::type_complexity)]
+    let cases: &[(
+        &str,
+        Row,
+        Option<&[(&str, Value)]>,
+        Option<&[(&str, Value)]>,
+        bool,
+    )] = &[
+        // A value from the event compared against a column of the filtered table.
+        (
+            "owner === row.owner",
+            Row {
+                owner: Some("u1"),
+                ..Row::default()
+            },
+            Some(&[("owner", Value::Text("u1".into()))]),
+            None,
+            true,
+        ),
+        (
+            "owner === row.owner",
+            Row {
+                owner: Some("u1"),
+                ..Row::default()
+            },
+            Some(&[("owner", Value::Text("u2".into()))]),
+            None,
+            false,
+        ),
+        // `old` null (an insert): the member is null, so the comparison is false…
+        (
+            "title === old.title",
+            Row {
+                title: Some("t"),
+                ..Row::default()
+            },
+            Some(&[("title", Value::Text("t".into()))]),
+            None,
+            false,
+        ),
+        // …and `old === null` is the test for "this is not an update".
+        (
+            "old === null",
+            Row::default(),
+            Some(&[("title", Value::Text("t".into()))]),
+            None,
+            true,
+        ),
+        // `old` present: the classic "the field just changed" only-if.
+        (
+            "title !== old.title",
+            Row {
+                title: Some("new"),
+                ..Row::default()
+            },
+            Some(&[("title", Value::Text("new".into()))]),
+            Some(&[("title", Value::Text("old".into()))]),
+            true,
+        ),
+        (
+            "title !== old.title",
+            Row {
+                title: Some("same"),
+                ..Row::default()
+            },
+            Some(&[("title", Value::Text("same".into()))]),
+            Some(&[("title", Value::Text("same".into()))]),
+            false,
+        ),
+        // A null *field* of a present object is still null, not absent — so the
+        // comparison is false on both sides (and its negation true).
+        (
+            "title === row.title",
+            Row {
+                title: Some("t"),
+                ..Row::default()
+            },
+            Some(&[("title", Value::Null)]),
+            None,
+            false,
+        ),
+        (
+            "title !== row.title",
+            Row {
+                title: Some("t"),
+                ..Row::default()
+            },
+            Some(&[("title", Value::Null)]),
+            None,
+            true,
+        ),
+        // Arithmetic and ordered comparison over ambient values.
+        (
+            "pages > row.pages",
+            Row {
+                pages: Some(10),
+                ..Row::default()
+            },
+            Some(&[("pages", Value::Int(5))]),
+            None,
+            true,
+        ),
+        // Both objects and the user in one formula.
+        (
+            "user && row.owner === user.id && old === null",
+            Row::default(),
+            Some(&[("owner", Value::Text("u1".into()))]),
+            None,
+            true,
+        ),
+    ];
+
+    for (src, row, amb_row, amb_old, expect) in cases {
+        set_row(&client, row).await;
+        let formula = Formula::parse(src).expect(src);
+        let user = [("id", Value::Text("u1".into()))];
+        let user_env = UserEnv::Inline(Some(user_map(&user)));
+
+        let ambient: AmbientValues = BTreeMap::from([
+            (Ambient::Row, amb_row.map(user_map)),
+            (Ambient::Old, amb_old.map(user_map)),
+        ]);
+        let pred = translate(
+            &formula,
+            Operation::Update,
+            &Env::new(&user_env).with_ambient(&ambient),
+            &shape,
+            "books",
+        )
+        .unwrap_or_else(|e| panic!("{src}: translate: {e}"));
+        let symbolic = sql_verdict(&client, pred).await;
+
+        let reified = ev
+            .eval(FormulaCall {
+                formula,
+                op: Operation::Update,
+                row: row.bindings(),
+                user: Some(user_map(&user)),
+                ambient,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{src}: reified: {e}"));
+
+        assert_eq!(symbolic, reified, "{src}: evaluators disagree");
+        assert_eq!(symbolic, *expect, "{src}: verdict");
     }
 }

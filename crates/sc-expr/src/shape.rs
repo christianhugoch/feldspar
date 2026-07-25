@@ -8,17 +8,35 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::analyze::Ambient;
+
 /// The tables a formula may reach: the formula's own table plus every table
-/// reachable through Ⱶ-join paths, keyed by table name.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// reachable through Ⱶ-join paths, keyed by table name — plus which ambient
+/// objects are in scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaShape {
     /// Per-table field shapes.
     pub tables: BTreeMap<String, TableShape>,
-    /// The fields of the `user` object (the user table's columns as the formula
-    /// sees them: `id`, `role`, and the admin-added extras). `None` means the
-    /// caller does not know — validation then skips `user.x` membership checks
-    /// rather than rejecting every one.
-    pub user_fields: Option<BTreeSet<String>>,
+    /// The [`Ambient`] objects in scope, each with its fields when the caller
+    /// knows them (`None` = "the caller does not know", which skips membership
+    /// checks rather than rejecting every access).
+    ///
+    /// Presence is scope: a shape declares `user` always (every formula has a
+    /// caller — [`Default`] puts it here), and `row`/`old` only where a trigger's
+    /// formula may see them. An ambient object that is *not* declared is not a
+    /// special identifier at all, so an ownership formula naming `row` gets the
+    /// unknown-identifier error it deserves.
+    pub ambient: BTreeMap<Ambient, Option<BTreeSet<String>>>,
+}
+
+impl Default for SchemaShape {
+    /// No tables, and `user` in scope with unknown fields — the base language.
+    fn default() -> SchemaShape {
+        SchemaShape {
+            tables: BTreeMap::new(),
+            ambient: BTreeMap::from([(Ambient::User, None)]),
+        }
+    }
 }
 
 /// One table's fields, keyed by field name.
@@ -67,13 +85,40 @@ impl SchemaShape {
     }
 
     /// Declare the user object's fields (enables `user.x` validation).
-    pub fn user_fields<I, S>(mut self, fields: I) -> SchemaShape
+    pub fn user_fields<I, S>(self, fields: I) -> SchemaShape
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.user_fields = Some(fields.into_iter().map(Into::into).collect());
+        self.ambient_fields(Ambient::User, Some(fields))
+    }
+
+    /// Put `ambient` in scope, with its fields when they are known.
+    ///
+    /// `None` declares the object in scope but its fields unchecked;
+    /// `Some(fields)` also enables the membership check on every `ambient.x`.
+    pub fn ambient_fields<I, S>(mut self, ambient: Ambient, fields: Option<I>) -> SchemaShape
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.ambient.insert(
+            ambient,
+            fields.map(|f| f.into_iter().map(Into::into).collect()),
+        );
         self
+    }
+
+    /// Whether `ambient` is in scope for a formula validated against this shape.
+    pub fn declares_ambient(&self, ambient: Ambient) -> bool {
+        self.ambient.contains_key(&ambient)
+    }
+
+    /// The declared fields of `ambient`, or `None` when it is out of scope or its
+    /// fields are unknown — either way, there is nothing to check a member
+    /// against.
+    pub fn ambient_field_set(&self, ambient: Ambient) -> Option<&BTreeSet<String>> {
+        self.ambient.get(&ambient)?.as_ref()
     }
 
     /// The key fields pointing *at* `table`: every `(child_table, key_field)`

@@ -22,6 +22,11 @@ sc-catalog.workspace = true
 sc-expr.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+# `_sc_triggers` is stored metadata, so this crate speaks the query language and
+# reads rows back out of the driver (§9's storage pattern, as `file_stores` does).
+sc-query.workspace = true
+sc-db.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 # The `ActionContext` contract needs a real `Catalog`, so it is pinned against a

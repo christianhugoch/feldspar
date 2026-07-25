@@ -2,11 +2,13 @@
 //!
 //! This crate owns the **event → action** half of the trigger system: what can
 //! happen ([`Event`]), what can be done about it ([`Action`]), what one run of an
-//! action can see ([`ActionContext`]), and which actions exist
-//! ([`ActionRegistry`]). The trigger that binds the two — its storage in
-//! `_sc_triggers`, its validation and the dispatch that fires it — lands in the
-//! phases after this one; the event model is deliberately independent of it, so
-//! the row layer can emit events without knowing whether anything listens.
+//! action can see ([`ActionContext`]), which actions exist ([`ActionRegistry`]),
+//! and the [`Trigger`] that binds an event to a configured action — its storage in
+//! `_sc_triggers` ([`save_trigger`] and friends), its
+//! [validation](validate_trigger), and the cached live set ([`Triggers`]) an event
+//! is matched against. The dispatch that actually fires one lands in a later
+//! phase; the event model is deliberately independent of the trigger, so the row
+//! layer can emit events without knowing whether anything listens.
 //!
 //! Three design commitments are expressed as types here rather than as prose:
 //!
@@ -30,7 +32,18 @@
 mod action;
 mod event;
 mod registry;
+mod store;
+mod trigger;
+mod triggers;
+mod validate;
 
 pub use action::{Action, ActionContext};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use registry::ActionRegistry;
+pub use store::{
+    TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers, load_trigger,
+    load_trigger_by_name, save_trigger,
+};
+pub use trigger::{ATTR_ENABLED, Trigger, TriggerId};
+pub use triggers::{TriggerIssue, Triggers};
+pub use validate::{trigger_shape, validate_trigger};

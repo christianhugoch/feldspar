@@ -28,12 +28,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use sc_auth::{COL_ID, COL_ROLE, ROLE_PUBLIC, User};
-use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
+use sc_catalog::{CallerContext, Catalog, Table, prefetch_bindings};
 use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_expr::{
-    AggUse, Formula, FormulaCall, INVERSE, JsEvaluator, Operation, TranslateError, UserEnv,
-    join_path_expr, translate_with_calc,
+    Env, Formula, FormulaCall, JsEvaluator, Operation, TranslateError, UserEnv, join_path_expr,
+    translate,
 };
 use sc_query::{Expr, Projection, Select, Source, Value};
 use serde_json::{Map, Value as Json};
@@ -94,13 +94,13 @@ pub(crate) async fn list_owned_rows(
 ) -> Result<Json> {
     let shape = cat.schema_shape()?;
     let env = UserEnv::Inline(user_values(user));
-    match translate_with_calc(
+    let calc = table.calc_formulas();
+    match translate(
         formula,
         Operation::Read,
-        &env,
+        &Env::new(&env).with_calc(&calc),
         &shape,
         &table.name,
-        &table.calc_formulas(),
     ) {
         // The database filters: one query, no V8 in the loop.
         Ok(pred) => rows::list_rows_where(cat, table, Some(pred), None).await,
@@ -138,73 +138,12 @@ pub(crate) async fn row_allowed(
     let shape = cat.schema_shape()?;
     let analysis = formula.validate(&shape, &table.name)?;
     let mut values = values.clone();
-    for path in &analysis.join_paths {
-        if !values.contains_key(&path.ident) {
-            let value = resolve_join_value(cat, table, &path.segments, &values).await?;
-            values.insert(path.ident.clone(), value);
-        }
-    }
-    // Aggregations over incoming keys (Phase 7): the reified evaluator does no
-    // I/O, so prefetch each relation's child rows and bind them under the
-    // relation identifier (`childↃkey`) — the array the prelude aggregates.
-    for agg in &analysis.agg_uses {
-        let ident = format!("{}{}{}", agg.child_table, INVERSE, agg.key_field);
-        if !values.contains_key(&ident) {
-            let rows = resolve_agg_relation(cat, &shape, agg, &values).await?;
-            values.insert(ident, rows);
-        }
-    }
+    // The join/relation values the evaluator needs but the row does not carry —
+    // resolved by `sc_catalog::prefetch_bindings`, which a trigger's `only_if`
+    // (Phase 2) shares, so there is one implementation of "what does a reified
+    // formula get bound".
+    prefetch_bindings(cat, table, &analysis, &shape, &mut values).await?;
     Ok(allowed(evaluator, formula, op, user, &values).await)
-}
-
-/// Fetch the child rows an aggregation ranges over, as a JSON array bound under
-/// the relation identifier for the reified evaluator. The correlation is the
-/// parent's own value in the column the child key targets; a null there (or no
-/// matching children) is the empty relation.
-async fn resolve_agg_relation(
-    cat: &Catalog,
-    shape: &sc_expr::SchemaShape,
-    agg: &AggUse,
-    values: &BTreeMap<String, Value>,
-) -> Result<Value> {
-    let empty = Value::Json(Json::Array(Vec::new()));
-    // The parent column the child key references (the correlation target).
-    let Some(parent_field) = shape
-        .tables
-        .get(&agg.child_table)
-        .and_then(|t| t.fields.get(&agg.key_field))
-        .and_then(|f| f.key.as_ref())
-        .map(|k| k.target_field.clone())
-    else {
-        return Ok(empty);
-    };
-    let parent_value = values.get(&parent_field).cloned().unwrap_or(Value::Null);
-    if parent_value.is_null() {
-        return Ok(empty);
-    }
-    let child = cat.require(&agg.child_table)?;
-    let select = Select::from(Source::table(child.name.clone()))
-        .columns(vec![Projection::all()])
-        .filter(Expr::col(agg.key_field.clone()).eq(Expr::lit(parent_value)));
-    let fetched: Vec<Row> = cat
-        .provider(&child)
-        .query(&select)
-        .await?
-        .try_collect()
-        .await?;
-    let rows: Vec<Json> = fetched
-        .iter()
-        .map(|row| {
-            let obj: Map<String, Json> = row
-                .columns()
-                .iter()
-                .zip(row.values().iter())
-                .map(|(name, value)| (name.clone(), value_to_json(value)))
-                .collect();
-            Json::Object(obj)
-        })
-        .collect();
-    Ok(Value::Json(Json::Array(rows)))
 }
 
 /// The translated guard predicate for a write, when the formula is
@@ -220,13 +159,13 @@ pub(crate) fn write_guard(
 ) -> Result<Option<Expr>> {
     let shape = cat.schema_shape()?;
     let env = UserEnv::Inline(user_values(user));
-    match translate_with_calc(
+    let calc = table.calc_formulas();
+    match translate(
         formula,
         op,
-        &env,
+        &Env::new(&env).with_calc(&calc),
         &shape,
         &table.name,
-        &table.calc_formulas(),
     ) {
         Ok(pred) => Ok(Some(pred)),
         Err(TranslateError::Untranslatable(_)) => Ok(None),
@@ -299,6 +238,10 @@ async fn allowed(
         op,
         row: values.clone(),
         user: user_values(user),
+        // An ownership formula has no triggering event, so no `row`/`old` is in
+        // scope — validation refuses naming one (§7.3's scope is the row's own
+        // fields, `user` and the flags).
+        ambient: Default::default(),
     };
     evaluator.eval(call).await.unwrap_or(false)
 }
@@ -340,60 +283,6 @@ async fn fetch_rows_with_joins(
                 .collect()
         })
         .collect())
-}
-
-/// Resolve one Ⱶ-join path from a row's values by walking the Key links — the
-/// path for *proposed* rows, which are not in the database to be projected
-/// from. A null anywhere propagates (the Ⱶ optional-chaining contract).
-async fn resolve_join_value(
-    cat: &Catalog,
-    table: &Table,
-    segments: &[String],
-    values: &BTreeMap<String, Value>,
-) -> Result<Value> {
-    let Some(first) = segments.first() else {
-        return Ok(Value::Null);
-    };
-    let mut current = table.clone();
-    let mut value = values.get(first).cloned().unwrap_or(Value::Null);
-    for i in 1..segments.len() {
-        if value.is_null() {
-            return Ok(Value::Null);
-        }
-        let link = &segments[i - 1];
-        let field = current
-            .field(link)
-            .ok_or_else(|| Error::invalid(format!("`{}` has no field `{link}`", current.name)))?;
-        let DataFieldKind::Key {
-            target_table,
-            target_field,
-            ..
-        } = &field.kind
-        else {
-            return Err(Error::invalid(format!(
-                "`{}`.`{link}` is not a Key field",
-                current.name
-            )));
-        };
-        let target = cat.require(&target_table.0)?;
-        let next = &segments[i];
-        let select = Select::from(Source::table(target.name.clone()))
-            .columns(vec![Projection::expr(Expr::col(next.clone()))])
-            .filter(Expr::col(target_field.0.clone()).eq(Expr::lit(value)))
-            .limit(1);
-        let fetched: Vec<Row> = cat
-            .provider(&target)
-            .query(&select)
-            .await?
-            .try_collect()
-            .await?;
-        value = fetched
-            .first()
-            .and_then(|r| r.values().first().cloned())
-            .unwrap_or(Value::Null);
-        current = target;
-    }
-    Ok(value)
 }
 
 /// The evaluator, or the loud configuration error. Fail closed: a deployment
