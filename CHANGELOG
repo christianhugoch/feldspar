@@ -2,6 +2,32 @@
 
 Changes in reverse chronological order.
 
+## New milestone: actions & triggers (plan only)
+
+The ownership-formulae milestone is complete, so its task list is archived and the next one is
+written. No code changed; the record lives in the new `TODO.md`.
+
+- **`TODO.md` archived to `docs/TODO-post-mvp-3.md`** (ownership formulae, calculated fields and
+  RLS — every phase `[x]`), with its root-relative doc links rewritten for its new directory.
+- **New `TODO.md` — Actions & Triggers**: elementary actions only (workflows and agents are a
+  later milestone), in nine phases — the `sc-action` crate (layer 6: `Action` trait, event model,
+  run context, registry); `_sc_triggers` storage with save-time validation and a cached registry;
+  the built-in actions (`insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`);
+  table `insert`/`update`/`delete` events with the `only_if` formula; `none`/`login`/`startup`/
+  `error` events; the admin API and SPA; applications picking triggers to expose over their API
+  (`POST {mount}/actions/{name}`, typed client method) as they already pick tables; the periodic
+  scheduler (`often`/`hourly`/`daily`/`weekly`, admin-configured times); and documentation.
+- **Seven decisions recorded up front**, because each is a fork the plan depends on: dispatch is
+  synchronous and *after* the write commits (no durable queue until `sc-bus`); the `sc-api::rows`
+  layer is the single emit choke point; `only_if` is the same `sc-expr` language minus the
+  operation flags; triggers are cached like every other created entity; recursion is bounded
+  (depth limit) rather than forbidden; periodic times are UTC and single-node, with a persisted
+  `last_run_at` so a run missed while down fires once at startup; and **one scope rule for every
+  formula in a trigger** — bare identifiers are the row the formula is about (the target table's
+  row in an `update_rows`/`delete_rows` `where`), while the triggering event is ambient as
+  `row`/`old` beside the existing `user`, which widens `sc-expr`'s `UserEnv` from one inlined
+  ambient object to a set of them.
+
 ## Admin UI: define calculated fields
 
 The admin table editor can now create a **non-stored calculated field** — the storage and
