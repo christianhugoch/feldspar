@@ -92,38 +92,65 @@ place where a different answer would have produced a different plan.
 
 ---
 
-## Phase 1 — The `sc-action` crate: actions, events, the run context
+## Phase 1 — The `sc-action` crate: actions, events, the run context ✅
 
 A new workspace crate at **layer 6** (design §2), depending on `sc-catalog`, `sc-expr`,
-`sc-query`, `sc-types` and `sc-error` — and deliberately **not** on `sc-auth` or `sc-api`: an
+`sc-types` and `sc-error` — and deliberately **not** on `sc-auth` or `sc-api`: an
 event carries the caller as a role plus a JSON user object (exactly what a formula binds), which
 is all an action needs and keeps the crate below the API layer that will call into it.
 
-- [ ] Workspace member `crates/sc-action`, added to `Cargo.toml`'s members and
-  `[workspace.dependencies]`, with the layer-6 comment the other layers carry.
-- [ ] `Event` — the event *model*, split from the trigger that listens for it:
+- [x] Workspace member `crates/sc-action`, added to `Cargo.toml`'s members and
+  `[workspace.dependencies]`, with the layer-6 comment the other layers carry. `sc-query` is
+  **not** yet a dependency — nothing in this phase renders a query, and an unused dependency is
+  a liability (principle 2); Phase 3's `where` translation adds it when it is real.
+- [x] `Event` — the event *model*, split from the trigger that listens for it:
   `EventKind` (`Insert`/`Update`/`Delete`/`None`/`Login`/`Startup`/`Error`/`Often`/`Hourly`/
-  `Daily`/`Weekly`) plus an `Event` value carrying `channel: Option<String>` (the table name for
-  table events), `row`/`old_row` (`Option<Json>`), `payload: Json` (an API-run trigger's body,
-  an error event's `{kind, message, …}`), the caller (`role: u8`, `user: Option<Json>`) and
-  `depth: u8`. `EventKind` round-trips through a lowercase string — it is stored in a column and
-  posted by the SPA.
-- [ ] `Action` trait per §10.1, object-safe and `async_trait`:
+  `Daily`/`Weekly`, enumerated once in `EVENT_KINDS` with `as_str`/`parse` and the
+  `is_table_event`/`is_periodic` classifiers derived from it) plus an `Event` value carrying
+  `channel`, `row`/`old_row`, `payload: Json` (always present — `Json::Null` when there is none,
+  so a formula reading it never has to guess), and the caller (`role: u8`, `user: Option<Json>`),
+  built fluently so a kind's inapplicable fields are simply unset. `row_object()`/
+  `old_row_object()` project the ambient `row`/`old` bindings decision 7 needs, with a missing or
+  non-object row reading as empty — which is what makes `old.x` on an insert *null* rather than
+  an evaluation error.
+  **Deviation, deliberate:** the planned `depth: u8` is a **`chain: Vec<String>`** of the trigger
+  names that led here, with `depth()` derived from it. Same bound, strictly more diagnosis: the
+  limit's error message can name the whole path (`a → b → c → d → e → f`), which is the thing an
+  admin actually has to see to fix a loop.
+- [x] `Action` trait per §10.1, object-safe and `async_trait`:
   `name()`, `description()`, `config_spec() -> Vec<FormField>` (the admin form is rendered from
   it, exactly as a file-store backend's is) and
   `run(&self, ctx: &mut ActionContext<'_>) -> Result<Json>`. The returned JSON is the action's
   result: the response body of a directly-run trigger today, a workflow step's context
   contribution tomorrow.
-- [ ] `ActionContext<'_>` — `&Catalog`, the `&Event`, the trigger's `config: &Attrs`, the
-  evaluator (`Option<&Arc<dyn JsEvaluator>>`, absent in contexts that have no engine, and then a
-  configuration error rather than a silent skip), and a `Json` context object the action may
-  read and write (the seam the workflow engine's run context grows into).
-- [ ] `ActionRegistry` — name → `Arc<dyn Action>`, with `builtin_actions()` returning the
-  registry Phase 3 fills. An unknown action name is a configuration error naming it and the
-  registered alternatives, never a silently skipped trigger.
-- [ ] Unit tests: registry lookup and the unknown-name error, `EventKind` string round-trip
-  (including an unknown kind refused by name), the depth limit refused at the boundary with the
-  chain named, and a hand-rolled test action asserting the `ActionContext` contract.
+- [x] `ActionContext<'_>` — `&Catalog`, the `&Event`, the trigger's `config: &Attrs`, the
+  trigger's *name* (so an action failure is attributable), the `chain` any event its writes raise
+  must carry, the evaluator (private, reached through `evaluator()` which is a
+  configuration error naming the trigger rather than a silent skip), and a `context: Attrs` the
+  action reads and writes (the seam the workflow engine's run context grows into). Config
+  accessors `setting()` and `require_str()`; `require_str` returns an owned `String` on purpose —
+  a borrow of `&self` would make "read a setting, then write the context" a borrow-check error in
+  every action that does both.
+- [x] `ActionRegistry` — name → `Arc<dyn Action>` in a `BTreeMap` (so every listing and every
+  "the registered actions are …" message is name-ordered, not hash-ordered), with `builtin()`
+  returning the registry Phase 3 fills. An unknown action name is a configuration error naming it
+  and the registered alternatives, never a silently skipped trigger; a **duplicate** registration
+  is refused rather than overwritten, so which implementation answers can never depend on load
+  order.
+- [x] Tests — 13 unit: every `EventKind` round-tripping through its stored spelling, an unknown
+  kind refused by name with the alternatives listed, the table/periodic classifiers over the whole
+  set, a fresh event's anonymous defaults (and a startup event refusing `require_channel`), a
+  table event's row/old-row/user/channel, the empty-object reading of a missing row, `firing`
+  extending the chain and the limit refused **with the chain named** and classified as an
+  *application* error, the trait's object-safety and declared config, registry lookup/ordering,
+  the unknown-name and duplicate-name refusals, and the debug rendering.
+  Plus 4 integration (`tests/action_context.rs`, real Postgres): an action reaching its event, its
+  configuration and a **live catalog** (resolving the table its event names); a missing required
+  setting failing the run with the trigger named; a context with no engine refusing rather than
+  skipping; and a stored action *name* resolved through the registry and run with an inherited
+  chain. **Deviation from "unit tests":** the `ActionContext` contract is integration-tested
+  because `Catalog` cannot be built without a database, and the alternative — a catalog-free
+  mirror of the accessors — would have tested a copy of the code instead of the code.
 
 ## Phase 2 — `_sc_triggers`: the trigger model, storage and validation
 

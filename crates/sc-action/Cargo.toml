@@ -1,0 +1,35 @@
+[package]
+name = "sc-action"
+description = "Action trait, event model, run context and registry (layer 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# `FormField` for an action's declared configuration and `Attrs` for the values
+# — the one vocabulary every configurable extension point speaks (§6.2).
+sc-types.workspace = true
+# An action reads and writes rows, so it needs the catalog. This is also what
+# fixes the crate at layer 6: everything above it may call in, nothing below.
+sc-catalog.workspace = true
+# The formula language an action's configuration is written in (decision 7).
+# The `eval` feature is deliberately *not* enabled here: this crate holds the
+# `JsEvaluator` seam, the server supplies the engine.
+sc-expr.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# The `ActionContext` contract needs a real `Catalog`, so it is pinned against a
+# real database (principle 4) rather than around a mock driver that does not exist.
+sc-db.workspace = true
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+tokio = { workspace = true }
+
+[lints]
+workspace = true

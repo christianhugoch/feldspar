@@ -16,6 +16,8 @@ members = [
     # Layer 5 — users/auth, files
     "crates/sc-auth",
     "crates/sc-files",
+    # Layer 6 — actions & triggers
+    "crates/sc-action",
     # Layer 8 — applications & API
     "crates/sc-api",
     "crates/sc-app",
@@ -51,6 +53,7 @@ sc-types = { path = "crates/sc-types" }
 sc-catalog = { path = "crates/sc-catalog" }
 sc-auth = { path = "crates/sc-auth" }
 sc-files = { path = "crates/sc-files" }
+sc-action = { path = "crates/sc-action" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-server = { path = "crates/sc-server" }

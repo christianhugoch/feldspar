@@ -2,6 +2,56 @@
 
 Changes in reverse chronological order.
 
+## Actions & triggers: the `sc-action` crate (Phase 1)
+
+The first phase of the actions-and-triggers milestone (TODO Phase 1; design §10.1–§10.2): the
+**event → action** half, with no trigger yet. A new layer-6 crate `sc-action` holds what can
+happen, what can be done about it, and which actions exist.
+
+- **`Event` / `EventKind`** (`event.rs`): the eleven kinds (`insert`/`update`/`delete`/`none`/
+  `login`/`startup`/`error` plus the four periodic ones) enumerated **once** in `EVENT_KINDS`,
+  with `as_str`/`parse` and the `is_table_event`/`is_periodic` classifiers derived from it — an
+  unknown kind is a configuration error naming the alternatives, because a trigger whose event
+  nothing implements must not silently become a trigger that never fires. An `Event` is built
+  fluently (`Event::new(EventKind::Insert).on("books").row(json)`) so the fields a kind does not
+  use are unset rather than filled with placeholders. `row_object()`/`old_row_object()` project
+  the ambient `row`/`old` bindings the scope rule (TODO decision 7) needs, reading a missing or
+  non-object row as **empty** — which is what makes `old.x` on an insert *null* instead of an
+  evaluation error.
+- **The event is separate from the trigger, and the caller is data.** The row layer can emit
+  events without knowing whether anything listens; and the caller travels as a role plus the
+  user's fields as JSON — exactly what the formula language binds `user` to — rather than as a
+  `sc_auth::User`, which keeps the crate off `sc-auth` and keeps actions implementable from a
+  guest language later.
+- **Cascades are bounded *and named*.** Deviation from the plan's `depth: u8`: an event carries
+  the `chain` of trigger names that led to it, and `Event::firing` refuses to descend past
+  `MAX_DEPTH` (5) with the whole path in the message (`a → b → c → d → e → f`). Same bound, and
+  the diagnosis an admin needs instead of a bare number.
+- **`Action` + `ActionContext`** (`action.rs`): the §10.1 trait — `name`, `description`,
+  `config_spec() -> Vec<FormField>` (configuration is data, so the admin UI renders a form for an
+  action it has never heard of) and `run(&mut ActionContext) -> Result<Json>`. The context carries
+  the catalog, the event, the configuration, the trigger's name (an unattributable action failure
+  is one an admin cannot fix), the cascade chain, and a `context: Attrs` the action reads and
+  writes — the seam a workflow's durable run context grows into. A missing JavaScript engine is a
+  configuration error naming the trigger, never a silent no-op (principle 5); `require_str`
+  returns an owned `String` so "read a setting, then write the context" is not a borrow-check
+  error in every action that does both.
+- **`ActionRegistry`** (`registry.rs`): name → `Arc<dyn Action>` in a `BTreeMap`, so listings and
+  "the registered actions are …" messages are name-ordered rather than hash-ordered. A duplicate
+  registration is **refused**, not overwritten — otherwise which implementation answers a stored
+  trigger would depend on load order. `builtin()` exists and is empty until Phase 3, so the
+  wiring above it is built against the real constructor.
+- **Tests**: 13 unit (kind round-trip, unknown kind by name, the classifiers over the whole set,
+  event defaults and `require_channel` on a kind that has no channel, the empty-object row
+  reading, `firing` extending the chain and the depth limit naming it as an *application* error,
+  object-safety, registry ordering/lookup, unknown- and duplicate-name refusals) and 4
+  integration against real Postgres (`tests/action_context.rs`): an action reaching its event,
+  configuration and a live catalog; a missing required setting failing the run with the trigger
+  named; no-engine refusing rather than skipping; and a stored action *name* resolved through the
+  registry and run with an inherited chain. The context is integration-tested rather than
+  unit-tested because `Catalog` needs a database, and a catalog-free mirror of its accessors would
+  have tested a copy of the code instead of the code.
+
 ## New milestone: actions & triggers (plan only)
 
 The ownership-formulae milestone is complete, so its task list is archived and the next one is
