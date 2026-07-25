@@ -2,6 +2,59 @@
 
 Changes in reverse chronological order.
 
+## `run_js_code`: the last core action, and a third method on the JS engine
+
+The escape hatch for the computation an elementary action cannot anticipate — and the **last item
+in Phase 3**, so the core action set is now complete: `insert_row`, `update_rows`, `delete_rows`,
+`fetch`, `run_js_code`.
+
+- **`sc-expr`: `JsEvaluator::run_code`**, beside `eval` and `eval_value`, taking a new **`CodeCall`**
+  (the source, plus the values in scope as JSON). Same thread, same isolate, same watchdog, same
+  no-ops/no-extensions sandbox — the body is wrapped in a function, so a top-level `return` is legal
+  and what it declares is local to the run (a trigger firing twice must not be a redeclaration
+  error). The result is `JSON.stringify`d back.
+
+  It is **not** a `FormulaCall`: a formula is one expression in the language this crate defines,
+  parsed and validated and normalised and evaluable two ways; a code body is opaque JavaScript the
+  host hands over verbatim. Collapsing them would have meant a `FormulaCall` whose `formula` was
+  sometimes not a formula.
+
+  Two details worth their lines: a **returned Promise is refused by name** (`JSON.stringify` of one
+  is `{}`, which would look exactly like a result, and the sandbox has nothing to await); and
+  binding **names** are checked as plain identifiers, because unlike the values — which ride in as
+  JSON, as a formula's do — the names are spliced into `const` declarations. Failure messages now
+  say `JavaScript code failed`/`timed out` where a formula's say `formula evaluation`, since the two
+  send an admin to different places.
+
+- **`sc-core-actions`: `RunJsCode`** — one setting, `code`. In scope: `row`, `old`, `user` and
+  `payload`. The first three follow decision 7 exactly, so a trigger's `only_if` and its code see
+  one world — **presence is scope**: `old` on an insert is in scope *and null*, while `row` on a
+  `login` trigger is not bound at all, so naming it is a `ReferenceError` rather than a silent
+  `undefined`. `payload` is the single addition: the formula language has no way to reach it, and a
+  `none` trigger's code is exactly what wants it. What the body returns is the action's result.
+
+- **Bounded on purpose.** No host API: the code cannot read or write the catalog, reach the network
+  or touch the disk. Catalog access from guest code is `sc-code`'s milestone (§15) and this is its
+  seed, not a preview of it — a test probes eight host globals from inside a body in a process that
+  does have a database.
+
+- **The timeout is the engine's, not the action's.** The isolate serves every ownership formula in
+  the process serially, so a configurable per-trigger timeout would be a configurable hold on all of
+  them. A runaway body is terminated by the existing watchdog and the engine serves the next run —
+  and the next formula — normally.
+
+- **Recorded limitation:** a syntax error surfaces at fire time, not on save, because compiling it
+  needs the engine and `validate_config` has no access to one. What *is* refused on save is the
+  blank body, which the generic spec check accepts (it is a string) and which would otherwise fire
+  doing nothing at all.
+
+- **Tests:** 7 integration tests against the real engine and a real catalog
+  (`sc-core-actions/tests/run_js_code.rs`), 7 engine-level tests in `sc-expr`, and 2 unit tests for
+  the action's scope and spec. Beyond the sandbox probes: statements/loop/`return` computing an
+  object; the `old` and `payload` cases above; throw, `TypeError` and `SyntaxError` each an
+  `Application` error naming the trigger and the setting; the watchdog case; save-time refusal of a
+  blank body; and a context with no engine failing by name rather than skipping.
+
 ## `sc-core-actions`: one crate for the core actions, one crate for the machinery
 
 No behaviour change; the whole point is that **"which crate is this action in?" now has one

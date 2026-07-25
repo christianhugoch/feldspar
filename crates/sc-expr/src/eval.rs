@@ -84,6 +84,26 @@ pub struct FormulaCall {
     pub ambient: AmbientValues,
 }
 
+/// One run of a JavaScript **code body**: the source, and the values in scope.
+///
+/// Not a [`FormulaCall`]: a formula is one expression in the language this crate
+/// defines — parsed, validated against a schema shape, normalised, and evaluable
+/// two ways — while this is opaque JavaScript statements the host hands over
+/// verbatim. They share the thread, the isolate, the watchdog and the sandbox;
+/// they share nothing else, and collapsing them into one type would have meant a
+/// `FormulaCall` whose `formula` was sometimes not a formula.
+#[derive(Debug, Clone, Default)]
+pub struct CodeCall {
+    /// The code body: statements, with `return` for the result. Run as the body
+    /// of a function, so `return` at the top level is legal and everything it
+    /// declares is local to the run.
+    pub code: String,
+    /// The values bound by name in the code's scope, as JSON — `row`, `user`,
+    /// … Each name must be a plain JavaScript identifier; anything else is an
+    /// error rather than something spliced into the script.
+    pub bindings: BTreeMap<String, serde_json::Value>,
+}
+
 /// The evaluator seam. `DenoEvaluator` is the implementation; the trait exists
 /// so the formula machinery never names the engine — a lighter engine
 /// (boa/quickjs) could sit behind it if V8's build weight ever matters.
@@ -102,6 +122,15 @@ pub trait JsEvaluator: Send + Sync {
     /// [`eval`](JsEvaluator::eval); the caller decodes the JSON into a column
     /// value. `Err` still means the formula could not be evaluated.
     async fn eval_value(&self, call: FormulaCall) -> Result<serde_json::Value>;
+
+    /// Run a JavaScript **code body** to its JSON result — the `run_js_code`
+    /// action (§10.1).
+    ///
+    /// Same isolate, thread, watchdog and sandbox as the two above, and the same
+    /// bounds: no host API, so the code cannot read or write the catalog (that is
+    /// `sc-code`'s milestone, §15), and the shared per-run timeout applies. A
+    /// throw, a timeout, or a result JSON cannot express is an `Err`.
+    async fn run_code(&self, call: CodeCall) -> Result<serde_json::Value>;
 }
 
 /// How long a single evaluation may run before the watchdog terminates it. A
@@ -211,6 +240,13 @@ enum Job {
         FormulaCall,
         tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     ),
+    /// Run a code body to its JSON result (the `run_js_code` action). Replies
+    /// like `EvalValue` — the difference is what is compiled, not what comes
+    /// back.
+    RunCode(
+        CodeCall,
+        tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
+    ),
     /// Raw script escape hatch for the watchdog test only: the formula
     /// language cannot express an infinite loop (no statements, no named
     /// recursion), which is a feature — but it leaves the timeout otherwise
@@ -295,6 +331,16 @@ impl JsEvaluator for DenoEvaluator {
             .await
             .map_err(|_| Error::msg("formula evaluator dropped the reply"))?
     }
+
+    async fn run_code(&self, call: CodeCall) -> Result<serde_json::Value> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Job::RunCode(call, reply_tx))
+            .map_err(|_| Error::msg("formula evaluator thread is gone"))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::msg("formula evaluator dropped the reply"))?
+    }
 }
 
 #[cfg(feature = "eval")]
@@ -339,25 +385,33 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
     }
 
     while let Ok(job) = rx.recv() {
-        // Build the script (with the right result wrapper) and remember how to
-        // reply. A build error goes straight back on the matching channel.
-        let (script, pending) = match job {
+        // Build the script (with the right result wrapper), remember how to
+        // reply, and name what is running for the failure messages. A build error
+        // goes straight back on the matching channel.
+        let (script, pending, what) = match job {
             Job::Eval(call, reply) => match build_script(&call, false) {
-                Ok(script) => (script, Pending::Bool(reply)),
+                Ok(script) => (script, Pending::Bool(reply), FORMULA),
                 Err(e) => {
                     let _ = reply.send(Err(e));
                     continue;
                 }
             },
             Job::EvalValue(call, reply) => match build_script(&call, true) {
-                Ok(script) => (script, Pending::Value(reply)),
+                Ok(script) => (script, Pending::Value(reply), FORMULA),
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
+            },
+            Job::RunCode(call, reply) => match build_code_script(&call) {
+                Ok(script) => (script, Pending::Value(reply), CODE),
                 Err(e) => {
                     let _ = reply.send(Err(e));
                     continue;
                 }
             },
             #[cfg(test)]
-            Job::Raw(script, reply) => (script, Pending::Bool(reply)),
+            Job::Raw(script, reply) => (script, Pending::Bool(reply), FORMULA),
         };
 
         timed_out.store(false, Ordering::SeqCst);
@@ -392,9 +446,9 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
                     // Termination poisons the isolate until cancelled; restore
                     // it so the next evaluation runs clean.
                     runtime.v8_isolate().cancel_terminate_execution();
-                    Error::invalid(format!("formula evaluation timed out after {timeout:?}"))
+                    Error::invalid(format!("{what} timed out after {timeout:?}"))
                 } else {
-                    Error::invalid(format!("formula evaluation failed: {e}"))
+                    Error::invalid(format!("{what} failed: {e}"))
                 };
                 match pending {
                     Pending::Bool(reply) => {
@@ -410,6 +464,14 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
     // rx closed: last DenoEvaluator handle dropped. watchdog_tx drops here,
     // which ends the watchdog thread's loop too.
 }
+
+/// What a failing job is called in its error message. Two words rather than one
+/// generic "evaluation", because "your formula threw" and "your code threw" send
+/// an admin to two different places.
+#[cfg(feature = "eval")]
+const FORMULA: &str = "formula evaluation";
+#[cfg(feature = "eval")]
+const CODE: &str = "JavaScript code";
 
 #[cfg(feature = "eval")]
 enum WatchdogMsg {
@@ -481,6 +543,63 @@ fn build_script(call: &FormulaCall, value_mode: bool) -> Result<String> {
     Ok(format!(
         "(function(__b) {{ \"use strict\";\n{consts}return {ret};\n}})({args})"
     ))
+}
+
+#[cfg(feature = "eval")]
+/// Assemble the script for one code body: the bindings as `const`s, the code as
+/// the body of a nested function (so a top-level `return` is legal and nothing it
+/// declares outlives the run), and `JSON.stringify` of what it returned.
+///
+/// The code itself is **not** escaped, and cannot be: it is the admin's own
+/// JavaScript, spliced in as source. That is not a hole — the wrapper is no
+/// privilege boundary, and there is nothing on the other side of it to reach
+/// (the isolate has no ops, no extensions and no host API). What *is* escaped is
+/// every value, which rides in as JSON exactly as a formula's bindings do.
+fn build_code_script(call: &CodeCall) -> Result<String> {
+    let mut bindings = serde_json::Map::new();
+    let mut consts = String::new();
+    for (name, value) in &call.bindings {
+        if !is_plain_ident(name) {
+            return Err(Error::msg(format!(
+                "code binding `{name}` is not a JavaScript identifier"
+            )));
+        }
+        let key =
+            serde_json::to_string(name).map_err(|e| Error::msg(format!("encode binding: {e}")))?;
+        consts.push_str(&format!("const {name} = __b[{key}];\n"));
+        bindings.insert(name.clone(), value.clone());
+    }
+    let args = serde_json::to_string(&serde_json::Value::Object(bindings))
+        .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
+    let code = &call.code;
+    // The Promise check is principle 5 in one line: an `async` body would
+    // otherwise stringify to `{}` and look like a result. There is no host API to
+    // await, so a Promise here is a mistake worth naming.
+    Ok(format!(
+        "(function(__b) {{ \"use strict\";\n\
+         {consts}\
+         const __result = (function() {{\n{code}\n}})();\n\
+         if (__result && typeof __result.then === \"function\") {{\n\
+         throw new Error(\"the code returned a Promise: run_js_code is synchronous, \
+         and the sandbox has nothing to await\");\n\
+         }}\n\
+         return JSON.stringify(__result);\n\
+         }})({args})"
+    ))
+}
+
+/// Whether a binding name is a plain JavaScript identifier — what can be spliced
+/// into `const <name> = …` without a thought. Deliberately stricter than JS
+/// itself (no `Ⱶ`, no escapes): every caller of [`CodeCall`] binds names it wrote
+/// itself, so anything else is a bug to report rather than a shape to support.
+#[cfg(feature = "eval")]
+fn is_plain_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 #[cfg(feature = "eval")]
@@ -917,6 +1036,167 @@ mod tests {
         // A null-valued expression reads back as JSON null.
         let c = with_row(call("owner", Operation::Read), &[("owner", Value::Null)]);
         assert_eq!(ev.eval_value(c).await.unwrap(), serde_json::Value::Null);
+    }
+
+    /// A code run with the given bindings.
+    fn code(source: &str, bindings: &[(&str, serde_json::Value)]) -> CodeCall {
+        CodeCall {
+            code: source.to_owned(),
+            bindings: bindings
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), v.clone()))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_code_runs_statements_and_returns_json() {
+        use serde_json::json;
+        let ev = DenoEvaluator::new();
+        // Statements, a local declaration and a `return` — the thing a formula
+        // (one expression) cannot be, which is why this method exists.
+        let call = code(
+            "let total = 0;\nfor (const line of row.lines) { total += line.qty; }\n\
+             return { total, who: user.email };",
+            &[
+                ("row", json!({ "lines": [{ "qty": 2 }, { "qty": 5 }] })),
+                ("user", json!({ "email": "a@b.c" })),
+            ],
+        );
+        assert_eq!(
+            ev.run_code(call).await.unwrap(),
+            json!({ "total": 7, "who": "a@b.c" })
+        );
+        // Nothing returned is null, not an error: an action that only had an
+        // effect has no result to report.
+        assert_eq!(
+            ev.run_code(code("const x = 1;", &[])).await.unwrap(),
+            serde_json::Value::Null
+        );
+        // A binding is in scope even when it is null, and JSON is the only
+        // vocabulary crossing the boundary in either direction.
+        assert_eq!(
+            ev.run_code(code(
+                "return old === null;",
+                &[("old", serde_json::Value::Null)]
+            ))
+            .await
+            .unwrap(),
+            json!(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn what_a_code_body_declares_is_local_to_that_run() {
+        // Runs share one isolate, so a body that declared into the global scope
+        // would make the *second* firing of the same trigger a redeclaration
+        // error. Running identical code twice is the assertion.
+        let ev = DenoEvaluator::new();
+        for run in 1..=2 {
+            let call = code("const total = 41; return total + 1;", &[]);
+            assert_eq!(
+                ev.run_code(call).await.unwrap(),
+                serde_json::json!(42),
+                "run {run}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_throwing_or_unbound_code_body_is_an_error() {
+        let ev = DenoEvaluator::new();
+        // A throw carries its message: it is the admin's own code failing.
+        let err = ev
+            .run_code(code("throw new Error('nope');", &[]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("JavaScript code failed"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+        // Naming something the event did not put in scope — `row` on a login
+        // trigger — is a ReferenceError naming it, not a silent undefined.
+        let err = ev
+            .run_code(code("return row.id;", &[]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("row"), "{err}");
+        // A result JSON cannot express fails rather than coming back wrong.
+        let err = ev
+            .run_code(code("const a = {}; a.self = a; return a;", &[]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("JavaScript code failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_async_code_body_is_refused_rather_than_returning_an_empty_object() {
+        // `JSON.stringify(promise)` is `{}`, which would look exactly like a
+        // result. There is nothing to await in the sandbox, so say so.
+        let ev = DenoEvaluator::new();
+        let err = ev
+            .run_code(code("return (async () => 1)();", &[]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Promise"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn code_runs_in_the_same_sandbox_as_a_formula() {
+        // The point of the `run_js_code` bound: no host API, so the code cannot
+        // read or write the catalog, the network or the disk (§15 is where that
+        // changes). Probed from *inside* a code body, which — unlike a formula —
+        // can name anything JavaScript can.
+        let ev = DenoEvaluator::new();
+        for probe in ["Deno", "fetch", "require", "process", "globalThis.sc"] {
+            let call = code(&format!("return typeof {probe} === 'undefined';"), &[]);
+            assert!(
+                ev.run_code(call).await.unwrap() == serde_json::json!(true),
+                "sandbox leak: {probe}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runaway_code_body_is_terminated_and_the_isolate_recovers() {
+        let ev = DenoEvaluator::with_timeout(Duration::from_millis(50));
+        let err = ev
+            .run_code(code("while (true) {}", &[]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("JavaScript code timed out"), "{err}");
+        // The isolate serves the next run — and the next formula — normally.
+        assert_eq!(
+            ev.run_code(code("return 1 + 1;", &[])).await.unwrap(),
+            serde_json::json!(2)
+        );
+        assert!(ev.eval(call("_read", Operation::Read)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_binding_name_that_is_not_an_identifier_is_refused() {
+        // The values ride in as JSON; the *names* are spliced into `const` —
+        // so a name that is not an identifier is refused rather than compiled.
+        use serde_json::json;
+        let ev = DenoEvaluator::new();
+        let err = ev
+            .run_code(code(
+                "return 1;",
+                &[("row; globalThis.pwned = 1; //", json!(1))],
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a JavaScript identifier"), "{err}");
+        assert_eq!(
+            ev.run_code(code("return typeof globalThis.pwned;", &[]))
+                .await
+                .unwrap(),
+            serde_json::json!("undefined")
+        );
     }
 
     #[tokio::test]

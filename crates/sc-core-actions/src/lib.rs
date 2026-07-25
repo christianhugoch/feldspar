@@ -1,7 +1,7 @@
 //! The core built-in actions (layer 9; technical design §10.1, TODO Phase 3).
 //!
 //! Every action Saltcorn ships with, in one crate: [`InsertRow`], [`UpdateRows`],
-//! [`DeleteRows`] and [`Fetch`], with the JavaScript-body action to come. The set
+//! [`DeleteRows`], [`Fetch`] and [`RunJsCode`]. The set
 //! is **deliberately small** — GOALS asks for a minimal one, because control flow
 //! belongs to the workflow engine (§10.3) rather than to a proliferation of
 //! actions — and [`builtin_actions`] is the single constructor that assembles it.
@@ -42,6 +42,7 @@ mod delete_rows;
 mod fetch;
 mod insert_row;
 mod rows_scope;
+mod run_js_code;
 mod update_rows;
 
 use std::sync::Arc;
@@ -52,6 +53,7 @@ use sc_error::Result;
 pub use delete_rows::DeleteRows;
 pub use fetch::Fetch;
 pub use insert_row::InsertRow;
+pub use run_js_code::RunJsCode;
 pub use update_rows::UpdateRows;
 
 /// The built-in action set a server installs.
@@ -77,6 +79,7 @@ pub fn register_builtin_actions(registry: &mut ActionRegistry) -> Result<()> {
     registry.register(Arc::new(UpdateRows))?;
     registry.register(Arc::new(DeleteRows))?;
     registry.register(Arc::new(Fetch::new()?))?;
+    registry.register(Arc::new(RunJsCode))?;
     Ok(())
 }
 
@@ -89,7 +92,13 @@ mod tests {
         let registry = builtin_actions().unwrap();
         assert_eq!(
             registry.names(),
-            vec!["delete_rows", "fetch", "insert_row", "update_rows"]
+            vec![
+                "delete_rows",
+                "fetch",
+                "insert_row",
+                "run_js_code",
+                "update_rows"
+            ]
         );
         // Every one of them describes itself and its configuration as data, which
         // is what lets the admin UI render a form it has never heard of — and
@@ -128,5 +137,6 @@ mod tests {
             names("fetch"),
             vec!["url", "method", "headers", "body", "timeout_ms"]
         );
+        assert_eq!(names("run_js_code"), vec!["code"]);
     }
 }

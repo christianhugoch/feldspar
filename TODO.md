@@ -246,7 +246,7 @@ language spans ownership, calculated fields, only-if and action configuration.
 **Where the built-in actions live — a new crate, `sc-core-actions` (layer 9).**
 
 - **`sc-core-actions`** holds **every** core action: `insert_row`, `update_rows`, `delete_rows`,
-  `fetch`, and `run_js_code` next. `builtin_actions()` there is the one constructor a server calls.
+  `fetch` and `run_js_code`. `builtin_actions()` there is the one constructor a server calls.
   It sits above `sc-api` because three of them must write through the `rows` layer — that is the
   whole point (coercion, File rules, and Phase 4's events) — and `fetch` joins them because "which
   crate is this action in?" should have one answer, not one per action's incidental needs.
@@ -338,13 +338,37 @@ question.
     a whole (`row`, `payload`, `row.title`) — not a new object shape. The default envelope covers
     the common case; if formulas need to build objects, that is an `sc-expr` change, not a `fetch`
     one.
-- [ ] `run_js_code` — a JavaScript **code body** (statements, `return`) run in the existing
+- [x] `run_js_code` — a JavaScript **code body** (statements, `return`) run in the existing
   `deno_core` isolate with the event's row, `user` and payload in scope, returning JSON. This
   extends `JsEvaluator` with a third method (`run_code`) beside `eval`/`eval_value`, on the same
   thread/watchdog/sandbox machinery. **Bounded on purpose:** no host API, so the code cannot
   read or write the catalog — that is the `sc-code` JS adapter's milestone (§15), and this is
   its seed.
-- [~] Tests: one per action against a real database — rows inserted/updated/deleted with formula
+  Settled in the writing:
+  - **A `CodeCall`, not a `FormulaCall`.** A formula is one expression in `sc-expr`'s own language
+    — parsed, validated against a schema shape, normalised, evaluable two ways. A code body is
+    opaque JavaScript the host hands over verbatim. They share the thread, the isolate, the
+    watchdog and the sandbox and nothing else; one type for both would have meant a `FormulaCall`
+    whose `formula` was sometimes not a formula.
+  - **The scope is the formula scope plus `payload`.** `row`/`old`/`user` bind exactly as decision
+    7 has them (presence *is* scope: `old` on an insert is in scope and null; `row` on a `login`
+    trigger is not bound at all, so naming it is a `ReferenceError` rather than a silent
+    `undefined`), so a trigger's `only_if` and its code see one world. `payload` is the one
+    addition — the formula language cannot reach it, and a `none` trigger's code is what wants it.
+  - **The timeout stays the engine's** and is deliberately *not* configurable per action: the
+    isolate serves every ownership formula in the process serially, so a per-trigger timeout would
+    be a per-trigger hold on all of them.
+  - **A returned Promise is refused by name.** `JSON.stringify` of one is `{}`, which would look
+    exactly like a result; the sandbox has nothing to await, so a Promise is a mistake worth
+    naming rather than an empty object worth returning.
+  - **Values ride in as JSON, binding *names* are checked as identifiers** — the names are spliced
+    into `const` declarations, so anything that is not a plain identifier is an error. The code
+    itself is spliced in unescaped and cannot be otherwise: it is the admin's own JavaScript, and
+    the wrapper is no privilege boundary — there is nothing on the far side of it to reach.
+  - **Limitation to record:** a syntax error surfaces at fire time, not on save. Compiling it
+    would need the engine, which the save path (`validate_config`) has no access to; what *is*
+    refused on save is the blank body, which would otherwise fire and do nothing.
+- [x] Tests: one per action against a real database — rows inserted/updated/deleted with formula
   values; the `where` selecting exactly the intended rows, asserted **twice** over the same case
   (a translatable predicate through SQL and an untranslatable one through the fallback, same
   rows); the scope rule pinned by a test where the target table and the event's table share a
@@ -373,8 +397,19 @@ question.
   back as text; a 500 naming the status and quoting `upstream exploded`; a hung endpoint failing at
   a 250 ms timeout in well under the default 10 s; and 8 save-time refusals (bad URL, `file:`
   scheme, unoffered method, illegal header, over-long timeout, a body on a `GET`, and two body
-  formulas that do not resolve) measured against one configuration that validates. `run_js_code`
-  remains.
+  formulas that do not resolve) measured against one configuration that validates.
+  **Done for `run_js_code`** (`sc-core-actions/tests/run_js_code.rs`, 7 integration tests against the
+  real V8 engine and a real catalog, plus 7 engine-level tests in `sc-expr` and 2 unit tests for the
+  action's scope): a body of statements, a loop and a `return` computing an object from
+  `row`/`user`, with a scalar and a `return`-less body coming back as themselves; `old === null` on
+  an insert and `row.pages - old.pages` on an update; a `none` trigger reading its `payload` with a
+  null `user`, and `row` there failing as `ReferenceError` naming the trigger and the setting; the
+  **sandbox assertion** — eight probes (`Deno`, `fetch`, `require`, `process`, `XMLHttpRequest`,
+  `WebSocket`, two host globals) all undefined in a process that does have a database, with the
+  code's whole world being the keys the event bound; a throw, a `TypeError` and a `SyntaxError` each
+  an `Application` error naming trigger and setting; a `while (true) {}` terminated by the watchdog
+  with the engine serving the next run *and* the next formula; the blank and absent body refused on
+  save; and a missing engine failing by name rather than skipping.
 
 ## Phase 4 — Table events: insert, update, delete
 
