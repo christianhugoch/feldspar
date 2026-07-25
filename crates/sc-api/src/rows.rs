@@ -301,7 +301,7 @@ fn calc_map(table: &Table) -> CalcFields {
 /// SQL is **skipped** — computing it needs the reified evaluator, a read-path
 /// fallback not yet wired here (a genuinely untranslatable calc expression is
 /// the rare case; the built-in field/Ⱶ/Ↄ forms all translate).
-fn calc_projections(catalog: &Catalog, table: &Table) -> Result<Vec<Projection>> {
+pub(crate) fn calc_projections(catalog: &Catalog, table: &Table) -> Result<Vec<Projection>> {
     let calc = calc_map(table);
     if calc.is_empty() {
         return Ok(Vec::new());
@@ -459,7 +459,7 @@ pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
 /// Run a `SELECT`, collecting its rows — through an RLS caller-context
 /// transaction when `context` is given (§7.3), else on a pooled connection via
 /// the table's provider.
-async fn run_read(
+pub(crate) async fn run_read(
     catalog: &Catalog,
     table: &Table,
     select: &Select,

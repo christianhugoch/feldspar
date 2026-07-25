@@ -39,6 +39,33 @@ pub fn value_to_json(value: &Value) -> Json {
     }
 }
 
+/// Read a JSON value as the [`Value`] its own shape implies, with no column to
+/// coerce it towards — the inverse of [`value_to_json`] as far as JSON can
+/// express it (a timestamp that became a string comes back as text).
+///
+/// This is for the values that arrive as JSON with **no type declaration behind
+/// them**: an event's row for a table the catalog no longer has, a field of a
+/// caller object that is not a users-table column. Where a column *is* known,
+/// [`json_to_value`] is the right function — it recovers the uuid, the timestamp
+/// and the decimal that this one leaves as text, which is what lets a formula's
+/// `user.id` compare against a `uuid` column in SQL.
+pub fn json_to_natural_value(json: &Json) -> Value {
+    match json {
+        Json::Null => Value::Null,
+        Json::Bool(b) => Value::Bool(*b),
+        Json::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => Value::Int(i),
+            (None, Some(f)) => Value::Float(f),
+            // A number that is neither an i64 nor an f64 cannot occur in
+            // `serde_json`; carrying it as text loses nothing that was there.
+            (None, None) => Value::Text(n.to_string()),
+        },
+        Json::String(s) => Value::Text(s.clone()),
+        // A composite has one faithful `Value`, and it is the JSON itself.
+        Json::Array(_) | Json::Object(_) => Value::Json(json.clone()),
+    }
+}
+
 /// Coerce an incoming JSON scalar to the [`Value`] variant a column of the given
 /// [`BasicType`] expects.
 ///
@@ -173,6 +200,31 @@ mod tests {
     fn rejects_malformed_typed_string() {
         assert!(json_to_value(&BasicType::Uuid, &Json::String("nope".into())).is_err());
         assert!(json_to_value(&BasicType::Int, &Json::String("x".into())).is_err());
+    }
+
+    #[test]
+    fn a_typeless_json_value_reads_as_its_own_shape() {
+        assert_eq!(json_to_natural_value(&Json::Null), Value::Null);
+        assert_eq!(
+            json_to_natural_value(&Json::Bool(false)),
+            Value::Bool(false)
+        );
+        assert_eq!(json_to_natural_value(&Json::from(4_i64)), Value::Int(4));
+        assert_eq!(
+            json_to_natural_value(&Json::from(1.5_f64)),
+            Value::Float(1.5)
+        );
+        assert_eq!(
+            json_to_natural_value(&Json::String("x".into())),
+            Value::Text("x".into())
+        );
+        // A composite stays composite rather than being stringified.
+        let obj = serde_json::json!({ "a": 1 });
+        assert_eq!(json_to_natural_value(&obj), Value::Json(obj.clone()));
+        // And the round trip back to JSON is the identity for every one of them.
+        for json in [Json::Null, Json::Bool(true), Json::from(2_i64), obj] {
+            assert_eq!(value_to_json(&json_to_natural_value(&json)), json);
+        }
     }
 
     #[test]

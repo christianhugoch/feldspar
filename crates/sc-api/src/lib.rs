@@ -21,7 +21,12 @@
 //! provider run, [`auth`] the login vocabulary they share, and [`convert`] the
 //! bridge from JSON to the query layer's `Value` — all kept here, below every API
 //! surface, so there is one implementation rather than one per protocol.
+//!
+//! [`actions`] holds the built-in trigger actions that *write rows* (§10.1): they
+//! implement `sc-action`'s trait but go through [`rows`], so a trigger's write is
+//! validated and observable exactly like an API caller's.
 
+pub mod actions;
 pub mod auth;
 pub mod convert;
 pub mod rows;

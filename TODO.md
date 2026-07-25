@@ -243,14 +243,29 @@ the workflow engine's job, not an action's. Every action's configuration value t
 the event is a **formula** in the same `sc-expr` language under decision 7's scope rule — so one
 language spans ownership, calculated fields, only-if and action configuration.
 
-- [ ] `insert_row` — target table, and a field→formula map. The formulas range over no table, so
+**Where the row-writing actions live — deviation, deliberate.** `insert_row`/`update_rows`/
+`delete_rows` are implemented in **`sc-api`** (`actions/`), not in `sc-action`: they must write
+through the `rows` layer (that is the whole point — coercion, File rules, and Phase 4's events),
+and that layer is layer 8. So `sc-api` gained a dependency on `sc-action` and implements its
+trait; nothing in `sc-action` names `sc-api` in return, so Phase 4's emit seam (held by the
+catalog) is still the only path from a write back to a trigger. `sc_api::actions::builtin_actions`
+assembles `ActionRegistry::builtin()` plus these three, and is the one constructor a server calls;
+`fetch` and `run_js_code`, which need no rows, still belong in `sc-action`.
+
+- [x] `insert_row` — target table, and a field→formula map. The formulas range over no table, so
   they read the event ambiently (`row.title`, `user.id`); the computed values go through the
   ordinary `rows` write path so type coercion, File-field validation and the target table's own
-  triggers all apply (this is the recursion decision 5 exists for).
-- [ ] `update_rows` — target table, a `where` formula, and a field→formula map of assignments.
-  Both are written in the target table's scope (`project === row.id`, `count + 1`).
-- [ ] `delete_rows` — target table and a `where` formula, same scope.
-- [ ] **The `where` semantics, decided once for both:** the predicate **selects** rows — it is
+  triggers all apply (this is the recursion decision 5 exists for). The action's result is the
+  **inserted row**, so a workflow step can refer to what it just created. "Ranges over no table"
+  is implemented as a formula scope named `(the event)` — an empty table shape, so a bare
+  identifier gets `unknown identifier` naming the scope rather than silently resolving somewhere.
+- [x] `update_rows` — target table, a `where` formula, and a field→formula map of assignments.
+  Both are written in the target table's scope (`project === row.id`, `count + 1`). Result:
+  `{updated, ids}`.
+- [x] `delete_rows` — target table and a `where` formula, same scope. Result: `{deleted, ids}`.
+  The `where` is **required**: an omitted one would mean "delete everything", which is not
+  something a missing setting should be able to cause (an admin who means it writes `true`).
+- [x] **The `where` semantics, decided once for both:** the predicate **selects** rows — it is
   translated to a SQL `WHERE` when it translates (`UserEnv` inlining the event's row and user as
   literals, so no new SQL construct is needed) and falls back to fetch-then-filter through the
   reified evaluator when it does not, exactly as ownership reads do. The matched rows are then
@@ -259,6 +274,20 @@ language spans ownership, calculated fields, only-if and action configuration.
   (decision 2), and it is why an untranslatable `where` costs nothing extra — the rows are
   being fetched either way. A target table with no single-column primary key is refused at save,
   not at fire time.
+  Three things settled while writing it: an evaluator error here **fails the action** where the
+  same error in an ownership check would deny (there is no safe answer to "which rows did the
+  admin mean"); the fetched rows carry their calc fields and, per row, whatever Ⱶ-path or
+  Ↄ-relation the formulas read (`prefetch_bindings`, the same function an `only_if` uses); and an
+  action's writes carry **admin authority** on an RLS table (`ROLE_ADMIN` plus the event's user),
+  because a trigger is the admin's configuration and the audit row a user may not insert is
+  exactly what one is for.
+- [x] **`Action::validate_config`** — a new trait method (default `Ok(())`) taking a `ConfigCheck`
+  (catalog, configuration, the event's channel), called by `validate_trigger` after the generic
+  `config_spec` check. It is what lets "this table has no primary key", "this table has no field
+  `x`", "this formula does not resolve in this event's scope" be refused **on save** and re-checked
+  on load, rather than discovered at fire time. `trigger_shape` now takes `Option<&str>` for the
+  channel, so one function answers "what is in scope" for an `only_if` and for an action's
+  formulas.
 - [ ] `fetch` — an HTTP request to a configured URL: method (default `POST`), headers, and a
   formula-computed JSON body (defaulting to the event). The **parsed response body is the
   action's result**, which is what earns the name over `webhook` — a directly-run trigger can
@@ -272,7 +301,7 @@ language spans ownership, calculated fields, only-if and action configuration.
   thread/watchdog/sandbox machinery. **Bounded on purpose:** no host API, so the code cannot
   read or write the catalog — that is the `sc-code` JS adapter's milestone (§15), and this is
   its seed.
-- [ ] Tests: one per action against a real database — rows inserted/updated/deleted with formula
+- [~] Tests: one per action against a real database — rows inserted/updated/deleted with formula
   values; the `where` selecting exactly the intended rows, asserted **twice** over the same case
   (a translatable predicate through SQL and an untranslatable one through the fallback, same
   rows); the scope rule pinned by a test where the target table and the event's table share a
@@ -280,6 +309,18 @@ language spans ownership, calculated fields, only-if and action configuration.
   local listener with its response body returned as the action's result (and a non-2xx surfaced
   as an error); `run_js_code` returning a computed value plus a sandbox assertion that it cannot
   reach the host.
+  **Done for the three row actions** (`sc-api/tests/row_actions.rs`, 9 integration tests on real
+  Postgres with the real V8 engine): the field values computed from `row`/`old`/`user` (and `old`
+  on an *insert* reading null, not erroring); a value the column cannot hold refused by the `rows`
+  layer *naming the field*, with nothing written; the `where` asserted twice over one case as
+  specified — plus a **unit** test that the two spellings really do take the two different
+  strategies, without which that comparison could pass while the fallback was never run; the scope
+  rule over a shared `status` field, three predicates differing only by `row.`; `count + 1` reading
+  the row it replaces and leaving unselected rows alone; a delete through the reified path; a
+  predicate matching nothing; every save-time refusal (11 cases) naming the trigger, the action and
+  the fix; the same configuration valid on an `insert` trigger and refused on a `login` one; and an
+  RLS-forced table where the action inserts and deletes rows *it does not own* while an outsider
+  cannot even see them. `fetch` and `run_js_code` remain.
 
 ## Phase 4 — Table events: insert, update, delete
 

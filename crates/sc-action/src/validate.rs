@@ -26,6 +26,7 @@ use sc_error::{Error, Result};
 use sc_expr::{Ambient, Formula, SchemaShape};
 use sc_types::validate_attrs;
 
+use crate::action::ConfigCheck;
 use crate::registry::ActionRegistry;
 use crate::trigger::Trigger;
 
@@ -52,6 +53,9 @@ pub async fn validate_trigger(
         .map_err(|e| problem(e.to_string()))?;
     validate_attrs(&action.config_spec(), &trigger.configuration)
         .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
+    // The name is resolved and the values are of the declared shapes; whether
+    // they *mean* anything is the action's own check, run below once the channel
+    // has been resolved (it is the scope the action's formulas are read in).
 
     if let Some(role) = trigger.min_role
         && !(1..=100).contains(&role)
@@ -90,6 +94,20 @@ pub async fn validate_trigger(
         (false, None) => {}
     }
 
+    // Everything the spec cannot express: that a named table exists and can be
+    // addressed by primary key, that a configured formula parses and resolves in
+    // the scope this event gives it. Only the action knows what its own settings
+    // mean, so only the action can check them — and it is checked *here*, on
+    // save and on load, rather than at fire time.
+    action
+        .validate_config(&ConfigCheck {
+            catalog,
+            config: &trigger.configuration,
+            channel,
+        })
+        .await
+        .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
+
     if let Some(source) = trigger
         .only_if
         .as_deref()
@@ -107,7 +125,7 @@ pub async fn validate_trigger(
             )));
         };
         let formula = Formula::parse(source).map_err(|e| problem(format!("`only if`: {e}")))?;
-        let shape = trigger_shape(catalog, table)?;
+        let shape = trigger_shape(catalog, Some(table))?;
         let analysis = formula
             .validate(&shape, table)
             .map_err(|e| problem(format!("`only if`: {e}")))?;
@@ -127,22 +145,31 @@ pub async fn validate_trigger(
     Ok(())
 }
 
-/// The schema shape a trigger's formula is validated and evaluated against: the
-/// catalog's shape plus `row`/`old` in scope, carrying `table`'s fields
-/// (decision 7).
+/// The schema shape a trigger's formulas are validated and evaluated against:
+/// the catalog's shape plus `row`/`old` in scope, carrying the event's table's
+/// fields (decision 7).
+///
+/// `table` is the event's channel — `None` for an event that has no row, which
+/// leaves `row`/`old` **out of scope** rather than in scope and empty, so a
+/// formula naming `row` on a `login` trigger gets the unknown-identifier error it
+/// deserves instead of silently reading null.
 ///
 /// One function, so validation and evaluation cannot drift into disagreeing about
 /// what is in scope — a formula accepted on save and then unbound at fire time
-/// would be the worst of both.
-pub fn trigger_shape(catalog: &Catalog, table: &str) -> Result<SchemaShape> {
+/// would be the worst of both. Its callers are this module (an `only_if`) and the
+/// built-in actions, whose configuration is formulas in the same scope.
+pub fn trigger_shape(catalog: &Catalog, table: Option<&str>) -> Result<SchemaShape> {
+    let shape = catalog.schema_shape()?;
+    let Some(table) = table else {
+        return Ok(shape);
+    };
     let fields: Vec<String> = catalog
         .require(table)?
         .fields
         .iter()
         .map(|f| f.base.name.clone())
         .collect();
-    Ok(catalog
-        .schema_shape()?
+    Ok(shape
         .ambient_fields(Ambient::Row, Some(fields.clone()))
         .ambient_fields(Ambient::Old, Some(fields)))
 }

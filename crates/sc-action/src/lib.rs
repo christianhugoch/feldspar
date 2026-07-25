@@ -37,7 +37,7 @@ mod trigger;
 mod triggers;
 mod validate;
 
-pub use action::{Action, ActionContext};
+pub use action::{Action, ActionContext, ConfigCheck};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use registry::ActionRegistry;
 pub use store::{

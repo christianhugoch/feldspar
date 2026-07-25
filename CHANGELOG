@@ -2,6 +2,63 @@
 
 Changes in reverse chronological order.
 
+## The elementary row-writing actions: `insert_row`, `update_rows`, `delete_rows` (Phase 3)
+
+The first three built-in actions (TODO Phase 3), and the one `where` semantics both of the
+plural ones share. A trigger cannot fire yet — that is Phase 4 — so every one of these is
+driven directly through the `Action` trait in its tests, which is exactly how the admin UI's
+"run this now" and a workflow step will drive them too.
+
+- **They live in `sc-api`, not `sc-action`** (`crates/sc-api/src/actions/`). An action that
+  writes a row must write it through the **`rows` layer**, so the target table's type coercion,
+  rich-type attributes, `File`-field rules and — from Phase 4 — its own triggers all apply. That
+  layer is layer 8, so `sc-api` gained a dependency on `sc-action` and implements its trait;
+  nothing in `sc-action` names `sc-api` in return, so the emit seam the catalog will hold stays
+  the only path from a write back to a trigger, and the trigger machinery stays at layer 6.
+  `sc_api::actions::builtin_actions()` is the one constructor a server calls: the layer-6
+  registry plus these three. A test proves it, and that registering them twice is refused.
+- **`insert_row`** — a target table and a field→formula map, each formula computed from the event
+  (`row.title`, `old.title`, `user.email`, `row.pages * 2`) and the whole row then handed to
+  `rows::create_row_ctx`. The result is the **inserted row**, key and all, so a workflow step can
+  refer to what it just made. "The formulas range over no table" is implemented as a formula
+  scope named `(the event)` — an empty table shape — so `title` where `row.title` was meant is
+  ``unknown identifier `title` `` at save time rather than a null at fire time.
+- **`update_rows` / `delete_rows`** — a `where` formula and (for the update) a field→formula map
+  of assignments, both in the **target table's** scope: `status` is the row being written,
+  `row.status` is the event's, and a test where both tables have a `status` field pins that the
+  two select different rows. Each selected row is written **by primary key, one at a time**, which
+  is what will give it its own event with its own payload; a target table with no single-column
+  primary key is therefore refused on save. `delete_rows` requires its predicate — an omitted
+  `where` would mean "delete everything", which no missing setting should be able to cause.
+- **The `where` semantics, once, for both**: translated into the `SELECT`'s `WHERE` when it
+  translates (the event's row and caller inline as literals — no new SQL construct), and
+  fetch-then-filter through the reified evaluator when it does not, exactly as an ownership read
+  does. Three things settled in the writing: an evaluator error **fails the action** where the
+  same error in an ownership check denies (there is no safe answer to "which rows did the admin
+  mean"); the fetched rows carry their calculated fields and, per row, whatever Ⱶ-path or
+  Ↄ-relation the formulas read, through `sc_catalog::prefetch_bindings` — the function a trigger's
+  `only_if` already uses, so there is one answer to "what does a reified formula get bound"; and
+  an action's writes carry **admin authority** on an RLS-enforced table (`ROLE_ADMIN` plus the
+  event's user, so a policy reading `user` still sees who caused it), because a trigger is the
+  admin's configuration and the audit row a user may not insert is precisely what one is for.
+- **`Action::validate_config`** (new, defaulting to `Ok(())`) with a `ConfigCheck` carrying the
+  catalog, the configuration and the event's channel. `validate_trigger` calls it after the
+  generic `config_spec` check, so everything a spec cannot express — this table does not exist,
+  has no primary key, has no field `x`; this formula does not parse, does not resolve in *this
+  event's* scope, or uses the operation flags — is refused **in front of the admin** and
+  re-checked on load, where a trigger whose world changed drops out of the live set with a reason.
+  `sc_action::trigger_shape` now takes `Option<&str>` for the channel, so one function answers
+  "what is in scope" for an `only_if` and for an action's formulas: a configuration valid on an
+  `insert` trigger is refused on a `login` one, and a test asserts exactly that.
+- **`sc_api::convert::json_to_natural_value`** — reading a JSON value with no column behind it,
+  for an event's row from a table the catalog no longer has. Where a column *is* known the values
+  go through `json_to_value` instead, which is what recovers the uuid a `user.id` needs to compare
+  against a `uuid` column in SQL rather than a string that would not.
+- 9 integration tests on real Postgres with the real V8 engine, plus 5 unit tests. One of them is
+  there to keep another honest: the "same rows symbolically and reified" test compares two
+  spellings of one rule, so a unit test asserts that those two spellings really do take the two
+  different strategies — otherwise it could pass while the fallback was never run at all.
+
 ## Actions & triggers: `_sc_triggers`, ambient objects, and the live trigger set (Phase 2)
 
 The trigger itself (TODO Phase 2): what it is, where it is stored, everything that can be wrong

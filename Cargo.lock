@@ -2230,6 +2230,7 @@ dependencies = [
  "bytes",
  "chrono",
  "rust_decimal",
+ "sc-action",
  "sc-auth",
  "sc-catalog",
  "sc-db",

@@ -43,12 +43,47 @@ pub trait Action: Send + Sync {
     /// what a trigger's configuration is validated against on save (Phase 2).
     fn config_spec(&self) -> Vec<FormField>;
 
+    /// Check a configuration beyond what [`config_spec`](Action::config_spec) can
+    /// express — the part only this action knows: that a table it names exists and
+    /// can be addressed by primary key, that a setting holding a **formula**
+    /// parses and resolves in the scope the event will give it.
+    ///
+    /// Runs where the generic check runs: on save, in front of the admin, *and*
+    /// again on load, so a trigger whose world changed underneath it (a dropped
+    /// table, a renamed field) leaves the live set with a reason rather than
+    /// failing when it fires. The default is `Ok(())` — an action whose
+    /// configuration is fully described by its spec has nothing more to say.
+    async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
+        let _ = check;
+        Ok(())
+    }
+
     /// Run against `ctx`, returning the action's result.
     ///
     /// The result is the response body of a directly-run trigger, and will be a
     /// workflow step's contribution to the run context. An action with nothing to
     /// report returns [`Json::Null`].
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json>;
+}
+
+/// What an action's own configuration check ([`Action::validate_config`]) gets:
+/// the catalog to resolve names against, the configuration under scrutiny, and
+/// the event's table.
+///
+/// The channel is here because an action's formulas are read in the scope the
+/// *event* provides (decision 7): `row`/`old` are in scope exactly when the
+/// trigger listens to a table, so the same configuration can be valid on an
+/// `insert` trigger and invalid on a `login` one, and the message has to say so
+/// while the admin is still looking at the form.
+pub struct ConfigCheck<'a> {
+    /// The live catalog: what tables and fields exist.
+    pub catalog: &'a Catalog,
+    /// The configuration being validated, keyed by
+    /// [`config_spec`](Action::config_spec) field names.
+    pub config: &'a Attrs,
+    /// The table the trigger's event fires on, or `None` for an event with no
+    /// row (validation has already refused the mismatched combinations).
+    pub channel: Option<&'a str>,
 }
 
 /// Everything one action run has access to.
