@@ -16,6 +16,11 @@ sc-catalog.workspace = true
 # V8 engine behind it is constructed by the server and injected.
 sc-expr.workspace = true
 sc-auth.workspace = true
+# An application exposes a subset of the server's triggers as endpoints (§10.2,
+# §13.4): this crate projects them and runs them through the dispatcher. The
+# layering is the one `sc-action`'s own docs state — it is layer 6, this is layer
+# 7, and nothing below it may name a trigger.
+sc-action.workspace = true
 # The row layer (`rows`) executes table CRUD for every API surface, so it speaks
 # the query language and the type system directly.
 sc-db.workspace = true

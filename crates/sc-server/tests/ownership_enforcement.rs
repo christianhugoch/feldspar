@@ -262,7 +262,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
     catalog.connect_file_store(Arc::new(LocalFileStore::new("uploads", &uploads_dir)?))?;
 
     let source = app_source_from_config(&code_framework())?;
-    let report = build_application(&catalog, &blog_app(), &source).await?;
+    let report = build_application(&catalog, &blog_app(), &source, None).await?;
     let framework = Arc::new(CodeFramework::new("code", report.bundle));
     // The real boot wiring: the registry carries the engine, and the mount is
     // built with it — a formula's reified path has something to run on, and
@@ -273,6 +273,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
         framework,
         &catalog,
         apps.evaluator(),
+        None,
     )?)?;
 
     let config = ServerConfig {

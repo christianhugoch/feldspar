@@ -26,10 +26,13 @@ use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Valu
 use serde_json::{Value as Json, json};
 
 use crate::api::validate_api_mounts;
-use crate::application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir};
+use crate::application::{
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
+};
 use crate::applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
     COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
+    COL_TRIGGERS,
 };
 use crate::framework::{CFG_STORE, validate_framework_config};
 
@@ -193,6 +196,7 @@ fn app_columns() -> Vec<String> {
         COL_EXTRA_FRAMEWORKS,
         COL_TABLES,
         COL_FILE_STORES,
+        COL_TRIGGERS,
         COL_APIS,
         COL_STATIC_DIRS,
         COL_CSP,
@@ -216,6 +220,9 @@ fn app_values(app: &Application) -> Result<Vec<Value>> {
         )),
         Value::Json(names_to_json(app.tables.iter().map(|t| &t.0))),
         Value::Json(names_to_json(app.file_stores.iter().map(|s| &s.0))),
+        // Written as `[]` rather than left NULL, so a row this version saves is
+        // never one the tolerant read below has to forgive.
+        Value::Json(names_to_json(app.triggers.iter().map(|t| &t.0))),
         Value::Json(Json::Array(
             app.apis
                 .iter()
@@ -286,6 +293,14 @@ pub(crate) fn application_from_row(row: &Row) -> Result<Application> {
         file_stores: names_from_json(row, COL_FILE_STORES)?
             .into_iter()
             .map(FileStoreId)
+            .collect(),
+        // The one column read leniently, and only for `NULL`/absent: this is the
+        // column the additive bootstrap adds to rows that already exist, and
+        // "written before triggers existed" is not a broken row. A value of the
+        // wrong *shape* is still refused, like every other column.
+        triggers: optional_names_from_json(row, COL_TRIGGERS)?
+            .into_iter()
+            .map(TriggerRef)
             .collect(),
         apis: json_array(row, COL_APIS)?
             .iter()
@@ -388,6 +403,16 @@ fn names_from_json(row: &Row, column: &str) -> Result<Vec<String>> {
             })
         })
         .collect()
+}
+
+/// A JSON column holding an array of strings, where `NULL` (or a column the row
+/// does not carry at all) means the empty list — the read a column added by
+/// [`bootstrap`](crate::bootstrap) after rows existed needs.
+fn optional_names_from_json(row: &Row, column: &str) -> Result<Vec<String>> {
+    match row.get(column) {
+        Some(Value::Null) | None => Ok(Vec::new()),
+        _ => names_from_json(row, column),
+    }
 }
 
 /// A JSON value that must be an object.

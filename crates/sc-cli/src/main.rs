@@ -165,7 +165,7 @@ async fn build_app_command(args: &[String]) -> Result<()> {
         app.name, subdomain
     );
     let source = app_source_from_config(&app.framework)?;
-    let report = build_application(&catalog, &app, &source).await?;
+    let report = build_application(&catalog, &app, &source, None).await?;
 
     // The tool output is the point of running this here rather than clicking
     // Build, so it goes to stdout whole — not the tail an error message can

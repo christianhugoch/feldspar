@@ -16,6 +16,10 @@ sc-types.workspace = true
 sc-catalog.workspace = true
 sc-files.workspace = true
 sc-api.workspace = true
+# An app declares the subset of triggers it exposes as API endpoints (§10.2):
+# resolving those names against the live set — and running one — is the
+# dispatcher's, so the wiring layer holds it.
+sc-action.workspace = true
 # The `JsEvaluator` seam threaded into providers (§7.3); no engine linked here.
 sc-expr.workspace = true
 async-trait.workspace = true

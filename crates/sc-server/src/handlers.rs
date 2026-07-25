@@ -27,10 +27,10 @@ use sc_action::{
 use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
 use sc_app::{
-    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, app_source_from_config,
-    applications_using_file_store, delete_application, framework_config_spec,
-    framework_default_csp, list_applications, load_application, registered_framework_info,
-    require_scaffoldable, save_application, scaffold_app,
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
+    app_source_from_config, applications_using_file_store, delete_application,
+    framework_config_spec, framework_default_csp, list_applications, load_application,
+    registered_framework_info, require_scaffoldable, save_application, scaffold_app,
 };
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE,
@@ -986,6 +986,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let trigger = trigger_from_body(TriggerId::new(), &ctx.body)?;
                 save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
                 dispatcher.reload(&catalog).await?;
+                reproject_apps(&apps);
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)).with_status(201))
             }
         }
@@ -1008,6 +1009,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let trigger = trigger_from_body(id, &ctx.body)?;
                 save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
                 dispatcher.reload(&catalog).await?;
+                reproject_apps(&apps);
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)))
             }
         }
@@ -1026,6 +1028,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     return Err(Error::not_found(format!("no trigger with id {id}")));
                 }
                 dispatcher.reload(&catalog).await?;
+                reproject_apps(&apps);
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
             }
         }
@@ -1099,8 +1102,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("createApplication", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 // A create mints a fresh id; the body carries everything else.
                 let app = application_from_body(AppId::new(), &ctx.body)?;
@@ -1113,7 +1118,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // directory is a thing the admin fixes and re-tries, not a reason
                 // to lose the application they just configured.
                 let mut body = application_json(&app);
-                let scaffold = scaffold_new_app(&catalog, &app).await;
+                // The scaffolded project's generated client is typed against the
+                // app's endpoints, exposed triggers included, so the scaffold
+                // resolves them against the same live set a mount would.
+                let scaffold = scaffold_new_app(&catalog, &app, apps.triggers()).await;
                 if let Some(obj) = body.as_object_mut() {
                     match &scaffold {
                         Ok(Some(report)) => {
@@ -1440,6 +1448,7 @@ fn application_json(app: &Application) -> Json {
         "extra_frameworks": app.extra_frameworks.iter().map(framework_ref_json).collect::<Vec<_>>(),
         "tables": app.tables.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
         "file_stores": app.file_stores.iter().map(|s| s.0.clone()).collect::<Vec<_>>(),
+        "triggers": app.triggers.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
         "apis": app.apis.iter().map(|a| json!({ "provider": a.provider, "mount": a.mount })).collect::<Vec<_>>(),
         "static_dirs": app.static_dirs.iter().map(|d| json!({ "mount": d.mount, "store": d.store.0, "path": d.path })).collect::<Vec<_>>(),
         "csp": csp_json(&app.csp),
@@ -1500,11 +1509,12 @@ fn csp_json(csp: &CspPolicy) -> Json {
 async fn scaffold_new_app(
     catalog: &Catalog,
     app: &Application,
+    dispatcher: Option<&Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<Option<sc_app::ScaffoldReport>> {
     if require_scaffoldable(app).is_err() {
         return Ok(None);
     }
-    scaffold_app(catalog, app).await.map(Some)
+    scaffold_app(catalog, app, dispatcher).await.map(Some)
 }
 
 /// Parse an [`Application`] from a create/update body (matching
@@ -1538,6 +1548,14 @@ fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
     let file_stores = parse_str_array(obj, "file_stores")?
         .into_iter()
         .map(FileStoreId)
+        .collect();
+    // Absent means "expose nothing": the field arrived after applications did,
+    // and an older client that does not send it must not have its app's exposed
+    // subset silently rewritten — `parse_str_array` already reads a missing
+    // field as the empty list.
+    let triggers = parse_str_array(obj, "triggers")?
+        .into_iter()
+        .map(TriggerRef)
         .collect();
     let apis = parse_array(obj, "apis")?
         .iter()
@@ -1579,6 +1597,7 @@ fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
         extra_frameworks,
         tables,
         file_stores,
+        triggers,
         apis,
         static_dirs,
         csp,
@@ -1882,6 +1901,28 @@ fn triggers_of(apps: &AppMounts) -> Result<Arc<sc_action::TriggerDispatcher>> {
             "this server has no trigger dispatcher installed, so triggers cannot be managed",
         )
     })
+}
+
+/// Re-project every mounted app that exposes a trigger, after the trigger set
+/// changed — so a tightened `min_role` applies to the app's endpoint now rather
+/// than at the next restart ([`AppMounts::refresh_triggers`]).
+///
+/// **Reported, not returned**, which is the one place this differs from the
+/// table-settings handlers. An app can genuinely stop projecting: deleting a
+/// trigger an app exposes is allowed (blocking it would leave an admin unable to
+/// remove a trigger they no longer want), and it makes that app's declaration
+/// dangle. The trigger *is* deleted at that point, so failing the request would
+/// report the opposite of what happened; the app keeps its previous mount, the
+/// operator gets the reason, and the app names the missing trigger when it is
+/// next built or mounted.
+fn reproject_apps(apps: &AppMounts) {
+    if let Err(e) = apps.refresh_triggers() {
+        eprintln!(
+            "saltcorn: the trigger set changed, but an application could not be \
+             re-projected and keeps its previous mount: {}",
+            sc_error::format_chain(&e)
+        );
+    }
 }
 
 /// One stored trigger as JSON, with the reason it is not usable when there is

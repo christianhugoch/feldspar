@@ -307,6 +307,41 @@ impl Catalog {
         self.require(table)
     }
 
+    /// Ensure a system metadata table exists with (at least) `fields`, creating
+    /// it if absent and **additively reconciling** it if it is already there.
+    ///
+    /// This is the one-time bootstrap every `_sc_*` table performs
+    /// (`_sc_applications`, `_sc_triggers`, `_sc_file_stores`), factored here so
+    /// there is one answer to "what happens when a release adds a column".
+    ///
+    /// The design bans a migration framework for now, and without one an existing
+    /// database would simply lack the new column — every read of that table would
+    /// then fail on a database that was working yesterday. So a declared column
+    /// the table does not have is **created** ([`create_field`](Self::create_field)),
+    /// which is the subset of migration that is always safe: nothing is dropped,
+    /// nothing is renamed, and no data is rewritten. A column that exists is left
+    /// exactly as it is — this never re-types or re-constrains one, because that
+    /// *is* a migration and needs a framework that can decide what to do with the
+    /// rows already there.
+    ///
+    /// The corollary a caller must respect: **a field added to an existing
+    /// table's declaration cannot be `required`**. The rows already stored have no
+    /// value for it, so `NOT NULL` would be rejected by the database (or, worse,
+    /// accepted with an invented default). Such a column is nullable, and its
+    /// reader treats `NULL` as the empty value.
+    pub async fn bootstrap_table(&self, name: &str, fields: &[DataField]) -> Result<Table> {
+        let Some(existing) = self.get(name)? else {
+            return self.create_table(name, fields).await;
+        };
+        let mut table = existing;
+        for field in fields {
+            if table.field(&field.base.name).is_none() {
+                table = self.create_field(name, field).await?;
+            }
+        }
+        Ok(table)
+    }
+
     /// A provider that serves the given table's rows. For a database-backed table
     /// this is the trivial [`DriverTableProvider`] over the primary driver.
     pub fn provider(&self, table: &Table) -> Arc<dyn TableProvider> {

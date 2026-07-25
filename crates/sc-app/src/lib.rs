@@ -45,13 +45,16 @@ mod scaffold;
 mod store;
 
 pub use api::{
-    app_client, app_endpoints, app_providers, app_providers_with, app_tables, validate_api_mounts,
+    app_client, app_client_with, app_endpoints, app_endpoints_with, app_providers,
+    app_providers_with, app_tables, app_triggers, validate_api_mounts,
 };
-pub use application::{ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir};
+pub use application::{
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
+};
 pub use applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
     COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
-    bootstrap,
+    COL_TRIGGERS, bootstrap,
 };
 pub use build::{
     AppSource, BuildReport, app_source_from_config, build_app, build_application,

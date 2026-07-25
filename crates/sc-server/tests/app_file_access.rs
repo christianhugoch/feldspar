@@ -279,7 +279,7 @@ async fn setup(
     catalog.connect_file_store(uploads.clone())?;
 
     let source = app_source_from_config(&code_framework())?;
-    let report = build_application(&catalog, &blog_app(), &source).await?;
+    let report = build_application(&catalog, &blog_app(), &source, None).await?;
     let framework = Arc::new(CodeFramework::new("code", report.bundle));
     let apps = Arc::new(AppMounts::new(catalog.clone()));
     apps.mount(MountedApp::new(blog_app(), framework, &catalog)?)?;

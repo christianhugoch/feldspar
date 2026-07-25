@@ -92,7 +92,7 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     let tmp = TempDir::new("write")?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    let report = scaffold_app(&cat, &todo_app()).await?;
+    let report = scaffold_app(&cat, &todo_app(), None).await?;
     assert_eq!(report.project, "todo");
 
     // Everything `npm install && npm run build` needs, with no shell step: the
@@ -155,7 +155,7 @@ async fn scaffolding_never_overwrites_an_occupied_directory() -> sc_error::Resul
     std::fs::create_dir_all(project.join("src"))?;
     std::fs::write(project.join("src/App.tsx"), "// six months of work\n")?;
 
-    let err = scaffold_app(&cat, &todo_app())
+    let err = scaffold_app(&cat, &todo_app(), None)
         .await
         .expect_err("an occupied directory is refused")
         .to_string();
@@ -183,7 +183,7 @@ async fn a_store_that_is_already_a_repo_does_not_get_a_nested_one() -> sc_error:
     std::fs::create_dir_all(tmp.path().join(".git"))?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    let report = scaffold_app(&cat, &todo_app()).await?;
+    let report = scaffold_app(&cat, &todo_app(), None).await?;
     assert!(!report.git_initialized);
     assert!(!tmp.path().join("todo/.git").exists());
     Ok(())
@@ -197,7 +197,7 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
     let mut app = todo_app();
-    scaffold_app(&cat, &app).await?;
+    scaffold_app(&cat, &app, None).await?;
     let project = tmp.path().join("todo");
 
     // The admin edits their own code — the half of the project that is theirs.
@@ -216,7 +216,7 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
     app.tables.push(TableId("notes".to_owned()));
 
     let source = app_source_from_config(&app.framework)?;
-    let written = emit_react_runtime(&cat, &app, &source).await?;
+    let written = emit_react_runtime(&cat, &app, &source, None).await?;
     assert_eq!(
         written,
         ["todo/src/saltcorn/client.ts", "todo/src/saltcorn/hooks.ts"]
@@ -252,13 +252,13 @@ async fn a_scaffolded_app_installs_builds_and_serves_end_to_end() -> sc_error::R
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
     let app = todo_app();
-    let report = scaffold_app(&cat, &app).await?;
+    let report = scaffold_app(&cat, &app, None).await?;
     assert!(!report.files.is_empty());
 
     // No shell step between scaffolding and a served bundle: the build installs
     // the dependencies the scaffold declared, then runs the bundler.
     let source = app_source_from_config(&app.framework)?;
-    let report = build_application(&cat, &app, &source).await?;
+    let report = build_application(&cat, &app, &source, None).await?;
     assert!(report.installed, "the first build installs dependencies");
     assert!(tmp.path().join("todo/node_modules").is_dir());
 
@@ -271,7 +271,7 @@ async fn a_scaffolded_app_installs_builds_and_serves_end_to_end() -> sc_error::R
     assert_eq!(fw.serve(&AppRequest::get("/tasks/42")).status, 200);
 
     // A second build does not reinstall — the marker is on disk.
-    let again = build_application(&cat, &app, &source).await?;
+    let again = build_application(&cat, &app, &source, None).await?;
     assert!(!again.installed);
     Ok(())
 }

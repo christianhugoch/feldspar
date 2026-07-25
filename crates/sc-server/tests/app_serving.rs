@@ -241,7 +241,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
     // The real build path: emit the app's typed client, run the bundler, serve
     // what it produced.
     let source = app_source_from_config(&code_framework())?;
-    let report = build_application(&catalog, &blog_app(), &source).await?;
+    let report = build_application(&catalog, &blog_app(), &source, None).await?;
 
     let framework = Arc::new(CodeFramework::new("code", report.bundle));
     let mounted = MountedApp::new(blog_app(), framework, &catalog)?;

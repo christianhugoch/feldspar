@@ -588,27 +588,52 @@ question.
   `listActions` describing all five built-ins in the `FormField` vocabulary, with `fetch`'s
   `method` carrying its options and default so the form renders a picker.
 
-## Phase 7 — Applications and APIs pick triggers
+## Phase 7 — Applications and APIs pick triggers ✅
 
-- [ ] `Application.triggers: Vec<TriggerRef>` — the app's exposed subset, stored in a new
+- [x] `Application.triggers: Vec<TriggerRef>` — the app's exposed subset, stored in a new
   `triggers` column on `_sc_applications`. Because the design bans migrations for now, the
-  bootstrap gains **additive reconciliation**: a declared column absent from an existing
-  `_sc_*` table is created (`Catalog::create_field`), so an existing database keeps working
-  without a migration framework and without a hand-edited schema.
-- [ ] `RestProvider` projects one endpoint per included trigger —
+  bootstrap gains **additive reconciliation**, and it landed one level down as
+  `Catalog::bootstrap_table` (create the table, or create any declared column it does not have)
+  so all three `_sc_*` bootstraps share it and Phase 8's timing columns arrive the same way.
+  **The corollary is a rule:** a field added to an existing table's declaration cannot be
+  `required` — the rows already there have no value for it — so `triggers` is nullable where its
+  siblings are not, `NULL` reads as "exposes nothing" (which is what an app written before
+  triggers existed did), and every row this version writes stores `[]` rather than leaving it.
+- [x] `RestProvider` projects one endpoint per included trigger —
   `POST {mount}/actions/{name}`, body → event payload, action result → response — carrying the
-  trigger's `min_role` as its `AuthRequirement` — defaulting to **admin** when unset, so a
-  trigger nobody has thought about the access of is never accidentally public. Endpoint naming
-  follows `op_name`, so the generated client gets a typed `runFoo(body)`.
-- [ ] Wiring: `app_providers_with` resolves the declared triggers against the registry (an
-  undeclared/unknown trigger is a configuration error, exactly as a missing table is);
-  `AppMounts` re-projects mounted apps when a trigger changes, as it already does for tables.
-- [ ] Application form in the admin SPA gains a trigger picker beside the table picker; the
-  generated app client is emitted with the new methods.
-- [ ] Tests: an app exposing a `none` trigger, called over HTTP at its mount with a payload and
-  returning the action's result; role enforcement on that endpoint; a trigger *not* included in
-  the app returning 404; the generated client containing the typed method; the additive
-  bootstrap adding the column to a pre-existing `_sc_applications` table.
+  trigger's `min_role` as its `AuthRequirement`, defaulting to **admin** when unset. Endpoint
+  naming follows `op_name`, so the generated client gets a typed `runFoo(body)`. The literal
+  `actions/` segment is what keeps a trigger and a table from ever being confused, and a trigger
+  the app does not name is a **404 rather than a 403**: exposing one is the application's
+  decision, so there is nothing there to refuse at.
+- [x] Wiring: `app_providers_with` resolves the declared triggers against the live set
+  (`app_triggers`), where "never defined" and "defined but not usable" are already distinguished
+  for the admin's sake; `AppMounts::refresh_triggers` re-projects mounted apps on every trigger
+  mutation, sharing one `reproject` helper with `refresh_table`.
+  Two things settled in the writing:
+  - **An app with exposed triggers refuses to project without a trigger set.** `sc-api` gained a
+    dependency on `sc-action` (the layering that crate's own docs state) and the dispatcher is
+    threaded explicitly — through `build_application`, `scaffold_app` and `emit_react_runtime` as
+    well, because both of those regenerate the app's client and one that skipped the trigger
+    endpoints would silently overwrite one that had them.
+  - **Deleting an exposed trigger still succeeds** (decision from Phase 3): the delete returns,
+    the app keeps its previous mount and goes on serving, the dangling reference is reported to
+    the log rather than turned into a failed request that reports the opposite of what happened,
+    and the app names the missing trigger when it is next built or mounted.
+- [x] Application form in the admin SPA gains a trigger picker beside the table picker — checkboxes
+  over the server's actual triggers, each showing its action, the path it will be served at and the
+  role that guards it, with a selection naming a trigger that no longer exists shown in red rather
+  than dropped. `triggers: string[]` on the application contract (absent means expose nothing, so an
+  older client's body is not refused) and the regenerated client.
+- [x] Tests: 6 in `sc-server/tests/app_trigger_api.rs` over the real router — the call at the app's
+  mount returning the row its action wrote with the app user as `user.email`; the role floor at
+  401/403/200 across anonymous, reader, editor and admin including the admin-only default; the
+  unexposed trigger answering 404 *and* still running through the dispatcher, which is what makes
+  "not exposed ≠ not defined" a fact rather than a claim; a `min_role` tightened through the admin
+  API taking effect on the mounted app immediately; the dangling reference refusing to mount; and
+  the delete case. Plus the additive bootstrap end to end in `sc-app/tests/app_store.rs` (drop the
+  column, insert a row the way the previous release would, boot, read it back) and the projection
+  unit tests in `sc-api`.
 
 ## Phase 8 — The periodic scheduler
 

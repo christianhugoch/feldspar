@@ -151,7 +151,7 @@ async fn it_builds_a_scaffolded_app_and_prints_the_tool_output() -> sc_error::Re
     .with_file_store(FileStoreId("apps".to_owned()))
     .with_api(ApiConfig::new("rest", "/api"));
     save_application(&catalog, &app).await?;
-    scaffold_app(&catalog, &app).await?;
+    scaffold_app(&catalog, &app, None).await?;
 
     let store_flag = format!("apps={}", tmp.path().display());
     let (ok, stdout, stderr) = build_app(&[

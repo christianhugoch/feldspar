@@ -238,7 +238,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
     catalog.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
     let source = app_source_from_config(&code_framework())?;
-    let report = build_application(&catalog, &blog_app(), &source).await?;
+    let report = build_application(&catalog, &blog_app(), &source, None).await?;
     let framework = Arc::new(CodeFramework::new("code", report.bundle));
     let apps = Arc::new(AppMounts::new(catalog.clone()).with_evaluator(default_js_evaluator()));
     apps.mount(MountedApp::new_with(
@@ -246,6 +246,7 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
         framework,
         &catalog,
         apps.evaluator(),
+        None,
     )?)?;
 
     let config = ServerConfig {

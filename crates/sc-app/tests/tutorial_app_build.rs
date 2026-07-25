@@ -126,7 +126,7 @@ async fn the_tutorial_app_scaffolds_installs_type_checks_builds_and_serves() -> 
 
     // Step 3: creating the app scaffolds its project.
     let app = todo_app();
-    let scaffold = scaffold_app(&cat, &app).await?;
+    let scaffold = scaffold_app(&cat, &app, None).await?;
     assert!(scaffold.files.iter().any(|f| f.ends_with("package.json")));
 
     // Step 4: Build. Installs dependencies, regenerates the runtime, type-checks
@@ -134,7 +134,7 @@ async fn the_tutorial_app_scaffolds_installs_type_checks_builds_and_serves() -> 
     // what makes this test worth having: `tsc` names the file and line in the
     // *generated* code that no longer compiles.
     let source = app_source_from_config(&app.framework)?;
-    let report = build_application(&cat, &app, &source).await?;
+    let report = build_application(&cat, &app, &source, None).await?;
     assert!(report.installed, "the first build installs dependencies");
 
     // Step 5: what is served is a real Vite bundle — an entry point plus hashed
@@ -154,7 +154,7 @@ async fn the_tutorial_app_scaffolds_installs_type_checks_builds_and_serves() -> 
     assert_eq!(fw.serve(&AppRequest::get("/tasks/42")).status, 200);
 
     // A second build reuses the installed dependencies.
-    let again = build_application(&cat, &app, &source).await?;
+    let again = build_application(&cat, &app, &source, None).await?;
     assert!(!again.installed);
     Ok(())
 }
@@ -188,7 +188,7 @@ async fn an_app_with_no_api_provider_is_told_so_not_shown_typescript_errors() ->
     .with_table(TableId("tasks".to_owned()))
     .with_file_store(FileStoreId("apps".to_owned()));
 
-    let err = scaffold_app(&cat, &app)
+    let err = scaffold_app(&cat, &app, None)
         .await
         .expect_err("a react app with no API cannot work")
         .to_string();
@@ -203,7 +203,7 @@ async fn an_app_with_no_api_provider_is_told_so_not_shown_typescript_errors() ->
     // The same refusal from the build path, which is where an app saved before
     // this check existed arrives.
     let source = app_source_from_config(&app.framework)?;
-    let err = build_application(&cat, &app, &source)
+    let err = build_application(&cat, &app, &source, None)
         .await
         .expect_err("the build cannot succeed either")
         .to_string();
@@ -255,9 +255,9 @@ async fn projects_for_unusual_table_sets_also_build() -> sc_error::Result<()> {
     )
     .with_file_store(FileStoreId("apps".to_owned()))
     .with_api(ApiConfig::new("rest", "/api"));
-    scaffold_app(&cat, &bare).await?;
+    scaffold_app(&cat, &bare, None).await?;
     let source = app_source_from_config(&bare.framework)?;
-    build_application(&cat, &bare, &source).await?;
+    build_application(&cat, &bare, &source, None).await?;
 
     // (b) Two tables, one of them keyless and carrying date/int columns.
     let mixed = Application::new(
@@ -271,9 +271,9 @@ async fn projects_for_unusual_table_sets_also_build() -> sc_error::Result<()> {
     .with_table(TableId("events".to_owned()))
     .with_file_store(FileStoreId("apps".to_owned()))
     .with_api(ApiConfig::new("rest", "/api"));
-    scaffold_app(&cat, &mixed).await?;
+    scaffold_app(&cat, &mixed, None).await?;
     let source = app_source_from_config(&mixed.framework)?;
-    let report = build_application(&cat, &mixed, &source).await?;
+    let report = build_application(&cat, &mixed, &source, None).await?;
 
     // Both tables have a page, and the second one is reachable at its own path.
     let fw = CodeFramework::new("react", report.bundle);

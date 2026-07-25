@@ -25,7 +25,7 @@ use sc_types::FormField;
 use serde_json::Value as Json;
 use tokio::process::Command;
 
-use crate::api::app_endpoints;
+use crate::api::app_endpoints_with;
 use crate::application::{Application, FrameworkRef};
 use crate::framework::{
     AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT, CFG_SOURCE, CFG_STORE,
@@ -265,15 +265,19 @@ pub async fn build_app(cat: &Catalog, source: &AppSource) -> Result<BuildReport>
 /// (every provider it enables, projected — see [`app_endpoints`]) by the same
 /// generator the admin SPA's client comes from (§13.1). It is written **before**
 /// the bundler runs, because the app's source imports it: an app's endpoints
-/// depend on which tables it declares, so unlike the admin's client it cannot be
-/// a checked-in artifact and is regenerated on every build. An app that declares
-/// no [`client_path`](AppSource::client_path) just builds.
+/// depend on which tables and triggers it declares, so unlike the admin's client
+/// it cannot be a checked-in artifact and is regenerated on every build. An app
+/// that declares no [`client_path`](AppSource::client_path) just builds.
+///
+/// `dispatcher` is what the app's exposed triggers are resolved against
+/// ([`app_triggers`](crate::app_triggers)); an app that exposes none needs none.
 pub async fn build_application(
     cat: &Catalog,
     app: &Application,
     source: &AppSource,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<BuildReport> {
-    let client_path = emit_client(cat, source, &app_endpoints(app, cat)?).await?;
+    let client_path = emit_client(cat, source, &app_endpoints_with(app, cat, dispatcher)?).await?;
     // A `react` app's generated runtime is more than the client: its hooks are
     // typed from this app's tables, so they are regenerated on the same schedule
     // and for the same reason (§2.1/§2.3). Adding a table in the admin UI makes
@@ -281,7 +285,7 @@ pub async fn build_application(
     // by hand. `emit_react_runtime` rewrites the client too, which is harmless
     // and keeps "the runtime is one directory" true.
     if app.framework.name == REACT_FRAMEWORK {
-        emit_react_runtime(cat, app, source).await?;
+        emit_react_runtime(cat, app, source, dispatcher).await?;
     }
     let mut report = build_app(cat, source).await?;
     report.client_path = client_path;

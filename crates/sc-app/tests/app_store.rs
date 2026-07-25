@@ -301,6 +301,66 @@ async fn a_legacy_database_with_no_applications_table_bootstraps_cleanly() -> Re
     Ok(())
 }
 
+/// Phase 7: a column a release adds reaches a database that already has
+/// applications in it, without a migration framework.
+///
+/// The situation is the real one: `_sc_applications` exists, it has rows, and
+/// then `triggers` is declared. Nothing may be lost and nothing may break — a row
+/// written before the column existed reads back as an app that exposes no
+/// triggers, which is exactly what it was.
+#[tokio::test]
+async fn a_column_added_by_a_release_is_reconciled_onto_an_existing_table() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    bootstrap(&cat).await?;
+
+    // Rewind to the previous release's schema: the table as it was before
+    // `triggers` was declared, holding an application saved by that release.
+    let client = db.client().await?;
+    client
+        .batch_execute("ALTER TABLE _sc_applications DROP COLUMN triggers")
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    let old_id = uuid::Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO _sc_applications \
+             (id, name, description, subdomain, framework, extra_frameworks, tables, \
+              file_stores, apis, static_dirs, csp, attributes) \
+             VALUES ($1, 'Old Blog', '', 'old', '{\"name\": \"code\", \"config\": {}}', \
+                     '[]', '[]', '[]', '[]', '[]', '{}', '{}')",
+            &[&old_id],
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    cat.reload().await?;
+    assert!(cat.require("_sc_applications")?.field("triggers").is_none());
+
+    // Booting the new release: the declared column the table does not have is
+    // created, and nothing else is touched.
+    bootstrap(&cat).await?;
+    assert!(cat.require("_sc_applications")?.field("triggers").is_some());
+
+    // The row written by the old release still reads, as the app it was.
+    let old = load_application(&cat, sc_app::AppId(old_id))
+        .await?
+        .expect("the pre-existing application");
+    assert_eq!(old.name, "Old Blog");
+    assert!(old.triggers.is_empty());
+
+    // And the new column is a column like any other: it round-trips.
+    let exposing = blog().with_trigger(sc_app::TriggerRef::new("send_digest"));
+    save_application(&cat, &exposing).await?;
+    let loaded = load_application(&cat, exposing.id).await?.expect("saved");
+    assert_eq!(loaded, exposing);
+    assert!(loaded.exposes_trigger("send_digest"));
+
+    // Reconciling is additive only: the second boot changes nothing.
+    bootstrap(&cat).await?;
+    assert_eq!(list_applications(&cat).await?.len(), 2);
+    Ok(())
+}
+
 /// Phase 1.1: the application-level half of the file-store reference check.
 ///
 /// This is the half that actually protects a store today — the catalog-level

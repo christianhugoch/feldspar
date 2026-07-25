@@ -85,13 +85,14 @@ fn trigger_fields() -> Vec<DataField> {
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
 /// same contract as `sc_app::bootstrap` and `bootstrap_file_stores`. Call once at
-/// startup, after the [`Catalog`] is initialised and before loading triggers.
+/// startup, after the [`Catalog`] is initialised and before loading triggers. An
+/// existing table is reconciled additively
+/// ([`bootstrap_table`](sc_catalog::Catalog::bootstrap_table)), which is how
+/// Phase 8's periodic-timing columns will reach a database that already has
+/// triggers in it.
 pub async fn bootstrap_triggers(catalog: &Catalog) -> Result<Table> {
-    if let Some(existing) = catalog.get(TRIGGERS_TABLE)? {
-        return Ok(existing);
-    }
     catalog
-        .create_table(TRIGGERS_TABLE, &trigger_fields())
+        .bootstrap_table(TRIGGERS_TABLE, &trigger_fields())
         .await
 }
 

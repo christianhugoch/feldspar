@@ -22,6 +22,7 @@ import type {
   CreateApplicationRequest,
   ListApplicationsResponse,
   ListFrameworksResponse,
+  ListTriggersResponse,
 } from "../client";
 import { navigate } from "../App";
 import { setNotice } from "../notice";
@@ -29,6 +30,7 @@ import { SettingsFields, asString, buildConfig, readConfig } from "../settings";
 
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
+type TriggerItem = ListTriggersResponse[number];
 
 /** A `{ provider, mount }` API row, edited as a repeatable list. */
 type ApiRow = { provider: string; mount: string };
@@ -70,6 +72,10 @@ function textToCsp(text: string): Record<string, string[]> {
 
 export function ApplicationForm({ appId }: { appId?: string }) {
   const [frameworks, setFrameworks] = useState<FrameworkInfo[] | null>(null);
+  // The server's triggers, so the exposed subset is *picked* rather than typed:
+  // a name that does not resolve is an application that will not mount, and the
+  // list is right here to choose from (unlike tables, which are not).
+  const [allTriggers, setAllTriggers] = useState<TriggerItem[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -81,6 +87,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   const [config, setConfig] = useState<Record<string, string>>({});
   const [tables, setTables] = useState("");
   const [fileStores, setFileStores] = useState("");
+  const [triggers, setTriggers] = useState<string[]>([]);
   // A new application starts with REST at `/api`. An app with no API has no
   // endpoints, which for a React app means a generated client with no methods and
   // a project that cannot compile — and for any app means a UI that cannot reach
@@ -97,6 +104,10 @@ export function ApplicationForm({ appId }: { appId?: string }) {
     const run = async () => {
       try {
         const fws = await api.listFrameworks();
+        // A server with no triggers, or one that cannot list them, still edits
+        // applications: the picker is simply empty, and an app that already
+        // names a trigger keeps naming it.
+        const trigs = await api.listTriggers().catch(() => [] as TriggerItem[]);
         let existing: AppItem | undefined;
         if (appId) {
           existing = (await api.listApplications()).find((a) => a.id === appId);
@@ -107,6 +118,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         }
         if (cancelled) return;
         setFrameworks(fws);
+        setAllTriggers(trigs);
         if (existing) {
           setName(existing.name);
           setDescription(existing.description);
@@ -115,6 +127,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
           setConfig(readConfig(existing.framework.config));
           setTables(existing.tables.join(", "));
           setFileStores(existing.file_stores.join(", "));
+          setTriggers(existing.triggers);
           setApis(existing.apis.map((a) => ({ provider: a.provider, mount: a.mount })));
           setStaticDirs(
             existing.static_dirs.map((d) => ({
@@ -155,6 +168,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         extra_frameworks: [],
         tables: parseNames(tables),
         file_stores: parseNames(fileStores),
+        triggers,
         apis: apis.filter((a) => a.provider.trim() || a.mount.trim()),
         static_dirs: staticDirs.filter((d) => d.mount.trim() || d.path.trim()),
         // An empty box means "no opinion", and is sent as no field at all so the
@@ -320,6 +334,73 @@ export function ApplicationForm({ appId }: { appId?: string }) {
             </Form.Group>
           </Col>
         </Row>
+
+        <Card className="mb-3">
+          <Card.Header>Triggers</Card.Header>
+          <Card.Body>
+            {allTriggers.length === 0 && (
+              <div className="text-muted">
+                No triggers are configured on this server.
+              </div>
+            )}
+            {allTriggers.map((t) => (
+              <Form.Check
+                key={t.id}
+                type="checkbox"
+                id={`trigger-${t.id}`}
+                className="mb-2"
+                checked={triggers.includes(t.name)}
+                onChange={(e) =>
+                  setTriggers((current) =>
+                    e.target.checked
+                      ? [...current, t.name]
+                      : current.filter((n) => n !== t.name),
+                  )
+                }
+                label={
+                  <>
+                    <span className="fw-semibold">{t.name}</span>
+                    <div className="text-muted small">
+                      {t.action} · on {t.when} ·{" "}
+                      {/* Same vocabulary the trigger form uses: 1 is admin,
+                          100 is public, and no role set means admins only. */}
+                      {t.min_role == null
+                        ? "admins only (no minimum role set)"
+                        : `minimum role ${t.min_role}`}
+                    </div>
+                  </>
+                }
+              />
+            ))}
+            {/* An app that names a trigger the server no longer has will not
+                mount, so a stale selection is shown rather than dropped on the
+                floor by a picker that only knows about triggers that exist. */}
+            {triggers
+              .filter((name) => !allTriggers.some((t) => t.name === name))
+              .map((name) => (
+                <div key={name} className="text-danger small mb-2">
+                  <span className="fw-semibold">{name}</span> — no trigger of that
+                  name exists here, so this application will not mount until it is
+                  removed or the trigger is recreated.
+                  <Button
+                    size="sm"
+                    variant="outline-danger"
+                    className="ms-2"
+                    onClick={() =>
+                      setTriggers((current) => current.filter((n) => n !== name))
+                    }
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+            <Form.Text muted>
+              Each ticked trigger is exposed as <code>POST {"{api mount}"}/actions/
+              {"{name}"}</code> on this app, guarded by the trigger's own minimum
+              role.
+            </Form.Text>
+          </Card.Body>
+        </Card>
 
         <RepeatableRows
           title="APIs"

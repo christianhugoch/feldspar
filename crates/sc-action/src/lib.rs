@@ -33,13 +33,15 @@
 //!   language.
 //!
 //! Layering: this is the lowest crate that both holds a [`Catalog`](sc_catalog::Catalog)
-//! and needs the formula language, and nothing below it may depend on it. Above
-//! it, `sc-api` does — it implements the built-in actions that **write rows**
-//! (`insert_row`/`update_rows`/`delete_rows`), which must go through the row layer
-//! so a trigger's write is coerced, validated and observable exactly like an API
-//! caller's; the rule is "an action lives where the things it needs are". Emitting
-//! runs the other way regardless: the row layer raises an event through a seam the
-//! catalog holds (Phase 4), never by calling in here.
+//! and needs the formula language, and nothing below it may depend on it. Two
+//! crates above it do. `sc-core-actions` holds the built-in actions that **write
+//! rows** (`insert_row`/`update_rows`/`delete_rows`), which must go through the
+//! row layer so a trigger's write is coerced, validated and observable exactly
+//! like an API caller's; the rule is "an action lives where the things it needs
+//! are". `sc-api` projects an application's exposed triggers as endpoints and runs
+//! them through [`TriggerDispatcher`] (§13.4). Emitting runs the other way
+//! regardless: the row layer raises an event through a seam the catalog holds
+//! (Phase 4), never by calling in here.
 
 mod action;
 mod dispatch;

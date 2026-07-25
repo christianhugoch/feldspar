@@ -48,20 +48,23 @@ impl MountedApp {
         framework: Arc<dyn Framework>,
         cat: &Catalog,
     ) -> Result<MountedApp> {
-        MountedApp::new_with(app, framework, cat, None)
+        MountedApp::new_with(app, framework, cat, None, None)
     }
 
-    /// [`new`](MountedApp::new) with the server's JavaScript evaluator injected
-    /// into the providers, so ownership formulas' reified path (§7.3) has an
-    /// engine. The boot and refresh paths pass the [`AppMounts`]' evaluator;
-    /// a mount without one fails closed on formulas that need it.
+    /// [`new`](MountedApp::new) with the server's JavaScript evaluator and
+    /// trigger dispatcher injected into the providers, so ownership formulas'
+    /// reified path (§7.3) has an engine and the app's exposed triggers (§10.2)
+    /// resolve and run. The boot and refresh paths pass the [`AppMounts`]' own;
+    /// a mount without an evaluator fails closed on formulas that need it, and
+    /// one without a dispatcher is refused outright if the app exposes a trigger.
     pub fn new_with(
         app: Application,
         framework: Arc<dyn Framework>,
         cat: &Catalog,
         evaluator: Option<Arc<dyn sc_expr::JsEvaluator>>,
+        dispatcher: Option<&Arc<sc_action::TriggerDispatcher>>,
     ) -> Result<MountedApp> {
-        let providers = sc_app::app_providers_with(&app, cat, evaluator)?;
+        let providers = sc_app::app_providers_with(&app, cat, evaluator, dispatcher)?;
         Ok(MountedApp {
             app,
             framework,
@@ -221,6 +224,33 @@ impl AppMounts {
     /// unrelated one — the same "one bad app must not take the others with it"
     /// rule [`mount_all`] follows.
     pub fn refresh_table(&self, table: &str) -> Result<()> {
+        self.reproject(|app| app.tables.iter().any(|t| t.0 == table))
+    }
+
+    /// Re-project the API providers of every mounted app that exposes a trigger,
+    /// so a change to the trigger set takes effect with no restart — the
+    /// trigger-side counterpart of [`refresh_table`](AppMounts::refresh_table),
+    /// and for the same reason.
+    ///
+    /// A provider encodes an exposed trigger's `min_role` as its endpoint's auth
+    /// requirement, resolved from the live set **at mount time**. So without this,
+    /// an admin who tightens a trigger's role watches it save and change nothing
+    /// until the next restart — and, worse, an admin who *deletes* an exposed
+    /// trigger leaves its endpoint mounted, answering with the dispatcher's
+    /// "no trigger named" instead of not being there.
+    ///
+    /// Every app with a non-empty exposed subset is re-projected rather than only
+    /// the ones naming the trigger that changed: the caller (a create, an update,
+    /// a delete) knows which row it touched, but a *rename* changes two names at
+    /// once, and re-projecting an app whose endpoints turn out identical costs a
+    /// walk of its tables.
+    pub fn refresh_triggers(&self) -> Result<()> {
+        self.reproject(|app| !app.triggers.is_empty())
+    }
+
+    /// Re-project the providers of every mounted app matching `select`, keeping
+    /// each app's built framework as it is.
+    fn reproject(&self, select: impl Fn(&Application) -> bool) -> Result<()> {
         let Some(catalog) = self.catalog() else {
             return Ok(());
         };
@@ -230,7 +260,7 @@ impl AppMounts {
         let affected: Vec<Arc<MountedApp>> = self
             .read()
             .values()
-            .filter(|m| m.app.tables.iter().any(|t| t.0 == table))
+            .filter(|m| select(&m.app))
             .cloned()
             .collect();
         for mounted in affected {
@@ -239,6 +269,7 @@ impl AppMounts {
                 mounted.framework.clone(),
                 catalog,
                 self.evaluator(),
+                self.triggers(),
             )?;
             self.remount(refreshed);
         }
@@ -296,12 +327,12 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
     let source = app_source_from_config(&app.framework)?;
-    let report = build_application(catalog, &app, &source).await?;
+    let report = build_application(catalog, &app, &source, apps.triggers()).await?;
     let framework = Arc::new(CodeFramework::new(
         app.framework.name.clone(),
         report.bundle.clone(),
     ));
-    let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator())?;
+    let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
     Ok(report)
 }

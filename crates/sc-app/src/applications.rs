@@ -53,6 +53,15 @@ pub const COL_EXTRA_FRAMEWORKS: &str = "extra_frameworks";
 pub const COL_TABLES: &str = "tables";
 /// The declared file-store subset (JSON array of store names).
 pub const COL_FILE_STORES: &str = "file_stores";
+/// The exposed trigger subset (JSON array of trigger names).
+///
+/// **Nullable**, unlike its siblings, and that is a fact about *when* it was
+/// added rather than about what it means. It arrived after `_sc_applications`
+/// existed in the field, so [`bootstrap`] adds it to tables that already have
+/// rows — and a `NOT NULL` column cannot be added to a table with rows in it
+/// without inventing a value for them. `NULL` reads back as "this app exposes no
+/// triggers", which is exactly what an app written before triggers existed did.
+pub const COL_TRIGGERS: &str = "triggers";
 /// The enabled API providers (JSON array of `{provider, mount}`).
 pub const COL_APIS: &str = "apis";
 /// The statically-served directories (JSON array of `{mount, store, path}`).
@@ -80,6 +89,9 @@ fn applications_fields() -> Vec<DataField> {
         DataField::plain(COL_EXTRA_FRAMEWORKS, json()).required(),
         DataField::plain(COL_TABLES, json()).required(),
         DataField::plain(COL_FILE_STORES, json()).required(),
+        // Not `required`: see [`COL_TRIGGERS`] — it is reconciled onto existing
+        // tables, and those rows have no value for it.
+        DataField::plain(COL_TRIGGERS, json()),
         DataField::plain(COL_APIS, json()).required(),
         DataField::plain(COL_STATIC_DIRS, json()).required(),
         DataField::plain(COL_CSP, json()).required(),
@@ -90,17 +102,21 @@ fn applications_fields() -> Vec<DataField> {
 /// Ensure the `_sc_applications` table exists, creating it if absent, and return
 /// it.
 ///
-/// Idempotent: an existing table is returned unchanged (the MVP performs no
-/// schema reconciliation). Call this once at startup after the [`Catalog`] is
-/// initialised — including against a database that has never seen Saltcorn,
-/// which is exactly the case the table's absence covers: a legacy database
-/// bootstraps into one holding applications without any migration step.
+/// Idempotent, and **additively reconciled**: a declared column an existing table
+/// does not have is created ([`Catalog::bootstrap_table`]). The design bans a
+/// migration framework for now, and without that the alternative for a column
+/// added by a release — [`COL_TRIGGERS`] is the first — is that every existing
+/// deployment breaks on the next read of a table that worked yesterday. Adding a
+/// column is the part of migration that is always safe; nothing here drops,
+/// renames or re-types anything.
+///
+/// Call this once at startup after the [`Catalog`] is initialised — including
+/// against a database that has never seen Saltcorn, which is exactly the case the
+/// table's absence covers: a legacy database bootstraps into one holding
+/// applications without any migration step.
 pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
-    if let Some(existing) = catalog.get(APPLICATIONS_TABLE)? {
-        return Ok(existing);
-    }
     catalog
-        .create_table(APPLICATIONS_TABLE, &applications_fields())
+        .bootstrap_table(APPLICATIONS_TABLE, &applications_fields())
         .await
 }
 
@@ -157,6 +173,17 @@ mod tests {
             // a reader never has to distinguish "absent" from "empty".
             assert!(f.required, "{name} should be NOT NULL");
         }
+    }
+
+    #[test]
+    fn the_trigger_subset_is_json_but_nullable_because_it_arrived_later() {
+        let fields = applications_fields();
+        let triggers = fields.iter().find(|f| f.base.name == COL_TRIGGERS).unwrap();
+        assert_eq!(triggers.base.type_, TypeRef::Basic(BasicType::Json));
+        // The one exception to the rule above, and the reason is the additive
+        // bootstrap: this column is created on tables that already have rows,
+        // and NOT NULL would have no value to give them.
+        assert!(!triggers.required);
     }
 
     #[test]

@@ -272,6 +272,10 @@ async fn applications_are_managed_over_http_and_serve_without_a_restart() -> sc_
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(created["subdomain"], json!("blog"));
     assert_eq!(created["tables"], json!(["posts"]));
+    // The body carries no `triggers` at all — the shape a client written before
+    // applications could expose them posts — and the app comes back exposing
+    // none, rather than being refused for a field it never heard of.
+    assert_eq!(created["triggers"], json!([]));
     let id = created["id"].as_str().expect("a minted id").to_owned();
 
     // It is listed, and CSP defaults to strict on the round-trip.

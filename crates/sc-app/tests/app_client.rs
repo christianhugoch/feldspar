@@ -248,7 +248,7 @@ async fn the_client_is_emitted_into_the_apps_source_tree_before_the_bundler_runs
     let source = app_source_from_config(&code_framework())?;
     assert_eq!(source.client_path.as_deref(), Some("web/src/client.ts"));
 
-    let report = build_application(&cat, &blog(), &source).await?;
+    let report = build_application(&cat, &blog(), &source, None).await?;
 
     // The build reports where the client landed...
     assert_eq!(report.client_path.as_deref(), Some("web/src/client.ts"));

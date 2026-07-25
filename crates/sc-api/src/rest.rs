@@ -27,8 +27,16 @@
 //! **Custom routes** (developer-authored guest code or SQL, §13.4) are carried by
 //! the endpoint model and rejected with `501 Not Implemented` at runtime: the
 //! MVP stubs them (see `TODO.md` Phase 9), and the honest failure is better than
-//! pretending. **Actions** are not projected: the actions registry (`sc-action`)
-//! is explicitly outside MVP scope, so there is nothing yet to project.
+//! pretending.
+//!
+//! **Triggers** are projected one endpoint each — `POST {mount}/actions/{name}`,
+//! request body → the event's payload, the action's result → the response — but
+//! only for the triggers the *application* names ([`project_with`](RestProvider::project_with)).
+//! Server-side automation is not an API surface by default: a trigger becomes
+//! callable from outside because an app said so, and one nobody named is a 404
+//! rather than a 403. Authorization is the trigger's own `min_role`, defaulting
+//! to **admin** when it has none — a trigger whose access nobody has thought
+//! about must not be the one that turns out to be public.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,6 +93,15 @@ struct TableRoute {
     table: String,
 }
 
+/// The path segment an app's exposed triggers live under: `POST
+/// {mount}/actions/{name}`.
+///
+/// A literal segment rather than the trigger name at the mount's root, so a
+/// trigger can never collide with a table (`/api/posts` is the `posts` table
+/// whatever anyone calls a trigger) and a reader of a URL can tell which of the
+/// two they are looking at.
+const ACTIONS_SEGMENT: &str = "actions";
+
 /// The endpoint names of the app's own auth operations. They are fixed rather
 /// than derived from a table, so a table cannot collide with them: `op_name`
 /// always prefixes a table's operations with `list`/`create`/`update`/`delete`.
@@ -99,6 +116,13 @@ pub struct RestProvider {
     /// Endpoint name → the table operation it runs. Custom routes are absent
     /// here; they resolve through their [`HandlerRef`] instead.
     routes: HashMap<String, TableRoute>,
+    /// Endpoint name → the trigger it runs, for the app's exposed subset.
+    trigger_routes: HashMap<String, String>,
+    /// The dispatcher an exposed trigger is run through. Injected by the server
+    /// via [`with_dispatcher`](RestProvider::with_dispatcher); absent in the
+    /// contexts that only need the endpoint *shapes* (client generation), where
+    /// calling one is a configuration error rather than a silent no-op.
+    dispatcher: Option<Arc<sc_action::TriggerDispatcher>>,
     /// The engine behind ownership formulas' reified path (§7.3). Injected by
     /// the server via [`with_evaluator`](RestProvider::with_evaluator); when
     /// absent, a formula that needs it **fails closed** with a configuration
@@ -120,9 +144,25 @@ impl RestProvider {
     /// address one of its rows, so `PUT`/`DELETE` would be undeliverable
     /// promises.
     pub fn project(mount: impl Into<String>, tables: &[Table]) -> RestProvider {
+        RestProvider::project_with(mount, tables, &[])
+    }
+
+    /// [`project`](RestProvider::project) plus one endpoint per exposed trigger
+    /// (§10.2).
+    ///
+    /// The triggers are the application's declared subset, already resolved
+    /// against the live trigger set by the caller — the same arrangement the
+    /// tables have, and for the same reason: this crate sits below `sc-app`, so
+    /// it takes what an app resolved rather than the `Application`.
+    pub fn project_with(
+        mount: impl Into<String>,
+        tables: &[Table],
+        triggers: &[sc_action::Trigger],
+    ) -> RestProvider {
         let mount = normalize_mount(&mount.into());
         let mut endpoints = EndpointSet::new();
         let mut routes = HashMap::new();
+        let mut trigger_routes = HashMap::new();
 
         // The app's own auth (§7.2). Projected for every app: an app whose users
         // cannot log in can only ever serve public-role data, and a caller has to
@@ -261,10 +301,38 @@ impl RestProvider {
             }
         }
 
+        // The app's exposed triggers, one `POST {mount}/actions/{name}` each.
+        // The role floor is the trigger's own, and an unset one is **admin**:
+        // `min_role` is optional on a trigger because most triggers are never
+        // called from outside at all, so its absence means "nobody has decided",
+        // which must not read as "everybody".
+        for trigger in triggers {
+            let name = op_name("run", &trigger.name);
+            trigger_routes.insert(name.clone(), trigger.name.clone());
+            endpoints.register(
+                Endpoint::new(
+                    name.clone(),
+                    Method::Post,
+                    path_at(&mount).lit(ACTIONS_SEGMENT).lit(&trigger.name),
+                )
+                // The posted body *is* the event's payload, whatever shape the
+                // action's configuration reads out of it, so it is typed as
+                // json rather than as a struct nobody could derive.
+                .input(TypeSchema::json())
+                .output(TypeSchema::json())
+                .auth(AuthRequirement::MinRole(
+                    trigger.min_role.unwrap_or(sc_auth::ROLE_ADMIN),
+                ))
+                .handler(HandlerRef::named(name)),
+            );
+        }
+
         RestProvider {
             mount,
             endpoints,
             routes,
+            trigger_routes,
+            dispatcher: None,
             evaluator: None,
         }
     }
@@ -276,6 +344,46 @@ impl RestProvider {
     pub fn with_evaluator(mut self, evaluator: Arc<dyn JsEvaluator>) -> RestProvider {
         self.evaluator = Some(evaluator);
         self
+    }
+
+    /// Inject the trigger dispatcher an exposed trigger's endpoint runs through
+    /// — the *same* dispatcher every other event fires on, so a trigger called
+    /// over an app's API is the trigger the admin configured, with the same
+    /// `only_if`, the same cascade bound and the same action.
+    pub fn with_dispatcher(
+        mut self,
+        dispatcher: Arc<sc_action::TriggerDispatcher>,
+    ) -> RestProvider {
+        self.dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Run one of the app's exposed triggers, with the request body as the
+    /// event's payload and the caller travelling with it (§10.2).
+    ///
+    /// The caller is not merely recorded: it is what the trigger's action sees as
+    /// `user`, and what a row the action writes reports as the cause of its own
+    /// event. A failing action comes back as an **error** — somebody asked for
+    /// this one, so somebody is waiting for the answer — which is the same
+    /// contract the admin's "run this now" button has.
+    async fn run_trigger(
+        &self,
+        trigger: &str,
+        req: &ApiRequest,
+        cat: &Catalog,
+        user: Option<&User>,
+    ) -> Result<ApiResponse> {
+        let dispatcher = self.dispatcher.as_ref().ok_or_else(|| {
+            Error::config(format!(
+                "this application exposes trigger `{trigger}` but no trigger \
+                 dispatcher is available in this context, so it cannot be run"
+            ))
+        })?;
+        let caller = ownership::caller_context(user);
+        let result = dispatcher
+            .run_trigger(cat, trigger, req.body.clone(), Some(&caller))
+            .await?;
+        Ok(ApiResponse::ok(result))
     }
 
     /// Add a developer-authored custom route (guest code or SQL, §13.4).
@@ -881,12 +989,15 @@ impl ApiProvider for RestProvider {
             )),
             HandlerRef::Named(_) => match self.routes.get(&endpoint.name) {
                 Some(route) => self.run(route, &params, &req, cat, user).await,
-                // A named handler with no projected table route: the set was
-                // extended with a route this provider cannot run.
-                None => Ok(ApiResponse::error(
-                    501,
-                    format!("endpoint `{}` has no implementation", endpoint.name),
-                )),
+                None => match self.trigger_routes.get(&endpoint.name) {
+                    Some(trigger) => self.run_trigger(trigger, &req, cat, user).await,
+                    // A named handler with no projected route of either kind: the
+                    // set was extended with a route this provider cannot run.
+                    None => Ok(ApiResponse::error(
+                        501,
+                        format!("endpoint `{}` has no implementation", endpoint.name),
+                    )),
+                },
             },
             // Custom routes are carried by the model but not executable in the
             // MVP (design §13.4; TODO Phase 9).
@@ -1223,6 +1334,52 @@ mod tests {
         assert!(enforce_auth(&AuthRequirement::Public, None).is_none());
         assert!(enforce_auth(&AuthRequirement::LoggedIn, None).is_some());
         assert!(enforce_auth(&AuthRequirement::LoggedIn, Some(&user(100))).is_none());
+    }
+
+    #[test]
+    fn an_exposed_trigger_is_one_post_endpoint_carrying_its_own_role_floor() {
+        use sc_action::{EventKind, Trigger};
+
+        let open = Trigger::new("send_digest", EventKind::None, "fetch").min_role(80);
+        // No `min_role`: nobody has decided who may call it.
+        let unset = Trigger::new("purge_users", EventKind::None, "fetch");
+        let p = RestProvider::project_with(
+            "/api",
+            &[table("posts", AccessRules::default())],
+            &[open, unset],
+        );
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4 + 2);
+
+        let ep = p.endpoints().find("runSendDigest").unwrap();
+        assert_eq!(ep.method, Method::Post);
+        // Under `actions/`, so a trigger can never be confused with a table.
+        assert_eq!(ep.path.pattern(), "/api/actions/send_digest");
+        assert_eq!(ep.auth, AuthRequirement::MinRole(80));
+
+        // The undecided one is admin-only, not public.
+        assert_eq!(
+            p.endpoints().find("runPurgeUsers").unwrap().auth,
+            AuthRequirement::MinRole(sc_auth::ROLE_ADMIN)
+        );
+
+        // It routes, and it is typed into the app's client like anything else.
+        let (ep, params) = p
+            .resolve(&ApiRequest::new(Method::Post, "/api/actions/send_digest"))
+            .unwrap();
+        assert_eq!(ep.name, "runSendDigest");
+        assert!(params.is_empty());
+        assert!(crate::generate_client(p.endpoints()).contains("runSendDigest("));
+    }
+
+    #[test]
+    fn a_trigger_the_app_does_not_expose_has_no_endpoint_at_all() {
+        // The 404/403 distinction matters: a trigger nobody exposed is not a
+        // permission problem to be escalated, it is not there.
+        let p = RestProvider::project("/api", &[table("posts", AccessRules::default())]);
+        let miss = p
+            .resolve(&ApiRequest::new(Method::Post, "/api/actions/send_digest"))
+            .unwrap_err();
+        assert_eq!(miss.status, 404);
     }
 
     #[test]

@@ -84,13 +84,13 @@ fn file_store_fields() -> Vec<DataField> {
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
 /// same contract as `sc_app::bootstrap`. Call once at startup, after the
-/// [`Catalog`] is initialised and before loading stored stores.
+/// [`Catalog`] is initialised and before loading stored stores. An existing
+/// table is reconciled additively
+/// ([`bootstrap_table`](Catalog::bootstrap_table)), so a column added by a later
+/// release appears without a migration step.
 pub async fn bootstrap_file_stores(catalog: &Catalog) -> Result<Table> {
-    if let Some(existing) = catalog.get(FILE_STORES_TABLE)? {
-        return Ok(existing);
-    }
     catalog
-        .create_table(FILE_STORES_TABLE, &file_store_fields())
+        .bootstrap_table(FILE_STORES_TABLE, &file_store_fields())
         .await
 }
 

@@ -2421,6 +2421,7 @@ dependencies = [
  "bytes",
  "chrono",
  "rust_decimal",
+ "sc-action",
  "sc-auth",
  "sc-catalog",
  "sc-db",
@@ -2443,6 +2444,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "sc-action",
  "sc-api",
  "sc-catalog",
  "sc-db",

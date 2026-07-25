@@ -88,6 +88,35 @@ impl FrameworkRef {
     }
 }
 
+/// A reference to a trigger the application exposes through its API (design
+/// §10.2), by the trigger's unique **name**.
+///
+/// A name rather than the trigger's id, and deliberately: the name is what the
+/// endpoint is built from (`POST {mount}/actions/{name}`) and what the generated
+/// client's method is called (`runFoo`), so it is already the app's contract with
+/// its own code. Referring by id would let a rename silently repoint a published
+/// endpoint at a differently-named action; referring by name breaks the reference
+/// visibly, which is what a rename *is*.
+///
+/// A newtype for the same reason [`TableId`] is one: an app's declaration is a
+/// list of names, and a `Vec<String>` beside `Vec<TableId>` invites passing one
+/// where the other belongs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TriggerRef(pub String);
+
+impl TriggerRef {
+    /// A reference to the trigger named `name`.
+    pub fn new(name: impl Into<String>) -> TriggerRef {
+        TriggerRef(name.into())
+    }
+}
+
+impl std::fmt::Display for TriggerRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One API provider enabled for an application, mounted on a sub-path (design
 /// §13.4). The MVP ships a REST provider; the model carries the provider `name`
 /// so GraphQL/gRPC/tRPC/MCP slot in later without a shape change.
@@ -227,6 +256,14 @@ pub struct Application {
     pub tables: Vec<TableId>,
     /// The subset of file stores the app can access.
     pub file_stores: Vec<FileStoreId>,
+    /// The triggers the app exposes as API endpoints (§10.2).
+    ///
+    /// An **opt-in subset**, exactly like [`tables`](Application::tables): a
+    /// trigger is server-side configuration, and a server-side action becomes
+    /// callable from outside only because an app said so. A trigger the app does
+    /// not name has no endpoint, and a request for it is a 404 rather than a
+    /// 403 — there is nothing there.
+    pub triggers: Vec<TriggerRef>,
     /// Enabled API providers, each on a sub-path.
     pub apis: Vec<ApiConfig>,
     /// Statically-served store subdirectories, each on a sub-path.
@@ -261,6 +298,7 @@ impl Application {
             extra_frameworks: Vec::new(),
             tables: Vec::new(),
             file_stores: Vec::new(),
+            triggers: Vec::new(),
             apis: Vec::new(),
             static_dirs: Vec::new(),
             csp: CspPolicy::strict(),
@@ -290,6 +328,12 @@ impl Application {
     /// Grant the app access to a file store.
     pub fn with_file_store(mut self, store: FileStoreId) -> Application {
         self.file_stores.push(store);
+        self
+    }
+
+    /// Expose a trigger through the app's API.
+    pub fn with_trigger(mut self, trigger: TriggerRef) -> Application {
+        self.triggers.push(trigger);
         self
     }
 
@@ -326,6 +370,11 @@ impl Application {
     pub fn can_access_file_store(&self, store: &FileStoreId) -> bool {
         self.file_stores.contains(store)
     }
+
+    /// Whether the app exposes the trigger named `name`.
+    pub fn exposes_trigger(&self, name: &str) -> bool {
+        self.triggers.iter().any(|t| t.0 == name)
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +393,7 @@ mod tests {
         .description("The company blog")
         .with_table(TableId("posts".to_owned()))
         .with_file_store(FileStoreId("uploads".to_owned()))
+        .with_trigger(TriggerRef::new("send_digest"))
         .with_api(ApiConfig::new("rest", "api"))
         .with_static_dir(StaticDir::new(
             "docs",
@@ -361,6 +411,10 @@ mod tests {
         assert!(!app.can_access_table(&TableId("users".to_owned())));
         assert!(app.can_access_file_store(&FileStoreId("uploads".to_owned())));
         assert!(!app.can_access_file_store(&FileStoreId("secrets".to_owned())));
+        // Triggers are the same opt-in subset: one is exposed, everything else
+        // the server has configured is not.
+        assert!(app.exposes_trigger("send_digest"));
+        assert!(!app.exposes_trigger("purge_users"));
 
         // One REST provider, mount normalised with a leading slash.
         assert_eq!(app.apis.len(), 1);

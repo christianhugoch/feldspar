@@ -26,7 +26,7 @@ use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
 use tokio::process::Command;
 
-use crate::api::{app_endpoints, app_tables};
+use crate::api::{app_endpoints_with, app_tables};
 use crate::application::Application;
 use crate::build::{AppSource, app_source_from_config};
 use crate::react::REACT_FRAMEWORK;
@@ -67,7 +67,11 @@ impl ScaffoldReport {
 ///
 /// Refuses if the app is not a `react` app, if its store is unreachable, or if
 /// the project directory already has anything in it.
-pub async fn scaffold_app(cat: &Catalog, app: &Application) -> Result<ScaffoldReport> {
+pub async fn scaffold_app(
+    cat: &Catalog,
+    app: &Application,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+) -> Result<ScaffoldReport> {
     require_scaffoldable(app)?;
     require_api_provider(app)?;
     let source = app_source_from_config(&app.framework)?;
@@ -84,7 +88,7 @@ pub async fn scaffold_app(cat: &Catalog, app: &Application) -> Result<ScaffoldRe
     }
 
     let tables = app_tables(app, cat)?;
-    let endpoints = app_endpoints(app, cat)?;
+    let endpoints = app_endpoints_with(app, cat, dispatcher)?;
     let generated = files::project_files(&project, &tables, &endpoints);
 
     let mut written = Vec::with_capacity(generated.len());
@@ -166,6 +170,7 @@ pub async fn emit_react_runtime(
     cat: &Catalog,
     app: &Application,
     source: &AppSource,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<Vec<String>> {
     // Checked here as well as at scaffold time, because this is the path an
     // application saved before the check existed arrives on — and a build that
@@ -174,7 +179,7 @@ pub async fn emit_react_runtime(
     let project = &source.build.source_dir;
     let store = cat.require_file_store(&source.store.0)?;
     let tables = app_tables(app, cat)?;
-    let endpoints = app_endpoints(app, cat)?;
+    let endpoints = app_endpoints_with(app, cat, dispatcher)?;
 
     let mut written = Vec::new();
     for file in files::runtime_files(&tables, &endpoints) {
