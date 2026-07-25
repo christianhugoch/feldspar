@@ -2,6 +2,58 @@
 
 Changes in reverse chronological order.
 
+## `fetch`: calling an HTTP endpoint, and reading its answer (Phase 3)
+
+The fourth built-in action (TODO Phase 3). It is called `fetch` rather than `webhook` because the
+**response is the point**: the parsed body is the action's result, so a directly-run trigger
+returns it to its caller and a workflow step will put it in the run context. Fire-and-forget is
+the same action with the result ignored.
+
+- **New workspace dependency, as the plan called for**: `reqwest` with `default-features = false`
+  and `rustls-tls` — no OpenSSL anywhere in the tree, so a deployment does not need a system
+  libssl to call a webhook. `json` is the request-body serialiser only: responses are read as
+  bytes and parsed with `serde_json` here, which keeps the crate's charset machinery out.
+- **Configuration**: `url` (required, and refused unless it is an absolute `http`/`https` one — a
+  relative URL has nothing to resolve against server-side, and `file:`/`data:` is a way to make
+  the server read something local), `method` (a picker, default `POST`), literal `headers`,
+  a `body` formula, and `timeout_ms`.
+- **The body defaults to the event** — `{event, channel, row, old_row, payload, role, user}`,
+  written out rather than derived, because that JSON is a wire contract with whatever is on the
+  other end and must not change silently when a field is added to `Event`. A formula replaces it
+  wholesale; `GET`/`HEAD` send none, and a body formula *on* one of those is refused at save rather
+  than silently dropped. The default body needs no JavaScript engine, so one is demanded only when
+  a formula is actually configured.
+- **The timeout is bounded at 60 s and refused, not clamped**, when out of range. A trigger runs
+  inside the write or request that fired it, so an unbounded `fetch` is an unbounded hold on that
+  caller; and an admin who typed five minutes should be told, not quietly given one.
+- **Failures say what happened.** A non-2xx names the status *and quotes the endpoint's own
+  explanation* (truncated to 300 characters, so a page of HTML cannot become the error); a timeout
+  says "timed out" rather than leaving the reader to decode a transport message; both name the
+  trigger. A non-JSON 2xx body is **not** an error — it comes back as a JSON string, because an
+  endpoint that answers `OK` did what was asked, and failing over its content type would make
+  `fetch` unusable for half of what it is for.
+- **One client, built at registration** (`Fetch::new`, which is why `builtin_actions()` is
+  fallible): it holds the connection pool and the TLS configuration, and a deployment whose TLS
+  stack cannot initialise should hear about it at boot rather than at the first firing.
+- **Headers are literal, not formulas**: a header is a protocol detail of the endpoint being
+  called, and the values that vary with the event belong in the body. Each name and value is
+  checked at save time, and a configured `content-type` overrides the one the JSON body sets — a
+  test pins that ordering, since it is the sort of thing a refactor silently reverses.
+- **Where it lives — a revision.** `fetch` went into `sc-api`'s `actions/` module beside the row
+  actions, not into `sc-action` as the previous milestone's note planned. It needs no rows, but needs
+  the same configuration-and-scope machinery, and that machinery is in `sc-api` because the *row*
+  actions need it in a form that knows column types. The alternatives were a second copy of it or
+  pushing the JSON↔`Value` coercions down two layers to serve one caller.
+- **A limitation worth recording:** `sc-expr` has no object *literal*, so a body formula computes
+  a scalar, an array, or an ambient object as a whole (`row`, `payload`, `row.title`) — not a new
+  object shape. The default envelope covers the common case; building objects in formulas would be
+  an `sc-expr` change, not a `fetch` one.
+- 6 integration tests against a **real socket** — a one-shot listener on port 0 that reads the
+  request and hands it back to the test — plus 6 unit tests over the configuration parsers. The
+  request is asserted on its bytes (start line, content type, custom header, JSON body), because
+  every way this action can be wrong is in the bytes, and a mocked client would be asserting facts
+  about a request that never crossed a socket.
+
 ## The elementary row-writing actions: `insert_row`, `update_rows`, `delete_rows` (Phase 3)
 
 The first three built-in actions (TODO Phase 3), and the one `where` semantics both of the

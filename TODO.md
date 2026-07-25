@@ -243,14 +243,20 @@ the workflow engine's job, not an action's. Every action's configuration value t
 the event is a **formula** in the same `sc-expr` language under decision 7's scope rule — so one
 language spans ownership, calculated fields, only-if and action configuration.
 
-**Where the row-writing actions live — deviation, deliberate.** `insert_row`/`update_rows`/
-`delete_rows` are implemented in **`sc-api`** (`actions/`), not in `sc-action`: they must write
-through the `rows` layer (that is the whole point — coercion, File rules, and Phase 4's events),
-and that layer is layer 8. So `sc-api` gained a dependency on `sc-action` and implements its
-trait; nothing in `sc-action` names `sc-api` in return, so Phase 4's emit seam (held by the
-catalog) is still the only path from a write back to a trigger. `sc_api::actions::builtin_actions`
-assembles `ActionRegistry::builtin()` plus these three, and is the one constructor a server calls;
-`fetch` and `run_js_code`, which need no rows, still belong in `sc-action`.
+**Where the built-in actions live — deviation, deliberate.** They are implemented in **`sc-api`**
+(`actions/`), not in `sc-action`. The row-writing three must write through the `rows` layer (that
+is the whole point — coercion, File rules, and Phase 4's events), and that layer is layer 8. So
+`sc-api` gained a dependency on `sc-action` and implements its trait; nothing in `sc-action` names
+`sc-api` in return, so Phase 4's emit seam (held by the catalog) is still the only path from a
+write back to a trigger. `sc_api::actions::builtin_actions` assembles `ActionRegistry::builtin()`
+plus these, and is the one constructor a server calls.
+
+**Revision (after `fetch`):** `fetch` joined them rather than living in `sc-action` as first
+planned. It needs no rows — but it needs the same configuration-and-scope machinery
+(`actions/scope.rs`), and that machinery is in `sc-api` because the *row* actions need it in a form
+that knows column types. The alternatives were a second copy of it or pushing the JSON↔`Value`
+coercions down two layers to serve one caller; one home for the built-ins is the better trade.
+`run_js_code` will follow the same reasoning.
 
 - [x] `insert_row` — target table, and a field→formula map. The formulas range over no table, so
   they read the event ambiently (`row.title`, `user.id`); the computed values go through the
@@ -288,13 +294,37 @@ assembles `ActionRegistry::builtin()` plus these three, and is the one construct
   on load, rather than discovered at fire time. `trigger_shape` now takes `Option<&str>` for the
   channel, so one function answers "what is in scope" for an `only_if` and for an action's
   formulas.
-- [ ] `fetch` — an HTTP request to a configured URL: method (default `POST`), headers, and a
+- [x] `fetch` — an HTTP request to a configured URL: method (default `POST`), headers, and a
   formula-computed JSON body (defaulting to the event). The **parsed response body is the
   action's result**, which is what earns the name over `webhook` — a directly-run trigger can
   return it to its caller, and a workflow step will put it in the context. A non-2xx response is
   an application error naming the status; the timeout is bounded and configurable.
-  **Dependency decision to record:** an HTTP *client* is new to the workspace — `reqwest` with
-  `rustls-tls` and `default-features = false`, no OpenSSL, matching §16's pure-Rust TLS posture.
+  **Dependency decision recorded** in the workspace manifest: `reqwest` with `rustls-tls`,
+  `default-features = false`, no OpenSSL. `json` is the request-body serialiser only — responses
+  are read as bytes and parsed here, so the crate's charset machinery stays out of the tree.
+  Settled in the writing:
+  - **The client is built once**, at registration (`Fetch::new()`, hence a fallible
+    `builtin_actions()`): it carries the connection pool and the TLS config, and a deployment
+    whose TLS stack cannot initialise should hear about it at boot, not at the first firing.
+  - **Non-2xx quotes the endpoint** (truncated to 300 chars) as well as naming the status — the
+    endpoint's own explanation is the useful half. A **non-JSON** 2xx body is *not* an error: it
+    comes back as a JSON string (`"OK"`), and an empty body as `null`.
+  - **`timeout_ms` is bounded at 60 s and refused, not clamped**, when out of range: a trigger
+    runs inside the write that fired it, so an unbounded `fetch` is an unbounded hold on that
+    caller — and an admin who typed five minutes should be told, not quietly given one.
+  - **Headers are literal, not formulas** (a header is a detail of the endpoint; what varies with
+    the event belongs in the body), and each name/value is checked at save time. A configured
+    `content-type` overrides the one the JSON body sets, and a test pins that ordering.
+  - **The body defaults to the event** as a written-out object (`event`/`channel`/`row`/`old_row`/
+    `payload`/`role`/`user`) — a wire contract, so it must not change silently when a field is
+    added to `Event` — and a `GET`/`HEAD` sends none. A body formula *on* such a method is refused
+    at save rather than silently dropped. A default body needs no engine, so the evaluator is only
+    demanded when a formula is actually configured.
+  - **Limitation to record:** `sc-expr` has no object *literal* (its `Ast` has arrays and
+    templates but no `{}`), so a body formula computes a scalar, an array, or an ambient object as
+    a whole (`row`, `payload`, `row.title`) — not a new object shape. The default envelope covers
+    the common case; if formulas need to build objects, that is an `sc-expr` change, not a `fetch`
+    one.
 - [ ] `run_js_code` — a JavaScript **code body** (statements, `return`) run in the existing
   `deno_core` isolate with the event's row, `user` and payload in scope, returning JSON. This
   extends `JsEvaluator` with a third method (`run_code`) beside `eval`/`eval_value`, on the same
@@ -320,7 +350,18 @@ assembles `ActionRegistry::builtin()` plus these three, and is the one construct
   predicate matching nothing; every save-time refusal (11 cases) naming the trigger, the action and
   the fix; the same configuration valid on an `insert` trigger and refused on a `login` one; and an
   RLS-forced table where the action inserts and deletes rows *it does not own* while an outsider
-  cannot even see them. `fetch` and `run_js_code` remain.
+  cannot even see them.
+  **Done for `fetch`** (`sc-api/tests/fetch_action.rs`, 6 integration tests against a real socket —
+  a one-shot listener on port 0 that hands the request it read back to the test — plus 6 unit tests
+  for the configuration parsers): the default POST of the event envelope with its headers, asserted
+  on the *bytes* (start line, content type, custom header, JSON body) with the parsed response
+  returned as the result; a configured `content-type` beating the body's; a body formula sending
+  `row` as-is and a computed array; a `GET` with no body and no content type, whose `OK` reply comes
+  back as text; a 500 naming the status and quoting `upstream exploded`; a hung endpoint failing at
+  a 250 ms timeout in well under the default 10 s; and 8 save-time refusals (bad URL, `file:`
+  scheme, unoffered method, illegal header, over-long timeout, a body on a `GET`, and two body
+  formulas that do not resolve) measured against one configuration that validates. `run_js_code`
+  remains.
 
 ## Phase 4 — Table events: insert, update, delete
 

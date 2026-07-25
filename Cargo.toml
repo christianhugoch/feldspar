@@ -160,6 +160,20 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "set-header", "trace"] }
 matchit = "0.8"
 
+# --- HTTP client -------------------------------------------------------------
+#
+# Client decision (TODO Phase 3, the `fetch` action): **reqwest**, with
+# `default-features = false` and `rustls-tls` — no OpenSSL anywhere in the tree,
+# matching §16's pure-Rust TLS posture (a deployment must not need a system
+# libssl to call a webhook). It rides the hyper/tokio stack the server already
+# has, so this adds a TLS stack and the client itself, not a second runtime.
+# `json` is the request-body serialiser only; responses are read as bytes and
+# parsed with `serde_json` here, so the crate's charset machinery is not needed.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+
 # Workspace-wide lints. Principle 5 (no silent failures): library code must not
 # `unwrap()`/`expect()` on fallible paths — return a `sc-error::Result` instead.
 # Member crates opt in with `[lints]` + `workspace = true`. Test code is exempted
