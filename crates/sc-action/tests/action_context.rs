@@ -158,7 +158,7 @@ async fn a_registered_action_runs_through_the_registry() -> Result<()> {
 
     // The path every trigger takes: a stored action *name* resolved to the
     // implementation, then run.
-    let mut registry = ActionRegistry::builtin();
+    let mut registry = ActionRegistry::new();
     registry.register(Arc::new(Report))?;
 
     let event = Event::new(EventKind::Insert)

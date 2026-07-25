@@ -1,15 +1,14 @@
 //! `delete_rows` — delete every row a predicate selects.
 
-use sc_action::{Action, ActionContext, ConfigCheck};
 use sc_error::Result;
 use sc_expr::Operation;
 use sc_types::{BasicType, FormField};
 use serde_json::{Value as Json, json};
 
-use super::scope::{
-    CFG_TABLE, CFG_WHERE, Scope, action_shape, check_formula, config_str, row_id, where_formula,
-};
-use crate::rows;
+use sc_action::{Action, ActionContext, ConfigCheck, action_shape, check_formula};
+
+use crate::rows_scope::{CFG_TABLE, CFG_WHERE, Scope, row_id, target_table, where_formula};
+use sc_api::rows;
 
 /// Delete the rows of a table that a `where` formula selects.
 ///
@@ -45,9 +44,7 @@ impl Action for DeleteRows {
     }
 
     async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
-        let table = check
-            .catalog
-            .require(&config_str(check.config, CFG_TABLE)?)?;
+        let table = target_table(check.catalog, check.config)?;
         rows::single_pk(&table)?;
         let shape = action_shape(check.catalog, check.channel)?;
         check_formula(
@@ -59,7 +56,7 @@ impl Action for DeleteRows {
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
-        let table = ctx.catalog.require(&ctx.require_str(CFG_TABLE)?)?;
+        let table = target_table(ctx.catalog, ctx.config)?;
         let pk = rows::single_pk(&table)?;
         let predicate = where_formula(ctx.config)?;
         let scope = Scope::of(ctx)?;

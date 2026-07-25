@@ -1,0 +1,51 @@
+[package]
+name = "sc-core-actions"
+description = "The core built-in trigger actions (layer 9)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# The extension point these implement, and the shared machinery every action's
+# configuration goes through: the formula scope, the settings parsers and the
+# event's bindings (`sc_action::scope`).
+sc-action.workspace = true
+# The row layer. This is what fixes this crate *above* `sc-api`: a trigger's
+# write must be the same write an API caller makes — same coercion, same
+# rich-type and File-field validation, and (Phase 4) the same events — so it goes
+# through `rows` rather than around it.
+sc-api.workspace = true
+sc-catalog.workspace = true
+# `ROLE_ADMIN` and the users table: the authority an action's write runs under,
+# and the columns the caller object is typed against.
+sc-auth.workspace = true
+# `Expr`/`Value` for the translated `where` predicate and the values a formula is
+# evaluated against.
+sc-query.workspace = true
+sc-expr.workspace = true
+sc-types.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+# The `fetch` action's HTTP client (§10.1). Pure-Rust TLS; see the workspace
+# manifest for why it is `rustls-tls` with no default features.
+reqwest.workspace = true
+
+[dev-dependencies]
+# Every action is pinned against a real database (principle 4) and, where its
+# configuration is formulas, the real V8 engine — a mock evaluator would hide
+# exactly the mistakes these tests exist to catch.
+sc-db.workspace = true
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+sc-expr = { workspace = true, features = ["eval"] }
+# `net`/`io-util`/`time` are for the `fetch` tests' one-shot HTTP listener: the
+# action is pinned against a real socket rather than a mocked client, so the
+# request it builds and the response it parses are the real bytes.
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }
+
+[lints]
+workspace = true

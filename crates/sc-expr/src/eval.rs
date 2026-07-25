@@ -574,6 +574,63 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
+/// A JSON value read as the [`Value`] its own shape implies — the inverse of
+/// [`value_to_json`] as far as JSON can express it (a timestamp that became a
+/// string comes back as text).
+///
+/// This is for values that arrive as JSON with **no column behind them**: a
+/// trigger event's row, the caller object, an action's computed setting. Where a
+/// column *is* known the caller should coerce to its type instead (`sc-api`'s
+/// `json_to_value`), which recovers the uuid, timestamp and decimal this leaves
+/// as text — the distinction matters only for SQL translation, since a reified
+/// evaluation renders both back through [`value_to_json`] to the same JS value.
+pub fn value_from_json(json: &serde_json::Value) -> Value {
+    use serde_json::Value as J;
+    match json {
+        J::Null => Value::Null,
+        J::Bool(b) => Value::Bool(*b),
+        J::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => Value::Int(i),
+            (None, Some(f)) => Value::Float(f),
+            // Not representable as either: `serde_json` cannot produce this, and
+            // carrying the digits as text loses nothing that was there.
+            (None, None) => Value::Text(n.to_string()),
+        },
+        J::String(s) => Value::Text(s.clone()),
+        // A composite has one faithful `Value`, and it is the JSON itself.
+        J::Array(_) | J::Object(_) => Value::Json(json.clone()),
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_typeless_json_value_reads_as_its_own_shape_and_round_trips() {
+        assert_eq!(value_from_json(&json!(null)), Value::Null);
+        assert_eq!(value_from_json(&json!(false)), Value::Bool(false));
+        assert_eq!(value_from_json(&json!(4)), Value::Int(4));
+        assert_eq!(value_from_json(&json!(1.5)), Value::Float(1.5));
+        assert_eq!(value_from_json(&json!("x")), Value::Text("x".into()));
+        let obj = json!({ "a": [1, 2] });
+        assert_eq!(value_from_json(&obj), Value::Json(obj.clone()));
+        // The pair agrees in both directions for everything JSON can say, which
+        // is what lets an event's row be bound without a column to type it.
+        for value in [
+            json!(null),
+            json!(true),
+            json!(2),
+            json!(1.5),
+            json!("s"),
+            obj,
+        ] {
+            assert_eq!(value_to_json(&value_from_json(&value)), value);
+        }
+    }
+}
+
 #[cfg(feature = "eval")]
 #[cfg(test)]
 mod tests {

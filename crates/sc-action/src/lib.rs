@@ -10,6 +10,14 @@
 //! phase; the event model is deliberately independent of the trigger, so the row
 //! layer can emit events without knowing whether anything listens.
 //!
+//! It holds no actions itself — the core set is a crate of its own
+//! (`sc-core-actions`, above the row layer, because three of them write rows) —
+//! but it does hold the machinery *every* action's configuration goes through:
+//! what a configured formula may name ([`action_shape`], [`EVENT_SCOPE`]), what an
+//! event binds it to ([`EventBindings`]), and how a setting is parsed
+//! ([`config_str`], [`formula_map`], [`check_formula`] and friends). So a plugin's
+//! action needs this crate and nothing else.
+//!
 //! Three design commitments are expressed as types here rather than as prose:
 //!
 //! - **An action is one elementary step.** Control flow is the workflow engine's
@@ -25,13 +33,18 @@
 //!   language.
 //!
 //! Layering: this is the lowest crate that both holds a [`Catalog`](sc_catalog::Catalog)
-//! and needs the formula language, and nothing below it may depend on it — the
-//! row layer (`sc-api`, layer 8) reaches it through a seam the catalog holds
-//! (Phase 4), never the other way round.
+//! and needs the formula language, and nothing below it may depend on it. Above
+//! it, `sc-api` does — it implements the built-in actions that **write rows**
+//! (`insert_row`/`update_rows`/`delete_rows`), which must go through the row layer
+//! so a trigger's write is coerced, validated and observable exactly like an API
+//! caller's; the rule is "an action lives where the things it needs are". Emitting
+//! runs the other way regardless: the row layer raises an event through a seam the
+//! catalog holds (Phase 4), never by calling in here.
 
 mod action;
 mod event;
 mod registry;
+mod scope;
 mod store;
 mod trigger;
 mod triggers;
@@ -40,6 +53,10 @@ mod validate;
 pub use action::{Action, ActionContext, ConfigCheck};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use registry::ActionRegistry;
+pub use scope::{
+    EVENT_SCOPE, EventBindings, action_shape, check_formula, config_str, event_formula_value,
+    formula_map, optional_formula, required_formula,
+};
 pub use store::{
     TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers, load_trigger,
     load_trigger_by_name, save_trigger,

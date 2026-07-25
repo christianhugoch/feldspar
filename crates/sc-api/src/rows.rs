@@ -88,6 +88,39 @@ pub async fn list_rows_where(
     Ok(Json::Array(rows.iter().map(row_to_json).collect()))
 }
 
+/// The rows of `table` matching `filter` as **query values** keyed by column,
+/// including any non-stored calculated field.
+///
+/// The evaluation-side counterpart of [`list_rows_where`]: same rows, same RLS
+/// routing, but as the `Value` map a formula is evaluated against rather than the
+/// JSON wire shape. This is what an action's `where` predicate selects with — it
+/// needs the values *typed* to bind them, and it needs the calculated fields
+/// because a formula may read one.
+pub async fn select_values(
+    catalog: &Catalog,
+    table: &Table,
+    filter: Option<Expr>,
+    context: Option<&CallerContext>,
+) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
+    let mut columns = vec![Projection::all()];
+    columns.extend(calc_projections(catalog, table)?);
+    let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
+    if let Some(filter) = filter {
+        select = select.filter(filter);
+    }
+    let fetched = run_read(catalog, table, &select, context).await?;
+    Ok(fetched
+        .iter()
+        .map(|row| {
+            row.columns()
+                .iter()
+                .cloned()
+                .zip(row.values().iter().cloned())
+                .collect()
+        })
+        .collect())
+}
+
 /// Insert a row from a JSON object, returning the inserted row (with any
 /// database-generated columns filled in).
 pub async fn create_row(catalog: &Catalog, table: &Table, body: &Json) -> Result<Json> {
@@ -301,7 +334,7 @@ fn calc_map(table: &Table) -> CalcFields {
 /// SQL is **skipped** — computing it needs the reified evaluator, a read-path
 /// fallback not yet wired here (a genuinely untranslatable calc expression is
 /// the rare case; the built-in field/Ⱶ/Ↄ forms all translate).
-pub(crate) fn calc_projections(catalog: &Catalog, table: &Table) -> Result<Vec<Projection>> {
+fn calc_projections(catalog: &Catalog, table: &Table) -> Result<Vec<Projection>> {
     let calc = calc_map(table);
     if calc.is_empty() {
         return Ok(Vec::new());
@@ -459,7 +492,7 @@ pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
 /// Run a `SELECT`, collecting its rows — through an RLS caller-context
 /// transaction when `context` is given (§7.3), else on a pooled connection via
 /// the table's provider.
-pub(crate) async fn run_read(
+async fn run_read(
     catalog: &Catalog,
     table: &Table,
     select: &Select,

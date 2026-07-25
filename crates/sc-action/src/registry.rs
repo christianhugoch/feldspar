@@ -27,19 +27,16 @@ pub struct ActionRegistry {
 }
 
 impl ActionRegistry {
-    /// An empty registry — the starting point for a test, or for a deployment
-    /// that registers its own set.
+    /// An empty registry.
+    ///
+    /// The starting point for everything: `sc_core_actions::builtin_actions()`
+    /// fills one with the core set (design §10.1 — deliberately few), a plugin
+    /// adds its own to that, and a test starts from one with just the action it is
+    /// about. This crate deliberately registers **nothing** itself: it defines
+    /// what an action *is*, and an empty-but-named constructor pretending to be
+    /// the built-in set is exactly the placeholder that goes stale.
     pub fn new() -> ActionRegistry {
         ActionRegistry::default()
-    }
-
-    /// The built-in actions (design §10.1: deliberately few).
-    ///
-    /// Phase 3 fills this in; until then it is empty *and named*, so the wiring
-    /// above it can be built and tested against the real constructor rather than
-    /// against a placeholder that has to be found and replaced later.
-    pub fn builtin() -> ActionRegistry {
-        ActionRegistry::new()
     }
 
     /// Register `action` under its own [`name`](Action::name).
@@ -176,7 +173,7 @@ mod tests {
 
     #[test]
     fn an_empty_registry_still_explains_itself() {
-        let reg = ActionRegistry::builtin();
+        let reg = ActionRegistry::new();
         assert!(reg.is_empty());
         let msg = reg.require("insert_row").err().unwrap().to_string();
         assert!(

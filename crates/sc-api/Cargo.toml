@@ -16,13 +16,6 @@ sc-catalog.workspace = true
 # V8 engine behind it is constructed by the server and injected.
 sc-expr.workspace = true
 sc-auth.workspace = true
-# The `Action` trait, the event model and the run context the built-in actions
-# implement (§10.1). The dependency points *up* the layer numbers on purpose: an
-# action that writes rows belongs where the row layer is, and the trait it
-# implements is defined below it. Nothing in `sc-action` names this crate, so
-# Phase 4's emit seam (which the catalog holds) stays the only path from a write
-# back to a trigger.
-sc-action.workspace = true
 # The row layer (`rows`) executes table CRUD for every API surface, so it speaks
 # the query language and the type system directly.
 sc-db.workspace = true
@@ -33,9 +26,6 @@ sc-types.workspace = true
 # also serves and accepts a `File` field's bytes (§4), which is what `bytes` is
 # for: it is the body type the `FileStore` trait itself speaks.
 sc-files.workspace = true
-# The `fetch` action's HTTP client (§10.1). Pure-Rust TLS; see the workspace
-# manifest for why it is `rustls-tls` with no default features.
-reqwest.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -48,14 +38,7 @@ uuid.workspace = true
 [dev-dependencies]
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
-# The built-in actions' formulas are evaluated by the real engine in their tests:
-# a formula that computes the wrong value symbolically and the right one reified
-# (or vice versa) is exactly what a mock evaluator would hide.
-sc-expr = { workspace = true, features = ["eval"] }
-# `net`/`io-util`/`time` are for the `fetch` tests' one-shot HTTP listener: the
-# action is pinned against a real socket rather than a mocked client, so the
-# request it builds and the response it parses are the real bytes.
-tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

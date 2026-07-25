@@ -2420,9 +2420,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "reqwest",
  "rust_decimal",
- "sc-action",
  "sc-auth",
  "sc-catalog",
  "sc-db",
@@ -2517,6 +2515,27 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tower",
+]
+
+[[package]]
+name = "sc-core-actions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "sc-action",
+ "sc-api",
+ "sc-auth",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-error",
+ "sc-expr",
+ "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

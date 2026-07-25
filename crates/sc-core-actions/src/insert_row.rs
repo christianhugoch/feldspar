@@ -2,17 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use sc_action::{Action, ActionContext, ConfigCheck};
 use sc_error::Result;
 use sc_expr::Operation;
 use sc_types::{BasicType, FormField};
 use serde_json::{Map, Value as Json};
 
-use super::scope::{
-    CFG_TABLE, CFG_VALUES, EVENT_SCOPE, Scope, action_shape, check_formula, config_str,
-    formula_map, writable_field,
+use sc_action::{
+    Action, ActionContext, ConfigCheck, EVENT_SCOPE, action_shape, check_formula, formula_map,
 };
-use crate::rows;
+
+use crate::rows_scope::{CFG_TABLE, CFG_VALUES, Scope, target_table, writable_field};
+use sc_api::rows;
 
 /// Insert one row into a configured table, each field a formula over the event.
 ///
@@ -46,9 +46,7 @@ impl Action for InsertRow {
     }
 
     async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
-        let table = check
-            .catalog
-            .require(&config_str(check.config, CFG_TABLE)?)?;
+        let table = target_table(check.catalog, check.config)?;
         let shape = action_shape(check.catalog, check.channel)?;
         for (field, formula) in formula_map(check.config, CFG_VALUES)? {
             writable_field(&table, &field)?;
@@ -60,7 +58,7 @@ impl Action for InsertRow {
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
-        let table = ctx.catalog.require(&ctx.require_str(CFG_TABLE)?)?;
+        let table = target_table(ctx.catalog, ctx.config)?;
         let values = formula_map(ctx.config, CFG_VALUES)?;
         let scope = Scope::of(ctx)?;
         // Nothing is being read, so there is no row to bind as the bare scope.

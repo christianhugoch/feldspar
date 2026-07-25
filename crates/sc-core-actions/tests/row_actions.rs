@@ -24,11 +24,11 @@
 use std::sync::Arc;
 
 use sc_action::{ActionContext, Event, EventKind, Trigger, validate_trigger};
-use sc_api::actions::builtin_actions;
 use sc_api::rows;
 use sc_catalog::{
     CallerContext, Catalog, TableMeta, bootstrap_table_meta, enable_rls, save_table_meta,
 };
+use sc_core_actions::builtin_actions;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};

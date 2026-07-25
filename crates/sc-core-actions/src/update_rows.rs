@@ -1,16 +1,17 @@
 //! `update_rows` — assign formula values to every row a predicate selects.
 
-use sc_action::{Action, ActionContext, ConfigCheck};
 use sc_error::Result;
 use sc_expr::{Formula, Operation};
 use sc_types::{BasicType, FormField};
 use serde_json::{Map, Value as Json, json};
 
-use super::scope::{
-    CFG_ASSIGNMENTS, CFG_TABLE, CFG_WHERE, Scope, action_shape, check_formula, config_str,
-    formula_map, row_id, where_formula, writable_field,
+use sc_action::{Action, ActionContext, ConfigCheck, action_shape, check_formula, formula_map};
+
+use crate::rows_scope::{
+    CFG_ASSIGNMENTS, CFG_TABLE, CFG_WHERE, Scope, row_id, target_table, where_formula,
+    writable_field,
 };
-use crate::rows;
+use sc_api::rows;
 
 /// Update the rows of a table that a `where` formula selects, each assignment a
 /// formula in the target row's own scope.
@@ -52,9 +53,7 @@ impl Action for UpdateRows {
     }
 
     async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
-        let table = check
-            .catalog
-            .require(&config_str(check.config, CFG_TABLE)?)?;
+        let table = target_table(check.catalog, check.config)?;
         // Each matched row is addressed by its key, so a table without one cannot
         // be a target — said here, in front of the admin, rather than at fire
         // time in front of nobody.
@@ -74,7 +73,7 @@ impl Action for UpdateRows {
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
-        let table = ctx.catalog.require(&ctx.require_str(CFG_TABLE)?)?;
+        let table = target_table(ctx.catalog, ctx.config)?;
         let pk = rows::single_pk(&table)?;
         let predicate = where_formula(ctx.config)?;
         let assignments = formula_map(ctx.config, CFG_ASSIGNMENTS)?;

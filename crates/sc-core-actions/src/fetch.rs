@@ -2,13 +2,15 @@
 
 use std::time::Duration;
 
-use sc_action::{Action, ActionContext, ConfigCheck, Event};
 use sc_error::{Error, Result};
-use sc_expr::{Formula, Operation};
+use sc_expr::Formula;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
-use super::scope::{EVENT_SCOPE, Scope, action_shape, check_formula, config_str};
+use sc_action::{
+    Action, ActionContext, ConfigCheck, EVENT_SCOPE, Event, action_shape, check_formula,
+    config_str, event_formula_value, optional_formula,
+};
 
 /// The `url` setting.
 const CFG_URL: &str = "url";
@@ -131,13 +133,10 @@ impl Action for Fetch {
             // service what happened", and spelling it out as a formula would be
             // ceremony. A formula replaces it wholesale.
             let body = match body_formula(ctx.config)? {
-                // A formula needs the engine; the default body does not, so the
-                // scope is built only when there is a formula to evaluate.
+                // A formula needs the engine; the default body does not, so it is
+                // only asked for when there is a formula to evaluate.
                 Some(formula) => {
-                    let no_row = std::collections::BTreeMap::new();
-                    Scope::of(ctx)?
-                        .value(&formula, &no_row, Operation::Read, &format!("`{CFG_BODY}`"))
-                        .await?
+                    event_formula_value(ctx, &formula, &format!("`{CFG_BODY}`")).await?
                 }
                 None => event_json(ctx.event),
             };
@@ -304,15 +303,7 @@ fn timeout(config: &Attrs) -> Result<Duration> {
 
 /// The body formula, when one is configured.
 fn body_formula(config: &Attrs) -> Result<Option<Formula>> {
-    let Some(Json::String(source)) = config.get(CFG_BODY) else {
-        return Ok(None);
-    };
-    if source.trim().is_empty() {
-        return Ok(None);
-    }
-    Formula::parse(source)
-        .map(Some)
-        .map_err(|e| Error::invalid(format!("`{CFG_BODY}`: {e}")))
+    optional_formula(config, CFG_BODY)
 }
 
 /// A transport failure — DNS, connection, TLS, timeout — as an application error
@@ -429,7 +420,7 @@ mod tests {
 
     #[test]
     fn the_default_body_is_the_event_as_a_stable_object() {
-        let event = sc_action::Event::new(sc_action::EventKind::Insert)
+        let event = Event::new(sc_action::EventKind::Insert)
             .on("books")
             .row(json!({ "id": 1 }))
             .caller(1, Some(json!({ "email": "a@b.c" })));

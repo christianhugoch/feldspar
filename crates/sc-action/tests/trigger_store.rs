@@ -68,7 +68,7 @@ impl Action for Notify {
 /// Fallible (a duplicate name would be a bug in this file), so the tests `?` it
 /// rather than unwrapping inside a helper.
 fn registry() -> Result<ActionRegistry> {
-    let mut reg = ActionRegistry::builtin();
+    let mut reg = ActionRegistry::new();
     reg.register(Arc::new(Notify))?;
     Ok(reg)
 }

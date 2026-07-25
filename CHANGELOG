@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## `sc-core-actions`: one crate for the core actions, one crate for the machinery
+
+No behaviour change; the whole point is that **"which crate is this action in?" now has one
+answer**. Two rounds of moving got here — recorded as one entry, since the intermediate state
+never shipped.
+
+- **`crates/sc-core-actions` (layer 9, new)** holds every core action: `insert_row`,
+  `update_rows`, `delete_rows` and `fetch`, with `run_js_code` to follow. It sits above `sc-api`
+  because three of them must write through the `rows` layer — that *is* the point of them (type
+  coercion, rich-type attributes, `File` rules, and from Phase 4 the events that make cascades
+  work) — and `fetch` sits with them because splitting the set by each action's incidental needs
+  made the answer to "where does an action live?" a paragraph instead of a crate name.
+  `builtin_actions()` there is the single constructor a server calls.
+- **`sc-action` (layer 6) now holds no actions at all** — and that is the sharper statement of what
+  it *is*: the `Action` trait, the event model, the run context, the registry, the `Trigger` and its
+  storage, plus the machinery every action's configuration goes through. So a **plugin's** action
+  needs `sc-action` and nothing else, and the core crate is its first consumer rather than a
+  privileged one.
+- **`ActionRegistry::builtin()` is gone.** An empty constructor named for a set it does not hold is
+  precisely the placeholder that goes stale, and there is now a crate whose job that is; `new()` is
+  the only way in, and its doc says who fills it.
+- **`sc-api` is back to knowing nothing about actions** (no `sc-action` dependency until Phase 7
+  needs one for trigger endpoints). It gained one public function for them instead:
+  **`rows::select_values`** — the rows a filter selects as `Value` maps including calculated
+  fields, the evaluation-side counterpart of `list_rows_where`. One purposeful seam beats exposing
+  `calc_projections` and `run_read`, which is what the alternative would have been.
+- **Naming:** `sc-core-actions`, not `sc-actions`, because a one-letter difference from `sc-action`
+  in every `use` line is a bug waiting to be misread.
+
+### The shared machinery, now in `sc-action::scope`
+
+- It holds what all of them share: the `(the event)` no-table scope,
+  `action_shape`, the settings parsers (`config_str`, `optional_formula`, `required_formula`,
+  `formula_map`), `check_formula`, and **`EventBindings`** — which objects an event puts in scope,
+  with `old` present-but-null on an insert. That last one is the part worth centralising: it is the
+  rule two crates' actions could have drifted on *silently*, one binding `old` as null where the
+  other left it unbound.
+- **`EventBindings` reads values two ways, from one structure.** `of(event)` reads each field as
+  its own JSON shape — enough for reified evaluation, which is all an action that only reads the
+  event needs. `with_values(event, …)` takes a per-field reading, which is how the row actions type
+  them against real columns, because only the **translated** `where` cares: it compares inlined
+  literals against actual SQL types, so `user.id` has to be a uuid there. Reified evaluation renders
+  both back through `value_to_json` and cannot tell the difference — now stated where the two
+  constructors are, instead of being a thing you had to work out.
+- **`sc_expr::value_from_json`** — the inverse of `value_to_json`, next to it, with a test that the
+  pair agrees in both directions for everything JSON can say. `sc-api`'s `json_to_natural_value` is
+  gone in favour of it; the type-directed `json_to_value` stays where it was, for values that do
+  have a column behind them.
+- **`sc-core-actions`' `rows_scope` keeps only what a row action adds on top**: column-typed
+  values, the two `where` strategies, the per-row prefetching, and the RLS authority.
+- Tests travelled with their code — both integration suites are now
+  `sc-core-actions/tests/{row_actions,fetch_action}.rs`, the settings-parser and event-bindings unit
+  tests are in `sc-action::scope`. The bindings gained two of their own: presence-is-scope across
+  insert/update/no-row events, and that a caller-supplied reading is applied to every field of
+  every object.
+
 ## `fetch`: calling an HTTP endpoint, and reading its answer (Phase 3)
 
 The fourth built-in action (TODO Phase 3). It is called `fetch` rather than `webhook` because the
@@ -39,17 +95,15 @@ the same action with the result ignored.
   called, and the values that vary with the event belong in the body. Each name and value is
   checked at save time, and a configured `content-type` overrides the one the JSON body sets — a
   test pins that ordering, since it is the sort of thing a refactor silently reverses.
-- **Where it lives — a revision.** `fetch` went into `sc-api`'s `actions/` module beside the row
-  actions, not into `sc-action` as the previous milestone's note planned. It needs no rows, but needs
-  the same configuration-and-scope machinery, and that machinery is in `sc-api` because the *row*
-  actions need it in a form that knows column types. The alternatives were a second copy of it or
-  pushing the JSON↔`Value` coercions down two layers to serve one caller.
+- **Where it lives.** As written, `fetch` went into `sc-api` beside the row actions, to reuse their
+  configuration-and-scope machinery; the entry above is where it and every other core action ended
+  up — `sc-core-actions`, with the shared machinery in `sc-action`.
 - **A limitation worth recording:** `sc-expr` has no object *literal*, so a body formula computes
   a scalar, an array, or an ambient object as a whole (`row`, `payload`, `row.title`) — not a new
   object shape. The default envelope covers the common case; building objects in formulas would be
   an `sc-expr` change, not a `fetch` one.
 - 6 integration tests against a **real socket** — a one-shot listener on port 0 that reads the
-  request and hands it back to the test — plus 6 unit tests over the configuration parsers. The
+  request and hands it back to the test — plus unit tests over the configuration parsers. The
   request is asserted on its bytes (start line, content type, custom header, JSON body), because
   every way this action can be wrong is in the bytes, and a mocked client would be asserting facts
   about a request that never crossed a socket.
@@ -61,7 +115,9 @@ plural ones share. A trigger cannot fire yet — that is Phase 4 — so every on
 driven directly through the `Action` trait in its tests, which is exactly how the admin UI's
 "run this now" and a workflow step will drive them too.
 
-- **They live in `sc-api`, not `sc-action`** (`crates/sc-api/src/actions/`). An action that
+- **They live in `sc-api`, not `sc-action`** (`crates/sc-api/src/actions/`) — superseded: they are
+  in `sc-core-actions` now, see the entry above. The reasoning that put them above the row layer
+  still holds, and is what that crate's placement rests on. An action that
   writes a row must write it through the **`rows` layer**, so the target table's type coercion,
   rich-type attributes, `File`-field rules and — from Phase 4 — its own triggers all apply. That
   layer is layer 8, so `sc-api` gained a dependency on `sc-action` and implements its trait;

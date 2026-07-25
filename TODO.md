@@ -243,20 +243,33 @@ the workflow engine's job, not an action's. Every action's configuration value t
 the event is a **formula** in the same `sc-expr` language under decision 7's scope rule — so one
 language spans ownership, calculated fields, only-if and action configuration.
 
-**Where the built-in actions live — deviation, deliberate.** They are implemented in **`sc-api`**
-(`actions/`), not in `sc-action`. The row-writing three must write through the `rows` layer (that
-is the whole point — coercion, File rules, and Phase 4's events), and that layer is layer 8. So
-`sc-api` gained a dependency on `sc-action` and implements its trait; nothing in `sc-action` names
-`sc-api` in return, so Phase 4's emit seam (held by the catalog) is still the only path from a
-write back to a trigger. `sc_api::actions::builtin_actions` assembles `ActionRegistry::builtin()`
-plus these, and is the one constructor a server calls.
+**Where the built-in actions live — a new crate, `sc-core-actions` (layer 9).**
 
-**Revision (after `fetch`):** `fetch` joined them rather than living in `sc-action` as first
-planned. It needs no rows — but it needs the same configuration-and-scope machinery
-(`actions/scope.rs`), and that machinery is in `sc-api` because the *row* actions need it in a form
-that knows column types. The alternatives were a second copy of it or pushing the JSON↔`Value`
-coercions down two layers to serve one caller; one home for the built-ins is the better trade.
-`run_js_code` will follow the same reasoning.
+- **`sc-core-actions`** holds **every** core action: `insert_row`, `update_rows`, `delete_rows`,
+  `fetch`, and `run_js_code` next. `builtin_actions()` there is the one constructor a server calls.
+  It sits above `sc-api` because three of them must write through the `rows` layer — that is the
+  whole point (coercion, File rules, and Phase 4's events) — and `fetch` joins them because "which
+  crate is this action in?" should have one answer, not one per action's incidental needs.
+- **`sc-action` (layer 6)** holds no actions at all: the `Action` trait, the event model, the run
+  context, the registry, the `Trigger` and its storage — plus `scope.rs`, the machinery *every*
+  action's configuration goes through (the `EVENT_SCOPE` no-table scope, `action_shape`, the
+  settings parsers `config_str`/`optional_formula`/`required_formula`/`formula_map`,
+  `check_formula`, and `EventBindings` — which objects an event puts in scope, with `old`
+  present-but-null on an insert). So a **plugin's** action needs `sc-action` alone, and the core
+  crate is its first consumer rather than a privileged one.
+  `ActionRegistry::builtin()` is **gone**: an empty constructor named for a set it does not hold is
+  the placeholder that goes stale, and there is now a crate whose job that is. `new()` is the only
+  way in.
+- **`sc-api` (layer 8)** is back to knowing nothing about actions (no `sc-action` dependency until
+  Phase 7 needs one). It gained one public function for them: `rows::select_values` — the rows a
+  filter selects as `Value` maps including calc fields, the evaluation-side counterpart of
+  `list_rows_where`. That is a better seam than exposing `calc_projections`/`run_read`, which is
+  what the alternative would have been.
+
+Iterated twice to get here, and the reason is worth keeping: the layering constraint is only ever
+"an action that writes rows must be above the row layer". Everything else — where the shared
+machinery lives, whether the set is one crate or two — follows from wanting one answer per
+question.
 
 - [x] `insert_row` — target table, and a field→formula map. The formulas range over no table, so
   they read the event ambiently (`row.title`, `user.id`); the computed values go through the
@@ -304,8 +317,8 @@ coercions down two layers to serve one caller; one home for the built-ins is the
   are read as bytes and parsed here, so the crate's charset machinery stays out of the tree.
   Settled in the writing:
   - **The client is built once**, at registration (`Fetch::new()`, hence a fallible
-    `builtin_actions()`): it carries the connection pool and the TLS config, and a deployment
-    whose TLS stack cannot initialise should hear about it at boot, not at the first firing.
+    `builtin_actions()`): it carries the connection pool and the TLS config, and a deployment whose
+    TLS stack cannot initialise should hear about it at boot, not at the first firing.
   - **Non-2xx quotes the endpoint** (truncated to 300 chars) as well as naming the status — the
     endpoint's own explanation is the useful half. A **non-JSON** 2xx body is *not* an error: it
     comes back as a JSON string (`"OK"`), and an empty body as `null`.
@@ -339,7 +352,7 @@ coercions down two layers to serve one caller; one home for the built-ins is the
   local listener with its response body returned as the action's result (and a non-2xx surfaced
   as an error); `run_js_code` returning a computed value plus a sandbox assertion that it cannot
   reach the host.
-  **Done for the three row actions** (`sc-api/tests/row_actions.rs`, 9 integration tests on real
+  **Done for the three row actions** (`sc-core-actions/tests/row_actions.rs`, 9 integration tests on real
   Postgres with the real V8 engine): the field values computed from `row`/`old`/`user` (and `old`
   on an *insert* reading null, not erroring); a value the column cannot hold refused by the `rows`
   layer *naming the field*, with nothing written; the `where` asserted twice over one case as
@@ -351,7 +364,7 @@ coercions down two layers to serve one caller; one home for the built-ins is the
   the fix; the same configuration valid on an `insert` trigger and refused on a `login` one; and an
   RLS-forced table where the action inserts and deletes rows *it does not own* while an outsider
   cannot even see them.
-  **Done for `fetch`** (`sc-api/tests/fetch_action.rs`, 6 integration tests against a real socket —
+  **Done for `fetch`** (`sc-core-actions/tests/fetch_action.rs`, 6 integration tests against a real socket —
   a one-shot listener on port 0 that hands the request it read back to the test — plus 6 unit tests
   for the configuration parsers): the default POST of the event envelope with its headers, asserted
   on the *bytes* (start line, content type, custom header, JSON body) with the parsed response

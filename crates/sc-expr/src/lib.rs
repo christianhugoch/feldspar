@@ -38,7 +38,7 @@ pub use analyze::{Ambient, AmbientUse, Analysis, FreeVars, JOIN, JoinPath, OpFla
 pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;
-pub use eval::{FormulaCall, JsEvaluator, value_to_json};
+pub use eval::{FormulaCall, JsEvaluator, value_from_json, value_to_json};
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
 pub use translate::{
