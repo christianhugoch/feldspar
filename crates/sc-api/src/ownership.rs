@@ -94,7 +94,14 @@ pub(crate) async fn list_owned_rows(
 ) -> Result<Json> {
     let shape = cat.schema_shape()?;
     let env = UserEnv::Inline(user_values(user));
-    match translate_with_calc(formula, Operation::Read, &env, &shape, &table.name, &table.calc_formulas()) {
+    match translate_with_calc(
+        formula,
+        Operation::Read,
+        &env,
+        &shape,
+        &table.name,
+        &table.calc_formulas(),
+    ) {
         // The database filters: one query, no V8 in the loop.
         Ok(pred) => rows::list_rows_where(cat, table, Some(pred), None).await,
         // The formula's shape needs JavaScript: fetch rows with their join
@@ -213,7 +220,14 @@ pub(crate) fn write_guard(
 ) -> Result<Option<Expr>> {
     let shape = cat.schema_shape()?;
     let env = UserEnv::Inline(user_values(user));
-    match translate_with_calc(formula, op, &env, &shape, &table.name, &table.calc_formulas()) {
+    match translate_with_calc(
+        formula,
+        op,
+        &env,
+        &shape,
+        &table.name,
+        &table.calc_formulas(),
+    ) {
         Ok(pred) => Ok(Some(pred)),
         Err(TranslateError::Untranslatable(_)) => Ok(None),
         Err(e) => Err(e.into()),

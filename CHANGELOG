@@ -2,6 +2,22 @@
 
 Changes in reverse chronological order.
 
+## Repo hygiene: the CI gates go green under the current stable toolchain
+
+No behaviour changed; both fixes are toolchain drift the workspace had accumulated.
+
+- **`cargo fmt --all`** reformatted 15 files across `sc-api`, `sc-catalog`, `sc-expr`, `sc-query`,
+  `sc-db-postgres` and `sc-server` — a newer stable rustfmt wraps long call chains and macro
+  arguments differently, so `cargo fmt --all --check` (CI's first gate) had been failing on files
+  nobody had touched.
+- **One `#[allow(clippy::result_large_err)]`** on `RestProvider::resolve` (`sc-api/src/rest.rs`),
+  which is what CI's `cargo clippy -D warnings` gate was failing on. The lint's advice does not
+  apply here: the `Err` is not an error propagating up a stack, it **is** the response to send —
+  the one caller either dispatches the resolved endpoint or returns that `ApiResponse` unchanged.
+  Boxing it would add an indirection at seven call sites to shrink a value built once per missed
+  request (and `ApiResponse` already boxes the one field worth boxing, `raw`). The reasoning is in
+  a comment at the allow, so the next reader does not have to re-derive it.
+
 ## Actions & triggers: the `sc-action` crate (Phase 1)
 
 The first phase of the actions-and-triggers milestone (TODO Phase 1; design §10.1–§10.2): the

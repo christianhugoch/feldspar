@@ -12,11 +12,11 @@
 
 use std::collections::BTreeMap;
 
+use sc_db_postgres::PgParam;
 use sc_expr::{
     DenoEvaluator, Formula, FormulaCall, JsEvaluator, Operation, SchemaShape, TableShape, UserEnv,
     translate,
 };
-use sc_db_postgres::PgParam;
 use sc_query::{Expr as QExpr, Select, Source, SqlDialect, Statement, Value};
 use sc_test_harness::TestDb;
 use tokio_postgres::types::ToSql;
@@ -104,7 +104,10 @@ async fn sql_verdict(client: &tokio_postgres::Client, pred: QExpr) -> bool {
 }
 
 async fn seed(client: &tokio_postgres::Client, lines: &[Line]) {
-    client.execute("DELETE FROM lines", &[]).await.expect("clear");
+    client
+        .execute("DELETE FROM lines", &[])
+        .await
+        .expect("clear");
     for l in lines {
         client
             .execute(
@@ -179,9 +182,33 @@ async fn symbolic_and_reified_agree_on_aggregations() {
 
     // sum: null ignored, empty → 0 (the coalesce). `sum` widens to numeric in
     // Postgres, and the integer literal binds through it via `PgParam`.
-    check(&client, &ev, "linesↃorder.sum(\"qty\") === 6", &three, None, true).await;
-    check(&client, &ev, "linesↃorder.sum(\"qty\") === 4", &with_null, None, true).await;
-    check(&client, &ev, "linesↃorder.sum(\"qty\") === 0", &empty, None, true).await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.sum(\"qty\") === 6",
+        &three,
+        None,
+        true,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.sum(\"qty\") === 4",
+        &with_null,
+        None,
+        true,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.sum(\"qty\") === 0",
+        &empty,
+        None,
+        true,
+    )
+    .await;
     // sum with an arrow selector: 1*10 + 2*20 + 3*30 = 140.
     check(
         &client,
@@ -194,20 +221,108 @@ async fn symbolic_and_reified_agree_on_aggregations() {
     .await;
 
     // avg / min / max, empty → null grants nothing.
-    check(&client, &ev, "linesↃorder.avg(\"qty\") > 1.5", &three, None, true).await;
-    check(&client, &ev, "linesↃorder.avg(\"qty\") === null", &empty, None, true).await;
-    check(&client, &ev, "linesↃorder.min(\"qty\") === 1", &three, None, true).await;
-    check(&client, &ev, "linesↃorder.max(\"qty\") === 3", &three, None, true).await;
-    check(&client, &ev, "linesↃorder.max(\"qty\") === null", &empty, None, true).await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.avg(\"qty\") > 1.5",
+        &three,
+        None,
+        true,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.avg(\"qty\") === null",
+        &empty,
+        None,
+        true,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.min(\"qty\") === 1",
+        &three,
+        None,
+        true,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.max(\"qty\") === 3",
+        &three,
+        None,
+        true,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.max(\"qty\") === null",
+        &empty,
+        None,
+        true,
+    )
+    .await;
 
     // some / every, including the null-predicate corners.
-    check(&client, &ev, "linesↃorder.some(r => r.qty > 2)", &three, None, true).await;
-    check(&client, &ev, "linesↃorder.some(r => r.qty > 9)", &three, None, false).await;
-    check(&client, &ev, "linesↃorder.some(r => r.qty > 0)", &empty, None, false).await;
-    check(&client, &ev, "linesↃorder.every(r => r.qty > 0)", &three, None, true).await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.some(r => r.qty > 2)",
+        &three,
+        None,
+        true,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.some(r => r.qty > 9)",
+        &three,
+        None,
+        false,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.some(r => r.qty > 0)",
+        &empty,
+        None,
+        false,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.every(r => r.qty > 0)",
+        &three,
+        None,
+        true,
+    )
+    .await;
     // A null qty is not provenly > 0, so `every` fails.
-    check(&client, &ev, "linesↃorder.every(r => r.qty > 0)", &with_null, None, false).await;
-    check(&client, &ev, "linesↃorder.every(r => r.qty > 0)", &empty, None, true).await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.every(r => r.qty > 0)",
+        &with_null,
+        None,
+        false,
+    )
+    .await;
+    check(
+        &client,
+        &ev,
+        "linesↃorder.every(r => r.qty > 0)",
+        &empty,
+        None,
+        true,
+    )
+    .await;
 
     // filter folds into the WHERE (counted via length → int8).
     check(

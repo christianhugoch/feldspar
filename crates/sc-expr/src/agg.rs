@@ -311,16 +311,30 @@ fn build_method<'a>(
             *distinct_selector = optional_selector(relation, name, args)?;
             Ok(None)
         }
-        "sum" => Ok(Some(Terminal::Sum(optional_selector(relation, name, args)?))),
-        "avg" => Ok(Some(Terminal::Avg(optional_selector(relation, name, args)?))),
-        "min" => Ok(Some(Terminal::Min(optional_selector(relation, name, args)?))),
-        "max" => Ok(Some(Terminal::Max(optional_selector(relation, name, args)?))),
+        "sum" => Ok(Some(Terminal::Sum(optional_selector(
+            relation, name, args,
+        )?))),
+        "avg" => Ok(Some(Terminal::Avg(optional_selector(
+            relation, name, args,
+        )?))),
+        "min" => Ok(Some(Terminal::Min(optional_selector(
+            relation, name, args,
+        )?))),
+        "max" => Ok(Some(Terminal::Max(optional_selector(
+            relation, name, args,
+        )?))),
         "some" => Ok(Some(Terminal::Some(one_arrow(relation, name, args)?))),
         "every" => Ok(Some(Terminal::Every(one_arrow(relation, name, args)?))),
-        "includes" => Ok(Some(Terminal::Includes(one_value_arg(relation, name, args)?))),
+        "includes" => Ok(Some(Terminal::Includes(one_value_arg(
+            relation, name, args,
+        )?))),
         "join" => Ok(Some(Terminal::Join(one_value_arg(relation, name, args)?))),
-        "maxBy" => Ok(Some(Terminal::MaxBy(required_selector(relation, name, args)?))),
-        "minBy" => Ok(Some(Terminal::MinBy(required_selector(relation, name, args)?))),
+        "maxBy" => Ok(Some(Terminal::MaxBy(required_selector(
+            relation, name, args,
+        )?))),
+        "minBy" => Ok(Some(Terminal::MinBy(required_selector(
+            relation, name, args,
+        )?))),
         "reduce" => Err(err(
             relation,
             "`reduce` is not available in formulas — use `sum()`, `min()`, `max()` or `some()`",
@@ -381,14 +395,21 @@ fn as_arrow<'a>(relation: &str, method: &str, ast: &'a Ast) -> Result<Arrow<'a>>
             relation,
             &format!("the `{method}` arrow takes exactly one parameter (the child row)"),
         )),
-        _ => Err(err(relation, &format!("`{method}` needs an arrow argument"))),
+        _ => Err(err(
+            relation,
+            &format!("`{method}` needs an arrow argument"),
+        )),
     }
 }
 
 /// A selector that must be present (`maxBy`/`minBy`).
 fn required_selector<'a>(relation: &str, method: &str, args: &'a [Ast]) -> Result<Selector<'a>> {
-    optional_selector(relation, method, args)?
-        .ok_or_else(|| err(relation, &format!("`{method}` needs a selector (a field name or arrow)")))
+    optional_selector(relation, method, args)?.ok_or_else(|| {
+        err(
+            relation,
+            &format!("`{method}` needs a selector (a field name or arrow)"),
+        )
+    })
 }
 
 /// An optional selector argument: absent, a constant field-name string, or an
@@ -566,11 +587,18 @@ impl<'a> Chain<'a> {
                 push_sel(s, &mut out);
             }
             Terminal::MaxBy(s) | Terminal::MinBy(s) => collect_selector_fields(s, &mut out),
-            Terminal::Some(a) | Terminal::Every(a) => collect_child_fields(a.param, a.body, &mut out),
+            Terminal::Some(a) | Terminal::Every(a) => {
+                collect_child_fields(a.param, a.body, &mut out)
+            }
             Terminal::Length | Terminal::Includes(_) | Terminal::Join(_) => {}
         }
         if let Some(m) = self.member {
-            out.push(m.split(crate::analyze::JOIN).next().unwrap_or(m).to_string());
+            out.push(
+                m.split(crate::analyze::JOIN)
+                    .next()
+                    .unwrap_or(m)
+                    .to_string(),
+            );
         }
         dedup(out)
     }
@@ -672,8 +700,12 @@ fn collect_child_fields(param: &str, body: &Ast, out: &mut Vec<String>) {
             collect_child_fields(param, cons, out);
             collect_child_fields(param, alt, out);
         }
-        Ast::Array(elems) => elems.iter().for_each(|e| collect_child_fields(param, e, out)),
-        Ast::Template { exprs, .. } => exprs.iter().for_each(|e| collect_child_fields(param, e, out)),
+        Ast::Array(elems) => elems
+            .iter()
+            .for_each(|e| collect_child_fields(param, e, out)),
+        Ast::Template { exprs, .. } => exprs
+            .iter()
+            .for_each(|e| collect_child_fields(param, e, out)),
         Ast::Arrow { body, .. } => collect_child_fields(param, body, out),
         Ast::Ident(_) | Ast::Str(_) | Ast::Num(_) | Ast::Bool(_) | Ast::Null => {}
     }
@@ -705,10 +737,11 @@ mod tests {
         SchemaShape::new()
             .table(
                 "orders",
-                TableShape::new()
-                    .primary_key("id")
-                    .field("id")
-                    .key_field("customer", "customers", "id"),
+                TableShape::new().primary_key("id").field("id").key_field(
+                    "customer",
+                    "customers",
+                    "id",
+                ),
             )
             .table(
                 "order_lines",
@@ -721,7 +754,13 @@ mod tests {
                     .field("status")
                     .key_field("product", "products", "id"),
             )
-            .table("products", TableShape::new().primary_key("id").field("id").field("name"))
+            .table(
+                "products",
+                TableShape::new()
+                    .primary_key("id")
+                    .field("id")
+                    .field("name"),
+            )
             .table("customers", TableShape::new().primary_key("id").field("id"))
     }
 
@@ -759,7 +798,10 @@ mod tests {
         .unwrap();
         let use_ = a.agg_uses.first().unwrap();
         assert_eq!(use_.filter_fields, vec!["status".to_string()]);
-        assert_eq!(use_.value_fields, vec!["price".to_string(), "qty".to_string()]);
+        assert_eq!(
+            use_.value_fields,
+            vec!["price".to_string(), "qty".to_string()]
+        );
     }
 
     #[test]
@@ -778,7 +820,10 @@ mod tests {
         let err = validate("order_linesↃorder.sum(\"nope\") > 0")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("`nope` is not a field of `order_lines`"), "got: {err}");
+        assert!(
+            err.contains("`nope` is not a field of `order_lines`"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -801,7 +846,9 @@ mod tests {
     #[test]
     fn an_unresolvable_relation_is_refused() {
         // No table `widgets` in the shape.
-        let err = validate("widgetsↃorder.length > 0").unwrap_err().to_string();
+        let err = validate("widgetsↃorder.length > 0")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("child table `widgets`"), "got: {err}");
         // A key that does not point back at `orders`.
         let err = validate("order_linesↃproduct.length > 0")
@@ -821,7 +868,10 @@ mod tests {
         let err = validate("order_linesↃorder.sum(\"qty\").foo === 1")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("cannot follow") || err.contains("maxBy"), "got: {err}");
+        assert!(
+            err.contains("cannot follow") || err.contains("maxBy"),
+            "got: {err}"
+        );
     }
 
     #[test]

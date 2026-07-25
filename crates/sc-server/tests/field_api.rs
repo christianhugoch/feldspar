@@ -329,7 +329,10 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
     // It reads back merged, and is *not* a real column: `information_schema` has
     // `pages` but no `double_pages`.
     let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
-    assert_eq!(field(&fields, "double_pages")["kind"]["type"], json!("calc"));
+    assert_eq!(
+        field(&fields, "double_pages")["kind"]["type"],
+        json!("calc")
+    );
     let cols = _db
         .client()
         .await?
@@ -340,7 +343,10 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
         .await
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
     let names: Vec<String> = cols.iter().map(|r| r.get::<_, String>(0)).collect();
-    assert!(names.iter().any(|n| n == "pages"), "pages is a column: {names:?}");
+    assert!(
+        names.iter().any(|n| n == "pages"),
+        "pages is a column: {names:?}"
+    );
     assert!(
         !names.iter().any(|n| n == "double_pages"),
         "the calc field is virtual, not a column: {names:?}"
@@ -357,7 +363,11 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
     assert_eq!(status, StatusCode::CREATED, "{row}");
     let (_, rows) = client.send("GET", "/api/tables/book/rows", None).await;
     let first = &rows.as_array().unwrap()[0];
-    assert_eq!(first["double_pages"], json!(200), "computed on read: {first}");
+    assert_eq!(
+        first["double_pages"],
+        json!(200),
+        "computed on read: {first}"
+    );
 
     // A calc field is not writable: naming it on a write is refused.
     let (status, body) = client
@@ -383,7 +393,10 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body["error"].as_str().unwrap_or_default().contains("bad_calc"),
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bad_calc"),
         "the error names the field: {body}"
     );
 
@@ -409,7 +422,11 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
     let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
     for missing in ["bad_calc", "mine"] {
         assert!(
-            fields.as_array().unwrap().iter().all(|f| f["name"] != json!(missing)),
+            fields
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["name"] != json!(missing)),
             "`{missing}` must not exist"
         );
     }

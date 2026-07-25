@@ -309,8 +309,9 @@ fn policy_clause(
     // (Phase 8) — the policy has no column to reference, only an expression to
     // substitute; an untranslatable definition surfaces here as the reason RLS
     // cannot be enabled (§4 already refuses the whole formula the same way).
-    let pred = sc_expr::translate_with_calc(formula, op, env, shape, &table.name, &table.calc_formulas())
-        .map_err(Error::from)?;
+    let pred =
+        sc_expr::translate_with_calc(formula, op, env, shape, &table.name, &table.calc_formulas())
+            .map_err(Error::from)?;
     let floor = match op {
         Operation::Read => table.access.min_role_read,
         _ => table.access.min_role_write,

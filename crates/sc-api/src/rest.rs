@@ -292,6 +292,13 @@ impl RestProvider {
     ///
     /// `Err` distinguishes the two ways a request can miss: a path no endpoint
     /// claims (`404`) versus a path that exists but not for this method (`405`).
+    // `clippy::result_large_err` does not apply: the `Err` here is not an error
+    // being propagated up a call stack, it *is* the response to send — the one
+    // caller either dispatches the endpoint or returns this `ApiResponse`
+    // unchanged. Boxing it would add an indirection at seven call sites to shrink
+    // a value that is constructed once per missed request and immediately
+    // returned. (`ApiResponse` already boxes the one field worth boxing, `raw`.)
+    #[allow(clippy::result_large_err)]
     fn resolve(&self, req: &ApiRequest) -> std::result::Result<(&Endpoint, Params), ApiResponse> {
         let mut path_matched = false;
         for ep in self.endpoints.iter() {

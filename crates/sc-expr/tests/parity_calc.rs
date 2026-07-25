@@ -39,7 +39,10 @@ fn shape() -> SchemaShape {
         )
         .table(
             "publishers",
-            TableShape::new().primary_key("id").field("id").field("name"),
+            TableShape::new()
+                .primary_key("id")
+                .field("id")
+                .field("name"),
         )
         .table(
             "reviews",
@@ -103,11 +106,7 @@ async fn sql_value(client: &tokio_postgres::Client, calc: &CalcFields, src: &str
 }
 
 /// The reified value, as the same text form.
-async fn reified_value(
-    ev: &DenoEvaluator,
-    src: &str,
-    extra: &[(&str, Value)],
-) -> String {
+async fn reified_value(ev: &DenoEvaluator, src: &str, extra: &[(&str, Value)]) -> String {
     let json = ev
         .eval_value(FormulaCall {
             formula: Formula::parse(src).unwrap(),

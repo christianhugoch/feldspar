@@ -804,7 +804,8 @@ mod tests {
             distinct: true,
             args: vec![Expr::col("x")],
         };
-        let (sql, _) = render(Select::from(Source::table("t")).filter(distinct.eq(Expr::lit(1_i64))));
+        let (sql, _) =
+            render(Select::from(Source::table("t")).filter(distinct.eq(Expr::lit(1_i64))));
         assert!(sql.contains("count(DISTINCT \"x\")"), "got: {sql}");
     }
 

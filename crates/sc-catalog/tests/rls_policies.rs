@@ -10,8 +10,9 @@
 use std::sync::Arc;
 
 use sc_catalog::{
-    Catalog, CallerContext, DataFieldKind, FieldMeta, TableMeta, bootstrap_field_meta,
-    bootstrap_table_meta, disable_rls, enable_rls, run_in_context, save_field_meta, save_table_meta,
+    CallerContext, Catalog, DataFieldKind, FieldMeta, TableMeta, bootstrap_field_meta,
+    bootstrap_table_meta, disable_rls, enable_rls, run_in_context, save_field_meta,
+    save_table_meta,
 };
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
@@ -120,10 +121,9 @@ async fn run_in_context_sets_the_caller_gucs_a_policy_reads() -> Result<()> {
     let table = catalog.require("posts")?;
     enable_rls(&catalog, &table).await?;
 
-    let select =
-        Statement::Select(Box::new(Select::from(Source::table("posts")).columns(vec![
-            Projection::all(),
-        ])));
+    let select = Statement::Select(Box::new(
+        Select::from(Source::table("posts")).columns(vec![Projection::all()]),
+    ));
 
     // Alice's context: only her row is visible through the SELECT policy.
     let alice = CallerContext {
@@ -192,7 +192,10 @@ async fn a_calc_field_is_inlined_into_the_generated_policy() -> Result<()> {
 
     let qual = policy_qual(&db, "docs", "sc_owner_select").await;
     assert!(qual.contains("secret"), "definition not inlined: {qual}");
-    assert!(!qual.contains("is_public"), "calc column referenced: {qual}");
+    assert!(
+        !qual.contains("is_public"),
+        "calc column referenced: {qual}"
+    );
     Ok(())
 }
 
@@ -216,7 +219,10 @@ async fn enabling_rls_refuses_an_untranslatable_calc_definition() -> Result<()> 
 
     let docs = catalog.require("docs")?;
     let err = enable_rls(&catalog, &docs).await.unwrap_err().to_string();
-    assert!(err.contains("translated") || err.contains("function call"), "got: {err}");
+    assert!(
+        err.contains("translated") || err.contains("function call"),
+        "got: {err}"
+    );
     Ok(())
 }
 
@@ -257,6 +263,9 @@ async fn enabling_rls_refuses_a_policy_reference_cycle() -> Result<()> {
     let shares = catalog.require("shares")?;
     let err = enable_rls(&catalog, &shares).await.unwrap_err().to_string();
     assert!(err.contains("cycle"), "got: {err}");
-    assert!(err.contains("shares") && err.contains("documents"), "got: {err}");
+    assert!(
+        err.contains("shares") && err.contains("documents"),
+        "got: {err}"
+    );
     Ok(())
 }

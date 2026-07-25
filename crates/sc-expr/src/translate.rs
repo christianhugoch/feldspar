@@ -46,7 +46,8 @@ use std::fmt;
 
 use sc_error::Error;
 use sc_query::{
-    BinOp as QBinOp, Expr as QExpr, InSet, OrderBy, Projection, Select, Source, UnOp as QUnOp, Value,
+    BinOp as QBinOp, Expr as QExpr, InSet, OrderBy, Projection, Select, Source, UnOp as QUnOp,
+    Value,
 };
 
 use crate::agg::{self, Arrow, Chain, Relation, Selector, Terminal};
@@ -712,22 +713,30 @@ impl Translator<'_> {
             Terminal::Sum(_) => {
                 let v = self.require_value(chain, &rel, &alias)?;
                 let sum = agg_fn("sum", chain.distinct, vec![v]);
-                Ok(coalesce(self.scalar_sub(&rel, &alias, sum, base), QExpr::lit(0_i64)))
+                Ok(coalesce(
+                    self.scalar_sub(&rel, &alias, sum, base),
+                    QExpr::lit(0_i64),
+                ))
             }
             Terminal::Avg(_) => self.bare_agg("avg", chain, &rel, &alias, base),
             Terminal::Min(_) => self.bare_agg("min", chain, &rel, &alias, base),
             Terminal::Max(_) => self.bare_agg("max", chain, &rel, &alias, base),
             Terminal::Some(pred) => {
                 let p = self.child_predicate(&alias, &rel.child_table, pred)?;
-                let count = self.scalar_sub(&rel, &alias, agg_fn("count", false, vec![]), base.and(p));
+                let count =
+                    self.scalar_sub(&rel, &alias, agg_fn("count", false, vec![]), base.and(p));
                 Ok(QExpr::binary(QBinOp::Gt, count, QExpr::lit(0_i64)))
             }
             Terminal::Every(pred) => {
                 // No child fails the predicate: count of rows where the
                 // predicate is not provenly true is zero.
                 let p = self.child_predicate(&alias, &rel.child_table, pred)?;
-                let count =
-                    self.scalar_sub(&rel, &alias, agg_fn("count", false, vec![]), base.and(not_pred(p)));
+                let count = self.scalar_sub(
+                    &rel,
+                    &alias,
+                    agg_fn("count", false, vec![]),
+                    base.and(not_pred(p)),
+                );
                 Ok(QExpr::binary(QBinOp::Eq, count, QExpr::lit(0_i64)))
             }
             Terminal::Includes(x) => {
@@ -798,7 +807,13 @@ impl Translator<'_> {
         // Ignore rows with a null key, as every other aggregate does.
         let filter = base.and(QExpr::unary(QUnOp::IsNotNull, key.clone()));
         let desc = matches!(chain.terminal, Terminal::MaxBy(_));
-        let ob = |e: QExpr| if desc { OrderBy::desc(e) } else { OrderBy::asc(e) };
+        let ob = |e: QExpr| {
+            if desc {
+                OrderBy::desc(e)
+            } else {
+                OrderBy::asc(e)
+            }
+        };
         let mut sub = Select::from(Source::table_as(rel.child_table.clone(), alias.to_string()))
             .columns(vec![Projection::expr(proj)])
             .filter(filter)
@@ -1445,7 +1460,11 @@ mod tests {
 
     #[test]
     fn aggregation_length_becomes_a_correlated_count() {
-        let (sql, _) = where_sql("reviewsↃbook.length > 0", Operation::Read, &UserEnv::Inline(None));
+        let (sql, _) = where_sql(
+            "reviewsↃbook.length > 0",
+            Operation::Read,
+            &UserEnv::Inline(None),
+        );
         assert_eq!(
             sql,
             "((SELECT count(*) FROM \"reviews\" AS \"_sc_a1\" \
@@ -1455,8 +1474,11 @@ mod tests {
 
     #[test]
     fn aggregation_sum_coalesces_and_takes_a_selector() {
-        let (sql, binds) =
-            where_sql("reviewsↃbook.sum(\"rating\") >= 10", Operation::Read, &UserEnv::Inline(None));
+        let (sql, binds) = where_sql(
+            "reviewsↃbook.sum(\"rating\") >= 10",
+            Operation::Read,
+            &UserEnv::Inline(None),
+        );
         assert_eq!(
             sql,
             "(COALESCE((SELECT sum(\"_sc_a1\".\"rating\") FROM \"reviews\" AS \"_sc_a1\" \
@@ -1584,7 +1606,10 @@ mod tests {
             &env,
         );
         assert!(sql.contains("jsonb_extract_path_text"), "got: {sql}");
-        assert!(sql.contains("SELECT count(*) FROM \"reviews\""), "got: {sql}");
+        assert!(
+            sql.contains("SELECT count(*) FROM \"reviews\""),
+            "got: {sql}"
+        );
     }
 
     fn calc_of(pairs: &[(&str, &str)]) -> CalcFields {

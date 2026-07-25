@@ -1900,7 +1900,12 @@ fn validate_ownership_settings(
 /// caller). The field is not in the schema yet, so a self-reference reads as an
 /// unknown identifier — which is correct, since a field reading itself is a
 /// cycle the merge would drop anyway.
-fn validate_calc_field(catalog: &Catalog, table: &str, field: &str, expression: &str) -> Result<()> {
+fn validate_calc_field(
+    catalog: &Catalog,
+    table: &str,
+    field: &str,
+    expression: &str,
+) -> Result<()> {
     let formula = sc_expr::Formula::parse(expression)
         .map_err(|e| Error::invalid(format!("calculated field `{field}`: {e}")))?;
     let shape = catalog.schema_shape()?;

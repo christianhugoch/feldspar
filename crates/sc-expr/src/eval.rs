@@ -470,7 +470,6 @@ fn build_script(call: &FormulaCall, value_mode: bool) -> Result<String> {
     ))
 }
 
-
 #[cfg(feature = "eval")]
 /// The JSON value an identifier binds to, or `None` for a whitelisted global.
 /// An identifier with no binding and no global is an error — a caller bug (it
@@ -755,7 +754,10 @@ mod tests {
         let cases: &[(&str, bool)] = &[
             ("linesↃorder.length === 3", true),
             ("linesↃorder.sum(\"qty\") === 5", true), // null ignored
-            ("linesↃorder.filter(r => r.status === \"shipped\").length === 2", true),
+            (
+                "linesↃorder.filter(r => r.status === \"shipped\").length === 2",
+                true,
+            ),
             ("linesↃorder.some(r => r.qty > 2)", true),
             ("linesↃorder.every(r => r.qty > 0)", false), // null qty fails
             ("linesↃorder.map(r => r.status).includes(\"pending\")", true),
@@ -789,7 +791,10 @@ mod tests {
         // `.reviewer` on an empty `maxBy` must read null (optional chaining),
         // not throw — mirroring the symbolic `LIMIT 1` subquery.
         let c = with_relation(
-            call("linesↃorder.maxBy(\"qty\").status === null", Operation::Read),
+            call(
+                "linesↃorder.maxBy(\"qty\").status === null",
+                Operation::Read,
+            ),
             "linesↃorder",
             serde_json::json!([]),
         );
@@ -800,7 +805,10 @@ mod tests {
     async fn an_unprefetched_relation_is_a_named_error() {
         let c = call("linesↃorder.length > 0", Operation::Read);
         let err = eval(c).await.unwrap_err().to_string();
-        assert!(err.contains("linesↃorder") && err.contains("not prefetched"), "got: {err}");
+        assert!(
+            err.contains("linesↃorder") && err.contains("not prefetched"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

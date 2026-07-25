@@ -37,9 +37,7 @@ use sc_app::{
     ApiConfig, Application, CodeFramework, FrameworkRef, app_source_from_config, build_application,
 };
 use sc_auth::{ROLE_ADMIN, Role, SessionStore, create_user, save_role};
-use sc_catalog::{
-    Catalog, DataFieldKind, FieldMeta, FileStoreId, TableId, save_field_meta,
-};
+use sc_catalog::{Catalog, DataFieldKind, FieldMeta, FileStoreId, TableId, save_field_meta};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_files::LocalFileStore;
@@ -521,7 +519,10 @@ async fn an_aggregation_formula_grants_over_a_child_relation() -> sc_error::Resu
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
 
     let mut admin = Client::new(router.clone(), BASE_DOMAIN);
-    assert_eq!(admin.login("admin@example.com", "admin-pw").await, StatusCode::OK);
+    assert_eq!(
+        admin.login("admin@example.com", "admin-pw").await,
+        StatusCode::OK
+    );
     let mut alice = Client::new(router.clone(), APP_HOST);
     assert_eq!(alice.login(ALICE, "alice-pw").await, StatusCode::OK);
     let mut bob = Client::new(router.clone(), APP_HOST);
@@ -543,7 +544,11 @@ async fn an_aggregation_formula_grants_over_a_child_relation() -> sc_error::Resu
     // A write is guarded by the same aggregation: alice may edit her post,
     // bob may not (denial indistinguishable from absence).
     let (status, _) = alice
-        .send("PUT", "/api/posts/1", Some(json!({ "title": "alice-commented" })))
+        .send(
+            "PUT",
+            "/api/posts/1",
+            Some(json!({ "title": "alice-commented" })),
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = bob
@@ -586,7 +591,10 @@ async fn an_ownership_formula_grants_through_a_calc_field() -> sc_error::Result<
     catalog.reload().await?;
 
     let mut admin = Client::new(router.clone(), BASE_DOMAIN);
-    assert_eq!(admin.login("admin@example.com", "admin-pw").await, StatusCode::OK);
+    assert_eq!(
+        admin.login("admin@example.com", "admin-pw").await,
+        StatusCode::OK
+    );
     let mut alice = Client::new(router.clone(), APP_HOST);
     assert_eq!(alice.login(ALICE, "alice-pw").await, StatusCode::OK);
     let mut bob = Client::new(router.clone(), APP_HOST);

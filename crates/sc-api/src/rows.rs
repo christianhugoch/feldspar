@@ -287,7 +287,9 @@ fn calc_map(table: &Table) -> CalcFields {
         .calc_fields()
         .filter_map(|f| {
             let expr = f.calc_expression()?;
-            Formula::parse(expr).ok().map(|fm| (f.base.name.clone(), fm))
+            Formula::parse(expr)
+                .ok()
+                .map(|fm| (f.base.name.clone(), fm))
         })
         .collect()
 }

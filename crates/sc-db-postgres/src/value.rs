@@ -167,11 +167,31 @@ mod tests {
     fn an_int_encodes_into_a_numeric_placeholder() {
         let mut out = BytesMut::new();
         // Plain `i64::to_sql` refuses NUMERIC; `PgParam` coerces to Decimal.
-        assert!(PgParam(&Value::Int(100)).to_sql_checked(&Type::NUMERIC, &mut out).is_ok());
-        assert!(PgParam(&Value::Int(7)).to_sql_checked(&Type::INT4, &mut out).is_ok());
-        assert!(PgParam(&Value::Int(7)).to_sql_checked(&Type::INT2, &mut out).is_ok());
-        assert!(PgParam(&Value::Float(2.5)).to_sql_checked(&Type::NUMERIC, &mut out).is_ok());
+        assert!(
+            PgParam(&Value::Int(100))
+                .to_sql_checked(&Type::NUMERIC, &mut out)
+                .is_ok()
+        );
+        assert!(
+            PgParam(&Value::Int(7))
+                .to_sql_checked(&Type::INT4, &mut out)
+                .is_ok()
+        );
+        assert!(
+            PgParam(&Value::Int(7))
+                .to_sql_checked(&Type::INT2, &mut out)
+                .is_ok()
+        );
+        assert!(
+            PgParam(&Value::Float(2.5))
+                .to_sql_checked(&Type::NUMERIC, &mut out)
+                .is_ok()
+        );
         // The int8 path still works.
-        assert!(PgParam(&Value::Int(9)).to_sql_checked(&Type::INT8, &mut out).is_ok());
+        assert!(
+            PgParam(&Value::Int(9))
+                .to_sql_checked(&Type::INT8, &mut out)
+                .is_ok()
+        );
     }
 }

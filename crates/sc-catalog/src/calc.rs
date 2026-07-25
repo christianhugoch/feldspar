@@ -128,7 +128,12 @@ pub(crate) fn merge_calc_fields(
         // Rebuild the field list: the real columns keep their order; the
         // surviving calc fields follow in dependency order.
         if let Some(table) = map.get_mut(&id) {
-            let mut real: Vec<_> = table.fields.iter().filter(|f| !f.is_calc()).cloned().collect();
+            let mut real: Vec<_> = table
+                .fields
+                .iter()
+                .filter(|f| !f.is_calc())
+                .cloned()
+                .collect();
             for name in order {
                 if invalid.contains(&name) {
                     continue;
@@ -286,7 +291,14 @@ mod tests {
 
     #[test]
     fn user_and_flags_are_refused_in_a_calc_field() {
-        let t = table("t", vec![plain("id"), plain("owner"), calc("mine", "owner === user.id")]);
+        let t = table(
+            "t",
+            vec![
+                plain("id"),
+                plain("owner"),
+                calc("mine", "owner === user.id"),
+            ],
+        );
         let (t, issues) = run(t);
         assert_eq!(t.calc_fields().count(), 0);
         assert!(
@@ -309,16 +321,26 @@ mod tests {
         let (t, issues) = run(t);
         assert_eq!(t.calc_fields().count(), 0);
         assert!(
-            issues.iter().any(|i| i.field == "worse" && i.message.contains("reads")),
+            issues
+                .iter()
+                .any(|i| i.field == "worse" && i.message.contains("reads")),
             "got: {issues:?}"
         );
     }
 
     #[test]
     fn a_valid_calc_field_survives() {
-        let t = table("t", vec![plain("id"), plain("net"), calc("doubled", "net * 2")]);
+        let t = table(
+            "t",
+            vec![plain("id"), plain("net"), calc("doubled", "net * 2")],
+        );
         let (t, issues) = run(t);
         assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(t.calc_fields().map(|f| f.base.name.clone()).collect::<Vec<_>>(), vec!["doubled"]);
+        assert_eq!(
+            t.calc_fields()
+                .map(|f| f.base.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["doubled"]
+        );
     }
 }
