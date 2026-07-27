@@ -13,6 +13,19 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # A GitHub-hosted runner has ~20 GB of free disk, and this workspace links a
+  # static V8 (~180 MB) into **every** test binary: with debug info that is
+  # ~300 MB each, times the ~50 binaries `--all-targets` builds. Running out of
+  # disk mid-link does not fail politely — `rust-lld` dies with SIGBUS on the
+  # mapping it can no longer back — so the space is bought back here rather than
+  # diagnosed again later.
+  #
+  # Debug info is the bulk of it and CI has no use for it: a failing test still
+  # prints its assertion and a backtrace with symbol names, just without line
+  # numbers. Incremental output is the same trade (it is 42 GB in a working
+  # checkout) and buys nothing for a from-scratch build.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_INCREMENTAL: 0
 
 jobs:
   fmt:
@@ -32,6 +45,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install stable toolchain (clippy)
         run: rustup toolchain install stable --profile minimal --component clippy
+      # The preinstalled Android SDK, .NET and Haskell toolchains are ~13 GB that
+      # nothing here uses. Removing them is the difference between a build that
+      # fits and one that fits *today*; `|| true` because a runner image that has
+      # already dropped one of them must not fail the job.
+      - name: Free disk space on the runner
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc || true
+          df -h /
       - uses: Swatinem/rust-cache@v2
       # `Swatinem/rust-cache` restores `target/`, but not all of it. The `v8`
       # crate (behind `sc-expr`'s `eval` feature) has a build script that
@@ -81,6 +103,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
+      # The preinstalled Android SDK, .NET and Haskell toolchains are ~13 GB that
+      # nothing here uses. Removing them is the difference between a build that
+      # fits and one that fits *today*; `|| true` because a runner image that has
+      # already dropped one of them must not fail the job.
+      - name: Free disk space on the runner
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc || true
+          df -h /
       - uses: Swatinem/rust-cache@v2
       # `Swatinem/rust-cache` restores `target/`, but not all of it. The `v8`
       # crate (behind `sc-expr`'s `eval` feature) has a build script that
