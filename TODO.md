@@ -677,16 +677,29 @@ question.
   firing nor replaying. Plus the admin-API round trip of the timing and an edit that does not
   disturb the recorded last run.
 
-## Phase 9 — Documentation
+## Phase 9 — Documentation ✅
 
-- [ ] `docs/TECHNICAL_DESIGN.md`: §10.1/§10.2 rewritten as implemented (the event model, the
-  `Action` trait as built, the storage, the fire path and its choke point, only-if, the
-  recursion bound, the scheduler, and what `TriggerBody::Workflow` will need); the crate map in
-  §2 gains `sc-action`.
-- [ ] A tutorial in the established style (`docs/tutorial-triggers.md`): a table trigger with an
-  only-if writing an audit trail, a `none` trigger called from an app's API, and a daily
-  periodic trigger — cross-linked from the ownership tutorial, with the hygiene test extended.
-- [ ] CHANGELOG entries as each phase lands.
+- [x] `docs/TECHNICAL_DESIGN.md`: §10.1/§10.2 rewritten as implemented — the `Action` trait as
+  built (including `validate_config`, which is what moves every "is this configuration
+  meaningful?" question to save time), where the built-ins live and why, the event model, the
+  `Trigger` record, `_sc_triggers` as a definition rather than an overlay, the cached live set
+  and its fail-closed load, the fire path with `observes` as the choke point, the `only_if`
+  scope, the recursion bound, the scheduler, how an application reaches a trigger, and what
+  `TriggerBody::Workflow` will still need (durability — which is why it is a milestone and not a
+  fourth match arm). The crate map in §2 gains `sc-core-actions` (it was missing entirely) and
+  `sc-action`'s line now says what the crate holds; §9's `_sc_triggers` row describes its real
+  columns; §17's "since superseded" note lists it.
+- [x] `docs/tutorial-triggers.md` in the established style: an audit trail from a table trigger
+  with an `only_if`, a `none` trigger with a role floor exposed on the app and called from its
+  own JavaScript, and a daily sweep at 03:30 UTC — cross-linked from the ownership tutorial, with
+  the hygiene test extended (the link, and that all three kinds are still covered).
+  **And executed by a test**: `sc-core-actions/tests/tutorial_triggers.rs` copies the formulas
+  out of the document, puts them through `save_trigger` — the validator the Save button runs —
+  and fires them against a real database. Writing it caught one thing to fix in the document
+  rather than in the reader's afternoon: a formula has **no `new`**, so `new Date().toISOString()`
+  is not something a field value can compute; the tutorial stores `Date.now()` in a `bigint` and
+  says why.
+- [x] CHANGELOG entries as each phase lands.
 
 ---
 

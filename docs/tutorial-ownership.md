@@ -263,3 +263,8 @@ You have taken a table from role-only access to per-row ownership, reached an ow
 join, and pushed the whole rule into Postgres as policies you can read. The ownership formula is
 the same language used for **calculated fields** (a column computed on read from other fields,
 joins and child-row aggregations) — the natural next thing to explore from here.
+
+It is also the language **triggers** are configured in. The next tutorial makes the server act on
+its own: an audit trail written on every completed task, a job your app calls as a typed API
+method, and something that runs every night —
+[tutorial-triggers.md](tutorial-triggers.md).

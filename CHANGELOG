@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## Documenting the trigger system
+
+Phase 9, and the end of the triggers milestone. Two documents: §10 of the technical design
+rewritten as **what is built** rather than what was sketched, and a tutorial that gets an admin
+from an empty Triggers screen to a server that acts on its own.
+
+### `docs/TECHNICAL_DESIGN.md`
+
+§10.1 and §10.2 were a `trait Action` with a `Context` that no longer exists and a `Trigger` with
+a `body: TriggerBody` that was never built. They now describe the implementation: the `Action`
+trait as it is (including `validate_config`, the part that moves every "is this configuration
+meaningful?" question to save time), where the built-ins live and *why* (`sc-core-actions`, above
+the row layer, so a trigger's write is the same write an API caller makes), the `Trigger` record,
+`_sc_triggers` as a definition rather than an overlay, the cached live set and its fail-closed
+load, the fire path with `observes` as the choke point that keeps the feature free for writes
+that do not use it, the `only_if` scope, the cascade bound, the scheduler, how an application
+reaches a trigger, and — kept honest — **what `TriggerBody::Workflow` will still need**, which is
+durability, and is why it is a milestone rather than a fourth match arm.
+
+Also: `sc-core-actions` joins the crate map (it was missing), `sc-action`'s line says what the
+crate actually holds, the `_sc_triggers` row in §9's table describes its real columns, and §17's
+"since superseded" note lists it among the stored-metadata tables.
+
+### `docs/tutorial-triggers.md`
+
+Four steps, browser-only, continuing the `tasks`/`todo` app the earlier tutorials build: an audit
+trail written by an `insert_row` trigger with `done && !old.done` as its condition; a `none`
+trigger with a role floor, exposed on the application and called from the app's own JavaScript;
+and a daily sweep at 03:30 UTC. Each step states the decision it demonstrates — the caller travels
+with the event, a trigger writes with admin authority, exposing is the application's decision so
+an unexposed trigger is a 404 and not a 403, schedules are UTC, a missed run is caught up once,
+off is not down.
+
+**The tutorial is executed by a test.** `sc-core-actions/tests/tutorial_triggers.rs` copies the
+formulas out of the document, puts them through `save_trigger` — the same validator the admin's
+Save button runs — and then fires them against a real database: the audit trigger firing on
+*becoming* done and not on any later save, the `none` trigger deleting the caller's finished
+tasks and nobody else's, and the daily one reading back as 03:30 UTC. A tutorial breaks quietly
+(the formula language gains a rule, an action renames a setting) and a test that only reads the
+markdown would not notice.
+
+Writing it found one thing worth fixing in the document rather than in the reader's afternoon: a
+formula is one pure expression with **no `new`**, so `new Date().toISOString()` is not something a
+field value can compute. The tutorial's audit table stores `Date.now()` in a `bigint` and says
+why.
+
+The hygiene test gains the ownership→triggers cross-link and a check that the tutorial still
+covers all three kinds of trigger.
+
 ## The periodic scheduler
 
 Phase 8. `often`, `hourly`, `daily` and `weekly` triggers stop being event kinds nothing watches:

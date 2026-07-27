@@ -64,7 +64,8 @@ saltcorn/
 │  ├─ sc-auth/                    # 5. User, Role, authz (ACL/RLS), sessions, OAuth2 provider
 │  ├─ sc-code/                    # 5. code adapters (JS via a JS engine, Python via CPython)
 │  ├─ sc-files/                   # 5. FileStore trait, drivers (local, S3, git), xattr metadata
-│  ├─ sc-action/                  # 6. Action trait, registry, execution context
+│  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_sc_triggers`
+│  │                              #    storage & validation, the live set, dispatch, scheduler
 │  ├─ sc-workflow/               # 7. durable workflow engine (steps, runs, traces, recovery)
 │  ├─ sc-agent/                   # 7. Agent action + Skill trait + inference loop
 │  ├─ sc-model/                   # 7. ModelProvider trait, model instances, inference
@@ -73,6 +74,9 @@ saltcorn/
 │  ├─ sc-api/                     # 8. Endpoint model (typed Rust values) + API providers
 │  │                              #    (REST/GraphQL/gRPC/tRPC/MCP) + TypeScript consumer gen
 │  ├─ sc-app/                     # 8. Application, Framework provider trait, routing/subdomains
+│  ├─ sc-core-actions/            # 8. the built-in action set (insert_row, update_rows,
+│  │                              #    delete_rows, fetch, run_js_code) — above the row layer,
+│  │                              #    because a trigger's write goes *through* it (§10.1)
 │  ├─ sc-copilot/                 # 9. copilot agent + AppConstructor stages
 │  ├─ sc-server/                  # 9. HTTP server: admin routes, user routes, auth, CSP, sockets
 │  └─ sc-cli/                     # 10. `saltcorn` binary (serve, user/app mgmt, backup/restore)
@@ -118,7 +122,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `TableProvider` | `sc-catalog` | any | Present a data source as a virtual table |
 | `RichType` | `sc-types` | any | A type known to Saltcorn (attributes + validation) |
 | `FieldView` | `sc-fieldview` | any | Display/edit a value of one or more types (React component) |
-| `Action` | `sc-action` | any | One elementary step; configurable; reads/writes context |
+| `Action` | `sc-action` | any | One elementary step; configurable; reads one event, returns a value |
 | `Skill` | `sc-agent` | any | An elementary agent capability (usually an LLM tool) |
 | `Importer` / `Exporter` | `sc-catalog` | any | Move table data to/from a format |
 | `ModelProvider` | `sc-model` | any | Fit/inspect/apply a predictive model over table data |
@@ -711,7 +715,7 @@ a sparse value goes into `attributes`.**
 |---|---|---|
 | `_sc_tables` | overlay metadata for tables | access rules, label/description, attributes, provided-table defs; the DB's own tables need no row to be usable (§9.1) |
 | `_sc_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
-| `_sc_triggers` | triggers, workflows, agents | workflows are **versioned** so a suspended run finishes on its own version |
+| `_sc_triggers` | triggers (later: workflows, agents) | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, action + configuration, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. Workflows will be **versioned** so a suspended run finishes on its own version |
 | `_sc_runs` | workflow & agent runs | current context + state, updated after each step |
 | `_sc_run_traces` | per-step context + timing | only when tracing is enabled for that workflow |
 | `_sc_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
@@ -796,36 +800,222 @@ could never bootstrap them.
 
 ## 10. Actions, triggers, workflows (`sc-action`, `sc-workflow`)
 
+*Implemented; this section describes what is built.*
+
 ### 10.1 Actions
 
 ```rust
-/// One elementary step. Configurable; reads and writes the run context.
+/// One elementary step: configurable, and run against one event.
 #[async_trait]
 pub trait Action: Send + Sync {
     fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    /// The settings this action takes, as data (§6.2's `FormField`).
     fn config_spec(&self) -> Vec<FormField>;
-    async fn run(&self, ctx: &mut Context, cfg: &Attrs, cat: &Catalog) -> Result<()>;
+    /// Everything the spec cannot express — that a named table exists, that a
+    /// configured formula resolves in the scope this event gives it. Called on
+    /// **save and on load**, never at fire time.
+    async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> { Ok(()) }
+    async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json>;
 }
 ```
 
-The set of **built-in actions is deliberately minimal** (GOALS). Control flow lives in the
-workflow engine, not in a proliferation of actions.
+Three commitments are expressed as types rather than as prose:
+
+- **An action is one elementary step.** `run` returns a value and takes no branch: control
+  flow is the workflow engine's (§10.3). The small built-in set GOALS asks for is a
+  *consequence* of that split, not a separate decision.
+- **Configuration is data.** An action declares its settings as `FormField`s, so the admin UI
+  renders a form for an action it has never heard of, and save-time validation checks the
+  values against the same declaration. This is the same vocabulary a framework (§13.3) and a
+  file-store backend (§14.1) use.
+- **The caller travels as JSON.** `ActionContext` exposes the `Event` (below), the
+  configuration, the catalog, the JS evaluator and the firing chain — the caller as a role
+  plus the user's fields, not a `sc_auth::User`, because that JSON object is exactly what the
+  formula language binds `user` to and it keeps an action implementable from a guest language.
+
+**Where an action's configuration is a formula**, it is the §7.3 language in a scope the event
+defines: bare identifiers are the affected row's fields, `row`/`old`/`user`/`payload` are
+ambient, and `row`/`old` are *out of scope* on an event that has no row (so naming `row` in a
+`login` trigger is an unknown identifier, not a silent null). `sc-action` owns that scope
+(`action_shape`) so an `only_if` and an action's settings cannot disagree about what is
+in scope.
+
+The five built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch` and `run_js_code`,
+and they live in **`sc-core-actions`, above the row layer**. That placement is the design's
+one real constraint on where an action may live: a trigger's write goes through `sc-api`'s
+`rows` module, so it is coerced, validated, `File`-field-checked and *observed* exactly like an
+API caller's write. A second write path would quietly skip all of it.
+
+- `insert_row` / `update_rows` / `delete_rows` take a target table and formulas. The `where`
+  of the latter two **selects** rows: translated into SQL when it translates, and falling back
+  to fetch-then-filter through the reified evaluator when it does not (as ownership reads do).
+  Matched rows are then written **one at a time by primary key**, which is what makes each
+  affected row's own triggers fire with its own row payload. `delete_rows` requires a `where`:
+  an omitted one would mean "delete everything", which is not something a missing setting
+  should be able to cause.
+- `fetch` sends an HTTP request built from the event and returns the parsed response — the
+  response is the point, so a directly-run trigger can hand it back to its caller. Its timeout
+  is bounded (60s max) because a trigger runs inside the write or request that fired it.
+- `run_js_code` runs a JavaScript body on the server's isolate with `row`/`old`/`user`/
+  `payload` in scope. Deliberately **bounded**: no host API, so the code cannot reach the
+  catalog, the network or the disk. Catalog access from a guest language is `sc-code`'s
+  milestone (§15); this is its seed, not a preview of it.
+
+An action's writes carry **admin authority** on an RLS table (`ROLE_ADMIN` plus the event's
+user): a trigger is the admin's configuration, and the audit row a user may not insert is
+precisely the one the audit trigger exists to write.
 
 ### 10.2 Triggers
 
+A trigger binds one event to one configured action:
+
 ```rust
 pub struct Trigger {
-    pub id: TriggerId,
-    pub name: String,
-    pub when: Event,               // table Insert/Update/Delete(+Validate), periodic,
-                                   // login/logout, error, API call, custom
-    pub channel: Option<String>,  // usually a table name
-    pub body: TriggerBody,        // Action | Workflow | Agent
+    pub id: TriggerId,                 // UUID: it is stored metadata (§9)
+    pub name: String,                  // unique; the key an app, an API path and Run use
+    pub description: String,
+    pub when: EventKind,               // insert/update/delete · none · login · startup ·
+                                       // error · often/hourly/daily/weekly
+    pub channel: Option<String>,       // the table, for a table event; nothing else has one
+    pub only_if: Option<String>,       // a predicate over the affected row (table events)
+    pub action: String,                // a registered action's name
+    pub configuration: Attrs,          // that action's settings
+    pub min_role: Option<u8>,          // the floor for running it through an app's API;
+                                       // None = admin-only
+    pub attributes: Attrs,             // sparse: `enabled`, and the periodic timing
+    pub last_run_at: Option<DateTime<Utc>>, // the scheduler's record; never written by a save
 }
 ```
 
-A trigger binds an event to an action, a workflow, or an agent — agents and workflows *are*
-triggers, unifying v1's separate concepts.
+**One trigger = one event + one action.** Not a list of actions: a sequence of steps is a
+*workflow*, and conflating the two is what made v1's execution path hard to reason about. Two
+triggers on the same event is how you get two things done today. `TriggerBody::Workflow` is
+still the intended growth path (§10.3) and the record is shaped for it — `action` +
+`configuration` become one variant of a body — but nothing else has to move.
+
+**The event is separate from the trigger.** One insert on `books` is one `Event`; it may fire
+three triggers or none, and nothing about the event changes either way. That split is what lets
+the row layer emit without knowing whether anything listens, and what a workflow engine will
+later listen to with a different body.
+
+#### Storage and the live set
+
+`_sc_triggers` follows §9: a trigger has nothing to introspect it from, so **its row is its
+definition** (not an overlay). Reading is strict — a missing or ill-shaped column is an error
+naming the trigger, never a silently defaulted field that would fire the wrong action.
+
+`Triggers` is the **cached live set**: firing an event is a lookup, never a query (GOALS), so a
+write that nothing observes does not pay for the feature. Loading **validates**, and a trigger
+that fails is dropped from the live set *with its reason kept* — fail closed, exactly as an
+invalid ownership formula grants nothing — while remaining stored, listed and editable, because
+editing it is the repair. A *disabled* trigger is filtered at match time rather than dropped at
+load, so it stays listed (that is how it gets switched back on).
+
+Validation runs on **save** and again on **load**, in one function: the action resolves in the
+registry, the configuration validates against its `config_spec`, `min_role` is on the 1–100
+scale, a table event names a real table and a non-table event names none (*both* directions),
+the periodic timing is in range and belongs to the kind, and the `only_if` parses and resolves
+against that table's shape.
+
+#### The fire path, and its choke point
+
+A table write raises its event through a seam the **catalog** owns (`TableEvents`), because
+`sc-action` is layer 6 and the row layer is layer 8 — the writer cannot name the dispatcher.
+`TriggerDispatcher` implements it and a server installs it once at boot; until then a write is
+simply unobserved, which is what makes a build tool or an admin script safe to run against the
+same database.
+
+`TableEvents::observes(table, op)` is a **synchronous predicate the row layer asks first**, and
+it is the choke point that keeps the feature free for writes that do not use it: an update
+fetches its pre-image only when something will read it.
+
+Every other event is raised by something that already sits above `sc-action` and can simply
+hold the dispatcher: `login` from the one place a session starts, `startup` from the boot path,
+`error` from the four places an `Error` becomes a response (a 404 for an unrouted path is a
+*rejection*, not a failure, and does not raise one), and `none` from whoever asks —
+`run_trigger`, which is what the admin's Run button and an application's exposed endpoint both
+call.
+
+One dispatch, for each matching trigger in name order:
+
+1. **Check the depth.** An action may write a row, which is an event, which may fire another
+   trigger — a feature (denormalising into a second table is the archetype), so it is *bounded*
+   rather than forbidden. An event carries the **chain of trigger names** that led to it and
+   refuses to descend past `MAX_DEPTH` (5), naming the whole chain: a depth counter alone would
+   catch the loop but leave the admin to find it.
+2. **Evaluate the `only_if`**, reified, against the affected row. An evaluator error means the
+   trigger does **not** run: "could not be decided" is not "yes".
+3. **Run the action**, with the chain, so anything it writes knows how deep it is.
+
+**One trigger's failure is one trigger's failure**: every run is independent, and none of it
+reaches the write that caused it — which has already committed. A request that inserted a row
+gets its row back even when the audit trigger it fired is misconfigured, and the reason is
+reported rather than lost.
+
+The `error` event is guarded against re-entrancy at exactly one place (the fire-and-forget
+path), so an error raised while handling an error cannot become an infinite loop at the worst
+possible moment.
+
+#### `only_if`
+
+A predicate over the affected row, in decision 7's scope: bare identifiers are the row's
+fields, `row`/`old`/`user` are ambient, and the **operation flags (`_insert`, …) are refused by
+name** — the trigger's own event *is* the operation, so `_insert` inside an insert trigger is a
+tautology and inside a delete trigger a lie. It is always evaluated reified (there is no
+statement for a translation to ride in on: the row is in hand, already written), and every
+Ⱶ-path or Ↄ-relation it reads is resolved by the same prefetch an ownership check uses.
+
+An `only_if` on a channel-less event is refused on save: there is no row to test, and accepting
+a condition that can never be true is worse than saying so.
+
+#### The periodic scheduler
+
+`often` (every five minutes), `hourly`, `daily` and `weekly` — no cron expression, because a
+cron string is a second language to learn, to validate and to render a form for. The timing is
+three sparse attributes (`minute`, `hour`, `day_of_week`) and **everything is UTC**: a
+server-side schedule has no user to have a timezone, and a local one would mean an hour that
+happens twice a year and an hour that does not happen at all. One function (`Schedule::of`)
+both validates and reads the timing, so what the admin is refused and what the scheduler
+computes cannot drift apart; a timing value on a kind with no use for it is refused rather than
+ignored.
+
+`Scheduler` is one tokio task started by `serve` (and only by `serve`), waking on the minute
+boundary and firing due triggers through the same `run_trigger` path a direct run takes. The
+clock is a **parameter** — `tick(now)` — and the loop is the only place the time is read, which
+is what lets the rules be tested against a table of instants instead of waited for.
+
+- A trigger's clock starts from its persisted `last_run_at`, or from **now** for one that has
+  never run — never from the epoch, which would make every newly created trigger instantly
+  overdue.
+- A run missed while the server was down is caught up **once**: due is
+  `next_due(last_run) <= now`, and after one run `last_run` is now.
+- Each firing runs in **its own task**, so one slow action delays neither the clock nor another
+  trigger, and an occurrence that arrives while the last is still running is **dropped, not
+  queued**.
+- `last_run_at` is a column `save_trigger` never writes — only the scheduler does. An admin
+  editing a trigger at 3pm must not thereby claim the daily job ran at 3pm, or that it never
+  ran.
+- **Disabling is not downtime**: a disabled trigger's clock still advances, so switching a
+  nightly report off for a week and back on runs it *tonight*. Nobody chooses downtime, so that
+  one is caught up; switching a trigger off is a decision to skip those runs.
+
+#### Reaching a trigger from outside
+
+An application declares the subset of triggers it exposes (§13.2), and each becomes one
+`POST {mount}/actions/{name}` typed into the app's generated client as `runFoo(body)`. The body
+is the event's payload and the action's result is the response. Authorization is the trigger's
+own `min_role`, **defaulting to admin** when unset — a trigger whose access nobody has thought
+about must not turn out to be public — and a trigger the app does not name has no endpoint at
+all: a 404, not a 403, because exposing one is the application's decision.
+
+#### What `TriggerBody::Workflow` will need
+
+The pieces already in place: the event model, the registry, the live set, the fire path and its
+depth bound, and `run_trigger` as the "somebody asked" entry point. What a workflow body adds
+is **durability** — a run row with context and position, committed per step (§10.3) — which is
+why it is a separate milestone rather than a fourth variant of this dispatch: a `Workflow` body
+does not return a value at the end of `run`, it *suspends*.
 
 ### 10.3 Durable workflow engine
 
@@ -1527,9 +1717,10 @@ overlays stayed out because tables and fields work without them. "No stored meta
 information_schema" was always a statement about *overlays*, not a ban on the `_sc_*` tables
 whose subjects exist nowhere else.
 
-**Since superseded.** Two post-MVP milestones later, the catalog's stored metadata is:
-`_sc_applications` and `_sc_file_stores` (definitions — their subjects exist nowhere else),
-`_sc_roles` (the authoritative role list, §7.4), and the `_sc_tables`/`_sc_fields` **overlays**
+**Since superseded.** Three post-MVP milestones later, the catalog's stored metadata is:
+`_sc_applications`, `_sc_file_stores` and `_sc_triggers` (definitions — their subjects exist
+nowhere else), `_sc_roles` (the authoritative role list, §7.4), and the
+`_sc_tables`/`_sc_fields` **overlays**
 (§9.1), which is what replaced the "information_schema only" invariant. What the invariant was
 *for* — the zero-setup promise, "point Saltcorn at a legacy database and it just works" — still
 holds, and the merge rule is what carries it now: a table or field with **no overlay row** comes

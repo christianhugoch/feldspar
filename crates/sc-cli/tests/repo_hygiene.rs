@@ -154,4 +154,39 @@ fn tutorials_are_cross_linked() {
         ownership.contains("tutorial-file-fields.md"),
         "the ownership tutorial builds on the file-fields tutorial and should link it"
     );
+    assert!(
+        ownership.contains("tutorial-triggers.md"),
+        "the ownership tutorial should point at the triggers tutorial as a next step"
+    );
+    let triggers = read(&root, "docs/tutorial-triggers.md");
+    assert!(
+        triggers.contains("tutorial-ownership.md"),
+        "the triggers tutorial builds on the ownership tutorial and should link it"
+    );
+}
+
+/// The triggers tutorial teaches the three things Phases 2–8 built, and each of
+/// them is a *screen* an admin has to be able to find: an `only_if` on a table
+/// event, a `none` trigger reached through an application's API, and a periodic
+/// one. A tutorial that quietly lost a third of that would still read fine,
+/// which is exactly why it is worth a test.
+#[test]
+fn the_triggers_tutorial_covers_all_three_kinds_of_trigger() {
+    let root = workspace_root();
+    let triggers = read(&root, "docs/tutorial-triggers.md");
+    for fragment in [
+        "Only if",       // the per-row condition on a table event
+        "old.done",      // …which is what makes it "became done" rather than "is done"
+        "insert_row",    // the audit write
+        "no event",      // the `none` kind, as the event picker spells it
+        "/api/actions/", // reached through the app's API
+        "Minimum role",  // guarded by the trigger's own floor
+        "Once a day",    // the periodic kind, as the picker spells it
+        "UTC",           // …which is the thing people get wrong
+    ] {
+        assert!(
+            triggers.contains(fragment),
+            "the triggers tutorial should cover `{fragment}`"
+        );
+    }
 }
