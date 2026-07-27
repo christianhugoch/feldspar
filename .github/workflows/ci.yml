@@ -33,6 +33,27 @@ jobs:
       - name: Install stable toolchain (clippy)
         run: rustup toolchain install stable --profile minimal --component clippy
       - uses: Swatinem/rust-cache@v2
+      # `Swatinem/rust-cache` restores `target/`, but not all of it. The `v8`
+      # crate (behind `sc-expr`'s `eval` feature) has a build script that
+      # downloads a prebuilt `librusty_v8.a` into `target/<profile>/gn_out/`,
+      # which the cache does not keep — while the build script's *fingerprint*,
+      # which records that the download already happened, it does. Cargo then
+      # skips the script and rustc fails the whole build with `could not find
+      # native static library rusty_v8`.
+      #
+      # Dropping that fingerprint when the library is missing makes the script
+      # run again and fetch it. It costs nothing in the two consistent states: a
+      # warm cache that kept both, and a cold one that has neither.
+      - name: Re-fetch the prebuilt V8 library if the cache dropped it
+        run: |
+          for profile in debug release; do
+            fingerprints="target/$profile/.fingerprint"
+            lib="target/$profile/gn_out/obj/librusty_v8.a"
+            if [ -d "$fingerprints" ] && [ ! -f "$lib" ]; then
+              echo "$lib is missing; forcing the v8 build script to run again"
+              rm -rf "$fingerprints"/v8-*
+            fi
+          done
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -61,4 +82,25 @@ jobs:
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
+      # `Swatinem/rust-cache` restores `target/`, but not all of it. The `v8`
+      # crate (behind `sc-expr`'s `eval` feature) has a build script that
+      # downloads a prebuilt `librusty_v8.a` into `target/<profile>/gn_out/`,
+      # which the cache does not keep — while the build script's *fingerprint*,
+      # which records that the download already happened, it does. Cargo then
+      # skips the script and rustc fails the whole build with `could not find
+      # native static library rusty_v8`.
+      #
+      # Dropping that fingerprint when the library is missing makes the script
+      # run again and fetch it. It costs nothing in the two consistent states: a
+      # warm cache that kept both, and a cold one that has neither.
+      - name: Re-fetch the prebuilt V8 library if the cache dropped it
+        run: |
+          for profile in debug release; do
+            fingerprints="target/$profile/.fingerprint"
+            lib="target/$profile/gn_out/obj/librusty_v8.a"
+            if [ -d "$fingerprints" ] && [ ! -f "$lib" ]; then
+              echo "$lib is missing; forcing the v8 build script to run again"
+              rm -rf "$fingerprints"/v8-*
+            fi
+          done
       - run: cargo test --workspace --all-targets
