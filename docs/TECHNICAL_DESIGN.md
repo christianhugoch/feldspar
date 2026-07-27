@@ -566,6 +566,12 @@ absence — affected-rows 0, mapped to not-found — so "exists but forbidden" i
   policy is never emitted for a formula the database cannot honour. `USER_GUC = "sc.user"` and
   the role GUC are wrapped in `NULLIF(…, '')` so an unset-or-empty custom GUC folds to NULL and
   the policy fails closed.
+  **Operational requirement:** Saltcorn must **not** connect to Postgres as a superuser (or as a
+  role with `BYPASSRLS`). Such a role bypasses row security entirely — `FORCE ROW LEVEL SECURITY`
+  covers the table's *owner*, not a superuser — so every policy this emits would be inert while
+  looking correct. The database role needs only `LOGIN` and ownership of its own objects; CI
+  creates one deliberately rather than using the image's bootstrap superuser, and a deployment
+  that gets this wrong has no enforcement to fall back on but the runtime checks above.
 
 **The Ⱶ operator is an identifier character, not an operator.** U+2C75 (Latin capital letter
 half H, category Lu) is a valid JavaScript identifier character, so `publisherⱵname` is a

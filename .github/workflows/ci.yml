@@ -98,11 +98,28 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test
+      # **Not** the service's `POSTGRES_USER`: that role is a superuser, and
+      # Postgres lets a superuser bypass row-level security entirely — even on a
+      # table with FORCE ROW LEVEL SECURITY. Connecting as one makes the §6 RLS
+      # tests fail (they watch a policy filter rows) and would make any future
+      # test that merely *reads* through a policy pass for the wrong reason. The
+      # role is created in the step below with the least it needs: log in, and
+      # own the per-test databases the harness creates.
+      DATABASE_URL: postgres://sc_test:sc_test@localhost:5432/saltcorn_test
     steps:
       - uses: actions/checkout@v4
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
+      - name: Create the non-superuser role the tests connect as
+        env:
+          PGPASSWORD: saltcorn
+        run: |
+          command -v psql >/dev/null || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          }
+          psql -h localhost -U saltcorn -d saltcorn_test -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE sc_test LOGIN CREATEDB PASSWORD 'sc_test'"
       # The preinstalled Android SDK, .NET and Haskell toolchains are ~13 GB that
       # nothing here uses. Removing them is the difference between a build that
       # fits and one that fits *today*; `|| true` because a runner image that has
