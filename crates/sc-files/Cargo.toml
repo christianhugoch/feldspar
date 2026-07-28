@@ -20,7 +20,10 @@ mime_guess.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 uuid.workspace = true
-tokio = { workspace = true, features = ["fs", "rt"] }
+# `process` drives the git backend: `git` and `ssh-keygen` are external
+# processes, awaited without blocking a runtime thread (the same reason a code
+# framework's build step needs it, §13.3).
+tokio = { workspace = true, features = ["fs", "rt", "process"] }
 # Cross-platform extended-attribute access (technical design §9/§14.1): POSIX
 # xattrs (`user.` namespace) on Linux/macOS/FreeBSD/NetBSD/Android via the
 # mature `xattr` crate, and NTFS Alternate Data Streams on Windows. This is the

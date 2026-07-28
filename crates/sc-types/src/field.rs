@@ -130,6 +130,15 @@ pub struct FormField {
     /// [`OptionsSource::None`] leaves the field unrestricted; anything else makes
     /// it a choice, which the admin UI renders as a select.
     pub options_source: OptionsSource,
+    /// Whether the value is many lines rather than one, so the admin UI gives it
+    /// a text area instead of an input.
+    ///
+    /// A rendering hint rather than a type, because it changes nothing about
+    /// what the value *is*: an SSH public key, a certificate, a block of notes
+    /// are all `Text` and validate as `Text`. It is here because the alternative
+    /// is a UI that special-cases particular settings by name — which is the
+    /// coupling this whole vocabulary exists to remove.
+    pub multiline: bool,
     // Post-MVP (§6.2, §6.3, §12): `fieldview: FieldViewRef` and
     // `visibility: Option<Formula>`. Both name types that do not exist yet —
     // fieldviews and formulas are out of MVP scope — so they are left out rather
@@ -145,12 +154,19 @@ impl FormField {
             required: false,
             default: None,
             options_source: OptionsSource::None,
+            multiline: false,
         }
     }
 
     /// The field's name — the key it occupies in an [`Attrs`] bag.
     pub fn name(&self) -> &str {
         &self.base.name
+    }
+
+    /// Render this setting as a text area: its value is many lines, not one.
+    pub fn multiline(mut self) -> FormField {
+        self.multiline = true;
+        self
     }
 
     /// Set the human-facing label.

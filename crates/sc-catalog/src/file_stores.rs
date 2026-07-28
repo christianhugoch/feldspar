@@ -115,25 +115,7 @@ pub async fn bootstrap_file_stores(catalog: &Catalog) -> Result<Table> {
 /// validated structurally here and reachability is left to
 /// [`connect_from_def`](sc_files::connect_from_def).
 pub async fn save_file_store(catalog: &Catalog, def: &FileStoreDef) -> Result<()> {
-    let name = def.name.trim();
-    if name.is_empty() {
-        return Err(Error::invalid("a file store needs a name"));
-    }
-    if def.backend.trim().is_empty() {
-        return Err(Error::invalid(format!(
-            "file store `{name}` needs a backend"
-        )));
-    }
-    validate_file_store_config(def)?;
-
-    if let Some(other) = load_file_store_by_name(catalog, name).await?
-        && other.id != def.id
-    {
-        return Err(Error::invalid(format!(
-            "file store name `{name}` is already used; \
-             each store is connected under its own name"
-        )));
-    }
+    check_file_store_saveable(catalog, def).await?;
 
     let columns = store_columns();
     let values = store_values(def);
@@ -156,6 +138,44 @@ pub async fn save_file_store(catalog: &Catalog, def: &FileStoreDef) -> Result<()
             values.into_iter().map(Expr::Lit).collect(),
         );
         run(catalog, Statement::from(insert)).await?;
+    }
+    Ok(())
+}
+
+/// Everything [`save_file_store`] checks before it writes: a name, a backend,
+/// settings that match that backend's spec, and no other store already holding
+/// the name.
+///
+/// Public and separate because a caller sometimes needs to know a definition
+/// *would* save before doing something irreversible. Creating a store whose
+/// backend has to build something first — a git store's clone — is the case:
+/// the clone must happen before the row exists, or a failed one leaves a row the
+/// admin's corrected retry collides with, but cloning under a name that is
+/// already taken would be work thrown away and a directory left behind. So the
+/// cheap checks run first, then the creation, then the write.
+///
+/// Runs again inside `save_file_store`, which is deliberate: this is a
+/// convenience for callers that want to look before they leap, never a
+/// substitute for the check on the write path.
+pub async fn check_file_store_saveable(catalog: &Catalog, def: &FileStoreDef) -> Result<()> {
+    let name = def.name.trim();
+    if name.is_empty() {
+        return Err(Error::invalid("a file store needs a name"));
+    }
+    if def.backend.trim().is_empty() {
+        return Err(Error::invalid(format!(
+            "file store `{name}` needs a backend"
+        )));
+    }
+    validate_file_store_config(def)?;
+
+    if let Some(other) = load_file_store_by_name(catalog, name).await?
+        && other.id != def.id
+    {
+        return Err(Error::invalid(format!(
+            "file store name `{name}` is already used; \
+             each store is connected under its own name"
+        )));
     }
     Ok(())
 }

@@ -41,19 +41,20 @@ use sc_auth::{
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, AccessRules, Attrs, Catalog, DataField, DataFieldKind,
     FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId, Table, TableId, TableMeta,
-    connect_file_store_def, delete_file_store, delete_table_meta, file_kind_config_spec,
+    check_file_store_saveable, connect_file_store_def, delete_file_store, delete_table_meta, file_kind_config_spec,
     key_kind_config_spec, list_field_meta_for_table, list_file_stores, load_field_meta_by_field,
     load_file_store, load_file_store_by_name, load_table_meta_by_name, orphan_table_meta,
     resolve_options, save_field_meta, save_file_store, save_table_meta,
 };
 use sc_error::{Error, Result};
 use sc_files::{
-    Entry, FileMeta, FileStoreDef, FileStoreDefId, backend_config_spec, check_access,
-    effective_min_role, filter_visible, registered_backends,
+    Entry, FileMeta, FileStoreDef, FileStoreDefId, backend_config_spec, backend_operations,
+    check_access, effective_min_role, filter_visible, registered_backends, run_backend_operation,
 };
 use sc_query::{Expr, Projection, Select, Source, Statement};
 use sc_types::{
-    BasicType, FormField, RichTypeRef, TypeRef, registered_rich_types, rich_type_config_spec,
+    BasicType, FormField, Operation, OperationScope, RichTypeRef, TypeRef, registered_rich_types,
+    rich_type_config_spec,
 };
 use serde_json::{Map, Value as Json, json};
 
@@ -645,12 +646,25 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 // A create mints a fresh id; the body carries everything else.
-                let def = file_store_from_body(FileStoreDefId::new(), &ctx.body)?;
+                let mut def = file_store_from_body(FileStoreDefId::new(), &ctx.body)?;
+
+                // **Creating a store is transactional.** The cheap checks run
+                // first, then whatever the backend has to build, and only then
+                // is anything written — so a git store whose clone fails leaves
+                // no row at all. Saving first and reporting the failure (what
+                // an *edit* does, §1.2) is wrong here for a concrete reason:
+                // the admin corrects the URL, presses Create again, and is told
+                // the name is already taken — by the row their failed attempt
+                // left behind. There is nothing to preserve on a create, since
+                // the form still holds everything they typed.
+                check_file_store_saveable(&catalog, &def).await?;
+                create_backend_resources(&mut def).await?;
+
                 save_file_store(&catalog, &def).await?;
-                // Connect it straight away so the admin finds out now whether the
-                // directory is actually reachable, rather than on next boot. A
-                // failure is deliberately *not* an error: the definition is saved
-                // and valid, and the reason is reported in the response so the UI
+                // Connect it straight away so the admin finds out now whether
+                // the store is actually reachable, rather than on next boot. A
+                // failure here is deliberately *not* an error — the store was
+                // created, and the reason is reported in the response so the UI
                 // can show "saved, but not connected: <why>".
                 let _ = connect_file_store_def(&catalog, &def);
                 Ok(HandlerResponse::ok(file_store_json(&catalog, &def)?).with_status(201))
@@ -669,7 +683,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .ok_or_else(|| Error::not_found(format!("no file store with id {id:?}")))?;
                 // The id is the path's, not the body's — the row's identity is
                 // not something a payload gets to reassign.
-                let def = file_store_from_body(id, &ctx.body)?;
+                let mut def = file_store_from_body(id, &ctx.body)?;
+                // Attributes are server-managed (§9) — a git store's recorded
+                // clone directory lives there — and the edit form neither shows
+                // nor sends them, so they are carried across rather than reset.
+                // Dropping them would orphan a working tree on the next save.
+                def.attributes = existing.attributes.clone();
                 save_file_store(&catalog, &def).await?;
 
                 // A rename leaves the old handle connected under the old name,
@@ -681,7 +700,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 }
                 // Reconnect under the current name so an edited path takes
                 // effect immediately, with no restart (§1.3).
-                let _ = connect_file_store_def(&catalog, &def);
+                recreate_backend_resources(&catalog, &mut def).await?;
                 Ok(HandlerResponse::ok(file_store_json(&catalog, &def)?))
             }
         }
@@ -726,9 +745,87 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     out.push(json!({
                         "name": name,
                         "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        // What the backend can *do*, declared the same way as
+                        // what it can be told — so the form renders a button per
+                        // operation without knowing what any of them mean.
+                        "operations": backend_operations(&name)?
+                            .iter()
+                            .map(operation_json)
+                            .collect::<Vec<_>>(),
                     }));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    // --- backend operations -------------------------------------------------
+    // Both handlers are backend-agnostic: they look up what the backend declared
+    // and run it. Nothing here knows what a repository, a clone or a deploy key
+    // is — which is what lets a backend added later, in Rust or through
+    // `sc-code`, have buttons in the admin UI without either of these changing.
+
+    // Configure scope: against configuration the admin has not saved yet, so the
+    // definition is built from the body and thrown away, and what comes back is
+    // its config for the form to adopt.
+    reg.register("runBackendOperation", {
+        move |ctx| async move {
+            let backend = ctx.path_param("backend")?.to_owned();
+            let operation = ctx.path_param("operation")?.to_owned();
+            let obj = require_object(&ctx.body)?;
+            let name = obj.get("name").and_then(Json::as_str).unwrap_or("");
+            let mut def = FileStoreDef {
+                config: object_field(obj, "config")?,
+                ..FileStoreDef::new(name, &backend)
+            };
+            require_scope(&backend, &operation, OperationScope::Configure)?;
+
+            let output = run_backend_operation(&mut def, &operation, &object_field(obj, "input")?)
+                .await?;
+            Ok(HandlerResponse::ok(json!({
+                "config": Json::Object(def.config),
+                "output": output,
+            })))
+        }
+    });
+
+    // Instance scope: against a saved store. Whatever the operation changed in
+    // the definition is persisted, and the store is reconnected — an operation
+    // may be exactly what makes it connectable (a clone), and an admin who has
+    // just repaired a store should not have to save again to use it.
+    reg.register("runFileStoreOperation", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_file_store_id(ctx.path_param("id")?)?;
+                let operation = ctx.path_param("operation")?.to_owned();
+                let mut def = load_file_store(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no file store with id {id:?}")))?;
+                require_scope(&def.backend, &operation, OperationScope::Instance)?;
+                let input = match &ctx.body {
+                    Json::Object(obj) => object_field(obj, "input")?,
+                    _ => sc_types::Attrs::new(),
+                };
+
+                let before = def.clone();
+                let output = run_backend_operation(&mut def, &operation, &input).await?;
+                // Only when it actually changed something: an operation that
+                // merely reports (a status) must not rewrite the row on every
+                // screen open.
+                if def != before {
+                    save_file_store(&catalog, &def).await?;
+                }
+                // Failure stays a non-error, exactly as it is on save (§1.2):
+                // pulling a store whose disk has gone should report the pull's
+                // outcome, not swallow it behind a connection error.
+                let _ = connect_file_store_def(&catalog, &def);
+                Ok(HandlerResponse::ok(json!({
+                    "config": Json::Object(def.config),
+                    "output": output,
+                    "connected": catalog.file_store(&def.name)?.is_some(),
+                })))
             }
         }
     });
@@ -1707,6 +1804,112 @@ fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
     }))
 }
 
+/// Run every operation the backend declares as part of **creating** a store,
+/// before anything is written (`Operation::on_create` — a git store's clone).
+///
+/// A failure propagates, and that is the point: the caller has not saved yet, so
+/// a store whose contents could not be created is a store that does not exist,
+/// and the admin gets the backend's own message back in the form they are still
+/// looking at.
+///
+/// Backend-agnostic: `local` declares no such operation and so does nothing
+/// here, and a backend added later — an object store creating its bucket — gets
+/// the same transactional create by declaring one.
+async fn create_backend_resources(def: &mut FileStoreDef) -> Result<()> {
+    for op in backend_operations(&def.backend)? {
+        if op.on_create {
+            run_backend_operation(def, &op.name, &sc_types::Attrs::new()).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The same operations, on an **edit** of a store that already exists — where a
+/// failure is reported rather than fatal.
+///
+/// The asymmetry with [`create_backend_resources`] is deliberate and is §1.2's
+/// rule: an existing store must stay saved and editable even when it cannot be
+/// brought up, because editing it is the repair. Refusing the save would trap an
+/// admin whose remote is briefly unreachable with a definition they can no
+/// longer correct.
+///
+/// It runs on every save rather than only when something changed, because it is
+/// idempotent (a clone that has already happened is a no-op) and because this is
+/// how repointing a store at a reachable URL brings it back up.
+async fn recreate_backend_resources(catalog: &Catalog, def: &mut FileStoreDef) -> Result<()> {
+    for op in backend_operations(&def.backend)? {
+        if !op.on_create {
+            continue;
+        }
+        match run_backend_operation(def, &op.name, &sc_types::Attrs::new()).await {
+            // The operation may have recorded something in the definition — a
+            // git clone records where it cloned to — which has to reach the row,
+            // or a later rename would abandon the working copy.
+            Ok(_) => save_file_store(catalog, def).await?,
+            // Record this failure rather than letting the connect that follows
+            // overwrite it with "this has not been cloned yet" — which is true
+            // but says nothing about *why*, and the why is the admin's next move
+            // (a wrong URL, a deploy key not yet installed at the remote).
+            Err(e) => return report_unusable(catalog, def, &e),
+        }
+    }
+    if let Err(e) = connect_file_store_def(catalog, def) {
+        return report_unusable(catalog, def, &e);
+    }
+    Ok(())
+}
+
+/// An edited store that cannot be brought up: stop it serving, and record why.
+///
+/// The **disconnect** is the part that is easy to miss. A handle in the registry
+/// was built from the *previous* definition, so leaving it there after a failed
+/// save means the store goes on serving the old URL, the old directory — while
+/// the admin is looking at a form that says something else. The store is
+/// reported as connected and works, which is the most confusing possible answer
+/// to "did my edit take effect?".
+///
+/// Disconnecting clears any recorded error, so the reason is recorded after it.
+fn report_unusable(catalog: &Catalog, def: &FileStoreDef, error: &Error) -> Result<()> {
+    catalog.disconnect_file_store(&def.name)?;
+    catalog.record_file_store_error(&def.name, sc_error::format_causes(error))
+}
+
+/// Check that `operation` is one the backend declares **and** that it is being
+/// run at the right scope.
+///
+/// The scope check is not pedantry: a `Configure`-scope operation runs against
+/// an unsaved definition built from a request body, so allowing one through the
+/// instance endpoint (or the reverse) would run it against a definition it was
+/// never written for. Refusing by name is also the clearer error — "the `local`
+/// backend has no operation `pull`" beats a failure from inside git.
+fn require_scope(backend: &str, operation: &str, scope: OperationScope) -> Result<()> {
+    let declared = backend_operations(backend)?;
+    let found = declared
+        .iter()
+        .find(|op| op.name == operation)
+        .ok_or_else(|| {
+            Error::invalid(format!(
+                "the `{backend}` backend has no operation `{operation}`"
+            ))
+        })?;
+    if found.scope != scope {
+        return Err(Error::invalid(format!(
+            "operation `{operation}` of the `{backend}` backend cannot be run here"
+        )));
+    }
+    Ok(())
+}
+
+/// A JSON object field of a request body, defaulting to empty when absent —
+/// which is what a caller sends for an operation that takes no arguments.
+fn object_field(obj: &Map<String, Json>, key: &str) -> Result<sc_types::Attrs> {
+    match obj.get(key) {
+        Some(Json::Object(o)) => Ok(o.clone()),
+        None | Some(Json::Null) => Ok(sc_types::Attrs::new()),
+        Some(_) => Err(Error::invalid(format!("field `{key}` must be an object"))),
+    }
+}
+
 /// Resolve a store by name to its live handle **and** its store-wide `min_role`
 /// floor (§1.1), which is the outermost entry on every path in it.
 ///
@@ -2068,6 +2271,25 @@ fn form_field_json(field: &FormField) -> Json {
         "required": field.required,
         "default": field.default.clone().unwrap_or(Json::Null),
         "options": field.static_options(),
+        "multiline": field.multiline,
+    })
+}
+
+/// An [`Operation`] as the API returns it (matching `operation_schema`): what a
+/// backend can be asked to *do*, in the same declared-as-data shape its settings
+/// use.
+fn operation_json(op: &Operation) -> Json {
+    json!({
+        "name": op.name,
+        "label": op.label,
+        "description": op.description,
+        "scope": match op.scope {
+            OperationScope::Configure => "configure",
+            OperationScope::Instance => "instance",
+        },
+        "input_spec": op.input_spec.iter().map(form_field_json).collect::<Vec<_>>(),
+        "on_create": op.on_create,
+        "automatic": op.automatic,
     })
 }
 

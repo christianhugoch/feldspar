@@ -354,6 +354,77 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- backend operations -------------------------------------------------
+    // Some backends offer *acts* as well as settings — a git store generates a
+    // deploy key, clones, pulls, pushes and commits. Those are declared as data
+    // (`Operation`, §6.2) exactly as settings are, and run through these two
+    // endpoints, so the admin UI renders a button per declared operation and
+    // knows nothing about any particular one. A backend supplied by a plugin
+    // gets its buttons the same way a built-in one does; without this the UI
+    // would need a branch per backend, and an operation would be something only
+    // a built-in backend could have.
+    //
+    // There are two endpoints because there are two scopes, and the difference
+    // is real rather than bookkeeping:
+
+    // **Configure scope** — runs against configuration the admin is still
+    // editing, so it is addressed by *backend name* and carries the unsaved
+    // config in its body. This is what lets "generate a deploy key" happen
+    // before the store exists, which it must: saving a git store clones it, and
+    // cloning needs a key the remote already accepts. What comes back is the
+    // config with the operation's changes merged in, for the form to adopt.
+    set.register(
+        Endpoint::new(
+            "runBackendOperation",
+            Method::Post,
+            api()
+                .lit("file-store-backends")
+                .param("backend", ValueType::Text)
+                .lit("operations")
+                .param("operation", ValueType::Text),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("name", TypeSchema::text()),
+            StructField::new("config", TypeSchema::json()),
+            StructField::new("input", TypeSchema::json()),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("config", TypeSchema::json()),
+            StructField::new("output", TypeSchema::text()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Instance scope** — runs against a saved store, addressed by id like the
+    // rest of the configuration endpoints. Anything the operation changed in the
+    // definition is persisted, and the store is reconnected afterwards, since an
+    // operation may be exactly what makes it connectable (a clone).
+    //
+    // It works from the stored *definition*, not from a connected instance, and
+    // that is the point: a git store that has never been cloned has no instance,
+    // and cloning it is the operation that would otherwise be unreachable.
+    set.register(
+        Endpoint::new(
+            "runFileStoreOperation",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("id", ValueType::Uuid)
+                .lit("operations")
+                .param("operation", ValueType::Text),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "input",
+            TypeSchema::json(),
+        )]))
+        .output(TypeSchema::struct_of([
+            StructField::new("config", TypeSchema::json()),
+            StructField::new("output", TypeSchema::text()),
+            StructField::new("connected", TypeSchema::bool()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- files (file manager) ----------------------------------------------
 
     // Browse one directory of a store. A POST (not GET) so the directory — which
@@ -918,6 +989,28 @@ fn backend_info_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("name", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+        StructField::new("operations", TypeSchema::array(operation_schema())),
+    ])
+}
+
+/// One [`Operation`](sc_types::Operation) a backend declares: an *act* it
+/// offers, as opposed to a setting it takes.
+///
+/// The same "as data" move `form_field_schema` makes, for the other half of
+/// what an extension can offer. `scope` says whether it runs against unsaved
+/// configuration (`configure`) or a saved store (`instance`), which is what
+/// tells the UI where to put the button; `input_spec` is whatever the operation
+/// asks the admin for, in the ordinary settings vocabulary, so the same code
+/// renders a commit-message box that renders a store's settings.
+fn operation_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("scope", TypeSchema::text()),
+        StructField::new("input_spec", TypeSchema::array(form_field_schema())),
+        StructField::new("on_create", TypeSchema::bool()),
+        StructField::new("automatic", TypeSchema::bool()),
     ])
 }
 
@@ -1151,5 +1244,6 @@ fn form_field_schema() -> TypeSchema {
         StructField::new("required", TypeSchema::bool()),
         StructField::new("default", TypeSchema::optional(TypeSchema::json())),
         StructField::new("options", TypeSchema::array(TypeSchema::json())),
+        StructField::new("multiline", TypeSchema::bool()),
     ])
 }

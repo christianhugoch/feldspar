@@ -40,9 +40,13 @@
 use std::sync::Arc;
 
 use sc_error::{Context, Error, Repr, Result};
-use sc_types::{BasicType, FormField, validate_attrs};
+use sc_types::{Attrs, BasicType, FormField, Operation, validate_attrs};
 
-use crate::def::{CFG_CREATE, CFG_PATH, FileStoreDef, LOCAL_BACKEND};
+use crate::def::{
+    CFG_BRANCH, CFG_CREATE, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY, CFG_URL, FileStoreDef,
+    GIT_BACKEND, LOCAL_BACKEND,
+};
+use crate::git::{GitFileStore, GitRepo, git_operations};
 use crate::local::LocalFileStore;
 use crate::store::FileStore;
 
@@ -68,14 +72,118 @@ pub fn local_config_spec() -> Vec<FormField> {
     ]
 }
 
+/// The settings the [`git`](GIT_BACKEND) backend needs: which repository, which
+/// branch, and how to authenticate.
+///
+/// Note what is *not* here: where to put the clone. A `local` store's directory
+/// is the admin's own and only they can name it; a git clone is a directory
+/// Saltcorn creates, so Saltcorn places it (see [`clone_path`](crate::clone_path))
+/// and asking would be asking for a decision the admin has no basis to make.
+///
+/// `key_path` and `public_key` are ordinary settings even though the deploy-key
+/// button usually fills them in, because an admin pointing a store at a key that
+/// already exists on the machine is a configuration Saltcorn has no business
+/// refusing.
+pub fn git_config_spec() -> Vec<FormField> {
+    vec![
+        FormField::new(CFG_URL, BasicType::Text)
+            .label("Repository URL")
+            .required(),
+        FormField::new(CFG_BRANCH, BasicType::Text).label("Branch (blank for the default)"),
+        FormField::new(CFG_KEY_PATH, BasicType::Text).label("SSH private key file"),
+        FormField::new(CFG_PUBLIC_KEY, BasicType::Text)
+            .label("Deploy key (public)")
+            // A key is one long line the admin copies out, not a value they
+            // type; the hint is what gets it a text area without the UI knowing
+            // that this particular setting is a key.
+            .multiline(),
+    ]
+}
+
+/// The operations a backend offers beyond its settings (§6.2's vocabulary for
+/// *acts*, [`Operation`]) — what the admin UI renders as buttons.
+///
+/// The [`local`](LOCAL_BACKEND) backend has none: there is nothing to do to a
+/// directory that reading and writing files does not already cover. That is the
+/// shape most backends will have, and it is why operations are declared rather
+/// than assumed.
+pub fn backend_operations(name: &str) -> Result<Vec<Operation>> {
+    match name {
+        LOCAL_BACKEND => Ok(Vec::new()),
+        GIT_BACKEND => Ok(git_operations()),
+        other => Err(unknown_backend(other)),
+    }
+}
+
+/// Run one of a backend's declared [`operations`](backend_operations).
+///
+/// `def` is **mutable** because an operation may configure as well as act: the
+/// deploy-key generator fills in two settings, and a clone records where it
+/// cloned to. The caller persists whatever changed — a
+/// [`Configure`](OperationScope::Configure) operation's changes go back to the
+/// form the admin is still filling in, an [`Instance`](OperationScope::Instance)
+/// operation's to the store's row.
+///
+/// Returns text for the admin: a command's own output, or a summary. Anything
+/// that went wrong is an `Err` carrying the same, since the reason a push failed
+/// is the actionable part.
+pub async fn run_backend_operation(
+    def: &mut FileStoreDef,
+    operation: &str,
+    input: &Attrs,
+) -> Result<String> {
+    let declared = backend_operations(&def.backend)?;
+    let spec = declared
+        .iter()
+        .find(|op| op.name == operation)
+        .ok_or_else(|| {
+            Error::invalid(format!(
+                "the `{}` backend has no operation `{operation}`{}",
+                def.backend,
+                if declared.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; it offers {}",
+                        declared
+                            .iter()
+                            .map(|op| op.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            ))
+        })?;
+    // The operation's arguments are `FormField`s, so they are checked by the
+    // same code that checks settings — a missing commit message is caught here,
+    // with the same message shape, rather than by each operation separately.
+    validate_attrs(&spec.input_spec, input)?;
+
+    match def.backend.as_str() {
+        GIT_BACKEND => crate::git::run_git_operation(def, operation, input).await,
+        // Unreachable: `backend_operations` above returned a spec, so the
+        // backend both exists and declares this operation.
+        other => Err(Error::config(format!(
+            "file-store backend `{other}` declares operation `{operation}` but cannot run it"
+        ))),
+    }
+}
+
+/// The error for a backend nothing implements, naming what there is.
+fn unknown_backend(name: &str) -> Error {
+    Error::config(format!(
+        "unknown file-store backend `{name}`; the registered backends are {}",
+        registered_backends().join(", ")
+    ))
+}
+
 /// The names of every registered backend — what the admin UI lists so an admin
 /// can pick one and be shown its [`backend_config_spec`].
 ///
-/// The MVP registers exactly one; this is the single place that enumerates them,
-/// so a new backend is listed by adding it here (and to
-/// [`backend_config_spec`] and [`connect_from_def`]).
+/// This is the single place that enumerates them, so a new backend is listed by
+/// adding it here (and to [`backend_config_spec`] and [`connect_from_def`]).
 pub fn registered_backends() -> Vec<String> {
-    vec![LOCAL_BACKEND.to_owned()]
+    vec![LOCAL_BACKEND.to_owned(), GIT_BACKEND.to_owned()]
 }
 
 /// The settings the backend registered under `name` declares — the registry
@@ -89,11 +197,8 @@ pub fn registered_backends() -> Vec<String> {
 pub fn backend_config_spec(name: &str) -> Result<Vec<FormField>> {
     match name {
         LOCAL_BACKEND => Ok(local_config_spec()),
-        other => Err(Error::config(format!(
-            "unknown file-store backend `{other}`; \
-             the registered backends are {}",
-            registered_backends().join(", ")
-        ))),
+        GIT_BACKEND => Ok(git_config_spec()),
+        other => Err(unknown_backend(other)),
     }
 }
 
@@ -163,6 +268,19 @@ pub fn connect_from_def(def: &FileStoreDef) -> Result<Arc<dyn FileStore>> {
                 .with_context(|| format!("connecting file store `{}`", def.name))?;
             Ok(Arc::new(store) as Arc<dyn FileStore>)
         }
+        GIT_BACKEND => {
+            // Deliberately does **not** clone. Connecting happens at boot and on
+            // every save, and both must be fast, offline-safe and free of
+            // surprises: a clone is a network operation that can hang, can
+            // authenticate as the wrong identity, and — on a store whose remote
+            // has been repointed — could write a whole tree nobody asked for.
+            // `GitRepo::ensure_cloned` is the explicit, awaited path, and the
+            // server calls it when the admin saves the store.
+            let repo = GitRepo::from_def(def)?;
+            let store = GitFileStore::new(&def.name, repo)
+                .with_context(|| format!("connecting file store `{}`", def.name))?;
+            Ok(Arc::new(store) as Arc<dyn FileStore>)
+        }
         // Unreachable while `validate_file_store_config` runs first, which
         // rejects an unknown backend; kept so adding a backend to the registry
         // without adding it here is a clear error rather than a fallthrough.
@@ -186,7 +304,10 @@ fn creates_directory(def: &FileStoreDef) -> bool {
 mod tests {
     use super::*;
 
-    /// The error from a failed connect, as a string.
+    /// The error from a failed connect, as a string — the **whole** causal
+    /// chain, which is what `connect_file_store_def` records and the admin UI
+    /// shows. The outermost layer is only "connecting file store `x`"; the
+    /// reason is underneath it.
     ///
     /// `unwrap_err` is unavailable here: it requires the `Ok` type to be `Debug`
     /// and `Arc<dyn FileStore>` is not, a store being a live handle rather than
@@ -194,7 +315,7 @@ mod tests {
     fn connect_err(def: &FileStoreDef) -> String {
         match connect_from_def(def) {
             Ok(store) => panic!("expected `{}` not to connect", store.name()),
-            Err(e) => e.to_string(),
+            Err(e) => sc_error::format_causes(&e),
         }
     }
 
@@ -239,11 +360,119 @@ mod tests {
 
     #[test]
     fn the_registry_resolves_a_name_to_the_same_spec() {
-        assert_eq!(registered_backends(), [LOCAL_BACKEND]);
+        assert_eq!(registered_backends(), [LOCAL_BACKEND, GIT_BACKEND]);
         assert_eq!(
             backend_config_spec(LOCAL_BACKEND).unwrap(),
             local_config_spec()
         );
+        assert_eq!(backend_config_spec(GIT_BACKEND).unwrap(), git_config_spec());
+    }
+
+    #[test]
+    fn the_git_backend_asks_for_a_url_and_nothing_else_mandatory() {
+        let spec = git_config_spec();
+        let names: Vec<&str> = spec.iter().map(|f| f.name()).collect();
+        assert_eq!(names, [CFG_URL, CFG_BRANCH, CFG_KEY_PATH, CFG_PUBLIC_KEY]);
+        let required: Vec<&str> = spec
+            .iter()
+            .filter(|f| f.required)
+            .map(|f| f.name())
+            .collect();
+        // Only the URL: a public repository on its default branch needs no key
+        // and no branch, and demanding either would block the simplest case.
+        assert_eq!(required, [CFG_URL]);
+        assert!(spec.iter().all(|f| !f.base.label.is_empty()));
+
+        // No `path` setting — where a clone goes is Saltcorn's decision, not a
+        // question for the admin.
+        assert!(!names.contains(&CFG_PATH));
+    }
+
+    #[test]
+    fn a_git_store_without_a_url_is_rejected_on_save() {
+        let def = FileStoreDef::new("app", GIT_BACKEND);
+        let err = validate_file_store_config(&def).unwrap_err().to_string();
+        assert!(err.contains("app"), "{err}");
+        assert!(err.contains(CFG_URL), "{err}");
+    }
+
+    #[test]
+    fn a_backends_operations_are_declared_like_its_settings() {
+        // The `local` backend has none: there is nothing to do to a directory
+        // that reading and writing files does not already cover. That is the
+        // shape most backends have, and it is why operations are declared
+        // rather than assumed.
+        assert!(backend_operations(LOCAL_BACKEND).unwrap().is_empty());
+
+        let ops = backend_operations(GIT_BACKEND).unwrap();
+        let names: Vec<&str> = ops.iter().map(|op| op.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                crate::git::OP_GENERATE_KEY,
+                crate::git::OP_STATUS,
+                crate::git::OP_CLONE,
+                crate::git::OP_PULL,
+                crate::git::OP_PUSH,
+                crate::git::OP_COMMIT,
+            ]
+        );
+        // Every one carries a button label, because the admin UI renders this
+        // and nothing else knows what these mean.
+        assert!(ops.iter().all(|op| !op.label.is_empty()));
+
+        // An unknown backend has no operations for the same reason it has no
+        // settings spec: nothing implements it.
+        assert!(backend_operations("s3").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_operation_is_refused_by_name() {
+        // The check is the registry's, not any backend's — which is what a
+        // backend added later relies on.
+        let mut def = FileStoreDef::local("docs", "/srv/docs");
+        let err = run_backend_operation(&mut def, "pull", &Attrs::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pull"), "{err}");
+        assert!(err.contains(LOCAL_BACKEND), "{err}");
+
+        // A git store gets told what there *is*, since something is available.
+        let mut def = FileStoreDef::git("app", "git@example.com:me/app.git");
+        let err = run_backend_operation(&mut def, "rebase", &Attrs::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rebase"), "{err}");
+        assert!(err.contains(crate::git::OP_PULL), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_operations_arguments_are_validated_against_what_it_declared() {
+        // A commit with no message is caught by the declared `required` field,
+        // in the same place and with the same message shape a missing setting
+        // is — not by anything that knows what a commit is.
+        let mut def = FileStoreDef::git("app", "git@example.com:me/app.git");
+        let err = run_backend_operation(&mut def, crate::git::OP_COMMIT, &Attrs::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(crate::git::ARG_MESSAGE), "{err}");
+    }
+
+    #[test]
+    fn an_uncloned_git_store_does_not_connect_and_says_why() {
+        let mut def = FileStoreDef::git("app", "git@example.com:me/app.git");
+        // Structurally correct — the admin has configured it properly …
+        assert!(validate_file_store_config(&def).is_ok());
+        // … but there is no working tree, and connecting must not reach the
+        // network to make one. The error names the store and says what is
+        // missing, so the admin knows to clone rather than to re-check the URL.
+        crate::git::record_clone_path(&mut def, std::path::Path::new("/definitely/not/here"));
+        let err = connect_err(&def);
+        assert!(err.contains("app"), "{err}");
+        assert!(err.contains("clone"), "{err}");
     }
 
     #[test]

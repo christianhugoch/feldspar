@@ -28,13 +28,22 @@ type StoreItem = ListFileStoresResponse[number];
 
 /** A one-line summary of where a store's data lives, from its backend config.
  * Generic on purpose: the screen knows no backend's settings, so it shows the
- * settings there are rather than reaching for a `path` that only `local` has. */
+ * settings there are rather than reaching for a `path` that only `local` has.
+ *
+ * Long values are elided rather than special-cased away: a git store's public
+ * key is a legitimate setting and belongs in the summary, but at full length it
+ * would push everything else off the row. */
 function locationSummary(store: StoreItem): string {
   const config = store.config;
   if (!config || typeof config !== "object") return "";
   return Object.entries(config as Record<string, unknown>)
-    .map(([key, value]) => `${key}: ${asString(value)}`)
+    .map(([key, value]) => `${key}: ${elide(asString(value))}`)
     .join(", ");
+}
+
+/** A value shortened to fit a table cell. */
+function elide(value: string, max = 60): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
 export function FileStores() {

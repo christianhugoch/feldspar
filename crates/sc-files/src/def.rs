@@ -42,6 +42,49 @@ pub const CFG_PATH: &str = "path";
 /// create the directory when it does not exist, rather than refusing to connect.
 pub const CFG_CREATE: &str = "create";
 
+/// The backend backing a store with a **clone of a git repository**, implemented
+/// by [`GitFileStore`](crate::GitFileStore).
+///
+/// The second registered backend, and the one that proves the registry was worth
+/// building: adding it changed `sc-files` and nothing in the admin UI's settings
+/// rendering, because a backend declares its settings and the form renders what
+/// it is handed (§6.2).
+pub const GIT_BACKEND: &str = "git";
+
+/// The `url` setting of the [`git`](GIT_BACKEND) backend: the repository to
+/// clone. Any URL git accepts — `git@host:owner/repo.git`, `https://…`, or a
+/// local path.
+pub const CFG_URL: &str = "url";
+
+/// The `branch` setting of the [`git`](GIT_BACKEND) backend: which branch to
+/// check out. Empty means the repository's default branch.
+pub const CFG_BRANCH: &str = "branch";
+
+/// The `key_path` setting of the [`git`](GIT_BACKEND) backend: the SSH private
+/// key git authenticates with.
+///
+/// Usually written by [`record_deploy_key`](crate::record_deploy_key) when the
+/// admin generates a deploy key, but settable by hand — pointing a store at a
+/// key that already exists on the machine is a legitimate configuration.
+pub const CFG_KEY_PATH: &str = "key_path";
+
+/// The `public_key` setting of the [`git`](GIT_BACKEND) backend: the public half
+/// of [`CFG_KEY_PATH`], kept so the admin can read it again after generating it.
+///
+/// A public key, so storing and displaying it discloses nothing; what it saves
+/// is an admin who generated a deploy key, navigated away, and now needs to
+/// paste it into the repository's settings.
+pub const CFG_PUBLIC_KEY: &str = "public_key";
+
+/// Attribute (§9, sparse per-store values) recording **where** a git store was
+/// cloned.
+///
+/// An attribute rather than a setting because it is not the admin's to choose:
+/// the clone directory is picked by Saltcorn (see
+/// [`clone_path`](crate::clone_path)) and recorded so that renaming the store
+/// cannot orphan its working tree.
+pub const ATTR_CLONE_PATH: &str = "clone_path";
+
 /// Identifies a stored file-store definition. A UUID, per the §9 rule that every
 /// system metadata table has a UUID primary key.
 ///
@@ -114,6 +157,12 @@ impl FileStoreDef {
     /// common case, and the one `--file-store NAME=PATH` expresses.
     pub fn local(name: impl Into<String>, path: impl Into<String>) -> FileStoreDef {
         FileStoreDef::new(name, LOCAL_BACKEND).with(CFG_PATH, path.into())
+    }
+
+    /// A [`git`](GIT_BACKEND) store named `name` cloned from `url`, on the
+    /// repository's default branch and with no key configured yet.
+    pub fn git(name: impl Into<String>, url: impl Into<String>) -> FileStoreDef {
+        FileStoreDef::new(name, GIT_BACKEND).with(CFG_URL, url.into())
     }
 
     /// Set a backend setting, returning `self` for chaining.

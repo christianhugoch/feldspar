@@ -42,9 +42,9 @@ pub use field_meta::{
 };
 pub use file_stores::{
     FILE_STORES_TABLE, FileStoreConnections, QUERY_FILE_STORES, bootstrap_file_stores,
-    choosable_file_stores, connect_all_file_stores, connect_file_store_def, delete_file_store,
-    file_store_field_references, list_file_stores, load_file_store, load_file_store_by_name,
-    resolve_options, save_file_store,
+    check_file_store_saveable, choosable_file_stores, connect_all_file_stores,
+    connect_file_store_def, delete_file_store, file_store_field_references, list_file_stores,
+    load_file_store, load_file_store_by_name, resolve_options, save_file_store,
 };
 pub use prefetch::prefetch_bindings;
 pub use provider::{DriverTableProvider, TableProvider};

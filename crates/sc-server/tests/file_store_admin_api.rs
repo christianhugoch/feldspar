@@ -479,8 +479,13 @@ async fn backends_are_listed_with_their_settings_spec() -> sc_error::Result<()> 
     let (status, body) = client.send("GET", "/api/file-store-backends", None).await;
     assert_eq!(status, StatusCode::OK);
     let backends = body.as_array().unwrap();
-    assert_eq!(backends.len(), 1);
-    assert_eq!(backends[0]["name"], json!("local"));
+    // Every registered backend, in registry order. `git_store_api.rs` covers
+    // what the git one declares; this is about the shape they all share.
+    let names: Vec<&str> = backends
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["local", "git"]);
 
     let spec = backends[0]["config_spec"].as_array().unwrap();
     let names: Vec<&str> = spec.iter().map(|f| f["name"].as_str().unwrap()).collect();

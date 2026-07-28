@@ -26,6 +26,10 @@ export type FieldSpec = {
   required: boolean;
   default?: unknown | null;
   options: unknown[];
+  /** Render as a text area: the value is many lines, not one. A hint the field
+   * declares, so no screen has to know that some particular setting happens to
+   * hold an SSH key or a certificate. */
+  multiline: boolean;
 };
 
 /** Read a config value as a display string (config bags arrive as `unknown`). */
@@ -182,12 +186,27 @@ export function SettingField({
         {field.label}
         {field.required && <span className="text-danger"> *</span>}
       </Form.Label>
-      <Form.Control
-        type={field.type === "int" ? "number" : "text"}
-        value={value}
-        required={field.required}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      {field.multiline ? (
+        // Monospace and selectable-on-focus, because a multi-line setting is
+        // something copied in or out (a key, a certificate) far more often than
+        // it is typed.
+        <Form.Control
+          as="textarea"
+          rows={3}
+          className="font-monospace small"
+          value={value}
+          required={field.required}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={(e) => e.currentTarget.select()}
+        />
+      ) : (
+        <Form.Control
+          type={field.type === "int" ? "number" : "text"}
+          value={value}
+          required={field.required}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
     </Form.Group>
   );
 }

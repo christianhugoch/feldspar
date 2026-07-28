@@ -2,6 +2,141 @@
 
 Changes in reverse chronological order.
 
+## A file store can be a git repository
+
+Not a TODO item. `local` was the only registered file-store backend; there is now a second,
+`git`, whose store is a **working tree cloned from a remote** — configured with a repository
+URL, cloned when it is saved, and driven from the admin UI with pull, push and commit.
+
+### Operations are declared data, like settings
+
+The registry already made settings additive: a backend declares `Vec<FormField>` and the admin
+form renders what it is handed (§6.2), so `git`'s URL, branch and key path needed no new form
+code. What it had no vocabulary for is *acts* — generating a deploy key, cloning, pulling,
+pushing, committing. None of those is a value the admin types, and writing them as
+`backend === "git"` branches in the SPA would have made an operation something only a
+**built-in** backend could have: a backend supplied by a plugin, or through `sc-code` in a guest
+language, could declare settings and never a button.
+
+So there is now `sc_types::Operation`, the counterpart to `FormField`: a name, a label, a
+description, a scope, and — because some operations take an argument — its own `Vec<FormField>`
+for whatever it asks the admin for. `backend_operations(name)` reports them beside
+`backend_config_spec(name)`, and `run_backend_operation(&mut def, name, input)` runs one. The
+argument bag is checked with `validate_attrs` against the operation's own spec, so a missing
+commit message is caught by the same code and with the same message shape as a missing setting.
+
+An operation is handed the definition **mutably**, which is what lets it configure as well as
+act: the deploy-key generator fills in two settings, a clone records where it cloned to, and the
+caller persists whatever changed.
+
+The **scope** is the substance rather than bookkeeping, and it is why there are two endpoints:
+
+- `configure` runs against settings the admin is still editing, so it is addressed by *backend
+  name* and carries the unsaved config in its body (`POST
+  /api/file-store-backends/{backend}/operations/{operation}`). This is what makes "generate a
+  deploy key" possible at all — see below.
+- `instance` runs against a saved store, addressed by id like the rest of the configuration API
+  (`POST /api/file-stores/{id}/operations/{operation}`). It works from the stored *definition*,
+  not a connected instance, because a git store that has never been cloned has no instance and
+  cloning it is precisely the operation that would otherwise be unreachable.
+
+An operation may also be `automatic`: run when the screen opens rather than on a press, for the
+one whose whole job is to report state. `git`'s `status` is that, and it returns **text** — the
+generic thing a screen can render. A card showing branches and ahead/behind counts would be a
+card that knows what those are, and could not render a plugin backend's status at all.
+
+`FileStoreForm.tsx` therefore contains no mention of git: it renders a button per declared
+operation, a form per declared argument, and shows whatever output comes back. `FormField` also
+gained a `multiline` hint, so a setting holding an SSH public key gets a text area without any
+screen knowing which settings happen to hold keys.
+
+### Generating the deploy key comes before saving the store
+
+Saving a git store clones it, and cloning a private repository needs a key the remote already
+accepts. So the order the UI enforces is **generate, install, then save**, and that ordering is
+exactly what `configure` scope exists for: the operation runs against the form, not against a
+store, because there is no store yet. It returns the settings with `key_path` and `public_key`
+filled in, the form adopts them, the admin pastes the public key into the repository's deploy
+keys, and Create then clones with a key the remote already knows. An operation that required a
+saved store would always be one step too late — the first clone would always fail, for a reason
+that has nothing to do with what the admin configured.
+
+Only the public half ever crosses the API. The private key is written to Saltcorn's data
+directory with `0600` permissions and is referenced by path; `ssh` itself refuses a key that
+other users on the box can read, so the mode is not decoration.
+
+### Where the clone goes is Saltcorn's decision, and is recorded
+
+A `local` store's directory is the admin's own, so only they can name it. A git clone is a
+directory Saltcorn creates, so Saltcorn places it — under an OS-appropriate data directory
+(`%LOCALAPPDATA%\Saltcorn`, `~/Library/Application Support/Saltcorn`, or
+`$XDG_DATA_HOME/saltcorn`), overridable with `SC_DATA_DIR`, which is also what keeps tests out
+of a developer's real one. There is deliberately no `path` setting to ask about.
+
+The chosen path is **recorded** in the definition's attributes on the first clone rather than
+re-derived from the name each time. Without that, renaming a store would compute a fresh
+directory, point the store at an empty one, and abandon whatever was uncommitted in the old one.
+This also made `updateFileStore` carry a definition's attributes across a save, which it
+previously reset — server-managed values (§9) are not the edit form's to erase.
+
+### Creating a store is transactional; editing one is not
+
+An operation may declare itself part of **creating** an instance (`on_create`), and `git`'s
+`clone` does: until the clone succeeds there is no working copy and therefore no store. So
+creating a store runs the cheap checks (`check_file_store_saveable`, factored out of
+`save_file_store` for exactly this), then whatever the backend has to build, and only then
+writes the row. A failed clone leaves **nothing** — no row, no registry entry — and returns
+git's own message to the form the admin is still looking at.
+
+The alternative, saving first and reporting the failure, is what an *edit* does and it is wrong
+on a create for a concrete reason: the admin corrects the URL, presses Create again, and is told
+the name is already taken — by the row their own failed attempt left behind. There is nothing to
+preserve on a create, since the form still holds everything they typed.
+
+Editing keeps §1.2's rule, and the asymmetry is the substance: an existing store must stay saved
+and editable even when it cannot be brought up, because editing it *is* the repair. Refusing the
+save would trap an admin whose remote is briefly unreachable with a definition they can no
+longer correct. What editing now also does is **disconnect** a store it could not bring up: the
+handle in the registry was built from the previous definition, so leaving it there means the
+store goes on serving the old URL while the admin looks at a form saying something else — the
+most confusing possible answer to "did my edit take effect?".
+
+`local` declares no `on_create` operation and so is unaffected; a backend added later that has
+something to build — an object store creating its bucket — gets the same transactional create by
+declaring one. The server does the whole thing without naming a backend: `GIT_BACKEND` is no
+longer imported in `sc-server` at all.
+
+### Connecting never reaches the network; saving does
+
+`connect_from_def` stays synchronous and offline: it opens an existing clone or fails saying
+there is none. It runs at boot and on every save, and a clone there would make a slow remote a
+slow boot, or — on a store whose URL had been repointed — write a whole tree nobody asked for.
+Cloning is the backend's own `clone` operation, which both the save path and the button run —
+one implementation, so they cannot drift. It is idempotent, so re-saving never discards a
+working tree.
+
+### Every git invocation is non-interactive
+
+A server has no terminal, so a git subprocess that asks a question does not get an answer — it
+hangs, holding a request open. Every invocation runs with `GIT_TERMINAL_PROMPT=0`, and every one
+using a deploy key runs ssh with `BatchMode=yes`, `IdentitiesOnly=yes` (so an agent's other keys
+are not offered first, exhausting the remote's auth attempts before ours is tried) and
+`StrictHostKeyChecking=accept-new` (a first clone from an unknown host is the normal case here;
+a host whose key *changed* is still refused).
+
+### Tests
+
+`crates/sc-files/tests/git_store.rs` runs the driver against a real bare repository in a temp
+directory — clone, write through the `FileStore` API, commit, push, and a second clone pulling
+it back down — plus the deploy key's shape and permissions. `crates/sc-server/tests/
+git_store_api.rs` drives the same round trip through the assembled router as the admin UI does,
+over the generic operation endpoints, and covers what only that layer decides: that saving
+clones and connects, that a **failed clone creates nothing and the corrected retry succeeds**,
+that the same failure while editing keeps the store and reports why, that a `configure`
+operation cannot be run at instance scope or the reverse, that `local` — declaring no operations
+— refuses all of them by name, and that renaming a store keeps its working tree.
+Local paths are used as remotes throughout, so none of it touches the network.
+
 ## The admin UI wears Tabler
 
 Not a TODO item. The admin SPA was plain Bootstrap with a horizontal navbar; it is now

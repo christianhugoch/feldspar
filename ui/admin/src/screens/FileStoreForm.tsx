@@ -1,8 +1,28 @@
-// Create / edit a file store. The same point `ApplicationForm` proves, for
-// backends: **no screen knows a specific backend's settings**. The admin picks a
-// backend and the form renders whatever that backend's `config_spec` declares —
-// there is no `local`-backend-specific code here, so an S3 or git-remote backend
-// added to the registry gets a working form with no change to this file.
+// Create / edit a file store. The point `ApplicationForm` proves for
+// frameworks, held to for backends: **no screen knows a specific backend**.
+//
+// A backend declares two things and this renders both without knowing what
+// either means:
+//
+//   - its **settings**, as `FormField`s (§6.2) — rendered by `SettingsFields`;
+//   - its **operations**, as `Operation`s — rendered as buttons here.
+//
+// The second exists because some backends offer *acts*, not just values. A git
+// store generates a deploy key before it is saved, and pulls, pushes and commits
+// afterwards. Writing those as `backendName === "git"` branches would have made
+// an operation something only a built-in backend could have: a backend supplied
+// by a plugin, or through `sc-code` in a guest language, could declare settings
+// and never a button. So they are declared data too, and this file contains no
+// mention of git.
+//
+// The two operation **scopes** are why there are two places buttons appear, and
+// the distinction is the substance rather than layout:
+//
+//   - `configure` runs against settings the admin is still editing and can
+//     change them — which is what makes "generate a deploy key" possible at all,
+//     since the key must exist before saving a git store clones it.
+//   - `instance` runs against a saved store. `automatic` ones run when the
+//     screen opens, for the operation whose whole job is to report state.
 //
 // Saving does not require the store to be reachable (§1.2): a well-formed
 // definition whose directory is missing is saved, and the failure to connect is
@@ -25,12 +45,21 @@ import type {
   ListFileStoresResponse,
 } from "../client";
 import { navigate } from "../App";
-import { IconArrowLeft } from "../icons";
+import { IconArrowLeft, IconFolder } from "../icons";
 import { AlertBody, PageBody, PageHeader } from "../layout";
-import { SettingsFields, buildConfig, readConfig } from "../settings";
+import {
+  SettingsFields,
+  buildConfig,
+  readConfig,
+  type FieldSpec,
+} from "../settings";
 
 type BackendInfo = ListFileStoreBackendsResponse[number];
+type OperationInfo = BackendInfo["operations"][number];
 type StoreItem = ListFileStoresResponse[number];
+
+/** Values entered for each operation's arguments, keyed by operation name. */
+type OperationInputs = Record<string, Record<string, string>>;
 
 export function FileStoreForm({ storeId }: { storeId?: string }) {
   const [backends, setBackends] = useState<BackendInfo[] | null>(null);
@@ -82,6 +111,8 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
   }, [storeId]);
 
   const selected = backends?.find((b) => b.name === backendName);
+  const spec = selected?.config_spec ?? [];
+  const operations = selected?.operations ?? [];
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -93,7 +124,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
         name: name.trim(),
         description: description.trim(),
         backend: backendName,
-        config: buildConfig(selected?.config_spec ?? [], config),
+        config: buildConfig(spec, config),
         min_role: minRole.trim() === "" ? null : Number(minRole),
       };
       const saved = storeId
@@ -225,10 +256,24 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
               {/* The backend's own settings, rendered from its config_spec — no
                   backend-specific code lives here. */}
               <SettingsFields
-                spec={selected?.config_spec ?? []}
+                spec={spec}
                 values={config}
                 onChange={(key, v) => setConfig((c) => ({ ...c, [key]: v }))}
                 idPrefix="store-cfg"
+              />
+
+              {/* Operations that run against these unsaved settings and may fill
+                  them in. They belong beside the settings because that is what
+                  they change. */}
+              <ConfigureOperations
+                backend={backendName}
+                operations={operations.filter((op) => op.scope === "configure")}
+                storeName={name}
+                spec={spec}
+                config={config}
+                onConfig={(patch) =>
+                  setConfig((c) => ({ ...c, ...readConfig(patch) }))
+                }
               />
             </Card.Body>
           </Card>
@@ -237,7 +282,253 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
             {busy ? "Saving…" : storeId ? "Save changes" : "Create file store"}
           </Button>
         </Form>
+
+        {/* Only for a store that exists: an instance operation has nothing to
+            run against until there is a saved store. */}
+        {storeId && (
+          <InstanceOperations
+            storeId={storeId}
+            storeName={name}
+            operations={operations.filter((op) => op.scope === "instance")}
+          />
+        )}
       </PageBody>
     </>
+  );
+}
+
+/** The buttons for `configure`-scope operations, which act on the settings above
+ * them and can rewrite them.
+ *
+ * The whole config is posted with the request, because the operation is being
+ * run *against what the admin has typed* — a store that does not exist yet has
+ * no stored settings to read. What comes back replaces them. */
+function ConfigureOperations({
+  backend,
+  operations,
+  storeName,
+  spec,
+  config,
+  onConfig,
+}: {
+  backend: string;
+  operations: OperationInfo[];
+  storeName: string;
+  spec: FieldSpec[];
+  config: Record<string, string>;
+  onConfig: (patch: unknown) => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [output, setOutput] = useState<string | null>(null);
+  const [inputs, setInputs] = useState<OperationInputs>({});
+
+  if (operations.length === 0) return null;
+
+  const run = async (op: OperationInfo) => {
+    setBusy(op.name);
+    setError(null);
+    setOutput(null);
+    try {
+      const res = await api.runBackendOperation(backend, op.name, {
+        name: storeName.trim(),
+        config: buildConfig(spec, config),
+        input: buildConfig(op.input_spec, inputs[op.name] ?? {}),
+      });
+      onConfig(res.config);
+      setOutput(res.output);
+    } catch (err) {
+      setError(errorMessage(err, `Could not run ${op.label}.`));
+    }
+    setBusy(null);
+  };
+
+  return (
+    <div className="mt-3 border-top pt-3">
+      {error && <Alert variant="danger">{error}</Alert>}
+      <OperationOutput output={output} onClose={() => setOutput(null)} />
+      {operations.map((op) => (
+        <div key={op.name} className="mb-3">
+          <SettingsFields
+            spec={op.input_spec}
+            values={inputs[op.name] ?? {}}
+            onChange={(key, v) =>
+              setInputs((all) => ({
+                ...all,
+                [op.name]: { ...(all[op.name] ?? {}), [key]: v },
+              }))
+            }
+            idPrefix={`op-${op.name}`}
+          />
+          <Button
+            variant="outline-secondary"
+            onClick={() => void run(op)}
+            disabled={busy !== null}
+          >
+            {busy === op.name ? "Working…" : op.label}
+          </Button>
+          {op.description && (
+            <Form.Text className="d-block mt-1">{op.description}</Form.Text>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** The card for `instance`-scope operations on a saved store.
+ *
+ * `automatic` operations are run on open and their output shown — that is the
+ * generic form of "what state is this store in?", which an admin needs in front
+ * of them before choosing what to do. The rest are buttons, each rendering
+ * whatever arguments it declared. Every operation re-runs the automatic ones
+ * afterwards, because every one of them can change what those report. */
+function InstanceOperations({
+  storeId,
+  storeName,
+  operations,
+}: {
+  storeId: string;
+  storeName: string;
+  operations: OperationInfo[];
+}) {
+  const [reports, setReports] = useState<Record<string, string>>({});
+  const [inputs, setInputs] = useState<OperationInputs>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [output, setOutput] = useState<string | null>(null);
+
+  const automatic = operations.filter((op) => op.automatic);
+  const manual = operations.filter((op) => !op.automatic);
+
+  const refresh = async () => {
+    for (const op of automatic) {
+      try {
+        const res = await api.runFileStoreOperation(storeId, op.name, { input: {} });
+        setReports((r) => ({ ...r, [op.name]: res.output }));
+      } catch (err) {
+        setReports((r) => ({
+          ...r,
+          [op.name]: errorMessage(err, `Could not run ${op.label}.`),
+        }));
+      }
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId, operations.length]);
+
+  if (operations.length === 0) return null;
+
+  const run = async (op: OperationInfo) => {
+    setBusy(op.name);
+    setError(null);
+    setOutput(null);
+    try {
+      const res = await api.runFileStoreOperation(storeId, op.name, {
+        input: buildConfig(op.input_spec, inputs[op.name] ?? {}),
+      });
+      setOutput(res.output);
+      // Arguments are per-run, not settings: clearing them stops a commit
+      // message being reused by accident on the next press.
+      setInputs((all) => ({ ...all, [op.name]: {} }));
+    } catch (err) {
+      // The backend's own message, which is the actionable part — "Permission
+      // denied (publickey)", "rejected: non-fast-forward" — not a generic
+      // failure.
+      setError(errorMessage(err, `Could not run ${op.label}.`));
+    }
+    setBusy(null);
+    await refresh();
+  };
+
+  return (
+    <Card className="mb-3">
+      <Card.Header>Operations</Card.Header>
+      <Card.Body>
+        {error && <Alert variant="danger">{error}</Alert>}
+        <OperationOutput output={output} onClose={() => setOutput(null)} />
+
+        {automatic.map((op) =>
+          reports[op.name] ? (
+            <pre
+              key={op.name}
+              className="small text-break mb-3"
+              style={{ whiteSpace: "pre-wrap" }}
+            >
+              {reports[op.name]}
+            </pre>
+          ) : null,
+        )}
+
+        {manual.map((op) => (
+          <div key={op.name} className="mb-3">
+            <SettingsFields
+              spec={op.input_spec}
+              values={inputs[op.name] ?? {}}
+              onChange={(key, v) =>
+                setInputs((all) => ({
+                  ...all,
+                  [op.name]: { ...(all[op.name] ?? {}), [key]: v },
+                }))
+              }
+              idPrefix={`op-${op.name}`}
+            />
+            <Button
+              variant="outline-secondary"
+              onClick={() => void run(op)}
+              disabled={busy !== null || !argumentsGiven(op, inputs[op.name])}
+            >
+              {busy === op.name ? "Working…" : op.label}
+            </Button>
+            {op.description && (
+              <Form.Text className="d-block mt-1">{op.description}</Form.Text>
+            )}
+          </div>
+        ))}
+
+        <div className="btn-list">
+          <Button variant="outline-primary" href={`#/files/${encodeURIComponent(storeName)}`}>
+            <IconFolder className="icon-2" />
+            Change files
+          </Button>
+          <Button variant="outline-secondary" onClick={() => void refresh()}>
+            Refresh
+          </Button>
+        </div>
+      </Card.Body>
+    </Card>
+  );
+}
+
+/** Whether an operation's required arguments have been filled in — so a button
+ * that would fail validation on the server is disabled rather than tried. */
+function argumentsGiven(
+  op: OperationInfo,
+  values: Record<string, string> | undefined,
+): boolean {
+  return op.input_spec
+    .filter((f) => f.required)
+    .every((f) => (values?.[f.name] ?? "").trim() !== "");
+}
+
+/** Whatever an operation had to say, shown verbatim. Text, because the useful
+ * part is usually a command's own words. */
+function OperationOutput({
+  output,
+  onClose,
+}: {
+  output: string | null;
+  onClose: () => void;
+}) {
+  if (!output) return null;
+  return (
+    <Alert variant="secondary" onClose={onClose} dismissible>
+      <pre className="mb-0 small text-break" style={{ whiteSpace: "pre-wrap" }}>
+        {output}
+      </pre>
+    </Alert>
   );
 }
