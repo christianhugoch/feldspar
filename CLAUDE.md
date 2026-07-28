@@ -18,3 +18,7 @@ Standard working mode:
 6. Describe what you did in the changelog
 7. Mark the item as complete
 8. Do not commit to git. A human will review the work and commit.
+
+## Status
+
+The system is in prototype status. Do not add any code to handle backwards compatibility with previously created applications.
