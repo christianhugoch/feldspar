@@ -2,6 +2,108 @@
 
 Changes in reverse chronological order.
 
+## The admin UI wears Tabler
+
+Not a TODO item. The admin SPA was plain Bootstrap with a horizontal navbar; it is now
+[Tabler](https://tabler.io) 1.4.0 in its **vertical layout** — a dark sidebar of sections beside a
+page wrapper, which is the shape an admin console with a dozen screens wants and the one the
+navbar was going to run out of room for.
+
+### The theme is vendored CSS, and only CSS
+
+`ui/admin/src/vendor/tabler/tabler.min.css` is Tabler's released stylesheet, checked in with a
+`README.md` recording where it came from, why it is here rather than on npm or a CDN, and how to
+upgrade it. Two properties made that the right shape:
+
+- **Same-origin or nothing.** Every response carries `style-src 'self'; font-src 'self'`, so a CDN
+  link is not an option and neither is Tabler's own `@import url("https://rsms.me/inter/inter.css")`
+  — which its templates *do* carry and this does not. The file is self-contained: every image in it
+  is a `data:` URI and the font stack falls back to the system UI font.
+- **No vendored JS.** Tabler also ships `tabler.min.js` (Bootstrap's JS plus a theme script) and
+  none of it is needed: React owns the DOM, so the sidebar collapse is component state and the
+  light/dark switch is the `data-bs-theme` attribute, set by a `useTheme` hook that remembers the
+  choice and otherwise follows the OS. There is a light/dark toggle in the sidebar; both schemes
+  are styled, because Tabler styles both.
+
+Tabler's CSS is a superset of Bootstrap 5's, so every `react-bootstrap` component in the screens
+keeps working and gains Tabler's styling — the change is a stylesheet swap in `main.tsx`, not a
+component library migration. Bootstrap's own stylesheet is no longer imported.
+
+### `layout.tsx`: the page furniture, in one place
+
+Tabler's page header is a *sibling* of the page body, not a heading inside it, so the shell cannot
+wrap a screen in one container and be done. `PageHeader` (pre-title, title, actions in a
+`.btn-list`) and `PageBody` are that contract, and every screen now states its title through them
+instead of an ad-hoc `<h1 className="h3 mb-4">`. Also there, because both were places where
+Tabler's markup differs from Bootstrap's in a way that is invisible until it is wrong:
+
+- **`StatusBadge`.** Tabler's `.badge` takes its *text* colour from `--tblr-badge-color`, so
+  `<Badge bg="secondary">` renders grey on grey and the word disappears. The combinations Tabler
+  actually ships are `bg-<tone>` + `text-<tone>-fg` and the soft `bg-<tone>-lt`; this uses the
+  soft one and is now the only way a status badge is made.
+- **`AlertBody`.** Tabler's `.alert` is a flex **row** (its first column is the optional icon), so
+  an alert with a heading *and* a body laid them out side by side. The wrapper gives the row one
+  column.
+
+`CenteredPage` is the signed-out shape — a narrow centred column — which the login and first-user
+screens now use, with the Saltcorn mark above the card.
+
+`icons.tsx` holds the dozen Tabler icons the shell uses as inline SVG components (the sections, the
+theme toggle, log out), which is how Tabler's own templates do it and what the CSP wants: markup
+the bundle already carries, not a font or a sprite sheet to fetch.
+
+### An icons-only sidebar
+
+A chevron button at the foot of the menu — below the sections, above the account block — collapses
+the sidebar from Tabler's 15rem rail to 4.5rem: icons only, each carrying its section name as a
+`title` so hovering still says what it is. The chevron points left to narrow and right to widen,
+and the choice is remembered (`useNarrowSidebar`, same shape as `useTheme`) because an admin who
+wants the width back on the row editor wants it on the next screen too.
+
+Tabler has no such mode, so `admin.css` states it: the rail's width and the page wrapper's
+`margin-left` are one measurement written twice, and `admin_theme.rs` asserts they match — a rail
+narrowed without the wrapper following leaves a band of dead space down the whole page, and nothing
+else would catch it. All of it is scoped to Tabler's `lg` breakpoint, where the sidebar *is* a
+rail; below that it is a collapsing drawer with no width to give back, and hiding the labels would
+leave a menu of unexplained icons. The stored preference survives a narrow window — it just does
+not apply until the window is wide again.
+
+What disappears with the labels is opt-in (`.sidebar-wide-only`) rather than a blanket rule, so a
+future addition to the sidebar says for itself whether it survives the narrowing. The email address
+is one of them; it moves into the log-out button's tooltip.
+
+### The logo
+
+The real Saltcorn mark (the January 2023 logo) is vendored at
+`ui/admin/src/vendor/saltcorn-logo.svg` and shown at the top of the sidebar and above the card on
+the login and first-user screens. Unlike the icons it is an `<img>` of an imported file rather than
+inline SVG: it is brand art with three fixed colours — nothing to gain from `currentColor` — and a
+single imported file cannot drift from the mark the rest of the project ships. Vite inlines it into
+the bundle as a `data:` URI (it is ~1 KB), which `img-src 'self' data:` permits, so it costs no
+extra request. `src/vite-env.d.ts` pulls in Vite's ambient asset-module types so the import
+type-checks.
+
+The one trap, and the reason there is a test for it: Tabler's `.navbar-brand-autodark` applies
+`filter: brightness(0) invert(1)` to a brand image, to flip a monochrome logo white on a dark
+sidebar. On this logo it produces a white silhouette. The class is all over Tabler's templates, so
+it is exactly what a copy-paste would reintroduce; the brand blocks deliberately omit it.
+
+`admin.css` is the deliberately tiny list of what Tabler does not provide: `.text-pre-wrap` for the
+`<pre>` blocks that carry build logs and action results (Reboot's `<pre>` scrolls instead of
+wrapping, and Bootstrap's `.text-wrap` would collapse the newlines), and the `height: 100%` that
+reconnects `.page`'s `min-height: 100%` across `#root`, the mount point Tabler's static pages do
+not have.
+
+### Tests
+
+`crates/sc-server/tests/admin_theme.rs` asserts what neither compiler can: the vendored stylesheet
+keeps its MIT banner, contains no `@import`, and has no `url()` that is not a `data:` URI — the CSP
+hazard that a future theme upgrade would silently reintroduce — that `main.tsx` loads the theme
+(and not Bootstrap's stylesheet), the shell renders the vertical layout, and every screen renders a
+`<PageHeader>`; and that the logo is the vendored file, shown in all three places, with
+`navbar-brand-autodark` applied in none of them. The existing `admin_spa_typecheck` covers the
+rest.
+
 ## Documenting the trigger system
 
 Phase 9, and the end of the triggers milestone. Two documents: §10 of the technical design

@@ -15,13 +15,14 @@
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
-import Badge from "react-bootstrap/Badge";
 import Button from "react-bootstrap/Button";
 import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import type { ListTriggersResponse } from "../client";
 import { navigate } from "../App";
+import { IconPlus } from "../icons";
+import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 
 type TriggerItem = ListTriggersResponse[number];
 
@@ -133,107 +134,119 @@ export function Triggers() {
 
   return (
     <>
-      <div className="d-flex justify-content-between align-items-center mb-4">
-        <h1 className="h3 mb-0">Triggers</h1>
-        <Button onClick={() => navigate("/triggers/new")}>New trigger</Button>
-      </div>
+      <PageHeader
+        pretitle="Automation"
+        title="Triggers"
+        actions={
+          <Button onClick={() => navigate("/triggers/new")}>
+            <IconPlus className="icon-2" />
+            New trigger
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
+        {ran && (
+          <Alert variant="success" onClose={() => setRan(null)} dismissible>
+            <AlertBody>
+              <div className="mb-1">
+                <strong>{ran.name}</strong> ran. Result:
+              </div>
+              <pre className="mb-0 small text-break text-pre-wrap">{ran.result}</pre>
+            </AlertBody>
+          </Alert>
+        )}
 
-      {error && <Alert variant="danger">{error}</Alert>}
-      {ran && (
-        <Alert variant="success" onClose={() => setRan(null)} dismissible>
-          <div className="mb-1">
-            <strong>{ran.name}</strong> ran. Result:
-          </div>
-          <pre className="mb-0 small text-break">{ran.result}</pre>
-        </Alert>
-      )}
-
-      <Table hover responsive>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Event</th>
-            <th>Runs</th>
-            <th>Last run</th>
-            <th>Status</th>
-            <th className="text-end">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {triggers?.length === 0 && (
-            <tr>
-              <td colSpan={6} className="text-muted">
-                No triggers yet.
-              </td>
-            </tr>
-          )}
-          {triggers?.map((trigger) => (
-            <tr key={trigger.id}>
-              <td>
-                {trigger.name}
-                {trigger.description && (
-                  <div className="text-muted small">{trigger.description}</div>
-                )}
-              </td>
-              <td>
-                {trigger.when}
-                {trigger.channel && (
-                  <div className="text-muted small">on {trigger.channel}</div>
-                )}
-                {scheduleSummary(trigger) && (
-                  <div className="text-muted small">{scheduleSummary(trigger)}</div>
-                )}
-                {trigger.only_if && (
-                  <div className="text-muted small font-monospace text-break">
-                    if {trigger.only_if}
-                  </div>
-                )}
-              </td>
-              <td className="text-break">{targetSummary(trigger)}</td>
-              {/* Only a periodic trigger has a schedule to have missed, so it is
-                  the only one where "when did this last run?" is a question the
-                  list can answer usefully. */}
-              <td className="small">
-                {scheduleSummary(trigger) ? lastRun(trigger) : ""}
-              </td>
-              <td>
-                <StatusCell trigger={trigger} />
-              </td>
-              <td className="text-end">
-                <Button
-                  size="sm"
-                  variant="outline-secondary"
-                  className="me-2"
-                  href={`#/triggers/${encodeURIComponent(trigger.id)}/edit`}
-                >
-                  Edit
-                </Button>
-                {/* Only a `none` trigger is meaningful to run by hand: every
-                    other kind needs its own occurrence (a row, a login) to say
-                    anything about, and would fail on the row it does not have. */}
-                {trigger.when === "none" && (
-                  <Button
-                    size="sm"
-                    variant="outline-primary"
-                    className="me-2"
-                    disabled={!!trigger.error || !trigger.enabled}
-                    onClick={() => void run(trigger)}
-                  >
-                    Run
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="outline-danger"
-                  onClick={() => void remove(trigger)}
-                >
-                  Delete
-                </Button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
+        <div className="card">
+          <Table hover responsive className="card-table table-vcenter">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Event</th>
+                <th>Runs</th>
+                <th>Last run</th>
+                <th>Status</th>
+                <th className="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {triggers?.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="text-muted">
+                    No triggers yet.
+                  </td>
+                </tr>
+              )}
+              {triggers?.map((trigger) => (
+                <tr key={trigger.id}>
+                  <td>
+                    {trigger.name}
+                    {trigger.description && (
+                      <div className="text-muted small">{trigger.description}</div>
+                    )}
+                  </td>
+                  <td>
+                    {trigger.when}
+                    {trigger.channel && (
+                      <div className="text-muted small">on {trigger.channel}</div>
+                    )}
+                    {scheduleSummary(trigger) && (
+                      <div className="text-muted small">{scheduleSummary(trigger)}</div>
+                    )}
+                    {trigger.only_if && (
+                      <div className="text-muted small font-monospace text-break">
+                        if {trigger.only_if}
+                      </div>
+                    )}
+                  </td>
+                  <td className="text-break">{targetSummary(trigger)}</td>
+                  {/* Only a periodic trigger has a schedule to have missed, so
+                      it is the only one where "when did this last run?" is a
+                      question the list can answer usefully. */}
+                  <td className="small">
+                    {scheduleSummary(trigger) ? lastRun(trigger) : ""}
+                  </td>
+                  <td>
+                    <StatusCell trigger={trigger} />
+                  </td>
+                  <td className="text-end">
+                    <div className="btn-list justify-content-end flex-nowrap">
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        href={`#/triggers/${encodeURIComponent(trigger.id)}/edit`}
+                      >
+                        Edit
+                      </Button>
+                      {/* Only a `none` trigger is meaningful to run by hand:
+                          every other kind needs its own occurrence (a row, a
+                          login) to say anything about, and would fail on the
+                          row it does not have. */}
+                      {trigger.when === "none" && (
+                        <Button
+                          size="sm"
+                          variant="outline-primary"
+                          disabled={!!trigger.error || !trigger.enabled}
+                          onClick={() => void run(trigger)}
+                        >
+                          Run
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        onClick={() => void remove(trigger)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </div>
+      </PageBody>
     </>
   );
 }
@@ -244,13 +257,13 @@ function StatusCell({ trigger }: { trigger: TriggerItem }) {
   if (trigger.error) {
     return (
       <>
-        <Badge bg="danger">Not usable</Badge>
+        <StatusBadge tone="red">Not usable</StatusBadge>
         <div className="text-danger small text-break mt-1">{trigger.error}</div>
       </>
     );
   }
   if (!trigger.enabled) {
-    return <Badge bg="secondary">Off</Badge>;
+    return <StatusBadge tone="secondary">Off</StatusBadge>;
   }
-  return <Badge bg="success">Enabled</Badge>;
+  return <StatusBadge tone="green">Enabled</StatusBadge>;
 }

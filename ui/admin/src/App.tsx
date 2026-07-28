@@ -2,15 +2,34 @@
 // states the design calls for — create-first-user, login, and the authenticated
 // admin shell — then routes between the admin screens with a tiny hash router
 // (no router dependency, and no inline styles, so the strict CSP holds).
+//
+// The shell is Tabler's **vertical layout**: a dark sidebar holding the brand
+// and the section links, and a `.page-wrapper` beside it in which each screen
+// renders its own `PageHeader` + `PageBody` (see `layout.tsx`). The sidebar
+// collapse on narrow screens is React state toggling Bootstrap's `show` class
+// rather than Bootstrap's own JS — the SPA already owns the DOM, so vendoring a
+// second script to add one class would buy nothing.
 
-import { useCallback, useEffect, useState } from "react";
-import Container from "react-bootstrap/Container";
-import Nav from "react-bootstrap/Nav";
-import Navbar from "react-bootstrap/Navbar";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "./api";
 import type { AuthStatusResponse } from "./client";
+import {
+  IconApps,
+  IconBolt,
+  IconChevronLeft,
+  IconChevronRight,
+  IconFolder,
+  IconLogout,
+  IconMoon,
+  IconShieldLock,
+  IconSun,
+  IconTable,
+  IconUsers,
+  SaltcornLogo,
+} from "./icons";
+import { useNarrowSidebar, useTheme } from "./layout";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
 import { FileManager } from "./screens/FileManager";
@@ -64,17 +83,21 @@ export function App() {
 
   if (error) {
     return (
-      <Container className="py-5">
-        <div className="alert alert-danger">{error}</div>
-      </Container>
+      <div className="page page-center">
+        <div className="container container-tight py-4">
+          <div className="alert alert-danger">{error}</div>
+        </div>
+      </div>
     );
   }
 
   if (!status) {
     return (
-      <Container className="py-5 text-center">
-        <Spinner animation="border" role="status" />
-      </Container>
+      <div className="page page-center">
+        <div className="container container-tight py-4 text-center">
+          <Spinner animation="border" role="status" />
+        </div>
+      </div>
     );
   }
 
@@ -89,9 +112,45 @@ export function App() {
   return <Shell user={status.current_user} onLogout={refresh} />;
 }
 
-/** The authenticated admin shell: a nav bar plus the routed screen. */
+/** One entry in the sidebar: where it goes, what it is called, and which routes
+ * count as "here" (a detail screen is still its section). */
+type NavItem = {
+  href: string;
+  label: string;
+  icon: ReactNode;
+  /** Route prefixes that light this entry up. */
+  matches: string[];
+};
+
+const NAV: NavItem[] = [
+  { href: "#/tables", label: "Tables", icon: <IconTable />, matches: ["/tables"] },
+  {
+    href: "#/applications",
+    label: "Applications",
+    icon: <IconApps />,
+    matches: ["/applications"],
+  },
+  { href: "#/triggers", label: "Triggers", icon: <IconBolt />, matches: ["/triggers"] },
+  {
+    href: "#/file-stores",
+    label: "Files",
+    icon: <IconFolder />,
+    matches: ["/file-stores", "/files"],
+  },
+  { href: "#/users", label: "Users", icon: <IconUsers />, matches: ["/users"] },
+  { href: "#/roles", label: "Roles", icon: <IconShieldLock />, matches: ["/roles"] },
+];
+
+/** The authenticated admin shell: Tabler's vertical layout around the screen. */
 function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) {
   const route = useHashRoute();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [theme, toggleTheme] = useTheme();
+  const [narrow, toggleNarrow] = useNarrowSidebar();
+
+  // A tap on a sidebar link should close the sidebar it was in; on a wide
+  // screen the collapse is not rendered as a drawer, so this is a no-op there.
+  useEffect(() => setMenuOpen(false), [route]);
 
   const logout = async () => {
     try {
@@ -102,46 +161,150 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
   };
 
   return (
-    <>
-      <Navbar bg="dark" variant="dark" expand="lg" className="mb-4">
-        <Container>
-          <Navbar.Brand href="#/tables">Saltcorn</Navbar.Brand>
-          <Nav className="me-auto">
-            <Nav.Link href="#/tables" active={route.startsWith("/tables")}>
-              Tables
-            </Nav.Link>
-            <Nav.Link
-              href="#/applications"
-              active={route.startsWith("/applications")}
-            >
-              Applications
-            </Nav.Link>
-            <Nav.Link href="#/triggers" active={route.startsWith("/triggers")}>
-              Triggers
-            </Nav.Link>
-            <Nav.Link
-              href="#/file-stores"
-              active={route.startsWith("/file-stores") || route.startsWith("/files")}
-            >
-              Files
-            </Nav.Link>
-            <Nav.Link href="#/users" active={route.startsWith("/users")}>
-              Users
-            </Nav.Link>
-            <Nav.Link href="#/roles" active={route.startsWith("/roles")}>
-              Roles
-            </Nav.Link>
-          </Nav>
-          <Navbar.Text className="me-3">{user.email}</Navbar.Text>
-          <Nav>
-            <Nav.Link onClick={logout}>Log out</Nav.Link>
-          </Nav>
-        </Container>
-      </Navbar>
-      <Container>
+    // `sidebar-narrow` is the whole of the icons-only mode: it is on `.page`
+    // because both the sidebar's width and the page wrapper's matching offset
+    // hang off it (see `admin.css`), and they have to change together.
+    <div className={narrow ? "page sidebar-narrow" : "page"}>
+      <aside className="navbar navbar-vertical navbar-expand-lg" data-bs-theme="dark">
+        <div className="container-fluid">
+          <button
+            className="navbar-toggler"
+            type="button"
+            aria-controls="sidebar-menu"
+            aria-expanded={menuOpen}
+            aria-label="Toggle navigation"
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            <span className="navbar-toggler-icon" />
+          </button>
+          {/* No `navbar-brand-autodark` here: that class flips a monochrome
+              logo to white for a dark sidebar, and this one has its own
+              colours to keep. */}
+          <div className="navbar-brand">
+            <a href="#/tables" className="d-flex align-items-center gap-2" aria-label="Saltcorn">
+              <SaltcornLogo />
+              <span>Saltcorn</span>
+            </a>
+          </div>
+          {/* On a narrow screen the collapse is shut by default, so the account
+              controls sit in this always-visible row instead of at the foot of
+              the menu (where the wide layout keeps them). */}
+          <div className="navbar-nav flex-row d-lg-none">
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            <div className="nav-item ms-2">
+              <button
+                type="button"
+                className="nav-link px-0"
+                onClick={() => void logout()}
+                aria-label="Log out"
+                title={`Log out (${user.email})`}
+              >
+                <IconLogout className="icon-1" />
+              </button>
+            </div>
+          </div>
+          <div
+            className={menuOpen ? "collapse navbar-collapse show" : "collapse navbar-collapse"}
+            id="sidebar-menu"
+          >
+            <ul className="navbar-nav pt-lg-3">
+              {NAV.map((item) => {
+                const active = item.matches.some((prefix) => route.startsWith(prefix));
+                return (
+                  <li key={item.href} className={active ? "nav-item active" : "nav-item"}>
+                    <a
+                      className={active ? "nav-link active" : "nav-link"}
+                      href={item.href}
+                      aria-current={active ? "page" : undefined}
+                      // Narrowed, the icon is all there is to go on, so the
+                      // name becomes the hover label. Expanded it is already
+                      // on screen and a tooltip would only repeat it.
+                      title={narrow ? item.label : undefined}
+                    >
+                      <span className="nav-link-icon d-md-none d-lg-inline-block">
+                        {item.icon}
+                      </span>
+                      <span className="nav-link-title">{item.label}</span>
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+            {/* The nav list above is `flex-grow: 1` in a column collapse, so
+                everything below it settles at the bottom of the sidebar. The
+                width switch is only offered on `lg` and up: below that the
+                sidebar is a drawer, which has no width to give back. */}
+            <div className="d-none d-lg-flex justify-content-end px-3 pb-2">
+              <button
+                type="button"
+                className="btn btn-icon btn-ghost-secondary"
+                onClick={toggleNarrow}
+                aria-pressed={narrow}
+                aria-label={narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"}
+                title={narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"}
+              >
+                {narrow ? (
+                  <IconChevronRight className="icon-2" />
+                ) : (
+                  <IconChevronLeft className="icon-2" />
+                )}
+              </button>
+            </div>
+            <div className="d-none d-lg-block px-3 py-3 border-top">
+              {/* Narrowed there is no room for an address, so the email moves
+                  into the log-out button's tooltip (see `admin.css`). */}
+              <div className="text-secondary text-truncate mb-2 sidebar-wide-only">
+                {user.email}
+              </div>
+              <div className="d-flex align-items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  className="btn btn-outline-secondary btn-sm"
+                  onClick={() => void logout()}
+                  title={`Log out (${user.email})`}
+                >
+                  <IconLogout className="icon-2" />
+                  <span className="sidebar-wide-only">Log out</span>
+                </button>
+                <ThemeToggle theme={theme} onToggle={toggleTheme} />
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div className="page-wrapper">
         <Screen route={route} />
-      </Container>
-    </>
+        <footer className="footer footer-transparent d-print-none">
+          <div className="container-xl">
+            <div className="row text-center align-items-center flex-row-reverse">
+              <div className="col-12 col-lg-auto mt-3 mt-lg-0">
+                <span className="text-secondary">Saltcorn</span>
+              </div>
+            </div>
+          </div>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+/** Light/dark switch. One button that shows the scheme it would switch *to*,
+ * which is how Tabler's own header reads (it swaps two links; we swap an icon). */
+function ThemeToggle({ theme, onToggle }: { theme: string; onToggle: () => void }) {
+  const dark = theme === "dark";
+  return (
+    <div className="nav-item">
+      <button
+        type="button"
+        className="nav-link px-0"
+        onClick={onToggle}
+        title={dark ? "Enable light mode" : "Enable dark mode"}
+        aria-label={dark ? "Enable light mode" : "Enable dark mode"}
+      >
+        {dark ? <IconSun className="icon-1" /> : <IconMoon className="icon-1" />}
+      </button>
+    </div>
   );
 }
 

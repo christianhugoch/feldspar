@@ -1,0 +1,80 @@
+/* The admin SPA's own rules: what Tabler does not already provide.
+ *
+ * Deliberately tiny. Anything that can be said with a Tabler or Bootstrap
+ * utility class is said that way instead, so this file stays a list of genuine
+ * gaps rather than a second theme. It is imported after the theme in
+ * `main.tsx`, so these rules win where they overlap.
+ *
+ * It also exists because the strict CSP (`style-src 'self'`) means a one-off
+ * declaration has nowhere else to go: an inline `style` attribute is not an
+ * option, so a missing utility has to be added here.
+ */
+
+/* Tabler's `.page` is `min-height: 100%`, and it measures that against its
+ * parent chain — which in a static Tabler page is `<body>` (height: 100%) and
+ * here is `#root`, the SPA's mount point, sitting in between. Without these the
+ * chain resolves to `auto` and a short screen leaves the sidebar and the page
+ * background stopping partway down the viewport. */
+html,
+#root {
+  height: 100%;
+}
+
+/* Build logs, action results and error detail are rendered in `<pre>` so their
+ * line breaks survive. Reboot's `<pre>` scrolls sideways instead of wrapping,
+ * which hides the end of a long compiler diagnostic; wrap it. Bootstrap's
+ * `.text-wrap` is `white-space: normal`, which would collapse the newlines
+ * that are the reason for the `<pre>` in the first place. */
+.text-pre-wrap {
+  white-space: pre-wrap;
+}
+
+/* The icons-only sidebar (`.page.sidebar-narrow`, toggled by `useNarrowSidebar`).
+ *
+ * Tabler has no such mode: its vertical sidebar is a fixed 15rem rail, and the
+ * page wrapper is offset by exactly that. So both numbers are restated here,
+ * together — they are one measurement, and a rail that shrinks without the
+ * wrapper following leaves a 10rem gap down the page.
+ *
+ * Everything is inside Tabler's `lg` breakpoint (992px, where `navbar-expand-lg`
+ * turns the sidebar into a rail) because below it the sidebar is a collapsing
+ * drawer: it has no width to give back, and hiding the labels there would leave
+ * a menu of unexplained icons. The stored preference survives that — it just
+ * does not apply until the window is wide again. */
+@media (min-width: 992px) {
+  .sidebar-narrow .navbar-vertical.navbar-expand-lg {
+    width: 4.5rem;
+  }
+
+  .sidebar-narrow .navbar-vertical.navbar-expand-lg ~ .page-wrapper {
+    margin-left: 4.5rem;
+  }
+
+  /* The label beside each icon, the brand wordmark, and the account block's
+     prose. `.sidebar-wide-only` is the opt-in for the last of those, so a
+     future addition to the sidebar says for itself whether it survives the
+     narrowing rather than being caught by a blanket rule. */
+  .sidebar-narrow .navbar-vertical .nav-link-title,
+  .sidebar-narrow .navbar-vertical .navbar-brand span,
+  .sidebar-narrow .navbar-vertical .sidebar-wide-only {
+    display: none;
+  }
+
+  /* With no label to sit beside, the icon centres. Tabler's own padding is
+     horizontal room for text that is no longer there. */
+  .sidebar-narrow .navbar-vertical.navbar-expand-lg .navbar-collapse .nav-link {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .sidebar-narrow .navbar-vertical .navbar-brand,
+  .sidebar-narrow .navbar-vertical .navbar-collapse > div {
+    justify-content: center;
+  }
+
+  /* The account block's controls stack instead of overflowing the rail. */
+  .sidebar-narrow .navbar-vertical .navbar-collapse > div:last-child > .d-flex {
+    flex-direction: column;
+  }
+}

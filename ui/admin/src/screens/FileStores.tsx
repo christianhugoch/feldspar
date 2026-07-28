@@ -14,13 +14,14 @@
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
-import Badge from "react-bootstrap/Badge";
 import Button from "react-bootstrap/Button";
 import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import type { ListFileStoresResponse } from "../client";
 import { navigate } from "../App";
+import { IconPlus } from "../icons";
+import { PageBody, PageHeader, StatusBadge } from "../layout";
 import { asString } from "../settings";
 
 type StoreItem = ListFileStoresResponse[number];
@@ -75,105 +76,111 @@ export function FileStores() {
 
   return (
     <>
-      <div className="d-flex justify-content-between align-items-center mb-4">
-        <h1 className="h3 mb-0">File stores</h1>
-        <Button onClick={() => navigate("/file-stores/new")}>New file store</Button>
-      </div>
+      <PageHeader
+        pretitle="Storage"
+        title="File stores"
+        actions={
+          <Button onClick={() => navigate("/file-stores/new")}>
+            <IconPlus className="icon-2" />
+            New file store
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
 
-      {error && <Alert variant="danger">{error}</Alert>}
+        <div className="card">
+          <Table hover responsive className="card-table table-vcenter">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Backend</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th className="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stores?.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="text-muted">
+                    No file stores yet.
+                  </td>
+                </tr>
+              )}
+              {stores?.map((store) => (
+                <tr key={store.id ?? `flag:${store.name}`}>
+                  <td>
+                    {store.name}
+                    {store.description && (
+                      <div className="text-muted small">{store.description}</div>
+                    )}
+                    {store.min_role != null && (
+                      <div className="text-muted small">Minimum role {store.min_role}</div>
+                    )}
+                  </td>
+                  <td>{store.backend}</td>
+                  <td className="text-break small">{locationSummary(store)}</td>
+                  <td>
+                    <StatusCell store={store} />
+                  </td>
+                  <td className="text-end">
+                    <div className="btn-list justify-content-end flex-nowrap align-items-center">
+                      {store.id ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline-secondary"
+                            href={`#/file-stores/${encodeURIComponent(store.id)}/edit`}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline-primary"
+                            disabled={!store.connected}
+                            href={`#/files/${encodeURIComponent(store.name)}`}
+                          >
+                            Browse
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline-danger"
+                            onClick={() => void remove(store)}
+                          >
+                            Remove
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline-primary"
+                            href={`#/files/${encodeURIComponent(store.name)}`}
+                          >
+                            Browse
+                          </Button>
+                          {/* No row behind it, so nothing to edit or delete.
+                              Saying so beats offering buttons that would 404. */}
+                          <span className="text-muted small">Not editable</span>
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </div>
 
-      <Table hover responsive>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Backend</th>
-            <th>Location</th>
-            <th>Status</th>
-            <th className="text-end">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {stores?.length === 0 && (
-            <tr>
-              <td colSpan={5} className="text-muted">
-                No file stores yet.
-              </td>
-            </tr>
-          )}
-          {stores?.map((store) => (
-            <tr key={store.id ?? `flag:${store.name}`}>
-              <td>
-                {store.name}
-                {store.description && (
-                  <div className="text-muted small">{store.description}</div>
-                )}
-                {store.min_role != null && (
-                  <div className="text-muted small">
-                    Minimum role {store.min_role}
-                  </div>
-                )}
-              </td>
-              <td>{store.backend}</td>
-              <td className="text-break small">{locationSummary(store)}</td>
-              <td>
-                <StatusCell store={store} />
-              </td>
-              <td className="text-end">
-                {store.id ? (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="outline-secondary"
-                      className="me-2"
-                      href={`#/file-stores/${encodeURIComponent(store.id)}/edit`}
-                    >
-                      Edit
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline-primary"
-                      className="me-2"
-                      disabled={!store.connected}
-                      href={`#/files/${encodeURIComponent(store.name)}`}
-                    >
-                      Browse
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline-danger"
-                      onClick={() => void remove(store)}
-                    >
-                      Remove
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="outline-primary"
-                      className="me-2"
-                      href={`#/files/${encodeURIComponent(store.name)}`}
-                    >
-                      Browse
-                    </Button>
-                    {/* No row behind it, so nothing to edit or delete. Saying so
-                        beats offering buttons that would 404. */}
-                    <span className="text-muted small">Not editable</span>
-                  </>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-
-      {stores?.some((s) => !s.id) && (
-        <p className="text-muted small">
-          Stores shown as <em>from --file-store</em> were supplied on the command line. They
-          are not saved and will be gone when the server restarts unless the flag is passed
-          again.
-        </p>
-      )}
+        {stores?.some((s) => !s.id) && (
+          <p className="text-muted small mt-3">
+            Stores shown as <em>from --file-store</em> were supplied on the command line. They
+            are not saved and will be gone when the server restarts unless the flag is passed
+            again.
+          </p>
+        )}
+      </PageBody>
     </>
   );
 }
@@ -184,7 +191,7 @@ function StatusCell({ store }: { store: StoreItem }) {
   if (!store.connected) {
     return (
       <>
-        <Badge bg="danger">Not connected</Badge>
+        <StatusBadge tone="red">Not connected</StatusBadge>
         {store.error && (
           <div className="text-danger small text-break mt-1">{store.error}</div>
         )}
@@ -193,11 +200,11 @@ function StatusCell({ store }: { store: StoreItem }) {
   }
   return (
     <>
-      <Badge bg="success">Connected</Badge>
+      <StatusBadge tone="green">Connected</StatusBadge>
       {store.is_git_repo && (
-        <Badge bg="secondary" className="ms-1">
+        <StatusBadge tone="secondary" className="ms-1">
           git
-        </Badge>
+        </StatusBadge>
       )}
       {!store.id && (
         <div className="text-muted small mt-1">

@@ -10,7 +10,6 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
-import Badge from "react-bootstrap/Badge";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
 import InputGroup from "react-bootstrap/InputGroup";
@@ -18,6 +17,7 @@ import Table from "react-bootstrap/Table";
 
 import { api } from "../api";
 import type { ListOrphanTableSettingsResponse, ListTablesResponse } from "../client";
+import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import { roleLabel, useRoles } from "../roles";
 
 export function Tables() {
@@ -72,111 +72,122 @@ export function Tables() {
 
   return (
     <>
-      <h1 className="h3 mb-4">Tables</h1>
-      {error && <Alert variant="danger">{error}</Alert>}
+      <PageHeader
+        pretitle="Data"
+        title="Tables"
+        actions={
+          <Form onSubmit={create} className="d-flex">
+            <InputGroup>
+              <Form.Control
+                placeholder="New table name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+              <Button type="submit" disabled={busy || !name.trim()}>
+                Create table
+              </Button>
+            </InputGroup>
+          </Form>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
 
-      {orphans.length > 0 && (
-        <Alert variant="warning">
-          <Alert.Heading className="h6">Settings without a table</Alert.Heading>
-          <p className="mb-2">
-            These stored settings name tables that are not in the database. They are kept in case
-            the table comes back — recreating it restores its access rules — but nothing is using
-            them right now.
-          </p>
-          <ul className="mb-0 list-unstyled">
-            {orphans.map((o) => (
-              <li key={o.name} className="d-flex align-items-center gap-2 mb-1">
-                <code>{o.name}</code>
-                <span className="text-muted small">
-                  read {roleLabel(o.min_role_read, roles)}, write {roleLabel(o.min_role_write, roles)}
-                </span>
-                <Button
-                  size="sm"
-                  variant="outline-secondary"
-                  disabled={busy}
-                  onClick={() => void forget(o.name)}
-                >
-                  Forget
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </Alert>
-      )}
+        {orphans.length > 0 && (
+          <Alert variant="warning">
+            <AlertBody>
+              <Alert.Heading className="h6">Settings without a table</Alert.Heading>
+              <p className="mb-2">
+                These stored settings name tables that are not in the database. They are kept in
+                case the table comes back — recreating it restores its access rules — but
+                nothing is using them right now.
+              </p>
+              <ul className="mb-0 list-unstyled">
+                {orphans.map((o) => (
+                  <li key={o.name} className="d-flex align-items-center gap-2 mb-1">
+                    <code>{o.name}</code>
+                    <span className="text-muted small">
+                      read {roleLabel(o.min_role_read, roles)}, write{" "}
+                      {roleLabel(o.min_role_write, roles)}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline-secondary"
+                      disabled={busy}
+                      onClick={() => void forget(o.name)}
+                    >
+                      Forget
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </AlertBody>
+          </Alert>
+        )}
 
-      <Form onSubmit={create} className="mb-4">
-        <InputGroup>
-          <Form.Control
-            placeholder="New table name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-          <Button type="submit" disabled={busy || !name.trim()}>
-            Create table
-          </Button>
-        </InputGroup>
-      </Form>
-
-      <Table hover responsive>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Read</th>
-            <th>Write</th>
-            <th className="text-end">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tables?.length === 0 && (
-            <tr>
-              <td colSpan={4} className="text-muted">
-                No tables yet.
-              </td>
-            </tr>
-          )}
-          {tables?.map((t) => (
-            <tr key={t.name}>
-              <td>
-                {t.label && t.label !== t.name ? (
-                  <>
-                    {t.label} <span className="text-muted small">({t.name})</span>
-                  </>
-                ) : (
-                  t.name
-                )}
-                {/* Ownership marks: the roles alone no longer tell the whole
-                    access story for a table with a formula, so say so here. */}
-                {t.ownership_formula && !t.ownership_error && (
-                  <Badge bg="info" text="dark" className="ms-2" title={t.ownership_formula}>
-                    formula
-                  </Badge>
-                )}
-                {t.ownership_error && (
-                  <Badge bg="warning" text="dark" className="ms-2" title={t.ownership_error}>
-                    formula error
-                  </Badge>
-                )}
-                {t.rls_enabled && (
-                  <Badge bg="secondary" className="ms-2">
-                    RLS
-                  </Badge>
-                )}
-              </td>
-              <td>{roleLabel(t.min_role_read, roles)}</td>
-              <td>{roleLabel(t.min_role_write, roles)}</td>
-              <td className="text-end">
-                <Button
-                  size="sm"
-                  variant="outline-primary"
-                  href={`#/tables/${encodeURIComponent(t.name)}`}
-                >
-                  Open
-                </Button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
+        <div className="card">
+          <Table hover responsive className="card-table table-vcenter">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Read</th>
+                <th>Write</th>
+                <th className="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tables?.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="text-muted">
+                    No tables yet.
+                  </td>
+                </tr>
+              )}
+              {tables?.map((t) => (
+                <tr key={t.name}>
+                  <td>
+                    {t.label && t.label !== t.name ? (
+                      <>
+                        {t.label} <span className="text-muted small">({t.name})</span>
+                      </>
+                    ) : (
+                      t.name
+                    )}
+                    {/* Ownership marks: the roles alone no longer tell the whole
+                        access story for a table with a formula, so say so here. */}
+                    {t.ownership_formula && !t.ownership_error && (
+                      <StatusBadge tone="blue" className="ms-2" title={t.ownership_formula}>
+                        formula
+                      </StatusBadge>
+                    )}
+                    {t.ownership_error && (
+                      <StatusBadge tone="yellow" className="ms-2" title={t.ownership_error}>
+                        formula error
+                      </StatusBadge>
+                    )}
+                    {t.rls_enabled && (
+                      <StatusBadge tone="secondary" className="ms-2">
+                        RLS
+                      </StatusBadge>
+                    )}
+                  </td>
+                  <td>{roleLabel(t.min_role_read, roles)}</td>
+                  <td>{roleLabel(t.min_role_write, roles)}</td>
+                  <td className="text-end">
+                    <Button
+                      size="sm"
+                      variant="outline-primary"
+                      href={`#/tables/${encodeURIComponent(t.name)}`}
+                    >
+                      Open
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </div>
+      </PageBody>
     </>
   );
 }

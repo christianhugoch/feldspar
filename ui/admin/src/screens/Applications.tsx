@@ -10,13 +10,14 @@
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
-import Badge from "react-bootstrap/Badge";
 import Button from "react-bootstrap/Button";
 import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import type { ListApplicationsResponse } from "../client";
 import { navigate } from "../App";
+import { IconPlus } from "../icons";
+import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import { takeNotice, type Notice } from "../notice";
 
 type AppItem = ListApplicationsResponse[number];
@@ -97,107 +98,113 @@ export function Applications() {
 
   return (
     <>
-      <div className="d-flex justify-content-between align-items-center mb-4">
-        <h1 className="h3 mb-0">Applications</h1>
-        <Button onClick={() => navigate("/applications/new")}>New application</Button>
-      </div>
+      <PageHeader
+        pretitle="Deploy"
+        title="Applications"
+        actions={
+          <Button onClick={() => navigate("/applications/new")}>
+            <IconPlus className="icon-2" />
+            New application
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
+        {outcome && (
+          <Alert
+            variant={outcome.ok ? "success" : "danger"}
+            onClose={() => setOutcome(null)}
+            dismissible
+          >
+            <AlertBody>
+              <Alert.Heading className="h6">{outcome.title}</Alert.Heading>
+              <pre className="mb-0 text-break text-pre-wrap">{outcome.text}</pre>
+            </AlertBody>
+          </Alert>
+        )}
 
-      {error && <Alert variant="danger">{error}</Alert>}
-      {outcome && (
-        <Alert
-          variant={outcome.ok ? "success" : "danger"}
-          onClose={() => setOutcome(null)}
-          dismissible
-        >
-          <Alert.Heading className="h6">{outcome.title}</Alert.Heading>
-          <pre className="mb-0 text-break" style={{ whiteSpace: "pre-wrap" }}>
-            {outcome.text}
-          </pre>
-        </Alert>
-      )}
-
-      <Table hover responsive>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Subdomain</th>
-            <th>Framework</th>
-            <th>Build</th>
-            <th className="text-end">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {apps?.length === 0 && (
-            <tr>
-              <td colSpan={5} className="text-muted">
-                No applications yet.
-              </td>
-            </tr>
-          )}
-          {apps?.map((app) => {
-            const state = status[app.id] ?? "unbuilt";
-            return (
-              <tr key={app.id}>
-                <td>
-                  {app.name}
-                  {app.description && (
-                    <div className="text-muted small">{app.description}</div>
-                  )}
-                </td>
-                <td>
-                  <a href={appUrl(app.subdomain)} target="_blank" rel="noreferrer">
-                    {app.subdomain}
-                  </a>
-                </td>
-                <td>
-                  {app.framework.name}
-                  {app.source && (
-                    // The loop an admin actually works in is edit-file → build →
-                    // view, so the source directory is one click from the row.
-                    // Where an app's source *is* comes from the server (§2.4), so
-                    // this link works the same for a framework that states its
-                    // paths and one that derives them.
-                    <div className="small">
-                      <a href={filesUrl(app.source.store, app.source.path)}>
-                        {app.source.store}/{app.source.path || ""}
-                      </a>
-                    </div>
-                  )}
-                </td>
-                <td>
-                  <BuildBadge status={state} />
-                </td>
-                <td className="text-end">
-                  <Button
-                    size="sm"
-                    variant="outline-secondary"
-                    className="me-2"
-                    href={`#/applications/${encodeURIComponent(app.id)}/edit`}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline-primary"
-                    className="me-2"
-                    disabled={state === "building"}
-                    onClick={() => void build(app)}
-                  >
-                    {state === "building" ? "Building…" : "Build"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline-danger"
-                    onClick={() => void remove(app)}
-                  >
-                    Delete
-                  </Button>
-                </td>
+        <div className="card">
+          <Table hover responsive className="card-table table-vcenter">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Subdomain</th>
+                <th>Framework</th>
+                <th>Build</th>
+                <th className="text-end">Actions</th>
               </tr>
-            );
-          })}
-        </tbody>
-      </Table>
+            </thead>
+            <tbody>
+              {apps?.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="text-muted">
+                    No applications yet.
+                  </td>
+                </tr>
+              )}
+              {apps?.map((app) => {
+                const state = status[app.id] ?? "unbuilt";
+                return (
+                  <tr key={app.id}>
+                    <td>
+                      {app.name}
+                      {app.description && (
+                        <div className="text-muted small">{app.description}</div>
+                      )}
+                    </td>
+                    <td>
+                      <a href={appUrl(app.subdomain)} target="_blank" rel="noreferrer">
+                        {app.subdomain}
+                      </a>
+                    </td>
+                    <td>
+                      {app.framework.name}
+                      {app.source && (
+                        // The loop an admin actually works in is edit-file →
+                        // build → view, so the source directory is one click
+                        // from the row. Where an app's source *is* comes from
+                        // the server (§2.4), so this link works the same for a
+                        // framework that states its paths and one that derives
+                        // them.
+                        <div className="small">
+                          <a href={filesUrl(app.source.store, app.source.path)}>
+                            {app.source.store}/{app.source.path || ""}
+                          </a>
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <BuildBadge status={state} />
+                    </td>
+                    <td className="text-end">
+                      <div className="btn-list justify-content-end flex-nowrap">
+                        <Button
+                          size="sm"
+                          variant="outline-secondary"
+                          href={`#/applications/${encodeURIComponent(app.id)}/edit`}
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline-primary"
+                          disabled={state === "building"}
+                          onClick={() => void build(app)}
+                        >
+                          {state === "building" ? "Building…" : "Build"}
+                        </Button>
+                        <Button size="sm" variant="outline-danger" onClick={() => void remove(app)}>
+                          Delete
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </Table>
+        </div>
+      </PageBody>
     </>
   );
 }
@@ -207,12 +214,12 @@ export function Applications() {
 function BuildBadge({ status }: { status: BuildStatus }) {
   switch (status) {
     case "built":
-      return <Badge bg="success">Built</Badge>;
+      return <StatusBadge tone="green">Built</StatusBadge>;
     case "building":
-      return <Badge bg="info">Building…</Badge>;
+      return <StatusBadge tone="blue">Building…</StatusBadge>;
     case "failed":
-      return <Badge bg="danger">Build failed</Badge>;
+      return <StatusBadge tone="red">Build failed</StatusBadge>;
     default:
-      return <Badge bg="secondary">Not built yet</Badge>;
+      return <StatusBadge tone="secondary">Not built yet</StatusBadge>;
   }
 }

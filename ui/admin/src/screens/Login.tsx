@@ -5,12 +5,11 @@ import { useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Card from "react-bootstrap/Card";
-import Col from "react-bootstrap/Col";
-import Container from "react-bootstrap/Container";
 import Form from "react-bootstrap/Form";
-import Row from "react-bootstrap/Row";
 
 import { api, errorStatus } from "../api";
+import { SaltcornLogo } from "../icons";
+import { CenteredPage } from "../layout";
 
 export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [email, setEmail] = useState("");
@@ -36,44 +35,48 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   };
 
   return (
-    <Container className="py-5">
-      <Row className="justify-content-center">
-        <Col md={7} lg={5}>
-          <Card>
-            <Card.Body>
-              <Card.Title as="h1" className="h4 mb-4">
-                Sign in
-              </Card.Title>
-              {error && <Alert variant="danger">{error}</Alert>}
-              <Form onSubmit={submit}>
-                <Form.Group className="mb-3" controlId="loginEmail">
-                  <Form.Label>Email</Form.Label>
-                  <Form.Control
-                    type="email"
-                    value={email}
-                    autoComplete="username"
-                    required
-                    onChange={(e) => setEmail(e.target.value)}
-                  />
-                </Form.Group>
-                <Form.Group className="mb-3" controlId="loginPassword">
-                  <Form.Label>Password</Form.Label>
-                  <Form.Control
-                    type="password"
-                    value={password}
-                    autoComplete="current-password"
-                    required
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </Form.Group>
-                <Button type="submit" disabled={busy}>
-                  {busy ? "Signing in…" : "Sign in"}
-                </Button>
-              </Form>
-            </Card.Body>
-          </Card>
-        </Col>
-      </Row>
-    </Container>
+    <CenteredPage>
+      <div className="text-center mb-4">
+        <span className="navbar-brand d-inline-flex align-items-center gap-2">
+          <SaltcornLogo className="h-6" />
+          <span className="h1 mb-0">Saltcorn</span>
+        </span>
+      </div>
+      <Card className="card-md">
+        <Card.Body>
+          <Card.Title as="h1" className="h3 text-center mb-4">
+            Sign in
+          </Card.Title>
+          {error && <Alert variant="danger">{error}</Alert>}
+          <Form onSubmit={submit}>
+            <Form.Group className="mb-3" controlId="loginEmail">
+              <Form.Label>Email</Form.Label>
+              <Form.Control
+                type="email"
+                value={email}
+                autoComplete="username"
+                required
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </Form.Group>
+            <Form.Group className="mb-3" controlId="loginPassword">
+              <Form.Label>Password</Form.Label>
+              <Form.Control
+                type="password"
+                value={password}
+                autoComplete="current-password"
+                required
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </Form.Group>
+            <div className="form-footer">
+              <Button type="submit" className="w-100" disabled={busy}>
+                {busy ? "Signing in…" : "Sign in"}
+              </Button>
+            </div>
+          </Form>
+        </Card.Body>
+      </Card>
+    </CenteredPage>
   );
 }

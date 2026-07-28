@@ -25,6 +25,8 @@ import type {
   ListTriggersResponse,
 } from "../client";
 import { navigate } from "../App";
+import { IconArrowLeft } from "../icons";
+import { PageBody, PageHeader } from "../layout";
 import { setNotice } from "../notice";
 import { SettingsFields, asString, buildConfig, readConfig } from "../settings";
 
@@ -210,239 +212,250 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   };
 
   if (loadError) {
-    return <Alert variant="danger">{loadError}</Alert>;
+    return (
+      <PageBody>
+        <Alert variant="danger">{loadError}</Alert>
+      </PageBody>
+    );
   }
   if (!frameworks) {
     return (
-      <div className="text-center py-5">
-        <Spinner animation="border" role="status" />
-      </div>
+      <PageBody>
+        <div className="text-center py-5">
+          <Spinner animation="border" role="status" />
+        </div>
+      </PageBody>
     );
   }
 
   return (
     <>
-      <div className="d-flex justify-content-between align-items-center mb-4">
-        <h1 className="h3 mb-0">{appId ? "Edit application" : "New application"}</h1>
-        <Button variant="outline-secondary" onClick={() => navigate("/applications")}>
-          Back
-        </Button>
-      </div>
+      <PageHeader
+        pretitle="Deploy"
+        title={appId ? "Edit application" : "New application"}
+        actions={
+          <Button variant="outline-secondary" onClick={() => navigate("/applications")}>
+            <IconArrowLeft className="icon-2" />
+            Back
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
 
-      {error && <Alert variant="danger">{error}</Alert>}
+        <Form onSubmit={submit}>
+          <Row>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="appName">
+                <Form.Label>Name</Form.Label>
+                <Form.Control
+                  value={name}
+                  required
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </Form.Group>
+            </Col>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="appSubdomain">
+                <Form.Label>Subdomain</Form.Label>
+                <Form.Control
+                  value={subdomain}
+                  required
+                  onChange={(e) => setSubdomain(e.target.value)}
+                />
+                <Form.Text muted>Served at {subdomain || "<subdomain>"}.your-domain.</Form.Text>
+              </Form.Group>
+            </Col>
+          </Row>
 
-      <Form onSubmit={submit}>
-        <Row>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="appName">
-              <Form.Label>Name</Form.Label>
-              <Form.Control
-                value={name}
-                required
-                onChange={(e) => setName(e.target.value)}
+          <Form.Group className="mb-3" controlId="appDescription">
+            <Form.Label>Description</Form.Label>
+            <Form.Control
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Form.Group>
+
+          <Card className="mb-3">
+            <Card.Header>Framework</Card.Header>
+            <Card.Body>
+              {/* One choice per framework, each with the name and sentence the
+                  *server* supplied. Two frameworks are not two equal names in a
+                  dropdown — one creates the project for you and the other hands you
+                  the paths — and that difference has to reach the admin. It does so
+                  as data: the label, the description and the order all come from
+                  the registry (§2.2/§2.4), so this screen presents the distinction
+                  without knowing which framework is which. The first offered is the
+                  one an admin should take, and is what a new application starts on. */}
+              <fieldset className="mb-3">
+                <legend className="form-label">Framework</legend>
+                {frameworks.map((f) => (
+                  <Form.Check
+                    key={f.name}
+                    type="radio"
+                    name="framework"
+                    id={`framework-${f.name}`}
+                    className="mb-2"
+                    checked={f.name === frameworkName}
+                    onChange={() => setFrameworkName(f.name)}
+                    label={
+                      <>
+                        <span className="fw-semibold">{f.label || f.name}</span>
+                        {f.description && (
+                          <div className="text-muted small">{f.description}</div>
+                        )}
+                      </>
+                    }
+                  />
+                ))}
+              </fieldset>
+
+              {/* The framework's own settings, rendered from its config_spec — no
+                  framework-specific code lives here. Picking the first framework
+                  shows its two settings and picking the other shows five, with no
+                  branch in this file: the spec is the branch. */}
+              <SettingsFields
+                spec={selected?.config_spec ?? []}
+                values={config}
+                onChange={(name, v) => setConfig((c) => ({ ...c, [name]: v }))}
               />
-            </Form.Group>
-          </Col>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="appSubdomain">
-              <Form.Label>Subdomain</Form.Label>
-              <Form.Control
-                value={subdomain}
-                required
-                onChange={(e) => setSubdomain(e.target.value)}
-              />
-              <Form.Text muted>Served at {subdomain || "<subdomain>"}.your-domain.</Form.Text>
-            </Form.Group>
-          </Col>
-        </Row>
+            </Card.Body>
+          </Card>
 
-        <Form.Group className="mb-3" controlId="appDescription">
-          <Form.Label>Description</Form.Label>
-          <Form.Control
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </Form.Group>
+          <Row>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="appTables">
+                <Form.Label>Tables</Form.Label>
+                <Form.Control
+                  value={tables}
+                  placeholder="posts, comments"
+                  onChange={(e) => setTables(e.target.value)}
+                />
+                <Form.Text muted>The tables this app may access.</Form.Text>
+              </Form.Group>
+            </Col>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="appFileStores">
+                <Form.Label>File stores</Form.Label>
+                <Form.Control
+                  value={fileStores}
+                  placeholder="apps, uploads"
+                  onChange={(e) => setFileStores(e.target.value)}
+                />
+                <Form.Text muted>The file stores this app may access.</Form.Text>
+              </Form.Group>
+            </Col>
+          </Row>
 
-        <Card className="mb-3">
-          <Card.Header>Framework</Card.Header>
-          <Card.Body>
-            {/* One choice per framework, each with the name and sentence the
-                *server* supplied. Two frameworks are not two equal names in a
-                dropdown — one creates the project for you and the other hands you
-                the paths — and that difference has to reach the admin. It does so
-                as data: the label, the description and the order all come from
-                the registry (§2.2/§2.4), so this screen presents the distinction
-                without knowing which framework is which. The first offered is the
-                one an admin should take, and is what a new application starts on. */}
-            <fieldset className="mb-3">
-              <legend className="form-label">Framework</legend>
-              {frameworks.map((f) => (
+          <Card className="mb-3">
+            <Card.Header>Triggers</Card.Header>
+            <Card.Body>
+              {allTriggers.length === 0 && (
+                <div className="text-muted">
+                  No triggers are configured on this server.
+                </div>
+              )}
+              {allTriggers.map((t) => (
                 <Form.Check
-                  key={f.name}
-                  type="radio"
-                  name="framework"
-                  id={`framework-${f.name}`}
+                  key={t.id}
+                  type="checkbox"
+                  id={`trigger-${t.id}`}
                   className="mb-2"
-                  checked={f.name === frameworkName}
-                  onChange={() => setFrameworkName(f.name)}
+                  checked={triggers.includes(t.name)}
+                  onChange={(e) =>
+                    setTriggers((current) =>
+                      e.target.checked
+                        ? [...current, t.name]
+                        : current.filter((n) => n !== t.name),
+                    )
+                  }
                   label={
                     <>
-                      <span className="fw-semibold">{f.label || f.name}</span>
-                      {f.description && (
-                        <div className="text-muted small">{f.description}</div>
-                      )}
+                      <span className="fw-semibold">{t.name}</span>
+                      <div className="text-muted small">
+                        {t.action} · on {t.when} ·{" "}
+                        {/* Same vocabulary the trigger form uses: 1 is admin,
+                            100 is public, and no role set means admins only. */}
+                        {t.min_role == null
+                          ? "admins only (no minimum role set)"
+                          : `minimum role ${t.min_role}`}
+                      </div>
                     </>
                   }
                 />
               ))}
-            </fieldset>
+              {/* An app that names a trigger the server no longer has will not
+                  mount, so a stale selection is shown rather than dropped on the
+                  floor by a picker that only knows about triggers that exist. */}
+              {triggers
+                .filter((name) => !allTriggers.some((t) => t.name === name))
+                .map((name) => (
+                  <div key={name} className="text-danger small mb-2">
+                    <span className="fw-semibold">{name}</span> — no trigger of that
+                    name exists here, so this application will not mount until it is
+                    removed or the trigger is recreated.
+                    <Button
+                      size="sm"
+                      variant="outline-danger"
+                      className="ms-2"
+                      onClick={() =>
+                        setTriggers((current) => current.filter((n) => n !== name))
+                      }
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+              <Form.Text muted>
+                Each ticked trigger is exposed as <code>POST {"{api mount}"}/actions/
+                {"{name}"}</code> on this app, guarded by the trigger's own minimum
+                role.
+              </Form.Text>
+            </Card.Body>
+          </Card>
 
-            {/* The framework's own settings, rendered from its config_spec — no
-                framework-specific code lives here. Picking the first framework
-                shows its two settings and picking the other shows five, with no
-                branch in this file: the spec is the branch. */}
-            <SettingsFields
-              spec={selected?.config_spec ?? []}
-              values={config}
-              onChange={(name, v) => setConfig((c) => ({ ...c, [name]: v }))}
-            />
-          </Card.Body>
-        </Card>
-
-        <Row>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="appTables">
-              <Form.Label>Tables</Form.Label>
-              <Form.Control
-                value={tables}
-                placeholder="posts, comments"
-                onChange={(e) => setTables(e.target.value)}
-              />
-              <Form.Text muted>The tables this app may access.</Form.Text>
-            </Form.Group>
-          </Col>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="appFileStores">
-              <Form.Label>File stores</Form.Label>
-              <Form.Control
-                value={fileStores}
-                placeholder="apps, uploads"
-                onChange={(e) => setFileStores(e.target.value)}
-              />
-              <Form.Text muted>The file stores this app may access.</Form.Text>
-            </Form.Group>
-          </Col>
-        </Row>
-
-        <Card className="mb-3">
-          <Card.Header>Triggers</Card.Header>
-          <Card.Body>
-            {allTriggers.length === 0 && (
-              <div className="text-muted">
-                No triggers are configured on this server.
-              </div>
-            )}
-            {allTriggers.map((t) => (
-              <Form.Check
-                key={t.id}
-                type="checkbox"
-                id={`trigger-${t.id}`}
-                className="mb-2"
-                checked={triggers.includes(t.name)}
-                onChange={(e) =>
-                  setTriggers((current) =>
-                    e.target.checked
-                      ? [...current, t.name]
-                      : current.filter((n) => n !== t.name),
-                  )
-                }
-                label={
-                  <>
-                    <span className="fw-semibold">{t.name}</span>
-                    <div className="text-muted small">
-                      {t.action} · on {t.when} ·{" "}
-                      {/* Same vocabulary the trigger form uses: 1 is admin,
-                          100 is public, and no role set means admins only. */}
-                      {t.min_role == null
-                        ? "admins only (no minimum role set)"
-                        : `minimum role ${t.min_role}`}
-                    </div>
-                  </>
-                }
-              />
-            ))}
-            {/* An app that names a trigger the server no longer has will not
-                mount, so a stale selection is shown rather than dropped on the
-                floor by a picker that only knows about triggers that exist. */}
-            {triggers
-              .filter((name) => !allTriggers.some((t) => t.name === name))
-              .map((name) => (
-                <div key={name} className="text-danger small mb-2">
-                  <span className="fw-semibold">{name}</span> — no trigger of that
-                  name exists here, so this application will not mount until it is
-                  removed or the trigger is recreated.
-                  <Button
-                    size="sm"
-                    variant="outline-danger"
-                    className="ms-2"
-                    onClick={() =>
-                      setTriggers((current) => current.filter((n) => n !== name))
-                    }
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))}
-            <Form.Text muted>
-              Each ticked trigger is exposed as <code>POST {"{api mount}"}/actions/
-              {"{name}"}</code> on this app, guarded by the trigger's own minimum
-              role.
-            </Form.Text>
-          </Card.Body>
-        </Card>
-
-        <RepeatableRows
-          title="APIs"
-          rows={apis}
-          columns={[
-            { key: "provider", label: "Provider", placeholder: "rest" },
-            { key: "mount", label: "Mount", placeholder: "/api" },
-          ]}
-          onChange={setApis}
-          blank={{ provider: "", mount: "" }}
-        />
-
-        <RepeatableRows
-          title="Static directories"
-          rows={staticDirs}
-          columns={[
-            { key: "mount", label: "Mount", placeholder: "/docs" },
-            { key: "store", label: "Store", placeholder: "apps" },
-            { key: "path", label: "Path", placeholder: "handbook" },
-          ]}
-          onChange={setStaticDirs}
-          blank={{ mount: "", store: "", path: "" }}
-        />
-
-        <Form.Group className="mb-3" controlId="appCsp">
-          <Form.Label>Content-Security-Policy</Form.Label>
-          <Form.Control
-            as="textarea"
-            rows={3}
-            value={csp}
-            onChange={(e) => setCsp(e.target.value)}
+          <RepeatableRows
+            title="APIs"
+            rows={apis}
+            columns={[
+              { key: "provider", label: "Provider", placeholder: "rest" },
+              { key: "mount", label: "Mount", placeholder: "/api" },
+            ]}
+            onChange={setApis}
+            blank={{ provider: "", mount: "" }}
           />
-          <Form.Text muted>
-            One directive per line, e.g. `default-src: 'self'`. Leave empty to use
-            the framework's own default policy.
-          </Form.Text>
-        </Form.Group>
 
-        <Button type="submit" disabled={busy}>
-          {busy ? "Saving…" : appId ? "Save changes" : "Create application"}
-        </Button>
-      </Form>
+          <RepeatableRows
+            title="Static directories"
+            rows={staticDirs}
+            columns={[
+              { key: "mount", label: "Mount", placeholder: "/docs" },
+              { key: "store", label: "Store", placeholder: "apps" },
+              { key: "path", label: "Path", placeholder: "handbook" },
+            ]}
+            onChange={setStaticDirs}
+            blank={{ mount: "", store: "", path: "" }}
+          />
+
+          <Form.Group className="mb-3" controlId="appCsp">
+            <Form.Label>Content-Security-Policy</Form.Label>
+            <Form.Control
+              as="textarea"
+              rows={3}
+              value={csp}
+              onChange={(e) => setCsp(e.target.value)}
+            />
+            <Form.Text muted>
+              One directive per line, e.g. `default-src: 'self'`. Leave empty to use
+              the framework's own default policy.
+            </Form.Text>
+          </Form.Group>
+
+          <Button type="submit" disabled={busy}>
+            {busy ? "Saving…" : appId ? "Save changes" : "Create application"}
+          </Button>
+        </Form>
+      </PageBody>
     </>
   );
 }

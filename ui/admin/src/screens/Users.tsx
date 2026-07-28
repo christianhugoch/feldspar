@@ -16,6 +16,7 @@ import Table from "react-bootstrap/Table";
 
 import { api } from "../api";
 import type { ListUsersResponse } from "../client";
+import { PageBody, PageHeader } from "../layout";
 import { roleLabel, useRoles } from "../roles";
 
 export function Users() {
@@ -57,81 +58,88 @@ export function Users() {
 
   return (
     <>
-      <h1 className="h3 mb-4">Users</h1>
-      {error && <Alert variant="danger">{error}</Alert>}
+      <PageHeader pretitle="Access" title="Users" />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
 
-      <Row>
-        <Col lg={7} className="mb-4">
-          <Table hover responsive>
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Role</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users?.length === 0 && (
-                <tr>
-                  <td colSpan={2} className="text-muted">
-                    No users yet.
-                  </td>
-                </tr>
-              )}
-              {users?.map((u) => (
-                <tr key={u.id}>
-                  <td>{u.email}</td>
-                  <td>{roleLabel(u.role, roles)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        </Col>
-        <Col lg={5} className="mb-4">
-          <Card>
-            <Card.Header>Add user</Card.Header>
-            <Card.Body>
-              <Form onSubmit={create}>
-                <Form.Group className="mb-2" controlId="userEmail">
-                  <Form.Label>Email</Form.Label>
-                  <Form.Control
-                    type="email"
-                    value={email}
-                    autoComplete="off"
-                    required
-                    onChange={(e) => setEmail(e.target.value)}
-                  />
-                </Form.Group>
-                <Form.Group className="mb-2" controlId="userPassword">
-                  <Form.Label>Password</Form.Label>
-                  <Form.Control
-                    type="password"
-                    value={password}
-                    autoComplete="new-password"
-                    required
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </Form.Group>
-                <Form.Group className="mb-3" controlId="userRole">
-                  <Form.Label>Role</Form.Label>
-                  <Form.Select value={role} onChange={(e) => setRole(Number(e.target.value))}>
-                    {(roles ?? []).map((r) => (
-                      <option key={r.role} value={r.role}>
-                        {r.name} ({r.role})
-                      </option>
-                    ))}
-                  </Form.Select>
-                  <Form.Text muted>
-                    Lower is more privileged. Add roles on the <a href="#/roles">Roles</a> screen.
-                  </Form.Text>
-                </Form.Group>
-                <Button type="submit" disabled={busy}>
-                  Create user
-                </Button>
-              </Form>
-            </Card.Body>
-          </Card>
-        </Col>
-      </Row>
+        <Row>
+          <Col lg={7} className="mb-4">
+            <div className="card">
+              <div className="card-header">
+                <h3 className="card-title">Users</h3>
+              </div>
+              <Table hover responsive className="card-table table-vcenter">
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th>Role</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users?.length === 0 && (
+                    <tr>
+                      <td colSpan={2} className="text-muted">
+                        No users yet.
+                      </td>
+                    </tr>
+                  )}
+                  {users?.map((u) => (
+                    <tr key={u.id}>
+                      <td>{u.email}</td>
+                      <td>{roleLabel(u.role, roles)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            </div>
+          </Col>
+          <Col lg={5} className="mb-4">
+            <Card>
+              <Card.Header>Add user</Card.Header>
+              <Card.Body>
+                <Form onSubmit={create}>
+                  <Form.Group className="mb-2" controlId="userEmail">
+                    <Form.Label>Email</Form.Label>
+                    <Form.Control
+                      type="email"
+                      value={email}
+                      autoComplete="off"
+                      required
+                      onChange={(e) => setEmail(e.target.value)}
+                    />
+                  </Form.Group>
+                  <Form.Group className="mb-2" controlId="userPassword">
+                    <Form.Label>Password</Form.Label>
+                    <Form.Control
+                      type="password"
+                      value={password}
+                      autoComplete="new-password"
+                      required
+                      onChange={(e) => setPassword(e.target.value)}
+                    />
+                  </Form.Group>
+                  <Form.Group className="mb-3" controlId="userRole">
+                    <Form.Label>Role</Form.Label>
+                    <Form.Select value={role} onChange={(e) => setRole(Number(e.target.value))}>
+                      {(roles ?? []).map((r) => (
+                        <option key={r.role} value={r.role}>
+                          {r.name} ({r.role})
+                        </option>
+                      ))}
+                    </Form.Select>
+                    <Form.Text muted>
+                      Lower is more privileged. Add roles on the <a href="#/roles">Roles</a> screen.
+                    </Form.Text>
+                  </Form.Group>
+                  <Button type="submit" disabled={busy}>
+                    Create user
+                  </Button>
+                </Form>
+              </Card.Body>
+            </Card>
+          </Col>
+        </Row>
+      </PageBody>
     </>
   );
 }

@@ -14,7 +14,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Alert from "react-bootstrap/Alert";
-import Badge from "react-bootstrap/Badge";
 import Breadcrumb from "react-bootstrap/Breadcrumb";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
@@ -25,6 +24,7 @@ import Table from "react-bootstrap/Table";
 import { api, errorMessage, uploadFile } from "../api";
 import type { BrowseFilesResponse, GetFileMetaResponse } from "../client";
 import { navigate } from "../App";
+import { PageBody, PageHeader, StatusBadge } from "../layout";
 
 type Entry = BrowseFilesResponse[number];
 
@@ -191,177 +191,181 @@ export function FileManager({
 
   return (
     <>
-      <div className="d-flex justify-content-between align-items-center mb-4">
-        <h1 className="h3 mb-0">
-          Files <span className="text-muted">— {store}</span>
-        </h1>
-        <div>
-          <Button
-            variant="outline-secondary"
-            className="me-2"
-            onClick={() => navigate("/file-stores")}
-          >
-            File stores
-          </Button>
-          <Button variant="outline-primary" className="me-2" onClick={makeFolder}>
-            New folder
-          </Button>
-          <Button onClick={() => uploadInput.current?.click()}>Upload</Button>
-          <input
-            ref={uploadInput}
-            type="file"
-            multiple
-            className="d-none"
-            onChange={(e) => {
-              upload(e.target.files);
-              e.target.value = "";
-            }}
-          />
-        </div>
-      </div>
+      <PageHeader
+        pretitle="Storage"
+        title={
+          <>
+            Files <span className="text-muted">— {store}</span>
+          </>
+        }
+        actions={
+          <>
+            <Button variant="outline-secondary" onClick={() => navigate("/file-stores")}>
+              File stores
+            </Button>
+            <Button variant="outline-primary" onClick={makeFolder}>
+              New folder
+            </Button>
+            <Button onClick={() => uploadInput.current?.click()}>Upload</Button>
+            <input
+              ref={uploadInput}
+              type="file"
+              multiple
+              className="d-none"
+              onChange={(e) => {
+                upload(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </>
+        }
+      />
+      <PageBody>
+        {error && (
+          <Alert variant="danger" onClose={() => setError(null)} dismissible>
+            {error}
+          </Alert>
+        )}
 
-      {error && (
-        <Alert variant="danger" onClose={() => setError(null)} dismissible>
-          {error}
-        </Alert>
-      )}
+        <Breadcrumb>
+          <Breadcrumb.Item active={dir === ""} onClick={() => void load("")}>
+            {store}
+          </Breadcrumb.Item>
+          {crumbs.map((name, index) => {
+            const target = crumbs.slice(0, index + 1).join("/");
+            return (
+              <Breadcrumb.Item
+                key={target}
+                active={index === crumbs.length - 1}
+                onClick={() => void load(target)}
+              >
+                {name}
+              </Breadcrumb.Item>
+            );
+          })}
+        </Breadcrumb>
 
-      <Breadcrumb>
-        <Breadcrumb.Item active={dir === ""} onClick={() => void load("")}>
-          {store}
-        </Breadcrumb.Item>
-        {crumbs.map((name, index) => {
-          const target = crumbs.slice(0, index + 1).join("/");
-          return (
-            <Breadcrumb.Item
-              key={target}
-              active={index === crumbs.length - 1}
-              onClick={() => void load(target)}
-            >
-              {name}
-            </Breadcrumb.Item>
-          );
-        })}
-      </Breadcrumb>
-
-      {!entries ? (
-        <div className="text-center py-5">
-          <Spinner animation="border" role="status" />
-        </div>
-      ) : (
-        <Table hover responsive>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Size</th>
-              <th className="text-end">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {dir !== "" && (
+        {!entries ? (
+          <div className="text-center py-5">
+            <Spinner animation="border" role="status" />
+          </div>
+        ) : (
+          <div className="card">
+          <Table hover responsive className="card-table table-vcenter">
+            <thead>
               <tr>
-                <td colSpan={3}>
-                  <Button variant="link" className="p-0" onClick={() => void load(parentOf(dir))}>
-                    ../
-                  </Button>
-                </td>
+                <th>Name</th>
+                <th>Size</th>
+                <th className="text-end">Actions</th>
               </tr>
-            )}
-            {entries.length === 0 && (
-              <tr>
-                <td colSpan={3} className="text-muted">
-                  This folder is empty.
-                </td>
-              </tr>
-            )}
-            {entries.map((entry) => (
-              <tr key={entry.path}>
-                <td>
-                  {entry.is_dir ? (
-                    <Button
-                      variant="link"
-                      className="p-0"
-                      onClick={() => void load(entry.path)}
-                    >
-                      {entry.name}/
+            </thead>
+            <tbody>
+              {dir !== "" && (
+                <tr>
+                  <td colSpan={3}>
+                    <Button variant="link" className="p-0" onClick={() => void load(parentOf(dir))}>
+                      ../
                     </Button>
-                  ) : (
-                    entry.name
-                  )}
-                </td>
-                <td className="text-muted small">{formatSize(entry.size)}</td>
-                <td className="text-end">
-                  {!entry.is_dir && (
-                    <>
+                  </td>
+                </tr>
+              )}
+              {entries.length === 0 && (
+                <tr>
+                  <td colSpan={3} className="text-muted">
+                    This folder is empty.
+                  </td>
+                </tr>
+              )}
+              {entries.map((entry) => (
+                <tr key={entry.path}>
+                  <td>
+                    {entry.is_dir ? (
                       <Button
-                        size="sm"
-                        variant="outline-secondary"
-                        className="me-2"
-                        onClick={() => void openEditor(entry)}
+                        variant="link"
+                        className="p-0"
+                        onClick={() => void load(entry.path)}
                       >
-                        Edit
+                        {entry.name}/
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline-secondary"
-                        className="me-2"
-                        onClick={() => void download(entry)}
-                      >
-                        Download
-                      </Button>
-                    </>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="outline-secondary"
-                    className="me-2"
-                    onClick={() => void openPermissions(entry)}
-                  >
-                    Permissions
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline-secondary"
-                    className="me-2"
-                    disabled={busy}
-                    onClick={() => rename(entry)}
-                  >
-                    Rename
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline-danger"
-                    disabled={busy}
-                    onClick={() => remove(entry)}
-                  >
-                    Delete
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      )}
+                    ) : (
+                      entry.name
+                    )}
+                  </td>
+                  <td className="text-muted small">{formatSize(entry.size)}</td>
+                  <td className="text-end">
+                    {!entry.is_dir && (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline-secondary"
+                          className="me-2"
+                          onClick={() => void openEditor(entry)}
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline-secondary"
+                          className="me-2"
+                          onClick={() => void download(entry)}
+                        >
+                          Download
+                        </Button>
+                      </>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline-secondary"
+                      className="me-2"
+                      onClick={() => void openPermissions(entry)}
+                    >
+                      Permissions
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline-secondary"
+                      className="me-2"
+                      disabled={busy}
+                      onClick={() => rename(entry)}
+                    >
+                      Rename
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline-danger"
+                      disabled={busy}
+                      onClick={() => remove(entry)}
+                    >
+                      Delete
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          </div>
+        )}
 
-      <EditorModal
-        editing={editing}
-        busy={busy}
-        onChange={(text) => setEditing((e) => (e ? { ...e, text } : e))}
-        onCancel={() => setEditing(null)}
-        onSave={() => void saveEditor()}
-      />
+        <EditorModal
+          editing={editing}
+          busy={busy}
+          onChange={(text) => setEditing((e) => (e ? { ...e, text } : e))}
+          onCancel={() => setEditing(null)}
+          onSave={() => void saveEditor()}
+        />
 
-      <PermissionsModal
-        store={store}
-        meta={permissions}
-        onClose={() => setPermissions(null)}
-        onSaved={(saved) => {
-          setPermissions(null);
-          void load(dir);
-          return saved;
-        }}
-        onError={setError}
-      />
+        <PermissionsModal
+          store={store}
+          meta={permissions}
+          onClose={() => setPermissions(null)}
+          onSaved={(saved) => {
+            setPermissions(null);
+            void load(dir);
+            return saved;
+          }}
+          onError={setError}
+        />
+      </PageBody>
     </>
   );
 }
@@ -481,9 +485,9 @@ function PermissionsModal({
         <div className="mb-0">
           <span className="me-2">Effective:</span>
           {meta.effective_min_role == null ? (
-            <Badge bg="secondary">Unrestricted</Badge>
+            <StatusBadge tone="secondary">Unrestricted</StatusBadge>
           ) : (
-            <Badge bg="info">Role {meta.effective_min_role} or lower</Badge>
+            <StatusBadge tone="blue">Role {meta.effective_min_role} or lower</StatusBadge>
           )}
           {inherited && (
             <div className="text-muted small mt-2">

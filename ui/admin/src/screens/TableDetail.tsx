@@ -17,6 +17,8 @@ import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import { navigate } from "../App";
+import { IconArrowLeft } from "../icons";
+import { PageBody, PageHeader } from "../layout";
 import type {
   BrowseFilesResponse,
   CreateFieldRequest,
@@ -130,24 +132,30 @@ export function TableDetail({ table }: { table: string }) {
 
   return (
     <>
-      <div className="d-flex align-items-center mb-4">
-        <Button variant="link" className="ps-0" onClick={() => navigate("/tables")}>
-          ← Tables
-        </Button>
-        <h1 className="h3 mb-0 ms-2">{settings?.label || table}</h1>
-      </div>
-      {error && <Alert variant="danger">{error}</Alert>}
+      <PageHeader
+        pretitle="Table"
+        title={settings?.label || table}
+        actions={
+          <Button variant="outline-secondary" onClick={() => navigate("/tables")}>
+            <IconArrowLeft className="icon-2" />
+            Tables
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
 
-      <Settings table={table} settings={settings} onChange={load} />
+        <Settings table={table} settings={settings} onChange={load} />
 
-      <Row>
-        <Col lg={5} className="mb-4">
-          <Fields table={table} fields={fields} fieldTypes={fieldTypes} onChange={load} />
-        </Col>
-        <Col lg={7} className="mb-4">
-          <Rows table={table} fields={fields} rows={rows} onChange={load} />
-        </Col>
-      </Row>
+        <Row>
+          <Col lg={5} className="mb-4">
+            <Fields table={table} fields={fields} fieldTypes={fieldTypes} onChange={load} />
+          </Col>
+          <Col lg={7} className="mb-4">
+            <Rows table={table} fields={fields} rows={rows} onChange={load} />
+          </Col>
+        </Row>
+      </PageBody>
     </>
   );
 }

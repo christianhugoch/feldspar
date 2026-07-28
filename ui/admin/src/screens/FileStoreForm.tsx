@@ -25,6 +25,8 @@ import type {
   ListFileStoresResponse,
 } from "../client";
 import { navigate } from "../App";
+import { IconArrowLeft } from "../icons";
+import { AlertBody, PageBody, PageHeader } from "../layout";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
 
 type BackendInfo = ListFileStoreBackendsResponse[number];
@@ -116,113 +118,126 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
   };
 
   if (loadError) {
-    return <Alert variant="danger">{loadError}</Alert>;
+    return (
+      <PageBody>
+        <Alert variant="danger">{loadError}</Alert>
+      </PageBody>
+    );
   }
   if (!backends) {
     return (
-      <div className="text-center py-5">
-        <Spinner animation="border" role="status" />
-      </div>
+      <PageBody>
+        <div className="text-center py-5">
+          <Spinner animation="border" role="status" />
+        </div>
+      </PageBody>
     );
   }
 
   return (
     <>
-      <div className="d-flex justify-content-between align-items-center mb-4">
-        <h1 className="h3 mb-0">{storeId ? "Edit file store" : "New file store"}</h1>
-        <Button variant="outline-secondary" onClick={() => navigate("/file-stores")}>
-          Back
-        </Button>
-      </div>
+      <PageHeader
+        pretitle="Storage"
+        title={storeId ? "Edit file store" : "New file store"}
+        actions={
+          <Button variant="outline-secondary" onClick={() => navigate("/file-stores")}>
+            <IconArrowLeft className="icon-2" />
+            Back
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
+        {warning && (
+          <Alert variant="warning" onClose={() => setWarning(null)} dismissible>
+            <AlertBody>
+              <Alert.Heading className="h6">Saved, but not connected</Alert.Heading>
+              <div className="text-break">{warning}</div>
+              <hr />
+              <div className="mb-0 small">
+                The definition is stored and you can keep editing it. Fix the settings and save
+                again, or go back to the list.
+              </div>
+            </AlertBody>
+          </Alert>
+        )}
 
-      {error && <Alert variant="danger">{error}</Alert>}
-      {warning && (
-        <Alert variant="warning" onClose={() => setWarning(null)} dismissible>
-          <Alert.Heading className="h6">Saved, but not connected</Alert.Heading>
-          <div className="text-break">{warning}</div>
-          <hr />
-          <div className="mb-0 small">
-            The definition is stored and you can keep editing it. Fix the settings and save
-            again, or go back to the list.
-          </div>
-        </Alert>
-      )}
+        <Form onSubmit={submit}>
+          <Row>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="storeName">
+                <Form.Label>Name</Form.Label>
+                <Form.Control
+                  value={name}
+                  required
+                  onChange={(e) => setName(e.target.value)}
+                />
+                <Form.Text muted>
+                  How everything else refers to this store — a field, an application, the file
+                  manager.
+                </Form.Text>
+              </Form.Group>
+            </Col>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="storeMinRole">
+                <Form.Label>Minimum role</Form.Label>
+                <Form.Control
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={minRole}
+                  placeholder="unrestricted"
+                  onChange={(e) => setMinRole(e.target.value)}
+                />
+                <Form.Text muted>
+                  1 is admin, 100 is public; lower is more restrictive. Leave blank for no
+                  store-wide restriction. Applies before any per-file rule.
+                </Form.Text>
+              </Form.Group>
+            </Col>
+          </Row>
 
-      <Form onSubmit={submit}>
-        <Row>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="storeName">
-              <Form.Label>Name</Form.Label>
-              <Form.Control
-                value={name}
-                required
-                onChange={(e) => setName(e.target.value)}
-              />
-              <Form.Text muted>
-                How everything else refers to this store — a field, an application, the file
-                manager.
-              </Form.Text>
-            </Form.Group>
-          </Col>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="storeMinRole">
-              <Form.Label>Minimum role</Form.Label>
-              <Form.Control
-                type="number"
-                min={1}
-                max={100}
-                value={minRole}
-                placeholder="unrestricted"
-                onChange={(e) => setMinRole(e.target.value)}
-              />
-              <Form.Text muted>
-                1 is admin, 100 is public; lower is more restrictive. Leave blank for no
-                store-wide restriction. Applies before any per-file rule.
-              </Form.Text>
-            </Form.Group>
-          </Col>
-        </Row>
-
-        <Form.Group className="mb-3" controlId="storeDescription">
-          <Form.Label>Description</Form.Label>
-          <Form.Control
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </Form.Group>
-
-        <Card className="mb-3">
-          <Card.Header>Backend</Card.Header>
-          <Card.Body>
-            <Form.Group className="mb-3" controlId="storeBackend">
-              <Form.Label>Backend</Form.Label>
-              <Form.Select
-                value={backendName}
-                onChange={(e) => setBackendName(e.target.value)}
-              >
-                {backends.map((b) => (
-                  <option key={b.name} value={b.name}>
-                    {b.name}
-                  </option>
-                ))}
-              </Form.Select>
-            </Form.Group>
-
-            {/* The backend's own settings, rendered from its config_spec — no
-                backend-specific code lives here. */}
-            <SettingsFields
-              spec={selected?.config_spec ?? []}
-              values={config}
-              onChange={(key, v) => setConfig((c) => ({ ...c, [key]: v }))}
-              idPrefix="store-cfg"
+          <Form.Group className="mb-3" controlId="storeDescription">
+            <Form.Label>Description</Form.Label>
+            <Form.Control
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
             />
-          </Card.Body>
-        </Card>
+          </Form.Group>
 
-        <Button type="submit" disabled={busy}>
-          {busy ? "Saving…" : storeId ? "Save changes" : "Create file store"}
-        </Button>
-      </Form>
+          <Card className="mb-3">
+            <Card.Header>Backend</Card.Header>
+            <Card.Body>
+              <Form.Group className="mb-3" controlId="storeBackend">
+                <Form.Label>Backend</Form.Label>
+                <Form.Select
+                  value={backendName}
+                  onChange={(e) => setBackendName(e.target.value)}
+                >
+                  {backends.map((b) => (
+                    <option key={b.name} value={b.name}>
+                      {b.name}
+                    </option>
+                  ))}
+                </Form.Select>
+              </Form.Group>
+
+              {/* The backend's own settings, rendered from its config_spec — no
+                  backend-specific code lives here. */}
+              <SettingsFields
+                spec={selected?.config_spec ?? []}
+                values={config}
+                onChange={(key, v) => setConfig((c) => ({ ...c, [key]: v }))}
+                idPrefix="store-cfg"
+              />
+            </Card.Body>
+          </Card>
+
+          <Button type="submit" disabled={busy}>
+            {busy ? "Saving…" : storeId ? "Save changes" : "Create file store"}
+          </Button>
+        </Form>
+      </PageBody>
     </>
   );
 }

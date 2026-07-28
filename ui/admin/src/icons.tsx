@@ -1,0 +1,185 @@
+// The handful of Tabler icons the admin shell uses, as inline SVG components.
+//
+// Tabler's own templates inline every icon rather than loading a font or a
+// sprite sheet, and that is what the strict CSP wants too: an icon is markup the
+// React bundle already carries, so there is no second asset to serve and no
+// external origin to allow. Only the icons that are actually used are copied
+// here — adding one means copying its paths from https://tabler.io/icons.
+//
+// Every icon takes Tabler's own `icon` class plus a size class (`icon-1`/`icon-2`
+// in the templates) and inherits colour from `currentColor`, so the same
+// component works on a dark sidebar and a light page.
+
+import type { ReactNode } from "react";
+
+import logoUrl from "./vendor/saltcorn-logo.svg";
+
+/** Props shared by every icon: an extra class, and a title for standalone use. */
+type IconProps = {
+  /** Appended to the base `icon` class — Tabler's `icon-1`, `icon-2`, `text-…`. */
+  className?: string;
+};
+
+/** The common `<svg>` wrapper: Tabler's 24×24 stroked outline geometry. */
+function Svg({ className, children }: IconProps & { children: ReactNode }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className ? `icon ${className}` : "icon"}
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+export function IconTable(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 5a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14z" />
+      <path d="M3 10h18" />
+      <path d="M10 3v18" />
+    </Svg>
+  );
+}
+
+export function IconApps(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 4m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z" />
+      <path d="M4 14m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z" />
+      <path d="M14 14m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z" />
+      <path d="M14 7l6 0" />
+      <path d="M17 4l0 6" />
+    </Svg>
+  );
+}
+
+export function IconBolt(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M13 3l0 7l6 0l-8 11l0 -7l-6 0l8 -11" />
+    </Svg>
+  );
+}
+
+export function IconFolder(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2" />
+    </Svg>
+  );
+}
+
+export function IconUsers(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 7m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" />
+      <path d="M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      <path d="M21 21v-2a4 4 0 0 0 -3 -3.85" />
+    </Svg>
+  );
+}
+
+export function IconShieldLock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3" />
+      <path d="M12 11m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+      <path d="M12 12l0 2.5" />
+    </Svg>
+  );
+}
+
+export function IconSun(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" />
+      <path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7" />
+    </Svg>
+  );
+}
+
+export function IconMoon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </Svg>
+  );
+}
+
+export function IconLogout(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M14 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2" />
+      <path d="M9 12h12l-3 -3" />
+      <path d="M18 15l3 -3" />
+    </Svg>
+  );
+}
+
+export function IconPlus(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 5l0 14" />
+      <path d="M5 12l14 0" />
+    </Svg>
+  );
+}
+
+export function IconChevronLeft(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M15 6l-6 6l6 6" />
+    </Svg>
+  );
+}
+
+export function IconChevronRight(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 6l6 6l-6 6" />
+    </Svg>
+  );
+}
+
+export function IconArrowLeft(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 12l14 0" />
+      <path d="M5 12l6 6" />
+      <path d="M5 12l6 -6" />
+    </Svg>
+  );
+}
+
+/** The Saltcorn logo (`src/vendor/saltcorn-logo.svg`, the January 2023 mark).
+ *
+ * An `<img>` rather than inline SVG: it is brand art, not an icon — three fixed
+ * colours that must not take `currentColor` — so there is nothing to gain from
+ * inlining it, and a single imported file cannot drift from the one the rest of
+ * the project ships. Vite inlines it into the bundle as a `data:` URI (it is
+ * ~1 KB), which `img-src 'self' data:` permits.
+ *
+ * Tabler's `.navbar-brand-image` sizes it (2rem tall, width auto). Note that it
+ * must **not** sit inside a `.navbar-brand-autodark`: that class exists to flip
+ * a monochrome logo to white on a dark background, and it would flatten this
+ * one to a white silhouette. */
+export function SaltcornLogo({ className }: IconProps) {
+  return (
+    <img
+      src={logoUrl}
+      alt="Saltcorn"
+      className={className ? `navbar-brand-image ${className}` : "navbar-brand-image"}
+    />
+  );
+}

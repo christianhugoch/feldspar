@@ -25,6 +25,8 @@ import Spinner from "react-bootstrap/Spinner";
 import { api, errorMessage } from "../api";
 import type { ListActionsResponse, ListTriggersResponse } from "../client";
 import { navigate } from "../App";
+import { IconArrowLeft } from "../icons";
+import { PageBody, PageHeader } from "../layout";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
 
 type ActionInfo = ListActionsResponse[number];
@@ -218,253 +220,269 @@ export function TriggerForm({ triggerId }: { triggerId?: string }) {
   };
 
   if (loadError) {
-    return <Alert variant="danger">{loadError}</Alert>;
+    return (
+      <PageBody>
+        <Alert variant="danger">{loadError}</Alert>
+      </PageBody>
+    );
   }
   if (!actions) {
     return (
-      <div className="py-5 text-center">
-        <Spinner animation="border" role="status" />
-      </div>
+      <PageBody>
+        <div className="py-5 text-center">
+          <Spinner animation="border" role="status" />
+        </div>
+      </PageBody>
     );
   }
 
   return (
     <>
-      <h1 className="h3 mb-4">{triggerId ? "Edit trigger" : "New trigger"}</h1>
+      <PageHeader
+        pretitle="Automation"
+        title={triggerId ? "Edit trigger" : "New trigger"}
+        actions={
+          <Button variant="outline-secondary" onClick={() => navigate("/triggers")}>
+            <IconArrowLeft className="icon-2" />
+            Back
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
 
-      {error && <Alert variant="danger">{error}</Alert>}
+        <Form onSubmit={(e) => void submit(e)}>
+          <Row>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="triggerName">
+                <Form.Label>
+                  Name<span className="text-danger"> *</span>
+                </Form.Label>
+                <Form.Control
+                  value={name}
+                  required
+                  onChange={(e) => setName(e.target.value)}
+                />
+                <Form.Text muted>
+                  How everything else refers to this trigger — an application&apos;s API, a
+                  run button. Renaming it breaks those references deliberately.
+                </Form.Text>
+              </Form.Group>
+            </Col>
+            <Col md={6}>
+              <Form.Group className="mb-3" controlId="triggerMinRole">
+                <Form.Label>Minimum role</Form.Label>
+                <Form.Control
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={minRole}
+                  placeholder="admin only"
+                  onChange={(e) => setMinRole(e.target.value)}
+                />
+                <Form.Text muted>
+                  Who may run this trigger through an application&apos;s API. 1 is admin, 100
+                  is public. Leave blank for admin only.
+                </Form.Text>
+              </Form.Group>
+            </Col>
+          </Row>
 
-      <Form onSubmit={(e) => void submit(e)}>
-        <Row>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="triggerName">
-              <Form.Label>
-                Name<span className="text-danger"> *</span>
-              </Form.Label>
-              <Form.Control
-                value={name}
-                required
-                onChange={(e) => setName(e.target.value)}
-              />
-              <Form.Text muted>
-                How everything else refers to this trigger — an application&apos;s API, a
-                run button. Renaming it breaks those references deliberately.
-              </Form.Text>
-            </Form.Group>
-          </Col>
-          <Col md={6}>
-            <Form.Group className="mb-3" controlId="triggerMinRole">
-              <Form.Label>Minimum role</Form.Label>
-              <Form.Control
-                type="number"
-                min={1}
-                max={100}
-                value={minRole}
-                placeholder="admin only"
-                onChange={(e) => setMinRole(e.target.value)}
-              />
-              <Form.Text muted>
-                Who may run this trigger through an application&apos;s API. 1 is admin, 100
-                is public. Leave blank for admin only.
-              </Form.Text>
-            </Form.Group>
-          </Col>
-        </Row>
+          <Form.Group className="mb-3" controlId="triggerDescription">
+            <Form.Label>Description</Form.Label>
+            <Form.Control
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Form.Group>
 
-        <Form.Group className="mb-3" controlId="triggerDescription">
-          <Form.Label>Description</Form.Label>
-          <Form.Control
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </Form.Group>
-
-        <Card className="mb-3">
-          <Card.Header>When</Card.Header>
-          <Card.Body>
-            <Row>
-              <Col md={tableEvent ? 6 : 12}>
-                <Form.Group className="mb-3" controlId="triggerWhen">
-                  <Form.Label>Event</Form.Label>
-                  <Form.Select value={when} onChange={(e) => setWhen(e.target.value)}>
-                    {EVENT_KINDS.map((kind) => (
-                      <option key={kind.value} value={kind.value}>
-                        {kind.label}
-                      </option>
-                    ))}
-                  </Form.Select>
-                </Form.Group>
-              </Col>
-              {tableEvent && (
-                <Col md={6}>
-                  <Form.Group className="mb-3" controlId="triggerChannel">
-                    <Form.Label>
-                      Table<span className="text-danger"> *</span>
-                    </Form.Label>
-                    <Form.Select
-                      value={channel}
-                      onChange={(e) => setChannel(e.target.value)}
-                    >
-                      <option value="">—</option>
-                      {tables.map((table) => (
-                        <option key={table} value={table}>
-                          {table}
+          <Card className="mb-3">
+            <Card.Header>When</Card.Header>
+            <Card.Body>
+              <Row>
+                <Col md={tableEvent ? 6 : 12}>
+                  <Form.Group className="mb-3" controlId="triggerWhen">
+                    <Form.Label>Event</Form.Label>
+                    <Form.Select value={when} onChange={(e) => setWhen(e.target.value)}>
+                      {EVENT_KINDS.map((kind) => (
+                        <option key={kind.value} value={kind.value}>
+                          {kind.label}
                         </option>
                       ))}
                     </Form.Select>
                   </Form.Group>
                 </Col>
-              )}
-            </Row>
-
-            {timingUsed.length > 0 && (
-              <Row>
-                {timingUsed.includes("day_of_week") && (
-                  <Col md={4}>
-                    <Form.Group className="mb-3" controlId="triggerDayOfWeek">
-                      <Form.Label>Day</Form.Label>
+                {tableEvent && (
+                  <Col md={6}>
+                    <Form.Group className="mb-3" controlId="triggerChannel">
+                      <Form.Label>
+                        Table<span className="text-danger"> *</span>
+                      </Form.Label>
                       <Form.Select
-                        value={timing.day_of_week}
-                        onChange={(e) =>
-                          setTiming((t) => ({ ...t, day_of_week: e.target.value }))
-                        }
+                        value={channel}
+                        onChange={(e) => setChannel(e.target.value)}
                       >
-                        {DAYS.map((day, index) => (
-                          <option key={day} value={String(index)}>
-                            {day}
+                        <option value="">—</option>
+                        {tables.map((table) => (
+                          <option key={table} value={table}>
+                            {table}
                           </option>
                         ))}
                       </Form.Select>
                     </Form.Group>
                   </Col>
                 )}
-                {timingUsed.includes("hour") && (
-                  <Col md={4}>
-                    <Form.Group className="mb-3" controlId="triggerHour">
-                      <Form.Label>Hour (UTC)</Form.Label>
-                      <Form.Control
-                        type="number"
-                        min={0}
-                        max={23}
-                        placeholder="0"
-                        value={timing.hour}
-                        onChange={(e) =>
-                          setTiming((t) => ({ ...t, hour: e.target.value }))
-                        }
-                      />
-                    </Form.Group>
-                  </Col>
-                )}
-                {timingUsed.includes("minute") && (
-                  <Col md={4}>
-                    <Form.Group className="mb-3" controlId="triggerMinute">
-                      <Form.Label>Minute past the hour</Form.Label>
-                      <Form.Control
-                        type="number"
-                        min={0}
-                        max={59}
-                        placeholder="0"
-                        value={timing.minute}
-                        onChange={(e) =>
-                          setTiming((t) => ({ ...t, minute: e.target.value }))
-                        }
-                      />
-                    </Form.Group>
-                  </Col>
-                )}
-                <Col xs={12}>
-                  <Form.Text muted>
-                    Schedules are in <strong>UTC</strong>, so they mean the same
-                    instant wherever the server runs and are not moved by daylight
-                    saving. An empty box is 0.
-                  </Form.Text>
-                </Col>
               </Row>
-            )}
 
-            {tableEvent && (
-              <Form.Group className="mb-0" controlId="triggerOnlyIf">
-                <Form.Label>Only if</Form.Label>
-                <Form.Control
-                  as="textarea"
-                  rows={2}
-                  className="font-monospace"
-                  value={onlyIf}
-                  placeholder="pages > 100"
-                  onChange={(e) => setOnlyIf(e.target.value)}
-                />
-                <Form.Text muted>
-                  A JavaScript expression over the affected row&apos;s fields,{" "}
-                  <code>row</code>, <code>old</code> and <code>user</code>. The action runs
-                  only when it is true. Leave blank to always run.
-                </Form.Text>
+              {timingUsed.length > 0 && (
+                <Row>
+                  {timingUsed.includes("day_of_week") && (
+                    <Col md={4}>
+                      <Form.Group className="mb-3" controlId="triggerDayOfWeek">
+                        <Form.Label>Day</Form.Label>
+                        <Form.Select
+                          value={timing.day_of_week}
+                          onChange={(e) =>
+                            setTiming((t) => ({ ...t, day_of_week: e.target.value }))
+                          }
+                        >
+                          {DAYS.map((day, index) => (
+                            <option key={day} value={String(index)}>
+                              {day}
+                            </option>
+                          ))}
+                        </Form.Select>
+                      </Form.Group>
+                    </Col>
+                  )}
+                  {timingUsed.includes("hour") && (
+                    <Col md={4}>
+                      <Form.Group className="mb-3" controlId="triggerHour">
+                        <Form.Label>Hour (UTC)</Form.Label>
+                        <Form.Control
+                          type="number"
+                          min={0}
+                          max={23}
+                          placeholder="0"
+                          value={timing.hour}
+                          onChange={(e) =>
+                            setTiming((t) => ({ ...t, hour: e.target.value }))
+                          }
+                        />
+                      </Form.Group>
+                    </Col>
+                  )}
+                  {timingUsed.includes("minute") && (
+                    <Col md={4}>
+                      <Form.Group className="mb-3" controlId="triggerMinute">
+                        <Form.Label>Minute past the hour</Form.Label>
+                        <Form.Control
+                          type="number"
+                          min={0}
+                          max={59}
+                          placeholder="0"
+                          value={timing.minute}
+                          onChange={(e) =>
+                            setTiming((t) => ({ ...t, minute: e.target.value }))
+                          }
+                        />
+                      </Form.Group>
+                    </Col>
+                  )}
+                  <Col xs={12}>
+                    <Form.Text muted>
+                      Schedules are in <strong>UTC</strong>, so they mean the same
+                      instant wherever the server runs and are not moved by daylight
+                      saving. An empty box is 0.
+                    </Form.Text>
+                  </Col>
+                </Row>
+              )}
+
+              {tableEvent && (
+                <Form.Group className="mb-0" controlId="triggerOnlyIf">
+                  <Form.Label>Only if</Form.Label>
+                  <Form.Control
+                    as="textarea"
+                    rows={2}
+                    className="font-monospace"
+                    value={onlyIf}
+                    placeholder="pages > 100"
+                    onChange={(e) => setOnlyIf(e.target.value)}
+                  />
+                  <Form.Text muted>
+                    A JavaScript expression over the affected row&apos;s fields,{" "}
+                    <code>row</code>, <code>old</code> and <code>user</code>. The action runs
+                    only when it is true. Leave blank to always run.
+                  </Form.Text>
+                </Form.Group>
+              )}
+            </Card.Body>
+          </Card>
+
+          <Card className="mb-3">
+            <Card.Header>Do</Card.Header>
+            <Card.Body>
+              <Form.Group className="mb-3" controlId="triggerAction">
+                <Form.Label>Action</Form.Label>
+                <Form.Select
+                  value={actionName}
+                  onChange={(e) => {
+                    setActionName(e.target.value);
+                    // A different action has different settings; carrying the old
+                    // values over would post settings the new one never declared.
+                    setConfig({});
+                  }}
+                >
+                  {actions.map((a) => (
+                    <option key={a.name} value={a.name}>
+                      {a.name}
+                    </option>
+                  ))}
+                </Form.Select>
+                {action && <Form.Text muted>{action.description}</Form.Text>}
               </Form.Group>
-            )}
-          </Card.Body>
-        </Card>
 
-        <Card className="mb-3">
-          <Card.Header>Do</Card.Header>
-          <Card.Body>
-            <Form.Group className="mb-3" controlId="triggerAction">
-              <Form.Label>Action</Form.Label>
-              <Form.Select
-                value={actionName}
-                onChange={(e) => {
-                  setActionName(e.target.value);
-                  // A different action has different settings; carrying the old
-                  // values over would post settings the new one never declared.
-                  setConfig({});
-                }}
-              >
-                {actions.map((a) => (
-                  <option key={a.name} value={a.name}>
-                    {a.name}
-                  </option>
-                ))}
-              </Form.Select>
-              {action && <Form.Text muted>{action.description}</Form.Text>}
-            </Form.Group>
+              {/* Rendered from the server's `config_spec`: this screen has no
+                  knowledge of any particular action's settings. */}
+              <SettingsFields
+                spec={spec}
+                values={config}
+                idPrefix="trigger-cfg"
+                onChange={(field, value) =>
+                  setConfig((prev) => ({ ...prev, [field]: value }))
+                }
+              />
+              <Form.Text muted>
+                Values are formulas over the event: <code>row.title</code>,{" "}
+                <code>user.email</code>, <code>payload.n</code>.
+              </Form.Text>
+            </Card.Body>
+          </Card>
 
-            {/* Rendered from the server's `config_spec`: this screen has no
-                knowledge of any particular action's settings. */}
-            <SettingsFields
-              spec={spec}
-              values={config}
-              idPrefix="trigger-cfg"
-              onChange={(field, value) =>
-                setConfig((prev) => ({ ...prev, [field]: value }))
-              }
-            />
-            <Form.Text muted>
-              Values are formulas over the event: <code>row.title</code>,{" "}
-              <code>user.email</code>, <code>payload.n</code>.
-            </Form.Text>
-          </Card.Body>
-        </Card>
+          <Form.Check
+            type="checkbox"
+            id="triggerEnabled"
+            className="mb-3"
+            label="Enabled"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
 
-        <Form.Check
-          type="checkbox"
-          id="triggerEnabled"
-          className="mb-3"
-          label="Enabled"
-          checked={enabled}
-          onChange={(e) => setEnabled(e.target.checked)}
-        />
-
-        <div className="d-flex gap-2">
-          <Button type="submit" disabled={busy}>
-            {busy ? "Saving…" : "Save"}
-          </Button>
-          <Button
-            variant="outline-secondary"
-            disabled={busy}
-            onClick={() => navigate("/triggers")}
-          >
-            Cancel
-          </Button>
-        </div>
-      </Form>
+          <div className="d-flex gap-2">
+            <Button type="submit" disabled={busy}>
+              {busy ? "Saving…" : "Save"}
+            </Button>
+            <Button
+              variant="outline-secondary"
+              disabled={busy}
+              onClick={() => navigate("/triggers")}
+            >
+              Cancel
+            </Button>
+          </div>
+        </Form>
+      </PageBody>
     </>
   );
 }
