@@ -2,6 +2,44 @@
 
 Changes in reverse chronological order.
 
+## The file-store IDE: design and milestone plan
+
+Documentation only — no code yet. A file store holding a React front-end is a software project,
+and the file manager treats it as a folder of files: one file at a time, a textarea, nothing
+project-wide. The next milestone replaces that with **VS Code in the browser**, and the question
+worth recording is which VS Code, because the answer decides how much of this we write ourselves.
+
+Three distributions were examined. **`vscode-web`** — the static official web build — is dead: last
+published 1.91.1 in July 2024, repository archived 2026-07-21, and its live neighbours are a
+several-hundred-megabyte server binary to supervise and reverse-proxy.
+**`@typefox/monaco-editor-react`** is the right family but a layer too low: one editor and one
+language client per component, pinning `@codingame/*@^25.1.2`. **`@codingame/monaco-vscode-api`**
+is at 36.0.0, tracks VS Code 1.128.1, and publishes the workbench service by service as npm
+packages.
+
+The decision is the third, and the deciding argument is **where customization lives**. A statically
+served workbench can only be extended by web extensions served to it, so a filesystem, a formatter
+and a build button are three extension builds — and `prettier-vscode` is a *node* extension that
+cannot run in a web extension host at all. With `monaco-vscode-api` the workbench runs in the host
+page's own JavaScript context: `registerExtension` takes a manifest **object**, and the build
+command and the formatter are ordinary `vscode.*` calls in our bundle. The extension this feature
+"probably needs" turns out to be a manifest literal.
+
+Two consequences shape everything else. VS Code initializes once per page and cannot be unloaded,
+so `ui/ide` is a **separate page** under `/ide/` rather than a screen in the SPA — which also
+contains its need for a relaxed CSP, leaving the admin UI's strict policy alone. And its filesystem
+is a `FileSystemProvider` over the **file endpoints that already exist**, so the IDE adds no file
+API and works against every backend.
+
+The one thing that cannot be backend-agnostic is TypeScript semantics: a real
+`typescript-language-server` runs in the store's directory, keeping `node_modules` on the server,
+which gates it on `FileStore::local_path` — the same rule a framework's build step already follows,
+and now documented as such in §14.1. A store without one is told it has no semantics rather than
+being given worse ones.
+
+Written up as technical design **§12.1**, with the milestone's five phases in `TODO.md`; the
+completed actions-and-triggers list is archived as `docs/TODO-post-mvp-4.md`.
+
 ## A file store can be a git repository
 
 Not a TODO item. `local` was the only registered file-store backend; there is now a second,

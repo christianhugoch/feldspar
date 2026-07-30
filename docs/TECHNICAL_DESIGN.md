@@ -1155,12 +1155,106 @@ generated typed client (§13.1), so the API and the UI cannot drift.
   dynamically populated selects (options from the server or from client code, depending on
   other field values), dynamic attributes/contents, and client+server validation. Styling is
   **Bootstrap 5.3 via react-bootstrap**.
+- **`ui/ide`** — the file-store IDE: the VS Code workbench embedded on its own admin route, for
+  editing a store that holds an application's source. It is *not* part of the SPA, for reasons
+  that are structural rather than stylistic (§12.1).
 - **`ui/builder`** — the Craft.js + react-flow drag-and-drop builder is *not* built into the
   admin UI; it arrives with the Saltcorn-v1 view/page experience (post-MVP).
 
 The XSS-safety story is now the ordinary React one — values are escaped by the framework and
 `dangerouslySetInnerHTML` is banned by lint — pairing with the structural SQL-injection
 safety in `sc-query` (§4).
+
+### 12.1 The file-store IDE (`ui/ide`)
+
+A file store holding a React front-end (§13.3) is a **software project**, and the file manager
+in `ui/admin` treats it as a folder of files: one file open at a time, a plain textarea, no
+project-wide anything. That is the wrong instrument for the primary use case. The requirement is
+therefore stated at full strength: an admin edits a store **as if they had it open in desktop
+VS Code** — a project tree on the left, tabs of editors in the main area, the command palette,
+find-in-files, keybindings and settings — and from there formats JavaScript with **prettier**,
+sees **TypeScript errors**, and **builds the application**.
+
+**This is the real VS Code workbench, not an editor component.** The tree, the tabs, the
+palette, the settings editor and the keyboard story are the deliverable, and every one of them
+is code that already exists in VS Code. Writing them again around a bare editor is the failure
+mode to avoid, so the decision is which distribution of VS Code to embed. Three were examined
+(July 2026):
+
+- **`@codingame/monaco-vscode-api`** — VS Code's own workbench, service by service, as npm
+  packages, at **36.0.0 tracking VS Code 1.128.1** and published within the week. Its
+  `workbench-service-override` renders the full workbench into a container element; its
+  `files-service-override` takes a **custom `FileSystemProvider`**; extensions are registered
+  from a **manifest object in the host page**, which can then call the `vscode` API directly.
+- **`vscode-web`** — the static official web build, served under a route. **Dead**: last publish
+  1.91.1 (July 2024), repository archived 2026-07-21. Its live neighbours are no better —
+  upstream `openvscode-server` stopped being updated (deprecated by its packagers 2026-07-16),
+  leaving `code-server`: a several-hundred-megabyte per-platform binary to install, supervise and
+  reverse-proxy, for a product whose only Rust-side dependency today is `npm`.
+- **`@typefox/monaco-editor-react`** — the right family (it wraps `monaco-vscode-api`) but one
+  layer too low: it is documented as one editor and *one language client per component*, and it
+  pins `@codingame/*@^25.1.2`, eleven majors of VS Code behind. Its genuinely useful part,
+  `monaco-languageclient`, is a separate package used on its own merits (below).
+
+**The decision is `@codingame/monaco-vscode-api`, and the deciding argument is where
+customization lives.** In a statically served workbench, everything the host wants — a
+filesystem, a formatter, a build button — must be packaged, bundled and served as a **web
+extension**, three extension builds before anything works, and `prettier-vscode` is a *node*
+extension that does not run in a web extension host at all. With `monaco-vscode-api` the
+workbench runs in the host page's own JavaScript context: `registerExtension(manifest,
+ExtensionHostKind.LocalProcess).setAsDefaultApi()` takes a manifest **object**, after which
+`vscode.commands.registerCommand` and `vscode.languages.register*Provider` are ordinary function
+calls in `ui/ide`. **No `.vsix` is built and no extension is packaged** — the "there will
+probably have to be a VS Code extension" turns out to be a manifest literal.
+
+**`ui/ide` is its own page, not part of the admin SPA.** VS Code is designed to be initialized
+once per page and cannot be unloaded, the bundle is an order of magnitude larger than the SPA,
+and the workbench owns its whole viewport. So it is a separate Vite project served under
+`/ide/`, opened as `/ide/?store=<name>` — one document, no history fallback, no base-path games —
+with the store name choosing the workspace folder, so the workbench's own storage keeps each
+store's open tabs and layout. It is admin-only through the same session cookie as every other
+admin surface, and it reuses the **generated typed client** (§13.1) rather than hand-written
+`fetch` calls, so it cannot drift from the API either.
+
+**It needs its own CSP.** The strict admin policy (`script-src 'self'; style-src 'self'`) is
+satisfied structurally by React (above); the workbench injects styles and runs workers from
+blobs, so `/ide/*` is served with a relaxed policy of its own — `style-src` allowing inline,
+`worker-src blob:` — and the admin SPA's policy is left untouched. Serving the IDE from a
+distinct route is what makes that containment possible, and is the second reason it is a
+separate page.
+
+The four capabilities then land as follows:
+
+- **Files** — a `FileSystemProvider` registered with `registerFileSystemOverlay` over the file
+  endpoints that already exist (`browseFiles`, `readFile`, `writeFile`, `makeDirectory`,
+  `deleteFile`, `renameFile`, §9's per-file metadata beside them). No new server surface: the
+  file manager's API *is* the IDE's filesystem, so a store of any backend — local, git, object —
+  is editable.
+- **Prettier** — `prettier/standalone` with its plugins, **in the browser**, registered as a
+  `DocumentFormattingEditProvider` so format-on-save and the format command work as they do in
+  desktop VS Code. The project's own `.prettierrc` (or `package.json`'s `prettier` key) is read
+  through the filesystem provider and passed as options. Deliberately *not* the project's own
+  installed prettier: a store need not have one, need not have `node_modules`, and need not have
+  a local path at all — formatting should not be the capability that stops working on an object
+  store.
+- **Build** — a command contributed by the in-page manifest, calling `buildApplication` (§13.2)
+  for the application whose derived `source.store` (§13.3) is this store; the SPA already
+  receives that field, so the IDE filters the application list client-side and adds no endpoint.
+  A build failure is an **Application** error carrying the bundler's and `tsc`'s diagnostics
+  (§16), and those go into a `DiagnosticCollection` — so the Problems panel shows a failed
+  build's errors, by file and line, in the tab the admin has open.
+- **TypeScript errors** — a **language server on the server**, `typescript-language-server`
+  spawned in the store's directory and bridged to `monaco-languageclient` over a WebSocket on an
+  admin-authenticated route. The alternative, VS Code's own `typescript-language-features`
+  extension in a web worker, is available as a package and would work through the filesystem
+  provider — at the price of dragging the project's entire `node_modules` type surface across
+  HTTP. Server-side keeps it where it already is, and type-checks against the real
+  `tsconfig.json` and the really-installed dependencies. This is the one capability that needs
+  `FileStore::local_path` (§14.1), so it follows the rule that method already established: a
+  store with no local path cannot host a buildable app, and equally cannot host a language
+  server. Such a store gets editing, formatting, grammars and syntax errors, and is told why it
+  gets no semantics. Until the language server lands, the build's diagnostics are the
+  type errors, which is why they are wired to the Problems panel and not to a toast.
 
 ---
 
@@ -1548,6 +1642,11 @@ pub trait FileStore: Send + Sync {
 Drivers: local directory, S3, git-recognised directory. **Access rules** are set per file
 and per directory; to access a file, a user must have rights to **every directory in its
 path** (path-cumulative authorization). Per-file metadata is xattrs, no DB rows (§9).
+
+`local_path` is the deliberate exception to backend-agnosticism: `Ok(None)` means the backend has
+no on-disk path, and the two jobs that cannot work without one are a framework's **build step**
+(§13.3) and the IDE's **language server** (§12.1). Both must say so rather than pretend
+otherwise.
 
 ### 14.2 Predictive models
 
