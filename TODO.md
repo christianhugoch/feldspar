@@ -70,20 +70,20 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] **Done when** `/ide/?store=<name>` shows the workbench — tree, tabs, palette — over an empty
       in-memory workspace.
 
-## Phase 2 — The store as a filesystem
+## Phase 2 — The store as a filesystem ✅
 
-- [ ] A `FileSystemProvider` over the file endpoints (`stat`, `readDirectory`, `readFile`,
+- [x] A `FileSystemProvider` over the file endpoints (`stat`, `readDirectory`, `readFile`,
       `writeFile`, `createDirectory`, `delete`, `rename`), registered with
       `registerFileSystemOverlay`, with the workspace folder derived from `?store=`.
-- [ ] Handle what the API does and does not give: no watch, so `onDidChangeFile` is driven by the
+- [x] Handle what the API does and does not give: no watch, so `onDidChangeFile` is driven by the
       IDE's own writes plus an explicit refresh; base64 for non-UTF-8 bytes; a store that is
       defined but not connected surfaces its reason (§9's `connected`/`why`) as a dialog, not a
       stack trace.
-- [ ] Link into the IDE from the admin SPA: from `FileStores` (per store) and from an application's
+- [x] Link into the IDE from the admin SPA: from `FileStores` (per store) and from an application's
       derived `source.store` (§13.3), the same places the file manager is reached from.
-- [ ] Tests: `vitest` over the provider against a stubbed client — read/write round-trip, directory
+- [x] Tests: `vitest` over the provider against a stubbed client — read/write round-trip, directory
       listing to `FileType`, delete/rename, and the error mapping for a missing path.
-- [ ] **Done when** an admin edits and saves a scaffolded React app's `src/App.tsx` in the
+- [x] **Done when** an admin edits and saves a scaffolded React app's `src/App.tsx` in the
       workbench and the file manager shows the new contents.
 
 ## Phase 3 — Prettier, and the build button

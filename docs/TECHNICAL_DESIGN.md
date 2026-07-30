@@ -1229,7 +1229,12 @@ The four capabilities then land as follows:
   endpoints that already exist (`browseFiles`, `readFile`, `writeFile`, `makeDirectory`,
   `deleteFile`, `renameFile`, §9's per-file metadata beside them). No new server surface: the
   file manager's API *is* the IDE's filesystem, so a store of any backend — local, git, object —
-  is editable.
+  is editable. What the API did have to learn is that **a missing path is a 404, not a 500**:
+  an editor asks whether a path exists by trying to read it — it stats before writing, and looks
+  for optional files like `.vscode/settings.json` — so "not there" is a value it acts on rather
+  than a failure to report (§16). There is no `stat` endpoint and no watcher, and neither is
+  worth adding yet: a path is stat'ed by listing its parent, and a change made outside the IDE
+  is seen when the explorer is refreshed.
 - **Prettier** — `prettier/standalone` with its plugins, **in the browser**, registered as a
   `DocumentFormattingEditProvider` so format-on-save and the format command work as they do in
   desktop VS Code. The project's own `.prettierrc` (or `package.json`'s `prettier` key) is read

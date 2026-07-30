@@ -69,6 +69,25 @@ impl LocalFileStore {
         }
         Ok(out)
     }
+
+    /// Turn a filesystem error into a domain error, keeping **"it is not there"**
+    /// distinct from "it broke".
+    ///
+    /// This is the difference between a 404 and a 500 at the API (§16), and it is
+    /// not cosmetic: asking whether a path exists by trying to read it is the
+    /// normal thing for a client to do — the IDE's filesystem (§12.1) stats a
+    /// path before writing it, and looks for optional files like
+    /// `.vscode/settings.json` that are usually absent. A missing file reported as
+    /// a system failure makes every one of those an error the admin is shown.
+    fn io<T>(&self, result: std::io::Result<T>, path: &str, doing: &str) -> Result<T> {
+        match result {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::not_found(format!(
+                "{path:?} does not exist in store {}",
+                self.name
+            ))),
+            other => other.with_context(|| format!("{doing} {path:?} in store {}", self.name)),
+        }
+    }
 }
 
 #[async_trait]
@@ -79,9 +98,7 @@ impl FileStore for LocalFileStore {
 
     async fn read(&self, path: &str) -> Result<Bytes> {
         let abs = self.resolve(path)?;
-        let data = tokio::fs::read(&abs)
-            .await
-            .with_context(|| format!("reading {path:?} from store {}", self.name))?;
+        let data = self.io(tokio::fs::read(&abs).await, path, "reading")?;
         Ok(Bytes::from(data))
     }
 
@@ -100,9 +117,7 @@ impl FileStore for LocalFileStore {
 
     async fn list(&self, dir: &str) -> Result<Vec<Entry>> {
         let abs = self.resolve(dir)?;
-        let mut read_dir = tokio::fs::read_dir(&abs)
-            .await
-            .with_context(|| format!("listing {dir:?} in store {}", self.name))?;
+        let mut read_dir = self.io(tokio::fs::read_dir(&abs).await, dir, "listing")?;
         // Normalise the directory prefix so child paths are `<dir>/<name>` with
         // no leading, trailing, or doubled separators.
         let prefix = dir.trim_matches('/');

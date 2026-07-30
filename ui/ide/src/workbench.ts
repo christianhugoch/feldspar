@@ -49,7 +49,7 @@ import "@codingame/monaco-vscode-markdown-basics-default-extension";
 import defaultConfiguration from "./user/configuration.json?raw";
 import defaultKeybindings from "./user/keybindings.json?raw";
 import { configureWorkers } from "./workers";
-import { registerPlaceholderFilesystem, storeFolderUri } from "./workspace";
+import { registerStoreFilesystem, storeFolderUri } from "./workspace";
 
 /**
  * The services this IDE runs on.
@@ -135,6 +135,6 @@ export async function bootWorkbench(store: string, container: HTMLElement): Prom
     initUserConfiguration(defaultConfiguration),
     initUserKeybindings(defaultKeybindings),
   ]);
-  registerPlaceholderFilesystem(store);
+  registerStoreFilesystem(store);
   await initializeVscodeApi(services, container, constructionOptions(store), environment);
 }

@@ -15,7 +15,7 @@ import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import type { ListApplicationsResponse } from "../client";
-import { navigate } from "../App";
+import { ideUrl, navigate } from "../App";
 import { IconPlus } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import { takeNotice, type Notice } from "../notice";
@@ -169,7 +169,8 @@ export function Applications() {
                         <div className="small">
                           <a href={filesUrl(app.source.store, app.source.path)}>
                             {app.source.store}/{app.source.path || ""}
-                          </a>
+                          </a>{" "}
+                          <a href={ideUrl(app.source.store)}>(edit code)</a>
                         </div>
                       )}
                     </td>

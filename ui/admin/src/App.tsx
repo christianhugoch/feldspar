@@ -64,6 +64,17 @@ export function navigate(path: string): void {
   window.location.hash = path;
 }
 
+/**
+ * Where a file store is edited as code: the IDE (design §12.1).
+ *
+ * Not a hash route — the IDE is a **separate page** with its own bundle, served
+ * at `/ide/`, because VS Code initializes once per page. So this is an ordinary
+ * link that leaves the SPA, and the browser's Back button is what comes back.
+ */
+export function ideUrl(store: string): string {
+  return `/ide/?store=${encodeURIComponent(store)}`;
+}
+
 export function App() {
   const [status, setStatus] = useState<AuthStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);

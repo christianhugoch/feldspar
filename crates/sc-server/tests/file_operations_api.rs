@@ -456,3 +456,62 @@ async fn upload_rejects_an_unauthenticated_caller() -> sc_error::Result<()> {
 
     Ok(())
 }
+
+/// A path that is not there is **404, not 500** — the distinction the IDE's
+/// filesystem (§12.1) is built on.
+///
+/// Asking whether a path exists by trying to read it is the ordinary thing for a
+/// client to do: an editor stats a file before writing it, and looks for optional
+/// files (`.vscode/settings.json`, a `.prettierrc`) that are usually absent. Every
+/// one of those is a *value* — "not there" — and reporting it as a system failure
+/// (§16) turns each into an error the admin is shown and a flow the editor cannot
+/// complete.
+#[tokio::test]
+async fn a_missing_path_is_reported_as_not_found() -> sc_error::Result<()> {
+    let (mut client, store, _db) = setup().await?;
+
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/read",
+            Some(json!({ "path": "nothing/here.txt" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    // A directory that does not exist, listed: the same answer, because the
+    // editor asks about a whole directory just as often as about one file.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/browse",
+            Some(json!({ "dir": "nothing" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    // The store root is always there, even when it is empty.
+    let (status, listing) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/browse",
+            Some(json!({ "dir": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listing.is_array());
+
+    // And a path that *is* there still reads, so this is a mapping and not a
+    // blanket refusal.
+    store.write("here.txt", "x".into()).await?;
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/read",
+            Some(json!({ "path": "here.txt" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    Ok(())
+}

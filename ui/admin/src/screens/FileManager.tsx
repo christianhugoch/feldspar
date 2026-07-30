@@ -23,7 +23,7 @@ import Table from "react-bootstrap/Table";
 
 import { api, errorMessage, uploadFile } from "../api";
 import type { BrowseFilesResponse, GetFileMetaResponse } from "../client";
-import { navigate } from "../App";
+import { ideUrl, navigate } from "../App";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
 
 type Entry = BrowseFilesResponse[number];
@@ -202,6 +202,13 @@ export function FileManager({
           <>
             <Button variant="outline-secondary" onClick={() => navigate("/file-stores")}>
               File stores
+            </Button>
+            {/* The same store, opened as a project instead of a folder of files
+                (§12.1). One file at a time and a textarea is the wrong
+                instrument for a source tree, and this is where the admin goes
+                when that becomes obvious. */}
+            <Button variant="outline-primary" href={ideUrl(store)}>
+              Edit code
             </Button>
             <Button variant="outline-primary" onClick={makeFolder}>
               New folder

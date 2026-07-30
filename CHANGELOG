@@ -2,6 +2,54 @@
 
 Changes in reverse chronological order.
 
+## The IDE edits the real store
+
+TODO phase 2. The workbench's filesystem is now the file store's own API, so the
+explorer is the store's tree, opening a file reads it, and Ctrl+S writes it. Create,
+rename and delete work from the explorer; the admin UI links into the IDE from the file
+store list, the file manager, and an application's source.
+
+### Two layers, because only one of them is worth testing
+
+`storeFiles.ts` is the store as a filesystem in the *store's* vocabulary — paths, bytes,
+and the four outcomes an operation can have (`notFound`, `exists`, `noPermission`,
+`failed`). It has no VS Code in it at all. `fileSystemProvider.ts` is the translation:
+URIs to store paths, entries to `FileType`, those four outcomes to the codes VS Code acts
+on. The split is what lets the interesting half — path mapping, base64, and which HTTP
+status means what — be tested in twelve `vitest` cases against a stubbed client, with no
+workbench to boot.
+
+No new endpoints: `browseFiles`/`readFile`/`writeFile`/`makeDirectory`/`deleteFile`/
+`renameFile` are exactly the file manager's, which is what makes any backend editable.
+Two absences are worked around rather than filled in. There is no `stat`, so a path is
+stat'ed by listing its parent — which also gives the right answer for a path whose parent
+does not exist. And there is no watcher and cannot be one over request/response, so the
+IDE announces its own writes and everything else is seen on an explorer refresh; `watch()`
+returns a no-op disposable, which keeps that a limitation instead of a failure.
+
+The store has no timestamps, so `mtime` is a constant. That is deliberate: `mtime` exists
+for VS Code to notice a file changed under an open editor, and a made-up clock would
+manufacture a conflict on every save.
+
+### A missing file is a 404 now
+
+`LocalFileStore` reported a missing path as an I/O failure, which the API turned into a
+**500**. That was wrong before and unworkable now: asking whether a path exists by trying
+to read it is the ordinary thing for a client to do. Booting the workbench probes
+`.vscode/settings.json`, `tasks.json`, `launch.json` and `mcp.json`, none of which
+normally exist — five "the server broke" errors before the editor has drawn anything.
+`read` and `list` now map `NotFound` to `Error::not_found`, so the answer is a 404 the
+provider turns into `FileNotFound` and VS Code proceeds. Everything else stays a system
+error with its context intact.
+
+### What is not connected is said, not shown
+
+A store can be defined but not connected (§9), and a workbench over one is a tree of error
+dialogs. So the IDE asks `listFileStores` *before* it boots and, when the store is missing
+or disconnected, renders the store's own reason as the page instead — the reason the admin
+needs, in the place they were going anyway. A session that expired between the page load
+and that call sends them to the admin UI, where logging in is possible.
+
 ## The workbench boots: `ui/ide`, served under `/ide/`
 
 TODO phase 1. VS Code — the real workbench, not an editor component — now runs in the

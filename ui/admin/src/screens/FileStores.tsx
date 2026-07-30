@@ -19,7 +19,7 @@ import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import type { ListFileStoresResponse } from "../client";
-import { navigate } from "../App";
+import { ideUrl, navigate } from "../App";
 import { IconPlus } from "../icons";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
 import { asString } from "../settings";
@@ -154,6 +154,14 @@ export function FileStores() {
                           </Button>
                           <Button
                             size="sm"
+                            variant="outline-primary"
+                            disabled={!store.connected}
+                            href={ideUrl(store.name)}
+                          >
+                            Edit code
+                          </Button>
+                          <Button
+                            size="sm"
                             variant="outline-danger"
                             onClick={() => void remove(store)}
                           >
@@ -168,6 +176,13 @@ export function FileStores() {
                             href={`#/files/${encodeURIComponent(store.name)}`}
                           >
                             Browse
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline-primary"
+                            href={ideUrl(store.name)}
+                          >
+                            Edit code
                           </Button>
                           {/* No row behind it, so nothing to edit or delete.
                               Saying so beats offering buttons that would 404. */}

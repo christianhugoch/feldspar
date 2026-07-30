@@ -7,6 +7,7 @@
  * why there is no client-side router here — switching stores is a navigation.
  */
 import "./style.css";
+import { api, errorStatus } from "./api";
 
 const CONTAINER_ID = "workbench";
 
@@ -54,6 +55,27 @@ function renderMessage(title: string, detail: string, link?: { href: string; tex
   container.append(box);
 }
 
+/**
+ * Why `store` cannot be edited, or `null` when it can.
+ *
+ * A store is more than its definition (§9): it is defined *and* connected, or it
+ * is a row with a reason it is not — a directory that has gone away, a git remote
+ * that will not clone. The IDE asks before it boots, because a workbench over a
+ * store that cannot be reached is a tree of error dialogs, and the reason the
+ * admin needs is the one the store already carries.
+ */
+async function unusableBecause(store: string): Promise<string | null> {
+  const stores = await api.listFileStores();
+  const found = stores.find((candidate) => candidate.name === store);
+  if (found == null) {
+    return `There is no file store named ${store}. It may have been renamed or deleted.`;
+  }
+  if (!found.connected) {
+    return found.error ?? `The file store ${store} is defined but not connected.`;
+  }
+  return null;
+}
+
 const store = requestedStore();
 if (store == null) {
   renderMessage(
@@ -64,14 +86,28 @@ if (store == null) {
 } else {
   document.title = `${store} — Saltcorn IDE`;
   try {
-    const { bootWorkbench } = await import("./workbench");
-    await bootWorkbench(store, workbenchContainer());
+    const reason = await unusableBecause(store);
+    if (reason != null) {
+      renderMessage(`Cannot edit ${store}`, reason, {
+        href: "/",
+        text: "Back to the admin UI",
+      });
+    } else {
+      const { bootWorkbench } = await import("./workbench");
+      await bootWorkbench(store, workbenchContainer());
+    }
   } catch (err) {
-    renderMessage(
-      "The editor failed to start",
-      err instanceof Error ? err.message : String(err),
-      { href: "/", text: "Back to the admin UI" },
-    );
-    throw err;
+    // A session that expired between the page load and this call: the admin UI
+    // is where logging in happens, so go there rather than explain it.
+    if (errorStatus(err) === 401) {
+      window.location.href = "/";
+    } else {
+      renderMessage(
+        "The editor failed to start",
+        err instanceof Error ? err.message : String(err),
+        { href: "/", text: "Back to the admin UI" },
+      );
+      throw err;
+    }
   }
 }
