@@ -99,6 +99,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
       `listApplications`; no new endpoint), and reports success as a notification.
 - [ ] A failed build's diagnostics — an Application error carrying `tsc`'s and the bundler's output
       (§16) — parsed into a `DiagnosticCollection` so the Problems panel names file and line.
+- [ ] A build writes into the source tree (the generated client) and into `dist/`, which is a
+      change made outside the editor by an action taken inside it: the build command drops what
+      the filesystem remembers (`StoreFiles::forgetEverything`) rather than waiting for the
+      listing lifetime to expire.
 - [ ] Tests: `vitest` for the config resolution and the store→application match; a Rust test that a
       failing build's error text carries the file-and-line diagnostics the parser relies on.
 - [ ] **Done when** an admin formats a file with prettier's own configuration, presses Build, and a

@@ -2,6 +2,49 @@
 
 Changes in reverse chronological order.
 
+## The IDE stops asking questions it can already answer
+
+Opening a store wrote five `not found` errors into the server log: VS Code looks for
+`.vscode/settings.json`, `tasks.json`, `launch.json` and `mcp.json`, then lists `.vscode`
+itself, and none of them normally exist. The provider forwarded each question to the store,
+which has no way to answer "no" except by failing the request.
+
+Quieting the log was the wrong fix, and was reverted. **A 404 should be logged** — it means
+something asked for a thing that is not there, which is worth seeing precisely because it
+ought not to be routine. The bug was that the IDE had made it routine.
+
+A directory listing says what a directory contains, and therefore what it does not. Once
+the root's listing is known, "is there a `.vscode/settings.json`?" needs no request: there
+is no `.vscode`. So `StoreFiles` now keeps listings as it fetches them and resolves a path
+by walking them from the root — `stat` of a path under a missing directory is `null` with
+nothing asked, and `read` establishes existence before requesting bytes. The only calls
+that reach the server are for paths that exist, plus the listings themselves. A whole
+session — boot, expand, open, edit, save — now leaves the log empty.
+
+Four rules keep it honest rather than merely quiet:
+
+- **`list` always refetches.** It is what the explorer's Refresh runs, and with no watcher
+  that is the one way to see a change made outside the IDE; refresh has to mean refresh.
+- **A mutation forgets** every listing along its path and beneath it, because the store
+  creates missing parents on write — so a new file is visible without a refresh, and so is
+  a deletion.
+- **Listings are held as promises**, so the concurrent lookups a workbench fires at startup
+  share one request instead of racing to duplicate it.
+- **A listing is believed for five seconds**, and the page forgets everything when it
+  regains focus.
+
+The last of those is the answer to the obvious objection: what about a file created
+outside the editor? A *deletion* cannot mislead — the listing still names the file, so
+reading it asks the server and gets the 404 it deserves, which is exactly the case worth
+logging. A *creation* can, so it is bounded three ways: anything that lists sees it at
+once, focus drops everything remembered, and nothing is believed for longer than the
+lifetime anyway. What an expiry costs is another *listing*, which succeeds — so bounding
+staleness never reintroduces a request for a path that is not there.
+
+The tests say what the requirement is rather than how it is met: the four `.vscode` probes
+plus a listing of `.vscode` make exactly one call — `browse ""` — and three concurrent stats
+under `src` make two.
+
 ## The IDE has no settings
 
 Not a TODO item — a correction, found by running it. A server started without

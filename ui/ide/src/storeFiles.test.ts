@@ -7,7 +7,7 @@
  * "new file" or a red error box.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "./client";
 import {
@@ -20,6 +20,9 @@ import {
   toStorePath,
   toUriPath,
 } from "./storeFiles";
+
+/** Every call the stub was asked to make, in order — `endpoint path` strings. */
+const calls: string[] = [];
 
 /** A store held in a map, standing in for the server's file endpoints. */
 function stubClient(files: Record<string, string>): ApiClient {
@@ -35,6 +38,7 @@ function stubClient(files: Record<string, string>): ApiClient {
   };
   const client = {
     async browseFiles(_store: string, body: { dir: string }) {
+      calls.push(`browse ${body.dir}`);
       const dir = body.dir.replace(/\/+$/, "");
       if (dir !== "" && !directories().has(dir)) {
         throw failure("browseFiles", 404, `"${dir}" does not exist`);
@@ -56,6 +60,7 @@ function stubClient(files: Record<string, string>): ApiClient {
       return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
     },
     async readFile(_store: string, body: { path: string }) {
+      calls.push(`read ${body.path}`);
       const contents = files[body.path];
       if (contents === undefined) {
         throw failure("readFile", 404, `"${body.path}" does not exist`);
@@ -63,14 +68,17 @@ function stubClient(files: Record<string, string>): ApiClient {
       return { path: body.path, size: contents.length, base64: btoa(contents), text: contents };
     },
     async writeFile(_store: string, body: { path: string; base64?: string | null }) {
+      calls.push(`write ${body.path}`);
       files[body.path] = atob(body.base64 ?? "");
       return { name: body.path, path: body.path, is_dir: false, size: files[body.path].length };
     },
     async makeDirectory(_store: string, body: { path: string }) {
+      calls.push(`mkdir ${body.path}`);
       files[`${body.path}/.keep`] = "";
       return { name: body.path, path: body.path, is_dir: true, size: 0 };
     },
     async deleteFile(_store: string, body: { path: string }) {
+      calls.push(`delete ${body.path}`);
       let deleted = false;
       for (const path of Object.keys(files)) {
         if (path === body.path || path.startsWith(`${body.path}/`)) {
@@ -81,6 +89,7 @@ function stubClient(files: Record<string, string>): ApiClient {
       return { deleted };
     },
     async renameFile(_store: string, body: { from: string; to: string }) {
+      calls.push(`rename ${body.from}`);
       if (files[body.to] !== undefined) {
         throw failure("renameFile", 400, "the destination already exists");
       }
@@ -93,6 +102,16 @@ function stubClient(files: Record<string, string>): ApiClient {
   };
   return client as unknown as ApiClient;
 }
+
+beforeEach(() => {
+  calls.length = 0;
+  // Fake time, so a test can step past a listing's lifetime without waiting.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("paths", () => {
   it("maps a workspace URI path to a store path and back", () => {
@@ -181,6 +200,106 @@ describe("StoreFiles", () => {
     });
     await files.move("src/Renamed.tsx", "src/main.tsx", true);
     expect(new TextDecoder().decode(await files.read("src/main.tsx"))).toContain("export const App");
+  });
+
+  /**
+   * The requirement this whole class is shaped around: an editor asks constantly
+   * whether optional files exist, and a store cannot answer "no" except by failing
+   * a request. A 404 in the operator's log should mean something asked for a thing
+   * that is not there — so the IDE must not be the thing routinely asking.
+   */
+  it("answers a path under a missing directory without asking the server", async () => {
+    const files = store();
+    // What opening a store in VS Code actually does.
+    await expect(files.read(".vscode/settings.json")).rejects.toMatchObject({ kind: "notFound" });
+    await expect(files.read(".vscode/tasks.json")).rejects.toMatchObject({ kind: "notFound" });
+    await expect(files.list(".vscode")).rejects.toMatchObject({ kind: "notFound" });
+    expect(await files.stat(".vscode/launch.json")).toBeNull();
+
+    // One listing — of the root, which exists — answered all of it.
+    expect(calls).toEqual(["browse "]);
+  });
+
+  it("asks once for a directory however many questions are asked about it", async () => {
+    const files = store();
+    await Promise.all([
+      files.stat("src/App.tsx"),
+      files.stat("src/main.tsx"),
+      files.stat("src/Missing.tsx"),
+    ]);
+    // The root's listing and `src`'s, each fetched once despite the concurrency.
+    expect(calls).toEqual(["browse ", "browse src"]);
+  });
+
+  it("refetches a listing when it is listed, because refresh must mean refresh", async () => {
+    const files = store();
+    await files.list("");
+    await files.list("");
+    expect(calls).toEqual(["browse ", "browse "]);
+  });
+
+  it("forgets what it knew about a path it changed", async () => {
+    const files = store();
+    expect(await files.stat("src/New.tsx")).toBeNull();
+    await files.write("src/New.tsx", new TextEncoder().encode("x"));
+    // The new file is visible without an explicit refresh…
+    expect(await files.stat("src/New.tsx")).not.toBeNull();
+    // …and so is a deletion.
+    await files.remove("src/New.tsx");
+    expect(await files.stat("src/New.tsx")).toBeNull();
+  });
+
+  /**
+   * The cost of remembering listings, and its three bounds. A file created
+   * *outside* the IDE — a git pull, the file manager, a build — is the only thing
+   * a remembered listing can be wrong about; a deletion cannot mislead, because
+   * the listing still names the file and reading it asks the server.
+   */
+  describe("a file created outside the IDE", () => {
+    it("is seen once the listing is too old to believe", async () => {
+      const backing: Record<string, string> = { "src/App.tsx": "x" };
+      const files = new StoreFiles("app", stubClient(backing), 5_000);
+      expect(await files.stat("src/Outside.tsx")).toBeNull();
+
+      backing["src/Outside.tsx"] = "made elsewhere";
+      // Within the window, the remembered listing still answers.
+      expect(await files.stat("src/Outside.tsx")).toBeNull();
+
+      vi.setSystemTime(Date.now() + 6_000);
+      expect(await files.stat("src/Outside.tsx")).not.toBeNull();
+    });
+
+    it("is seen at once when the page regains focus", async () => {
+      const backing: Record<string, string> = { "src/App.tsx": "x" };
+      const files = new StoreFiles("app", stubClient(backing));
+      expect(await files.stat("src/Outside.tsx")).toBeNull();
+
+      backing["src/Outside.tsx"] = "made elsewhere";
+      files.forgetEverything();
+      expect(await files.stat("src/Outside.tsx")).not.toBeNull();
+    });
+
+    it("is seen by anything that lists, which is how the explorer refreshes", async () => {
+      const backing: Record<string, string> = { "src/App.tsx": "x" };
+      const files = new StoreFiles("app", stubClient(backing));
+      await files.list("src");
+
+      backing["src/Outside.tsx"] = "made elsewhere";
+      expect((await files.list("src")).map((e) => e.name)).toContain("Outside.tsx");
+    });
+
+    it("does not mislead in the other direction: a deletion still reaches the server", async () => {
+      const backing: Record<string, string> = { "src/App.tsx": "x" };
+      const files = new StoreFiles("app", stubClient(backing));
+      await files.stat("src/App.tsx");
+
+      delete backing["src/App.tsx"];
+      calls.length = 0;
+      // The listing still names it, so this asks — and the 404 is a real one,
+      // which the server is right to log.
+      await expect(files.read("src/App.tsx")).rejects.toMatchObject({ kind: "notFound" });
+      expect(calls).toContain("read src/App.tsx");
+    });
   });
 
   it("reports a missing file as notFound rather than a failure", async () => {

@@ -176,6 +176,11 @@ export function toProviderError(err: StoreFileError): Error {
   switch (err.kind) {
     case "notFound":
       return createFileSystemProviderError(err.message, FileSystemProviderErrorCode.FileNotFound);
+    case "notADirectory":
+      return createFileSystemProviderError(
+        err.message,
+        FileSystemProviderErrorCode.FileNotADirectory,
+      );
     case "exists":
       return createFileSystemProviderError(err.message, FileSystemProviderErrorCode.FileExists);
     case "noPermission":

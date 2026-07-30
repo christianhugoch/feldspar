@@ -33,7 +33,12 @@ export interface StoreEntry {
  * *values*, not surprises. `noPermission` is the access rule of §9 refusing.
  * `failed` is everything else, and carries the server's own message.
  */
-export type StoreFileErrorKind = "notFound" | "exists" | "noPermission" | "failed";
+export type StoreFileErrorKind =
+  | "notFound"
+  | "notADirectory"
+  | "exists"
+  | "noPermission"
+  | "failed";
 
 /** An error from a store operation, tagged with which of the four it is. */
 export class StoreFileError extends Error {
@@ -105,49 +110,113 @@ export function baseName(storePath: string): string {
   return cut === -1 ? storePath : storePath.slice(cut + 1);
 }
 
-/** The file operations of one store, on top of the generated client. */
+/**
+ * How long a directory listing is believed, in milliseconds.
+ *
+ * Long enough to collapse the burst of questions a workbench asks when it opens a
+ * store, which lands within a few hundred milliseconds; short enough that a file
+ * created outside the IDE is not invisible for longer than it takes to notice.
+ * Note what the expiry costs when it fires: another *listing*, which succeeds —
+ * never a request for a path that is not there.
+ */
+export const LISTING_TTL_MS = 5_000;
+
+/** A directory's entries, and the moment they were asked for. */
+interface CachedListing {
+  readonly fetchedAt: number;
+  readonly entries: Promise<Map<string, StoreEntry>>;
+}
+
+/**
+ * The file operations of one store, on top of the generated client.
+ *
+ * **Existence questions are answered here, not asked of the server.** An editor
+ * asks a great many of them — opening a store makes VS Code look for
+ * `.vscode/settings.json`, `tasks.json`, `launch.json`, `mcp.json` and the
+ * `.vscode` directory itself, none of which normally exist — and a store's API has
+ * no way to answer "no" except by failing the request. Asking anyway would make
+ * every one of those a 404 in the operator's log, and a 404 *should* be logged: it
+ * means something asked for a thing that is not there, which is worth seeing when
+ * it is not routine.
+ *
+ * So it is not routine here. A directory listing says what is in a directory, and
+ * therefore also what is *not*: once the root's listing is known, "is there a
+ * `.vscode/settings.json`?" is answerable without a request, because there is no
+ * `.vscode`. Listings are kept as they are fetched, and a path is resolved by
+ * walking them from the root — so the only requests that reach the server are for
+ * paths that exist, plus the listings themselves.
+ *
+ * **What a remembered listing can get wrong**, since there is no watcher to tell
+ * us otherwise, is a file created *outside* the IDE — a git pull, the file
+ * manager, a build writing into the source tree. A deletion cannot mislead: the
+ * listing still names the file, so reading it asks the server and gets the 404 it
+ * deserves. A creation can, so three things bound it. Anything that goes through
+ * [`list`](StoreFiles::list) — the explorer, Refresh, find-in-files, Go to File —
+ * refetches and sees it. [`forgetEverything`](StoreFiles::forgetEverything) drops
+ * the lot, which is what the page does when it regains focus, the moment an admin
+ * is most likely to have just done something elsewhere. And a listing is only
+ * believed for [`LISTING_TTL_MS`], so nothing is wrong for longer than that
+ * anyway.
+ */
 export class StoreFiles {
+  /**
+   * Directory → its entries by name, and when they were fetched.
+   *
+   * Promises rather than values, so concurrent lookups under one directory (which
+   * is what a workbench does on startup) share a single request.
+   */
+  private readonly listings = new Map<string, CachedListing>();
+
   constructor(
     readonly store: string,
     private readonly client: ApiClient,
+    /** How long a listing is believed; see [`LISTING_TTL_MS`]. */
+    private readonly ttlMs: number = LISTING_TTL_MS,
   ) {}
 
-  /** The entries of a directory. */
+  /**
+   * The entries of a directory, **freshly fetched**.
+   *
+   * This is what the explorer's Refresh runs, and refresh has to mean refresh: it
+   * is the one way to see a change made outside the IDE (there is no watcher), so
+   * it replaces what is remembered rather than reading it.
+   */
   async list(dir: string): Promise<StoreEntry[]> {
-    const entries = await this.call("listing", () =>
-      this.client.browseFiles(this.store, { dir }),
-    );
-    return entries.map((entry) => ({
-      name: entry.name,
-      kind: entry.is_dir ? "directory" : "file",
-      size: entry.size ?? 0,
-    }));
+    await this.requireDirectory(dir);
+    return [...(await this.fetchListing(dir)).values()];
   }
 
   /**
    * What a path is, or `null` when nothing is there.
    *
-   * There is no `stat` endpoint, so this reads the parent's listing and looks for
-   * the name — which is also why a path whose *parent* is missing is `null` too
-   * rather than an error: neither exists, and the caller asked whether the path
-   * is there.
+   * There is no `stat` endpoint, and it turns out none is needed: a path exists
+   * exactly when every segment of it appears in its parent's listing, which is
+   * what this walks. A path under a directory that does not exist is `null`
+   * without any request being made about it.
    */
   async stat(storePath: string): Promise<StoreEntry | null> {
     if (storePath === "") {
       return { name: this.store, kind: "directory", size: 0 };
     }
-    let siblings: StoreEntry[];
-    try {
-      siblings = await this.list(parentPath(storePath));
-    } catch (err) {
-      if (err instanceof StoreFileError && err.kind === "notFound") return null;
-      throw err;
-    }
-    return siblings.find((entry) => entry.name === baseName(storePath)) ?? null;
+    const parent = parentPath(storePath);
+    const parentEntry = await this.stat(parent);
+    // Nothing can live under a path that is absent, or under a file.
+    if (parentEntry === null || parentEntry.kind !== "directory") return null;
+    const listing = await this.knownListing(parent);
+    return listing.get(baseName(storePath)) ?? null;
   }
 
   /** A file's bytes. */
   async read(storePath: string): Promise<Uint8Array> {
+    // Established first, so a file that is not there is answered rather than
+    // requested: `readFile` on a missing path is a 404 the server is right to log.
+    const entry = await this.stat(storePath);
+    if (entry === null) {
+      throw new StoreFileError(
+        "notFound",
+        `${storePath} does not exist in file store ${this.store}`,
+      );
+    }
     const content = await this.call("reading", () =>
       this.client.readFile(this.store, { path: storePath }),
     );
@@ -162,6 +231,9 @@ export class StoreFiles {
         base64: encodeBase64(bytes),
       }),
     );
+    // The store creates missing parents, so a write can add directories anywhere
+    // along the path — every listing from the root down may now be wrong.
+    this.forget(storePath);
   }
 
   /** Create a directory. Succeeds if it is already there. */
@@ -169,6 +241,7 @@ export class StoreFiles {
     await this.call("creating", () =>
       this.client.makeDirectory(this.store, { path: storePath }),
     );
+    this.forget(storePath);
   }
 
   /** Delete a file, or a directory and everything in it. */
@@ -176,6 +249,7 @@ export class StoreFiles {
     await this.call("deleting", () =>
       this.client.deleteFile(this.store, { path: storePath }),
     );
+    this.forget(storePath);
   }
 
   /**
@@ -191,6 +265,82 @@ export class StoreFiles {
       await this.remove(to);
     }
     await this.call("moving", () => this.client.renameFile(this.store, { from, to }));
+    this.forget(from);
+    this.forget(to);
+  }
+
+  /** Fail unless `dir` is a directory that exists, without asking about it. */
+  private async requireDirectory(dir: string): Promise<void> {
+    const entry = await this.stat(dir);
+    if (entry === null) {
+      throw new StoreFileError(
+        "notFound",
+        `${dir} does not exist in file store ${this.store}`,
+      );
+    }
+    if (entry.kind !== "directory") {
+      throw new StoreFileError("notADirectory", `${dir} is a file, not a directory`);
+    }
+  }
+
+  /**
+   * Forget every listing, so the next question is answered from the store.
+   *
+   * Called when the page regains focus: with no watcher, that is the cheapest
+   * honest signal that an admin may have just done something elsewhere — pulled in
+   * the git store's tab, edited in the file manager, run a build.
+   */
+  forgetEverything(): void {
+    this.listings.clear();
+  }
+
+  /**
+   * A directory's listing, fetching it unless one is remembered and still young
+   * enough to believe.
+   */
+  private knownListing(dir: string): Promise<Map<string, StoreEntry>> {
+    const cached = this.listings.get(dir);
+    if (cached != null && Date.now() - cached.fetchedAt < this.ttlMs) {
+      return cached.entries;
+    }
+    return this.fetchListing(dir);
+  }
+
+  /** Fetch a directory's listing and remember it. */
+  private fetchListing(dir: string): Promise<Map<string, StoreEntry>> {
+    const entries = this.call("listing", () => this.client.browseFiles(this.store, { dir }))
+      .then(
+        (listing) =>
+          new Map(
+            listing.map((entry) => [
+              entry.name,
+              {
+                name: entry.name,
+                kind: entry.is_dir ? ("directory" as const) : ("file" as const),
+                size: entry.size ?? 0,
+              },
+            ]),
+          ),
+      )
+      .catch((err: unknown) => {
+        // A failed fetch must not be remembered as the truth about a directory.
+        if (this.listings.get(dir)?.entries === entries) this.listings.delete(dir);
+        throw err;
+      });
+    this.listings.set(dir, { fetchedAt: Date.now(), entries });
+    return entries;
+  }
+
+  /**
+   * Drop what is remembered about a path: every directory along it (an operation
+   * may have created or removed any of them) and everything beneath it.
+   */
+  private forget(storePath: string): void {
+    for (const dir of [...this.listings.keys()]) {
+      const inside = dir === storePath || dir.startsWith(`${storePath}/`);
+      const above = storePath === dir || storePath.startsWith(dir === "" ? "" : `${dir}/`);
+      if (inside || above) this.listings.delete(dir);
+    }
   }
 
   /** Run one client call, turning its failure into a [`StoreFileError`]. */

@@ -1229,12 +1229,28 @@ The four capabilities then land as follows:
   endpoints that already exist (`browseFiles`, `readFile`, `writeFile`, `makeDirectory`,
   `deleteFile`, `renameFile`, §9's per-file metadata beside them). No new server surface: the
   file manager's API *is* the IDE's filesystem, so a store of any backend — local, git, object —
-  is editable. What the API did have to learn is that **a missing path is a 404, not a 500**:
-  an editor asks whether a path exists by trying to read it — it stats before writing, and looks
-  for optional files like `.vscode/settings.json` — so "not there" is a value it acts on rather
-  than a failure to report (§16). There is no `stat` endpoint and no watcher, and neither is
-  worth adding yet: a path is stat'ed by listing its parent, and a change made outside the IDE
-  is seen when the explorer is refreshed.
+  is editable. What the API did have to learn is that **a missing path is a 404, not a 500** —
+  a file that was there and is not is an ordinary answer, not an infrastructure failure (§16).
+
+  There is no `stat` endpoint and no watcher, and neither is worth adding: a path's existence
+  is decided by **the provider, from the directory listings it already holds**. That is not an
+  optimisation. An editor asks constantly whether optional files exist — opening a store makes
+  VS Code look for `.vscode/settings.json`, `tasks.json`, `launch.json`, `mcp.json` and the
+  `.vscode` directory itself — and a store's API cannot answer "no" except by failing a
+  request. Were the IDE to ask, every session would write half a dozen 404s into the
+  operator's log, and a 404 must stay worth reading: it means something asked for a thing that
+  is not there, which is worth seeing *because* it is not routine. A listing says what a
+  directory contains and therefore what it does not, so once the root is known the answer is
+  already in hand; the only requests that reach the server are for paths that exist.
+
+  What a remembered listing can be wrong about is a file created **outside** the IDE — a git
+  pull, the file manager, a build writing into the source tree. A *deletion* cannot mislead:
+  the listing still names the file, so reading it asks the server and gets the 404 it
+  deserves. A creation can, and three things bound it: anything that lists (the explorer,
+  Refresh, find-in-files, Go to File) refetches; the page forgets everything when it regains
+  focus, the moment an admin is most likely to have just acted elsewhere; and a listing is
+  believed for five seconds regardless. Note what an expiry costs — another *listing*, which
+  succeeds — so bounding staleness never reintroduces a request for a path that is not there.
 - **Prettier** — `prettier/standalone` with its plugins, **in the browser**, registered as a
   `DocumentFormattingEditProvider` so format-on-save and the format command work as they do in
   desktop VS Code. The project's own `.prettierrc` (or `package.json`'s `prettier` key) is read

@@ -17,5 +17,12 @@ export function storeFolderUri(store: string): monaco.Uri {
 
 /** Serve the workspace folder from the file store's own API (design §12.1). */
 export function registerStoreFilesystem(store: string): void {
-  registerStoreFileSystem(new StoreFiles(store, api));
+  const files = new StoreFiles(store, api);
+  registerStoreFileSystem(files);
+  // There is no watcher over an HTTP file API, so the IDE cannot be told when the
+  // store changes under it. Regaining focus is the cheapest honest approximation:
+  // it is the moment an admin is most likely to have just done something in
+  // another tab — pulled the git store, edited in the file manager, run a build —
+  // and it costs one listing per directory they then look at.
+  window.addEventListener("focus", () => files.forgetEverything());
 }
