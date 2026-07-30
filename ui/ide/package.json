@@ -34,6 +34,7 @@
     "@codingame/monaco-vscode-output-service-override": "^36.0.0",
     "@codingame/monaco-vscode-preferences-service-override": "^36.0.0",
     "@codingame/monaco-vscode-quickaccess-service-override": "^36.0.0",
+    "@codingame/monaco-vscode-scm-service-override": "^36.0.0",
     "@codingame/monaco-vscode-search-service-override": "^36.0.0",
     "@codingame/monaco-vscode-secret-storage-service-override": "^36.0.0",
     "@codingame/monaco-vscode-storage-service-override": "^36.0.0",

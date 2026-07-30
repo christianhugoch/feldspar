@@ -82,6 +82,11 @@ class SocketLanguageClient extends BaseLanguageClient {
  */
 export function registerLanguageClient(store: string): vscode.Disposable {
   const socket = new WebSocket(languageServerUrl(window.location, store));
+  // `{ log: true }`: the client writes levelled records, and a plain output
+  // channel would drop the levels on the floor. Created here rather than in
+  // `clientOptions` so that stopping the client takes its channel with it — a
+  // restart (a branch switch) would otherwise leave one behind per switch.
+  const output = vscode.window.createOutputChannel("TypeScript (Saltcorn)", { log: true });
   let client: SocketLanguageClient | null = null;
   let started = false;
 
@@ -91,7 +96,7 @@ export function registerLanguageClient(store: string): vscode.Disposable {
     client = new SocketLanguageClient(
       "saltcorn-typescript",
       "TypeScript (Saltcorn)",
-      clientOptions(store),
+      clientOptions(store, output),
       {
         reader: new WebSocketMessageReader(connection),
         writer: new WebSocketMessageWriter(connection),
@@ -119,14 +124,42 @@ export function registerLanguageClient(store: string): vscode.Disposable {
     client = null;
   });
 
-  return new vscode.Disposable(() => {
+  const disposable = new vscode.Disposable(() => {
     void client?.stop();
     socket.close();
+    output.dispose();
   });
+  current = disposable;
+  return disposable;
+}
+
+/**
+ * The client this page is running, so that something which invalidates the
+ * server's whole view of the project can replace it.
+ *
+ * One page edits one store (§12.1, decision 3), so one client is the whole of
+ * the state there is to keep.
+ */
+let current: vscode.Disposable | null = null;
+
+/**
+ * Stop the language client and start a fresh one.
+ *
+ * What this is for is a **branch switch**: the working copy's every file may
+ * have changed at once, and the server holds an in-memory project built from the
+ * old ones. Restarting is one process (§12.1) and is cheaper — in reasoning as
+ * much as in milliseconds — than working out which of its beliefs survived.
+ * Nothing else needs it: an ordinary save is synchronised by the protocol, and a
+ * pull's changes are on the disk the server is reading from.
+ */
+export function restartLanguageClient(store: string): void {
+  current?.dispose();
+  current = null;
+  registerLanguageClient(store);
 }
 
 /** What the client tells the server about the workspace it is opening. */
-function clientOptions(store: string): LanguageClientOptions {
+function clientOptions(store: string, output: vscode.LogOutputChannel): LanguageClientOptions {
   return {
     // Scheme-qualified: the store's files are `file:` URIs served by the
     // filesystem provider (§12.1), and nothing else in the workbench — VS Code's
@@ -141,11 +174,7 @@ function clientOptions(store: string): LanguageClientOptions {
     // translates between this and the store's real directory, and neither end
     // ever sees the other's paths.
     workspaceFolder: { uri: storeFolderUri(store), name: store, index: 0 },
-    // `{ log: true }`: the client writes levelled records, and a plain output
-    // channel would drop the levels on the floor.
-    outputChannel: vscode.window.createOutputChannel("TypeScript (Saltcorn)", {
-      log: true,
-    }),
+    outputChannel: output,
     // A dead socket cannot be revived by restarting the client on top of it, and
     // a client that keeps trying turns one honest failure into a stream of
     // notifications. The `close` handler above has already said what happened.

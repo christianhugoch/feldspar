@@ -15,8 +15,19 @@ import type {
 } from "@codingame/monaco-vscode-api/extensions";
 
 import { BUILD_COMMAND, registerBuildCommand } from "./build";
+import type { StoreFileSystemProvider } from "./fileSystemProvider";
 import { registerPrettierFormatter } from "./formatter";
+import { StoreGit } from "./git";
 import { registerLanguageClient } from "./languageClient";
+import {
+  CHECKOUT_COMMAND,
+  COMMIT_COMMAND,
+  GIT_STORE_CONTEXT,
+  PULL_COMMAND,
+  PUSH_COMMAND,
+  REFRESH_COMMAND,
+  registerSourceControl,
+} from "./sourceControl";
 import type { StoreFiles } from "./storeFiles";
 
 /**
@@ -41,7 +52,33 @@ const MANIFEST: IExtensionManifest = {
         category: "Saltcorn",
         icon: "$(tools)",
       },
+      { command: COMMIT_COMMAND, title: "Commit", category: "Git", icon: "$(check)" },
+      { command: PULL_COMMAND, title: "Pull", category: "Git", icon: "$(cloud-download)" },
+      { command: PUSH_COMMAND, title: "Push", category: "Git", icon: "$(cloud-upload)" },
+      { command: CHECKOUT_COMMAND, title: "Switch Branch…", category: "Git", icon: "$(git-branch)" },
+      { command: REFRESH_COMMAND, title: "Refresh", category: "Git", icon: "$(refresh)" },
     ],
+    // The Source Control view's title bar, and the palette. Both are gated on
+    // the same context key, which is set only for a store that is a git working
+    // copy: a local-directory store must not be offered a Pull that can only
+    // fail. `navigation` is the group that renders as icons rather than as an
+    // overflow menu.
+    menus: {
+      "scm/title": [
+        { command: COMMIT_COMMAND, group: "navigation", when: `${GIT_STORE_CONTEXT}` },
+        { command: REFRESH_COMMAND, group: "navigation", when: `${GIT_STORE_CONTEXT}` },
+        { command: PULL_COMMAND, group: "navigation", when: `${GIT_STORE_CONTEXT}` },
+        { command: PUSH_COMMAND, group: "navigation", when: `${GIT_STORE_CONTEXT}` },
+        { command: CHECKOUT_COMMAND, group: "navigation", when: `${GIT_STORE_CONTEXT}` },
+      ],
+      commandPalette: [
+        { command: COMMIT_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+        { command: PULL_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+        { command: PUSH_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+        { command: CHECKOUT_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+        { command: REFRESH_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+      ],
+    },
   },
 };
 
@@ -74,6 +111,12 @@ export function declareSaltcornExtension(): RegisterLocalProcessExtensionResult 
 export async function activateSaltcornExtension(
   extension: RegisterLocalProcessExtensionResult,
   files: StoreFiles,
+  provider: StoreFileSystemProvider,
+  /**
+   * The store's git side, or `null` when it is not a working copy — which is
+   * what decides whether there is a Source Control view at all (§12.1).
+   */
+  git: StoreGit | null,
 ): Promise<void> {
   // The failure above is a *hang*, not a throw: the workbench comes up looking
   // perfectly healthy while none of this ever runs, which is what made it cost an
@@ -90,7 +133,11 @@ export async function activateSaltcornExtension(
     window.clearTimeout(overdue);
   }
   registerPrettierFormatter(files);
-  registerBuildCommand(files);
+  // Source control first, so the Build command can be handed its refresh: a
+  // build writes the generated client into the source tree and a bundle into
+  // `dist/`, which is exactly the kind of change the Changes group must show.
+  const sourceControl = git === null ? null : registerSourceControl(files, provider, git);
+  registerBuildCommand(files, sourceControl?.refresh);
   // Last, and not awaited: prettier, the Build command and the grammars are the
   // capabilities every store has, and a store that cannot host a language server
   // (§12.1) must still get all of them. The client says so for itself when the

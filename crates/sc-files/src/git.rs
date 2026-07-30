@@ -50,6 +50,7 @@ use sc_types::{Attrs, BasicType, FormField, Operation, OperationScope};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+use crate::backend::OperationOutcome;
 use crate::def::{
     ATTR_CLONE_PATH, CFG_BRANCH, CFG_KEY_PATH, CFG_PUBLIC_KEY, CFG_URL, FileStoreDef, GIT_BACKEND,
 };
@@ -98,7 +99,9 @@ pub fn data_dir() -> Result<PathBuf> {
             });
     }
     let home = std::env::var("HOME").map_err(|_| {
-        Error::config("cannot decide where to keep git clones: neither `SC_DATA_DIR` nor `HOME` is set")
+        Error::config(
+            "cannot decide where to keep git clones: neither `SC_DATA_DIR` nor `HOME` is set",
+        )
     })?;
     if cfg!(target_os = "macos") {
         return Ok(PathBuf::from(home).join("Library/Application Support/Saltcorn"));
@@ -279,6 +282,10 @@ pub struct GitStatus {
     pub branch: String,
     /// One `git status --porcelain` line per changed path.
     pub changes: Vec<String>,
+    /// Every branch that can be checked out: the local ones, plus the names of
+    /// remote-tracking branches with no local counterpart — which `git checkout`
+    /// creates a tracking branch for, so they are switchable in one step.
+    pub branches: Vec<String>,
     /// The last commit, as `<short hash> <subject> (<author>, <when>)`; empty in
     /// a repository with no commits yet.
     pub last_commit: String,
@@ -519,7 +526,21 @@ impl GitRepo {
         }
         let branch = self.current_branch().await?;
         let changes = self
-            .run(&self.root, &["status", "--porcelain"])
+            // Two flags, both so that a change can be *addressed* rather than
+            // only counted. `core.quotepath=false` keeps a non-ASCII path as
+            // itself instead of C-style `\303\251` escapes; `--untracked-files=all`
+            // names each new file rather than collapsing a new directory to
+            // `notes/`, which is not a path anything can open.
+            .run(
+                &self.root,
+                &[
+                    "-c",
+                    "core.quotepath=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+            )
             .await?
             .output
             .lines()
@@ -527,16 +548,15 @@ impl GitRepo {
             .map(str::to_owned)
             .collect();
         let last_commit = self
-            .run(
-                &self.root,
-                &["log", "-1", "--pretty=%h %s (%an, %ar)"],
-            )
+            .run(&self.root, &["log", "-1", "--pretty=%h %s (%an, %ar)"])
             .await?;
         let (ahead, behind) = self.tracking().await?;
+        let branches = self.branches().await?;
         Ok(GitStatus {
             cloned: true,
             branch,
             changes,
+            branches,
             last_commit: if last_commit.success {
                 last_commit.output
             } else {
@@ -576,6 +596,79 @@ impl GitRepo {
         let ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         let behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         Ok((ahead, behind))
+    }
+
+    /// Every branch that can be checked out (see [`GitStatus::branches`]), in
+    /// the order git lists them: local branches first, then remote-only names.
+    ///
+    /// A remote-tracking branch is offered under its **short** name (`origin/`
+    /// stripped) because that is the name `git checkout` wants: given one that
+    /// matches exactly one remote, git creates the local tracking branch itself.
+    /// `HEAD` is dropped — `origin/HEAD` is a symbolic ref, not a branch someone
+    /// means to switch to.
+    ///
+    /// A repository with no commits has no branches to list and says so with an
+    /// empty list rather than an error, exactly as [`status`](GitRepo::status)
+    /// does for the other things such a repository does not have.
+    pub async fn branches(&self) -> Result<Vec<String>> {
+        self.require_cloned()?;
+        let local = self
+            .run(&self.root, &["branch", "--format=%(refname:short)"])
+            .await?;
+        let mut names: Vec<String> = if local.success {
+            local
+                .output
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let remote = self
+            .run(
+                &self.root,
+                &["branch", "--remotes", "--format=%(refname:short)"],
+            )
+            .await?;
+        if remote.success {
+            for line in remote.output.lines() {
+                let full = line.trim();
+                // `origin/main` → `main`; anything without a remote prefix is
+                // not a name checkout would understand and is left alone.
+                let Some((_, short)) = full.split_once('/') else {
+                    continue;
+                };
+                if short.is_empty() || short == "HEAD" || full.contains(" -> ") {
+                    continue;
+                }
+                if !names.iter().any(|known| known == short) {
+                    names.push(short.to_owned());
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    /// Switch to `branch`, creating it from the current head when `create`.
+    ///
+    /// Plainly `git checkout`: **no `--force`, no stash**. A switch that would
+    /// discard uncommitted work fails with git's own refusal, which names the
+    /// files in the way and is the answer an admin needs — the alternative is an
+    /// editor that silently eats the change someone just made.
+    pub async fn checkout(&self, branch: &str, create: bool) -> Result<GitOutput> {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            return Err(Error::invalid("a checkout needs a branch name"));
+        }
+        let mut args = vec!["checkout"];
+        if create {
+            args.push("-b");
+        }
+        args.push(branch);
+        self.checked(&args, "checkout").await
     }
 
     /// Whether the repository resolves a committer identity (from its own
@@ -774,6 +867,13 @@ pub const OP_PUSH: &str = "push";
 pub const OP_COMMIT: &str = "commit";
 /// The `message` argument of [`OP_COMMIT`].
 pub const ARG_MESSAGE: &str = "message";
+/// The name of the operation that switches branch.
+pub const OP_CHECKOUT: &str = "checkout";
+/// The `branch` argument of [`OP_CHECKOUT`].
+pub const ARG_BRANCH: &str = "branch";
+/// The `create` argument of [`OP_CHECKOUT`]: make the branch rather than
+/// expecting it to exist.
+pub const ARG_CREATE: &str = "create";
 
 /// What the git backend offers beyond its settings (§6.2's [`Operation`]).
 ///
@@ -826,10 +926,21 @@ pub fn git_operations() -> Vec<Operation> {
         Operation::new(OP_COMMIT, OperationScope::Instance)
             .label("Commit all changes")
             .description("Stages everything in the working copy and commits it.")
+            .input([FormField::new(ARG_MESSAGE, BasicType::Text)
+                .label("Commit message")
+                .required()]),
+        Operation::new(OP_CHECKOUT, OperationScope::Instance)
+            .label("Switch branch")
+            .description(
+                "Checks out another branch. Uncommitted changes that the switch would \
+                 overwrite stop it — commit or pull them first.",
+            )
             .input([
-                FormField::new(ARG_MESSAGE, BasicType::Text)
-                    .label("Commit message")
+                FormField::new(ARG_BRANCH, BasicType::Text)
+                    .label("Branch")
                     .required(),
+                FormField::new(ARG_CREATE, BasicType::Bool)
+                    .label("Create the branch from the current one"),
             ]),
     ]
 }
@@ -848,52 +959,144 @@ pub(crate) async fn run_git_operation(
     def: &mut FileStoreDef,
     operation: &str,
     input: &Attrs,
-) -> Result<String> {
+) -> Result<OperationOutcome> {
     if operation == OP_GENERATE_KEY {
         // The one operation that must work with no repository and no clone: it
         // is what makes reaching the repository possible in the first place.
         let key = generate_deploy_key(&def.name).await?;
         record_deploy_key(def, &key);
-        return Ok(format!(
+        return Ok(OperationOutcome::text(format!(
             "Generated a deploy key. Add this to the repository's deploy keys:\n\n{}",
             key.public_key
-        ));
+        )));
     }
 
     let repo = GitRepo::from_def(def)?;
-    match operation {
-        OP_STATUS => Ok(describe(&repo.status().await?, &repo)),
+    let text = match operation {
+        OP_STATUS => describe(&repo.status().await?, &repo),
         OP_CLONE => {
             // Recorded before the clone runs, so the location survives a later
             // rename — which would otherwise re-derive a fresh directory and
             // abandon this working copy.
             record_clone_path(def, repo.root());
             let out = repo.ensure_cloned().await?;
-            Ok(format!(
+            format!(
                 "{}\n\n{}",
                 out.output,
                 describe(&repo.status().await?, &repo)
-            ))
+            )
         }
-        OP_PULL => Ok(repo.pull().await?.output),
-        OP_PUSH => Ok(repo.push().await?.output),
+        OP_PULL => repo.pull().await?.output,
+        OP_PUSH => repo.push().await?.output,
+        OP_CHECKOUT => {
+            let branch = input
+                .get(ARG_BRANCH)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let create = input
+                .get(ARG_CREATE)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            repo.checkout(branch, create).await?.output
+        }
         OP_COMMIT => {
             let message = input
                 .get(ARG_MESSAGE)
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
             let outcome = repo.commit_all(message).await?;
-            Ok(if outcome.committed {
+            if outcome.committed {
                 outcome.output
             } else {
                 // Not a failure — see `CommitOutcome`. Said plainly, because
                 // git's own "nothing to commit, working tree clean" arrives
                 // through an error path and would read as one.
                 "Nothing to commit — the working copy has no changes.".to_owned()
-            })
+            }
         }
-        other => Err(Error::invalid(format!("unknown git operation `{other}`"))),
+        other => return Err(Error::invalid(format!("unknown git operation `{other}`"))),
+    };
+
+    // Every one of these leaves the working tree in a state a source-control
+    // view wants to redraw from, and the operation has just proved the
+    // repository is reachable — so the state rides back with the outcome rather
+    // than costing the caller a second request. Best-effort: the operation
+    // succeeded, and a status that will not compute is not a reason to report it
+    // as having failed.
+    let outcome = OperationOutcome::text(text);
+    Ok(match repo.status().await {
+        Ok(status) => outcome.with_data(status_payload(&status)),
+        Err(_) => outcome,
+    })
+}
+
+/// A [`GitStatus`] as the data an SCM view can draw: the same facts as
+/// [`describe`]'s prose, plus the porcelain lines split into a status code and a
+/// path, because a view has to address each changed file by name.
+///
+/// The **shape is git's**, and deliberately so: this is the payload of the git
+/// backend's operations, not a vocabulary every backend has to fit into. A
+/// backend with a different idea of "changed" describes it its own way, and a
+/// client that does not recognise the shape has `output` — which is why `data`
+/// is optional and why nothing but the IDE's git view reads it.
+fn status_payload(status: &GitStatus) -> serde_json::Value {
+    serde_json::json!({
+        "cloned": status.cloned,
+        "branch": status.branch,
+        "branches": status.branches,
+        "ahead": status.ahead,
+        "behind": status.behind,
+        "last_commit": status.last_commit,
+        "changes": status
+            .changes
+            .iter()
+            .filter_map(|line| parse_change(line))
+            .map(|change| serde_json::json!({ "status": change.status, "path": change.path }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// One changed path, as `git status --porcelain` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitChange {
+    /// The two-character `XY` code: index status, then working-tree status —
+    /// `??` for untracked, ` M` for modified but unstaged, and so on. Passed
+    /// through as git wrote it, since a view showing "M" is showing git's letter.
+    pub status: String,
+    /// The path, relative to the repository root.
+    pub path: String,
+}
+
+/// Split one porcelain line into its code and its path, or `None` for a line too
+/// short to be one.
+///
+/// A rename reads `R  old -> new`, and the path that matters is the **new** one:
+/// it is what the file is called now and therefore what an editor can open. The
+/// quotes git puts round a path needing them are stripped, so callers see the
+/// name rather than the encoding (status is read with `core.quotepath=false`, so
+/// what is inside them is already the path itself).
+pub fn parse_change(line: &str) -> Option<GitChange> {
+    if line.len() < 4 {
+        return None;
     }
+    let (code, rest) = line.split_at(2);
+    let path = rest.trim_start();
+    let path = match path.split_once(" -> ") {
+        Some((_, after)) => after,
+        None => path,
+    };
+    let path = path.trim();
+    let path = path
+        .strip_prefix('"')
+        .and_then(|p| p.strip_suffix('"'))
+        .unwrap_or(path);
+    if path.is_empty() {
+        return None;
+    }
+    Some(GitChange {
+        status: code.to_owned(),
+        path: path.to_owned(),
+    })
 }
 
 /// A working tree's state as a few lines of prose for the admin.
@@ -984,7 +1187,10 @@ mod tests {
         temp_env(|| {
             unsafe { std::env::set_var(DATA_DIR_ENV, "/tmp/sc-data") };
             assert_eq!(data_dir().unwrap(), PathBuf::from("/tmp/sc-data"));
-            assert_eq!(clone_dir().unwrap(), PathBuf::from("/tmp/sc-data/git-stores"));
+            assert_eq!(
+                clone_dir().unwrap(),
+                PathBuf::from("/tmp/sc-data/git-stores")
+            );
             assert_eq!(key_dir().unwrap(), PathBuf::from("/tmp/sc-data/keys"));
         });
     }

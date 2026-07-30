@@ -15,7 +15,8 @@ remain in [docs/GOALS.md](./docs/GOALS.md) and
 area, command palette, find-in-files, keybindings — editing the real store. In it they format a
 file with **prettier**, see **TypeScript errors** for the project as `tsc` would report them, and
 **build the application** whose source that store holds, with a failed build's diagnostics landing
-in the Problems panel by file and line.
+in the Problems panel by file and line. When the store is a git working copy, they also see what
+they have changed, commit it and exchange it with the remote without leaving the workbench.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -140,12 +141,85 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] **Done when** typing a type error in `src/App.tsx` underlines it, with completions and
       go-to-definition working across the project's own files and its installed dependencies.
 
-## Phase 5 — Documentation
+## Phase 5 — Source control: the minimal SCM view
 
-- [ ] `docs/tutorial-ide.md`: open a store, edit the React app from the
-      [React tutorial](./docs/tutorial-react-todo.md), format, fix a type error, build.
-- [ ] §12.1 revised to describe what was built where it deviates from what was planned.
-- [ ] CHANGELOG entries as each phase lands.
+Not VS Code's full SCM story. The subset is: **see what changed, commit it, exchange with the
+remote, and switch branch.** No index (stage/unstage per file or per hunk), no diff editor, no
+gutter quick-diff, no history or blame, no discard, no merge/rebase, no conflict resolution — each
+of those needs something the backend does not have (a way to read a blob at a revision, a log
+endpoint, a merge driver), and none of them is what stops an admin committing the file they just
+edited. Most of the operations exist already as declared backend operations (`status`, `clone`,
+`pull`, `push`, `commit`, §14.1), so this phase is mostly the view over them; **checkout** is the
+one genuinely new piece of git.
+
+- [x] Register `@codingame/monaco-vscode-scm-service-override` (36.0.0, the workbench's own
+      version) so a source-control provider can exist at all, and create one **only for a git
+      working copy** — `listFileStores`' `is_git_repo`, plus the id the operations are addressed
+      by. A store without one gets no provider, no commands and no branch in the status bar.
+      *What was planned and is not possible:* leaving the **viewlet** out for such a store. The
+      Source Control view and its activity-bar icon come from the workbench itself, not from this
+      service — omitting the service was tried and changes nothing but whether the view can work —
+      so a plain directory shows VS Code's own "No source control providers registered."
+- [x] Structured status. `status`'s output is deliberately prose, and §14.1's argument for that
+      holds — the admin screen must not learn what a branch is. So add an **optional** structured
+      payload to `RunFileStoreOperationResponse` (`data`, absent for every backend that does not
+      fill it), and have git's `status` fill it from the `GitStatus` it already builds: branch,
+      ahead/behind, last commit, and the porcelain lines split into `{ status, path }`. The admin
+      UI keeps rendering `output` and is untouched; the IDE stops parsing prose.
+- [x] The source control provider: `vscode.scm.createSourceControl` over the workspace folder with
+      one resource group, **Changes**, built from that payload — each resource state addressed by
+      the file's workspace URI, so selecting one opens the editor (a diff would need `HEAD`, which
+      is out of scope above). `inputBox` takes the commit message; `acceptInputCommand` is Commit,
+      calling `runFileStoreOperation(store, "commit", { message })` and refusing an empty message
+      client-side rather than making the round trip to be told.
+- [x] **Pull**, **Push** and **Refresh** as commands contributed by the existing in-page extension
+      manifest, with `menus["scm/title"]` entries so they are the view's title-bar buttons, each
+      running its declared operation and reporting the git output as a notification — a failed push
+      shows git's own text, which is the actionable part.
+- [x] Refresh discipline. A pull changes files under the editor, exactly as a build does: every
+      operation drops what the filesystem layer remembers (`StoreFiles::forgetEverything`, as the
+      build command already does) and re-runs `status` afterwards. Status also re-runs on the
+      IDE's own saves and after a build, since those are what make the working copy dirty.
+- [x] **`sc-files`: a `checkout` operation** alongside the others in `git_operations()` — input a
+      `branch` name plus a Bool `create` (`git checkout -b`), so the declared-input validation of
+      §6.2 catches an empty name exactly as it catches an empty commit message. It runs plain
+      `git checkout`: **no `--force` and no automatic stash**, so a switch that would clobber
+      uncommitted work fails with git's own refusal, which is the right answer and the reason
+      commit and pull come first in this list. `git checkout <name>` already does the right thing
+      for a branch that exists only on the remote, so no separate track-remote flag.
+- [x] The branch list rides the same `status` payload (local branches, plus remote-tracking names
+      with no local counterpart) rather than becoming a second operation: `status` already runs on
+      open and after every operation, so the picker is never staler than the view around it.
+- [x] Branch and ahead/behind in the status bar via `sourceControl.statusBarCommands`, bound to a
+      **Checkout** command: pressing it opens a `showQuickPick` of that branch list with a "Create
+      new branch…" entry at the top, which prompts for a name and runs `checkout` with `create`.
+      Same command in `menus["scm/title"]` and the palette. This is the piece that decides whether
+      to pull, and the piece that switches — one control, as in desktop VS Code.
+- [x] A branch switch changes the **whole tree** at once, which is the strongest version of the
+      refresh problem: drop the filesystem cache as every operation does, re-run `status`, and
+      restart the language client (`registerLanguageClient` returns a `Disposable`; disposing and
+      re-registering is one process and cheaper than reasoning about which of its in-memory files
+      survived). Editors open on a file that the new branch changed reload from the provider; one
+      open on a file the new branch does not have is left to VS Code's own missing-file handling
+      rather than closed behind the admin's back.
+- [x] Tests: Rust — the `status` operation's structured payload names the changed file, its status
+      letter, the branch and the branch list for a working copy with one uncommitted edit, and
+      stays absent for the local backend; `checkout` switches an existing branch, creates one with
+      `create`, and fails with git's message rather than discarding work when the tree is dirty;
+      and the endpoint carries `data` over HTTP, checkout included (`git_store_api.rs`).
+      `vitest` — the SCM model against a stubbed client: porcelain lines to resource states, commit
+      passing the message through, an empty message rejected, the branch picker's entries built
+      from the payload, and no source control created for a non-git store.
+- [x] **Done when** an admin edits a file in the workbench, sees it appear under Changes with the
+      branch in the status bar, types a message, commits and pushes, and the repository has the
+      commit — then switches to another branch from the status bar and the tree, the editors and
+      the TypeScript diagnostics are all the new branch's.
+
+## Phase 6 — Documentation
+
+- [ ] update the [React tutorial](./docs/tutorial-react-todo.md) to describe format, fix a type error, build.
+- [ ] §12.1 revised to describe what was built where it deviates from what was planned, including
+      the SCM view's subset and why the rest was left out.
 
 ---
 
@@ -153,8 +227,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 - **A server-side search endpoint.** Find-in-files walks the tree through the filesystem provider,
   which is correct but costs one request per directory; a store-side search would be one request.
-- **The SCM panel.** A git store already has pull/push/commit as backend operations (§14.1) driven
-  from the SPA; surfacing them as VS Code's own source-control view is a later, separate job.
+- **The rest of the SCM panel.** Phase 5 ships the minimal subset (changed files, commit, pull,
+  push, checkout). Staging by file or hunk, a diff against `HEAD` and the gutter's quick-diff,
+  history and blame, discard, merge/rebase and conflict resolution all wait on backend operations
+  that do not exist yet — reading a blob at a revision, listing the log, a merge that can report
+  and resolve conflicts.
 - **A terminal.** It implies handing an admin a shell on the server, which is a security decision
   of its own and not one this milestone needs to take.
 - **`npm install` from the IDE.** The build already installs when `node_modules` is missing

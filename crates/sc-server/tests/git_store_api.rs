@@ -198,12 +198,7 @@ async fn setup() -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
 }
 
 /// Run an instance-scope operation and return its output, asserting it worked.
-async fn operation(
-    client: &mut Client,
-    id: &str,
-    name: &str,
-    input: Option<Value>,
-) -> String {
+async fn operation(client: &mut Client, id: &str, name: &str, input: Option<Value>) -> String {
     let (status, body) = client
         .send(
             "POST",
@@ -213,6 +208,20 @@ async fn operation(
         .await;
     assert_eq!(status, StatusCode::OK, "{name}: {body}");
     body["output"].as_str().unwrap_or_default().to_owned()
+}
+
+/// The same, keeping the whole response — the structured `data` the IDE's
+/// source-control view reads (§12.1) as well as the prose the admin UI renders.
+async fn operation_body(client: &mut Client, id: &str, name: &str, input: Option<Value>) -> Value {
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("/api/file-stores/{id}/operations/{name}"),
+            Some(json!({ "input": input.unwrap_or_else(|| json!({})) })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    body
 }
 
 /// Create a git store named `name` for `url`, as the form would.
@@ -261,7 +270,15 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
     let names: Vec<&str> = ops.iter().map(|o| o["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        ["generate_deploy_key", "status", "clone", "pull", "push", "commit"]
+        [
+            "generate_deploy_key",
+            "status",
+            "clone",
+            "pull",
+            "push",
+            "commit",
+            "checkout"
+        ]
     );
     let by_name = |n: &str| ops.iter().find(|o| o["name"] == json!(n)).unwrap();
     // The key generator runs against unsaved settings — it has to, because
@@ -305,8 +322,7 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
 
     // Creating the store clones it — that is the whole difference from a local
     // store, whose directory has to exist already.
-    let (status, created) =
-        create_git_store(&mut client, "site", &origin.to_string_lossy()).await;
+    let (status, created) = create_git_store(&mut client, "site", &origin.to_string_lossy()).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["connected"], json!(true));
     assert_eq!(created["error"], Value::Null);
@@ -354,9 +370,22 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
         .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let report = operation(&mut client, &id, "status", None).await;
+    let body = operation_body(&mut client, &id, "status", None).await;
+    let report = body["output"].as_str().unwrap();
     assert!(report.contains("1 uncommitted change(s):"), "{report}");
     assert!(report.contains("index.md"), "{report}");
+
+    // The same answer, structured, for the client that has to *act* on it: the
+    // IDE's Source Control view cannot list changed files from that paragraph.
+    // The admin UI reads `output` and never looks at this (§12.1, §14.1).
+    let data = &body["data"];
+    assert_eq!(data["branch"], json!("main"), "{data}");
+    assert_eq!(data["branches"], json!(["main"]), "{data}");
+    assert_eq!(
+        data["changes"],
+        json!([{ "status": "??", "path": "index.md" }]),
+        "{data}"
+    );
 
     // Commit everything, with the admin's message — an argument the operation
     // declared, validated against that declaration like any setting.
@@ -427,6 +456,48 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
     assert_eq!(status, StatusCode::OK);
     assert_eq!(file["text"], json!("elsewhere\n"));
 
+    // Switching branch is a declared operation like the rest, with its arguments
+    // validated the same way — which is what puts a branch picker in the IDE
+    // (§12.1) without either end growing a git-shaped endpoint.
+    let body = operation_body(
+        &mut client,
+        &id,
+        "checkout",
+        Some(json!({ "branch": "draft", "create": true })),
+    )
+    .await;
+    assert_eq!(body["data"]["branch"], json!("draft"), "{body}");
+    let branches = body["data"]["branches"].as_array().unwrap();
+    assert!(
+        branches.contains(&json!("draft")) && branches.contains(&json!("main")),
+        "{body}"
+    );
+
+    // And back, by name alone.
+    let body = operation_body(
+        &mut client,
+        &id,
+        "checkout",
+        Some(json!({ "branch": "main" })),
+    )
+    .await;
+    assert_eq!(body["data"]["branch"], json!("main"), "{body}");
+
+    // A checkout with no branch is refused by its declared argument, in the same
+    // place and with the same shape as a commit with no message.
+    let (status, refused) = client
+        .send(
+            "POST",
+            &format!("/api/file-stores/{id}/operations/checkout"),
+            Some(json!({ "input": { } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        serde_json::to_string(&refused).unwrap().contains("branch"),
+        "{refused}"
+    );
+
     Ok(())
 }
 
@@ -467,9 +538,7 @@ async fn a_deploy_key_is_generated_before_the_store_is_saved() -> sc_error::Resu
     let key_path = PathBuf::from(config["key_path"].as_str().unwrap());
     assert!(key_path.is_file());
     assert!(
-        !serde_json::to_string(&res)
-            .unwrap()
-            .contains("PRIVATE KEY"),
+        !serde_json::to_string(&res).unwrap().contains("PRIVATE KEY"),
         "the private key must not be returned: {res}"
     );
     // Its output is the public key, for the admin to copy.
@@ -530,8 +599,7 @@ async fn a_failed_clone_creates_nothing_and_the_retry_succeeds() -> sc_error::Re
     let (mut client, catalog, _db) = setup().await?;
     let missing = data_dir().join("no-such-repository");
 
-    let (status, body) =
-        create_git_store(&mut client, "retried", &missing.to_string_lossy()).await;
+    let (status, body) = create_git_store(&mut client, "retried", &missing.to_string_lossy()).await;
     // Refused, with git's own message — which is what tells the admin what to
     // change.
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

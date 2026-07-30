@@ -2,6 +2,72 @@
 
 Changes in reverse chronological order.
 
+## Source control in the IDE: the minimal SCM view
+
+A store that is a git working copy now has VS Code's **Source Control** view in the IDE: the
+files you have changed, a message box, Commit / Pull / Push / Refresh as the view's title
+buttons, and the branch in the status bar with a picker that switches it. The subset is
+deliberate and it is stated in one line — **see what changed, commit it, exchange it with the
+remote, switch branch** — because everything else an SCM panel usually offers needs something
+the file-store backend has no operation for.
+
+**What is left out, and why.** No index (stage and unstage per file or per hunk), no diff
+editor and no gutter quick-diff, no history or blame, no discard, no merge or rebase, no
+conflict resolution. The first three all want the same missing thing: a way to read a blob at
+a revision — there is no endpoint that serves `HEAD:src/App.tsx`, so a "diff" would be a diff
+against nothing. Clicking a changed file therefore *opens* it, which is the honest act
+available. None of these is what stops an admin committing the file they just edited.
+
+**The operations were already there; this is the view over them.** `status`, `clone`, `pull`,
+`push` and `commit` are declared backend operations (§14.1) and have been driven from the admin
+SPA since git stores landed. One is new — **`checkout`**, taking a `branch` name and a `create`
+flag, so a missing branch name is caught by the same declared-input validation that catches a
+missing commit message. It runs plain `git checkout`: **no `--force`, no automatic stash**. A
+switch that would overwrite uncommitted work fails with git's own refusal, naming the files,
+because the alternative is an editor that silently eats what someone just typed.
+
+**An operation now answers twice.** `status`'s output is prose, and §14.1's reason for that
+stands: a screen that rendered branches and ahead/behind counts would be a screen that knows
+what those are, and could not render a plugin backend's status at all. But a source-control
+view cannot list changed files from a paragraph of English. So `RunFileStoreOperationResponse`
+grew an **optional** `data` field, which the git backend fills with the working copy as
+structure — branch, branch list, ahead/behind, last commit, and the porcelain lines split into
+`{ status, path }`. The admin UI still renders `output` and is untouched; every other backend
+leaves `data` null; the IDE stops parsing prose. Every instance operation carries it, not just
+`status`, because the server computes the state anyway and a view that redrew from a second
+request could disagree with the operation it had just run.
+
+Two flags were added to how status is read, both so a change can be *addressed* rather than
+only counted: `--untracked-files=all`, because a new directory reported as `notes/` is not a
+path anything can open, and `core.quotepath=false`, so a non-ASCII path arrives as itself
+rather than as C-style escapes.
+
+**The refresh discipline is the substance of the client side.** Every operation drops what the
+filesystem layer remembers (`StoreFiles::forgetEverything`, as the Build command already did),
+announces the open documents as changed so a stale editor re-reads, and redraws from the status
+the operation itself reported. A **branch switch** is the strongest case: the whole tree can
+change at once, so it also restarts the language client rather than reasoning about which of
+tsserver's in-memory beliefs survived — one process, and cheaper in thought than the
+alternative. The provider grew an `announceChanged` for this, which is the counterpart to its
+`watch` returning nothing: no watcher can *notice* an outside change, but the IDE sometimes
+**causes** one, and in that moment it knows exactly what a watcher would have told it.
+
+**A store that is not a working copy gets no provider** — no commands in the palette, no title
+buttons, no branch. The planned version of that was to leave the SCM service out entirely for
+such a store; it turns out the Source Control view and its activity-bar icon belong to the
+workbench itself, and omitting the service changes nothing except whether the view can work. So
+the service is registered always, and a plain directory shows VS Code's own "No source control
+providers registered."
+
+Tested on both sides, and driven for real: Rust tests for the payload's shape and for
+`checkout` (switch, create, and the refusal that leaves the working copy alone), an HTTP-level
+test that `data` and `checkout` reach the endpoint, and `vitest` over the browser-side model —
+payload parsing that drops what it cannot use, each operation's request, git's own words
+surviving a failure, name validation, and which stores have source control at all. The whole
+flow was then run in a headless browser against a real repository: edit, Refresh, the file
+appears under Changes, commit (`[other 0dae1a9] commit from the IDE`), push (`branch 'other'
+set up to track 'origin/other'`), and a branch created from the status-bar picker.
+
 ## TypeScript semantics in the IDE: a language server per store
 
 Typing a type error in `src/App.tsx` now underlines it as you type, and completions and

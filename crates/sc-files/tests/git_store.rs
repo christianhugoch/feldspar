@@ -15,10 +15,12 @@ use std::process::Command;
 
 use bytes::Bytes;
 use sc_files::{
-    CFG_BRANCH, DATA_DIR_ENV, FileStore, FileStoreDef, GIT_BACKEND, GitFileStore, GitRepo,
-    clone_path, connect_from_def, generate_deploy_key, record_clone_path,
+    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, CFG_BRANCH, DATA_DIR_ENV, FileStore, FileStoreDef,
+    GIT_BACKEND, GitFileStore, GitRepo, OP_CHECKOUT, OP_COMMIT, OP_STATUS, clone_path,
+    connect_from_def, generate_deploy_key, record_clone_path, run_backend_operation,
     validate_file_store_config,
 };
+use sc_types::Attrs;
 
 /// A fresh unique temp directory for one test.
 fn temp_dir(tag: &str) -> PathBuf {
@@ -132,7 +134,11 @@ async fn a_git_store_clones_serves_commits_and_pushes() {
         "{:?}",
         status.changes
     );
-    assert!(status.last_commit.contains("initial"), "{}", status.last_commit);
+    assert!(
+        status.last_commit.contains("initial"),
+        "{}",
+        status.last_commit
+    );
 
     // Commit everything, with a message.
     let commit = repo.commit_all("add today's notes").await.unwrap();
@@ -149,10 +155,7 @@ async fn a_git_store_clones_serves_commits_and_pushes() {
 
     // Push, and the remote has it.
     repo.push().await.unwrap();
-    assert_eq!(
-        git(&origin, &["show", "main:notes/today.md"]),
-        "hello"
-    );
+    assert_eq!(git(&origin, &["show", "main:notes/today.md"]), "hello");
     let status = repo.status().await.unwrap();
     assert_eq!((status.ahead, status.behind), (0, 0));
 }
@@ -204,8 +207,8 @@ async fn a_branch_setting_checks_out_that_branch() {
     git(&seed, &["commit", "-m", "release 1.0"]);
     git(&seed, &["push", "origin", "release"]);
 
-    let mut def = FileStoreDef::git("app", origin.to_string_lossy().into_owned())
-        .with(CFG_BRANCH, "release");
+    let mut def =
+        FileStoreDef::git("app", origin.to_string_lossy().into_owned()).with(CFG_BRANCH, "release");
     record_clone_path(&mut def, &workspace.join("app"));
     let repo = GitRepo::from_def(&def).unwrap();
     repo.ensure_cloned().await.unwrap();
@@ -255,6 +258,140 @@ async fn operations_on_a_store_that_was_never_cloned_say_so() {
 }
 
 #[tokio::test]
+async fn the_status_operation_carries_the_working_copy_as_data() {
+    // The IDE's source-control view (§12.1) cannot list changed files from a
+    // paragraph of prose, so `status` answers twice: `output` for the admin
+    // screen, `data` for a client that has to act on it. Both, from one run.
+    let origin = origin_with_a_commit("statusdata");
+    let workspace = temp_dir("statusdata-clone");
+    let mut def = git_store_def("app", &origin, &workspace.join("app"));
+    let repo = GitRepo::from_def(&def).unwrap();
+    repo.ensure_cloned().await.unwrap();
+
+    let store = connect_from_def(&def).unwrap();
+    store
+        .write("notes/today.md", Bytes::from_static(b"hello\n"))
+        .await
+        .unwrap();
+
+    let outcome = run_backend_operation(&mut def, OP_STATUS, &Attrs::new())
+        .await
+        .unwrap();
+    // The prose is unchanged and still the whole of what the admin UI renders.
+    assert!(
+        outcome.output.contains("On branch main"),
+        "{}",
+        outcome.output
+    );
+
+    let data = outcome.data.expect("the git backend fills the payload");
+    assert_eq!(data["cloned"], serde_json::json!(true));
+    assert_eq!(data["branch"], serde_json::json!("main"));
+    assert_eq!(data["ahead"], serde_json::json!(0));
+    assert_eq!(data["behind"], serde_json::json!(0));
+    assert!(
+        data["last_commit"].as_str().unwrap().contains("initial"),
+        "{data}"
+    );
+    assert_eq!(
+        data["branches"].as_array().unwrap(),
+        &[serde_json::json!("main")],
+        "{data}"
+    );
+
+    // The porcelain lines, split into what a view addresses a file by: git's own
+    // two-letter code, and the path.
+    let changes = data["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{data}");
+    assert_eq!(changes[0]["status"], serde_json::json!("??"));
+    assert_eq!(changes[0]["path"], serde_json::json!("notes/today.md"));
+
+    // A commit through the same entry point, and the change is gone from the
+    // payload rather than only from the prose.
+    let mut input = Attrs::new();
+    input.insert(ARG_MESSAGE.to_owned(), serde_json::json!("add notes"));
+    let outcome = run_backend_operation(&mut def, OP_COMMIT, &input)
+        .await
+        .unwrap();
+    let data = outcome
+        .data
+        .expect("every instance operation reports the state it left");
+    assert!(data["changes"].as_array().unwrap().is_empty(), "{data}");
+    assert_eq!(data["ahead"], serde_json::json!(1), "{data}");
+}
+
+#[tokio::test]
+async fn a_checkout_switches_branch_creates_one_and_refuses_to_discard_work() {
+    let origin = origin_with_a_commit("checkout");
+    let workspace = temp_dir("checkout-clone");
+    let mut def = git_store_def("app", &origin, &workspace.join("app"));
+    let repo = GitRepo::from_def(&def).unwrap();
+    repo.ensure_cloned().await.unwrap();
+    let clone = workspace.join("app");
+    git(&clone, &["config", "user.email", "test@example.com"]);
+    git(&clone, &["config", "user.name", "Test"]);
+
+    // Create a branch and land a change on it.
+    let mut input = Attrs::new();
+    input.insert(ARG_BRANCH.to_owned(), serde_json::json!("feature"));
+    input.insert(ARG_CREATE.to_owned(), serde_json::json!(true));
+    let outcome = run_backend_operation(&mut def, OP_CHECKOUT, &input)
+        .await
+        .unwrap();
+    let data = outcome.data.unwrap();
+    assert_eq!(data["branch"], serde_json::json!("feature"), "{data}");
+    // Both branches are now switchable, so both are offered.
+    let branches = data["branches"].as_array().unwrap();
+    assert!(
+        branches.contains(&serde_json::json!("main"))
+            && branches.contains(&serde_json::json!("feature")),
+        "{data}"
+    );
+
+    std::fs::write(clone.join("README.md"), "# changed on the branch\n").unwrap();
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "-m", "diverge"]);
+
+    // Switching back to an existing branch needs no `create`.
+    let mut input = Attrs::new();
+    input.insert(ARG_BRANCH.to_owned(), serde_json::json!("main"));
+    let outcome = run_backend_operation(&mut def, OP_CHECKOUT, &input)
+        .await
+        .unwrap();
+    assert_eq!(outcome.data.unwrap()["branch"], serde_json::json!("main"));
+    assert_eq!(
+        std::fs::read_to_string(clone.join("README.md")).unwrap(),
+        "# from the remote\n"
+    );
+
+    // And an uncommitted change the switch would overwrite stops it — with
+    // git's own message, naming the file. No force, no stash: the alternative
+    // is an editor that silently eats what someone just typed.
+    std::fs::write(clone.join("README.md"), "# edited in the IDE\n").unwrap();
+    let mut input = Attrs::new();
+    input.insert(ARG_BRANCH.to_owned(), serde_json::json!("feature"));
+    let err = run_backend_operation(&mut def, OP_CHECKOUT, &input)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("README.md"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(clone.join("README.md")).unwrap(),
+        "# edited in the IDE\n",
+        "the refused checkout must leave the working copy alone"
+    );
+
+    // A branch name that is not there is a failure, not a silent creation.
+    let mut input = Attrs::new();
+    input.insert(ARG_BRANCH.to_owned(), serde_json::json!("nonexistent"));
+    assert!(
+        run_backend_operation(&mut def, OP_CHECKOUT, &input)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn an_empty_commit_message_is_refused() {
     let origin = origin_with_a_commit("nomsg");
     let workspace = temp_dir("nomsg-clone");
@@ -280,7 +417,11 @@ async fn a_generated_deploy_key_is_an_ed25519_key_only_we_can_read() {
         "{}",
         key.public_key
     );
-    assert!(key.public_key.contains("saltcorn:my app"), "{}", key.public_key);
+    assert!(
+        key.public_key.contains("saltcorn:my app"),
+        "{}",
+        key.public_key
+    );
     assert!(!key.public_key.contains('\n'), "one line, to be pasted");
 
     // The private half stays on disk, under the name-derived filename, and is

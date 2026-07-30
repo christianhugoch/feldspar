@@ -28,7 +28,11 @@ export const BUILD_COMMAND = "saltcorn.buildApplication";
  * Contribute the command, its status-bar button and the collection its failures
  * land in.
  */
-export function registerBuildCommand(files: StoreFiles): vscode.Disposable[] {
+export function registerBuildCommand(
+  files: StoreFiles,
+  /** Called once a build has finished, for a view that redraws from the tree. */
+  afterBuild?: () => void,
+): vscode.Disposable[] {
   const output = vscode.window.createOutputChannel("Saltcorn Build");
   const problems = vscode.languages.createDiagnosticCollection("saltcorn-build");
 
@@ -41,7 +45,7 @@ export function registerBuildCommand(files: StoreFiles): vscode.Disposable[] {
   button.show();
 
   const command = vscode.commands.registerCommand(BUILD_COMMAND, () =>
-    build(files, output, problems),
+    build(files, output, problems, afterBuild),
   );
   return [command, button, output, problems];
 }
@@ -51,6 +55,7 @@ async function build(
   files: StoreFiles,
   output: vscode.OutputChannel,
   problems: vscode.DiagnosticCollection,
+  afterBuild?: () => void,
 ): Promise<void> {
   const chosen = await chooseApplication(files.store);
   if (chosen === null) return;
@@ -76,6 +81,8 @@ async function build(
     // something done inside it, and there is no watcher to notice — so what the
     // filesystem remembers is dropped rather than left to expire.
     files.forgetEverything();
+    // And what it wrote is uncommitted work, so the Changes group is now wrong.
+    afterBuild?.();
   }
 }
 

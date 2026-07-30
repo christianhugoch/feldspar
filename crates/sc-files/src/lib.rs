@@ -25,18 +25,18 @@ pub mod xattr;
 
 pub use access::{ROLE_PUBLIC, check_access, effective_min_role, filter_visible};
 pub use backend::{
-    backend_config_spec, backend_operations, connect_from_def, git_config_spec, local_config_spec,
-    registered_backends, run_backend_operation, validate_file_store_config,
+    OperationOutcome, backend_config_spec, backend_operations, connect_from_def, git_config_spec,
+    local_config_spec, registered_backends, run_backend_operation, validate_file_store_config,
 };
 pub use def::{
     ATTR_CLONE_PATH, CFG_BRANCH, CFG_CREATE, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY, CFG_URL,
     FileStoreDef, FileStoreDefId, GIT_BACKEND, LOCAL_BACKEND,
 };
 pub use git::{
-    ARG_MESSAGE, CommitOutcome, DATA_DIR_ENV, DeployKey, GitFileStore, GitOutput, GitRepo,
-    GitStatus, OP_CLONE, OP_COMMIT, OP_GENERATE_KEY, OP_PULL, OP_PUSH, OP_STATUS, clone_dir,
-    clone_path, data_dir, generate_deploy_key, git_operations, key_dir, record_clone_path,
-    record_deploy_key,
+    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, CommitOutcome, DATA_DIR_ENV, DeployKey, GitChange,
+    GitFileStore, GitOutput, GitRepo, GitStatus, OP_CHECKOUT, OP_CLONE, OP_COMMIT, OP_GENERATE_KEY,
+    OP_PULL, OP_PUSH, OP_STATUS, clone_dir, clone_path, data_dir, generate_deploy_key,
+    git_operations, key_dir, parse_change, record_clone_path, record_deploy_key,
 };
 pub use local::LocalFileStore;
 pub use reference::{mime_for_path, validate_file_path};

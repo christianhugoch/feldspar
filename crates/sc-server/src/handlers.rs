@@ -41,10 +41,10 @@ use sc_auth::{
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, AccessRules, Attrs, Catalog, DataField, DataFieldKind,
     FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId, Table, TableId, TableMeta,
-    check_file_store_saveable, connect_file_store_def, delete_file_store, delete_table_meta, file_kind_config_spec,
-    key_kind_config_spec, list_field_meta_for_table, list_file_stores, load_field_meta_by_field,
-    load_file_store, load_file_store_by_name, load_table_meta_by_name, orphan_table_meta,
-    resolve_options, save_field_meta, save_file_store, save_table_meta,
+    check_file_store_saveable, connect_file_store_def, delete_file_store, delete_table_meta,
+    file_kind_config_spec, key_kind_config_spec, list_field_meta_for_table, list_file_stores,
+    load_field_meta_by_field, load_file_store, load_file_store_by_name, load_table_meta_by_name,
+    orphan_table_meta, resolve_options, save_field_meta, save_file_store, save_table_meta,
 };
 use sc_error::{Error, Result};
 use sc_files::{
@@ -780,11 +780,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             };
             require_scope(&backend, &operation, OperationScope::Configure)?;
 
-            let output = run_backend_operation(&mut def, &operation, &object_field(obj, "input")?)
-                .await?;
+            let outcome =
+                run_backend_operation(&mut def, &operation, &object_field(obj, "input")?).await?;
             Ok(HandlerResponse::ok(json!({
                 "config": Json::Object(def.config),
-                "output": output,
+                "output": outcome.output,
+                "data": outcome.data,
             })))
         }
     });
@@ -810,7 +811,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 };
 
                 let before = def.clone();
-                let output = run_backend_operation(&mut def, &operation, &input).await?;
+                let outcome = run_backend_operation(&mut def, &operation, &input).await?;
                 // Only when it actually changed something: an operation that
                 // merely reports (a status) must not rewrite the row on every
                 // screen open.
@@ -823,7 +824,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let _ = connect_file_store_def(&catalog, &def);
                 Ok(HandlerResponse::ok(json!({
                     "config": Json::Object(def.config),
-                    "output": output,
+                    "output": outcome.output,
+                    // Optional and backend-shaped (§14.1): the git backend fills
+                    // it with the working copy's state so the IDE's source
+                    // control view can draw itself; every other backend leaves it
+                    // null and every other client ignores it.
+                    "data": outcome.data,
                     "connected": catalog.file_store(&def.name)?.is_some(),
                 })))
             }

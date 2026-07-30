@@ -25,6 +25,7 @@ import getNotificationServiceOverride from "@codingame/monaco-vscode-notificatio
 import getOutputServiceOverride from "@codingame/monaco-vscode-output-service-override";
 import getPreferencesServiceOverride from "@codingame/monaco-vscode-preferences-service-override";
 import getQuickAccessServiceOverride from "@codingame/monaco-vscode-quickaccess-service-override";
+import getScmServiceOverride from "@codingame/monaco-vscode-scm-service-override";
 import getSearchServiceOverride from "@codingame/monaco-vscode-search-service-override";
 import getSecretStorageServiceOverride from "@codingame/monaco-vscode-secret-storage-service-override";
 import getStatusBarServiceOverride from "@codingame/monaco-vscode-view-status-bar-service-override";
@@ -48,7 +49,9 @@ import "@codingame/monaco-vscode-markdown-basics-default-extension";
 
 import defaultConfiguration from "./user/configuration.json?raw";
 import defaultKeybindings from "./user/keybindings.json?raw";
+import { api } from "./api";
 import { activateSaltcornExtension, declareSaltcornExtension } from "./extension";
+import { storeGit, type FileStoreSummary } from "./git";
 import { configureWorkers } from "./workers";
 import { registerStoreFilesystem, storeFolderUri } from "./workspace";
 
@@ -89,6 +92,13 @@ const services: IEditorOverrideServices = {
   ...getLifecycleServiceOverride(),
   ...getWorkingCopyServiceOverride(),
   ...getExtensionServiceOverride({ enableWorkerExtensionHost: true }),
+  // Source control. What this adds is the ability to *host* a provider: the
+  // Source Control viewlet and its icon are the workbench's own and are there
+  // either way — leaving this out was tried, and all it changes is that the view
+  // cannot work. Whether there is a provider to show is `sourceControl.ts`'s
+  // question, and for a store that is not a git working copy the answer is no,
+  // which VS Code renders as its own "no source control providers" empty state.
+  ...getScmServiceOverride(),
 };
 
 /**
@@ -127,8 +137,18 @@ function constructionOptions(store: string): IWorkbenchConstructionOptions {
   };
 }
 
-/** Boot the workbench for `store` into `container`. */
-export async function bootWorkbench(store: string, container: HTMLElement): Promise<void> {
+/**
+ * Boot the workbench for `summary`'s store into `container`.
+ *
+ * The whole store record rather than its name: source control is addressed by
+ * the store's **id** and offered only for a git working copy, and both facts are
+ * in the listing the page has already read to decide it can open at all.
+ */
+export async function bootWorkbench(
+  summary: FileStoreSummary,
+  container: HTMLElement,
+): Promise<void> {
+  const store = summary.name;
   configureWorkers();
   // Before `initialize`, so the theme is right on the first frame rather than
   // after a flash of the default one.
@@ -136,11 +156,12 @@ export async function bootWorkbench(store: string, container: HTMLElement): Prom
     initUserConfiguration(defaultConfiguration),
     initUserKeybindings(defaultKeybindings),
   ]);
-  const files = registerStoreFilesystem(store);
+  const { files, provider } = registerStoreFilesystem(store);
   // Declared before `initialize` so it is one of the workbench's built-in
   // extensions, and activated after it so the API it hands out has services to
   // talk to. Both halves matter; `extension.ts` says what goes wrong otherwise.
   const extension = declareSaltcornExtension();
+  const git = storeGit(summary, api);
   await initializeVscodeApi(services, container, constructionOptions(store), environment);
-  await activateSaltcornExtension(extension, files);
+  await activateSaltcornExtension(extension, files, provider, git);
 }

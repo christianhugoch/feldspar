@@ -391,6 +391,7 @@ pub fn admin_endpoints() -> EndpointSet {
         .output(TypeSchema::struct_of([
             StructField::new("config", TypeSchema::json()),
             StructField::new("output", TypeSchema::text()),
+            StructField::new("data", TypeSchema::optional(TypeSchema::json())),
         ]))
         .auth(AuthRequirement::admin()),
     );
@@ -420,6 +421,11 @@ pub fn admin_endpoints() -> EndpointSet {
         .output(TypeSchema::struct_of([
             StructField::new("config", TypeSchema::json()),
             StructField::new("output", TypeSchema::text()),
+            // Optional, and shaped by whichever backend filled it: `output` is
+            // what every client renders, and this is for the one that has to act
+            // on the result rather than show it — the IDE's source-control view,
+            // which cannot list changed files from a paragraph of prose (§12.1).
+            StructField::new("data", TypeSchema::optional(TypeSchema::json())),
             StructField::new("connected", TypeSchema::bool()),
         ]))
         .auth(AuthRequirement::admin()),

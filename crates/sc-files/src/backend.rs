@@ -115,6 +115,48 @@ pub fn backend_operations(name: &str) -> Result<Vec<Operation>> {
     }
 }
 
+/// What an operation has to say for itself: prose for the admin, and — where a
+/// backend has something a machine can read — the same facts as data.
+///
+/// `output` is the whole of the contract and the only part the admin UI renders:
+/// a screen that understood branches would be a screen that could not render a
+/// plugin backend's status at all (§14.1). `data` is the deliberate escape
+/// hatch, taken by exactly one caller: the IDE's source-control view, which
+/// cannot draw a list of changed files from a paragraph of English. It is
+/// **optional**, unrendered where nothing sets it, and no backend has to grow
+/// one to keep working.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationOutcome {
+    /// What happened, in the words the admin sees.
+    pub output: String,
+    /// The same, structured, for a client that needs to act on it.
+    pub data: Option<serde_json::Value>,
+}
+
+impl OperationOutcome {
+    /// An outcome that is only prose — what most operations are.
+    pub fn text(output: impl Into<String>) -> OperationOutcome {
+        OperationOutcome {
+            output: output.into(),
+            data: None,
+        }
+    }
+
+    /// Carry structured data alongside the prose.
+    pub fn with_data(self, data: serde_json::Value) -> OperationOutcome {
+        OperationOutcome {
+            data: Some(data),
+            ..self
+        }
+    }
+}
+
+impl From<String> for OperationOutcome {
+    fn from(output: String) -> OperationOutcome {
+        OperationOutcome::text(output)
+    }
+}
+
 /// Run one of a backend's declared [`operations`](backend_operations).
 ///
 /// `def` is **mutable** because an operation may configure as well as act: the
@@ -124,14 +166,15 @@ pub fn backend_operations(name: &str) -> Result<Vec<Operation>> {
 /// form the admin is still filling in, an [`Instance`](OperationScope::Instance)
 /// operation's to the store's row.
 ///
-/// Returns text for the admin: a command's own output, or a summary. Anything
-/// that went wrong is an `Err` carrying the same, since the reason a push failed
-/// is the actionable part.
+/// Returns an [`OperationOutcome`]: text for the admin — a command's own output,
+/// or a summary — and optionally the same facts as data. Anything that went
+/// wrong is an `Err` carrying the text, since the reason a push failed is the
+/// actionable part.
 pub async fn run_backend_operation(
     def: &mut FileStoreDef,
     operation: &str,
     input: &Attrs,
-) -> Result<String> {
+) -> Result<OperationOutcome> {
     let declared = backend_operations(&def.backend)?;
     let spec = declared
         .iter()
@@ -415,6 +458,7 @@ mod tests {
                 crate::git::OP_PULL,
                 crate::git::OP_PUSH,
                 crate::git::OP_COMMIT,
+                crate::git::OP_CHECKOUT,
             ]
         );
         // Every one carries a button label, because the admin UI renders this

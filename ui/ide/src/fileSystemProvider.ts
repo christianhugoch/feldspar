@@ -147,6 +147,24 @@ export class StoreFileSystemProvider implements IFileSystemProviderWithFileReadW
     ]);
   }
 
+  /**
+   * Say that these paths changed outside the IDE, so what is open on them is
+   * re-read.
+   *
+   * The counterpart to [`watch`](StoreFileSystemProvider::watch) returning
+   * nothing: no watcher can *notice* an outside change, but the IDE sometimes
+   * **causes** one — a pull, a branch switch, a build — and in those moments it
+   * knows exactly as much as a watcher would have told it. Announcing then is
+   * what makes an open editor show the branch that was just checked out instead
+   * of the one that was.
+   */
+  announceChanged(resources: readonly URI[]): void {
+    if (resources.length === 0) return;
+    this._onDidChangeFile.fire(
+      resources.map((resource) => ({ type: FileChangeType.UPDATED, resource })),
+    );
+  }
+
   /** The store-relative path a URI names. */
   private path(resource: URI): string {
     return toStorePath(this.files.store, resource.path);
@@ -190,7 +208,13 @@ export function toProviderError(err: StoreFileError): Error {
   }
 }
 
-/** Serve the workspace folder from `files`, for as long as the page lives. */
-export function registerStoreFileSystem(files: StoreFiles): IDisposable {
-  return registerFileSystemOverlay(1, new StoreFileSystemProvider(files));
+/**
+ * Serve the workspace folder from `files`, for as long as the page lives,
+ * returning the provider — source control needs it to say that a pull or a
+ * checkout changed what is open.
+ */
+export function registerStoreFileSystem(files: StoreFiles): StoreFileSystemProvider {
+  const provider = new StoreFileSystemProvider(files);
+  registerFileSystemOverlay(1, provider);
+  return provider;
 }

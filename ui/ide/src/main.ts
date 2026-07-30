@@ -8,6 +8,7 @@
  */
 import "./style.css";
 import { api, errorStatus } from "./api";
+import type { FileStoreSummary } from "./git";
 
 const CONTAINER_ID = "workbench";
 
@@ -56,24 +57,30 @@ function renderMessage(title: string, detail: string, link?: { href: string; tex
 }
 
 /**
- * Why `store` cannot be edited, or `null` when it can.
+ * The store this page will edit, or why it cannot be edited.
  *
  * A store is more than its definition (§9): it is defined *and* connected, or it
  * is a row with a reason it is not — a directory that has gone away, a git remote
  * that will not clone. The IDE asks before it boots, because a workbench over a
  * store that cannot be reached is a tree of error dialogs, and the reason the
  * admin needs is the one the store already carries.
+ *
+ * The record itself comes back, not merely a verdict: it carries the id the
+ * operation endpoints are addressed by and whether the store is a git working
+ * copy, which is what decides whether there is a Source Control view.
  */
-async function unusableBecause(store: string): Promise<string | null> {
+async function openableStore(store: string): Promise<FileStoreSummary | { reason: string }> {
   const stores = await api.listFileStores();
   const found = stores.find((candidate) => candidate.name === store);
   if (found == null) {
-    return `There is no file store named ${store}. It may have been renamed or deleted.`;
+    return {
+      reason: `There is no file store named ${store}. It may have been renamed or deleted.`,
+    };
   }
   if (!found.connected) {
-    return found.error ?? `The file store ${store} is defined but not connected.`;
+    return { reason: found.error ?? `The file store ${store} is defined but not connected.` };
   }
-  return null;
+  return found;
 }
 
 const store = requestedStore();
@@ -86,15 +93,15 @@ if (store == null) {
 } else {
   document.title = `${store} — Saltcorn IDE`;
   try {
-    const reason = await unusableBecause(store);
-    if (reason != null) {
-      renderMessage(`Cannot edit ${store}`, reason, {
+    const found = await openableStore(store);
+    if ("reason" in found) {
+      renderMessage(`Cannot edit ${store}`, found.reason, {
         href: "/",
         text: "Back to the admin UI",
       });
     } else {
       const { bootWorkbench } = await import("./workbench");
-      await bootWorkbench(store, workbenchContainer());
+      await bootWorkbench(found, workbenchContainer());
     }
   } catch (err) {
     // A session that expired between the page load and this call: the admin UI

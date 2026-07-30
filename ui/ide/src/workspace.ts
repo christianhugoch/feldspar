@@ -1,7 +1,7 @@
 import * as monaco from "monaco-editor";
 
 import { api } from "./api";
-import { registerStoreFileSystem } from "./fileSystemProvider";
+import { registerStoreFileSystem, type StoreFileSystemProvider } from "./fileSystemProvider";
 import { StoreFiles } from "./storeFiles";
 
 /**
@@ -21,14 +21,17 @@ export function storeFolderUri(store: string): monaco.Uri {
  * that what it writes into the source tree is dropped from the same cache the
  * explorer reads.
  */
-export function registerStoreFilesystem(store: string): StoreFiles {
+export function registerStoreFilesystem(store: string): {
+  files: StoreFiles;
+  provider: StoreFileSystemProvider;
+} {
   const files = new StoreFiles(store, api);
-  registerStoreFileSystem(files);
+  const provider = registerStoreFileSystem(files);
   // There is no watcher over an HTTP file API, so the IDE cannot be told when the
   // store changes under it. Regaining focus is the cheapest honest approximation:
   // it is the moment an admin is most likely to have just done something in
   // another tab — pulled the git store, edited in the file manager, run a build —
   // and it costs one listing per directory they then look at.
   window.addEventListener("focus", () => files.forgetEverything());
-  return files;
+  return { files, provider };
 }
