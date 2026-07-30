@@ -157,6 +157,7 @@ export function FileStores() {
                             variant="outline-primary"
                             disabled={!store.connected}
                             href={ideUrl(store.name)}
+                            target="_blank"
                           >
                             Edit code
                           </Button>
@@ -181,6 +182,7 @@ export function FileStores() {
                             size="sm"
                             variant="outline-primary"
                             href={ideUrl(store.name)}
+                            target="_blank"
                           >
                             Edit code
                           </Button>

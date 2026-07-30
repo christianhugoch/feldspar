@@ -29,6 +29,17 @@ html,
   white-space: pre-wrap;
 }
 
+/* Match the brand wordmark to the sidebar's menu links. */
+div.navbar-brand > a > span {
+  color: var(--tblr-navbar-color);
+  text-decoration: none;
+}
+
+div.navbar-brand > a:hover {
+  color: var(--tblr-navbar-color);
+  text-decoration: none;
+}
+
 /* The icons-only sidebar (`.page.sidebar-narrow`, toggled by `useNarrowSidebar`).
  *
  * Tabler has no such mode: its vertical sidebar is a fixed 15rem rail, and the
