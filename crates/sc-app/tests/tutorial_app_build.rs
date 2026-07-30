@@ -159,6 +159,57 @@ async fn the_tutorial_app_scaffolds_installs_type_checks_builds_and_serves() -> 
     Ok(())
 }
 
+/// **The IDE's Problems panel, from the server's end** (design §12.1).
+///
+/// The IDE has no type-checker of its own until the language server lands, so a
+/// type error reaches the admin only if a failed build's error carries where it
+/// is. `tsc` writes that to stdout while npm reports the failure on stderr, and
+/// the browser parses `src/App.tsx(12,15): error TS…` out of the message — so
+/// this test puts a deliberate type error in the scaffolded `src/App.tsx` and
+/// asserts the position survives the whole path, through npm and out of the API.
+#[tokio::test]
+async fn a_type_error_fails_the_build_naming_the_file_and_the_line() -> sc_error::Result<()> {
+    if !npm_available() {
+        eprintln!("skipping: `npm` is not on PATH, so the tutorial build cannot run");
+        return Ok(());
+    }
+
+    let db = TestDb::new().await?;
+    let cat = tutorial_catalog(&db).await?;
+    let tmp = TempDir::new("typeerror")?;
+    cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+
+    let app = todo_app();
+    scaffold_app(&cat, &app, None).await?;
+
+    // What an admin does in the editor and gets wrong: a string where the
+    // component wants a number. Appended, so the line it is on is known.
+    let app_tsx = tmp.path().join("todo/src/App.tsx");
+    let source = std::fs::read_to_string(&app_tsx)?;
+    let bad_line = source.lines().count() + 2;
+    // Exported, so the only thing wrong with it is its type.
+    std::fs::write(
+        &app_tsx,
+        format!("{source}\nexport const pageSize: number = \"twenty\";\n"),
+    )?;
+
+    let err = build_application(&cat, &app, &app_source_from_config(&app.framework)?, None)
+        .await
+        .expect_err("a type error must fail the build")
+        .to_string();
+
+    // The position, in the form the IDE parses: `<file>(<line>,<col>): error TS…`.
+    assert!(
+        err.contains(&format!("src/App.tsx({bad_line},")),
+        "the error must name the file and the line: {err}"
+    );
+    assert!(
+        err.contains("error TS2322"),
+        "and the type error itself: {err}"
+    );
+    Ok(())
+}
+
 /// An application that declares tables but **enables no API provider**.
 ///
 /// Reported from a real run: the app's endpoint set is then empty, so the

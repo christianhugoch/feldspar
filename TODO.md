@@ -86,26 +86,29 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] **Done when** an admin edits and saves a scaffolded React app's `src/App.tsx` in the
       workbench and the file manager shows the new contents.
 
-## Phase 3 — Prettier, and the build button
+## Phase 3 — Prettier, and the build button ✅
 
-- [ ] Prettier in the browser: `prettier/standalone` with the estree/typescript/babel/postcss/html/
+- [x] Prettier in the browser: `prettier/standalone` with the estree/typescript/babel/postcss/html/
       markdown plugins, registered as a `DocumentFormattingEditProvider` for the languages a React
       project contains, so format-on-save and the format command both work.
-- [ ] Resolve the project's own configuration through the provider — `.prettierrc*` or
-      `package.json`'s `prettier` key, nearest ancestor wins — and pass it as options.
-- [ ] The in-page extension: `registerExtension(manifest).setAsDefaultApi()`, contributing a
+- [x] Resolve the project's own configuration through the provider — `.prettierrc*` or
+      `package.json`'s `prettier` key, nearest ancestor wins — and pass it as options. A `.js`,
+      YAML or TOML configuration is *found* and reported as unusable rather than stepped over.
+- [x] The in-page extension: `registerExtension(manifest).setAsDefaultApi()`, contributing a
       **Build** command with a palette entry and a visible button, which calls `buildApplication`
       for the application whose `source.store` is this store (client-side match over
       `listApplications`; no new endpoint), and reports success as a notification.
-- [ ] A failed build's diagnostics — an Application error carrying `tsc`'s and the bundler's output
+- [x] A failed build's diagnostics — an Application error carrying `tsc`'s and the bundler's output
       (§16) — parsed into a `DiagnosticCollection` so the Problems panel names file and line.
-- [ ] A build writes into the source tree (the generated client) and into `dist/`, which is a
+      Required fixing `run_build`, which quoted stderr in preference to stdout and so dropped
+      `tsc`'s diagnostics whenever npm said anything; both streams are now carried.
+- [x] A build writes into the source tree (the generated client) and into `dist/`, which is a
       change made outside the editor by an action taken inside it: the build command drops what
       the filesystem remembers (`StoreFiles::forgetEverything`) rather than waiting for the
       listing lifetime to expire.
-- [ ] Tests: `vitest` for the config resolution and the store→application match; a Rust test that a
+- [x] Tests: `vitest` for the config resolution and the store→application match; a Rust test that a
       failing build's error text carries the file-and-line diagnostics the parser relies on.
-- [ ] **Done when** an admin formats a file with prettier's own configuration, presses Build, and a
+- [x] **Done when** an admin formats a file with prettier's own configuration, presses Build, and a
       deliberate type error appears in the Problems panel at the right line.
 
 ## Phase 4 — TypeScript semantics: the language server

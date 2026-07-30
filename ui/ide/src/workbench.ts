@@ -48,6 +48,7 @@ import "@codingame/monaco-vscode-markdown-basics-default-extension";
 
 import defaultConfiguration from "./user/configuration.json?raw";
 import defaultKeybindings from "./user/keybindings.json?raw";
+import { registerSaltcornExtension } from "./extension";
 import { configureWorkers } from "./workers";
 import { registerStoreFilesystem, storeFolderUri } from "./workspace";
 
@@ -135,6 +136,9 @@ export async function bootWorkbench(store: string, container: HTMLElement): Prom
     initUserConfiguration(defaultConfiguration),
     initUserKeybindings(defaultKeybindings),
   ]);
-  registerStoreFilesystem(store);
+  const files = registerStoreFilesystem(store);
   await initializeVscodeApi(services, container, constructionOptions(store), environment);
+  // After `initialize`, because the extension's API talks to the services it
+  // registers: prettier's formatter and the Build command (§12.1).
+  await registerSaltcornExtension(files);
 }

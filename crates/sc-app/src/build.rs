@@ -477,19 +477,31 @@ fn command_line(spec: &BuildSpec) -> String {
     line
 }
 
-/// The tail of a failed build's output: stderr when it said anything, else
-/// stdout — bundlers differ on which stream they fail to.
-fn tail<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
-    let text = if stderr.trim().is_empty() {
-        stdout
-    } else {
-        stderr
-    };
-    let text = text.trim_end();
+/// The tail of a failed build's output: **both** streams, stdout first.
+///
+/// Not one or the other, because a build step is more than one tool and they do
+/// not agree on where to fail to. The React framework's is `tsc --noEmit && vite
+/// build`: `tsc` writes its diagnostics — the file, the line and the column of
+/// every type error — to *stdout*, while `npm` and the bundler report the failure
+/// itself on *stderr*. Preferring stderr would therefore drop exactly the part
+/// worth reading, and with it what the IDE parses into the Problems panel
+/// (§12.1). Each stream is bounded separately so a chatty one cannot crowd the
+/// other out.
+fn tail(stderr: &str, stdout: &str) -> String {
+    [stdout, stderr]
+        .into_iter()
+        .map(str::trim_end)
+        .filter(|text| !text.trim().is_empty())
+        .map(last_bytes)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The last [`OUTPUT_TAIL_BYTES`] of `text`, cut at a character boundary.
+fn last_bytes(text: &str) -> &str {
     if text.len() <= OUTPUT_TAIL_BYTES {
         return text;
     }
-    // Cut at a char boundary so the tail stays valid UTF-8.
     let mut start = text.len() - OUTPUT_TAIL_BYTES;
     while start < text.len() && !text.is_char_boundary(start) {
         start += 1;
@@ -948,6 +960,44 @@ mod tests {
         // No silent failures: the bundler's own error reaches the caller.
         assert!(msg.contains("TS2304: Cannot find name foo"), "{msg}");
         assert!(msg.contains("build.sh"), "{msg}");
+    }
+
+    /// The contract the IDE's Problems panel is parsed from (§12.1).
+    ///
+    /// A React build is `tsc --noEmit && vite build` run by `npm`, and the two
+    /// halves use different streams: `tsc` names the file, line and column on
+    /// stdout, while npm reports the failure on stderr. The error must carry the
+    /// former — an exit status and "the build failed" cannot be turned into a
+    /// diagnostic at a line, so a squiggle in the editor depends on this.
+    #[tokio::test]
+    async fn a_failing_build_carries_the_type_errors_file_and_line() {
+        let tmp = TempDir::new("tsc");
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        write_fake_bundler(
+            &web,
+            "#!/bin/sh\n\
+             echo \"src/App.tsx(12,15): error TS2322: Type 'string' is not assignable to type 'number'.\"\n\
+             echo 'npm error Lifecycle script `build` failed with error:' >&2\n\
+             exit 2\n",
+        );
+
+        let msg = run_build(&spec(&["build.sh"]), tmp.path())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("src/App.tsx(12,15): error TS2322:"),
+            "the type error's position must survive npm's own noise: {msg}"
+        );
+        // And the failure itself is still reported, from the other stream.
+        assert!(msg.contains("npm error Lifecycle script"), "{msg}");
+        // The directory is what lets an absolute path in a diagnostic be placed
+        // back inside the store.
+        assert!(
+            msg.contains(&format!("failed in {} with", web.display())),
+            "{msg}"
+        );
     }
 
     #[tokio::test]

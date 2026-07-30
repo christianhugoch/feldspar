@@ -2,6 +2,70 @@
 
 Changes in reverse chronological order.
 
+## Prettier, and a Build button that leaves its errors in the Problems panel
+
+The workbench could edit a store; it could not do anything a project needs doing. It now
+formats with **prettier** and **builds the application** whose source the store holds, and
+a failed build's type errors land in the Problems panel by file and line — which is the
+whole reason they were never wired to a toast.
+
+**No extension was packaged.** This is the payoff of embedding `@codingame/monaco-vscode-api`
+rather than serving a static workbench (§12.1): `registerExtension(<manifest object>)` plus
+`setAsDefaultApi()` makes the `vscode` import in `ui/ide`'s own modules that extension's API,
+so a formatter and a command are two ordinary function calls. The manifest is a literal in
+`extension.ts`. There is no `.vsix`, no bundling step, and nothing to install.
+
+**Prettier runs in the browser**, from `prettier/standalone` with the estree, babel,
+typescript, postcss, html and markdown plugins — deliberately not the project's installed
+copy, which a store need not have. Registering a `DocumentFormattingEditProvider` (rather
+than a command of our own) is what makes Format Document, the context menu and
+`editor.formatOnSave` all work at once.
+
+The price of standalone prettier is that `resolveConfig` is part of its *node* half, so the
+search is ours: `prettierConfig.ts` walks from the file's directory to the workspace root,
+consulting `package.json`'s `prettier` key before the dotfiles in each, and the nearest
+ancestor wins. Three details are worth stating because they are what a project actually
+contains. A `package.json` **without** a `prettier` key is not a configuration and does not
+end the search — that is the monorepo package inheriting the root's settings. Comments and
+trailing commas are accepted, because hand-written configs have them. And a `.js`, `.yaml`
+or `.toml` configuration — which a browser cannot execute or parse — is *found*, reported
+once as "not being used, and here is why", and not silently stepped over to use a different
+file's settings. Where the project says nothing, the editor's own tab settings are used, so
+formatting is never worse than the editor alone.
+
+**Build** is a palette entry (`Saltcorn: Build Application`) and a status-bar button. It
+matches this store against `listApplications`'s derived `source.store` **in the browser**, so
+the milestone adds no endpoint; one match builds, several ask, none says so plainly rather
+than doing nothing. Afterwards the filesystem forgets every listing it held: a build writes
+the generated client into the source tree and a bundle into `dist/`, which is a change made
+outside the editor by something done inside it, and there is no watcher to notice.
+
+**A failure is parsed into a `DiagnosticCollection`.** The server's error carries the tail of
+what the tools said (§16), and `buildDiagnostics.ts` reads three shapes out of it: `tsc`'s
+`src/App.tsx(12,15): error TS2322: …`, esbuild's `file:line:col: ERROR: …`, and rolldown's
+boxed report, whose position is in the frame header and whose message is the line above it —
+colour codes included, since the bundler emits them with no TTY in sight. Paths are placed
+back in the store relative to the application's source directory; an absolute path is mapped
+only when it lies under the directory the build reported, because a diagnostic pointing at a
+file the admin cannot open is worse than one only in the output channel. Everything else, and
+the whole log, goes to the "Saltcorn Build" output channel unparsed.
+
+That last part turned up **a server bug that made the feature impossible.** `run_build`
+quoted stderr when stderr had said anything, and stdout only otherwise. But the React build
+is `tsc --noEmit && vite build` run by npm, and `tsc` writes its diagnostics — the file, the
+line, the column of every type error — to **stdout**, while npm reports the failure itself on
+stderr. Preferring stderr therefore dropped exactly the part worth reading, on the exact tool
+that produces the errors this feature exists to show. A failed build's error now carries both
+streams, each bounded separately so a chatty one cannot crowd the other out.
+
+Tested from both ends. `vitest` covers the configuration search (nearest ancestor,
+`package.json` with and without the key, the unreadable ones), that the options found change
+the output, the store→application match, and the diagnostic parser against real output from
+each of the three tools. In Rust, a failing build whose diagnostics are on stdout and whose
+noise is on stderr must carry the position — and, end to end with a real toolchain, a
+deliberate type error appended to the scaffolded `src/App.tsx` fails the build with
+`src/App.tsx(<that line>,…): error TS2322`.
+
 ## The IDE stops asking questions it can already answer
 
 Opening a store wrote five `not found` errors into the server log: VS Code looks for

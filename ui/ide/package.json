@@ -46,6 +46,7 @@
     "@codingame/monaco-vscode-workbench-service-override": "^36.0.0",
     "@codingame/monaco-vscode-working-copy-service-override": "^36.0.0",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^36.0.0",
+    "prettier": "^3.9.6",
     "vscode": "npm:@codingame/monaco-vscode-extension-api@^36.0.0"
   },
   "devDependencies": {

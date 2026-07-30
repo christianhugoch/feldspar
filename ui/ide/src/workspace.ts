@@ -15,8 +15,13 @@ export function storeFolderUri(store: string): monaco.Uri {
   return monaco.Uri.file(`/${store}`);
 }
 
-/** Serve the workspace folder from the file store's own API (design §12.1). */
-export function registerStoreFilesystem(store: string): void {
+/**
+ * Serve the workspace folder from the file store's own API (design §12.1),
+ * returning the store's files — the Build command needs the same instance, so
+ * that what it writes into the source tree is dropped from the same cache the
+ * explorer reads.
+ */
+export function registerStoreFilesystem(store: string): StoreFiles {
   const files = new StoreFiles(store, api);
   registerStoreFileSystem(files);
   // There is no watcher over an HTTP file API, so the IDE cannot be told when the
@@ -25,4 +30,5 @@ export function registerStoreFilesystem(store: string): void {
   // another tab — pulled the git store, edited in the file manager, run a build —
   // and it costs one listing per directory they then look at.
   window.addEventListener("focus", () => files.forgetEverything());
+  return files;
 }
