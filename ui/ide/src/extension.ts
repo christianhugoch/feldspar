@@ -9,7 +9,10 @@
  */
 
 import { ExtensionHostKind, registerExtension } from "@codingame/monaco-vscode-api/extensions";
-import type { IExtensionManifest } from "@codingame/monaco-vscode-api/extensions";
+import type {
+  IExtensionManifest,
+  RegisterLocalProcessExtensionResult,
+} from "@codingame/monaco-vscode-api/extensions";
 
 import { BUILD_COMMAND, registerBuildCommand } from "./build";
 import { registerPrettierFormatter } from "./formatter";
@@ -41,14 +44,50 @@ const MANIFEST: IExtensionManifest = {
   },
 };
 
+/** How long the extension's API may take to arrive before that is news. */
+const API_OVERDUE_MS = 15_000;
+
 /**
- * Register the extension and everything it contributes for `files`'s store.
+ * Declare the extension. **Must be called before `initialize`.**
  *
- * Called after `initialize`: the services the API talks to have to exist first.
+ * That ordering is not a style choice. `registerExtension` behaves differently
+ * either side of initialization: before, the extension joins the built-in set the
+ * workbench registers as it starts; after, it is a *delta* applied to a running
+ * workbench, which takes the extension registry's lock and waits for every
+ * extension host to accept it — including the web worker host, which this bundle
+ * has no extension for and which does not start. Registering afterwards therefore
+ * hangs (`handleDeltaExtensions has been holding on to the lock`), the promise
+ * never settles, and everything the extension contributes silently never appears.
  */
-export async function registerSaltcornExtension(files: StoreFiles): Promise<void> {
-  const extension = registerExtension(MANIFEST, ExtensionHostKind.LocalProcess);
-  await extension.setAsDefaultApi();
+export function declareSaltcornExtension(): RegisterLocalProcessExtensionResult {
+  return registerExtension(MANIFEST, ExtensionHostKind.LocalProcess);
+}
+
+/**
+ * Take over the `vscode` API and register what the extension contributes.
+ *
+ * Called after `initialize`, because the API talks to services that must exist:
+ * `setAsDefaultApi` is what makes the `vscode` import in `formatter.ts` and
+ * `build.ts` resolve to this extension's own API rather than the anonymous one.
+ */
+export async function activateSaltcornExtension(
+  extension: RegisterLocalProcessExtensionResult,
+  files: StoreFiles,
+): Promise<void> {
+  // The failure above is a *hang*, not a throw: the workbench comes up looking
+  // perfectly healthy while none of this ever runs, which is what made it cost an
+  // afternoon. So a wait this long says so out loud.
+  const overdue = window.setTimeout(() => {
+    console.error(
+      "[saltcorn] the extension API has not arrived; Build and formatting are missing. " +
+        "Is the extension being registered after initialize()?",
+    );
+  }, API_OVERDUE_MS);
+  try {
+    await extension.setAsDefaultApi();
+  } finally {
+    window.clearTimeout(overdue);
+  }
   registerPrettierFormatter(files);
   registerBuildCommand(files);
 }

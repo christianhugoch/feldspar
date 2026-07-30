@@ -48,7 +48,7 @@ import "@codingame/monaco-vscode-markdown-basics-default-extension";
 
 import defaultConfiguration from "./user/configuration.json?raw";
 import defaultKeybindings from "./user/keybindings.json?raw";
-import { registerSaltcornExtension } from "./extension";
+import { activateSaltcornExtension, declareSaltcornExtension } from "./extension";
 import { configureWorkers } from "./workers";
 import { registerStoreFilesystem, storeFolderUri } from "./workspace";
 
@@ -137,8 +137,10 @@ export async function bootWorkbench(store: string, container: HTMLElement): Prom
     initUserKeybindings(defaultKeybindings),
   ]);
   const files = registerStoreFilesystem(store);
+  // Declared before `initialize` so it is one of the workbench's built-in
+  // extensions, and activated after it so the API it hands out has services to
+  // talk to. Both halves matter; `extension.ts` says what goes wrong otherwise.
+  const extension = declareSaltcornExtension();
   await initializeVscodeApi(services, container, constructionOptions(store), environment);
-  // After `initialize`, because the extension's API talks to the services it
-  // registers: prettier's formatter and the Build command (§12.1).
-  await registerSaltcornExtension(files);
+  await activateSaltcornExtension(extension, files);
 }

@@ -15,6 +15,18 @@ rather than serving a static workbench (§12.1): `registerExtension(<manifest ob
 so a formatter and a command are two ordinary function calls. The manifest is a literal in
 `extension.ts`. There is no `.vsix`, no bundling step, and nothing to install.
 
+**The extension is declared before `initialize` and activated after it**, and that ordering
+is the whole difference between this working and not. Registered first, it joins the built-in
+set the workbench brings up with itself. Registered afterwards — which is what the first
+attempt did, and what upstream's README shows — it is a *delta* against a running workbench,
+which takes the extension registry's lock and waits for every extension host to accept it,
+including the web worker host this bundle has no extension for and which never starts. The
+result is not an error: `setAsDefaultApi()` simply never resolves, the workbench looks
+perfectly healthy, and the formatter and the Build button silently do not exist. The console
+says only `handleDeltaExtensions has been holding on to the lock for 30s`. Since the failure
+mode is a hang rather than a throw, a wait longer than fifteen seconds now logs what to
+suspect.
+
 **Prettier runs in the browser**, from `prettier/standalone` with the estree, babel,
 typescript, postcss, html and markdown plugins — deliberately not the project's installed
 copy, which a store need not have. Registering a `DocumentFormattingEditProvider` (rather
@@ -57,6 +69,14 @@ line, the column of every type error — to **stdout**, while npm reports the fa
 stderr. Preferring stderr therefore dropped exactly the part worth reading, on the exact tool
 that produces the errors this feature exists to show. A failed build's error now carries both
 streams, each bounded separately so a chatty one cannot crowd the other out.
+
+That ordering bug is also a reminder of what the split test strategy does not cover: both
+sides were green while the feature did not exist in the browser. It was found, and the fix
+confirmed, by driving the built bundle in headless Chromium against a stub of the file-store
+API — the Build button in the status bar, Format Document rewriting a `.js` file to the
+project's `.prettierrc`, and a failed build's `TS2339` landing in the Problems panel at
+`Ln 2, Col 26`. That harness is not checked in; whether the milestone wants one is a question
+for phase 5.
 
 Tested from both ends. `vitest` covers the configuration search (nearest ancestor,
 `package.json` with and without the key, the unreadable ones), that the options found change
