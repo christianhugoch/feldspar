@@ -152,7 +152,9 @@ mime_guess = "2"
 # supplies the cookie jar for session cookies; the session store itself stays in
 # `sc-auth`. Versions track the current axum 0.8 stable line; exact pairings are
 # confirmed when Phase 6 first compiles against them.
-axum = { version = "0.8", features = ["macros"] }
+# `ws` carries the file-store IDE's language server (§12.1): one WebSocket per
+# workbench, bridged to a `typescript-language-server` process on the server.
+axum = { version = "0.8", features = ["macros", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 # Base64 for carrying file bytes across the JSON file-manager API (§14.1). The
 # file endpoints reuse the same typed-JSON dispatch as the rest of the admin API
@@ -162,6 +164,11 @@ base64 = "0.22"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "set-header", "trace"] }
 matchit = "0.8"
+# A WebSocket **client**, for tests only: the IDE's language-server route (§12.1)
+# is the one piece of the server a `tower::oneshot` cannot exercise, because the
+# thing under test happens *after* the 101. Same version axum's `ws` feature
+# already builds, so this adds no new code to the tree.
+tokio-tungstenite = "0.29"
 
 # --- HTTP client -------------------------------------------------------------
 #

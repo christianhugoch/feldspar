@@ -16,6 +16,7 @@ import type {
 
 import { BUILD_COMMAND, registerBuildCommand } from "./build";
 import { registerPrettierFormatter } from "./formatter";
+import { registerLanguageClient } from "./languageClient";
 import type { StoreFiles } from "./storeFiles";
 
 /**
@@ -90,4 +91,9 @@ export async function activateSaltcornExtension(
   }
   registerPrettierFormatter(files);
   registerBuildCommand(files);
+  // Last, and not awaited: prettier, the Build command and the grammars are the
+  // capabilities every store has, and a store that cannot host a language server
+  // (§12.1) must still get all of them. The client says so for itself when the
+  // socket refuses it.
+  registerLanguageClient(files.store);
 }

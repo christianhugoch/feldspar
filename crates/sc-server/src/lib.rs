@@ -23,6 +23,7 @@ mod apps;
 mod config;
 mod handler;
 mod handlers;
+mod lsp;
 mod router;
 mod security;
 mod serve;
@@ -42,6 +43,7 @@ pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
 pub use handlers::admin_handlers;
+pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
 pub use router::{
     BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
 };

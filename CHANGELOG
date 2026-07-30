@@ -2,6 +2,71 @@
 
 Changes in reverse chronological order.
 
+## TypeScript semantics in the IDE: a language server per store
+
+Typing a type error in `src/App.tsx` now underlines it as you type, and completions and
+go-to-definition work across the project's own files and its installed dependencies. Until
+now the build's diagnostics *were* the type errors, which is why they were wired to the
+Problems panel and not to a toast; they still are, and now they have company.
+
+**The semantics come from a real `typescript-language-server` process on the server**, not
+from tsserver in a web worker (§12.1). The deciding fact is where `node_modules` is: the
+project's dependencies and its `tsconfig.json` are already on the server's disk, so checking
+against them there costs one process, while checking against them in the browser would mean
+dragging a React project's whole type surface across HTTP. `GET /ide/lsp/<store>` upgrades to
+a WebSocket, spawns one process in the store's directory, and kills it when the socket closes;
+at most eight run at once, and the ninth is refused with that sentence rather than being
+allowed to take the machine down.
+
+**A store that cannot have semantics is told so, once.** This is the one IDE capability gated
+on `FileStore::local_path`, exactly as a framework's build step is — an object store cannot
+host a process any more than it can host a bundler — and a project whose dependencies have
+never been installed is refused too, because without `node_modules` tsserver resolves no
+import at all and every file becomes a wall of "cannot find module": thousands of errors
+saying one thing. Saying the one thing is better, and the fix (Build, which installs) is a
+button the admin already has.
+
+Those refusals arrive **in the close frame, not as an HTTP status**. Only the admin check is
+answered before the upgrade, because a browser cannot read the body of a failed WebSocket
+handshake: a reason sent that way is a reason nobody sees. So the socket is accepted and then
+closed with the reason in it, and the IDE shows that sentence — the server's own words, not a
+second wording of them — as a warning.
+
+**The bridge translates two things, and the second one is the interesting one.** The socket
+carries bare JSON-RPC (what `vscode-ws-jsonrpc` speaks) and the process speaks LSP's
+`Content-Length` framing, which is bookkeeping. But the workbench edits the store as the
+workspace folder `/<store>` while the process sees a directory on disk, and neither end can be
+talked out of its own URIs. The TODO's plan was to make the workbench's folder *be* the
+server's root; that was dropped, because the browser would then have to be told the server's
+directory layout, the folder would differ between stores that have a local path and stores
+that do not, and a relative `--file-store` path would have to be canonicalised on the way.
+Instead the bridge — the one place that knows both roots — rewrites URIs as messages pass. It
+walks the JSON rather than doing a textual replacement, which matters more than it sounds: a
+`didOpen` carries a document's whole text, and a blind search-and-replace over that would edit
+the admin's source code. A URI it cannot map (a definition in a file outside the store) passes
+through untouched, so the workbench reports it cannot open that file instead of being handed a
+path that does not exist.
+
+**`monaco-languageclient` is not used, for the reason §12.1 rejected
+`@typefox/monaco-editor-react`.** Its released line pins `@codingame/monaco-vscode-api@^25`
+and its unreleased one `^35`, against the `36` this workbench is built on; npm would install a
+second copy, and two copies of that package are two service registries — the client would
+register its providers with a workbench nobody is looking at. Its actual content beyond that
+is a twenty-line subclass of `vscode-languageclient`'s `BaseLanguageClient` that returns a
+ready-made transport, so those twenty lines are in `languageClient.ts` and
+`vscode-languageclient` (with `vscode-ws-jsonrpc` for the socket) is used directly. Nothing is
+reimplemented; what is skipped is a shim whose only other content is a version conflict.
+
+Tested on both sides. Rust: the route refuses an anonymous and a non-admin socket before the
+upgrade; a store with no local path and a store that is not connected each close with their
+reason; a stub language server installed where a real one would be proves each direction of
+the URI translation independently (the echo is deliberately not a URI, or the test would watch
+a round trip and call it a delivery); and a real `typescript-language-server` reports a real
+type error on the right line — that last one skipping, as `ide_typecheck.rs` does, when
+`npm install` has not been run in `ui/ide`. `vitest` covers the socket URL (including `wss:`
+from an `https:` page, which is otherwise a mixed-content block that looks exactly like a
+store with no semantics) and what the admin is told when the socket closes silently.
+
 ## Prettier, and a Build button that leaves its errors in the Problems panel
 
 The workbench could edit a store; it could not do anything a project needs doing. It now

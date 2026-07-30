@@ -32,6 +32,9 @@ sc-types.workspace = true
 
 tokio.workspace = true
 axum.workspace = true
+# `SinkExt`/`StreamExt` over the split WebSocket the IDE's language server rides
+# on (§12.1).
+futures.workspace = true
 axum-extra.workspace = true
 tower = { workspace = true, features = ["util"] }
 tower-http.workspace = true
@@ -45,6 +48,10 @@ rust_decimal.workspace = true
 
 [dev-dependencies]
 sc-test-harness.workspace = true
+tokio-tungstenite.workspace = true
+# A test-only `FileStore` double: the store with no local path, which is what the
+# IDE's language-server route has to refuse (§12.1).
+async-trait.workspace = true
 
 [lints]
 workspace = true

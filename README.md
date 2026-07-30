@@ -176,6 +176,20 @@ cd ui/ide && npm ci && npm run build     # if you are not using SC_BUILD_ADMIN=1
 It is a separate page rather than a screen in the admin SPA because VS Code initializes
 once per page and owns the whole viewport.
 
+**TypeScript errors, completions and go-to-definition** come from a
+`typescript-language-server` the server starts in the store's own directory, so they need
+two things that are the *project's*, not the IDE's: an on-disk store (an object store can
+be edited and formatted, but not type-checked), and dependencies installed — which the
+first Build does. The tool itself is found in the project's `node_modules/.bin` or on the
+server's `PATH`:
+
+```bash
+npm install -g typescript-language-server    # or add it to the project's devDependencies
+```
+
+Without it — or without either of the other two — the IDE says so once, in a notification,
+and everything else about the workbench goes on working.
+
 ---
 
 ## 6. Running the server

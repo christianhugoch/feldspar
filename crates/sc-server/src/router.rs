@@ -39,6 +39,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::apps::{AppMounts, MountedApp, subdomain_of};
 use crate::config::ServerConfig;
 use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
+use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
 use crate::security::{
     CONTENT_SECURITY_POLICY, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
     build_cookie, csrf_middleware,
@@ -86,6 +87,8 @@ struct AppState {
     apps: Arc<AppMounts>,
     /// The domain apps are served under; `None` disables app routing.
     base_domain: Option<Arc<String>>,
+    /// How many more language servers the IDE may start (design §12.1).
+    lsp_slots: ServerSlots,
 }
 
 /// Build the axum router for an endpoint set, serving no applications.
@@ -149,6 +152,7 @@ pub fn build_router_with_apps(
         secure_cookies: config.secure_cookies,
         apps,
         base_domain: config.base_domain.clone().map(Arc::new),
+        lsp_slots: server_slots(),
     };
 
     let app = Router::new()
@@ -172,6 +176,11 @@ pub fn build_router_with_apps(
         // is repeated here rather than inherited. CSRF is *not* repeated: the
         // middleware wraps every route including this one.
         .route("/upload/{store}/{*path}", axum::routing::post(upload))
+        // The file-store IDE's language server (design §12.1). A real route
+        // rather than a branch of the fallback, because a WebSocket upgrade is
+        // not a request the fallback's `Bytes` body could survive: it has to be
+        // extracted before the body is touched.
+        .route(LSP_ROUTE, axum::routing::get(language_server))
         .fallback(dispatch)
         .with_state(state)
         // CSRF runs outside dispatch so it guards every route and can mint the
@@ -290,6 +299,34 @@ async fn upload(
             .await
         }
     }
+}
+
+/// The IDE's language-server socket (design §12.1): admin-only, one process per
+/// connection.
+///
+/// The auth check is the same one every admin surface applies, and it is the
+/// *only* refusal answered with an HTTP status: a browser cannot read the body of
+/// a failed WebSocket handshake, so every other reason a store cannot be
+/// type-checked is carried by the close frame instead (see [`crate::lsp`]).
+///
+/// CSRF does not apply — this is a `GET`, and the middleware leaves safe methods
+/// alone — but the same-origin story still holds: the session cookie is
+/// `SameSite=Strict`, so a cross-site page's WebSocket carries no session and
+/// lands on the rejection below.
+async fn language_server(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    AxumPath(store): AxumPath<String>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let user = match session_user(&state, &jar) {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        return rejection;
+    }
+    language_server_upgrade(ws, state.apps.catalog(), &state.lsp_slots, store).await
 }
 
 /// Group endpoints by path pattern and insert them into a `matchit` router.

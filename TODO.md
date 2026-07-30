@@ -111,23 +111,33 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] **Done when** an admin formats a file with prettier's own configuration, presses Build, and a
       deliberate type error appears in the Problems panel at the right line.
 
-## Phase 4 — TypeScript semantics: the language server
+## Phase 4 — TypeScript semantics: the language server ✅
 
-- [ ] `sc-server`: a WebSocket route for a store's language server (axum's `ws` feature), admin-only
+- [x] `sc-server`: a WebSocket route for a store's language server (axum's `ws` feature), admin-only
       through the same session middleware, refusing a store with no `local_path` with the reason
-      spelled out.
-- [ ] Spawn `typescript-language-server --stdio` with the store's directory as its working
+      spelled out. The reason rides the **close frame**, not an HTTP status: a browser cannot read
+      the body of a failed handshake, so only the admin check — which needs no explanation — is
+      answered before the upgrade.
+- [x] Spawn `typescript-language-server --stdio` with the store's directory as its working
       directory and pipe it over the socket; one process per connection, killed when the socket
-      closes, with a bound on how many may run at once.
-- [ ] Client side: `monaco-languageclient` + `vscode-ws-jsonrpc` against that route for TypeScript
-      and JavaScript documents, with the workspace folder URI matching the server's root so no URI
-      translation is needed.
-- [ ] Tell the admin when there are no semantics: a store with no local path, or a project with no
+      closes, with a bound on how many may run at once (`MAX_LANGUAGE_SERVERS`).
+- [x] Client side: `vscode-languageclient` + `vscode-ws-jsonrpc` against that route for TypeScript
+      and JavaScript documents. **Two deviations, both argued in the CHANGELOG.**
+      `monaco-languageclient` is not used: it pins `@codingame/monaco-vscode-api` at `^25`
+      (released) / `^35` (unreleased) against this workbench's `36`, and two copies of that package
+      are two service registries — the same argument §12.1 used to reject
+      `@typefox/monaco-editor-react`. What it adds beyond that is a twenty-line
+      `BaseLanguageClient` subclass, which is now in `languageClient.ts`. And the workspace folder
+      URI deliberately does *not* match the server's root: the **bridge** translates between
+      `/<store>` and the store's real directory, structurally over each JSON message, so the
+      browser is never told the server's directory layout and the workspace folder stays the same
+      for every backend.
+- [x] Tell the admin when there are no semantics: a store with no local path, or a project with no
       `node_modules` yet, says so once rather than reporting thousands of phantom errors.
-- [ ] Tests: the route rejects a non-admin and an object-store-backed store; a spawned server
+- [x] Tests: the route rejects a non-admin and an object-store-backed store; a spawned server
       completes an initialize handshake over the socket and reports a diagnostic for a file with a
       deliberate type error.
-- [ ] **Done when** typing a type error in `src/App.tsx` underlines it, with completions and
+- [x] **Done when** typing a type error in `src/App.tsx` underlines it, with completions and
       go-to-definition working across the project's own files and its installed dependencies.
 
 ## Phase 5 — Documentation
