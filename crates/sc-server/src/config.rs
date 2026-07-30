@@ -23,13 +23,14 @@ pub struct ServerConfig {
     /// server still serves the minimal bootstrap document so the SPA can boot
     /// once built.
     pub static_dir: Option<PathBuf>,
-    /// Directory holding the built `ui/ide` bundle, if any — the file-store IDE,
-    /// served under `/ide/` (design §12.1).
+    /// Directory holding the built `ui/ide` bundle — the file-store IDE, served
+    /// under `/ide/` (design §12.1).
     ///
-    /// A **second** directory rather than a subdirectory of `static_dir` because
-    /// it is a second bundle with its own build, its own entry point and its own
-    /// CSP: an operator can serve the admin UI without the IDE, and a development
-    /// checkout can point the two at different trees.
+    /// **Not a command-line setting.** The IDE is part of the admin UI as far as
+    /// an operator is concerned: it is built with it and served with it, so there
+    /// is nothing to decide and no flag to forget. The binary fills this in from
+    /// the bundle it was built with, or from the checkout it was built in (see
+    /// `sc-cli`); a test points it at a directory of its own.
     pub ide_dir: Option<PathBuf>,
     /// Session lifetime in hours.
     pub session_ttl_hours: i64,
@@ -64,8 +65,8 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Parse configuration from CLI arguments (everything after the subcommand).
     ///
-    /// Recognised flags: `--bind <addr>`, `--static-dir <path>`, `--ide-dir
-    /// <path>`, `--session-ttl-hours <n>`, `--secure-cookies`, and `--base-domain
+    /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
+    /// `--session-ttl-hours <n>`, `--secure-cookies`, and `--base-domain
     /// <domain>`. Unknown flags are an [`Error::Config`], so a typo fails loudly
     /// rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
@@ -85,9 +86,6 @@ impl ServerConfig {
                 }
                 "--static-dir" => {
                     cfg.static_dir = Some(PathBuf::from(next_value(&mut it, "--static-dir")?));
-                }
-                "--ide-dir" => {
-                    cfg.ide_dir = Some(PathBuf::from(next_value(&mut it, "--ide-dir")?));
                 }
                 "--session-ttl-hours" => {
                     let raw = next_value(&mut it, "--session-ttl-hours")?;
@@ -141,8 +139,6 @@ mod tests {
             "0.0.0.0:8080",
             "--static-dir",
             "/srv/admin",
-            "--ide-dir",
-            "/srv/ide",
             "--session-ttl-hours",
             "12",
             "--secure-cookies",
@@ -155,13 +151,15 @@ mod tests {
             cfg.static_dir.as_deref(),
             Some(std::path::Path::new("/srv/admin"))
         );
-        assert_eq!(
-            cfg.ide_dir.as_deref(),
-            Some(std::path::Path::new("/srv/ide"))
-        );
         assert_eq!(cfg.session_ttl_hours, 12);
         assert!(cfg.secure_cookies);
         assert_eq!(cfg.base_domain.as_deref(), Some("example.com"));
+    }
+
+    /// The IDE is not configurable, and asking for it is a typo like any other.
+    #[test]
+    fn the_ide_bundle_is_not_a_flag() {
+        assert!(ServerConfig::from_args(["--ide-dir", "/srv/ide"]).is_err());
     }
 
     #[test]

@@ -2,6 +2,31 @@
 
 Changes in reverse chronological order.
 
+## The IDE has no settings
+
+Not a TODO item — a correction, found by running it. A server started without
+`--ide-dir` had no IDE bundle, and `/ide/` answered **every** path under it — `main.js`
+and `main.css` included — with a fallback document. The browser asked for a module, got
+HTML, refused it on its MIME type, and rendered a blank page; the console said `Failed to
+load module script`, which names the symptom and not the cause.
+
+Both halves of that were wrong, and the flag was the bigger half. **`--ide-dir` and
+`SC_BUILD_IDE` are gone.** The IDE is not a deployment choice: it is where an admin edits
+an application's source, reached from a button in the admin UI, so an operator has nothing
+to decide and a build that produced the admin UI without it would leave that button
+leading nowhere. `SC_BUILD_ADMIN=1` now builds `ui/admin` **and** `ui/ide` and embeds both
+paths; a binary built without it finds `ui/ide/dist` in the checkout it was compiled from.
+Either way `saltcorn serve` serves the IDE with no flag, and `--ide-dir` is now rejected
+like any other unknown argument.
+
+The fallback document is gone too, with no page in its place: with no bundle, every path
+under `/ide/` — the document as much as an asset — is a 404. The SPA has a fallback so a
+client-routed deep link still loads the bundle; the IDE has no client-side routes to
+deep-link into (a store is a query parameter), so there is nothing to fall back *for*. The
+general lesson, which is why this is worth a note: a fallback that serves the wrong *kind*
+of thing is worse than a 404, because it turns a clear failure into a blank page. A test
+now asserts that nothing under the prefix is ever `text/html` when the bundle is missing.
+
 ## The IDE edits the real store
 
 TODO phase 2. The workbench's filesystem is now the file store's own API, so the

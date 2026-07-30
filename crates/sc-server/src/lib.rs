@@ -43,8 +43,7 @@ pub use handler::{
 };
 pub use handlers::admin_handlers;
 pub use router::{
-    BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_BOOTSTRAP_HTML, IDE_PREFIX, build_router,
-    build_router_with_apps,
+    BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
 };
 pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};

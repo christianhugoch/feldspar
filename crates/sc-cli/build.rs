@@ -1,36 +1,40 @@
-//! Wire the `ui/admin` SPA and `ui/ide` builds into the server binary's build.
+//! Wire the admin UI into the server binary's build: the `ui/admin` SPA **and**
+//! the `ui/ide` file-store IDE (design §12.1), which are one thing to an operator.
 //!
-//! Building either bundle needs a Node toolchain, which the Rust-only build and CI
-//! paths must not require. So each build is **opt-in**: set `SC_BUILD_ADMIN=1` when
-//! building the `saltcorn` binary and this script runs the `ui/admin` production
-//! build (`npm ci && npm run build`) and records the output directory in the
-//! `SC_ADMIN_BUNDLE_DIR` compile-time env; `SC_BUILD_IDE=1` does the same for the
-//! file-store IDE (design §12.1) and `SC_IDE_BUNDLE_DIR`. The binary then defaults
-//! `--static-dir` and `--ide-dir` to those paths (see `main.rs`), so a bundle-built
-//! `saltcorn serve` serves them out of the box. Without the flags the script is a
-//! no-op and the server falls back to the minimal bootstrap documents.
+//! Building them needs a Node toolchain, which the Rust-only build and CI paths
+//! must not require. So the build is **opt-in**: set `SC_BUILD_ADMIN=1` when
+//! building the `saltcorn` binary and this script runs both production builds
+//! (`npm ci && npm run build`) and records the output directories in the
+//! `SC_ADMIN_BUNDLE_DIR` and `SC_IDE_BUNDLE_DIR` compile-time envs. The binary
+//! then serves both with no flags at all (see `main.rs`). Without the variable the
+//! script is a no-op.
 //!
-//! The two are separate flags, not one, because they cost very differently: the IDE
-//! bundles VS Code, so building it is far slower than building the SPA and an
-//! operator who does not want the IDE should not pay for it.
+//! **One variable, not two.** The IDE is not a separate product an operator
+//! chooses: it is where they edit an application's source, reached from the admin
+//! UI, and a build that produced the admin UI without it would leave a button
+//! leading nowhere. It costs a slower build, which is the right price for not
+//! having a half-built admin UI as a state anyone can be in.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    build_bundle("ui/admin", "SC_BUILD_ADMIN", "SC_ADMIN_BUNDLE_DIR", "admin");
-    build_bundle("ui/ide", "SC_BUILD_IDE", "SC_IDE_BUNDLE_DIR", "IDE");
+    println!("cargo:rerun-if-env-changed=SC_BUILD_ADMIN");
+    let build = std::env::var_os("SC_BUILD_ADMIN").is_some();
+    build_bundle("ui/admin", "SC_ADMIN_BUNDLE_DIR", "admin UI", build);
+    build_bundle("ui/ide", "SC_IDE_BUNDLE_DIR", "file-store IDE", build);
 }
 
-/// Build one UI bundle when its opt-in flag is set, and export its `dist` path.
-fn build_bundle(subdir: &str, flag: &str, env_var: &str, label: &str) {
-    println!("cargo:rerun-if-env-changed={flag}");
-
+/// Build one UI bundle and export its `dist` path, when asked to.
+///
+/// The `rerun-if-changed` lines are printed either way: they are what tells cargo
+/// a bundle needs rebuilding, and they must not depend on whether this particular
+/// build was the one that built it.
+fn build_bundle(subdir: &str, env_var: &str, label: &str, build: bool) {
     let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(subdir);
 
-    // Rebuild the bundle when its source (or its build config) changes.
     for entry in [
         "src",
         "package.json",
@@ -41,12 +45,15 @@ fn build_bundle(subdir: &str, flag: &str, env_var: &str, label: &str) {
         println!("cargo:rerun-if-changed={}", ui.join(entry).display());
     }
 
-    if std::env::var_os(flag).is_none() {
+    if !build {
         return;
     }
 
     if !ui.join("package.json").exists() {
-        panic!("{flag} set but {} has no package.json", ui.display());
+        panic!(
+            "SC_BUILD_ADMIN set but {} has no package.json",
+            ui.display()
+        );
     }
 
     run(&ui, ["ci"]);
@@ -55,7 +62,7 @@ fn build_bundle(subdir: &str, flag: &str, env_var: &str, label: &str) {
     let dist = ui.join("dist");
     if !dist.join("main.js").exists() {
         panic!(
-            "{label} build did not produce {}",
+            "the {label} build did not produce {}",
             dist.join("main.js").display()
         );
     }

@@ -158,29 +158,23 @@ The JSON API still works, but the browser shows only an empty bootstrap document
 
 ### The file-store IDE (`ui/ide`)
 
-A second, separate bundle: the **VS Code workbench**, for editing a file store that
-holds an application's source — a project tree, editor tabs, the command palette
-(design §12.1). It is served at `/ide/?store=<name>` and is **admin-only**. It is a
-separate page rather than a screen in the admin SPA because VS Code initializes once
-per page and owns the whole viewport.
+A second bundle built alongside the SPA: the **VS Code workbench**, for editing a file
+store that holds an application's source — a project tree, editor tabs, the command
+palette (design §12.1). It is served at `/ide/?store=<name>`, is **admin-only**, and is
+reached from an "Edit code" button in the file store list, the file manager, and an
+application's row.
 
-It builds and is served exactly like the SPA, under its own flags:
+**There is nothing to configure.** `SC_BUILD_ADMIN=1` builds it along with the SPA and
+the binary serves both; a binary built without it finds `ui/ide/dist` in the checkout it
+was compiled from, so a development server serves the IDE with no flag either. The one
+thing it needs is to have been built:
 
 ```bash
-cd ui/ide
-npm ci
-npm run build          # outputs ui/ide/dist (main.js + main.css)
-cd ../..
-
-target/release/saltcorn serve --ide-dir ui/ide/dist ...       # option A
-SC_BUILD_IDE=1 cargo build --release -p sc-cli                # option B: embed it
+cd ui/ide && npm ci && npm run build     # if you are not using SC_BUILD_ADMIN=1
 ```
 
-Two flags rather than one because they cost very differently: this bundle contains
-VS Code, so it is much slower to build and much larger to serve, and an operator who
-does not need it should not pay for it. Without either flag `/ide/` still answers an
-admin with its bootstrap document — and a blank workbench, which means the bundle
-was never built.
+It is a separate page rather than a screen in the admin SPA because VS Code initializes
+once per page and owns the whole viewport.
 
 ---
 
@@ -210,7 +204,6 @@ present, wins.
 |---|---|---|
 | `--bind <addr>` | address:port to listen on | `127.0.0.1:3000` |
 | `--static-dir <dir>` | directory holding the built admin bundle | (embedded bundle if built with `SC_BUILD_ADMIN=1`, else none) |
-| `--ide-dir <dir>` | directory holding the built file-store IDE bundle, served at `/ide/` | (embedded bundle if built with `SC_BUILD_IDE=1`, else none) |
 | `--session-ttl-hours <n>` | session lifetime | `24` |
 | `--secure-cookies` | set the `Secure` attribute on session/CSRF cookies (use behind HTTPS) | off |
 | `--base-domain <domain>` | domain that applications are served under: an app with subdomain `blog` is served at `blog.<domain>` | none (app routing off) |

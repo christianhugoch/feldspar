@@ -67,28 +67,6 @@ pub const BOOTSTRAP_HTML: &str = "<!doctype html>\n\
 /// The path prefix the file-store IDE is served under (design §12.1).
 pub const IDE_PREFIX: &str = "/ide";
 
-/// The bootstrap document for the IDE, serving the same purpose as
-/// [`BOOTSTRAP_HTML`] does for the SPA: a request that reaches `/ide/` before the
-/// bundle's own `index.html` is in place still loads the bundle's stable entry
-/// points, which `ui/ide`'s Vite config pins to `/ide/main.js` + `/ide/main.css`.
-///
-/// It is a **separate** document, not the SPA's, because the IDE is a separate
-/// page: VS Code initializes once per page and owns the whole viewport, so it
-/// cannot be a screen inside the SPA (§12.1).
-pub const IDE_BOOTSTRAP_HTML: &str = "<!doctype html>\n\
-<html lang=\"en\">\n\
-<head>\n\
-<meta charset=\"utf-8\">\n\
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-<title>Saltcorn IDE</title>\n\
-<link rel=\"stylesheet\" href=\"/ide/main.css\">\n\
-</head>\n\
-<body>\n\
-<div id=\"workbench\"></div>\n\
-<script type=\"module\" src=\"/ide/main.js\"></script>\n\
-</body>\n\
-</html>\n";
-
 /// Shared server state threaded through dispatch.
 #[derive(Clone)]
 struct AppState {
@@ -762,9 +740,7 @@ async fn serve_ide(
     }
 
     // `/ide/main.js` is `main.js` within the bundle, and `/ide` or `/ide/` is its
-    // document. The IDE has no client-side routes (a store is a query parameter,
-    // §12.1), so anything else that is not a file in the bundle is a 404 from
-    // `ServeDir` — which the bootstrap fallback below turns into the document.
+    // document.
     let rest = uri
         .path()
         .strip_prefix(IDE_PREFIX)
@@ -781,8 +757,19 @@ async fn serve_ide(
             }
         }
     }
-    let mut response =
-        response.unwrap_or_else(|| (StatusCode::OK, Html(IDE_BOOTSTRAP_HTML)).into_response());
+    // Nothing there: a 404, for the document as much as for an asset. There is no
+    // fallback document, and that is the point — the SPA has one so a client-routed
+    // deep link still loads the bundle, while the IDE has no client-side routes to
+    // deep-link into (a store is a query parameter, §12.1). A document served in
+    // answer to a request for `/ide/main.js` is HTML where the browser expected a
+    // module: it refuses it on its MIME type and renders a blank page, so the
+    // fallback would hide the very thing it was meant to explain.
+    let mut response = response.unwrap_or_else(|| {
+        json_error(
+            StatusCode::NOT_FOUND,
+            "the file-store IDE bundle is not built (run `npm ci && npm run build` in ui/ide)",
+        )
+    });
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(IDE_CONTENT_SECURITY_POLICY),

@@ -36,15 +36,19 @@ fn ide_type_checks() {
     );
 }
 
-/// The bundle's entry points are a contract with the server, not a build detail:
-/// `IDE_BOOTSTRAP_HTML` references `/ide/main.js` and `/ide/main.css` by name, so
-/// the Vite config has to keep emitting exactly those.
+/// The bundle's **base path** is a contract with the server, not a build detail.
+///
+/// Everything else about the bundle is the bundle's business — the server serves
+/// its `index.html` and whatever that references — but the asset URLs baked into
+/// it at build time have to be the prefix the route actually answers on. A bundle
+/// built with a different base loads nothing, from a page that looks fine.
 #[test]
-fn the_bundle_pins_the_entry_points_the_server_serves() {
+fn the_bundle_is_built_for_the_prefix_the_server_serves_it_on() {
     let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/ide");
     let config = std::fs::read_to_string(ui.join("vite.config.ts")).expect("read vite.config.ts");
-    assert!(config.contains("base: \"/ide/\""));
-    assert!(config.contains("entryFileNames: \"main.js\""));
-    assert!(sc_server::IDE_BOOTSTRAP_HTML.contains("/ide/main.js"));
-    assert!(sc_server::IDE_BOOTSTRAP_HTML.contains("/ide/main.css"));
+    assert!(
+        config.contains(&format!("base: \"{}/\"", sc_server::IDE_PREFIX)),
+        "ui/ide must be built with base {}/",
+        sc_server::IDE_PREFIX
+    );
 }

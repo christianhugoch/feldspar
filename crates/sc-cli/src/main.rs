@@ -49,6 +49,26 @@ async fn run(args: &[String]) -> Result<()> {
     }
 }
 
+/// The file-store IDE's bundle, in the checkout this binary was built in.
+///
+/// A hard-coded path, deliberately. The IDE is not a deployment choice — it is
+/// where an admin edits an application's source, reached from a button in the
+/// admin UI — so there is nothing for an operator to decide and no flag to forget:
+/// a binary built with `SC_BUILD_ADMIN=1` carries the bundle's path, and one built
+/// without it finds `ui/ide/dist` next to the source it was compiled from.
+const IDE_BUNDLE_IN_CHECKOUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/ide/dist");
+
+/// Where the IDE bundle is: the one built into this binary, else the checkout's.
+///
+/// `None` only when neither exists — a binary built without `SC_BUILD_ADMIN=1` and
+/// run away from its source tree, which has no admin UI to reach the IDE from
+/// either.
+fn ide_bundle_dir() -> Option<std::path::PathBuf> {
+    let candidate = option_env!("SC_IDE_BUNDLE_DIR").unwrap_or(IDE_BUNDLE_IN_CHECKOUT);
+    let path = std::path::PathBuf::from(candidate);
+    path.join("index.html").exists().then_some(path)
+}
+
 /// `saltcorn serve [--database-url URL | --db-host H ...] [--bind ADDR] [...]`.
 ///
 /// Database flags are consumed by [`DbConfig::extract`]; whatever is left over is
@@ -58,19 +78,13 @@ async fn serve_command(args: &[String]) -> Result<()> {
     let (file_store_specs, server_args) = extract_file_stores(rest)?;
     let mut config = ServerConfig::from_args(server_args)?;
     // When the binary was built with the admin bundle (`SC_BUILD_ADMIN=1`, see
-    // `build.rs`) and no explicit `--static-dir` was given, serve that bundle. The
-    // file-store IDE (§12.1) is the same story under its own flag, because it is a
-    // second bundle an operator may or may not want to build.
+    // `build.rs`) and no explicit `--static-dir` was given, serve that bundle.
     if config.static_dir.is_none() {
         if let Some(dir) = option_env!("SC_ADMIN_BUNDLE_DIR") {
             config.static_dir = Some(std::path::PathBuf::from(dir));
         }
     }
-    if config.ide_dir.is_none() {
-        if let Some(dir) = option_env!("SC_IDE_BUNDLE_DIR") {
-            config.ide_dir = Some(std::path::PathBuf::from(dir));
-        }
-    }
+    config.ide_dir = ide_bundle_dir();
 
     // Bring the data layer up before binding: connect the database, load the
     // catalog, and ensure the users table exists. A bad connection fails here

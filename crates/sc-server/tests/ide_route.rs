@@ -211,26 +211,59 @@ async fn the_relaxed_policy_stays_on_the_ide_route() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// With no bundle, every path under the prefix is a 404 — **including the
+/// document**, and never HTML.
+///
+/// This is the shape of a bug that already happened once. Answering a request for
+/// `/ide/main.js` with a document gives the browser HTML where it expected a
+/// module: it refuses it on its MIME type and renders a blank page, so the
+/// fallback hides the very thing it was meant to explain. There is nothing to fall
+/// back *for* — the IDE has no client-side routes — so there is no fallback.
 #[tokio::test]
-async fn without_a_built_bundle_an_admin_gets_the_bootstrap_document() {
-    // `--ide-dir` unset: the route still answers, with the document that loads the
-    // bundle's pinned entry points, so a checkout that has not built `ui/ide` fails
-    // in the browser with a blank workbench rather than a 404 nobody can explain.
+async fn without_a_bundle_nothing_under_the_prefix_is_html() {
     let (router, sessions) = router_with_ide(None);
+    let token = session_for(&sessions, ROLE_ADMIN);
+
+    for path in [
+        "/ide/",
+        "/ide/?store=app-source",
+        "/ide/main.js",
+        "/ide/main.css",
+        "/ide/assets/onig.wasm",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(get(path, Some(&token), true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            !content_type.contains("text/html"),
+            "{path} answered with {content_type}: HTML where a module was expected is \
+             what renders as a blank page"
+        );
+    }
+}
+
+/// The same rule when a bundle *is* configured: a path the bundle does not contain
+/// is missing, not the document.
+#[tokio::test]
+async fn an_asset_outside_the_bundle_is_a_404() {
+    let dir = ide_bundle("missing-asset");
+    let (router, sessions) = router_with_ide(Some(dir.clone()));
     let token = session_for(&sessions, ROLE_ADMIN);
 
     let response = router
         .clone()
-        .oneshot(get("/ide/", Some(&token), true))
+        .oneshot(get("/ide/assets/not-there.js", Some(&token), false))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-        .await
-        .unwrap();
-    let body = String::from_utf8_lossy(&body);
-    assert_eq!(body, sc_server::IDE_BOOTSTRAP_HTML);
-    // It loads the IDE's assets, not the SPA's.
-    assert!(body.contains("/ide/main.js"));
-    assert!(body.contains("/ide/main.css"));
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
