@@ -2,6 +2,46 @@
 
 Changes in reverse chronological order.
 
+## The documentation catches up with the IDE
+
+Documentation only, and the last phase of the milestone. Two documents were describing a product
+that no longer matches: the React tutorial taught the edit loop as "open the file manager, edit a
+textarea, press Build on the app's row", and §12.1 still described the IDE as it was *planned*.
+
+**The tutorial's step 7 is now the IDE.** It opens the workbench from the `(edit code)` link the
+admin already has, formats `Tasks.tsx` with prettier — including what a `.prettierrc` of the
+project's own changes, and `editor.formatOnSave` — misspells a column so the generated `TasksRow`
+catches it as you type, takes the quick fix, and builds from the status bar with the failure
+landing in the Problems panel. The two conditions on semantics are stated where a reader meets
+them rather than as caveats at the end: dependencies must be installed (which is why the build
+comes first, and what the "press Build to install" notice means), and the store must have a local
+directory. Source control gets a paragraph with the honest footnote that this tutorial's own
+layout does not have it — the store is `/srv/apps` and the scaffold initialised the repository in
+`/srv/apps/todo`, one level down, so the store as opened is not a working copy. Two new
+"trips people up" entries: the first build is what turns on type semantics, and the IDE has no
+file watcher, so a change made elsewhere is seen when something lists.
+
+**§12.1 now describes what was built.** The narrative that chose `@codingame/monaco-vscode-api`
+stands unchanged — it is still the reason customization lives in the host page — and the
+deviations are recorded beside it: the real CSP (four relaxations, and nothing about where code
+may come from), the flag that was built and then deleted (`--ide-dir` is not a deployment choice,
+and there is no fallback document), prettier's configuration search being ours because
+`resolveConfig` is node-only, the three diagnostic shapes the build parses and the `run_build`
+stdout/stderr bug that made the feature impossible, and the three ways the language server came
+out differently from the plan — refusals in the close frame, a workspace folder that deliberately
+is not the server's root with a URI-translating bridge in between, and `monaco-languageclient`
+skipped for the same version conflict that rejected `@typefox/monaco-editor-react`. The extension
+ordering that decides whether the contributions exist at all is written down, because the failure
+mode is a hang and not a throw. The SCM view gets a subsection of its own: the subset in one
+sentence, what is left out and the missing backend operation behind each absence, the optional
+`data` beside an operation's prose `output`, the refresh discipline, and the viewlet that could
+not be omitted. §14.1 gained the paragraph those references point at — what an operation is, which
+ones git declares, and why its output is prose with structure optional beside it.
+
+Documentation is testable to the extent that it can be *lost* silently, and both of these could
+be: `repo_hygiene.rs` now asserts the tutorial still teaches each step of the loop and that §12.1
+still records each deviation, in the same style as the existing test over the triggers tutorial.
+
 ## Source control in the IDE: the minimal SCM view
 
 A store that is a git working copy now has VS Code's **Source Control** view in the IDE: the

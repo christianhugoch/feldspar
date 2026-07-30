@@ -170,18 +170,98 @@ export const routes: AppRoute[] = [
 you forget about is closed rather than open. Client-side auth is a convenience only — every
 request is authorized again by the server, against the table's roles.
 
-## Step 7 — Edit it
+## Step 7 — Edit it, in the IDE
 
-The loop is **edit file → build → view**:
+The file manager edits one file at a time in a textarea, which is the wrong instrument for a
+project. Next to the source link on the app's row there is **(edit code)** — the same button is
+on the store's row under **File stores**, and in the file manager's toolbar. It opens
 
-1. On the app's row, click the source link (`apps/todo`) to open the file manager there.
-2. Edit `src/pages/Tasks.tsx` — add a column, change the layout.
-3. Press **Build** on the app's row.
-4. Reload `todo.localhost:3000`.
+```
+http://localhost:3000/ide/?store=apps
+```
 
-No restart, and other applications keep serving throughout. If you would rather work over SSH or
-with your own editor, the project is an ordinary git repository on disk; nothing here depends on
-having gone through the file manager.
+in a new tab, and that is **VS Code**: the project tree on the left, tabs of editors, the command
+palette (`F1` or `Ctrl+Shift+P`), find-in-files, keybindings and the settings editor — editing the
+real store, so a save here is what the file manager shows and what the next build compiles. It is
+admin-only, and it is a page of its own rather than a screen in the admin UI.
+
+Open `todo/src/pages/Tasks.tsx` from the tree.
+
+### Format
+
+`Shift+Alt+F`, or **Format Document** from the palette, runs **prettier** — in your browser, not on
+the server, so it works on a store with no `node_modules` and on one with no local directory at
+all. It uses **your project's** settings: put
+
+```json
+{ "singleQuote": true, "printWidth": 100 }
+```
+
+in `todo/.prettierrc` and format again, and the file is rewritten to that. The nearest ancestor
+wins, and `package.json`'s `prettier` key counts as one, so a project laid out as a monorepo
+behaves as prettier itself would. A configuration a browser cannot run — `.prettierrc.js`, or a
+YAML or TOML one — is *found* and reported as unusable rather than quietly skipped for a different
+file's settings; if you see that notice, the fix is to write the same options as JSON.
+
+Turn on **Settings → `editor.formatOnSave`** and every `Ctrl+S` formats first.
+
+### Fix a type error
+
+Type errors are underlined as you type, against the types Saltcorn generated from your table.
+Misspell a column in the row that `Tasks.tsx` renders:
+
+```tsx
+<td>{String(row.titel ?? "")}</td>
+```
+
+`titel` is squiggled immediately — `Property 'titel' does not exist on type 'TasksRow'. Did you
+mean 'title'?` — the **Problems** panel names the file and line, and `Ctrl+.` offers the spelling
+fix. Take it, and the squiggle goes. Hovering `row` shows `TasksRow` with your two columns on it;
+`F12` on `useTasks` jumps into `src/saltcorn/hooks.ts`, and `F12` on a React import jumps into the
+really-installed `node_modules`.
+
+Those semantics come from a real `typescript-language-server` running **on the server, in your
+project's directory**, checking against the `tsconfig.json` and the dependencies that are actually
+installed there. Two consequences worth knowing:
+
+- **It needs the dependencies installed**, which is why step 4 comes first. Before the first build
+  the IDE says `no TypeScript semantics: todo has no node_modules — press Build to install`, once,
+  instead of reporting thousands of "cannot find module" errors that all mean that one thing.
+- **It needs a store with a local directory.** An object-store-backed store gets editing, prettier,
+  syntax highlighting and syntax errors, and is told plainly that it gets no semantics — the same
+  rule that decides which stores can host a buildable app at all.
+
+### Build
+
+`Ctrl+S`, then press **Build** in the status bar (or `Saltcorn: Build Application` in the palette).
+It runs the same build as the button on the app's row — the IDE works out which application's
+source this store holds — and reports the result as a notification.
+
+When it fails, its diagnostics land where you are working: `tsc`'s and the bundler's errors are
+parsed into the **Problems** panel by file and line, so clicking one opens the file at the fault.
+The whole log is in the **Saltcorn Build** output channel either way. Try it: put the misspelling
+back, save, Build, and `TS2339` appears on the line you broke — the build's own diagnostics, from
+`tsc --noEmit`, in the tab you have open.
+
+Then reload `todo.localhost:3000`. No restart, and other applications keep serving throughout.
+
+### Commit it
+
+If the store's own root is a git working copy, the **Source Control** view is live: the files you
+have changed, a message box, and Commit / Pull / Push / Switch Branch as the view's title buttons,
+with the branch and its ahead/behind count in the status bar. It is a deliberate subset — see what
+changed, commit it, exchange it with the remote, switch branch — with no staging, no diff editor
+and no history; the rest waits on backend operations that do not exist yet.
+
+Note *the store's* root. This tutorial's store is `/srv/apps` and the scaffold initialised the
+repository one level down, in `/srv/apps/todo`, so the store as opened here is not a working copy
+and the view says there is no provider. To get source control in the IDE, give the project a store
+of its own (a `local` store pointed at `/srv/apps/todo`), or use a **git** store, which is a
+working copy by construction. A switch of branch reloads the tree, the open editors and the type
+diagnostics together.
+
+If you would rather work over SSH or with your own editor, the project is an ordinary git
+repository on disk; nothing here depends on having gone through the IDE.
 
 ## Things that trip people up
 
@@ -192,7 +272,12 @@ having gone through the file manager.
   already has files in it creates the application but refuses to generate into it, and says so.
   Pick another project name, or point the app at the project that is already there.
 - **The first build is the slow one** — it installs dependencies. Later builds skip that unless
-  `node_modules` has gone away.
+  `node_modules` has gone away. It is also what turns on type semantics in the IDE, since there is
+  nothing to check against until the dependencies exist.
+- **The IDE has no file watcher**, because a file store's API is request/response and cannot push.
+  It notices its own writes, a build's, and a git operation's; a change made from the file manager,
+  over SSH or by another tab is seen when something lists — the explorer's **Refresh**, find-in-files,
+  Go to File — or when you come back to the tab, which drops everything it remembered.
 - **Building from a terminal**: `saltcorn build-app todo` builds one application by subdomain
   and prints the installer's and bundler's output as it goes. It is the same build the button
   runs, so it is what to reach for in a deploy script — or when a failing build has left the

@@ -1217,13 +1217,31 @@ admin surface, and it reuses the **generated typed client** (§13.1) rather than
 `fetch` calls, so it cannot drift from the API either.
 
 **It needs its own CSP.** The strict admin policy (`script-src 'self'; style-src 'self'`) is
-satisfied structurally by React (above); the workbench injects styles and runs workers from
-blobs, so `/ide/*` is served with a relaxed policy of its own — `style-src` allowing inline,
-`worker-src blob:` — and the admin SPA's policy is left untouched. Serving the IDE from a
-distinct route is what makes that containment possible, and is the second reason it is a
-separate page.
+satisfied structurally by React (above); the workbench computes and injects styles, runs its
+editor, textmate, search and extension-host code as workers built from blobs, and hosts the
+worker extension host in a sandboxed iframe. So `/ide/*` is served with its own
+`IDE_CONTENT_SECURITY_POLICY`, which relaxes exactly those four things — inline styles,
+`unsafe-eval`, blob workers, blob frames — and nothing about *where* code may come from:
+`default-src 'self'` stands, there is
+no remote origin, and `connect-src 'self'` keeps the IDE talking only to this server (which also
+admits the same-origin WebSocket the language server needs). It is set per response on the IDE's
+own route, so relaxing the policy for the workbench cannot relax it for the admin UI. Serving the
+IDE from a distinct route is what makes that containment possible, and is the second reason it is
+a separate page.
 
-The four capabilities then land as follows:
+**The bundle is not a deployment choice.** `--ide-dir` and `SC_BUILD_IDE` were built first and
+then removed: the IDE is where an admin edits an application's source, reached from a button in
+the admin UI, so an operator has nothing to decide and a build that produced the admin UI without
+it would leave that button leading nowhere. `SC_BUILD_ADMIN=1` builds `ui/admin` **and** `ui/ide`
+and embeds both paths; a binary built without it finds `ui/ide/dist` in the checkout it was
+compiled from. There is also **no fallback document**: with no bundle, every path under `/ide/` —
+the document as much as an asset — is a 404. The SPA has a fallback so a client-routed deep link
+still loads the bundle; the IDE has no client-side routes to deep-link into (a store is a query
+parameter), so there is nothing to fall back *for*, and a fallback that answers a request for a
+module with HTML turns a clear failure into a blank page.
+
+The capabilities then land as follows — four were planned and a fifth, source control, was added
+once they were real:
 
 - **Files** — a `FileSystemProvider` registered with `registerFileSystemOverlay` over the file
   endpoints that already exist (`browseFiles`, `readFile`, `writeFile`, `makeDirectory`,
@@ -1258,15 +1276,36 @@ The four capabilities then land as follows:
   installed prettier: a store need not have one, need not have `node_modules`, and need not have
   a local path at all — formatting should not be the capability that stops working on an object
   store.
+
+  The price of standalone prettier is that `resolveConfig` belongs to its *node* half, so the
+  search is ours: from the file's directory to the workspace root, `package.json`'s `prettier`
+  key before the dotfiles in each, nearest ancestor wins. A `package.json` **without** that key
+  is not a configuration and does not end the search — that is the monorepo package inheriting
+  the root's settings. Comments and trailing commas are accepted, because hand-written configs
+  have them. And a `.js`, YAML or TOML configuration, which a browser can neither execute nor
+  parse, is *found* and reported once as unusable rather than silently stepped over to use some
+  other file's settings.
 - **Build** — a command contributed by the in-page manifest, calling `buildApplication` (§13.2)
   for the application whose derived `source.store` (§13.3) is this store; the SPA already
   receives that field, so the IDE filters the application list client-side and adds no endpoint.
   A build failure is an **Application** error carrying the bundler's and `tsc`'s diagnostics
   (§16), and those go into a `DiagnosticCollection` — so the Problems panel shows a failed
-  build's errors, by file and line, in the tab the admin has open.
+  build's errors, by file and line, in the tab the admin has open. Three output shapes are
+  parsed (`tsc`'s `src/App.tsx(12,15): error TS2322: …`, esbuild's `file:line:col: ERROR: …`,
+  and rolldown's boxed report, colour codes included); everything else, and the whole log, goes
+  to an output channel unparsed. Paths are placed back in the store relative to the
+  application's source directory, and an absolute path is mapped only when it lies under the
+  directory the build reported — a diagnostic pointing at a file the admin cannot open is worse
+  than one only in the log.
+
+  Wiring this up found a server bug that made the feature impossible: `run_build` quoted stderr
+  whenever stderr had said anything, and stdout only otherwise, while the React build is
+  `tsc --noEmit && vite build` run by npm — `tsc` writes its diagnostics to **stdout** and npm
+  reports the failure on stderr. A failed build's error now carries both streams, each bounded
+  separately so a chatty one cannot crowd the other out.
 - **TypeScript errors** — a **language server on the server**, `typescript-language-server`
-  spawned in the store's directory and bridged to `monaco-languageclient` over a WebSocket on an
-  admin-authenticated route. The alternative, VS Code's own `typescript-language-features`
+  spawned in the store's directory and bridged over a WebSocket on an admin-authenticated route.
+  The alternative, VS Code's own `typescript-language-features`
   extension in a web worker, is available as a package and would work through the filesystem
   provider — at the price of dragging the project's entire `node_modules` type surface across
   HTTP. Server-side keeps it where it already is, and type-checks against the real
@@ -1274,8 +1313,92 @@ The four capabilities then land as follows:
   `FileStore::local_path` (§14.1), so it follows the rule that method already established: a
   store with no local path cannot host a buildable app, and equally cannot host a language
   server. Such a store gets editing, formatting, grammars and syntax errors, and is told why it
-  gets no semantics. Until the language server lands, the build's diagnostics are the
-  type errors, which is why they are wired to the Problems panel and not to a toast.
+  gets no semantics — as is a project whose dependencies have never been installed, because
+  without `node_modules` tsserver resolves no import and every file becomes a wall of "cannot
+  find module": thousands of errors saying one thing, whose fix is the Build button. One process
+  runs per socket and is killed when the socket closes, with a bound on how many may run at once
+  so the ninth admin is refused with a sentence rather than the machine falling over.
+
+  Three things about that route came out differently from the plan, and each is load-bearing:
+
+  - **The refusals ride the close frame, not an HTTP status.** A browser cannot read the body of
+    a failed WebSocket handshake, so a reason sent that way is a reason nobody sees. Only the
+    admin check — which needs no explanation — is answered before the upgrade; everything else
+    accepts the socket and closes it with the reason in it, which the IDE shows verbatim.
+  - **The workspace folder deliberately does not match the server's root.** Making them equal was
+    the plan; it would have meant telling the browser the server's directory layout, a folder
+    that differs between stores with a local path and stores without, and canonicalising relative
+    `--file-store` paths on the way. Instead the bridge — the one place that knows both roots —
+    rewrites URIs between `/<store>` and the real directory as messages pass, walking the JSON
+    rather than replacing text, because a `didOpen` carries a document's whole contents and a
+    blind search-and-replace would edit the admin's source code. A URI it cannot map (a
+    definition outside the store) passes through untouched.
+  - **`monaco-languageclient` is not used**, for the reason this section rejected
+    `@typefox/monaco-editor-react`: it pins `@codingame/monaco-vscode-api` at `^25` released /
+    `^35` unreleased against this workbench's `36`, and two copies of that package are two
+    service registries — the client would register its providers with a workbench nobody is
+    looking at. What it adds beyond that is a twenty-line `BaseLanguageClient` subclass returning
+    a ready-made transport, so those twenty lines are ours and `vscode-languageclient` (with
+    `vscode-ws-jsonrpc` for the socket) is used directly.
+- **Source control** — the fifth capability, added once the other four were real, and the one
+  place the milestone deliberately ships a *subset* (below).
+
+**The extension must be registered before `initialize` and activated after it.** This is not a
+detail; it is the difference between the formatter and the Build button existing and not.
+Registered first, the manifest joins the built-in set the workbench brings up with itself.
+Registered afterwards — which upstream's README shows — it is a *delta* against a running
+workbench, which takes the extension registry's lock and waits for every extension host to accept
+it, including the web worker host this bundle has no extension for and never starts.
+`setAsDefaultApi()` then never resolves, the workbench looks perfectly healthy, and the
+contributions silently do not exist. The failure mode is a hang rather than a throw, so a wait
+longer than fifteen seconds logs what to suspect.
+
+#### Source control: the minimal SCM view
+
+A store that is a git working copy gets VS Code's **Source Control** view, and the scope is one
+sentence: **see what changed, commit it, exchange it with the remote, switch branch.** Left out
+are the index (staging per file or per hunk), the diff editor and the gutter's quick-diff,
+history and blame, discard, merge and rebase, and conflict resolution. Those are not omitted for
+effort: the first three want the same missing thing, a way to read a blob at a revision — there
+is no operation that serves `HEAD:src/App.tsx`, so a "diff" would be a diff against nothing —
+and the rest want a log endpoint or a merge that can report and resolve conflicts. Clicking a
+changed file therefore *opens* it, which is the honest act available, and none of the absences is
+what stops an admin committing the file they just edited.
+
+Most of the operations existed already as declared backend operations (§14.1): `status`, `clone`,
+`pull`, `push`, `commit`. One is new — **`checkout`**, taking a `branch` name and a `create`
+flag, so a missing branch name is caught by the same declared-input validation that catches a
+missing commit message. It runs plain `git checkout`: **no `--force` and no automatic stash**, so
+a switch that would overwrite uncommitted work fails with git's own refusal, naming the files.
+An editor that silently ate what someone had just typed would be the worse answer, and it is why
+commit and pull are the operations that come first.
+
+**An operation answers twice.** `status`'s `output` is prose and stays prose — the admin screen
+that rendered branches and ahead/behind counts would be a screen that knows what those are, and
+could not render a plugin backend's status at all — but a source-control view cannot list changed
+files from a paragraph of English. So `RunFileStoreOperationResponse` carries an **optional**
+`data`, which the git backend fills with the working copy as structure: branch, branch list,
+ahead/behind, last commit, and the porcelain lines split into `{ status, path }`. Every other
+backend leaves it null, the admin UI still renders `output` and is untouched, and the IDE stops
+parsing prose. Every instance operation carries it, not just `status`, because the server computes
+the state anyway and a view that redrew from a second request could disagree with the operation it
+had just run.
+
+**Refresh discipline is the substance of the client side.** There is no watcher (above), so every
+operation drops what the filesystem layer remembers, announces the open documents as changed so a
+stale editor re-reads, and redraws from the status the operation itself reported. A **branch
+switch** is the strongest case — the whole tree can change at once — so it also restarts the
+language client rather than reasoning about which of tsserver's in-memory beliefs survived: one
+process, and cheaper in thought than the alternative. This is the counterpart to `watch()`
+returning nothing: no watcher can *notice* an outside change, but the IDE sometimes **causes** one,
+and in that moment it knows exactly what a watcher would have told it.
+
+**A store that is not a working copy gets no provider** — no commands in the palette, no title
+buttons, no branch in the status bar. What was planned and turned out to be impossible is leaving
+the *viewlet* out too: the Source Control view and its activity-bar icon belong to the workbench
+itself, not to the SCM service, and omitting the service changes nothing except whether the view
+can work. So the service is always registered, and a plain directory shows VS Code's own "No
+source control providers registered."
 
 ---
 
@@ -1668,6 +1791,15 @@ path** (path-cumulative authorization). Per-file metadata is xattrs, no DB rows 
 no on-disk path, and the two jobs that cannot work without one are a framework's **build step**
 (§13.3) and the IDE's **language server** (§12.1). Both must say so rather than pretend
 otherwise.
+
+**Operations** are how a backend offers what only it can do, declared rather than hard-coded: a
+label, a description, a scope (configure the definition, or act on the instance) and typed input
+fields, so the admin screen renders and validates them without knowing what any of them mean. Git
+declares `generate_deploy_key`, `status`, `clone`, `pull`, `push`, `commit` and `checkout`. Their `output`
+is **prose** for the same reason: a screen that rendered branches and ahead/behind counts could not
+render a plugin backend's status at all. A caller that needs structure — the IDE's SCM view (§12.1)
+— reads the **optional** `data` beside it, which a backend fills only if it has something to say,
+and which is null everywhere else.
 
 ### 14.2 Predictive models
 

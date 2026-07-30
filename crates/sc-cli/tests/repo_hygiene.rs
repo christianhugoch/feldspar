@@ -165,6 +165,61 @@ fn tutorials_are_cross_linked() {
     );
 }
 
+/// The React tutorial is where an admin learns the edit loop, and since the IDE
+/// milestone that loop is **format → fix a type error → build**, in the
+/// workbench rather than in the file manager's textarea. Each fragment below is
+/// a step of it that would be invisibly lost if the section were rewritten
+/// around the old file-manager loop: the tutorial would still read fine.
+#[test]
+fn the_react_tutorial_teaches_the_ide_loop() {
+    let root = workspace_root();
+    let react = read(&root, "docs/tutorial-react-todo.md");
+    for fragment in [
+        "/ide/?store=apps",     // how the workbench is reached, and from where
+        "Format Document",      // …prettier, by the command's own name
+        ".prettierrc",          // …with the project's own configuration
+        "editor.formatOnSave",  // …and on save
+        "TasksRow",             // the type a type error is caught against
+        "Problems",             // where a diagnostic lands, from either source
+        "node_modules",         // …which is why semantics need a build first
+        "Saltcorn: Build Appl", // the build, from inside the editor
+        "Source Control",       // and committing what was just edited
+    ] {
+        assert!(
+            react.contains(fragment),
+            "the React tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// §12.1 is the IDE's design section, and the milestone deviated from it in
+/// places that are load-bearing — a build that is served without a flag, a
+/// language client that is not `monaco-languageclient`, an SCM view that is
+/// deliberately a subset. A design document that still described the plan
+/// instead of what was built would mislead the next person to read it, which is
+/// the failure this test exists to catch.
+#[test]
+fn the_design_records_what_the_ide_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        "IDE_CONTENT_SECURITY_POLICY",          // the relaxed policy, by name
+        "SC_BUILD_ADMIN=1",                     // …and no `--ide-dir` to decide
+        "before `initialize`",                  // the ordering the contributions depend on
+        "monaco-languageclient` is not used",   // the language client deviation
+        "does not match the server's root",     // …and the URI bridge it forced
+        "close frame",                          // where a refusal is carried
+        "Source control: the minimal SCM view", // the subset, and
+        "Left out",                             // …what it leaves out
+        "a diff against nothing",               // …for a stated reason
+    ] {
+        assert!(
+            design.contains(fragment),
+            "§12.1 should record `{fragment}`"
+        );
+    }
+}
+
 /// The triggers tutorial teaches the three things Phases 2–8 built, and each of
 /// them is a *screen* an admin has to be able to find: an `only_if` on a table
 /// event, a `none` trigger reached through an application's API, and a periodic

@@ -215,11 +215,22 @@ one genuinely new piece of git.
       commit — then switches to another branch from the status bar and the tree, the editors and
       the TypeScript diagnostics are all the new branch's.
 
-## Phase 6 — Documentation
+## Phase 6 — Documentation ✅
 
-- [ ] update the [React tutorial](./docs/tutorial-react-todo.md) to describe format, fix a type error, build.
-- [ ] §12.1 revised to describe what was built where it deviates from what was planned, including
-      the SCM view's subset and why the rest was left out.
+- [x] update the [React tutorial](./docs/tutorial-react-todo.md) to describe format, fix a type error, build.
+      Step 7 is now the workbench: format with the project's own prettier config, catch a
+      misspelled column against the generated `TasksRow`, build from the status bar with the
+      failure in the Problems panel — plus the two conditions on semantics (installed
+      dependencies, a local directory) and a note that this tutorial's store is not itself a
+      working copy, so it has no Source Control view.
+- [x] §12.1 revised to describe what was built where it deviates from what was planned, including
+      the SCM view's subset and why the rest was left out. Also: the real CSP, the deleted
+      `--ide-dir`, prettier's own configuration search, the build's diagnostic shapes and the
+      `run_build` stdout/stderr fix, the three language-server deviations (close-frame refusals,
+      the URI bridge, no `monaco-languageclient`) and the extension-registration ordering.
+      §14.1 gained the paragraph on operations those references point at.
+- [x] Tests: `repo_hygiene.rs` asserts the tutorial still teaches each step of the loop and that
+      §12.1 still records each deviation — both are documents that could be lost silently.
 
 ---
 
