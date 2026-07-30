@@ -58,10 +58,17 @@ async fn serve_command(args: &[String]) -> Result<()> {
     let (file_store_specs, server_args) = extract_file_stores(rest)?;
     let mut config = ServerConfig::from_args(server_args)?;
     // When the binary was built with the admin bundle (`SC_BUILD_ADMIN=1`, see
-    // `build.rs`) and no explicit `--static-dir` was given, serve that bundle.
+    // `build.rs`) and no explicit `--static-dir` was given, serve that bundle. The
+    // file-store IDE (§12.1) is the same story under its own flag, because it is a
+    // second bundle an operator may or may not want to build.
     if config.static_dir.is_none() {
         if let Some(dir) = option_env!("SC_ADMIN_BUNDLE_DIR") {
             config.static_dir = Some(std::path::PathBuf::from(dir));
+        }
+    }
+    if config.ide_dir.is_none() {
+        if let Some(dir) = option_env!("SC_IDE_BUNDLE_DIR") {
+            config.ide_dir = Some(std::path::PathBuf::from(dir));
         }
     }
 

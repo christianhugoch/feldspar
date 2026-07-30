@@ -23,6 +23,14 @@ pub struct ServerConfig {
     /// server still serves the minimal bootstrap document so the SPA can boot
     /// once built.
     pub static_dir: Option<PathBuf>,
+    /// Directory holding the built `ui/ide` bundle, if any — the file-store IDE,
+    /// served under `/ide/` (design §12.1).
+    ///
+    /// A **second** directory rather than a subdirectory of `static_dir` because
+    /// it is a second bundle with its own build, its own entry point and its own
+    /// CSP: an operator can serve the admin UI without the IDE, and a development
+    /// checkout can point the two at different trees.
+    pub ide_dir: Option<PathBuf>,
     /// Session lifetime in hours.
     pub session_ttl_hours: i64,
     /// Whether the session/CSRF cookies carry the `Secure` attribute (set behind
@@ -45,6 +53,7 @@ impl Default for ServerConfig {
                 .parse()
                 .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 3000))),
             static_dir: None,
+            ide_dir: None,
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,
             base_domain: None,
@@ -55,8 +64,8 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Parse configuration from CLI arguments (everything after the subcommand).
     ///
-    /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
-    /// `--session-ttl-hours <n>`, `--secure-cookies`, and `--base-domain
+    /// Recognised flags: `--bind <addr>`, `--static-dir <path>`, `--ide-dir
+    /// <path>`, `--session-ttl-hours <n>`, `--secure-cookies`, and `--base-domain
     /// <domain>`. Unknown flags are an [`Error::Config`], so a typo fails loudly
     /// rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
@@ -76,6 +85,9 @@ impl ServerConfig {
                 }
                 "--static-dir" => {
                     cfg.static_dir = Some(PathBuf::from(next_value(&mut it, "--static-dir")?));
+                }
+                "--ide-dir" => {
+                    cfg.ide_dir = Some(PathBuf::from(next_value(&mut it, "--ide-dir")?));
                 }
                 "--session-ttl-hours" => {
                     let raw = next_value(&mut it, "--session-ttl-hours")?;
@@ -116,6 +128,7 @@ mod tests {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.addr.to_string(), "127.0.0.1:3000");
         assert!(cfg.static_dir.is_none());
+        assert!(cfg.ide_dir.is_none());
         assert!(!cfg.secure_cookies);
         // App subdomain routing is opt-in.
         assert!(cfg.base_domain.is_none());
@@ -128,6 +141,8 @@ mod tests {
             "0.0.0.0:8080",
             "--static-dir",
             "/srv/admin",
+            "--ide-dir",
+            "/srv/ide",
             "--session-ttl-hours",
             "12",
             "--secure-cookies",
@@ -139,6 +154,10 @@ mod tests {
         assert_eq!(
             cfg.static_dir.as_deref(),
             Some(std::path::Path::new("/srv/admin"))
+        );
+        assert_eq!(
+            cfg.ide_dir.as_deref(),
+            Some(std::path::Path::new("/srv/ide"))
         );
         assert_eq!(cfg.session_ttl_hours, 12);
         assert!(cfg.secure_cookies);

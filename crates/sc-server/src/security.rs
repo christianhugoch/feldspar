@@ -46,6 +46,46 @@ form-action 'self'; \
 frame-ancestors 'none'; \
 object-src 'none'";
 
+/// The Content-Security-Policy served with the **file-store IDE** under `/ide/`
+/// (design §12.1), and with nothing else.
+///
+/// The admin SPA satisfies the strict policy above structurally, because React
+/// escapes values and the bundle carries no inline anything. The IDE cannot: it is
+/// VS Code, which computes styles at runtime and injects them, runs its editor,
+/// textmate, search and extension-host code as workers created from blobs, and
+/// hosts the worker extension host in a sandboxed iframe. Each relaxation below is
+/// one of those facts, and no more than that:
+///
+/// - `style-src 'unsafe-inline'` — the workbench's own injected styles.
+/// - `script-src 'unsafe-eval' blob:` — worker bootstrap code, and the
+///   `WebAssembly` compilation textmate's oniguruma engine needs.
+/// - `worker-src blob:` and `frame-src blob:` — the workers and the extension
+///   host's iframe.
+///
+/// What it does **not** relax is where code may come from: `default-src 'self'`
+/// stands, there is no `https:` or wildcard source, and `connect-src 'self'` keeps
+/// the IDE talking to this server only (which is also what admits the same-origin
+/// WebSocket a language server will need). An extension marketplace would need a
+/// remote origin here, which is one more reason installing extensions is out of
+/// scope.
+///
+/// It is served **per response** on the IDE's own route rather than as a layer, so
+/// the strict policy remains the default for everything else: relaxing CSP for a
+/// route must not be a way of relaxing it for the admin UI.
+pub const IDE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+script-src 'self' 'unsafe-eval' blob:; \
+style-src 'self' 'unsafe-inline'; \
+img-src 'self' data: blob:; \
+font-src 'self' data:; \
+connect-src 'self' data: blob:; \
+worker-src 'self' blob:; \
+child-src 'self' blob:; \
+frame-src 'self' blob:; \
+base-uri 'none'; \
+form-action 'self'; \
+frame-ancestors 'none'; \
+object-src 'none'";
+
 /// A fresh, unguessable CSRF token (256 bits from two v4 UUIDs, hex-encoded).
 pub(crate) fn new_csrf_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())

@@ -2,6 +2,60 @@
 
 Changes in reverse chronological order.
 
+## The workbench boots: `ui/ide`, served under `/ide/`
+
+TODO phase 1. VS Code — the real workbench, not an editor component — now runs in the
+browser as a second bundle, and the server serves it to an admin at `/ide/?store=<name>`.
+The store is a placeholder in-memory folder for one more phase; everything around it is
+the shape the rest of the milestone builds on.
+
+### What is actually ours
+
+`ui/ide` is about 350 lines of TypeScript, and most of it is a service list. The workbench
+— activity bar, explorer tree, editor tabs, panels, status bar, command palette,
+find-in-files, the settings editor, keybindings — is `getWorkbenchServiceOverride()` plus
+the twenty-odd service overrides it expects to find beside it, from
+`@codingame/monaco-vscode-api` at 36.0.0 (VS Code 1.128.1). TextMate grammars and the
+theme come in as VS Code's *own* built-in extensions, published per-extension as npm
+packages, so a React project's files look like code with no highlighting code of ours.
+
+The service list is deliberately shorter than upstream's demo: no debug, no notebooks, no
+chat, no terminal, no extension gallery. Each of those is a decision this milestone has
+either deferred or ruled out, and leaving them out of the list is how that decision is
+enforced rather than merely written down.
+
+Two things needed knowing rather than reading: VS Code's workers are *named*, not
+constructed, by the page — so `workers.ts` builds `new Worker(new URL(…))` values that
+start nothing, which is what makes the bundler emit them as chunks while VS Code decides
+when to run them — and its stylesheets have to arrive as strings it injects itself, which
+is a six-line Vite resolver plugin. The build needs Vite 8: Vite 5 (what `ui/admin` uses)
+cannot resolve the deep wildcard subpath exports these packages publish.
+
+### The route is where the containment is
+
+`/ide/` is not a path inside the SPA's static bundle, and the difference is not cosmetic.
+
+It is **admin-only**. The SPA bundle is public because the login screen is in it; the IDE
+is reached only from an admin UI the caller has already logged into, so there is no reason
+to serve twelve megabytes of editor to an anonymous request. A navigation without a
+session is redirected to `/`, where logging in is possible; an asset fetch gets the
+ordinary 401/403, because a dead-end error page is what a redirect would be for a `fetch`.
+
+It has **its own Content-Security-Policy**. VS Code computes and injects styles, runs its
+editor, textmate, search and extension-host code as workers created from blobs, and hosts
+the worker extension host in a sandboxed iframe; the admin UI's strict policy forbids all
+of it. `IDE_CONTENT_SECURITY_POLICY` relaxes exactly those four things — inline styles,
+`unsafe-eval`, blob workers, blob frames — and nothing about *where* code may come from:
+`default-src 'self'` stands, there is no remote origin, and `connect-src 'self'` keeps the
+IDE talking only to this server (which also admits the same-origin WebSocket phase 4's
+language server needs). It is set per response on the IDE's own route, so relaxing the
+policy for the workbench cannot relax it for the admin UI — and a test asserts precisely
+that, including that `/ideas` is not the IDE's route.
+
+`--ide-dir` and `SC_BUILD_IDE=1` mirror `--static-dir` and `SC_BUILD_ADMIN=1`, as separate
+flags because this bundle contains VS Code and an operator who does not want it should not
+pay to build it.
+
 ## The file-store IDE: design and milestone plan
 
 Documentation only — no code yet. A file store holding a React front-end is a software project,

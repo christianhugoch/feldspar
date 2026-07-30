@@ -1,0 +1,40 @@
+/*
+ * The workbench owns the viewport: it lays itself out against the size of its
+ * container, so the container has to be the window and nothing may scroll past it.
+ * Everything else the page looks like comes from VS Code's own theme.
+ */
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+#workbench {
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Shown instead of the workbench when it cannot start (no store, or a failure). */
+.startup-message {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 3rem;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  color: #cccccc;
+  background: #1f1f1f;
+}
+
+.startup-message h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.startup-message a {
+  color: #4daafc;
+}

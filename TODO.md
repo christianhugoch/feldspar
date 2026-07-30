@@ -51,23 +51,23 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ---
 
-## Phase 1 — `ui/ide`: the workbench, served and authenticated
+## Phase 1 — `ui/ide`: the workbench, served and authenticated ✅
 
-- [ ] New Vite + TypeScript project `ui/ide` (no React), with `base: "/ide/"` and the CSS-as-string
+- [x] New Vite + TypeScript project `ui/ide` (no React), with `base: "/ide/"` and the CSS-as-string
       resolver plugin `@codingame/monaco-vscode-api` requires for its stylesheets.
-- [ ] Boot the workbench: `initialize` with `workbench-service-override` plus the service overrides
+- [x] Boot the workbench: `initialize` with `workbench-service-override` plus the service overrides
       §12.1 names (files, quickaccess, search, keybindings, configuration, storage, textmate,
       themes, languages, extensions), into a full-viewport container.
-- [ ] `typescript-basics` and the other grammar/default extensions needed for a React project
+- [x] `typescript-basics` and the other grammar/default extensions needed for a React project
       (`javascript`, `json`, `css`, `html`, `markdown`) — grammars now; semantics in phase 4.
-- [ ] Generate the typed admin client into `ui/ide/src/client.ts` from the same
+- [x] Generate the typed admin client into `ui/ide/src/client.ts` from the same
       `emit_admin_client` example `ui/admin` uses, and add the `gen-client` script.
-- [ ] `sc-server`: serve `ui/ide/dist` under `/ide/`, admin-only through the existing session
+- [x] `sc-server`: serve `ui/ide/dist` under `/ide/`, admin-only through the existing session
       middleware, with its own bootstrap document and its own relaxed CSP (inline styles,
       `worker-src blob:`) — leaving the SPA's strict policy untouched.
-- [ ] Tests: the route serves the IDE document only to an admin, and its CSP header is the relaxed
+- [x] Tests: the route serves the IDE document only to an admin, and its CSP header is the relaxed
       one while `/` still gets the strict one.
-- [ ] **Done when** `/ide/?store=<name>` shows the workbench — tree, tabs, palette — over an empty
+- [x] **Done when** `/ide/?store=<name>` shows the workbench — tree, tabs, palette — over an empty
       in-memory workspace.
 
 ## Phase 2 — The store as a filesystem

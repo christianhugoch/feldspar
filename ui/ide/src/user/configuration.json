@@ -1,0 +1,18 @@
+{
+  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.startupEditor": "none",
+  "editor.formatOnSave": true,
+  "editor.tabSize": 2,
+  "files.autoSave": "off",
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/.git": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true
+  },
+  "telemetry.telemetryLevel": "off",
+  "update.mode": "none",
+  "extensions.autoCheckUpdates": false
+}

@@ -8,7 +8,9 @@
 //! is matched to an endpoint, its [`AuthRequirement`] is enforced against the
 //! session, and its handler is resolved from the [`HandlerRegistry`]; anything
 //! that isn't an API route falls through to the static `ui/admin` bundle (via
-//! `tower-http`'s [`ServeDir`]) or the minimal bootstrap document.
+//! `tower-http`'s [`ServeDir`]) or the minimal bootstrap document — except under
+//! [`IDE_PREFIX`], which is the file-store IDE's own bundle, served admin-only and
+//! under its own Content-Security-Policy (design §12.1).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,7 +21,7 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
 use sc_api::{
@@ -38,7 +40,8 @@ use crate::apps::{AppMounts, MountedApp, subdomain_of};
 use crate::config::ServerConfig;
 use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
 use crate::security::{
-    CONTENT_SECURITY_POLICY, CSRF_HEADER, SESSION_COOKIE, build_cookie, csrf_middleware,
+    CONTENT_SECURITY_POLICY, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
+    build_cookie, csrf_middleware,
 };
 
 /// The minimal bootstrap document served for non-API navigations. It has **no
@@ -61,6 +64,31 @@ pub const BOOTSTRAP_HTML: &str = "<!doctype html>\n\
 </body>\n\
 </html>\n";
 
+/// The path prefix the file-store IDE is served under (design §12.1).
+pub const IDE_PREFIX: &str = "/ide";
+
+/// The bootstrap document for the IDE, serving the same purpose as
+/// [`BOOTSTRAP_HTML`] does for the SPA: a request that reaches `/ide/` before the
+/// bundle's own `index.html` is in place still loads the bundle's stable entry
+/// points, which `ui/ide`'s Vite config pins to `/ide/main.js` + `/ide/main.css`.
+///
+/// It is a **separate** document, not the SPA's, because the IDE is a separate
+/// page: VS Code initializes once per page and owns the whole viewport, so it
+/// cannot be a screen inside the SPA (§12.1).
+pub const IDE_BOOTSTRAP_HTML: &str = "<!doctype html>\n\
+<html lang=\"en\">\n\
+<head>\n\
+<meta charset=\"utf-8\">\n\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+<title>Saltcorn IDE</title>\n\
+<link rel=\"stylesheet\" href=\"/ide/main.css\">\n\
+</head>\n\
+<body>\n\
+<div id=\"workbench\"></div>\n\
+<script type=\"module\" src=\"/ide/main.js\"></script>\n\
+</body>\n\
+</html>\n";
+
 /// Shared server state threaded through dispatch.
 #[derive(Clone)]
 struct AppState {
@@ -70,6 +98,8 @@ struct AppState {
     handlers: Arc<HandlerRegistry>,
     /// The session store backing login/logout and per-request auth.
     sessions: Arc<SessionStore>,
+    /// Directory holding the built `ui/ide` bundle, if configured.
+    ide_dir: Option<Arc<PathBuf>>,
     /// Directory holding the built `ui/admin` bundle, if configured.
     static_dir: Option<Arc<PathBuf>>,
     /// Whether to set `Secure` on the session cookie.
@@ -137,6 +167,7 @@ pub fn build_router_with_apps(
         handlers: Arc::new(handlers),
         sessions,
         static_dir: config.static_dir.clone().map(Arc::new),
+        ide_dir: config.ide_dir.clone().map(Arc::new),
         secure_cookies: config.secure_cookies,
         apps,
         base_domain: config.base_domain.clone().map(Arc::new),
@@ -227,15 +258,9 @@ async fn upload(
     body: axum::body::Body,
 ) -> Response {
     let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    let user = match &session_token {
-        Some(token) => match state.sessions.user_for(token) {
-            Ok(user) => user,
-            Err(e) => {
-                log_failure("session lookup failed", &e);
-                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed");
-            }
-        },
-        None => None,
+    let user = match session_user(&state, &jar) {
+        Ok(user) => user,
+        Err(response) => return *response,
     };
     if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
         return rejection;
@@ -347,10 +372,15 @@ async fn dispatch(
                 ),
             }
         }
-        // Not an API route: serve the SPA bundle / bootstrap for navigations.
+        // Not an API route: the IDE under its own prefix, otherwise the SPA
+        // bundle / bootstrap for navigations.
         Err(_) => {
             if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
-                serve_static(&state, &uri).await
+                if is_ide_path(uri.path()) {
+                    serve_ide(&state, &uri, &headers, &jar).await
+                } else {
+                    serve_static(&state, &uri).await
+                }
             } else {
                 json_error(StatusCode::NOT_FOUND, "not found")
             }
@@ -685,6 +715,109 @@ async fn apply_response(
         }
     };
     (status, jar, Json(resp.body)).into_response()
+}
+
+/// Whether a path belongs to the file-store IDE (design §12.1).
+///
+/// `/ide` and `/ide/` are both the IDE itself; `/ide/main.js` and everything else
+/// under the prefix are its assets. A path that merely *starts* with the letters —
+/// `/ideas` — is not the IDE's, hence the boundary check.
+fn is_ide_path(path: &str) -> bool {
+    path.strip_prefix(IDE_PREFIX)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Serve the file-store IDE: its bundle, admin-only, under its own CSP.
+///
+/// Three things distinguish this from [`serve_static`], and each is a §12.1
+/// decision rather than an implementation detail:
+///
+/// 1. **It requires an admin session.** The SPA bundle is public because the login
+///    screen is *in* it; the IDE is reached only from an admin UI the caller must
+///    already have logged into, so there is no reason to serve twelve megabytes of
+///    editor to an anonymous request. A navigation without a session is redirected
+///    to the admin UI (where logging in is possible); anything else — an asset
+///    fetch whose session expired — gets the ordinary auth rejection.
+/// 2. **It has its own CSP.** [`IDE_CONTENT_SECURITY_POLICY`] is set on the
+///    response, which the `if_not_present` layer then leaves alone, so relaxing the
+///    policy for the workbench does not relax it for the admin UI.
+/// 3. **It falls back to its own bootstrap document**, not the SPA's.
+async fn serve_ide(
+    state: &AppState,
+    uri: &Uri,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+) -> Response {
+    let user = match session_user(state, jar) {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        // A browser navigation gets sent somewhere it can act on the problem; a
+        // fetch gets the JSON rejection it can report.
+        if accepts_html(headers) {
+            return Redirect::to("/").into_response();
+        }
+        return rejection;
+    }
+
+    // `/ide/main.js` is `main.js` within the bundle, and `/ide` or `/ide/` is its
+    // document. The IDE has no client-side routes (a store is a query parameter,
+    // §12.1), so anything else that is not a file in the bundle is a 404 from
+    // `ServeDir` — which the bootstrap fallback below turns into the document.
+    let rest = uri
+        .path()
+        .strip_prefix(IDE_PREFIX)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or("/");
+    let mut response = None;
+    if let Some(dir) = &state.ide_dir {
+        if let Ok(request) = Request::builder().uri(rest).body(Body::empty()) {
+            match ServeDir::new(dir.as_ref().as_path()).oneshot(request).await {
+                Ok(served) if served.status() != StatusCode::NOT_FOUND => {
+                    response = Some(served.map(Body::new));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut response =
+        response.unwrap_or_else(|| (StatusCode::OK, Html(IDE_BOOTSTRAP_HTML)).into_response());
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(IDE_CONTENT_SECURITY_POLICY),
+    );
+    response
+}
+
+/// Whether a request is a browser navigation rather than a programmatic fetch.
+fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+/// The user a request's session cookie names, or the response to send instead.
+///
+/// `Ok(None)` is an anonymous request — which is not by itself an error, since
+/// what anonymity costs depends on what is being asked for; `Err` is a session
+/// store that failed, which no caller can do anything about. The error is boxed
+/// because a `Response` is large and this is the rare path.
+fn session_user(
+    state: &AppState,
+    jar: &CookieJar,
+) -> std::result::Result<Option<User>, Box<Response>> {
+    let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned()) else {
+        return Ok(None);
+    };
+    state.sessions.user_for(&token).map_err(|e| {
+        log_failure("session lookup failed", &e);
+        Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session lookup failed",
+        ))
+    })
 }
 
 /// Serve a file from the static bundle, falling back to the SPA bootstrap
