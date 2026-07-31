@@ -67,7 +67,7 @@ saltcorn/
 │  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_sc_triggers`
 │  │                              #    storage & validation, the live set, dispatch, scheduler
 │  ├─ sc-workflow/               # 7. durable workflow engine (steps, runs, traces, recovery)
-│  ├─ sc-agent/                   # 7. Agent action + Skill trait + inference loop
+│  ├─ sc-agent/                   # 7. Agent action + AgentTrait trait + inference loop
 │  ├─ sc-model/                   # 7. ModelProvider trait, model instances, inference
 │  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
 │  ├─ sc-viewpattern/             # 8. ViewPattern trait (v1-style views: Show/List/Edit/Filter…)
@@ -92,7 +92,7 @@ saltcorn/
 Notes:
 
 - **`sc-db` drivers MUST be Rust** (per GOALS). Every other extension point (table
-  providers, types, fieldviews, actions, agents/skills, importers/exporters, model
+  providers, types, fieldviews, actions, agents/traits, importers/exporters, model
   providers, view patterns, frameworks, API providers) MAY be implemented in Rust or in a
   guest language via `sc-code`.
 - The React apps under `ui/` (including the admin SPA) are built to static bundles and
@@ -123,7 +123,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `RichType` | `sc-types` | any | A type known to Saltcorn (attributes + validation) |
 | `FieldView` | `sc-fieldview` | any | Display/edit a value of one or more types (React component) |
 | `Action` | `sc-action` | any | One elementary step; configurable; reads one event, returns a value |
-| `Skill` | `sc-agent` | any | An elementary agent capability (usually an LLM tool) |
+| `AgentTrait` | `sc-agent` | any | An elementary agent capability (usually an LLM tool) |
 | `Importer` / `Exporter` | `sc-catalog` | any | Move table data to/from a format |
 | `ModelProvider` | `sc-model` | any | Fit/inspect/apply a predictive model over table data |
 | `ViewPattern` | `sc-viewpattern` | any | A v1-style view template over a table |
@@ -1089,22 +1089,22 @@ redis/kafka drivers scale it out.
 ### 11.1 Agents
 
 An **agent is a kind of `Action`** (so it is also a trigger body). It is configured by
-enabling a set of **skills**, each with its own config. A skill is an elementary agent
+enabling a set of **traits**, each with its own config. A trait is an elementary agent
 capability — most expose a tool to the LLM loop, some change chat behaviour.
 
 ```rust
 #[async_trait]
-pub trait Skill: Send + Sync {
+pub trait AgentTrait: Send + Sync {
     fn name(&self) -> &str;
     fn config_spec(&self) -> Vec<FormField>;
-    /// Tools this skill contributes to the inference loop (may be zero).
+    /// Tools this agent trait contributes to the inference loop (may be zero).
     fn tools(&self, cfg: &Attrs, cat: &Catalog) -> Vec<Tool>;
     /// Hook to alter chat behaviour / system prompt (e.g. model picker, preload data).
     fn on_turn(&self, turn: &mut Turn) -> Result<()> { Ok(()) }
 }
 ```
 
-Built-in skills mirror v1's `agents` plugin: query-a-table tool, HTTP-request tool, run
+Built-in traits mirror v1's `agents` plugin's skills: query-a-table tool, HTTP-request tool, run
 a guest function as a tool, generate-and-run code tool, long-term memory (backed by a
 table), MCP client, model picker, preload data, use-any-action/workflow-as-a-tool,
 subagent handoff, web search, plan approval.
@@ -1117,7 +1117,7 @@ row) or through an Agent-chat view pattern (a ChatGPT-like UI with history and s
 
 ### 11.2 Copilot & AppConstructor
 
-The copilot is itself an agent composed of app-building skills (build tables, views,
+The copilot is itself an agent composed of app-building traits (build tables, views,
 workflows). Two front-ends, as in v1: a plain chat interface, and the staged
 **AppConstructor** (describe → clarify → research → requirements → plan → execute → user
 feedback → self-heal). For users who prefer an external coding agent, the copilot can emit a
@@ -1833,7 +1833,7 @@ Guest code can provide any extension point **except `DatabaseDriver`** (Rust-onl
 pub trait CodeAdapter: Send + Sync {
     fn language(&self) -> &str;                       // "javascript" | "python" | …
     async fn call(&self, module: &str, func: &str, args: Vec<Value>) -> Result<Value>;
-    /// Register a guest-provided extension (action, fieldview, skill, provider…).
+    /// Register a guest-provided extension (action, fieldview, agent trait, provider…).
     fn register(&self, decl: &GuestDecl) -> Result<Registration>;
 }
 ```

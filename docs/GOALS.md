@@ -8,7 +8,7 @@ A Rust library for a unified catalog and server in a cli command with web UI and
 
   * relational and relation-like data sources. Can connect to multiple databases and also show other data as if it were a table in a database 
   * A workflow engine with durable workflows. Workflows are based on elementary actions. 
-  * AI agents based on skills, which are elementary agent capabilities that can be enabled and configures. E.g. ability to search on a table, an tool based on code
+  * AI agents based on Traits (called "skills" in saltcorn v1, renamed traits to avoid confusion with agent skills), which are elementary agent capabilities that can be enabled and configures. E.g. ability to search on a table, an tool based on code
   * triggers: workflows and agents. 
   * file stores: connect multiple file stores 
   * predictive models. different types of models run 

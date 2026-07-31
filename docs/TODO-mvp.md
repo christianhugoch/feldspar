@@ -214,7 +214,7 @@ Tracked so they aren't accidentally pulled in early:
 - Rich types & full `FieldView` trait (React-component fieldviews) — basic types only for MVP
 - Stored `_sc_tables` / `_sc_fields` overlay metadata — the *overlays* only. `_sc_applications` **is** in scope (Phase 10): a table exists without a metadata row, an application does not exist without one (design §9/§13.2)
 - Workflows & durable engine (`sc-workflow`), triggers, actions registry
-- Agents / skills / copilot (`sc-agent`, `sc-copilot`)
+- Agents / agent traits / copilot (`sc-agent`, `sc-copilot`)
 - Predictive models (`sc-model`)
 - Message bus & cross-process cache invalidation (`sc-bus`) — single process for MVP
 - Drag-and-drop builder (`ui/builder`), dynamic form runtime, Saltcorn-v1 view patterns
