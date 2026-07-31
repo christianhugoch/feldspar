@@ -23,6 +23,7 @@ import {
   IconFolder,
   IconLogout,
   IconMoon,
+  IconRobot,
   IconShieldLock,
   IconSun,
   IconTable,
@@ -36,6 +37,8 @@ import { FileManager } from "./screens/FileManager";
 import { FileStores } from "./screens/FileStores";
 import { FileStoreForm } from "./screens/FileStoreForm";
 import { FirstUser } from "./screens/FirstUser";
+import { LlmProviders } from "./screens/LlmProviders";
+import { LlmProviderForm } from "./screens/LlmProviderForm";
 import { Login } from "./screens/Login";
 import { Roles } from "./screens/Roles";
 import { Tables } from "./screens/Tables";
@@ -147,6 +150,12 @@ const NAV: NavItem[] = [
     label: "Files",
     icon: <IconFolder />,
     matches: ["/file-stores", "/files"],
+  },
+  {
+    href: "#/llm-providers",
+    label: "Agents",
+    icon: <IconRobot />,
+    matches: ["/llm-providers"],
   },
   { href: "#/users", label: "Users", icon: <IconUsers />, matches: ["/users"] },
   { href: "#/roles", label: "Roles", icon: <IconShieldLock />, matches: ["/roles"] },
@@ -365,6 +374,16 @@ function Screen({ route }: { route: string }) {
       .map(decodeURIComponent)
       .join("/");
     return <FileManager store={decodeURIComponent(filesMatch[1])} initialDir={dir} />;
+  }
+  if (route === "/llm-providers/new") {
+    return <LlmProviderForm />;
+  }
+  const providerEditMatch = route.match(/^\/llm-providers\/([^/]+)\/edit$/);
+  if (providerEditMatch) {
+    return <LlmProviderForm providerId={decodeURIComponent(providerEditMatch[1])} />;
+  }
+  if (route.startsWith("/llm-providers")) {
+    return <LlmProviders />;
   }
   if (route.startsWith("/users")) {
     return <Users />;

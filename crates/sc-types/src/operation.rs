@@ -169,11 +169,9 @@ mod tests {
         let op = Operation::new("commit", OperationScope::Instance)
             .label("Commit all changes")
             .description("Stages and commits everything in the working tree.")
-            .input([
-                FormField::new("message", BasicType::Text)
-                    .label("Commit message")
-                    .required(),
-            ]);
+            .input([FormField::new("message", BasicType::Text)
+                .label("Commit message")
+                .required()]);
         assert_eq!(op.label, "Commit all changes");
         assert!(op.description.starts_with("Stages"));
         // The argument is an ordinary `FormField`, so the UI renders it with the

@@ -51,6 +51,10 @@ use sc_files::{
     Entry, FileMeta, FileStoreDef, FileStoreDefId, backend_config_spec, backend_operations,
     check_access, effective_min_role, filter_visible, registered_backends, run_backend_operation,
 };
+use sc_llm::{
+    LlmProviderDef, LlmProviderDefId, LlmRequest, connect_provider, delete_llm_provider,
+    list_llm_providers, load_llm_provider, provider_config_spec, save_llm_provider,
+};
 use sc_query::{Expr, Projection, Select, Source, Statement};
 use sc_types::{
     BasicType, FormField, Operation, OperationScope, RichTypeRef, TypeRef, registered_rich_types,
@@ -689,6 +693,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // nor sends them, so they are carried across rather than reset.
                 // Dropping them would orphan a working tree on the next save.
                 def.attributes = existing.attributes.clone();
+                // A secret the form sent back untouched is the sentinel it was
+                // shown, not the key: restore what is stored (§11.1).
+                def.config = unredacted_config(&def.backend, &existing.config, &def.config);
                 save_file_store(&catalog, &def).await?;
 
                 // A rename leaves the old handle connected under the old name,
@@ -832,6 +839,187 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     "data": outcome.data,
                     "connected": catalog.file_store(&def.name)?.is_some(),
                 })))
+            }
+        }
+    });
+
+    // --- LLM providers ------------------------------------------------------
+    //
+    // The file-store handlers one section up, with one difference that runs
+    // through all of them: a provider's config holds an API key, so it is
+    // redacted on the way out (`llm_provider_json`) and the sentinel is merged
+    // back on the way in (`unredacted_provider_config`). Both happen here, where
+    // the record is serialised, rather than in the screen — a second reader added
+    // later gets the same treatment without having to know it needs it (§11.1).
+
+    reg.register("listLlmProviders", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let out: Vec<Json> = list_llm_providers(&catalog)
+                    .await?
+                    .iter()
+                    .map(llm_provider_json)
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createLlmProvider", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // A create mints a fresh id; the body carries everything else.
+                // There is nothing stored to merge a sentinel against, so a
+                // submitted sentinel is dropped by `merge_secrets` and the save
+                // fails on the missing required key — which is the right answer
+                // for a form that was never given one.
+                let def = llm_provider_from_body(LlmProviderDefId::new(), &ctx.body)?;
+                save_llm_provider(&catalog, &def).await?;
+                Ok(HandlerResponse::ok(llm_provider_json(&def)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateLlmProvider", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_llm_provider_id(ctx.path_param("id")?)?;
+                let existing = load_llm_provider(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no LLM provider with id {id:?}")))?;
+                // The id is the path's, not the body's — the row's identity is
+                // not something a payload gets to reassign.
+                let mut def = llm_provider_from_body(id, &ctx.body)?;
+                // Attributes are server-managed (§9) and the form neither shows
+                // nor sends them, so they are carried across rather than reset.
+                def.attributes = existing.attributes.clone();
+                // The key the form sent back untouched is the sentinel it was
+                // shown, not the key: restore what is stored.
+                def.config =
+                    unredacted_provider_config(&def.backend, &existing.config, &def.config);
+                save_llm_provider(&catalog, &def).await?;
+                Ok(HandlerResponse::ok(llm_provider_json(&def)))
+            }
+        }
+    });
+
+    reg.register("deleteLlmProvider", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_llm_provider_id(ctx.path_param("id")?)?;
+                // No `extra_referents` yet: an agent is what will reference a
+                // provider, and `_sc_agents` arrives in the next phase. Passing
+                // an empty slice is the honest state of the system today — see
+                // `delete_llm_provider`'s note, which says so rather than
+                // implying a check that does not exist.
+                let deleted = delete_llm_provider(&catalog, id, &[]).await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    reg.register("listLlmProviderBackends", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let mut out = Vec::new();
+                for name in sc_llm::registered_backends() {
+                    let spec = resolve_options(&catalog, provider_config_spec(&name)?).await?;
+                    out.push(json!({
+                        "name": name,
+                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                    }));
+                }
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    // Send one trivial prompt and report what came back. This is the only
+    // handler in the admin API that waits on a third party, and it is worth it:
+    // without it a wrong key is discovered inside a chat transcript, where it
+    // looks like the agent misbehaving rather than the configuration being
+    // wrong.
+    //
+    // A failure is a **200 with `ok: false`**, not an error status. The provider
+    // refusing is the answer to the question that was asked — "does this work?"
+    // — and an error response would make the UI show it as a broken request
+    // rather than as the diagnostic it is.
+    reg.register("testLlmProvider", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let backend = non_empty_str_field(obj, "backend")?.to_owned();
+                let submitted = object_field(obj, "config")?;
+                let model = obj.get("model").and_then(Json::as_str).unwrap_or("");
+
+                // Testing a *saved* provider must not require retyping its key,
+                // so a submitted sentinel resolves against the stored row when
+                // the body names one.
+                let config = match obj.get("id").and_then(Json::as_str) {
+                    Some(raw) => {
+                        let id = parse_llm_provider_id(raw)?;
+                        match load_llm_provider(&catalog, id).await? {
+                            Some(stored) => {
+                                unredacted_provider_config(&backend, &stored.config, &submitted)
+                            }
+                            None => submitted,
+                        }
+                    }
+                    None => submitted,
+                };
+
+                let def = LlmProviderDef {
+                    config,
+                    ..LlmProviderDef::new("test", &backend)
+                };
+                // A structurally wrong config is an ordinary `Err`: it is the
+                // admin's typo, not the provider's answer, and the form should
+                // show it the way it shows a failed save.
+                let provider = connect_provider(&def, Some(model))?;
+                let model = provider.model().to_owned();
+
+                // Capped hard: the question is "does this endpoint answer",
+                // and a provider that takes it as an invitation to write an
+                // essay would bill the admin for asking.
+                let probe = LlmRequest::prompt("Reply with the single word: ok").max_tokens(16);
+                let outcome = match provider.stream(probe).await {
+                    Ok(stream) => stream.collect().await,
+                    // Failing to *start* — a refused connection, a rejected key
+                    // — is the same kind of answer as failing mid-stream, and
+                    // the admin reads it the same way.
+                    Err(e) => Err(e),
+                };
+
+                Ok(HandlerResponse::ok(match outcome {
+                    Ok(msg) => json!({
+                        "ok": true,
+                        // What the model actually said, so an admin who pointed
+                        // at the wrong endpoint sees a wrong answer rather than
+                        // a green tick.
+                        "message": msg.content.trim(),
+                        "model": model,
+                    }),
+                    // The provider's own words, whole. A category ("auth
+                    // failed") would throw away the part that says *which* key
+                    // or *which* model.
+                    Err(e) => json!({
+                        "ok": false,
+                        "message": sc_error::format_causes(&e),
+                        "model": model,
+                    }),
+                }))
             }
         }
     });
@@ -1799,7 +1987,14 @@ fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
         "name": def.name,
         "description": def.description,
         "backend": def.backend,
-        "config": Json::Object(def.config.clone()),
+        // Redacted here, where the record is serialised, rather than in the
+        // screen (§11.1): every reader of this endpoint gets the same treatment,
+        // including one written later that never thought about keys. No backend
+        // declares a secret today — the git backend's `key_path` is a path and
+        // its `public_key` is public — so this is currently a no-op, and that is
+        // the point: an S3 backend's secret is redacted by declaring it, not by
+        // editing this function.
+        "config": Json::Object(redacted_config(&def.backend, &def.config)),
         "min_role": def.min_role,
         "connected": connected.is_some(),
         // Only meaningful when not connected; a connected store has had any
@@ -1808,6 +2003,34 @@ fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
         // A property of the instance, so null when there is no instance to ask.
         "is_git_repo": connected.map(|store| store.is_git_repo()),
     }))
+}
+
+/// A file-store config with its backend's [`secret`](FormField::secret) settings
+/// replaced by the sentinel.
+///
+/// An unknown backend redacts nothing rather than failing: this is called while
+/// *listing*, and a store whose backend a plugin used to supply must still be
+/// listable and editable so the admin can repoint it. There is nothing to leak
+/// in that case either — no spec means no field is declared secret.
+fn redacted_config(backend: &str, config: &sc_types::Attrs) -> sc_types::Attrs {
+    match backend_config_spec(backend) {
+        Ok(spec) => sc_types::redact_attrs(&spec, config),
+        Err(_) => config.clone(),
+    }
+}
+
+/// The reverse, on the way in: a submitted config whose sentinels have been
+/// replaced by what is stored, so an admin editing a store's *name* does not
+/// save the mask over its key.
+fn unredacted_config(
+    backend: &str,
+    stored: &sc_types::Attrs,
+    submitted: &sc_types::Attrs,
+) -> sc_types::Attrs {
+    match backend_config_spec(backend) {
+        Ok(spec) => sc_types::merge_secrets(&spec, stored, submitted),
+        Err(_) => submitted.clone(),
+    }
 }
 
 /// Run every operation the backend declares as part of **creating** a store,
@@ -2099,6 +2322,73 @@ fn parse_file_store_id(raw: &str) -> Result<FileStoreDefId> {
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid file store id")))
 }
 
+/// An LLM provider as the API returns it (matching `llm_provider_schema`), with
+/// its backend's `secret` settings replaced by the sentinel.
+///
+/// **The redaction is here and nowhere else.** Every response that carries a
+/// provider goes through this function, so an endpoint added later cannot
+/// accidentally return a key: it would have to build the JSON by hand to do so.
+fn llm_provider_json(def: &LlmProviderDef) -> Json {
+    json!({
+        "id": def.id.0,
+        "name": def.name,
+        "description": def.description,
+        "backend": def.backend,
+        "config": Json::Object(redacted_provider_config(&def.backend, &def.config)),
+    })
+}
+
+/// A provider config with its backend's [`secret`](FormField::secret) settings
+/// replaced by the sentinel.
+///
+/// An unknown backend redacts nothing rather than failing, for the same reason
+/// `redacted_config` does for stores: a provider whose backend is no longer
+/// registered must stay listable so the admin can repoint or delete it, and no
+/// spec means no field was declared secret in the first place.
+fn redacted_provider_config(backend: &str, config: &sc_types::Attrs) -> sc_types::Attrs {
+    match provider_config_spec(backend) {
+        Ok(spec) => sc_types::redact_attrs(&spec, config),
+        Err(_) => config.clone(),
+    }
+}
+
+/// The reverse, on the way in: sentinels replaced by what is stored, so editing
+/// a provider's name does not save the mask over its key.
+fn unredacted_provider_config(
+    backend: &str,
+    stored: &sc_types::Attrs,
+    submitted: &sc_types::Attrs,
+) -> sc_types::Attrs {
+    match provider_config_spec(backend) {
+        Ok(spec) => sc_types::merge_secrets(&spec, stored, submitted),
+        Err(_) => submitted.clone(),
+    }
+}
+
+/// Rebuild a provider definition from a create/update body.
+fn llm_provider_from_body(id: LlmProviderDefId, body: &Json) -> Result<LlmProviderDef> {
+    let obj = require_object(body)?;
+    Ok(LlmProviderDef {
+        id,
+        name: non_empty_str_field(obj, "name")?.to_owned(),
+        description: obj
+            .get("description")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        backend: non_empty_str_field(obj, "backend")?.to_owned(),
+        config: object_field(obj, "config")?,
+        attributes: sc_types::Attrs::new(),
+    })
+}
+
+/// Parse a provider id from a path parameter.
+fn parse_llm_provider_id(raw: &str) -> Result<LlmProviderDefId> {
+    uuid::Uuid::parse_str(raw)
+        .map(LlmProviderDefId)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid LLM provider id")))
+}
+
 /// The trigger dispatcher this server was built with, or a configuration error.
 ///
 /// Fails loudly rather than answering with an empty list: a process that never
@@ -2278,6 +2568,7 @@ fn form_field_json(field: &FormField) -> Json {
         "default": field.default.clone().unwrap_or(Json::Null),
         "options": field.static_options(),
         "multiline": field.multiline,
+        "secret": field.secret,
     })
 }
 

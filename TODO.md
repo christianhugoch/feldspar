@@ -73,44 +73,44 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 1 — `sc-llm`: the provider seam, and the providers to configure
 
-- [ ] New crate `sc-llm` at layer 6 (depends on `sc-error`, `sc-types`, `sc-catalog` for its
+- [x] New crate `sc-llm` at layer 6 (depends on `sc-error`, `sc-types`, `sc-catalog` for its
       storage). Add `rig-core` to the workspace dependencies with `default-features = false` plus
       `reqwest` + `rustls`, and reconcile the tree's `reqwest` version with rig's 0.13 so there is
       one HTTP client in the build, not two.
-- [ ] The vocabulary of §11.1 as this crate's own types: `LlmRequest` (system, messages, tools,
+- [x] The vocabulary of §11.1 as this crate's own types: `LlmRequest` (system, messages, tools,
       max tokens, temperature), `LlmMessage` (`User` | `Assistant { content, tool_calls }` |
       `ToolResult`), `ToolSpec` (name, description, JSON-Schema parameters), `LlmDelta`
       (`Text` | `Reasoning` | `ToolCall` | `Stop { reason, usage }`), and the object-safe
       `LlmProvider { fn model(&self) -> &str; async fn stream(&self, req) -> Result<LlmStream> }`.
       Nothing rig exposes may appear in a public signature.
-- [ ] Two adapters. `openai_responses` over `providers::openai::responses_api` with a configurable
+- [x] Two adapters. `openai_responses` over `providers::openai::responses_api` with a configurable
       `base_url`, so *any* OpenAI-compatible Responses endpoint is a field value rather than a code
       change. `anthropic` over `providers::anthropic`. Both map deltas onto `LlmDelta` and
       assemble partial tool-call arguments into complete JSON before emitting a `ToolCall`.
-- [ ] `LlmStream::collect` — the whole stream to one assistant message plus usage. The
+- [x] `LlmStream::collect` — the whole stream to one assistant message plus usage. The
       non-streaming callers (`run_agent`, every test that does not care about deltas) use it, and
       it is the only place the two shapes meet.
-- [ ] **Secrets: `FormField::secret`.** A `bool` on the declaration, so it reaches every consumer
+- [x] **Secrets: `FormField::secret`.** A `bool` on the declaration, so it reaches every consumer
       at once. Where a record carrying a spec-declared config is serialised, a secret value is
       replaced by a fixed sentinel (**not** a truncation — a prefix is still a leak), and a save
       that submits the sentinel unchanged **keeps the stored value**. Do the redaction where the
       record is serialised, never in a screen. `sc-files`' backend specs get the flag too, since
       an S3 key is the same problem.
-- [ ] `_sc_llm_providers` storage, following `_sc_file_stores`: `name` (unique), `backend`,
+- [x] `_sc_llm_providers` storage, following `_sc_file_stores`: `name` (unique), `backend`,
       `description`, `config` (`Attrs`), validated against the backend's `config_spec` on save and
       on load, strict on read. `connect_provider(def, model) -> Arc<dyn LlmProvider>`.
-- [ ] Admin API + UI: `listLlmProviders` / `saveLlmProvider` / `deleteLlmProvider` /
+- [x] Admin API + UI: `listLlmProviders` / `saveLlmProvider` / `deleteLlmProvider` /
       `llmProviderBackends` (specs, so the form is generic), and an `LlmProviders` list +
       `LlmProviderForm` screen modelled on `FileStores` / `FileStoreForm` — including a **Test
       connection** button that sends one trivial prompt and reports the provider's own error text,
       because a wrong key must be discoverable here rather than inside a chat transcript.
-- [ ] Tests: Rust — each adapter against a **stub HTTP server** replaying a recorded SSE body
+- [x] Tests: Rust — each adapter against a **stub HTTP server** replaying a recorded SSE body
       (text, a reasoning block, a tool call split across chunks, a `Stop` with usage), asserting
       the deltas and that a tool call is emitted only once its arguments parse; a provider error
       (401, a malformed body, a truncated stream) surfaces as an error rather than an empty
       stream; `collect` reassembles what `stream` emitted; the secret sentinel round-trips through
       save/read/save without changing the stored key, and never appears in a listing response.
-- [ ] **Done when** an admin saves an Anthropic provider and an OpenAI-compatible one, presses
+- [x] **Done when** an admin saves an Anthropic provider and an OpenAI-compatible one, presses
       Test connection on each and gets an answer, and re-opening the form shows the key redacted
       and saving again does not destroy it.
 

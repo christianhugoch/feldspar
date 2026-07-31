@@ -20,6 +20,10 @@ sc-auth.workspace = true
 sc-app.workspace = true
 sc-catalog.workspace = true
 sc-files.workspace = true
+# `_sc_llm_providers` is bootstrapped alongside the other stored-metadata tables
+# at connect time (§9): an overlay may be created lazily, but a table whose rows
+# *are* the definitions must exist before anything can list them.
+sc-llm.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 tokio.workspace = true

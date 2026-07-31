@@ -2,6 +2,85 @@
 
 Changes in reverse chronological order.
 
+## `sc-llm`: the provider seam, and the providers an admin configures
+
+Agents Phase 1. An admin can now connect an **LLM provider** — an Anthropic key, or any
+endpoint speaking OpenAI's Responses API — press **Test connection**, get the model's own answer
+back, and reopen the form to find the key redacted and still working. Nothing calls a model yet;
+this is the seam the agent loop will be written against.
+
+**A new crate, `sc-llm` (layer 6).** It knows providers, messages, tools and streaming, and
+nothing about Saltcorn. `LlmRequest`, `LlmMessage`, `ToolSpec`, `ToolCall`, `LlmDelta`, `Usage`
+and the object-safe `LlmProvider { fn model(); async fn stream(req) }` are the whole vocabulary,
+and they are **ours** — nothing `rig-core` exposes appears in a public signature, so `sc-agent`
+will not churn when a provider crate does. The message types are `serde`-round-trippable because
+Phase 2 persists a run's history into `_sc_runs` after every step.
+
+**Streaming is the only shape.** `LlmStream::collect` drains a stream into one `AssistantMessage`,
+and that is what every non-streaming caller uses — so the tool-call assembly the two vendors do
+differently is written once and tested once. The first error wins and ends the collection: a
+partial answer followed by a failure is a failure, because returning the fragment as though it
+were the response is how a truncated stream becomes a wrong answer nobody notices.
+
+**Two adapters over `rig-core` 0.41, sharing one bridge.** `openai_responses` (with a
+configurable `base_url`, so any OpenAI-compatible endpoint is a field value rather than a code
+change) and `anthropic`. Three things the bridge is responsible for and rig is not:
+
+- **Consecutive tool results are merged into one user message.** Anthropic requires alternating
+  roles and rig does no merging, so three tool results emitted as three user messages is a request
+  the vendor rejects outright. Pinned by a test that captures the actual request body.
+- **A tool call is emitted only once its arguments parse.** Arguments that arrive as a JSON
+  *string* are parsed; a fragment that never parsed is an error rather than a call with empty
+  arguments, because running a tool with arguments the model did not ask for is the worse outcome.
+- **The stop reason is derived**, not forwarded — see the deviation below.
+
+**Providers are configured entities, like file stores.** `LlmProviderDef` + a backend registry
+declaring settings as `FormField`s + `_sc_llm_providers` (the `_sc_file_stores` shape: unique
+name, strict reads, validation on save) + `connect_provider(def, model)`. Structurally wrong
+(missing key, unknown backend) blocks the save, where the admin can fix it; *not currently
+working* (revoked key, retired model) is only knowable from a request, which is what Test
+connection makes.
+
+**`FormField::secret`, on the declaration.** So it reaches every consumer at once: the admin UI
+renders a password input, `redact_attrs` replaces the value with a fixed sentinel (`••••••••`, not
+a truncation — a prefix is still a leak) wherever a record is serialised, and `merge_secrets`
+restores the stored value when a save hands the sentinel back unchanged. Without that second half,
+an admin who opened a provider's form to fix a typo in its *name* would save the mask over the
+key. The sentinel with nothing stored is dropped rather than saved, so a provider cannot end up
+authenticating with `••••••••`. `sc-files`' store serialisation goes through the same pair, so an
+S3 backend's secret will be redacted by declaring it rather than by editing a handler.
+
+**Admin API + UI.** `listLlmProviders` / `createLlmProvider` / `updateLlmProvider` /
+`deleteLlmProvider` / `listLlmProviderBackends` / `testLlmProvider`, and `LlmProviders` +
+`LlmProviderForm` modelled on the file-store screens — no screen mentions OpenAI or Anthropic,
+including for the key, which is a password input because the spec says `secret`. A failed test
+connection is a **200 with `ok: false`**, not an error status: the provider refusing is the answer
+to the question that was asked, and it carries the provider's own words because "invalid
+x-api-key" is the actionable part and "auth failed" is not.
+
+**The reqwest pin moves to 0.13**, because that is what rig builds on. Letting `sc-llm` pull its
+own would have put two reqwests, two hyper stacks and two rustls configurations in one binary. The
+0.13 rename of `rustls-tls` to `rustls` was the whole of the migration; §16's no-OpenSSL posture
+is unchanged, though the default provider is now `aws-lc-rs` rather than `ring` (both pure-Rust
+builds, no system libssl).
+
+**Deviations from §11.1, recorded now rather than in Phase 6.** `StopReason` has two variants,
+`EndTurn` and `ToolCalls`, and is **derived from what the stream produced** — neither provider's
+streaming response carries a finish reason through rig 0.41, so a `MaxTokens` variant would be a
+value nothing could ever produce. A truncated response therefore reads as `EndTurn` unless the
+transport itself errors, which it does for a cut-off body (tested). Anthropic requires
+`max_tokens` on every request, so the adapter defaults it to 4096 rather than letting the vendor
+reject a well-formed call.
+
+**Tests.** `sc-llm`: each adapter against a stub HTTP server replaying a recorded SSE body —
+text, reasoning, a tool call split across four fragments, a `Stop` with usage — plus a 401, a
+malformed body and a truncated stream each surfacing as an error rather than an empty answer, and
+`collect` reassembling exactly what `stream` emitted. `_sc_llm_providers` against real Postgres,
+including the key surviving a read-edit-save cycle in which the reader never saw it. `sc-server`:
+the whole configuration API through the router, asserting that no response — not even the create
+that carried the key — contains any part of it. **No test requires an API key or spends a token**;
+the stub is a first-class part of the crate.
+
 ## A design and a plan for agents
 
 Planning only; no code. The IDE milestone is finished, so `TODO.md` is archived as

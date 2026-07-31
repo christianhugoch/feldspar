@@ -431,6 +431,108 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- LLM providers (configuration) --------------------------------------
+    // A provider, like a file store, exists only as its stored row (§9, §11.1),
+    // and these endpoints are that row's lifecycle. The shape is deliberately
+    // the file stores' shape one crate over: id-addressed configuration, a
+    // backends endpoint carrying each backend's declared settings so the form is
+    // generic, and one act (`testLlmProvider`) that is not a save.
+    //
+    // The one thing that is *not* a copy is what the config carries. A provider's
+    // config holds an API key, so every response redacts it
+    // (`sc_types::redact_attrs`) and every save merges the sentinel back
+    // (`merge_secrets`). That happens where the record is serialised, in the
+    // handler, rather than in the screen — see §11.1.
+
+    set.register(
+        Endpoint::new("listLlmProviders", Method::Get, api().lit("llm-providers"))
+            .output(TypeSchema::array(llm_provider_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createLlmProvider",
+            Method::Post,
+            api().lit("llm-providers"),
+        )
+        .input(llm_provider_input_schema())
+        .output(llm_provider_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateLlmProvider",
+            Method::Put,
+            api().lit("llm-providers").param("id", ValueType::Uuid),
+        )
+        .input(llm_provider_input_schema())
+        .output(llm_provider_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteLlmProvider",
+            Method::Delete,
+            api().lit("llm-providers").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The registered backends with their settings spec, so the create/edit form
+    // renders controls for a backend it knows nothing about — the same move
+    // `listFileStoreBackends` and `listFrameworks` make.
+    set.register(
+        Endpoint::new(
+            "listLlmProviderBackends",
+            Method::Get,
+            api().lit("llm-provider-backends"),
+        )
+        .output(TypeSchema::array(llm_backend_info_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Test connection.** Sends one trivial prompt and reports what came back,
+    // or the provider's own error text. It exists because a wrong key is
+    // otherwise discovered inside a chat transcript, which is the worst place
+    // for it: the admin is no longer looking at the form, and the failure looks
+    // like the agent rather than the configuration.
+    //
+    // It takes the *config in the body* rather than working from the saved row,
+    // so a provider can be tested before it is saved — the same reason a git
+    // store's deploy key is generated at `Configure` scope. A submitted secret
+    // sentinel still resolves against what is stored, when there is a stored row
+    // to resolve against, so testing an existing provider does not require
+    // retyping its key.
+    set.register(
+        Endpoint::new(
+            "testLlmProvider",
+            Method::Post,
+            api().lit("llm-provider-test"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("id", TypeSchema::optional(TypeSchema::uuid())),
+            StructField::new("backend", TypeSchema::text()),
+            StructField::new("config", TypeSchema::json()),
+            StructField::new("model", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("ok", TypeSchema::bool()),
+            // The model's reply on success, the provider's own words on
+            // failure. One field because the admin reads one thing either
+            // way: "did this work, and what did it say".
+            StructField::new("message", TypeSchema::text()),
+            StructField::new("model", TypeSchema::text()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- files (file manager) ----------------------------------------------
 
     // Browse one directory of a store. A POST (not GET) so the directory — which
@@ -987,6 +1089,60 @@ fn file_meta_schema() -> TypeSchema {
     ])
 }
 
+/// The fields of an LLM provider's definition that an admin sets.
+///
+/// Shorter than a file store's by one: there is no `min_role`, because a
+/// provider is reached only through an agent and it is the agent that carries
+/// who may chat with it (§11.2). A floor here as well would be a second
+/// authority over the same question.
+fn llm_provider_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("backend", TypeSchema::text()),
+        // The backend's settings. **On the way out this is redacted**: a
+        // `secret` setting reads back as the sentinel, never as the key.
+        StructField::new("config", TypeSchema::json()),
+    ]
+}
+
+/// An LLM provider as reported to the admin UI.
+///
+/// `id` is not optional here, unlike a file store's: there is no `--llm-provider`
+/// flag and no such thing as a provider without a row, so every provider in a
+/// listing is one that can be edited and deleted.
+///
+/// There is no `connected` either, and its absence is the design: connecting a
+/// provider builds an HTTP client and sends nothing, so "connected" would be a
+/// word for "the configuration parsed" — which the admin already knows, because
+/// the save succeeded. Whether the provider *works* is a request, and that is
+/// what `testLlmProvider` is.
+fn llm_provider_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(llm_provider_fields());
+    TypeSchema::Struct(fields)
+}
+
+/// The body accepted when creating or updating a provider: the definition's
+/// fields minus the id (server-assigned on create, taken from the path on
+/// update).
+fn llm_provider_input_schema() -> TypeSchema {
+    TypeSchema::Struct(llm_provider_fields())
+}
+
+/// A registered LLM provider backend and the settings it declares.
+///
+/// No `operations`: nothing an LLM provider offers is an *act* on its own
+/// configuration the way a git store's clone is. Testing the connection is one
+/// endpoint rather than a declared operation because it is the same act for
+/// every backend — there is no per-backend list for the UI to render.
+fn llm_backend_info_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+    ])
+}
+
 /// A registered file-store backend and the settings it declares, so the admin UI
 /// can render a form for a backend it knows nothing about. Each setting is a
 /// [`form_field_schema`] — the same `FormField` vocabulary a row editor and a
@@ -1251,5 +1407,9 @@ fn form_field_schema() -> TypeSchema {
         StructField::new("default", TypeSchema::optional(TypeSchema::json())),
         StructField::new("options", TypeSchema::array(TypeSchema::json())),
         StructField::new("multiline", TypeSchema::bool()),
+        // Whether the value is a secret (§11.1): the form renders a password
+        // input, and what it is handed for this field is the redaction
+        // sentinel, never the stored key.
+        StructField::new("secret", TypeSchema::bool()),
     ])
 }

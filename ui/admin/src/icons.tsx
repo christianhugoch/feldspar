@@ -100,6 +100,22 @@ export function IconShieldLock(props: IconProps) {
   );
 }
 
+/** A robot's head — the agents section, of which LLM providers are the first
+ * screen. */
+export function IconRobot(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" />
+      <path d="M12 2v4" />
+      <path d="M9 12h.01" />
+      <path d="M15 12h.01" />
+      <path d="M9.5 16a3.5 3.5 0 0 0 5 0" />
+      <path d="M3 12h3" />
+      <path d="M18 12h3" />
+    </Svg>
+  );
+}
+
 export function IconSun(props: IconProps) {
   return (
     <Svg {...props}>

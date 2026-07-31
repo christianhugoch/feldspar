@@ -1,0 +1,429 @@
+//! The vocabulary of a model call: what goes in ([`LlmRequest`], [`LlmMessage`],
+//! [`ToolSpec`]) and what comes back ([`LlmDelta`], [`AssistantMessage`],
+//! [`Usage`]) — design §11.1.
+//!
+//! **These types are ours, not a provider crate's.** Everything `rig-core`
+//! exposes stays behind [`LlmProvider`](crate::LlmProvider), for the reason §2
+//! gives generally: a provider abstraction is precisely the kind of dependency
+//! whose API churns, and `sc-agent` — which is written entirely against this
+//! module — must not churn with it. The adapters in
+//! [`openai`](crate::openai) and [`anthropic`](crate::anthropic) are the only
+//! code in the tree that names a rig type.
+//!
+//! They are also **serialisable**, which is not incidental: `sc-agent` persists
+//! a run's message history into `_sc_runs` after every step (§11.2), so the
+//! history has to survive a round trip through JSON without losing a tool call's
+//! id or arguments.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value as Json;
+
+/// One tool the model may call: what it is named, what it does, and what
+/// arguments it takes.
+///
+/// `parameters` is a **JSON Schema object**, which is what every provider's tool
+/// definition wants and what a trait's `tools()` produces. It is a
+/// [`Json`] rather than a typed schema because it is passed through: the model
+/// reads it, the provider forwards it, and nothing between here and the vendor
+/// has an opinion about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSpec {
+    /// The name the model calls, and the key [`ToolCall::name`] arrives under.
+    pub name: String,
+    /// What the tool does, in the words the model is given. This is the whole of
+    /// what it has to go on when choosing, so it is prose, not a label.
+    pub description: String,
+    /// JSON Schema for the arguments object.
+    pub parameters: Json,
+}
+
+impl ToolSpec {
+    /// A tool with the given name, description and parameter schema.
+    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: Json) -> Self {
+        ToolSpec {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        }
+    }
+}
+
+/// One call the model made: which tool, with which arguments, under which id.
+///
+/// The `id` is the provider's, and it is what a [`LlmMessage::ToolResult`] is
+/// correlated by — so it travels through the loop unchanged and is never
+/// regenerated. Two calls to one tool in a single turn are distinguished by
+/// nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// The provider's identifier for this call.
+    pub id: String,
+    /// Which tool was called — a [`ToolSpec::name`] that was offered.
+    pub name: String,
+    /// The arguments, as complete parsed JSON.
+    ///
+    /// **Complete** is the contract: providers stream tool arguments as partial
+    /// JSON text, and an adapter emits a `ToolCall` only once that text parses
+    /// (see [`LlmDelta::ToolCall`]). A caller never has to assemble fragments,
+    /// and never sees a half-formed argument object.
+    pub arguments: Json,
+}
+
+/// One message in the conversation sent to the model.
+///
+/// A `System` variant is deliberately absent: the system prompt is
+/// [`LlmRequest::system`], one per request, because that is what both providers
+/// model and because a system message appearing mid-history is a bug rather than
+/// a feature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum LlmMessage {
+    /// What the person said.
+    User {
+        /// The message text.
+        content: String,
+    },
+    /// What the model said: text, tool calls, or both. Both providers may emit
+    /// a sentence and a tool call in one turn, so this is not an either/or.
+    Assistant {
+        /// The assistant's text, empty when the turn was only tool calls.
+        content: String,
+        /// The tool calls the model made, in the order it made them.
+        #[serde(default)]
+        tool_calls: Vec<ToolCall>,
+    },
+    /// What a tool returned, answering one [`ToolCall`] by its id.
+    ///
+    /// `content` is text — including for a tool that failed, whose error is its
+    /// result (§11.2): an error the model can read is one it can recover from.
+    ToolResult {
+        /// The [`ToolCall::id`] this answers.
+        tool_call_id: String,
+        /// The tool's name, carried so a transcript can be rendered without
+        /// walking back to find the call.
+        #[serde(default)]
+        name: String,
+        /// What the tool produced, or the error it produced.
+        content: String,
+    },
+}
+
+impl LlmMessage {
+    /// A user message.
+    pub fn user(content: impl Into<String>) -> LlmMessage {
+        LlmMessage::User {
+            content: content.into(),
+        }
+    }
+
+    /// An assistant message that is only text.
+    pub fn assistant(content: impl Into<String>) -> LlmMessage {
+        LlmMessage::Assistant {
+            content: content.into(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// A tool result answering `call`.
+    pub fn tool_result(call: &ToolCall, content: impl Into<String>) -> LlmMessage {
+        LlmMessage::ToolResult {
+            tool_call_id: call.id.clone(),
+            name: call.name.clone(),
+            content: content.into(),
+        }
+    }
+}
+
+/// One request to a model (§11.1).
+///
+/// Deliberately small. Everything a *particular* provider can additionally be
+/// told — reasoning effort, cache control, structured outputs — is left out
+/// until something needs it, because a field here is a field every adapter must
+/// answer for and every caller must consider.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LlmRequest {
+    /// The system prompt, sent once per request rather than as a message.
+    pub system: Option<String>,
+    /// The conversation so far, oldest first.
+    pub messages: Vec<LlmMessage>,
+    /// The tools the model may call. Empty means it may not call any.
+    #[serde(default)]
+    pub tools: Vec<ToolSpec>,
+    /// Cap on the tokens generated, if the caller sets one.
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature, if the caller sets one.
+    pub temperature: Option<f64>,
+}
+
+impl LlmRequest {
+    /// A request carrying one user message and nothing else — what a "test
+    /// connection" sends and what the simplest chat turn is.
+    pub fn prompt(text: impl Into<String>) -> LlmRequest {
+        LlmRequest {
+            messages: vec![LlmMessage::user(text)],
+            ..LlmRequest::default()
+        }
+    }
+
+    /// Set the system prompt, returning `self` for chaining.
+    pub fn system(mut self, system: impl Into<String>) -> LlmRequest {
+        self.system = Some(system.into());
+        self
+    }
+
+    /// Offer the model these tools, returning `self` for chaining.
+    pub fn tools(mut self, tools: impl IntoIterator<Item = ToolSpec>) -> LlmRequest {
+        self.tools = tools.into_iter().collect();
+        self
+    }
+
+    /// Set the token cap, returning `self` for chaining.
+    pub fn max_tokens(mut self, max_tokens: u32) -> LlmRequest {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set the temperature, returning `self` for chaining.
+    pub fn temperature(mut self, temperature: f64) -> LlmRequest {
+        self.temperature = Some(temperature);
+        self
+    }
+}
+
+/// Why the model stopped.
+///
+/// Two variants, because two are what can be *known*. Both providers' streaming
+/// responses, as `rig-core` 0.41 surfaces them, carry token usage but no finish
+/// reason, so this is derived from what the stream actually produced: a turn
+/// that emitted tool calls stopped to call them, and one that did not ended.
+/// A `MaxTokens` variant would be a value nothing could ever produce, which is
+/// worse than its absence — see §11.1's note on the deviation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The model finished its turn and is waiting for the user.
+    EndTurn,
+    /// The model stopped to call tools; the loop runs them and continues.
+    ToolCalls,
+}
+
+/// What a request cost, as the provider reports it.
+///
+/// Zero throughout means "the provider did not say", which both vendors do for
+/// some responses. It is not distinguished from a genuinely free call because
+/// there is no such thing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Tokens in the prompt.
+    pub input_tokens: u64,
+    /// Tokens generated.
+    pub output_tokens: u64,
+    /// Prompt tokens served from the provider's cache, where it reports them.
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+}
+
+impl Usage {
+    /// Accumulate another call's usage into this one — what a run's total is
+    /// built from across the steps of a loop.
+    pub fn add(&mut self, other: Usage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cached_input_tokens += other.cached_input_tokens;
+    }
+
+    /// Input plus output. Not stored, because the two halves are priced
+    /// differently and a sum that hides that is a number nobody can use.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+/// One event from a streaming response (§11.1).
+///
+/// A well-formed stream is any number of `Text`/`Reasoning`/`ToolCall` events
+/// followed by exactly one `Stop`. An adapter that ends without a `Stop` — a
+/// connection cut mid-answer — yields an error instead, because a chat window
+/// that silently stops is unfixable by the person watching it (§11.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LlmDelta {
+    /// A fragment of the assistant's text, to be appended in order.
+    Text(String),
+    /// A fragment of the model's reasoning, where the provider exposes it.
+    ///
+    /// Kept separate from `Text` rather than merged into it: reasoning is not
+    /// part of the answer, is not sent back in the next turn's history, and a
+    /// chat that rendered it as the reply would be showing the model's notes as
+    /// its conclusion.
+    Reasoning(String),
+    /// A complete tool call, emitted **only once its arguments parse**.
+    ToolCall(ToolCall),
+    /// The end of the response.
+    Stop {
+        /// Why it ended.
+        reason: StopReason,
+        /// What it cost.
+        usage: Usage,
+    },
+}
+
+/// A whole response, collected from a stream (see
+/// [`LlmStream::collect`](crate::LlmStream::collect)).
+///
+/// This is what a non-streaming caller wants and what one turn of the loop
+/// appends to a run's history.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AssistantMessage {
+    /// Every `Text` delta, concatenated.
+    pub content: String,
+    /// Every `Reasoning` delta, concatenated. Kept out of [`message`] for the
+    /// reason [`LlmDelta::Reasoning`] gives.
+    ///
+    /// [`message`]: AssistantMessage::message
+    #[serde(default)]
+    pub reasoning: String,
+    /// The tool calls, in the order the model asked for them — which is the
+    /// order the loop must run them in (§11.2).
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    /// Why the model stopped.
+    pub stop_reason: Option<StopReason>,
+    /// What the response cost.
+    #[serde(default)]
+    pub usage: Usage,
+}
+
+impl AssistantMessage {
+    /// This response as the [`LlmMessage`] that goes back into the history.
+    ///
+    /// The reasoning is dropped, deliberately: it is not part of the
+    /// conversation, and replaying a model's own notes to it is neither what
+    /// either provider expects nor something either would accept unchanged.
+    pub fn message(&self) -> LlmMessage {
+        LlmMessage::Assistant {
+            content: self.content.clone(),
+            tool_calls: self.tool_calls.clone(),
+        }
+    }
+
+    /// Fold one delta into this message — the whole of what `collect` does per
+    /// event, exposed so a *streaming* caller can accumulate the same message
+    /// while it forwards deltas to a browser.
+    pub fn push(&mut self, delta: LlmDelta) {
+        match delta {
+            LlmDelta::Text(text) => self.content.push_str(&text),
+            LlmDelta::Reasoning(text) => self.reasoning.push_str(&text),
+            LlmDelta::ToolCall(call) => self.tool_calls.push(call),
+            LlmDelta::Stop { reason, usage } => {
+                self.stop_reason = Some(reason);
+                self.usage = usage;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_history_round_trips_through_json() {
+        // `_sc_runs` stores the message history as JSON after every step
+        // (§11.2), so a tool call's id and arguments have to survive the trip —
+        // losing an id would break the correlation the next turn depends on.
+        let history = vec![
+            LlmMessage::user("how many books?"),
+            LlmMessage::Assistant {
+                content: "let me look".to_owned(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_owned(),
+                    name: "query_books".to_owned(),
+                    arguments: json!({"where": {"author": "Melville"}}),
+                }],
+            },
+            LlmMessage::ToolResult {
+                tool_call_id: "call_1".to_owned(),
+                name: "query_books".to_owned(),
+                content: "3".to_owned(),
+            },
+        ];
+        let text = serde_json::to_string(&history).unwrap();
+        let back: Vec<LlmMessage> = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, history);
+    }
+
+    #[test]
+    fn an_assistant_message_accumulates_deltas_in_order() {
+        let mut msg = AssistantMessage::default();
+        msg.push(LlmDelta::Reasoning("thinking".to_owned()));
+        msg.push(LlmDelta::Text("the ".to_owned()));
+        msg.push(LlmDelta::Text("answer".to_owned()));
+        msg.push(LlmDelta::ToolCall(ToolCall {
+            id: "c1".to_owned(),
+            name: "t".to_owned(),
+            arguments: json!({}),
+        }));
+        msg.push(LlmDelta::Stop {
+            reason: StopReason::ToolCalls,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                cached_input_tokens: 0,
+            },
+        });
+
+        assert_eq!(msg.content, "the answer");
+        assert_eq!(msg.reasoning, "thinking");
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert_eq!(msg.stop_reason, Some(StopReason::ToolCalls));
+        assert_eq!(msg.usage.total_tokens(), 14);
+    }
+
+    #[test]
+    fn reasoning_does_not_go_back_into_the_history() {
+        let msg = AssistantMessage {
+            content: "hello".to_owned(),
+            reasoning: "the user greeted me".to_owned(),
+            ..AssistantMessage::default()
+        };
+        assert_eq!(msg.message(), LlmMessage::assistant("hello"));
+    }
+
+    #[test]
+    fn usage_accumulates_across_the_steps_of_a_loop() {
+        let mut total = Usage::default();
+        total.add(Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cached_input_tokens: 80,
+        });
+        total.add(Usage {
+            input_tokens: 130,
+            output_tokens: 5,
+            cached_input_tokens: 100,
+        });
+        assert_eq!(total.input_tokens, 230);
+        assert_eq!(total.output_tokens, 25);
+        assert_eq!(total.cached_input_tokens, 180);
+        assert_eq!(total.total_tokens(), 255);
+    }
+
+    #[test]
+    fn a_tool_result_is_correlated_by_the_calls_own_id() {
+        let call = ToolCall {
+            id: "call_42".to_owned(),
+            name: "insert_row".to_owned(),
+            arguments: json!({"row": {}}),
+        };
+        assert_eq!(
+            LlmMessage::tool_result(&call, "ok"),
+            LlmMessage::ToolResult {
+                tool_call_id: "call_42".to_owned(),
+                name: "insert_row".to_owned(),
+                content: "ok".to_owned(),
+            }
+        );
+    }
+}

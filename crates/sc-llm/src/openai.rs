@@ -1,0 +1,81 @@
+//! The `openai_responses` adapter: an [`LlmProvider`] over OpenAI's **Responses**
+//! API (design §11.1).
+//!
+//! The Responses API rather than Chat Completions, and that is the whole reason
+//! `rig-core` was chosen over the crate the request named: it is where OpenAI's
+//! reasoning models are, and where their compatible reimplementations have
+//! settled.
+//!
+//! **`base_url` is a field value, not a code change.** Any endpoint that speaks
+//! the Responses API — a local server, a gateway, an alternative vendor — is
+//! reached by typing its URL into the provider form. That is what makes
+//! "OpenAI-compatible" a configuration fact rather than a list of vendors
+//! somebody has to keep extending.
+
+use async_trait::async_trait;
+use rig_core::client::CompletionClient;
+use rig_core::completion::CompletionModel as _;
+use rig_core::providers::openai;
+use sc_error::{Error, Result};
+
+use crate::message::LlmRequest;
+use crate::provider::{LlmProvider, LlmStream};
+use crate::rig_bridge::{map_stream, provider_error, to_rig_request};
+
+/// The default endpoint, used when the provider's `base_url` is left blank.
+pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// An OpenAI-compatible Responses endpoint, bound to one model.
+pub struct OpenAiResponses {
+    model: openai::responses_api::ResponsesCompletionModel<reqwest::Client>,
+    model_name: String,
+}
+
+impl OpenAiResponses {
+    /// Connect to `base_url` with `api_key`, ready to call `model`.
+    ///
+    /// Nothing is sent here: this builds a client, and a wrong key or an
+    /// unreachable host is discovered on the first [`stream`](LlmProvider::stream).
+    /// That is the same split file stores draw between a *structurally* wrong
+    /// definition and an unreachable one (§14.1) — and it is why the admin form
+    /// has a **Test connection** button, which is the deliberate way to find out
+    /// now rather than inside a chat transcript.
+    pub fn new(base_url: &str, api_key: &str, model: impl Into<String>) -> Result<OpenAiResponses> {
+        let base_url = if base_url.trim().is_empty() {
+            DEFAULT_BASE_URL
+        } else {
+            base_url.trim()
+        };
+        let client = openai::Client::builder()
+            .api_key(api_key)
+            .base_url(base_url)
+            .build()
+            .map_err(|e| {
+                Error::config(format!(
+                    "cannot build an OpenAI Responses client for {base_url}: {e}"
+                ))
+            })?;
+        let model_name = model.into();
+        Ok(OpenAiResponses {
+            model: client.completion_model(&model_name),
+            model_name,
+        })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiResponses {
+    fn model(&self) -> &str {
+        &self.model_name
+    }
+
+    async fn stream(&self, req: LlmRequest) -> Result<LlmStream> {
+        let request = to_rig_request(req)?;
+        let response = self
+            .model
+            .stream(request)
+            .await
+            .map_err(|e| provider_error(&e))?;
+        Ok(LlmStream::new(map_stream(response)))
+    }
+}

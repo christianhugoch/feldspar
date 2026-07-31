@@ -22,7 +22,7 @@ export type CreateFieldRequest = { name: string; type: string; kind?: unknown | 
 export type CreateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; kind: unknown; attributes: unknown };
 export type UpdateFieldRequest = { type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null };
 export type UpdateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; kind: unknown; attributes: unknown };
-export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean }> }>;
+export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 export type ListRowsResponse = Array<unknown>;
 export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
@@ -34,11 +34,20 @@ export type CreateFileStoreResponse = { id?: string | null; name: string; descri
 export type UpdateFileStoreRequest = { name: string; description: string; backend: string; config: unknown; min_role?: number | null };
 export type UpdateFileStoreResponse = { id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null };
 export type DeleteFileStoreResponse = { deleted: boolean };
-export type ListFileStoreBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean }>; operations: Array<{ name: string; label: string; description: string; scope: string; input_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean }>; on_create: boolean; automatic: boolean }> }>;
+export type ListFileStoreBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }>; operations: Array<{ name: string; label: string; description: string; scope: string; input_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }>; on_create: boolean; automatic: boolean }> }>;
 export type RunBackendOperationRequest = { name: string; config: unknown; input: unknown };
 export type RunBackendOperationResponse = { config: unknown; output: string; data?: unknown | null };
 export type RunFileStoreOperationRequest = { input: unknown };
 export type RunFileStoreOperationResponse = { config: unknown; output: string; data?: unknown | null; connected: boolean };
+export type ListLlmProvidersResponse = Array<{ id: string; name: string; description: string; backend: string; config: unknown }>;
+export type CreateLlmProviderRequest = { name: string; description: string; backend: string; config: unknown };
+export type CreateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
+export type UpdateLlmProviderRequest = { name: string; description: string; backend: string; config: unknown };
+export type UpdateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
+export type DeleteLlmProviderResponse = { deleted: boolean };
+export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
+export type TestLlmProviderRequest = { id?: string | null; backend: string; config: unknown; model?: string | null };
+export type TestLlmProviderResponse = { ok: boolean; message: string; model: string };
 export type BrowseFilesRequest = { dir: string };
 export type BrowseFilesResponse = Array<{ name: string; path: string; is_dir: boolean; size?: number | null }>;
 export type ReadFileRequest = { path: string };
@@ -62,7 +71,7 @@ export type UpdateApplicationRequest = { name: string; description: string; subd
 export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null };
 export type DeleteApplicationResponse = { deleted: boolean };
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
-export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean }> }>;
+export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
 export type CreateUserRequest = { email: string; password: string; role: number };
 export type CreateUserResponse = { id: string; email: string; role: number };
@@ -74,7 +83,7 @@ export type UpdateTriggerResponse = { id: string; name: string; description: str
 export type DeleteTriggerResponse = { deleted: boolean };
 export type RunTriggerRequest = unknown;
 export type RunTriggerResponse = { result: unknown };
-export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean }> }>;
+export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 
 export interface ApiClient {
   authStatus(): Promise<AuthStatusResponse>;
@@ -104,6 +113,12 @@ export interface ApiClient {
   listFileStoreBackends(): Promise<ListFileStoreBackendsResponse>;
   runBackendOperation(backend: string, operation: string, body: RunBackendOperationRequest): Promise<RunBackendOperationResponse>;
   runFileStoreOperation(id: string, operation: string, body: RunFileStoreOperationRequest): Promise<RunFileStoreOperationResponse>;
+  listLlmProviders(): Promise<ListLlmProvidersResponse>;
+  createLlmProvider(body: CreateLlmProviderRequest): Promise<CreateLlmProviderResponse>;
+  updateLlmProvider(id: string, body: UpdateLlmProviderRequest): Promise<UpdateLlmProviderResponse>;
+  deleteLlmProvider(id: string): Promise<DeleteLlmProviderResponse>;
+  listLlmProviderBackends(): Promise<ListLlmProviderBackendsResponse>;
+  testLlmProvider(body: TestLlmProviderRequest): Promise<TestLlmProviderResponse>;
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
   readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
   writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
@@ -399,6 +414,57 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("runFileStoreOperation", res);
       return (await res.json()) as RunFileStoreOperationResponse;
+    },
+    async listLlmProviders() {
+      const res = await doFetch(`${baseUrl}/api/llm-providers`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listLlmProviders", res);
+      return (await res.json()) as ListLlmProvidersResponse;
+    },
+    async createLlmProvider(body) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createLlmProvider", res);
+      return (await res.json()) as CreateLlmProviderResponse;
+    },
+    async updateLlmProvider(id, body) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateLlmProvider", res);
+      return (await res.json()) as UpdateLlmProviderResponse;
+    },
+    async deleteLlmProvider(id) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteLlmProvider", res);
+      return (await res.json()) as DeleteLlmProviderResponse;
+    },
+    async listLlmProviderBackends() {
+      const res = await doFetch(`${baseUrl}/api/llm-provider-backends`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listLlmProviderBackends", res);
+      return (await res.json()) as ListLlmProviderBackendsResponse;
+    },
+    async testLlmProvider(body) {
+      const res = await doFetch(`${baseUrl}/api/llm-provider-test`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("testLlmProvider", res);
+      return (await res.json()) as TestLlmProviderResponse;
     },
     async browseFiles(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/browse`, {

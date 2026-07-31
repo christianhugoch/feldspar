@@ -44,7 +44,10 @@ mod type_ref;
 
 pub use attrs::Attrs;
 pub use basic::BasicType;
-pub use field::{BaseField, FormField, OptionsSource, validate_attrs};
+pub use field::{
+    BaseField, FormField, OptionsSource, SECRET_SENTINEL, merge_secrets, redact_attrs,
+    validate_attrs,
+};
 pub use json::{json_to_value, value_to_json};
 pub use operation::{Operation, OperationScope};
 pub use rich::{RichType, RichTypeRef, registered_rich_types, rich_type, rich_type_config_spec};

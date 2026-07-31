@@ -30,7 +30,20 @@ export type FieldSpec = {
    * declares, so no screen has to know that some particular setting happens to
    * hold an SSH key or a certificate. */
   multiline: boolean;
+  /** The value is a secret (§11.1): render a password input, and expect the
+   * value handed here to be the redaction sentinel rather than the stored key.
+   * Submitting the sentinel unchanged keeps what the server has, which is what
+   * makes editing a provider's other settings safe. */
+  secret?: boolean;
 };
+
+/** What the server substitutes for a secret setting's value on read, and what it
+ * reads back as "unchanged" on write (`sc_types::SECRET_SENTINEL`).
+ *
+ * Duplicated here rather than imported because it is a *protocol* constant — it
+ * travels in the JSON — and the client's copy having to match is the same
+ * arrangement every other field name in this file lives under. */
+export const SECRET_SENTINEL = "••••••••";
 
 /** Read a config value as a display string (config bags arrive as `unknown`). */
 export function asString(value: unknown): string {
@@ -201,11 +214,22 @@ export function SettingField({
         />
       ) : (
         <Form.Control
-          type={field.type === "int" ? "number" : "text"}
+          type={field.secret ? "password" : field.type === "int" ? "number" : "text"}
           value={value}
           required={field.required}
           onChange={(e) => onChange(e.target.value)}
+          // A secret arrives as the sentinel, and the sentinel is what the
+          // server reads as "unchanged". Clearing it on focus is what makes
+          // *replacing* a key possible: typing into the mask would otherwise
+          // produce "••••••••sk-new", which is neither the old key nor the new
+          // one. Blurring without typing puts it back, so opening a form and
+          // tabbing through it does not silently unset a key.
+          onFocus={field.secret ? () => value === SECRET_SENTINEL && onChange("") : undefined}
+          onBlur={field.secret ? () => value === "" && onChange(SECRET_SENTINEL) : undefined}
         />
+      )}
+      {field.secret && value === SECRET_SENTINEL && (
+        <Form.Text muted>Stored. Type to replace it.</Form.Text>
       )}
     </Form.Group>
   );

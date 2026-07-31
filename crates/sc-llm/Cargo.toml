@@ -1,0 +1,53 @@
+[package]
+name = "sc-llm"
+description = "The LLM provider seam: messages, tools, streaming, and the configured providers (layer 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# `FormField` for a backend's declared configuration, `Attrs` for the values,
+# and `redact_attrs`/`merge_secrets` for the API key (§11.1) — the one
+# vocabulary every configurable extension point speaks (§6.2).
+sc-types.workspace = true
+# `_sc_llm_providers` is stored metadata, so this crate speaks the query
+# language and reads rows back out of the driver, exactly as `_sc_file_stores`
+# does (§9's storage pattern). Needing a `Catalog` is what fixes this crate
+# above layer 4.
+sc-catalog.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+async-trait.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+uuid.workspace = true
+# `Stream` for `LlmStream`, and the combinators the adapters map with.
+futures.workspace = true
+# The provider calls, and only the calls (§11.1). `default-features = false`
+# because rig's defaults pull `derive`, `rayon` and the document loaders none of
+# which this crate uses; `reqwest` + `rustls` are the HTTP client the workspace
+# already pins, so there is one in the build rather than two.
+rig-core = { workspace = true }
+# Named only to spell rig's default HTTP client in the adapters' types
+# (`ResponsesCompletionModel<reqwest::Client>`). No request in this crate is made
+# through it directly — rig owns every call — but the type has to be nameable,
+# and naming the workspace's pinned one is what guarantees it is the same client
+# the rest of the tree builds.
+reqwest.workspace = true
+
+[dev-dependencies]
+# The adapters are tested against a **stub HTTP server** replaying a recorded SSE
+# body — never a real vendor, and never an API key (decision 7). `net` is the
+# listener that stub binds; the rest of the workspace's tokio features are
+# already on.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+sc-db.workspace = true
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+
+[lints]
+workspace = true

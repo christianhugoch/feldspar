@@ -1200,6 +1200,34 @@ a secret cannot be exposed by a second reader that forgot. Encryption at rest is
 milestone: the value sits in the primary database like every other configuration value, and
 saying so is better than implying a protection that a database dump would disprove.
 
+**What was built, where it deviates from the above** (Phase 1, recorded here rather than left
+for the end of the milestone):
+
+- **`StopReason` has two variants, `EndTurn` and `ToolCalls`, and is derived rather than
+  forwarded.** Neither provider's *streaming* response carries a finish reason through
+  `rig-core` 0.41 — both surface token usage and nothing else — so the adapter infers it from
+  what the stream produced: a turn that emitted tool calls stopped to call them, and one that
+  did not ended. A `MaxTokens` variant is deliberately absent, because it would be a value
+  nothing could ever produce, which is worse than its absence. The consequence to know: a
+  response truncated by the token cap reads as `EndTurn`. A response truncated by the
+  *transport* is still an error, because the HTTP body ends short.
+- **`LlmDelta::Reasoning` is separate from `Text` and does not travel back.** An assistant
+  message's reasoning is accumulated for display and dropped from the history the next turn
+  sends, since replaying a model's own notes to it is neither expected nor accepted unchanged
+  by either vendor.
+- **The adapter merges consecutive tool results into one user message.** Anthropic requires
+  alternating roles, `LlmMessage::ToolResult` is one result because that is the shape a loop
+  produces them in, and rig does no merging — so a run of them is folded at the boundary. This
+  is a wire-format obligation the design did not name and every multi-tool turn depends on.
+- **`anthropic` defaults `max_tokens` to 4096.** Anthropic requires the field on every request;
+  a caller that sets none gets this rather than a vendor rejection they would have to decode.
+- **The workspace's `reqwest` moved to 0.13**, which is what rig builds on, so there is one HTTP
+  client in the build rather than two. TLS stays pure-Rust (§16); the default provider is now
+  `aws-lc-rs` rather than `ring`.
+- **Providers have no `min_role`.** A file store has one because an application's users browse
+  it; a provider is reached only through an agent, and §11.2's `min_role` is the single authority
+  over who may chat with it.
+
 ### 11.2 Agents, traits and the loop (`sc-agent`)
 
 ```rust

@@ -16,8 +16,9 @@ members = [
     # Layer 5 — users/auth, files
     "crates/sc-auth",
     "crates/sc-files",
-    # Layer 6 — actions & triggers
+    # Layer 6 — actions & triggers, and the LLM provider seam
     "crates/sc-action",
+    "crates/sc-llm",
     # Layer 8 — applications & API
     "crates/sc-api",
     "crates/sc-app",
@@ -56,6 +57,7 @@ sc-catalog = { path = "crates/sc-catalog" }
 sc-auth = { path = "crates/sc-auth" }
 sc-files = { path = "crates/sc-files" }
 sc-action = { path = "crates/sc-action" }
+sc-llm = { path = "crates/sc-llm" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-core-actions = { path = "crates/sc-core-actions" }
@@ -179,9 +181,38 @@ tokio-tungstenite = "0.29"
 # has, so this adds a TLS stack and the client itself, not a second runtime.
 # `json` is the request-body serialiser only; responses are read as bytes and
 # parsed with `serde_json` here, so the crate's charset machinery is not needed.
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+#
+# **0.13, because `rig-core` builds on it** (TODO Phase 1). The `fetch` action
+# was written against 0.12; letting `sc-llm` pull its own would put two reqwests,
+# two hyper stacks and two rustls configurations in one binary — the thing
+# pinning versions here exists to prevent. The 0.13 rename of `rustls-tls` to
+# `rustls` is the whole of the migration, since nothing in the tree touches the
+# parts that changed shape.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
     "json",
+] }
+
+# --- LLM providers -----------------------------------------------------------
+#
+# The provider calls behind `sc-llm`'s own object-safe seam (design §11.1, TODO
+# Phase 1 decision 1). `rig-core` is the only surveyed crate carrying OpenAI's
+# **Responses** API as a first-class provider *and* a maintained Anthropic
+# provider; the survey and the rejected alternatives are in §11.1.
+#
+# `default-features = false` because rig's defaults pull the derive macro, rayon
+# and the document loaders (pdf, epub, image), none of which a provider call
+# needs. `reqwest` + `rustls` are the two features that matter: they make rig
+# build on the same HTTP client the `fetch` action already uses — which is why
+# the reqwest pin above is 0.13 — and keep TLS pure-Rust per §16.
+#
+# **Only the call is rig's**: not its `Agent`, not its tool registry, not its
+# RAG. Nothing rig exposes appears in an `sc-llm` public signature, for the
+# reason §2 gives generally — a provider abstraction is exactly the kind of
+# dependency whose API churns.
+rig-core = { version = "0.41", default-features = false, features = [
+    "reqwest",
+    "rustls",
 ] }
 
 # Workspace-wide lints. Principle 5 (no silent failures): library code must not

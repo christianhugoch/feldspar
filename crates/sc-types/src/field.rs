@@ -139,6 +139,17 @@ pub struct FormField {
     /// is a UI that special-cases particular settings by name — which is the
     /// coupling this whole vocabulary exists to remove.
     pub multiline: bool,
+    /// Whether the value is a **secret** — an API key, a password, a token
+    /// (design §11.1).
+    ///
+    /// A property of the *declaration*, so it reaches every consumer at once:
+    /// the admin UI renders a password input, [`redact_attrs`] replaces the
+    /// value with [`SECRET_SENTINEL`] wherever the record carrying it is
+    /// serialised, and [`merge_secrets`] restores the stored value when a save
+    /// submits that sentinel back unchanged. Doing it on the declaration is what
+    /// stops a second reader — a listing endpoint added later, an export — from
+    /// leaking a key its author never thought about.
+    pub secret: bool,
     // Post-MVP (§6.2, §6.3, §12): `fieldview: FieldViewRef` and
     // `visibility: Option<Formula>`. Both name types that do not exist yet —
     // fieldviews and formulas are out of MVP scope — so they are left out rather
@@ -155,6 +166,7 @@ impl FormField {
             default: None,
             options_source: OptionsSource::None,
             multiline: false,
+            secret: false,
         }
     }
 
@@ -166,6 +178,14 @@ impl FormField {
     /// Render this setting as a text area: its value is many lines, not one.
     pub fn multiline(mut self) -> FormField {
         self.multiline = true;
+        self
+    }
+
+    /// Mark this setting a [`secret`](FormField::secret): its value is redacted
+    /// where the record holding it is serialised, and a save that submits the
+    /// sentinel keeps what is stored.
+    pub fn secret(mut self) -> FormField {
+        self.secret = true;
         self
     }
 
@@ -334,6 +354,70 @@ pub fn validate_attrs(spec: &[FormField], attrs: &Attrs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What a [`secret`](FormField::secret) setting's value is replaced by when the
+/// record holding it is serialised (design §11.1).
+///
+/// **A fixed sentinel, not a truncation.** Showing the first four characters of
+/// an API key is a leak, not a courtesy: it narrows a brute force and, for keys
+/// whose prefix identifies the account, identifies the account. It is also a
+/// fixed string rather than one derived from the value, so two providers sharing
+/// a key cannot be told apart by reading a listing.
+///
+/// It doubles as the *input* contract: a save that submits this value unchanged
+/// means "I did not touch it", and [`merge_secrets`] restores what is stored.
+pub const SECRET_SENTINEL: &str = "••••••••";
+
+/// Replace every [`secret`](FormField::secret) value in `attrs` with
+/// [`SECRET_SENTINEL`] — what a record carrying a spec-declared config does on
+/// the way out.
+///
+/// Only keys that are *present* are redacted: an unset key stays unset, so the
+/// admin UI can still tell "no key configured yet" from "a key it may not see".
+/// A key the spec does not describe is left alone; `validate_attrs` is what
+/// rejects those, and silently dropping one here would hide the mistake.
+pub fn redact_attrs(spec: &[FormField], attrs: &Attrs) -> Attrs {
+    let mut out = attrs.clone();
+    for field in spec.iter().filter(|f| f.secret) {
+        if let Some(value) = out.get_mut(field.name())
+            && !value.is_null()
+        {
+            *value = Json::String(SECRET_SENTINEL.to_owned());
+        }
+    }
+    out
+}
+
+/// Undo [`redact_attrs`] for the values the submitter did not change: wherever
+/// `submitted` carries [`SECRET_SENTINEL`] for a secret field, take `stored`'s
+/// value instead.
+///
+/// This is the other half of the contract and the reason redaction can be done
+/// at all. Without it, an admin who opened a provider's form to fix a typo in
+/// its name would save the mask over the key and break the provider — the
+/// classic failure of masking a field the round trip writes back.
+///
+/// A secret submitted as the sentinel with *nothing* stored is dropped rather
+/// than saved: storing the mask itself would produce a provider that
+/// authenticates with `••••••••`, which is worse than an unset key because it
+/// looks configured.
+pub fn merge_secrets(spec: &[FormField], stored: &Attrs, submitted: &Attrs) -> Attrs {
+    let mut out = submitted.clone();
+    for field in spec.iter().filter(|f| f.secret) {
+        if out.get(field.name()).and_then(Json::as_str) != Some(SECRET_SENTINEL) {
+            continue;
+        }
+        match stored.get(field.name()) {
+            Some(value) => {
+                out.insert(field.name().to_owned(), value.clone());
+            }
+            None => {
+                out.remove(field.name());
+            }
+        }
+    }
+    out
 }
 
 /// A JSON value's shape, for error messages.
@@ -535,5 +619,96 @@ mod tests {
                 Some(&json!(false))
             ]
         );
+    }
+
+    /// The spec a secret round-trip is tested against: one secret, one not.
+    fn secret_spec() -> Vec<FormField> {
+        vec![
+            FormField::new("base_url", BasicType::Text),
+            FormField::new("api_key", BasicType::Text)
+                .secret()
+                .required(),
+        ]
+    }
+
+    #[test]
+    fn secret_is_a_property_of_the_declaration() {
+        let spec = secret_spec();
+        assert!(!spec[0].secret);
+        assert!(spec[1].secret);
+        // It changes nothing about what the value *is*, so it still validates as
+        // the text it is.
+        let mut attrs = Attrs::new();
+        attrs.insert("api_key".to_owned(), json!("sk-live-1234"));
+        assert!(validate_attrs(&spec, &attrs).is_ok());
+    }
+
+    #[test]
+    fn redaction_replaces_the_whole_value_and_leaves_the_rest() {
+        let spec = secret_spec();
+        let mut attrs = Attrs::new();
+        attrs.insert("base_url".to_owned(), json!("https://api.example.com"));
+        attrs.insert("api_key".to_owned(), json!("sk-live-1234"));
+
+        let out = redact_attrs(&spec, &attrs);
+        assert_eq!(out.get("api_key"), Some(&json!(SECRET_SENTINEL)));
+        // Not a truncation: no part of the key survives, not even its prefix.
+        let rendered = Json::Object(out.clone()).to_string();
+        assert!(!rendered.contains("sk-"), "{rendered}");
+        // A non-secret setting is untouched.
+        assert_eq!(out.get("base_url"), Some(&json!("https://api.example.com")));
+    }
+
+    #[test]
+    fn an_unset_secret_stays_unset_rather_than_becoming_the_sentinel() {
+        // "No key configured" and "a key you may not see" are different states
+        // and the form has to show them differently.
+        let out = redact_attrs(&secret_spec(), &Attrs::new());
+        assert!(out.get("api_key").is_none());
+    }
+
+    #[test]
+    fn the_sentinel_round_trips_without_destroying_the_stored_key() {
+        let spec = secret_spec();
+        let mut stored = Attrs::new();
+        stored.insert("base_url".to_owned(), json!("https://api.example.com"));
+        stored.insert("api_key".to_owned(), json!("sk-live-1234"));
+
+        // Read → edit an unrelated field → save.
+        let mut submitted = redact_attrs(&spec, &stored);
+        submitted.insert("base_url".to_owned(), json!("https://gateway.internal"));
+
+        let merged = merge_secrets(&spec, &stored, &submitted);
+        assert_eq!(merged.get("api_key"), Some(&json!("sk-live-1234")));
+        assert_eq!(
+            merged.get("base_url"),
+            Some(&json!("https://gateway.internal"))
+        );
+    }
+
+    #[test]
+    fn a_submitted_new_secret_replaces_the_stored_one() {
+        let spec = secret_spec();
+        let mut stored = Attrs::new();
+        stored.insert("api_key".to_owned(), json!("sk-old"));
+        let mut submitted = Attrs::new();
+        submitted.insert("api_key".to_owned(), json!("sk-new"));
+
+        let merged = merge_secrets(&spec, &stored, &submitted);
+        assert_eq!(merged.get("api_key"), Some(&json!("sk-new")));
+    }
+
+    #[test]
+    fn the_sentinel_with_nothing_stored_is_dropped_not_saved() {
+        // Otherwise the provider would authenticate with the mask, which looks
+        // configured and is not.
+        let spec = secret_spec();
+        let mut submitted = Attrs::new();
+        submitted.insert("api_key".to_owned(), json!(SECRET_SENTINEL));
+
+        let merged = merge_secrets(&spec, &Attrs::new(), &submitted);
+        assert!(merged.get("api_key").is_none());
+        // And it is then caught as the missing required setting it is.
+        assert!(validate_attrs(&spec, &merged).is_err());
     }
 }

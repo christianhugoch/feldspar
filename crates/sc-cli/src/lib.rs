@@ -58,6 +58,9 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_catalog::bootstrap_field_meta(&catalog)
         .await
         .context("ensuring the field overlay table exists")?;
+    sc_llm::bootstrap_llm_providers(&catalog)
+        .await
+        .context("ensuring the LLM providers table exists")?;
     Ok(catalog)
 }
 
