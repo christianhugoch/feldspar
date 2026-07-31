@@ -20,7 +20,7 @@ use sc_db::Row;
 use sc_error::{Error, Repr, Result};
 use sc_expr::{CalcFields, Env, Formula, TranslateError, UserEnv, translate_value};
 use sc_query::{
-    Assignment, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
+    Assignment, Delete, Expr, Insert, OrderBy, Projection, Select, Source, Statement, Update, Value,
 };
 use sc_types::{BasicType, TypeRef};
 use serde_json::{Map, Value as Json, json};
@@ -78,14 +78,92 @@ pub async fn list_rows_where(
     filter: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<Json> {
+    list_rows_query(catalog, table, &RowQuery::new().where_(filter), context).await
+}
+
+/// Which rows of a table to read, in what order, and how many at most.
+///
+/// The shape of a read that is not "everything": a filter, an ordering and a
+/// bound. It exists because an agent's `query_table` tool (§11.3) asks for
+/// exactly those three and must not be able to ask for anything else — a tool
+/// that could name its own projection or its own SQL would be a second row layer
+/// with none of this one's rules. Every field is optional, so
+/// [`RowQuery::new`] is "every row, in no particular order".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RowQuery {
+    /// `WHERE`, if any. Ownership enforcement ANDs its own predicate into this.
+    pub filter: Option<Expr>,
+    /// `ORDER BY` keys, in precedence order.
+    pub order: Vec<OrderBy>,
+    /// The most rows to return.
+    pub limit: Option<u64>,
+}
+
+impl RowQuery {
+    /// Every row, unordered and unbounded.
+    pub fn new() -> RowQuery {
+        RowQuery::default()
+    }
+
+    /// Restrict to the rows matching `filter` (`None` leaves it unrestricted).
+    pub fn where_(mut self, filter: Option<Expr>) -> RowQuery {
+        self.filter = filter;
+        self
+    }
+
+    /// Order by these keys.
+    pub fn order_by(mut self, order: Vec<OrderBy>) -> RowQuery {
+        self.order = order;
+        self
+    }
+
+    /// Return at most `n` rows.
+    pub fn limit(mut self, n: u64) -> RowQuery {
+        self.limit = Some(n);
+        self
+    }
+
+    /// This query with `extra` ANDed into its filter — how an ownership
+    /// predicate joins a caller's own one without either being able to drop the
+    /// other.
+    pub fn and_filter(mut self, extra: Expr) -> RowQuery {
+        self.filter = Some(match self.filter {
+            Some(existing) => existing.and(extra),
+            None => extra,
+        });
+        self
+    }
+}
+
+/// [`list_rows_where`] with an ordering and a bound: the general read.
+pub async fn list_rows_query(
+    catalog: &Catalog,
+    table: &Table,
+    query: &RowQuery,
+    context: Option<&CallerContext>,
+) -> Result<Json> {
+    let rows = run_read(
+        catalog,
+        table,
+        &read_select(catalog, table, query)?,
+        context,
+    )
+    .await?;
+    Ok(Json::Array(rows.iter().map(row_to_json).collect()))
+}
+
+/// The `SELECT` one [`RowQuery`] renders to: every column plus the calculated
+/// fields, filtered, ordered and bounded.
+fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Select> {
     let mut columns = vec![Projection::all()];
     columns.extend(calc_projections(catalog, table)?);
     let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
-    if let Some(filter) = filter {
+    if let Some(filter) = query.filter.clone() {
         select = select.filter(filter);
     }
-    let rows = run_read(catalog, table, &select, context).await?;
-    Ok(Json::Array(rows.iter().map(row_to_json).collect()))
+    select.order = query.order.clone();
+    select.limit = query.limit;
+    Ok(select)
 }
 
 /// The rows of `table` matching `filter` as **query values** keyed by column,

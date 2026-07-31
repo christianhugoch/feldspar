@@ -129,7 +129,7 @@ mod tests {
         fn config_spec(&self) -> Vec<FormField> {
             Vec::new()
         }
-        fn tools(&self, _config: &Attrs) -> Vec<ToolSpec> {
+        fn tools(&self, _catalog: &sc_catalog::Catalog, _config: &Attrs) -> Vec<ToolSpec> {
             Vec::new()
         }
         async fn call(

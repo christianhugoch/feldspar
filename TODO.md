@@ -169,10 +169,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 3 — `sc-core-traits`: connecting tables and actions
 
-- [ ] New crate `sc-core-traits` at layer 9, beside `sc-core-actions` and for the same reason: a
+- [x] New crate `sc-core-traits` at layer 9, beside `sc-core-actions` and for the same reason: a
       trait that writes a row goes **through `sc-api::rows`**, so the write is coerced, validated,
       `File`-field-checked and observed by triggers exactly like an API caller's.
-- [ ] `query_table` — configured with one table, an optional field allow-list and a maximum row
+- [x] `query_table` — configured with one table, an optional field allow-list and a maximum row
       count. Its tool takes a `where` object, an optional ordering and a `limit` bounded by the
       configuration. The tool's description and JSON schema are **generated from the table's own
       fields**, so the model is told what it may filter on rather than guessing.

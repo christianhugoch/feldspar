@@ -2,6 +2,71 @@
 
 Changes in reverse chronological order.
 
+## `sc-core-traits`: the built-in agent traits, and `query_table`
+
+Agents Phase 3, first half. An agent can now be pointed at a table and asked about the data in
+it — and what it can see is exactly what the person chatting can see, on a table with an
+ownership formula as much as on one without.
+
+**A new crate at layer 9, beside `sc-core-actions` and for the same reason.** A trait that
+touches rows goes **through `sc-api`**, never around it: a read is the same read an API caller
+makes, under the same §7.3 rule, and the writes Phase 3 adds next go through the same coercion,
+the same rich-type and `File`-field validation and the same events. That fixes the built-in
+traits *above* the row layer, while `sc-agent` (layer 7) stays what a plugin needs to write a
+trait of its own. `sc-agent` registers nothing; `builtin_traits()` is this crate's single
+constructor, and it is the first consumer of the seam rather than a privileged one.
+
+**`query_table`** takes one table, an optional field allow-list and a maximum row count. Its
+tool takes a `where` object, an optional ordering and a `limit`. Four properties are
+load-bearing and each is pinned by a test against a real database:
+
+- **The tool describes the table.** Its name is derived from the configuration (`query_books`,
+  not `query`), and its description and JSON schema are generated from the table's own fields:
+  every field with its type, `order_by` as an enum of exactly the fields that have a column, and
+  a `limit` whose `maximum` is the configured ceiling. A model left to guess column names will
+  guess, and a guess that misses costs a turn the person watching pays for. This is what made
+  **`AgentTrait::tools` take the catalog** — a declaration built from the configuration alone
+  cannot say any of it. It stays infallible: a trait whose table was dropped still returns its
+  tool under the name the configuration gives it, because "this agent has no tools" is not a
+  repairable message and "this agent names a table that is gone" is.
+- **The caller's access is the tool's access, and the trait cannot skip it.** The read goes
+  through the new `sc_api::read_rows_as`, which is the §7.3 rule the REST API already applies —
+  shared rather than re-implemented, because a second copy of "meets the floor OR the formula
+  grants it" is a second place for it to be subtly wrong, and the wrong one is the one nobody
+  is looking at. The same `books` table read by two chatting users returns each of their own
+  rows and neither of the other's, on the translated path and on the reified one; a trigger's
+  run carries the trigger's authority instead and sees everything (decision 5). A filter cannot
+  reach past the formula, and a caller it grants nothing gets an empty table rather than an
+  error that would confirm the rows are there.
+- **The configuration bounds the tool, never the reverse.** The allow-list is what the model may
+  see, filter on *and* order by — a field left out of it cannot be read back through a `where` —
+  and `max_rows` is a ceiling a larger `limit` is clamped to, not a default it can raise. One
+  row more than asked for is fetched so the answer can carry `more_rows_available`: a model that
+  cannot tell a truncated answer from a complete one will state the truncated one as fact.
+- **Everything refused is refused by name.** An unknown field, an unknown operator, an argument
+  the schema never described, a `limit` of zero — each comes back naming what was wrong and, for
+  a field, listing the ones that exist. These errors are read by a model that can only recover
+  if it is told, so they are written for that reader.
+
+Three supporting changes, each recorded in §11.3:
+
+- **`sc_api::rows::RowQuery`** — filter, ordering, bound — is the only shape a tool can ask a
+  read in. There is no projection and no SQL: a tool that could name either would be a second
+  row layer with none of this one's rules. On the reified ownership path the bound is applied
+  **after** the evaluator has spoken, because a `LIMIT` that counted rows the caller may not see
+  would answer "10 rows" with three.
+- **`TraitContext` carries the JavaScript evaluator**, put there by `Runner::with_evaluator`. A
+  tool needs V8 exactly when the table it reads has an untranslatable ownership formula; one
+  that could not reach an engine would have to choose between failing and skipping the check,
+  and `require_evaluator` makes the first choice the explicit one. It is optional, so an agent
+  that only talks does not build an isolate to say hello.
+- **`query_table`'s `where` is JSON, not a formula.** Each entry is a field against a value to
+  match exactly or an object with one operator key (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`,
+  `like`, `ilike`, `in`, `is_null`), all ANDed; `null` and `{"eq": null}` are both the null
+  test, because SQL's `=` is never true of one and a model writing it means "unset". A model
+  writes JSON reliably and JavaScript unreliably, and the object form is the one whose
+  vocabulary the schema can enumerate.
+
 ## `sc-agent`: the agent, the trait, the loop and its runs
 
 Agents Phase 2. An agent is now a stored record an admin can define, validate and run: a

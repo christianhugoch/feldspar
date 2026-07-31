@@ -101,7 +101,7 @@ impl AgentTrait for Counter {
         Ok(())
     }
 
-    fn tools(&self, config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, _catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
         vec![ToolSpec::new(
             format!("count_{}", collection(config)),
             format!("Count the {} ", collection(config)),
@@ -156,7 +156,7 @@ impl AgentTrait for Preamble {
         vec![FormField::new("text", BasicType::Text).required()]
     }
 
-    fn tools(&self, _config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, _catalog: &Catalog, _config: &Attrs) -> Vec<ToolSpec> {
         Vec::new()
     }
 

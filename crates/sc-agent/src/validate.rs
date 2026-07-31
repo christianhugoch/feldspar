@@ -97,7 +97,7 @@ pub async fn validate_agent(
             .await
             .map_err(|e| where_(e.to_string()))?;
 
-        for tool in trait_.tools(&enabled.config) {
+        for tool in trait_.tools(catalog, &enabled.config) {
             if tool.name.is_empty()
                 || tool.name.len() > MAX_TOOL_NAME
                 || !tool

@@ -23,9 +23,12 @@
 //! trigger carries the trigger's authority instead, and that difference is set at
 //! exactly one place: where the run is created.
 
+use std::sync::Arc;
+
 use sc_auth::User;
 use sc_catalog::Catalog;
-use sc_error::Result;
+use sc_error::{Error, Result};
+use sc_expr::JsEvaluator;
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
@@ -72,9 +75,19 @@ pub trait AgentTrait: Send + Sync {
     /// refused on save by [`validate_agent`](crate::validate_agent), where it is
     /// fixable, rather than discovered when the model picks the wrong one.
     ///
-    /// Infallible, because it is only ever called on a configuration that has
-    /// already validated.
-    fn tools(&self, config: &Attrs) -> Vec<ToolSpec>;
+    /// The `catalog` is here because a tool's **description and JSON schema are
+    /// generated from the thing it is configured against** (§11.3): `query_books`
+    /// tells the model which fields it may filter on rather than leaving it to
+    /// guess, and a guess that misses costs a turn. A declaration built from the
+    /// configuration alone could not say any of that.
+    ///
+    /// Infallible, because it is called wherever the tool set is needed —
+    /// including while reporting *why* an agent is invalid. A trait whose target
+    /// has since been dropped should still return its tool under the name the
+    /// configuration gives it, described as best it can: dropping the tool
+    /// silently would turn "this agent names a table that is gone" into "this
+    /// agent has no tools", and the second is not a repairable message.
+    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec>;
 
     /// Run one of this trait's tools.
     ///
@@ -187,6 +200,31 @@ pub struct TraitContext<'a> {
     pub agent: &'a str,
     /// The run this call belongs to, so a trait can record against it.
     pub run: RunId,
+    /// The JavaScript engine, where the deployment has one.
+    ///
+    /// A tool that reads rows needs it exactly when the table it reads has an
+    /// **untranslatable** ownership formula (§7.3): the rows come back and the
+    /// formula decides per row, in V8. It is carried rather than reached for
+    /// because a run may be driven from a context that has no engine, and the
+    /// honest answer there is [`require_evaluator`](TraitContext::require_evaluator)'s
+    /// configuration error rather than a read that quietly skips the check.
+    pub evaluator: Option<&'a Arc<dyn JsEvaluator>>,
+}
+
+impl TraitContext<'_> {
+    /// The engine, or the configuration error that says the server has none.
+    ///
+    /// Fail closed and fail loudly: a trait that cannot evaluate an ownership
+    /// formula must not fall back to reading the rows anyway.
+    pub fn require_evaluator(&self) -> Result<&Arc<dyn JsEvaluator>> {
+        self.evaluator.ok_or_else(|| {
+            Error::config(format!(
+                "agent `{}`: this needs the JavaScript evaluator, \
+                 and none is configured on this server",
+                self.agent
+            ))
+        })
+    }
 }
 
 /// One turn about to be sent to the model, as [`AgentTrait::on_turn`] may change

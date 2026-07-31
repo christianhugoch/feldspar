@@ -35,7 +35,7 @@ use sc_expr::{
     Env, Formula, FormulaCall, JsEvaluator, Operation, TranslateError, UserEnv, join_path_expr,
     translate,
 };
-use sc_query::{Expr, Projection, Select, Source, Value};
+use sc_query::{Expr, OrderBy, Projection, Select, Source, Value};
 use serde_json::{Map, Value as Json};
 
 use crate::convert::value_to_json;
@@ -92,6 +92,89 @@ fn user_values(user: Option<&User>) -> Option<BTreeMap<String, Value>> {
     })
 }
 
+/// The rows of `table` a caller may read, applying §7.3's rule to a
+/// [`RowQuery`](rows::RowQuery) rather than to "everything".
+///
+/// The one entry point for a reader that is **not** an API surface — today an
+/// agent's `query_table` tool (§11.3), which must see exactly what the person
+/// chatting would see through the REST API and not one row more. Sharing this
+/// function rather than the rule is the point: a second implementation of "meets
+/// the floor OR the formula grants it" is a second place for it to be subtly
+/// wrong, and the one that is wrong is the one nobody is looking at.
+///
+/// `role` is passed explicitly rather than read off `user` because a caller is
+/// not always a user: a trigger-started agent run carries the trigger's
+/// authority (admin) with no user attached, and an anonymous reader carries
+/// public with the same. A caller the floor does not admit and no formula
+/// extends gets an [`Error::auth`] naming the table — the reader here is a tool
+/// result a model has to be able to act on, not an HTTP status.
+pub async fn read_rows_as(
+    cat: &Catalog,
+    table: &Table,
+    query: &rows::RowQuery,
+    role: u8,
+    user: Option<&User>,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<Json> {
+    // The database enforces this table's ownership: run the read in a
+    // caller-context transaction and let the policies decide, exactly as the
+    // REST provider's RLS path does.
+    if table.rls_enabled {
+        let ctx = caller_context_at(role, user);
+        return rows::list_rows_query(cat, table, query, Some(&ctx)).await;
+    }
+    if role <= table.access.min_role_read {
+        return rows::list_rows_query(cat, table, query, None).await;
+    }
+    let Some(formula) = &table.ownership else {
+        return Err(Error::auth(format!("you may not read `{}`", table.name)));
+    };
+
+    let shape = cat.schema_shape()?;
+    let env = UserEnv::Inline(user_values(user));
+    let calc = table.calc_formulas();
+    match translate(
+        formula,
+        Operation::Read,
+        &Env::new(&env).with_calc(&calc),
+        &shape,
+        &table.name,
+    ) {
+        // The database filters, and the caller's own filter, ordering and bound
+        // ride along in the same statement.
+        Ok(pred) => rows::list_rows_query(cat, table, &query.clone().and_filter(pred), None).await,
+        // The formula needs JavaScript. The filter and the ordering still go to
+        // the database — the ordering survives because filtering preserves it —
+        // but the **bound does not**: a `LIMIT` applied before the evaluator has
+        // spoken would count rows the caller may not see, and answer "10 rows"
+        // with three. So it is applied here, after.
+        Err(TranslateError::Untranslatable(_)) => {
+            let evaluator = require_evaluator(evaluator)?;
+            let fetched = fetch_rows_with_joins(
+                cat,
+                table,
+                formula,
+                &shape,
+                query.filter.clone(),
+                &query.order,
+            )
+            .await?;
+            let limit = query.limit.unwrap_or(u64::MAX);
+            let mut granted = Vec::new();
+            for values in fetched {
+                if granted.len() as u64 >= limit {
+                    break;
+                }
+                if allowed(evaluator, formula, Operation::Read, user, &values).await {
+                    granted.push(table_row_json(table, &values));
+                }
+            }
+            Ok(Json::Array(granted))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// The rows of `table` the formula grants `user` for reading — the sub-floor
 /// read path.
 pub(crate) async fn list_owned_rows(
@@ -117,7 +200,7 @@ pub(crate) async fn list_owned_rows(
         // values projected alongside and let the evaluator decide per row.
         Err(TranslateError::Untranslatable(_)) => {
             let evaluator = require_evaluator(evaluator)?;
-            let fetched = fetch_rows_with_joins(cat, table, formula, &shape, None).await?;
+            let fetched = fetch_rows_with_joins(cat, table, formula, &shape, None, &[]).await?;
             let mut granted = Vec::with_capacity(fetched.len());
             for values in fetched {
                 if allowed(evaluator, formula, Operation::Read, user, &values).await {
@@ -193,7 +276,7 @@ pub(crate) async fn fetch_row_values(
     let shape = cat.schema_shape()?;
     let pk = rows::single_pk(table)?;
     let filter = rows::pk_filter(table, &pk, id)?;
-    let mut fetched = fetch_rows_with_joins(cat, table, formula, &shape, Some(filter)).await?;
+    let mut fetched = fetch_rows_with_joins(cat, table, formula, &shape, Some(filter), &[]).await?;
     Ok(fetched.drain(..).next())
 }
 
@@ -265,6 +348,7 @@ async fn fetch_rows_with_joins(
     formula: &Formula,
     shape: &sc_expr::SchemaShape,
     filter: Option<Expr>,
+    order: &[OrderBy],
 ) -> Result<Vec<BTreeMap<String, Value>>> {
     let analysis = formula.validate(shape, &table.name)?;
     let mut columns = vec![Projection::all()];
@@ -276,6 +360,7 @@ async fn fetch_rows_with_joins(
     if let Some(filter) = filter {
         select = select.filter(filter);
     }
+    select.order = order.to_vec();
     let fetched: Vec<Row> = cat
         .provider(table)
         .query(&select)

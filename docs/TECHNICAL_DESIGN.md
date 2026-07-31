@@ -1357,6 +1357,32 @@ optional field list, an ordering and a bounded `limit`), `insert_row` and `updat
 granting writes is a decision with a form field attached. All of them go through `sc-api::rows`
 with the run's caller.
 
+**What was built, where it deviates** (Phase 3, `query_table`):
+
+- **`AgentTrait::tools` takes the catalog.** The declaration was `tools(&config)`, and a tool
+  declared from its configuration alone cannot do what this section asks of it: `query_books`'s
+  description and JSON schema are *generated from the table's own fields*, so the model is told
+  what it may filter on rather than guessing, and the ordering key is an enum of exactly the
+  fields that have a column. It stays infallible — a trait whose table has since been dropped
+  returns its tool under the name its configuration derives, described as unavailable, because
+  dropping it silently would turn "this agent names a table that is gone" into "this agent has
+  no tools", and only the first is a repairable message.
+- **The §7.3 read rule is shared, not re-implemented**: `sc_api::read_rows_as(catalog, table,
+  RowQuery, role, user, evaluator)` is the one entry point for a reader that is not an API
+  surface, and `RowQuery` (filter, ordering, bound) is the only shape a tool can ask in. On the
+  reified path the bound is applied **after** the evaluator has spoken — a `LIMIT` that counted
+  rows the caller may not see would answer "10 rows" with three.
+- **`TraitContext` carries the evaluator**, and `Runner::with_evaluator` puts it there. A tool
+  needs V8 exactly when the table it reads has an untranslatable ownership formula; a tool that
+  could not reach one would have to choose between failing and skipping the check, and
+  `TraitContext::require_evaluator` makes the first choice explicit.
+- **`query_table`'s `where` is a JSON object, not a formula.** Each entry is a field against a
+  value to match exactly or an object with one operator key (`eq`, `ne`, `gt`, `gte`, `lt`,
+  `lte`, `like`, `ilike`, `in`, `is_null`), all ANDed. A model writes JSON reliably and
+  JavaScript unreliably, and the object form is the one whose vocabulary the schema can
+  enumerate. `max_rows` is a **ceiling** the `limit` argument is clamped to, and the result
+  carries `more_rows_available` so a truncated answer is not stated as a complete one.
+
 **Actions.** `run_trigger` exposes one configured trigger as a tool. The trigger's own
 `min_role` still gates it, so exposing an agent to a role does not thereby expose everything the
 agent could call. This is the trait that connects an agent to the whole of §10 — a workflow,

@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
+use sc_expr::JsEvaluator;
 use sc_llm::{AssistantMessage, LlmDelta, LlmProvider, LlmRequest, ToolCall, ToolSpec};
 
 use crate::agent::Agent;
@@ -66,6 +67,7 @@ pub struct Runner<'a> {
     provider: Arc<dyn LlmProvider>,
     caller: RunCaller,
     observer: Option<&'a dyn RunObserver>,
+    evaluator: Option<&'a Arc<dyn JsEvaluator>>,
 }
 
 impl<'a> Runner<'a> {
@@ -88,12 +90,25 @@ impl<'a> Runner<'a> {
             provider,
             caller,
             observer: None,
+            evaluator: None,
         }
     }
 
     /// Watch the run as it happens.
     pub fn observing(mut self, observer: &'a dyn RunObserver) -> Runner<'a> {
         self.observer = Some(observer);
+        self
+    }
+
+    /// Give this run's tools the JavaScript engine.
+    ///
+    /// Optional, and deliberately: an agent whose traits never touch a table with
+    /// an untranslatable ownership formula never needs one, and a `Runner` that
+    /// demanded an engine to hold a conversation would make every caller build a
+    /// V8 isolate to say hello. A tool that does need it and does not have it
+    /// says so (`TraitContext::require_evaluator`) rather than reading anyway.
+    pub fn with_evaluator(mut self, evaluator: &'a Arc<dyn JsEvaluator>) -> Runner<'a> {
+        self.evaluator = Some(evaluator);
         self
     }
 
@@ -186,7 +201,7 @@ impl<'a> Runner<'a> {
         for enabled in &self.agent.traits {
             let trait_ = self.registry.require(&enabled.trait_)?;
             trait_.on_turn(&enabled.config, &mut turn).await?;
-            tools.extend(trait_.tools(&enabled.config));
+            tools.extend(trait_.tools(self.catalog, &enabled.config));
         }
 
         let system = turn.system_prompt(&self.agent.system_prompt);
@@ -248,6 +263,7 @@ impl<'a> Runner<'a> {
                             caller: &self.caller,
                             agent: &self.agent.name,
                             run: run.id,
+                            evaluator: self.evaluator,
                         };
                         match trait_
                             .call(&enabled.config, &tool_name, &call.arguments, &mut ctx)
@@ -274,7 +290,7 @@ impl<'a> Runner<'a> {
                 continue;
             };
             if trait_
-                .tools(&enabled.config)
+                .tools(self.catalog, &enabled.config)
                 .iter()
                 .any(|spec| spec.name == tool)
             {
@@ -290,7 +306,12 @@ impl<'a> Runner<'a> {
         let mut names: Vec<String> = Vec::new();
         for enabled in &self.agent.traits {
             if let Ok(trait_) = self.registry.require(&enabled.trait_) {
-                names.extend(trait_.tools(&enabled.config).into_iter().map(|t| t.name));
+                names.extend(
+                    trait_
+                        .tools(self.catalog, &enabled.config)
+                        .into_iter()
+                        .map(|t| t.name),
+                );
             }
         }
         if names.is_empty() {

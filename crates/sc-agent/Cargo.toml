@@ -19,6 +19,11 @@ sc-types.workspace = true
 sc-catalog.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
+# `JsEvaluator` alone — the trait, not an engine (the workspace dep defaults
+# `eval` off). A trait's tool carries it because a table whose ownership formula
+# does not translate to SQL is read row by row through V8 (§7.3), and a tool that
+# could not reach one would have to choose between failing and skipping the check.
+sc-expr.workspace = true
 # The provider seam. This crate knows agents, traits and the loop, and nothing
 # about which vendor is on the other end (§11.1).
 sc-llm.workspace = true

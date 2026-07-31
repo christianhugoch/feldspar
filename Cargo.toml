@@ -25,8 +25,10 @@ members = [
     "crates/sc-api",
     "crates/sc-app",
     # Layer 9 — the core built-in actions (above the row layer, because three of
-    # them write rows through it) and the server
+    # them write rows through it), the core built-in agent traits (above it for
+    # exactly the same reason) and the server
     "crates/sc-core-actions",
+    "crates/sc-core-traits",
     "crates/sc-server",
     # Layer 10 — CLI binary
     "crates/sc-cli",
@@ -64,6 +66,7 @@ sc-agent = { path = "crates/sc-agent" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-core-actions = { path = "crates/sc-core-actions" }
+sc-core-traits = { path = "crates/sc-core-traits" }
 sc-server = { path = "crates/sc-server" }
 sc-test-harness = { path = "tests/harness" }
 
