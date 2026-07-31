@@ -176,21 +176,26 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
       count. Its tool takes a `where` object, an optional ordering and a `limit` bounded by the
       configuration. The tool's description and JSON schema are **generated from the table's own
       fields**, so the model is told what it may filter on rather than guessing.
-- [ ] `insert_row`, `update_rows`, `delete_rows` as three separate opt-in traits over a configured
+- [x] `insert_row`, `update_rows`, `delete_rows` as three separate opt-in traits over a configured
       table, so a read-only agent is the default shape and each grant is a deliberate act with a
-      form field attached. `delete_rows` requires a `where`, for §10.1's reason.
-- [ ] `run_trigger` — one configured trigger as one tool, taking the event payload. The trigger's
+      form field attached. `delete_rows` requires a `where`, for §10.1's reason — and so does
+      `update_rows`, because a table rewritten by an omitted argument is the same accident as one
+      emptied by it. All three go through the write half of §7.3's shared rule
+      (`sc_api::insert_row_as` / `update_row_as` / `delete_row_as`), and `max_rows` **refuses**
+      a call that matches too many rather than truncating it.
+- [x] `run_trigger` — one configured trigger as one tool, taking the event payload. The trigger's
       own `min_role` still gates it, so exposing the agent to a role does not thereby expose
       everything it can reach. This is the trait that connects an agent to all of §10 — and to
-      workflows, unchanged, once §10.3 lands.
-- [ ] Each trait's `validate_config` checks what the spec cannot: that the table exists and is
+      workflows, unchanged, once §10.3 lands. The dispatcher travels on `TraitContext`, beside the
+      evaluator and for the same reason.
+- [x] Each trait's `validate_config` checks what the spec cannot: that the table exists and is
       addressable by primary key, that the trigger exists, that a named field is real.
-- [ ] Tests: Rust against a real Postgres — a query trait returning rows the caller may see and
+- [x] Tests: Rust against a real Postgres — a query trait returning rows the caller may see and
       **not** returning rows an ownership formula hides (the same table read by two callers gives
       two answers); a write trait's insert firing the table's own trigger; `delete_rows` refusing a
       missing `where`; `run_trigger` refused for a caller below the trigger's `min_role`; a trait
       configured against a dropped table leaving its agent invalid with a reason.
-- [ ] **Done when** an agent given `query_table` over a real table and `run_trigger` over a real
+- [x] **Done when** an agent given `query_table` over a real table and `run_trigger` over a real
       trigger answers a question about the data and then performs the action, with the whole
       exchange in its run's context.
 

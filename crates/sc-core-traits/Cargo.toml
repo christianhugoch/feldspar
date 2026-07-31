@@ -19,6 +19,10 @@ sc-agent.workspace = true
 # through the same coercion, validation and events.
 sc-api.workspace = true
 sc-catalog.workspace = true
+# The trigger set and the dispatcher `run_trigger` runs one through — the same
+# dispatcher every other event fires on, so an agent is one more thing that can
+# ask rather than a second way to fire (§11.3).
+sc-action.workspace = true
 # `User` and the role scale a caller is checked on.
 sc-auth.workspace = true
 # `Expr`/`OrderBy`/`Value`: what a tool's `where` and ordering are translated
@@ -45,6 +49,10 @@ sc-expr = { workspace = true, features = ["eval"] }
 # The scripted provider (`sc-agent`'s `testing` feature): a trait is exercised
 # through a whole agent run, and no test in this tree may need an API key.
 sc-agent = { workspace = true, features = ["testing"] }
+# The built-in actions, so a trigger an agent fires — and a trigger an agent's
+# own write fires — is a real one doing real work, rather than a stub that would
+# prove only that the seam was called.
+sc-core-actions.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 uuid.workspace = true
 

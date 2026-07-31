@@ -1383,10 +1383,55 @@ with the run's caller.
   enumerate. `max_rows` is a **ceiling** the `limit` argument is clamped to, and the result
   carries `more_rows_available` so a truncated answer is not stated as a complete one.
 
+**What was built, where it deviates** (Phase 3, the write traits):
+
+- **The §7.3 write rule is shared too**: `sc_api::insert_row_as` / `update_row_as` /
+  `delete_row_as` are the write half of `read_rows_as` — meets `min_role_write` **or** the
+  ownership formula grants the row, checked on the existing row *and* on the row as it would
+  become, then through `sc_api::rows`' ordinary write so the values are coerced, the `File`
+  fields validated and the table's own triggers fired. The REST provider keeps its own
+  orchestration because it turns each denial into an HTTP status; the *rule* is the shared
+  part, which is the half that must not be able to differ.
+- **`update_rows` requires a `where` as well as `delete_rows` does.** The TODO asks it of the
+  delete alone, but a whole table rewritten by an omitted argument is the same accident as one
+  emptied by it, and §10.1 already refuses both on the *actions*. A model that means every row
+  writes a condition that matches every row.
+- **`max_rows` on a write refuses rather than truncates.** One row past the ceiling and nothing
+  is written, with the count in the message. A read that returns the first 50 of 200 is a short
+  answer; a write that changes the first 50 of 200 is a half-applied change nobody can find the
+  other half of. The rows are then selected through `read_rows_as` — the **caller's own read** —
+  so a tool can only change rows the same caller could have been shown, and written one at a
+  time by primary key, which is what gives each its own event (§10.2's decision 2).
+- **A write trait's field allow-list bounds what may be *set*, not what may be *matched*.**
+  "The row whose title is Dune" is how a model addresses a row it may not rename, and the rows a
+  filter can reach are already bounded by the caller's access. A read trait's allow-list is the
+  other way round, because there a hidden field could be read back one comparison at a time.
+- **`insert_row`'s arguments are the row itself**, flat, and its schema has **no `required`
+  list**: a `NOT NULL` column may have a database default and the catalog does not record
+  defaults, so demanding every required column would make the model invent values the database
+  was going to supply. The prose says which fields are required; a genuinely missing value comes
+  back as an error the model can read and retry.
+
 **Actions.** `run_trigger` exposes one configured trigger as a tool. The trigger's own
 `min_role` still gates it, so exposing an agent to a role does not thereby expose everything the
 agent could call. This is the trait that connects an agent to the whole of §10 — a workflow,
 once §10.3 lands, becomes callable the same way, because a workflow is a trigger.
+
+**What was built, where it deviates** (Phase 3, `run_trigger`):
+
+- **`TraitContext` carries the `TriggerDispatcher`**, put there by `Runner::with_triggers`,
+  exactly as it carries the evaluator and for the same reason: the tool runs *the* dispatcher's
+  trigger — the same one every other event fires on, with its `only_if`, its cascade bound and
+  its enabled switch — so an agent is one more thing that can ask rather than a second way to
+  fire. A context without one says so (`require_triggers`) instead of reaching for another path.
+  This is why `sc-agent` depends on `sc-action`; nothing in it knows which triggers exist.
+- **The trigger is resolved from storage on save and from the live set at call time.** A trigger
+  that is stored but not currently valid leaves *its own* live set with a reason; an agent that
+  names it stays valid, and calling the tool reports the trigger's problem in the trigger's own
+  words. One broken thing should produce one error, in the place it can be repaired.
+- **The payload schema is open** (`additionalProperties: true`). What a payload should contain
+  is the action's business, and a closed schema here would be this crate guessing at another
+  crate's contract — a guess the vendor enforces by refusing the call.
 
 **Code.** The coding traits work inside **one configured file store**, optionally rooted at a
 subdirectory, through the `FileStore` trait and §9's access rules — so they are the same

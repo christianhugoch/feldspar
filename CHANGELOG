@@ -2,6 +2,88 @@
 
 Changes in reverse chronological order.
 
+## `sc-core-traits`: writing rows, and running a trigger
+
+Agents Phase 3, completed. An agent can now be given four more grants over the world it was
+only reading: `insert_row`, `update_rows` and `delete_rows` over one configured table, and
+`run_trigger` over one configured trigger — which connects an agent to the whole of §10, and to
+workflows unchanged once §10.3 lands, because a workflow is a trigger.
+
+**Three write traits, not one.** A read-only agent is the default shape of an agent, and each
+way of changing data is a separate entry in the trait list with a form of its own, so an admin
+reading a definition can see that it may insert into `orders` and may not delete from it without
+reading any code. Every one of them goes through **`sc-api`**, so a trait's write is the write
+an API caller makes: coerced, validated against the field types, `File`-field-checked, and
+**observed by the table's own triggers** — pinned by a test in which an agent's insert fires the
+trigger that files the arrival.
+
+Four properties bound what a write can do, and each is a test:
+
+- **The caller's access is the tool's access, on a write as on a read.** `sc_api::insert_row_as`
+  / `update_row_as` / `delete_row_as` are the write half of `read_rows_as`, and they share §7.3's
+  rule rather than restating it: meets `min_role_write` **or** the ownership formula grants the
+  row — checked on the existing row *and* on the row as it would become, so an update cannot move
+  a row out of the caller's own ownership even when every value in it is valid. Under
+  `owner === user.email` Ada renames her own book, cannot touch Bob's, and gets the same
+  nothing-matched a genuinely absent row gives, because a tool must not become a way to probe
+  which rows exist. The REST provider keeps its own orchestration, which turns each denial into
+  an HTTP status; the *rule* is the shared part, which is the half that must not be able to
+  differ between two callers of it.
+- **A `where` is required — on `update_rows` as well as `delete_rows`.** The TODO asks it of the
+  delete alone, but a whole table rewritten by an omitted argument is the same accident as one
+  emptied by it, and §10.1 already refuses both on the *actions*. A model that means every row
+  writes a condition that matches every row.
+- **`max_rows` refuses rather than truncates.** One row past the ceiling and **nothing** is
+  written, with the count in the message and an instruction to narrow the filter. A read that
+  returns the first 50 of 200 is a short answer; a write that changes the first 50 of 200 is a
+  half-applied change nobody can find the other half of. Matching *nothing*, by contrast, is a
+  count of zero rather than a failure — an idempotent call must not look broken the second time
+  it is made.
+- **The rows are selected through the caller's own read**, then written one at a time by primary
+  key. So a tool can only change rows the same caller could have been shown, and each changed row
+  raises its own event with its own payload (§10.2's decision 2), exactly as the actions of the
+  same names do.
+
+The allow-list works the other way round from the read trait's, deliberately: on a write trait it
+bounds what may be **set**, not what may be **matched**. "The row whose title is Dune" is how a
+model addresses a row it may not rename, and a filter's reach is already bounded by the caller's
+access — whereas on a read trait a hidden field left filterable could be read back one comparison
+at a time. `insert_row`'s arguments are the row itself, flat, and its schema carries **no
+`required` list**: a `NOT NULL` column may have a database default, the catalog does not record
+defaults, and demanding every required column would make the model invent values the database was
+going to supply.
+
+**`run_trigger` runs the dispatcher's trigger, not a copy of it.** The call goes through the same
+`TriggerDispatcher` every other event fires on, so the `only_if` runs, the cascade depth is
+counted, a disabled trigger stays disabled, and what the action returned is what the tool returns.
+Three consequences, each recorded in §11.3 and each tested:
+
+- **`TraitContext` carries the dispatcher**, put there by `Runner::with_triggers`, exactly as it
+  carries the evaluator and for the same reason — a capability the deployment has or has not got,
+  whose absence is an honest configuration error (`require_triggers`) rather than a second way to
+  fire an event. This is why `sc-agent` now depends on `sc-action`; nothing in it knows which
+  triggers exist.
+- **The trigger's own `min_role` still gates it.** Exposing an agent to a role does not thereby
+  expose everything the agent can reach: an absent `min_role` is admin-only, as it is everywhere
+  else in §10, and a run started by a trigger carries that trigger's authority and clears the
+  floor — decision 5 read the other way round.
+- **The trigger is resolved from storage on save and from the live set at call time.** A trigger
+  that is stored but does not currently validate leaves *its own* live set with a reason; the
+  agent that names it stays valid, and calling the tool reports the trigger's problem in the
+  trigger's own words. One broken thing should produce one error, in the place it can be repaired.
+
+Two supporting changes. The `where` vocabulary, the configuration keys and the field descriptions
+now live in one module (`table.rs`) that all four table traits share — not to save the lines, but
+because each of them is a promise to the model, and four dialects of one tool set would be four
+chances to get it right somewhere and wrong somewhere else. And the crate's tests share an `Env`
+that assembles a real database, the real V8 engine and a real trigger dispatcher, so a test that
+stubbed the rule out would be testing nothing.
+
+Phase 3's "done when" now runs end to end: an agent given `query_table` over a real table and
+`run_trigger` over a real trigger answers a question about the data — seeing only what the person
+chatting may see — and then performs the action as that person, with the whole exchange readable
+in its run's context.
+
 ## `sc-core-traits`: the built-in agent traits, and `query_table`
 
 Agents Phase 3, first half. An agent can now be pointed at a table and asked about the data in

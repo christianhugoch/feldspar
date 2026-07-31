@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use sc_action::TriggerDispatcher;
 use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
@@ -209,6 +210,17 @@ pub struct TraitContext<'a> {
     /// honest answer there is [`require_evaluator`](TraitContext::require_evaluator)'s
     /// configuration error rather than a read that quietly skips the check.
     pub evaluator: Option<&'a Arc<dyn JsEvaluator>>,
+    /// The trigger dispatcher, where the deployment has one.
+    ///
+    /// A tool that runs a trigger (§11.3's `run_trigger`) needs *the* dispatcher
+    /// — the same one every other event fires on — so what an agent runs is the
+    /// trigger the admin configured, with its `only_if`, its cascade bound and
+    /// its action. Carried rather than reached for, and for the same reason the
+    /// evaluator is: a run may be driven from a context that has none, and the
+    /// honest answer there is
+    /// [`require_triggers`](TraitContext::require_triggers)' configuration error
+    /// rather than a second way to fire an event.
+    pub triggers: Option<&'a Arc<TriggerDispatcher>>,
 }
 
 impl TraitContext<'_> {
@@ -221,6 +233,18 @@ impl TraitContext<'_> {
             Error::config(format!(
                 "agent `{}`: this needs the JavaScript evaluator, \
                  and none is configured on this server",
+                self.agent
+            ))
+        })
+    }
+
+    /// The trigger dispatcher, or the configuration error that says this context
+    /// has none.
+    pub fn require_triggers(&self) -> Result<&Arc<TriggerDispatcher>> {
+        self.triggers.ok_or_else(|| {
+            Error::config(format!(
+                "agent `{}`: this needs the trigger dispatcher, \
+                 and none is available in this context",
                 self.agent
             ))
         })

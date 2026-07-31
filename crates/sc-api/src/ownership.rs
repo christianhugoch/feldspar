@@ -175,6 +175,167 @@ pub async fn read_rows_as(
     }
 }
 
+/// Insert `body` into `table` as a caller who is **not** an API surface — an
+/// agent's `insert_row` tool (§11.3).
+///
+/// The write half of [`read_rows_as`], and the same argument for its existence:
+/// §7.3's rule for a write is *meets `min_role_write` OR the formula grants the
+/// proposed row*, checked with `_insert` folded true (§6's WITH CHECK, at
+/// runtime), and a second implementation of that is a second place for it to be
+/// subtly wrong. The write itself goes through [`rows::create_row_ctx`], so it is
+/// coerced, validated, `File`-field-checked and **observed by triggers** exactly
+/// like an API caller's.
+///
+/// A caller the floor does not admit and no formula extends gets an
+/// [`Error::auth`] naming the table, rather than an HTTP status: the reader is a
+/// tool result a model has to be able to act on.
+pub async fn insert_row_as(
+    cat: &Catalog,
+    table: &Table,
+    body: &Json,
+    role: u8,
+    user: Option<&User>,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<Json> {
+    let caller = caller_context_at(role, user);
+    // The database enforces this table's ownership: the policies decide, and a
+    // `WITH CHECK` they refuse surfaces from `run_in_context`.
+    if table.rls_enabled {
+        return rows::create_row_ctx(cat, table, body, Some(&caller)).await;
+    }
+    if let Some(formula) = write_formula(table, role, "write")? {
+        let proposed = rows::coerce_row_values(table, body)?;
+        if !row_allowed(
+            cat,
+            table,
+            formula,
+            Operation::Insert,
+            user,
+            evaluator,
+            &proposed,
+        )
+        .await?
+        {
+            return Err(Error::auth(format!(
+                "this row is outside what you may write to `{}`",
+                table.name
+            )));
+        }
+    }
+    rows::create_row_ctx(cat, table, body, Some(&caller)).await
+}
+
+/// Update the row of `table` addressed by `id`, as a caller who is not an API
+/// surface (§11.3). [`insert_row_as`]'s sibling.
+///
+/// Checked **twice** where it matters, exactly as the REST path is: granted on
+/// the existing row (USING) *and* on the row as it would become (WITH CHECK), so
+/// an update cannot move a row out of the caller's own ownership. A row the
+/// formula withholds is the **same** not-found an absent row gets — a tool must
+/// not become a way to probe which rows exist.
+pub async fn update_row_as(
+    cat: &Catalog,
+    table: &Table,
+    id: &str,
+    body: &Json,
+    role: u8,
+    user: Option<&User>,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<Json> {
+    let caller = caller_context_at(role, user);
+    if table.rls_enabled {
+        return rows::update_row_ctx(cat, table, id, body, Some(&caller)).await;
+    }
+    let Some(formula) = write_formula(table, role, "write")? else {
+        return rows::update_row_ctx(cat, table, id, body, Some(&caller)).await;
+    };
+    let existing = owned_row(cat, table, formula, Operation::Update, user, evaluator, id).await?;
+    let changes = rows::coerce_row_values(table, body)?;
+    let merged = merged_row(table, &existing, &changes);
+    if !row_allowed(
+        cat,
+        table,
+        formula,
+        Operation::Update,
+        user,
+        evaluator,
+        &merged,
+    )
+    .await?
+    {
+        return Err(Error::auth(format!(
+            "that update would move the row out of what you may reach in `{}`",
+            table.name
+        )));
+    }
+    // The translated predicate rides in the UPDATE's WHERE where it can, closing
+    // the gap between the check and the write.
+    let guard = write_guard(cat, table, formula, Operation::Update, user)?;
+    rows::update_row_guarded(cat, table, id, body, guard, Some(&caller)).await
+}
+
+/// Delete the row of `table` addressed by `id`, as a caller who is not an API
+/// surface (§11.3). [`insert_row_as`]'s sibling, and the same not-found rule.
+pub async fn delete_row_as(
+    cat: &Catalog,
+    table: &Table,
+    id: &str,
+    role: u8,
+    user: Option<&User>,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<Json> {
+    let caller = caller_context_at(role, user);
+    if table.rls_enabled {
+        return rows::delete_row_ctx(cat, table, id, Some(&caller)).await;
+    }
+    let Some(formula) = write_formula(table, role, "delete from")? else {
+        return rows::delete_row_ctx(cat, table, id, Some(&caller)).await;
+    };
+    owned_row(cat, table, formula, Operation::Delete, user, evaluator, id).await?;
+    let guard = write_guard(cat, table, formula, Operation::Delete, user)?;
+    rows::delete_row_guarded(cat, table, id, guard, Some(&caller)).await
+}
+
+/// Which formula a sub-floor writer is judged by: `None` when the caller meets
+/// `min_role_write` and takes the ordinary path, `Some` when they are below it
+/// and the table has one, and an error when they are below it and it has none —
+/// which is the same denial the `MinRole` gate would have produced, said in words
+/// a tool result can carry.
+fn write_formula<'a>(table: &'a Table, role: u8, verb: &str) -> Result<Option<&'a Formula>> {
+    if role <= table.access.min_role_write {
+        return Ok(None);
+    }
+    match &table.ownership {
+        Some(formula) => Ok(Some(formula)),
+        None => Err(Error::auth(format!("you may not {verb} `{}`", table.name))),
+    }
+}
+
+/// The existing row `id`, granted to the caller by the formula for `op` — or the
+/// **same not-found a missing row gets**, which is what makes a denial
+/// indistinguishable from an absence. The twin of `RestProvider::owned_row`.
+async fn owned_row(
+    cat: &Catalog,
+    table: &Table,
+    formula: &Formula,
+    op: Operation,
+    user: Option<&User>,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+    id: &str,
+) -> Result<BTreeMap<String, Value>> {
+    let not_found = || {
+        let pk = rows::single_pk(table)?;
+        Err(Error::not_found(format!("no row with {pk} = {id}")))
+    };
+    let Some(existing) = fetch_row_values(cat, table, formula, id).await? else {
+        return not_found();
+    };
+    if !row_allowed(cat, table, formula, op, user, evaluator, &existing).await? {
+        return not_found();
+    }
+    Ok(existing)
+}
+
 /// The rows of `table` the formula grants `user` for reading — the sub-floor
 /// read path.
 pub(crate) async fn list_owned_rows(

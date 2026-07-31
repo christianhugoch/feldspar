@@ -20,21 +20,20 @@
 //!   raise. An agent cannot widen its own grant by asking nicely.
 
 use sc_agent::{AgentTrait, TraitCheck, TraitContext};
-use sc_catalog::{Catalog, DataField, DataFieldKind, Table};
+use sc_catalog::{Catalog, Table};
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
-use sc_query::{BinOp, Expr, InSet, OrderBy, UnOp, Value};
+use sc_query::{Expr, OrderBy};
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Map, Value as Json, json};
 
-use sc_api::rows::{self, RowQuery};
+use sc_api::rows::RowQuery;
 
-/// The table this trait reads.
-pub const CFG_TABLE: &str = "table";
-/// The fields the model may see, filter on and order by. Empty means all of them.
-pub const CFG_FIELDS: &str = "fields";
-/// The ceiling on how many rows one call may return.
-pub const CFG_MAX_ROWS: &str = "max_rows";
+use crate::table::{
+    ARG_WHERE, CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE, WHERE_HELP, arguments, check_table_config,
+    config_str, configured_table, field_list, max_rows, project, queryable_field, queryable_fields,
+    visible_fields, where_expr, where_schema,
+};
 
 /// The ceiling when the admin sets none.
 ///
@@ -81,26 +80,7 @@ impl AgentTrait for QueryTable {
     }
 
     async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
-        let table = configured_table(check.catalog, check.config)?;
-        // Addressable by primary key: a row the model reports on that nobody can
-        // then name is a half-useful answer, and every write trait beside this
-        // one needs the key outright.
-        rows::single_pk(&table)?;
-        // Every named field is real. A stale allow-list would otherwise silently
-        // narrow the tool to nothing, which reads as an empty table.
-        for name in configured_fields(check.config)? {
-            if table.field(&name).is_none() {
-                return Err(Error::invalid(format!(
-                    "`{}` has no field `{name}`",
-                    table.name
-                )));
-            }
-        }
-        if max_rows(check.config)? == 0 {
-            return Err(Error::invalid(format!(
-                "`{CFG_MAX_ROWS}` must be at least 1"
-            )));
-        }
+        check_table_config(check.catalog, check.config, DEFAULT_MAX_ROWS as u64)?;
         Ok(())
     }
 
@@ -119,7 +99,7 @@ impl AgentTrait for QueryTable {
             )];
         };
         let visible = visible_fields(&table, config).unwrap_or_default();
-        let ceiling = max_rows(config).unwrap_or(DEFAULT_MAX_ROWS as u64);
+        let ceiling = max_rows(config, DEFAULT_MAX_ROWS as u64).unwrap_or(DEFAULT_MAX_ROWS as u64);
         vec![ToolSpec::new(
             name,
             describe(&table, &visible, ceiling),
@@ -136,8 +116,8 @@ impl AgentTrait for QueryTable {
     ) -> Result<Json> {
         let table = configured_table(ctx.catalog, config)?;
         let visible = visible_fields(&table, config)?;
-        let ceiling = max_rows(config)?;
-        let args = arguments(args)?;
+        let ceiling = max_rows(config, DEFAULT_MAX_ROWS as u64)?;
+        let args = arguments(args, &ARGUMENTS)?;
 
         let filter = where_expr(&table, &visible, args.get(ARG_WHERE))?;
         let order = order_by(&table, &visible, &args)?;
@@ -196,78 +176,33 @@ fn describe(table: &Table, visible: &[String], ceiling: u64) -> String {
     if visible.len() < table.fields.len() {
         out.push_str(" Other fields of this table are not available to you.");
     }
-    out.push_str(
-        "\n\nIn `where`, each entry is a field name against either a value to \
-         match exactly or an object with one operator key: `eq`, `ne`, `gt`, \
-         `gte`, `lt`, `lte`, `like`, `ilike` (text patterns, `%` matches any \
-         run of characters), `in` (a list) or `is_null` (true or false). All \
-         the entries must hold at once.",
-    );
+    out.push_str("\n\n");
+    out.push_str(WHERE_HELP);
     out
-}
-
-/// `id (int, primary key), title (text), author (int, references authors)` — the
-/// table as one line.
-fn field_list(table: &Table, visible: &[String]) -> String {
-    table
-        .fields
-        .iter()
-        .filter(|f| visible.contains(&f.base.name))
-        .map(|f| format!("{} ({})", f.base.name, field_note(f)))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// One field's type and whatever else the model needs to know to use it.
-fn field_note(field: &DataField) -> String {
-    let mut note = field.base.type_.name().to_owned();
-    if field.primary_key {
-        note.push_str(", primary key");
-    }
-    match &field.kind {
-        DataFieldKind::Key { target_table, .. } => {
-            note.push_str(&format!(", references {}", target_table.0));
-        }
-        // A calculated field is computed on read and has no column, so it comes
-        // back with every row but cannot be filtered or ordered on — and being
-        // told that up front is cheaper than a failed call that says it.
-        DataFieldKind::Calc { .. } => note.push_str(", computed; not filterable"),
-        DataFieldKind::File { .. } => note.push_str(", a file path"),
-        DataFieldKind::Plain => {}
-    }
-    note
 }
 
 /// The tool's JSON Schema, generated from the table.
 fn parameters(table: &Table, visible: &[String], ceiling: u64) -> Json {
     // Only the stored fields: `where` and `order_by` become SQL, and a
     // calculated field has no column to put in it.
-    let queryable: Vec<&DataField> = table
-        .fields
+    let names: Vec<&str> = queryable_fields(table, visible)
         .iter()
-        .filter(|f| visible.contains(&f.base.name) && !f.is_calc())
+        .map(|f| f.base.name.as_str())
         .collect();
-    let mut conditions = Map::new();
-    for field in &queryable {
-        conditions.insert(
-            field.base.name.clone(),
-            json!({
-                "description": format!("{} ({})", field.base.name, field_note(field)),
-            }),
+    let mut where_ = where_schema(table, visible);
+    if let Some(obj) = where_.as_object_mut() {
+        obj.insert(
+            "description".to_owned(),
+            json!(
+                "Which rows: field name → an exact value, or an object with one \
+                 of the operator keys. Omit it for every row."
+            ),
         );
     }
-    let names: Vec<&str> = queryable.iter().map(|f| f.base.name.as_str()).collect();
     json!({
         "type": "object",
         "properties": {
-            ARG_WHERE: {
-                "type": "object",
-                "description":
-                    "Which rows: field name → an exact value, or an object with \
-                     one of the operator keys. Omit it for every row.",
-                "properties": Json::Object(conditions),
-                "additionalProperties": false,
-            },
+            ARG_WHERE: where_,
             ARG_ORDER_BY: {
                 "type": "string",
                 "description": "Sort the rows by this field.",
@@ -294,8 +229,6 @@ fn parameters(table: &Table, visible: &[String], ceiling: u64) -> Json {
 
 // --- the tool's arguments ---------------------------------------------------
 
-/// The filter object.
-const ARG_WHERE: &str = "where";
 /// The field to order by.
 const ARG_ORDER_BY: &str = "order_by";
 /// Whether that ordering descends.
@@ -305,34 +238,6 @@ const ARG_LIMIT: &str = "limit";
 
 /// Every argument this tool takes — so one it does not is refused **by name**.
 const ARGUMENTS: [&str; 4] = [ARG_WHERE, ARG_ORDER_BY, ARG_DESCENDING, ARG_LIMIT];
-
-/// The arguments object, or an empty one.
-///
-/// A missing or null argument bag means "every row": both vendors send one for a
-/// tool whose parameters are all optional, and refusing it would fail the most
-/// ordinary call there is. Anything else that is not an object is the model
-/// having produced something the schema did not describe, and saying so is what
-/// lets it correct itself.
-fn arguments(args: &Json) -> Result<Map<String, Json>> {
-    let obj = match args {
-        Json::Null => Map::new(),
-        Json::Object(map) => map.clone(),
-        other => {
-            return Err(Error::invalid(format!(
-                "the arguments should be an object, got {other}"
-            )));
-        }
-    };
-    for key in obj.keys() {
-        if !ARGUMENTS.contains(&key.as_str()) {
-            return Err(Error::invalid(format!(
-                "unknown argument `{key}`; this tool takes {}",
-                ARGUMENTS.join(", ")
-            )));
-        }
-    }
-    Ok(obj)
-}
 
 /// The `limit`, clamped to the configured ceiling.
 ///
@@ -384,236 +289,6 @@ fn order_by(table: &Table, visible: &[String], args: &Map<String, Json>) -> Resu
     }])
 }
 
-// --- the `where` object -----------------------------------------------------
-
-/// The comparisons a `where` entry may ask for, in the order the tool's
-/// description lists them.
-const OPERATORS: [&str; 10] = [
-    "eq", "ne", "gt", "gte", "lt", "lte", "like", "ilike", "in", "is_null",
-];
-
-/// The predicate a `where` object translates to — every entry ANDed.
-///
-/// `None` for an absent or empty object, which is "every row" rather than "no
-/// rows": a model that wants a count of everything sends `{}`, and reading that
-/// as an unsatisfiable filter would answer zero.
-fn where_expr(table: &Table, visible: &[String], where_: Option<&Json>) -> Result<Option<Expr>> {
-    let Some(where_) = where_.filter(|v| !v.is_null()) else {
-        return Ok(None);
-    };
-    let obj = where_.as_object().ok_or_else(|| {
-        Error::invalid(format!(
-            "`{ARG_WHERE}` should be an object of field conditions, got {where_}"
-        ))
-    })?;
-    let mut predicate: Option<Expr> = None;
-    for (name, condition) in obj {
-        let field = queryable_field(table, visible, name, ARG_WHERE)?;
-        let expr = condition_expr(table, field, condition)?;
-        predicate = Some(match predicate {
-            Some(existing) => existing.and(expr),
-            None => expr,
-        });
-    }
-    Ok(predicate)
-}
-
-/// One field's condition.
-///
-/// A JSON object whose single key is one of [`OPERATORS`] is that comparison;
-/// **anything else is a literal to match exactly**, including an object destined
-/// for a `Json` column. The rule is stated that way round — and in the tool's
-/// own description — because the alternative (an object is always an operator)
-/// makes a `Json` column unfilterable, and a model that means equality can
-/// always say `{"eq": …}`.
-fn condition_expr(table: &Table, field: &DataField, condition: &Json) -> Result<Expr> {
-    let name = &field.base.name;
-    let col = || Expr::col(name.clone());
-    if let Json::Object(map) = condition
-        && map.len() == 1
-        && let Some((op, operand)) = map.iter().next()
-        && OPERATORS.contains(&op.as_str())
-    {
-        let literal =
-            |json: &Json| -> Result<Expr> { Ok(Expr::lit(rows::column_value(table, name, json)?)) };
-        let text = |json: &Json| -> Result<Expr> {
-            json.as_str()
-                .map(|s| Expr::lit(Value::Text(s.to_owned())))
-                .ok_or_else(|| {
-                    Error::invalid(format!("`{name}`: `{op}` takes a text pattern, got {json}"))
-                })
-        };
-        return Ok(match op.as_str() {
-            // `eq`/`ne` against null mean the null tests, because SQL's `=` is
-            // never true of one and a model writing `{"eq": null}` means "unset".
-            "eq" if operand.is_null() => Expr::unary(UnOp::IsNull, col()),
-            "ne" if operand.is_null() => Expr::unary(UnOp::IsNotNull, col()),
-            "eq" => Expr::binary(BinOp::Eq, col(), literal(operand)?),
-            "ne" => Expr::binary(BinOp::Ne, col(), literal(operand)?),
-            "gt" => Expr::binary(BinOp::Gt, col(), literal(operand)?),
-            "gte" => Expr::binary(BinOp::Ge, col(), literal(operand)?),
-            "lt" => Expr::binary(BinOp::Lt, col(), literal(operand)?),
-            "lte" => Expr::binary(BinOp::Le, col(), literal(operand)?),
-            "like" => Expr::binary(BinOp::Like, col(), text(operand)?),
-            "ilike" => Expr::binary(BinOp::ILike, col(), text(operand)?),
-            "in" => {
-                let items = operand.as_array().ok_or_else(|| {
-                    Error::invalid(format!("`{name}`: `in` takes a list, got {operand}"))
-                })?;
-                if items.is_empty() {
-                    return Err(Error::invalid(format!(
-                        "`{name}`: `in` needs at least one value"
-                    )));
-                }
-                let set: Result<Vec<Expr>> = items.iter().map(literal).collect();
-                Expr::In {
-                    e: Box::new(col()),
-                    set: InSet::List(set?),
-                }
-            }
-            "is_null" => {
-                let want = operand.as_bool().ok_or_else(|| {
-                    Error::invalid(format!(
-                        "`{name}`: `is_null` takes true or false, got {operand}"
-                    ))
-                })?;
-                Expr::unary(if want { UnOp::IsNull } else { UnOp::IsNotNull }, col())
-            }
-            other => {
-                return Err(Error::invalid(format!(
-                    "`{name}`: unknown operator `{other}`"
-                )));
-            }
-        });
-    }
-    Ok(match condition {
-        Json::Null => Expr::unary(UnOp::IsNull, col()),
-        other => Expr::binary(
-            BinOp::Eq,
-            col(),
-            Expr::lit(rows::column_value(table, name, other)?),
-        ),
-    })
-}
-
-// --- the configuration ------------------------------------------------------
-
-/// A string setting, or the empty string.
-fn config_str(config: &Attrs, key: &str) -> String {
-    config
-        .get(key)
-        .and_then(Json::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
-}
-
-/// The configured table, resolved against the catalog.
-fn configured_table(catalog: &Catalog, config: &Attrs) -> Result<Table> {
-    let name = config_str(config, CFG_TABLE);
-    if name.is_empty() {
-        return Err(Error::invalid(format!("`{CFG_TABLE}` is required")));
-    }
-    catalog.require(&name)
-}
-
-/// The configured allow-list, as written. Empty means "every field".
-fn configured_fields(config: &Attrs) -> Result<Vec<String>> {
-    match config.get(CFG_FIELDS) {
-        None | Some(Json::Null) => Ok(Vec::new()),
-        Some(Json::Array(items)) => items
-            .iter()
-            .map(|item| {
-                item.as_str()
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        Error::invalid(format!("`{CFG_FIELDS}` should be a list of field names"))
-                    })
-            })
-            .collect(),
-        Some(other) => Err(Error::invalid(format!(
-            "`{CFG_FIELDS}` should be a list of field names, got {other}"
-        ))),
-    }
-}
-
-/// The fields this instance exposes, in the table's own declaration order.
-///
-/// Table order rather than allow-list order, so the tool's description reads
-/// like the table does and two instances over the same table cannot describe it
-/// differently depending on how the admin typed the list.
-fn visible_fields(table: &Table, config: &Attrs) -> Result<Vec<String>> {
-    let allowed = configured_fields(config)?;
-    Ok(table
-        .fields
-        .iter()
-        .map(|f| f.base.name.clone())
-        .filter(|name| allowed.is_empty() || allowed.contains(name))
-        .collect())
-}
-
-/// The configured ceiling.
-fn max_rows(config: &Attrs) -> Result<u64> {
-    match config.get(CFG_MAX_ROWS) {
-        None | Some(Json::Null) => Ok(DEFAULT_MAX_ROWS as u64),
-        Some(Json::Number(n)) => match n.as_i64() {
-            Some(n) if n >= 0 => Ok(n as u64),
-            _ => Err(Error::invalid(format!(
-                "`{CFG_MAX_ROWS}` should be a whole number, got {n}"
-            ))),
-        },
-        Some(other) => Err(Error::invalid(format!(
-            "`{CFG_MAX_ROWS}` should be a number, got {other}"
-        ))),
-    }
-}
-
-/// A field the model may filter on or order by: visible, real, and backed by a
-/// column.
-///
-/// The error names the alternatives, because a model that guessed a column name
-/// can only recover if it is told the ones that exist — and being told is
-/// cheaper than a second round trip through a failed query.
-fn queryable_field<'a>(
-    table: &'a Table,
-    visible: &[String],
-    name: &str,
-    what: &str,
-) -> Result<&'a DataField> {
-    if !visible.contains(&name.to_owned()) {
-        return Err(Error::invalid(format!(
-            "`{what}`: `{}` has no field `{name}` you may use; the fields are {}",
-            table.name,
-            visible.join(", ")
-        )));
-    }
-    let field = table
-        .field(name)
-        .ok_or_else(|| Error::invalid(format!("`{}` has no field `{name}`", table.name)))?;
-    if field.is_calc() {
-        return Err(Error::invalid(format!(
-            "`{what}`: `{name}` is a calculated field; it is returned with each row \
-             but cannot be filtered or ordered on"
-        )));
-    }
-    Ok(field)
-}
-
-/// One row narrowed to the visible fields.
-fn project(row: &Json, visible: &[String]) -> Json {
-    let Some(obj) = row.as_object() else {
-        return row.clone();
-    };
-    let mut out = Map::with_capacity(visible.len());
-    for name in visible {
-        if let Some(value) = obj.get(name) {
-            out.insert(name.clone(), value.clone());
-        }
-    }
-    Json::Object(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,47 +311,5 @@ mod tests {
         assert!(requested_limit(&args(json!({"limit": 0})), 50).is_err());
         assert!(requested_limit(&args(json!({"limit": -3})), 50).is_err());
         assert!(requested_limit(&args(json!({"limit": "5"})), 50).is_err());
-    }
-
-    #[test]
-    fn an_argument_the_schema_does_not_describe_is_refused_by_name() {
-        let err = arguments(&json!({"sql": "drop table books"})).unwrap_err();
-        assert!(err.to_string().contains("`sql`"), "{err}");
-        // …while an absent bag is the ordinary "everything" call.
-        assert!(arguments(&Json::Null).unwrap().is_empty());
-        assert!(arguments(&json!({})).unwrap().is_empty());
-        assert!(arguments(&json!([])).is_err());
-    }
-
-    #[test]
-    fn the_allow_list_is_read_in_the_tables_order_not_the_admins() {
-        let config: Attrs = json!({"fields": ["pages", "title"]})
-            .as_object()
-            .cloned()
-            .unwrap();
-        assert_eq!(
-            configured_fields(&config).unwrap(),
-            vec!["pages".to_owned(), "title".to_owned()]
-        );
-        let empty = Attrs::new();
-        assert!(configured_fields(&empty).unwrap().is_empty());
-        let wrong: Attrs = json!({"fields": "title"}).as_object().cloned().unwrap();
-        assert!(configured_fields(&wrong).is_err());
-    }
-
-    #[test]
-    fn the_ceiling_defaults_and_refuses_nonsense() {
-        assert_eq!(max_rows(&Attrs::new()).unwrap(), DEFAULT_MAX_ROWS as u64);
-        let cfg: Attrs = json!({"max_rows": 7}).as_object().cloned().unwrap();
-        assert_eq!(max_rows(&cfg).unwrap(), 7);
-        let cfg: Attrs = json!({"max_rows": -1}).as_object().cloned().unwrap();
-        assert!(max_rows(&cfg).is_err());
-    }
-
-    #[test]
-    fn a_row_is_narrowed_to_the_visible_fields() {
-        let row = json!({"id": 1, "title": "A", "secret": "x"});
-        let visible = vec!["id".to_owned(), "title".to_owned()];
-        assert_eq!(project(&row, &visible), json!({"id": 1, "title": "A"}));
     }
 }

@@ -21,146 +21,32 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
+mod common;
+
 use std::sync::Arc;
 
+use common::{Env, as_user, config, reader, titles};
 use sc_agent::testing::{FakeProvider, Reply};
-use sc_agent::{
-    Agent, Agents, EnabledTrait, RunCaller, RunId, Runner, TraitCheck, TraitContext,
-    bootstrap_agents, bootstrap_runs, save_agent,
-};
-use sc_auth::User;
-use sc_catalog::{Catalog, TableMeta, bootstrap_table_meta, save_table_meta};
-use sc_core_traits::{CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE, builtin_traits};
-use sc_db::DatabaseDriver;
-use sc_db_postgres::PgDriver;
-use sc_error::{Error, Result};
-use sc_expr::{DenoEvaluator, JsEvaluator};
-use sc_llm::{LlmProviderDef, bootstrap_llm_providers, save_llm_provider};
-use sc_query::Value;
-use sc_test_harness::TestDb;
+use sc_agent::{Agent, Agents, EnabledTrait, RunCaller, Runner, save_agent};
+use sc_core_traits::{CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE};
+use sc_error::Result;
 use sc_types::Attrs;
 use serde_json::{Value as Json, json};
-use uuid::Uuid;
-
-/// A library with two owners, so an ownership formula has something to divide,
-/// and a `notes` column an allow-list can keep from the model.
-const SCHEMA: &str = "
-    CREATE TABLE books (
-        id bigint primary key,
-        title text,
-        pages bigint,
-        owner text,
-        notes text
-    );
-    INSERT INTO books VALUES
-        (1, 'Dune',   412, 'ada@example.com', 'ada''s copy'),
-        (2, 'Emma',   474, 'bob@example.com', 'bob''s copy'),
-        (3, 'Ilium',  576, 'ada@example.com', 'also ada''s'),
-        (4, 'Ubik',   224, 'bob@example.com', NULL);
-";
-
-/// A catalog over a per-test database with the schema, the overlay table and the
-/// agent tables, plus one connected provider — an agent that names no connected
-/// provider does not validate, so every test would otherwise write the same row.
-async fn setup(db: &TestDb) -> Result<Catalog> {
-    db.client()
-        .await?
-        .batch_execute(SCHEMA)
-        .await
-        .map_err(|e| Error::database(e.to_string()))?;
-    let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
-    let catalog = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;
-    bootstrap_table_meta(&catalog).await?;
-    bootstrap_llm_providers(&catalog).await?;
-    bootstrap_agents(&catalog).await?;
-    bootstrap_runs(&catalog).await?;
-    save_llm_provider(
-        &catalog,
-        &LlmProviderDef::anthropic("main", "sk-ant-not-a-real-key", "claude-sonnet-4-5"),
-    )
-    .await?;
-    catalog.reload().await?;
-    Ok(catalog)
-}
-
-/// Put `formula` on `books` as a runtime ownership rule — **not** RLS, so the
-/// §7.3 checks run in `sc-api` rather than in the database, which is the path a
-/// tool takes on an ordinary table.
-async fn own_books(catalog: &Catalog, formula: &str) -> Result<()> {
-    let mut meta = TableMeta::new("books");
-    meta.set_ownership_formula(Some(formula));
-    save_table_meta(catalog, &meta).await?;
-    let books = catalog.require("books")?;
-    assert!(books.ownership.is_some(), "the formula is live");
-    Ok(())
-}
-
-/// A configuration from `(key, value)` pairs.
-fn config(entries: &[(&str, Json)]) -> Attrs {
-    entries
-        .iter()
-        .map(|(k, v)| ((*k).to_owned(), v.clone()))
-        .collect()
-}
 
 /// The plainest configuration: every field of `books`, default ceiling.
 fn books() -> Attrs {
     config(&[(CFG_TABLE, json!("books"))])
 }
 
-/// A reader at role 40 — below `books`' admin-only read floor, so their access is
-/// whatever the ownership formula grants and nothing else.
-fn reader(email: &str) -> User {
-    let mut user = User::new(Uuid::new_v4(), 40).unwrap();
-    user.extra = BTreeMap::from([("email".to_owned(), Value::Text(email.to_owned()))]);
-    user
-}
-
-fn engine() -> Arc<dyn JsEvaluator> {
-    Arc::new(DenoEvaluator::new())
-}
-
-/// Call the trait's tool directly, as `caller`.
-async fn query(
-    catalog: &Catalog,
-    cfg: &Attrs,
-    args: Json,
-    caller: &RunCaller,
-    evaluator: Option<&Arc<dyn JsEvaluator>>,
-) -> Result<Json> {
-    let registry = builtin_traits()?;
-    let trait_ = registry.require("query_table")?.clone();
-    let tool = trait_.tools(catalog, cfg)[0].name.clone();
-    let mut ctx = TraitContext {
-        catalog,
-        caller,
-        agent: "librarian",
-        run: RunId::new(),
-        evaluator,
-    };
-    trait_.call(cfg, &tool, &args, &mut ctx).await
-}
-
-/// The `title` of every returned row, in the order they came back.
-fn titles(result: &Json) -> Vec<String> {
-    result["rows"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|r| r["title"].as_str().unwrap_or_default().to_owned())
-        .collect()
+/// Call `query_table` with this configuration, as `caller`.
+async fn query(env: &Env, cfg: &Attrs, args: Json, caller: &RunCaller) -> Result<Json> {
+    env.call("query_table", cfg, args, caller).await
 }
 
 #[tokio::test]
 async fn the_tool_describes_the_table_it_is_configured_against() -> Result<()> {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
-    let registry = builtin_traits()?;
-    let trait_ = registry.require("query_table")?;
-
-    let tools = trait_.tools(&catalog, &books());
+    let env = Env::new().await?;
+    let tools = env.tools("query_table", &books());
     assert_eq!(tools.len(), 1);
     let tool = &tools[0];
     // The name is the configuration's, so two instances are distinguishable.
@@ -195,8 +81,7 @@ async fn the_tool_describes_the_table_it_is_configured_against() -> Result<()> {
 
 #[tokio::test]
 async fn an_allow_list_narrows_what_is_returned_and_what_may_be_filtered() -> Result<()> {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
+    let env = Env::new().await?;
     let cfg = config(&[
         (CFG_TABLE, json!("books")),
         (CFG_FIELDS, json!(["title", "id"])),
@@ -204,8 +89,7 @@ async fn an_allow_list_narrows_what_is_returned_and_what_may_be_filtered() -> Re
 
     // Declared: the tool only ever mentions the two fields, in the *table's*
     // order rather than the order they were typed.
-    let registry = builtin_traits()?;
-    let tools = registry.require("query_table")?.tools(&catalog, &cfg);
+    let tools = env.tools("query_table", &cfg);
     let order: Vec<&str> = tools[0].parameters["properties"]["order_by"]["enum"]
         .as_array()
         .unwrap()
@@ -216,18 +100,17 @@ async fn an_allow_list_narrows_what_is_returned_and_what_may_be_filtered() -> Re
 
     // Returned: `notes` and `owner` are not in the rows…
     let caller = RunCaller::system();
-    let result = query(&catalog, &cfg, json!({"limit": 1}), &caller, None).await?;
+    let result = query(&env, &cfg, json!({"limit": 1}), &caller).await?;
     let row = result["rows"][0].as_object().unwrap();
     assert_eq!(row.keys().collect::<Vec<_>>(), vec!["id", "title"]);
 
     // …and, the point of an allow-list, they cannot be read *through* a filter
     // either. A `where` on a hidden field is refused by name.
     let err = query(
-        &catalog,
+        &env,
         &cfg,
         json!({"where": {"notes": "ada's copy"}}),
         &caller,
-        None,
     )
     .await
     .unwrap_err();
@@ -238,12 +121,11 @@ async fn an_allow_list_narrows_what_is_returned_and_what_may_be_filtered() -> Re
 
 #[tokio::test]
 async fn the_where_operators_translate_to_the_comparisons_they_name() -> Result<()> {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
+    let env = Env::new().await?;
     let cfg = books();
     let caller = RunCaller::system();
     let ask = async |args: Json| -> Result<Vec<String>> {
-        Ok(titles(&query(&catalog, &cfg, args, &caller, None).await?))
+        Ok(titles(&query(&env, &cfg, args, &caller).await?))
     };
 
     // A bare value is equality; `in` is a list; the comparisons compare.
@@ -299,9 +181,7 @@ async fn the_where_operators_translate_to_the_comparisons_they_name() -> Result<
         (json!({"sql": "drop table books"}), "sql"),
         (json!({"order_by": "nope"}), "nope"),
     ] {
-        let err = query(&catalog, &cfg, args, &caller, None)
-            .await
-            .unwrap_err();
+        let err = query(&env, &cfg, args, &caller).await.unwrap_err();
         assert!(err.to_string().contains(needle), "{err}");
     }
     Ok(())
@@ -309,41 +189,26 @@ async fn the_where_operators_translate_to_the_comparisons_they_name() -> Result<
 
 #[tokio::test]
 async fn max_rows_is_a_ceiling_and_a_truncated_answer_says_so() -> Result<()> {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
+    let env = Env::new().await?;
     let cfg = config(&[(CFG_TABLE, json!("books")), (CFG_MAX_ROWS, json!(2))]);
     let caller = RunCaller::system();
 
     // No `limit` at all: the ceiling applies, and the answer admits it is short.
-    let result = query(&catalog, &cfg, json!({"order_by": "id"}), &caller, None).await?;
+    let result = query(&env, &cfg, json!({"order_by": "id"}), &caller).await?;
     assert_eq!(titles(&result), ["Dune", "Emma"]);
     assert_eq!(result["count"], json!(2));
     assert_eq!(result["more_rows_available"], json!(true));
 
     // A larger `limit` is clamped rather than refused — a recoverable mistake,
     // and the model is told exactly what it got.
-    let result = query(
-        &catalog,
-        &cfg,
-        json!({"limit": 100, "order_by": "id"}),
-        &caller,
-        None,
-    )
-    .await?;
+    let result = query(&env, &cfg, json!({"limit": 100, "order_by": "id"}), &caller).await?;
     assert_eq!(titles(&result), ["Dune", "Emma"]);
 
     // A smaller one is honoured, and a complete answer says it is complete.
-    let result = query(&catalog, &cfg, json!({"limit": 1}), &caller, None).await?;
+    let result = query(&env, &cfg, json!({"limit": 1}), &caller).await?;
     assert_eq!(result["count"], json!(1));
     assert_eq!(result["more_rows_available"], json!(true));
-    let result = query(
-        &catalog,
-        &cfg,
-        json!({"where": {"title": "Emma"}}),
-        &caller,
-        None,
-    )
-    .await?;
+    let result = query(&env, &cfg, json!({"where": {"title": "Emma"}}), &caller).await?;
     assert_eq!(result["count"], json!(1));
     assert_eq!(result["more_rows_available"], json!(false));
     Ok(())
@@ -351,9 +216,8 @@ async fn max_rows_is_a_ceiling_and_a_truncated_answer_says_so() -> Result<()> {
 
 #[tokio::test]
 async fn the_same_table_read_by_two_callers_gives_two_answers() -> Result<()> {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
-    own_books(&catalog, "owner === user.email").await?;
+    let env = Env::new().await?;
+    env.own("books", "owner === user.email").await?;
     let cfg = books();
 
     // Each reader sees their own rows and nobody else's, from one configuration
@@ -363,29 +227,29 @@ async fn the_same_table_read_by_two_callers_gives_two_answers() -> Result<()> {
     let bob = RunCaller::user(reader("bob@example.com"));
     let sorted = json!({"order_by": "id"});
     assert_eq!(
-        titles(&query(&catalog, &cfg, sorted.clone(), &ada, None).await?),
+        titles(&query(&env, &cfg, sorted.clone(), &ada).await?),
         ["Dune", "Ilium"]
     );
     assert_eq!(
-        titles(&query(&catalog, &cfg, sorted.clone(), &bob, None).await?),
+        titles(&query(&env, &cfg, sorted.clone(), &bob).await?),
         ["Emma", "Ubik"]
     );
 
     // A filter cannot reach past the formula: asking for a row you do not own
     // returns nothing, not that row.
     let hidden = json!({"where": {"title": "Emma"}});
-    let result = query(&catalog, &cfg, hidden, &ada, None).await?;
+    let result = query(&env, &cfg, hidden, &ada).await?;
     assert_eq!(result["count"], json!(0));
 
     // …and a reader the formula grants nothing sees an empty table rather than
     // an error that would tell them the rows are there.
     let nobody = RunCaller::user(reader("nobody@example.com"));
-    let result = query(&catalog, &cfg, sorted.clone(), &nobody, None).await?;
+    let result = query(&env, &cfg, sorted.clone(), &nobody).await?;
     assert_eq!(result["count"], json!(0));
 
     // A trigger-started run carries the trigger's authority instead (decision 5),
     // which clears the floor and sees everything.
-    let result = query(&catalog, &cfg, sorted, &RunCaller::system(), None).await?;
+    let result = query(&env, &cfg, sorted, &RunCaller::system()).await?;
     assert_eq!(result["count"], json!(4));
     Ok(())
 }
@@ -393,26 +257,22 @@ async fn the_same_table_read_by_two_callers_gives_two_answers() -> Result<()> {
 #[tokio::test]
 async fn an_untranslatable_formula_is_enforced_row_by_row_and_still_bounds_the_answer() -> Result<()>
 {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
+    let env = Env::new().await?;
     // The same rule, spelled so it cannot become SQL — the reified path, where
     // the evaluator decides per row.
-    own_books(&catalog, "[owner].some(o => o === user.email)").await?;
+    env.own("books", "[owner].some(o => o === user.email)")
+        .await?;
     let cfg = config(&[(CFG_TABLE, json!("books")), (CFG_MAX_ROWS, json!(1))]);
-    let engine = engine();
-    let ada = RunCaller::user(reader("ada@example.com"));
+    let ada = as_user("ada@example.com");
+    let with_engine = Env::new().await?.with_engine();
+    with_engine
+        .own("books", "[owner].some(o => o === user.email)")
+        .await?;
 
     // The ceiling counts rows the caller may **see**: applied before the
     // evaluator spoke it would return one of Ada's two and claim there were no
     // more, or return nothing at all when row 1 happened to be Bob's.
-    let result = query(
-        &catalog,
-        &cfg,
-        json!({"order_by": "id"}),
-        &ada,
-        Some(&engine),
-    )
-    .await?;
+    let result = query(&with_engine, &cfg, json!({"order_by": "id"}), &ada).await?;
     assert_eq!(titles(&result), ["Dune"]);
     assert_eq!(result["more_rows_available"], json!(true));
 
@@ -420,39 +280,25 @@ async fn an_untranslatable_formula_is_enforced_row_by_row_and_still_bounds_the_a
     // database applied before the filtering.
     let cfg = books();
     let result = query(
-        &catalog,
+        &with_engine,
         &cfg,
         json!({"order_by": "id", "descending": true}),
         &ada,
-        Some(&engine),
     )
     .await?;
     assert_eq!(titles(&result), ["Ilium", "Dune"]);
 
     // Without an engine the tool says so rather than reading anyway: a formula
     // that cannot be evaluated must not become a formula that is not applied.
-    let err = query(&catalog, &cfg, json!({}), &ada, None)
-        .await
-        .unwrap_err();
+    let err = query(&env, &cfg, json!({}), &ada).await.unwrap_err();
     assert!(err.to_string().contains("evaluator"), "{err}");
     Ok(())
 }
 
 #[tokio::test]
 async fn a_configuration_the_catalog_contradicts_is_refused_on_save() -> Result<()> {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
-    let registry = builtin_traits()?;
-    let trait_ = registry.require("query_table")?;
-    let check = async |cfg: Attrs| -> Result<()> {
-        trait_
-            .validate_config(&TraitCheck {
-                catalog: &catalog,
-                config: &cfg,
-                agent: "librarian",
-            })
-            .await
-    };
+    let env = Env::new().await?;
+    let check = async |cfg: Attrs| -> Result<()> { env.check("query_table", &cfg).await };
 
     check(books()).await?;
     // A table that is not there, and a field that is not on the table that is.
@@ -468,12 +314,8 @@ async fn a_configuration_the_catalog_contradicts_is_refused_on_save() -> Result<
     .unwrap_err();
     assert!(err.to_string().contains("athor"), "{err}");
     // A table with no single-column primary key cannot be addressed by one.
-    db.client()
-        .await?
-        .batch_execute("CREATE TABLE keyless (a bigint)")
-        .await
-        .map_err(|e| Error::database(e.to_string()))?;
-    catalog.reload().await?;
+    env.execute("CREATE TABLE keyless (a bigint)").await?;
+    env.catalog.reload().await?;
     assert!(
         check(config(&[(CFG_TABLE, json!("keyless"))]))
             .await
@@ -484,24 +326,20 @@ async fn a_configuration_the_catalog_contradicts_is_refused_on_save() -> Result<
 
 #[tokio::test]
 async fn a_trait_configured_against_a_dropped_table_leaves_its_agent_with_a_reason() -> Result<()> {
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
-    let registry = builtin_traits()?;
+    let env = Env::new().await?;
+    let registry = &env.registry;
+    let catalog = &env.catalog;
     let agent = Agent::new("librarian", "main")
         .with_trait(EnabledTrait::new("query_table").config(CFG_TABLE, "books"));
-    save_agent(&catalog, &registry, &agent).await?;
-    assert_eq!(Agents::load(&catalog, &registry).await?.all().len(), 1);
+    save_agent(catalog, registry, &agent).await?;
+    assert_eq!(Agents::load(catalog, registry).await?.all().len(), 1);
 
-    db.client()
-        .await?
-        .batch_execute("DROP TABLE books")
-        .await
-        .map_err(|e| Error::database(e.to_string()))?;
+    env.execute("DROP TABLE books").await?;
     catalog.reload().await?;
 
     // Out of the live set, with the reason kept — and still stored, listed and
     // editable, because editing it is the repair.
-    let agents = Agents::load(&catalog, &registry).await?;
+    let agents = Agents::load(catalog, registry).await?;
     assert!(agents.all().is_empty());
     let issue = &agents.issues()[0];
     assert_eq!(issue.agent, "librarian");
@@ -511,9 +349,7 @@ async fn a_trait_configured_against_a_dropped_table_leaves_its_agent_with_a_reas
 
     // The tool keeps the name the configuration gives it even now, so the
     // collision check and the admin UI still have something to say.
-    let tools = registry
-        .require("query_table")?
-        .tools(&catalog, &agent.traits[0].config);
+    let tools = env.tools("query_table", &agent.traits[0].config);
     assert_eq!(tools[0].name, "query_books");
     Ok(())
 }
@@ -523,10 +359,10 @@ async fn an_agent_answers_a_question_about_its_table_through_a_whole_run() -> Re
     // Phase 3's "done when", for the read half: an agent given `query_table` over
     // a real table answers a question about the data, with the whole exchange in
     // its run's context — and it sees only what the person chatting may see.
-    let db = TestDb::new().await?;
-    let catalog = setup(&db).await?;
-    own_books(&catalog, "owner === user.email").await?;
-    let registry = builtin_traits()?;
+    let env = Env::new().await?;
+    env.own("books", "owner === user.email").await?;
+    let registry = &env.registry;
+    let catalog = &env.catalog;
     let agent = Agent::new("librarian", "main")
         .system_prompt("You answer questions about the library.")
         .with_trait(
@@ -534,7 +370,7 @@ async fn an_agent_answers_a_question_about_its_table_through_a_whole_run() -> Re
                 .config(CFG_TABLE, "books")
                 .config(CFG_FIELDS, json!(["id", "title", "pages"])),
         );
-    save_agent(&catalog, &registry, &agent).await?;
+    save_agent(catalog, registry, &agent).await?;
 
     let provider = Arc::new(FakeProvider::new([
         Reply::calls(
@@ -544,8 +380,8 @@ async fn an_agent_answers_a_question_about_its_table_through_a_whole_run() -> Re
         .with_preamble("Let me look."),
         Reply::says("Your longest book is Ilium, at 576 pages."),
     ]));
-    let caller = RunCaller::user(reader("ada@example.com"));
-    let runner = Runner::new(&catalog, &registry, &agent, provider.clone(), caller);
+    let caller = as_user("ada@example.com");
+    let runner = Runner::new(catalog, registry, &agent, provider.clone(), caller);
 
     let (run, conclusion) = runner.start("what is my longest book?").await?;
     assert_eq!(
@@ -561,7 +397,7 @@ async fn an_agent_answers_a_question_about_its_table_through_a_whole_run() -> Re
 
     // The result the model was given holds Ada's two books and neither of Bob's,
     // narrowed to the three allowed fields — the whole exchange, on the run.
-    let state = sc_agent::load_run(&catalog, run.id)
+    let state = sc_agent::load_run(catalog, run.id)
         .await?
         .expect("the run row")
         .agent_loop()?;

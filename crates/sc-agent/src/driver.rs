@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use sc_action::TriggerDispatcher;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
@@ -68,6 +69,7 @@ pub struct Runner<'a> {
     caller: RunCaller,
     observer: Option<&'a dyn RunObserver>,
     evaluator: Option<&'a Arc<dyn JsEvaluator>>,
+    triggers: Option<&'a Arc<TriggerDispatcher>>,
 }
 
 impl<'a> Runner<'a> {
@@ -91,6 +93,7 @@ impl<'a> Runner<'a> {
             caller,
             observer: None,
             evaluator: None,
+            triggers: None,
         }
     }
 
@@ -109,6 +112,18 @@ impl<'a> Runner<'a> {
     /// says so (`TraitContext::require_evaluator`) rather than reading anyway.
     pub fn with_evaluator(mut self, evaluator: &'a Arc<dyn JsEvaluator>) -> Runner<'a> {
         self.evaluator = Some(evaluator);
+        self
+    }
+
+    /// Give this run's tools the trigger dispatcher — the server's own, so a
+    /// trigger an agent runs is the trigger everything else runs (§11.3).
+    ///
+    /// Optional on the same terms as the evaluator: an agent with no
+    /// `run_trigger` trait never needs one, and a tool that does need it and has
+    /// not got it says so (`TraitContext::require_triggers`) rather than finding
+    /// another way to fire an event.
+    pub fn with_triggers(mut self, triggers: &'a Arc<TriggerDispatcher>) -> Runner<'a> {
+        self.triggers = Some(triggers);
         self
     }
 
@@ -264,6 +279,7 @@ impl<'a> Runner<'a> {
                             agent: &self.agent.name,
                             run: run.id,
                             evaluator: self.evaluator,
+                            triggers: self.triggers,
                         };
                         match trait_
                             .call(&enabled.config, &tool_name, &call.arguments, &mut ctx)
