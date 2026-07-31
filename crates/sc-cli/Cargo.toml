@@ -24,6 +24,8 @@ sc-files.workspace = true
 # at connect time (§9): an overlay may be created lazily, but a table whose rows
 # *are* the definitions must exist before anything can list them.
 sc-llm.workspace = true
+# `_sc_agents` and `_sc_runs`, bootstrapped beside the other metadata tables.
+sc-agent.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 tokio.workspace = true

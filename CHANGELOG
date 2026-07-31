@@ -2,6 +2,96 @@
 
 Changes in reverse chronological order.
 
+## `sc-agent`: the agent, the trait, the loop and its runs
+
+Agents Phase 2. An agent is now a stored record an admin can define, validate and run: a
+provider, a system prompt and a list of enabled **traits**. It holds a conversation, calls the
+tools its traits declare, and leaves a run behind that reloads into the same history it was
+holding — all of it against a scripted provider, so no test in the tree needs an API key.
+
+**The loop is a steppable machine, not an `async fn`** (§11.2, decision 8). `AgentLoop` owns
+every decision — what to send, when to run tools, when to stop — and does no IO at all: a driver
+asks `next_step()` and feeds the result back through `model_answered` or `tool_results`. The
+whole state is therefore a `Serialize + Deserialize` value, and *that value is `_sc_runs.context`*.
+Persisting after every step and resuming from the row are then the same mechanism rather than two,
+and §10.3's durable engine inherits it. `next_step` is **idempotent**, which is what makes a
+process that died between being told to act and acting come back and be told the same thing.
+
+The shape is borrowed from `rig-agent`'s sans-IO `AgentRun`, which was surveyed again before this
+phase now that rig 0.41 has split its runtime into a separate crate. The crate itself is still not
+taken, for reasons now recorded in §11.1: rig type-erases tools and vector stores but **not**
+models, so `Agent<M>` would need a unified model enum that makes `sc-llm`'s two adapters
+redundant; `ConversationMemory` appends per *turn* where `_sc_runs` writes per *step*; and it has
+nothing to say about the agent record, the trait specs or the validation, which are most of this
+phase's code.
+
+**A trait is the extension point, and this crate implements none of them.** `AgentTrait` declares
+its configuration as `FormField`s — the same "settings as data" move an action and a file-store
+backend make — plus `tools(config)`, `call(...)` and `on_turn(...)`. `AgentRegistry` is
+`ActionRegistry`'s twin. The built-ins arrive in `sc-core-traits` (Phase 3) at layer 9, above the
+row layer, because a trait that writes a row must go through `sc-api` like any other write.
+
+Three properties of the trait seam are load-bearing and each is pinned by a test:
+
+- **A trait may be enabled twice.** `traits` is a list of `(trait, config)` pairs stored as a JSON
+  array, so "count the books" and "count the orders" are one trait with two configurations, in the
+  order their tools are offered. **Tool names are derived from the configuration** (`count_books`,
+  not `count`), and a collision between two enabled traits is refused **on save**, where it is
+  fixable, rather than discovered when the model picks the wrong one. A tool name a provider would
+  reject is refused there too — otherwise the failure is a 400 mid-conversation naming a tool the
+  admin never typed.
+- **`on_turn` runs before every model call**, not once per run, so a trait's contribution can
+  differ on the second step from the first.
+- **A tool that fails returns its error as the tool result.** `error: no collection named 'cars'`
+  is something a model can act on; an exception is not. Only a failure of the loop itself ends a
+  run — including a tool the model *invented*, which comes back as a result naming the tools that
+  do exist.
+
+**The caller travels with the run, and there is no default.** `RunCaller` is a user (a chat turn)
+or the system (a trigger's authority), the `Runner` constructor takes one, and `Run::new` records
+it — so decision 5's difference is visible at exactly one place. `sc-agent` sits at layer 7 and
+deliberately stops there: the conversion to the row layer's `CallerContext` is spelled at the call
+site in `sc-core-traits`, above `sc-api`, rather than smuggled downwards.
+
+**Two tables, in the shapes their neighbours already use.** `_sc_agents` follows `_sc_triggers`:
+the row *is* the definition, reads are strict, a missing or ill-shaped column is an error naming
+the agent. `_sc_runs` is created here with the shape the workflow engine will also use — `kind`
+discriminates `agent` from `workflow` — and is written after **every** step. Validation runs on
+save *and* on load, in one function: the provider resolves, each trait resolves, each configuration
+validates against its spec and then its own `validate_config`, `min_role` is on the 1–100 scale,
+tool names do not collide. An agent that fails is dropped from `Agents`' live set **with its reason
+kept**, and stays stored, listed and editable — editing it is the repair. Asking for it says "not
+usable: no LLM provider named `openai`" rather than "not found", because those send an admin to
+different places.
+
+**`FakeProvider` is part of the crate, behind a `testing` feature** rather than `#[cfg(test)]`
+(decision 7), so `sc-core-traits` and `sc-server` can drive whole runs against it. It scripts three
+things — say this, call these tools, *fail* — because "the provider refused" is a path the loop and
+the chat window both have to handle and no happy script exercises it. It also records every request
+it was sent, which is how a test asserts what the agent actually offered the model.
+
+**Deviations from the plan, recorded here rather than left for the end of the milestone:**
+
+- **`_sc_runs` has no `name` column**, departing from §9's rule for metadata tables. It has
+  `subject` — what the run is *of* — and a name column that always equalled it would be residue on
+  every row. §9's rule is about definitions an admin names and addresses; a run is neither.
+- **`_sc_runs` has an `error` column** the plan did not list. §11.4 requires a failure to be an
+  event a reader can see, and a run whose state is `failed` with nowhere to say why is not one.
+- **A `RunObserver` seam exists already**, unused by this phase. The chat socket (Phase 4) needs
+  deltas, tool calls and results as they happen, and adding the seam later would mean rewriting the
+  one function that ends a step.
+- **`Conclusion` has an `Aborted` variant and `AgentLoop::abort`**, ahead of the stop button, so
+  the run state a stopped conversation leaves behind is decided in the machine rather than in the
+  transport.
+
+64 tests: the machine's transitions synchronously and without a database (including the whole
+state round-tripping through JSON and resuming), the record and its storage against a real
+Postgres, and the loop end to end against the fake provider — a two-turn conversation with no
+traits at all, a tool call and continuation, two calls in one turn executed in order, a failing
+tool the run survives, `max_steps` stopping a model that never stops asking, a provider failure
+leaving the row `failed` with its reason and its transcript, and a run resumed from nothing but
+its row.
+
 ## `sc-llm`: the provider seam, and the providers an admin configures
 
 Agents Phase 1. An admin can now connect an **LLM provider** — an Anthropic key, or any

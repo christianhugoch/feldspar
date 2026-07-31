@@ -1182,6 +1182,43 @@ enforce a caller's role inside every tool, and stream to a browser. Concretely, 
 `Box<dyn>` chosen from stored configuration needs a seam regardless; `sc-llm` is that seam and
 is not much more than it.
 
+**The agent runtime was surveyed again before Phase 2, and still not taken.** Rig 0.41 moved
+`Agent` out of `rig-core` into a separate crate, **`rig-agent`** ("Rig's classic agent runtime",
+first published 2026-07-19), so adopting it is a new dependency rather than a feature flag. What
+it offers is real — `Agent<M>` with a builder, a `ToolSet` whose `DynamicTool` is defined at
+runtime from a name, a description, a JSON schema and a closure (which would suit a
+configuration-driven trait), a typed `AgentHook` stack, multi-turn streaming as
+`MultiTurnStreamItem`, `ConversationMemory`, and an MCP client wired into the tool set. It is
+declined for three reasons, in order of weight:
+
+- **There is no erased model.** Rig type-erases vector stores and tools but not models: there is
+  no `dyn CompletionModel` anywhere in 0.41. Because Saltcorn chooses the provider at runtime
+  from an `_sc_llm_providers` row, `Agent<M>` would require a unified `enum` model with unified
+  `Serialize`/`DeserializeOwned` `Response` and `StreamingResponse` types and a re-mapping of
+  both stream shapes — glue that would also make `sc-llm`'s two adapters redundant.
+- **Persistence granularity.** `ConversationMemory::append` is specified as running after a
+  successful *turn* and carries messages only — no usage, state, caller or run kind — whereas
+  §11.4 writes `_sc_runs` after every *step*. Reconstructing that from hooks, which return
+  control actions rather than state, is not the shorter path.
+- **Nothing to say about the rest.** The bulk of `sc-agent` is the agent record, its storage,
+  `AgentTrait` with admin-rendered `config_spec`s, validate-on-save-and-load, and `_sc_runs`.
+  Rig's agent addresses none of it, and the loop it *would* replace is the smallest part.
+
+Tool authority, expected to be the obstacle, is not one: rig carries a per-run `ToolContext`
+typemap, and a `DynamicTool` closure can capture the caller directly.
+
+**One piece of its design is taken, without the dependency.** `rig-agent`'s `AgentRun` is a
+sans-IO, steppable, `Serialize + Deserialize` state machine — `next_step()` yields *call the
+model*, *call these tools* or *done*, and the driver feeds the results back — so the run state
+*is* the persisted value and resumption falls out rather than being bolted on. §11.2's loop is
+built in that shape over `sc-llm`'s own types. What is deliberately not taken is the type: its
+vocabulary is rig's `Message`/`ToolCall`/`UserContent`, which sits behind this seam by design, so
+using it would convert rig → `sc-llm` → rig on every request, with the fidelity risk that carries
+for content blocks that must round-trip exactly; and rig states its run serialization has no
+cross-version stability, which is a poor property for a stored run. The one future argument for
+revisiting is `rig-agent`'s MCP integration — but it pays off only through rig's `ToolSet`, which
+returns to the first bullet, so an `AgentTrait` over the `rmcp` crate is the likelier route.
+
 **Providers are configured entities, like file stores.** A named record in `_sc_llm_providers`
 — `name`, `backend` (`openai_responses` | `anthropic`), `config` (`Attrs`), `description` —
 with the backend's settings declared as `FormField`s and rendered by the same admin form that
@@ -1273,7 +1310,12 @@ rather than a map keyed by trait name. Tool names are therefore made unique per 
 across two enabled traits is refused **on save**, where it is a fixable mistake, rather than
 discovered when the model picks the wrong one.
 
-**The loop**, in `sc-agent`:
+**The loop**, in `sc-agent`. It is a **steppable machine, not an `async fn`** (§11.1): the run
+holds its own state, `next_step()` says what must happen next — call the model, call these tools,
+or stop — and the driver performs that one piece of IO and hands the result back. The state is
+therefore serialisable at every step boundary, which is what `_sc_runs` stores; a resumed process
+loads it and asks for the next step, and the durable workflow engine (§10.3) inherits the same
+machine rather than needing a second one. What the driver does at each step:
 
 1. Build the request: system prompt (plus whatever `on_turn` appended), the run's messages, and
    every enabled trait's tools.
@@ -1343,6 +1385,23 @@ workflow engine will also use: `id`, `kind` (`agent` today, `workflow` later), `
 agent's or workflow's id), `context` (JSON — for an agent, the message history and accumulated
 usage), `state`, `user`, timestamps. Persisting after every step is what a durable engine needs
 and what a chat needs to survive a reload, so it is one mechanism rather than two.
+
+**What was built, where it deviates** (Phase 2):
+
+- **`subject` is the agent's *name*, not its id**, so a transcript stays readable after the agent
+  it was of is deleted. A run that became an orphaned UUID would be a record nobody could
+  interpret, which is the opposite of what keeping it is for. Deleting an agent therefore does not
+  delete its runs.
+- **`context` is the loop's whole state**, not the message history alone: messages, step count,
+  budget, accumulated usage and which side is next. That is what makes resuming a load rather than
+  a reconstruction (§11.2).
+- **There is no `name` column**, departing from §9's rule. A run is not a definition an admin names
+  and addresses, and a name that always equalled `subject` would be residue on every row.
+- **There is an `error` column** holding why a failed run failed. A state of `failed` with nowhere
+  to record the reason cannot satisfy the paragraph below.
+- **A `RunObserver` seam** in `sc-agent`'s driver carries deltas, tool calls and tool results to
+  whoever is watching. It exists at that layer rather than in the transport because the events are
+  the loop's, and only the loop knows when they happen; the socket below is its first consumer.
 
 **Transport is a WebSocket**, `/admin/agent-chat`, admin-authenticated through the same session
 middleware as the language-server route (§12.1) and following its precedent: the typed

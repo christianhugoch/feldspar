@@ -2848,6 +2848,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "sc-agent",
+ "sc-auth",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-error",
+ "sc-llm",
+ "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sc-api"
 version = "0.1.0"
 dependencies = [
@@ -2936,6 +2959,7 @@ name = "sc-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "sc-agent",
  "sc-api",
  "sc-app",
  "sc-auth",

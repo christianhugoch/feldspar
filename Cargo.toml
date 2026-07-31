@@ -19,6 +19,8 @@ members = [
     # Layer 6 — actions & triggers, and the LLM provider seam
     "crates/sc-action",
     "crates/sc-llm",
+    # Layer 7 — agents: the agent record, the trait extension point, the loop
+    "crates/sc-agent",
     # Layer 8 — applications & API
     "crates/sc-api",
     "crates/sc-app",
@@ -58,6 +60,7 @@ sc-auth = { path = "crates/sc-auth" }
 sc-files = { path = "crates/sc-files" }
 sc-action = { path = "crates/sc-action" }
 sc-llm = { path = "crates/sc-llm" }
+sc-agent = { path = "crates/sc-agent" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-core-actions = { path = "crates/sc-core-actions" }

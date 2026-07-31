@@ -49,7 +49,13 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
    loop is ours because it persists to `_sc_runs`, runs every tool as the chatting user, and
    streams to a browser. Rig's `CompletionModel` is not object-safe anyway (associated types,
    `impl Future`, `Clone`), so a `Box<dyn>` chosen from stored configuration needs a seam
-   regardless — `sc-llm` is that seam and not much more.
+   regardless — `sc-llm` is that seam and not much more. **Re-surveyed before Phase 2** now that
+   0.41 has split the runtime into a separate `rig-agent` crate, and the decision stands: rig
+   erases tools and vector stores but *not* models, so `Agent<M>` would need a unified model enum
+   that makes `sc-llm`'s adapters redundant; its `ConversationMemory` appends per turn where
+   `_sc_runs` writes per step; and it has nothing to say about the agent record, the trait specs
+   or the validation, which are most of this milestone's code. §11.1 records the survey in full.
+   **One piece of its design is taken** — see decision 8.
 3. **Streaming is the only shape.** A non-streaming call is a stream collected to the end; the
    reverse is not true, and the chat needs deltas from the first turn. One path also means the
    tool-call assembly providers each do differently is written and tested once.
@@ -68,6 +74,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
    real file stores). `vitest` for `ui/admin`'s chat model against a stubbed socket. **No test may
    require an API key or spend a token**; the fake provider is a first-class part of the crate, not
    a test fixture bolted on.
+8. **The loop is a steppable machine, not an `async fn`.** `rig-agent`'s `AgentRun` is sans-IO and
+   serialisable: it decides, the driver does the IO. Ours is built in that shape over `sc-llm`'s
+   types, so the run state *is* what `_sc_runs` stores, a reload resumes by construction, and
+   §10.3's engine gets the same machine instead of a second one.
 
 ---
 
@@ -116,44 +126,44 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 2 — `sc-agent`: the agent, the trait, the loop
 
-- [ ] New crate `sc-agent` at layer 7. The `Agent` record of §11.2 (`id`, `name`, `description`,
+- [x] New crate `sc-agent` at layer 7. The `Agent` record of §11.2 (`id`, `name`, `description`,
       `provider`, `model`, `system_prompt`, `traits: Vec<EnabledTrait>`, `min_role`, `attributes`)
       and `_sc_agents` storage in the shape `_sc_triggers` uses: the row *is* the definition, reads
       are strict, a missing or ill-shaped column is an error naming the agent.
-- [ ] The `AgentTrait` trait of §11.2 — `name`, `description`, `config_spec`, `validate_config`,
+- [x] The `AgentTrait` trait of §11.2 — `name`, `description`, `config_spec`, `validate_config`,
       `tools(cfg)`, `call(cfg, tool, args, ctx)`, `on_turn(cfg, turn)` — and `AgentRegistry`, the
       twin of `ActionRegistry` (a `BTreeMap`, duplicate names refused, this crate registering
       nothing itself).
-- [ ] **A trait may be enabled twice.** `traits` is a list of `(trait, config)` pairs, not a map:
+- [x] **A trait may be enabled twice.** `traits` is a list of `(trait, config)` pairs, not a map:
       "query `books`" and "query `orders`" are one trait, twice. Each enabled trait derives its
       tool names from its own configuration, and a collision between two of them is refused **on
       save**, where it is fixable, not discovered when the model picks the wrong tool.
-- [ ] Validation on save **and on load**, in one function, exactly as a trigger's is (§10.2): the
+- [x] Validation on save **and on load**, in one function, exactly as a trigger's is (§10.2): the
       provider resolves, each trait name resolves, each configuration validates against its
       `config_spec` and then its `validate_config`, `min_role` is on the 1–100 scale, tool names do
       not collide. An agent that fails is dropped from the live set **with its reason kept**, and
       stays stored, listed and editable — editing it is the repair.
-- [ ] `_sc_runs`, created here with the shape the workflow engine will also use: `id`, `kind`
+- [x] `_sc_runs`, created here with the shape the workflow engine will also use: `id`, `kind`
       (`agent` now, `workflow` later), `subject`, `context` (JSON — the message history and
       accumulated usage), `state`, `user`, `created_at`/`updated_at`. Written after **every** step,
       so a reload resumes and a durable engine later needs no second mechanism.
-- [ ] The loop: build the request (system prompt plus whatever `on_turn` appended, the run's
+- [x] The loop: build the request (system prompt plus whatever `on_turn` appended, the run's
       messages, every enabled trait's tools) → stream → dispatch tool calls **sequentially in the
       order the model asked** → append results → repeat, bounded by `max_steps` (default 20). A
       tool that fails returns its error **as the tool result**, because an error the model can read
       is one it can recover from; only a failure of the loop itself ends the run.
-- [ ] The run's caller travels with it and every tool executes as that user (decision 5). The
+- [x] The run's caller travels with it and every tool executes as that user (decision 5). The
       constructor takes the caller; there is no default and no ambient admin.
-- [ ] A **`FakeProvider`** in the crate (behind a `testing` feature, not `#[cfg(test)]`, so
+- [x] A **`FakeProvider`** in the crate (behind a `testing` feature, not `#[cfg(test)]`, so
       `sc-core-traits` and `sc-server` can use it): scripted turns — "emit this text", "call this
       tool with these arguments", "then say this" — which is what makes the loop, every trait and
       the chat socket testable without a vendor.
-- [ ] Tests: Rust — a single-turn run; a run that calls one tool and continues; two tool calls in
+- [x] Tests: Rust — a single-turn run; a run that calls one tool and continues; two tool calls in
       one assistant message, executed in order; a tool that errors, with the loop continuing and
       the error visible in the transcript; `max_steps` stopping a provider that never stops asking;
       the run row's context after each step matching what the loop holds; save/load round-trip and
       an agent naming a missing provider or an unknown trait leaving the live set with a reason.
-- [ ] **Done when** an agent with no traits at all holds a two-turn conversation through the
+- [x] **Done when** an agent with no traits at all holds a two-turn conversation through the
       library against the fake provider and against a real one, and its run row can be reloaded
       into the same message history.
 

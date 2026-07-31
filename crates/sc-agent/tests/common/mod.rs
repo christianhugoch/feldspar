@@ -1,0 +1,192 @@
+#![allow(dead_code)] // each test binary compiles this module and uses part of it
+
+//! The scaffolding both integration tests share: a catalog with the agent
+//! tables bootstrapped, a connected provider row to point agents at, and a
+//! trait whose tools are derived from its configuration.
+
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use sc_agent::{
+    AgentRegistry, AgentTrait, TraitCheck, TraitContext, bootstrap_agents, bootstrap_runs,
+};
+use sc_catalog::Catalog;
+use sc_db::DatabaseDriver;
+use sc_db_postgres::PgDriver;
+use sc_error::{Error, Result};
+use sc_llm::{LlmProviderDef, ToolSpec, bootstrap_llm_providers, save_llm_provider};
+use sc_test_harness::TestDb;
+use sc_types::{Attrs, BasicType, FormField};
+use serde_json::{Value as Json, json};
+
+/// A catalog over a per-test database with `_sc_llm_providers`, `_sc_agents` and
+/// `_sc_runs` bootstrapped, and one provider named `main` saved — because an
+/// agent that names no connected provider does not validate, so every test would
+/// otherwise start by writing the same row.
+pub async fn catalog(db: &TestDb) -> Result<Catalog> {
+    let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
+    let catalog = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;
+    bootstrap_llm_providers(&catalog).await?;
+    bootstrap_agents(&catalog).await?;
+    bootstrap_runs(&catalog).await?;
+    save_llm_provider(
+        &catalog,
+        &LlmProviderDef::anthropic("main", "sk-ant-not-a-real-key", "claude-sonnet-4-5"),
+    )
+    .await?;
+    Ok(catalog)
+}
+
+/// A trait that counts something in a named collection.
+///
+/// It exists to exercise the three things every real trait will do and the loop
+/// depends on: its **tool name is derived from its configuration**
+/// (`count_books`, not `count`), its `validate_config` refuses a collection it
+/// does not know about, and its `call` can be made to fail on demand.
+pub struct Counter {
+    /// What it returns, and what it records having been asked.
+    pub calls: Mutex<Vec<Json>>,
+}
+
+impl Counter {
+    pub fn new() -> Arc<Counter> {
+        Arc::new(Counter {
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The collections it knows — anything else fails `validate_config`, which is
+    /// how a trait configured against something that no longer exists behaves.
+    pub const KNOWN: [&'static str; 2] = ["books", "orders"];
+
+    /// The arguments it was called with, in order.
+    pub fn seen(&self) -> Vec<Json> {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// The configured collection, or the empty string.
+fn collection(config: &Attrs) -> String {
+    config
+        .get("collection")
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[async_trait::async_trait]
+impl AgentTrait for Counter {
+    fn name(&self) -> &str {
+        "count"
+    }
+
+    fn description(&self) -> &str {
+        "Count the things in one collection"
+    }
+
+    fn config_spec(&self) -> Vec<FormField> {
+        vec![
+            FormField::new("collection", BasicType::Text).required(),
+            // Not required, and the reason a test can make a tool fail without a
+            // second trait: the failure is a configured property of this one.
+            FormField::new("always_fails", BasicType::Bool),
+        ]
+    }
+
+    async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
+        let name = collection(check.config);
+        if !Counter::KNOWN.contains(&name.as_str()) {
+            return Err(Error::invalid(format!("no collection named `{name}`")));
+        }
+        Ok(())
+    }
+
+    fn tools(&self, config: &Attrs) -> Vec<ToolSpec> {
+        vec![ToolSpec::new(
+            format!("count_{}", collection(config)),
+            format!("Count the {} ", collection(config)),
+            json!({"type": "object", "properties": {}}),
+        )]
+    }
+
+    async fn call(
+        &self,
+        config: &Attrs,
+        _tool: &str,
+        args: &Json,
+        _ctx: &mut TraitContext<'_>,
+    ) -> Result<Json> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(args.clone());
+        if config
+            .get("always_fails")
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(Error::invalid(format!(
+                "the {} collection is unavailable",
+                collection(config)
+            )));
+        }
+        Ok(json!(match collection(config).as_str() {
+            "books" => 3,
+            "orders" => 7,
+            _ => 0,
+        }))
+    }
+}
+
+/// A trait that says something extra in the system prompt and offers no tools —
+/// the `on_turn` half of the extension point.
+pub struct Preamble;
+
+#[async_trait::async_trait]
+impl AgentTrait for Preamble {
+    fn name(&self) -> &str {
+        "preamble"
+    }
+
+    fn description(&self) -> &str {
+        "Append a line to the system prompt"
+    }
+
+    fn config_spec(&self) -> Vec<FormField> {
+        vec![FormField::new("text", BasicType::Text).required()]
+    }
+
+    fn tools(&self, _config: &Attrs) -> Vec<ToolSpec> {
+        Vec::new()
+    }
+
+    async fn call(
+        &self,
+        _config: &Attrs,
+        tool: &str,
+        _args: &Json,
+        _ctx: &mut TraitContext<'_>,
+    ) -> Result<Json> {
+        Err(Error::invalid(format!(
+            "`{tool}` is not a tool of this trait"
+        )))
+    }
+
+    async fn on_turn(&self, config: &Attrs, turn: &mut sc_agent::Turn<'_>) -> Result<()> {
+        let text = config
+            .get("text")
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        // Which step it is, so a test can see this runs before *every* call.
+        turn.append_system(format!("{text} (step {})", turn.step));
+        Ok(())
+    }
+}
+
+/// A registry with both test traits in it.
+pub fn registry(counter: Arc<Counter>) -> Result<AgentRegistry> {
+    let mut registry = AgentRegistry::new();
+    registry.register(counter)?;
+    registry.register(Arc::new(Preamble))?;
+    Ok(registry)
+}

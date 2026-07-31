@@ -1,0 +1,51 @@
+[package]
+name = "sc-agent"
+description = "Agents: the agent record, the trait extension point, the loop and its runs (layer 7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# `FormField` for a trait's declared configuration and `Attrs` for the values —
+# the vocabulary every configurable extension point in the tree speaks (§6.2).
+sc-types.workspace = true
+# `_sc_agents` and `_sc_runs` are stored metadata, so this crate speaks the query
+# language and reads rows back out of the driver, exactly as `_sc_triggers` does.
+# `CallerContext` also lives here, which is what a trait's tools run as.
+sc-catalog.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+# The provider seam. This crate knows agents, traits and the loop, and nothing
+# about which vendor is on the other end (§11.1).
+sc-llm.workspace = true
+# `User`: the caller a run carries, and the identity every tool executes as
+# (decision 5). Layer 5, below this one.
+sc-auth.workspace = true
+async-trait.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+# `Stream` combinators for the scripted provider's failure stream.
+futures.workspace = true
+
+[features]
+# The scripted provider the loop, the traits and the chat socket are tested
+# against. A **feature**, not `#[cfg(test)]`: `sc-core-traits` and `sc-server`
+# test against it too, and a fake that only exists inside this crate's own test
+# build is one they cannot reach (decision 7).
+testing = []
+
+[dev-dependencies]
+sc-agent = { workspace = true, features = ["testing"] }
+sc-db.workspace = true
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
