@@ -66,8 +66,11 @@ saltcorn/
 │  ├─ sc-files/                   # 5. FileStore trait, drivers (local, S3, git), xattr metadata
 │  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_sc_triggers`
 │  │                              #    storage & validation, the live set, dispatch, scheduler
+│  ├─ sc-llm/                     # 6. object-safe LlmProvider seam over a provider crate
+│  │                              #    (OpenAI Responses + Anthropic), `_sc_llm_providers` (§11.1)
 │  ├─ sc-workflow/               # 7. durable workflow engine (steps, runs, traces, recovery)
-│  ├─ sc-agent/                   # 7. Agent action + AgentTrait trait + inference loop
+│  ├─ sc-agent/                   # 7. Agent record + AgentTrait trait + registry + inference
+│  │                              #    loop + `_sc_agents`/`_sc_runs` storage (§11.2)
 │  ├─ sc-model/                   # 7. ModelProvider trait, model instances, inference
 │  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
 │  ├─ sc-viewpattern/             # 8. ViewPattern trait (v1-style views: Show/List/Edit/Filter…)
@@ -77,6 +80,9 @@ saltcorn/
 │  ├─ sc-core-actions/            # 8. the built-in action set (insert_row, update_rows,
 │  │                              #    delete_rows, fetch, run_js_code) — above the row layer,
 │  │                              #    because a trigger's write goes *through* it (§10.1)
+│  ├─ sc-core-traits/             # 9. the built-in agent traits (table, trigger and coding
+│  │                              #    traits) + the `run_agent` action — same layer, same
+│  │                              #    reason: their writes go through the row layer (§11.3)
 │  ├─ sc-copilot/                 # 9. copilot agent + AppConstructor stages
 │  ├─ sc-server/                  # 9. HTTP server: admin routes, user routes, auth, CSP, sockets
 │  └─ sc-cli/                     # 10. `saltcorn` binary (serve, user/app mgmt, backup/restore)
@@ -124,6 +130,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `FieldView` | `sc-fieldview` | any | Display/edit a value of one or more types (React component) |
 | `Action` | `sc-action` | any | One elementary step; configurable; reads one event, returns a value |
 | `AgentTrait` | `sc-agent` | any | An elementary agent capability (usually an LLM tool) |
+| `LlmProvider` | `sc-llm` | Rust | One configured chat model, streamed; hides the vendor's API |
 | `Importer` / `Exporter` | `sc-catalog` | any | Move table data to/from a format |
 | `ModelProvider` | `sc-model` | any | Fit/inspect/apply a predictive model over table data |
 | `ViewPattern` | `sc-viewpattern` | any | A v1-style view template over a table |
@@ -722,7 +729,9 @@ a sparse value goes into `attributes`.**
 | `_sc_tables` | overlay metadata for tables | access rules, label/description, attributes, provided-table defs; the DB's own tables need no row to be usable (§9.1) |
 | `_sc_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
 | `_sc_triggers` | triggers (later: workflows, agents) | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, action + configuration, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. Workflows will be **versioned** so a suspended run finishes on its own version |
-| `_sc_runs` | workflow & agent runs | current context + state, updated after each step |
+| `_sc_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps |
+| `_sc_llm_providers` | LLM connections | name + backend (`openai_responses` \| `anthropic`) + config (§11.1); the same shape as `_sc_file_stores`, and the API key is a `secret` field, redacted on read |
+| `_sc_runs` | workflow & agent runs | current context + state, updated after each step; `kind` discriminates `agent` from `workflow`, so a chat session and a durable run are one mechanism (§11.4) |
 | `_sc_run_traces` | per-step context + timing | only when tracing is enabled for that workflow |
 | `_sc_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
 | `_sc_config` | configuration | scoped to whole setup or one application; per-key value-type restriction; values stored as JSON |
@@ -1084,42 +1093,264 @@ redis/kafka drivers scale it out.
 
 ---
 
-## 11. Agents and copilot (`sc-agent`, `sc-copilot`)
+## 11. Agents (`sc-llm`, `sc-agent`, `sc-core-traits`) and copilot (`sc-copilot`)
 
-### 11.1 Agents
+*Designed for the sixth post-MVP milestone; §11.1–§11.5 are written for it, §11.6 is not.*
 
-An **agent is a kind of `Action`** (so it is also a trigger body). It is configured by
-enabling a set of **traits**, each with its own config. A trait is an elementary agent
-capability — most expose a tool to the LLM loop, some change chat behaviour.
+An **agent** is a configured LLM loop: a provider and model, a system prompt, and a set of
+enabled **traits**. A trait is an elementary agent capability — most contribute one or more
+**tools** to the loop, some only change the turn (extra system prompt, preloaded data). This is
+v1's `agents` plugin restated with the vocabulary the rest of v2 already uses: a trait declares
+its configuration as `FormField`s exactly as an action, a framework and a file-store backend do,
+so the admin UI renders a form for a trait it has never heard of, and the same declaration is
+what validates a saved agent.
+
+Three separations are load-bearing, and they are why this is three crates rather than one:
+
+- **Talking to a model is not being an agent.** `sc-llm` knows providers, messages, tools and
+  streaming, and nothing about Saltcorn. `sc-agent` knows agents, traits and the loop, and
+  nothing about which vendor is on the other end.
+- **A trait that touches rows must sit above the row layer**, for the reason §10.1 gives for
+  `sc-core-actions`: a write goes through `sc-api`'s `rows` module so it is coerced, validated
+  and *observed*. So `sc-agent` (layer 7) owns the trait, the loop and the storage, and the
+  built-in traits live in `sc-core-traits` (layer 9), beside the built-in actions.
+- **An agent is a kind of `Action`** (GOALS, §10.2), but it is *not* stored as one. Its
+  definition is its own record; `run_agent` is the one registered action that runs it. A trigger
+  therefore fires an agent through machinery that already exists, and the agent stays editable
+  as an agent rather than as a blob inside a trigger's `configuration`.
+
+### 11.1 The LLM seam (`sc-llm`)
 
 ```rust
+/// One configured model, ready to be called. Object-safe: which provider runs is
+/// decided at runtime from stored configuration.
 #[async_trait]
-pub trait AgentTrait: Send + Sync {
-    fn name(&self) -> &str;
-    fn config_spec(&self) -> Vec<FormField>;
-    /// Tools this agent trait contributes to the inference loop (may be zero).
-    fn tools(&self, cfg: &Attrs, cat: &Catalog) -> Vec<Tool>;
-    /// Hook to alter chat behaviour / system prompt (e.g. model picker, preload data).
-    fn on_turn(&self, turn: &mut Turn) -> Result<()> { Ok(()) }
+pub trait LlmProvider: Send + Sync {
+    fn model(&self) -> &str;
+    /// One request. Returns a stream of deltas ending in a `Stop`.
+    async fn stream(&self, req: LlmRequest) -> Result<LlmStream>;
+}
+
+pub struct LlmRequest {
+    pub system: Option<String>,
+    pub messages: Vec<LlmMessage>,   // User | Assistant{content, tool_calls} | ToolResult
+    pub tools: Vec<ToolSpec>,        // name, description, JSON-Schema parameters
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+}
+
+pub enum LlmDelta {
+    Text(String),
+    Reasoning(String),
+    ToolCall(ToolCall),              // id, name, arguments (JSON)
+    Stop { reason: StopReason, usage: Usage },
 }
 ```
 
-Built-in traits mirror v1's `agents` plugin's skills: query-a-table tool, HTTP-request tool, run
-a guest function as a tool, generate-and-run code tool, long-term memory (backed by a
-table), MCP client, model picker, preload data, use-any-action/workflow-as-a-tool,
-subagent handoff, web search, plan approval.
+**Streaming is the only shape**, not one of two. A non-streaming call is a stream collected to
+the end (`LlmStream::collect`), whereas the reverse is not true, and the chat interface (§11.4)
+needs deltas from the first turn. Having exactly one path also means the tool-call assembly that
+providers do differently is written and tested once.
 
-Agents run either attached to events (with an initial prompt derived from the triggering
-row) or through an Agent-chat view pattern (a ChatGPT-like UI with history and sharing).
+**The vocabulary above is ours, not the crate's.** Everything a provider crate exposes stays
+behind this trait, for the reason §2 gives generally: a provider abstraction is precisely the
+kind of dependency whose API churns, and `sc-agent` must not churn with it.
 
-**LLM provider note:** the inference loop targets the Claude API by default (latest models
-— Opus/Sonnet/Haiku families), with an abstraction over providers so others can be added.
+**Which crate.** [`rig-core`](https://docs.rs/rig-core) (0.41, ~470k downloads/month) is the
+choice, one thin adapter per provider. It is the only surveyed crate that carries **OpenAI's
+Responses API as a first-class provider** (`providers::openai::responses_api` — reasoning items,
+`tool_choice`, structured outputs, streaming) *and* a maintained **Anthropic** provider (content
+blocks, cache control, thinking), which is exactly the pair GOALS requires. It defaults to
+`rustls` and keeps `reqwest` behind its own `http_client` seam, so it does not contradict §16's
+no-OpenSSL posture. Rejected, with reasons, because the survey is the decision:
 
-### 11.2 Copilot & AppConstructor
+- **`llm` / `rllm`** (`llm` 1.3.8, ~4.7k downloads/month) — the crate named in the request. Its
+  `LLMProvider` trait *is* object-safe, which would have saved the adapter, but it speaks Chat
+  Completions only. The Responses API is a requirement, not a preference: it is where OpenAI's
+  reasoning models and their compatible reimplementations are.
+- **`litellm-rust`, `multi_llm`, `tiycore`, `llm-sdk-rs`** — each is a smaller, younger take on
+  the same surface; none has both required APIs with the depth rig's do.
+- **Writing the two clients by hand** — two providers is not much HTTP, and this was the serious
+  alternative. It loses on the parts that are not the happy path: SSE framing, partial-JSON
+  tool-argument assembly, and each provider's error and refusal shapes. Those are what a
+  maintained crate is actually buying.
 
-The copilot is itself an agent composed of app-building traits (build tables, views,
-workflows). Two front-ends, as in v1: a plain chat interface, and the staged
-**AppConstructor** (describe → clarify → research → requirements → plan → execute → user
+**What rig is *not* used for.** Its `Agent`, its tool registry, its RAG and vector stores, its
+`CompletionModel` generics: the loop is ours (§11.2) because it must persist to `_sc_runs`,
+enforce a caller's role inside every tool, and stream to a browser. Concretely, rig's
+`CompletionModel` is not object-safe (associated types, `impl Future`, `Clone`), so a
+`Box<dyn>` chosen from stored configuration needs a seam regardless; `sc-llm` is that seam and
+is not much more than it.
+
+**Providers are configured entities, like file stores.** A named record in `_sc_llm_providers`
+— `name`, `backend` (`openai_responses` | `anthropic`), `config` (`Attrs`), `description` —
+with the backend's settings declared as `FormField`s and rendered by the same admin form that
+renders a file store's. `openai_responses` takes a `base_url` (defaulted, so any
+OpenAI-compatible endpoint — a local server, a gateway, an alternative vendor — is a value in a
+field rather than a code change), an API key and a default model; `anthropic` takes an API key,
+a default model and an optional base URL. An agent names a provider and may override the model.
+This is what makes "OpenAI-compatible" a configuration fact.
+
+**Secrets.** `FormField` gains `secret: bool`. It is a property of the *declaration*, so it
+travels to every consumer at once: the admin UI renders a password input, the API **redacts**
+the value on read (a fixed sentinel, never a truncation — a prefix is still a leak), and a
+write that submits the sentinel unchanged **keeps the stored value** rather than overwriting the
+key with its own mask. Redaction happens where the record is serialised, not in the screen, so
+a secret cannot be exposed by a second reader that forgot. Encryption at rest is *not* in this
+milestone: the value sits in the primary database like every other configuration value, and
+saying so is better than implying a protection that a database dump would disprove.
+
+### 11.2 Agents, traits and the loop (`sc-agent`)
+
+```rust
+pub struct Agent {
+    pub id: AgentId,                 // UUID: stored metadata (§9)
+    pub name: String,                // unique; what a trigger and the chat address
+    pub description: String,
+    pub provider: String,            // an `_sc_llm_providers` name
+    pub model: Option<String>,       // overrides the provider's default
+    pub system_prompt: String,
+    pub traits: Vec<EnabledTrait>,   // { trait_: String, config: Attrs }
+    pub min_role: Option<u8>,        // who may chat with it; None = admin-only
+    pub attributes: Attrs,           // sparse: temperature, max_tokens, max_steps
+}
+
+#[async_trait]
+pub trait AgentTrait: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn config_spec(&self) -> Vec<FormField>;
+    /// Beyond what the spec can express: that a named table exists, that a store
+    /// is connected. Called on save **and on load**, as an action's is (§10.1).
+    async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> { Ok(()) }
+    /// The tools this trait contributes. May be zero.
+    fn tools(&self, cfg: &Attrs) -> Vec<ToolSpec>;
+    /// Run one of them. `cfg` is this trait's configuration; `ctx` carries the
+    /// catalog, the caller and the run.
+    async fn call(&self, cfg: &Attrs, tool: &str, args: &Json, ctx: &mut TraitContext<'_>)
+        -> Result<Json>;
+    /// Change the turn without adding a tool — extra system prompt, preloaded data.
+    async fn on_turn(&self, cfg: &Attrs, turn: &mut Turn<'_>) -> Result<()> { Ok(()) }
+}
+```
+
+`AgentRegistry` is `ActionRegistry`'s twin (a `BTreeMap`, duplicate names refused), for the same
+reason: the set is meant to grow from outside the crate, and the admin UI must render a trait it
+has never heard of from its `config_spec` alone.
+
+**A trait may be enabled more than once.** "Query the `books` table" and "query the `orders`
+table" are one trait with two configurations, so `traits` is a list of `(trait, config)` pairs
+rather than a map keyed by trait name. Tool names are therefore made unique per enabled trait
+(`query_books`, `query_orders`) by the trait itself from its configuration, and a collision
+across two enabled traits is refused **on save**, where it is a fixable mistake, rather than
+discovered when the model picks the wrong one.
+
+**The loop**, in `sc-agent`:
+
+1. Build the request: system prompt (plus whatever `on_turn` appended), the run's messages, and
+   every enabled trait's tools.
+2. Stream it. Text and reasoning deltas go to the caller as they arrive; tool calls are
+   accumulated.
+3. For each tool call, dispatch to the trait that declared it, in the order the model asked —
+   **sequentially**, because a trait that writes a row and a trait that reads one have an order
+   between them that only the model knows. A tool that fails returns its error *as the tool
+   result*, not as a loop failure: "that table does not exist" is something the model can act
+   on, and turning it into an exception is what makes an agent unable to recover.
+4. Append the results and go to 1, until the model stops asking for tools or **`max_steps`**
+   (default 20) is reached — an agent that will not converge must be stopped by a number, and
+   the number is the admin's.
+
+**The caller travels with the run.** Every tool executes as the user who is chatting, not as the
+server: a `query_table` tool is an ordinary read through `sc-api`'s rows module with that
+caller, so §7.3's ownership and RLS apply unchanged and an agent cannot become a way around
+them. This is the opposite of an action's authority (§10.1), and deliberately: a trigger is the
+admin's configuration running on the admin's behalf, whereas a chat turn is a user's request. An
+agent run *from* a trigger runs with that trigger's authority, and the difference is visible at
+exactly one place — where the run is created.
+
+**Storage and validation** follow triggers exactly (§10.2): `_sc_agents` is a definition, not an
+overlay; reading is strict; validation runs on save and again on load, in one function (the
+provider resolves, each named trait resolves in the registry, each configuration validates
+against its `config_spec` and then its `validate_config`, `min_role` is on the 1–100 scale, tool
+names do not collide); and an agent that fails validation is dropped from the live set **with
+its reason kept**, remaining stored, listed and editable, because editing it is the repair.
+
+### 11.3 The built-in traits (`sc-core-traits`)
+
+Deliberately few, and split by what they touch. Each names its target in its configuration —
+there is no trait that can reach *any* table or *any* store, because "which tables may this
+agent see" is the first thing an admin needs to be able to answer.
+
+**Tables.** `query_table` (one configured table; tool arguments are a `where` object, an
+optional field list, an ordering and a bounded `limit`), `insert_row` and `update_rows` /
+`delete_rows` as separate opt-in traits, so read-only is the default shape of an agent and
+granting writes is a decision with a form field attached. All of them go through `sc-api::rows`
+with the run's caller.
+
+**Actions.** `run_trigger` exposes one configured trigger as a tool. The trigger's own
+`min_role` still gates it, so exposing an agent to a role does not thereby expose everything the
+agent could call. This is the trait that connects an agent to the whole of §10 — a workflow,
+once §10.3 lands, becomes callable the same way, because a workflow is a trigger.
+
+**Code.** The coding traits work inside **one configured file store**, optionally rooted at a
+subdirectory, through the `FileStore` trait and §9's access rules — so they are the same
+capability the file manager and the IDE already have, handed to a model:
+`read_file`, `write_file`, `edit_file` (exact-string replacement, which is the edit that can be
+verified before it is applied), `list_files`, `search_files` (a server-side search, which is
+also the endpoint the IDE's find-in-files wanted), and `build_application` for the application
+whose source is that store, returning the build's diagnostics as the tool result — a failed
+build is the most useful thing the model can be told.
+
+**No shell.** There is no `run_command` trait. Handing a model a shell on the server is the
+same decision the IDE milestone declined to take for a terminal, and it should not arrive by the
+back door. `run_project_script` is the bounded version and the one that ships: it runs
+`npm run <script>` for a script that **already exists** in the project's `package.json`, so the
+set of runnable commands is the project's own and the model chooses from it rather than
+composing one.
+
+### 11.4 Chat: runs, transport, UI
+
+**A chat session is a run.** `_sc_runs` (§9) is created by this milestone with the shape the
+workflow engine will also use: `id`, `kind` (`agent` today, `workflow` later), `subject` (the
+agent's or workflow's id), `context` (JSON — for an agent, the message history and accumulated
+usage), `state`, `user`, timestamps. Persisting after every step is what a durable engine needs
+and what a chat needs to survive a reload, so it is one mechanism rather than two.
+
+**Transport is a WebSocket**, `/admin/agent-chat`, admin-authenticated through the same session
+middleware as the language-server route (§12.1) and following its precedent: the typed
+JSON endpoint model (§13.1) describes request/response pairs, and a chat turn is a
+bidirectional exchange — deltas out while a new message or an abort may come in. The typed API
+keeps what it is good at: listing agents, listing and deleting runs, reading a run's history.
+
+**Failures are events on the socket, not dropped connections.** A provider that refuses, a key
+that is wrong, a tool that panics — each arrives as an error event that renders in the
+transcript, because an agent whose chat window silently stops is unfixable by the person looking
+at it.
+
+**The admin UI** gains `Agents` (list), `AgentForm` (provider, model, prompt, plus the trait
+picker rendering each enabled trait's `config_spec` through the existing `SettingsFields`) and
+`AgentChat` — a transcript of user and assistant messages with tool calls shown as collapsible
+entries naming the tool and its arguments and result, a composer, a stop button, and the run
+history for that agent.
+
+### 11.5 The agent as an action
+
+`run_agent` is a registered `Action` (in `sc-core-traits`, since it runs a loop whose tools
+reach the row layer) taking an agent name and a prompt formula evaluated in the event's scope
+(§10.1). It makes an agent a trigger body without touching the trigger model: a row insert can
+start an agent with a prompt derived from the row, an application can expose it as
+`POST {mount}/actions/{name}` under the trigger's `min_role` (§13.2), and the run it creates is
+the same `_sc_runs` row the chat interface reads, so a triggered run is inspectable afterwards.
+
+Its result is the agent's final assistant message plus the run id. It does **not** stream: an
+action returns a value (§10.1), and a caller who wants the deltas is a chat client.
+
+### 11.6 Copilot & AppConstructor
+
+*Not this milestone.* The copilot is itself an agent composed of **app-building** traits (create
+tables and fields, create triggers, create views) — which is why §11.2's `AgentTrait` is the
+extension point and not a closed set. Two front-ends, as in v1: a plain chat interface, and the
+staged **AppConstructor** (describe → clarify → research → requirements → plan → execute → user
 feedback → self-heal). For users who prefer an external coding agent, the copilot can emit a
 `SKILL.md` describing the app.
 

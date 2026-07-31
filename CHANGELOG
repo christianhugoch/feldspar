@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## A design and a plan for agents
+
+Planning only; no code. The IDE milestone is finished, so `TODO.md` is archived as
+`docs/TODO-post-mvp-5.md` and replaced by the **agents** milestone, and §11 of the technical
+design — two paragraphs of intent since the document was first written — is rewritten as the
+design that plan is against.
+
+**The milestone.** An admin connects an LLM provider, builds an agent out of configured *traits*,
+chats with it in the admin UI while its answer streams in, and fires it from a trigger. Its traits
+query tables, run triggers, and read, grep, edit and build code in a file store. The copilot's
+app-building traits and the AppConstructor are explicitly **not** in it: this milestone builds the
+extension point they will be written against, and a trait that constructs a table would mean the
+boundary was lost.
+
+**Three crates, because three things are separate.** `sc-llm` (layer 6) knows providers, messages,
+tools and streaming and nothing about Saltcorn; `sc-agent` (layer 7) knows agents, traits, the
+loop and the runs and nothing about which vendor answers; `sc-core-traits` (layer 9) holds the
+built-in traits, beside `sc-core-actions` and for the same reason §10.1 gives — a trait that
+writes a row must go through the row layer, or it skips the coercion, the validation and the
+triggers that layer owns.
+
+**`rig-core` for the provider calls, behind our own object-safe seam.** The request named the
+`llm` crate; the survey rejected it. `llm` 1.3.8 speaks Chat Completions only, and the OpenAI
+*Responses* API is a requirement rather than a preference — it is where the reasoning models and
+their compatible reimplementations are. `rig-core` 0.41 is the only surveyed crate carrying
+`providers::openai::responses_api` *and* a maintained Anthropic provider with cache control and
+thinking; it defaults to `rustls`, so §16's no-OpenSSL posture survives. `litellm-rust`,
+`multi_llm`, `tiycore` and `llm-sdk-rs` are younger takes with neither API as deep. Writing the
+two clients by hand was the serious alternative and loses on SSE framing, partial-JSON tool
+argument assembly and each vendor's error shapes — not on the happy path. Only the *call* is
+rig's: its `CompletionModel` is not object-safe (associated types, `impl Future`, `Clone`), so a
+`Box<dyn>` chosen from stored configuration needs a seam whatever crate is underneath, and the
+loop has to be ours anyway because it persists to `_sc_runs`, runs every tool as the chatting user
+and streams to a browser.
+
+**Two decisions the plan makes that are worth reading on their own.** A tool runs as the *caller*
+and an action runs as the *admin*: a chat turn is a user's request, so every trait's read goes
+through `sc-api::rows` with that user and §7.3's ownership and RLS apply — an agent is not a way
+around them — whereas a trigger-started run carries the trigger's authority, and the two meet at
+exactly one place, where the run is created. And there is **no shell**: the IDE milestone declined
+to hand an admin a terminal, that decision must not arrive by the back door, so the coding traits
+get `build_application` and `run_project_script` (an existing `package.json` script, by name) and
+nothing that composes a command.
+
+Three smaller things the plan puts on the table because nothing else has needed them yet:
+`FormField::secret`, so a provider key is redacted where records are serialised rather than in a
+screen, and a save that submits the sentinel keeps the stored value; `_sc_runs`, created in the
+shape the durable workflow engine will also use, so a chat session and a resumable run are one
+mechanism; and a server-side `search_files`, which is both the coding agent's grep and the
+endpoint the IDE's find-in-files was carried past its own milestone wanting.
+
 ## The documentation catches up with the IDE
 
 Documentation only, and the last phase of the milestone. Two documents were describing a product
