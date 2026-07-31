@@ -48,6 +48,16 @@ export type DeleteLlmProviderResponse = { deleted: boolean };
 export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 export type TestLlmProviderRequest = { id?: string | null; backend: string; config: unknown; model?: string | null };
 export type TestLlmProviderResponse = { ok: boolean; message: string; model: string };
+export type ListAgentsResponse = Array<{ id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null }>;
+export type CreateAgentRequest = { name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown };
+export type CreateAgentResponse = { id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null };
+export type UpdateAgentRequest = { name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown };
+export type UpdateAgentResponse = { id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null };
+export type DeleteAgentResponse = { deleted: boolean };
+export type ListAgentTraitsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
+export type ListRunsResponse = Array<{ id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string }>;
+export type GetRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; context: unknown; attributes: unknown };
+export type DeleteRunResponse = { deleted: boolean };
 export type BrowseFilesRequest = { dir: string };
 export type BrowseFilesResponse = Array<{ name: string; path: string; is_dir: boolean; size?: number | null }>;
 export type ReadFileRequest = { path: string };
@@ -119,6 +129,14 @@ export interface ApiClient {
   deleteLlmProvider(id: string): Promise<DeleteLlmProviderResponse>;
   listLlmProviderBackends(): Promise<ListLlmProviderBackendsResponse>;
   testLlmProvider(body: TestLlmProviderRequest): Promise<TestLlmProviderResponse>;
+  listAgents(): Promise<ListAgentsResponse>;
+  createAgent(body: CreateAgentRequest): Promise<CreateAgentResponse>;
+  updateAgent(id: string, body: UpdateAgentRequest): Promise<UpdateAgentResponse>;
+  deleteAgent(id: string): Promise<DeleteAgentResponse>;
+  listAgentTraits(): Promise<ListAgentTraitsResponse>;
+  listRuns(agent: string): Promise<ListRunsResponse>;
+  getRun(id: string): Promise<GetRunResponse>;
+  deleteRun(id: string): Promise<DeleteRunResponse>;
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
   readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
   writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
@@ -465,6 +483,72 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("testLlmProvider", res);
       return (await res.json()) as TestLlmProviderResponse;
+    },
+    async listAgents() {
+      const res = await doFetch(`${baseUrl}/api/agents`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listAgents", res);
+      return (await res.json()) as ListAgentsResponse;
+    },
+    async createAgent(body) {
+      const res = await doFetch(`${baseUrl}/api/agents`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createAgent", res);
+      return (await res.json()) as CreateAgentResponse;
+    },
+    async updateAgent(id, body) {
+      const res = await doFetch(`${baseUrl}/api/agents/${id}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateAgent", res);
+      return (await res.json()) as UpdateAgentResponse;
+    },
+    async deleteAgent(id) {
+      const res = await doFetch(`${baseUrl}/api/agents/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteAgent", res);
+      return (await res.json()) as DeleteAgentResponse;
+    },
+    async listAgentTraits() {
+      const res = await doFetch(`${baseUrl}/api/agent-traits`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listAgentTraits", res);
+      return (await res.json()) as ListAgentTraitsResponse;
+    },
+    async listRuns(agent) {
+      const res = await doFetch(`${baseUrl}/api/agent-runs/${agent}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listRuns", res);
+      return (await res.json()) as ListRunsResponse;
+    },
+    async getRun(id) {
+      const res = await doFetch(`${baseUrl}/api/runs/${id}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getRun", res);
+      return (await res.json()) as GetRunResponse;
+    },
+    async deleteRun(id) {
+      const res = await doFetch(`${baseUrl}/api/runs/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteRun", res);
+      return (await res.json()) as DeleteRunResponse;
     },
     async browseFiles(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/browse`, {

@@ -15,6 +15,9 @@
 //!
 //! Like the other `ui/admin` tests, this reads the checked-in source rather
 //! than a build, so it needs no Node toolchain.
+// `allow-expect-in-tests` covers `#[cfg(test)]` modules and not an integration
+// test's own body, so every test file in this crate says so for itself.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
 

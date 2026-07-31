@@ -19,7 +19,9 @@
 //! [`admin_handlers`]; they are resolved by name against the [`sc_api`] admin
 //! endpoint set at dispatch time.
 
+mod agents;
 mod apps;
+mod chat;
 mod config;
 mod handler;
 mod handlers;
@@ -29,7 +31,9 @@ mod security;
 mod serve;
 mod triggers;
 
+pub use agents::{AgentServices, ProviderConnector, StoredProviders, install_agents};
 pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
+pub use chat::AGENT_CHAT_ROUTE;
 
 /// The server's JavaScript evaluator: the `deno_core`-backed engine ownership
 /// formulas' reified path runs on (§7.3). Constructed once at boot and shared —

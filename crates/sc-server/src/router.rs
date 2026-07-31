@@ -37,6 +37,7 @@ use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::apps::{AppMounts, MountedApp, subdomain_of};
+use crate::chat::{AGENT_CHAT_ROUTE, agent_chat_upgrade};
 use crate::config::ServerConfig;
 use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
 use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
@@ -181,6 +182,11 @@ pub fn build_router_with_apps(
         // not a request the fallback's `Bytes` body could survive: it has to be
         // extracted before the body is touched.
         .route(LSP_ROUTE, axum::routing::get(language_server))
+        // The admin chat socket (§11.4). A real route for the same reason the
+        // language server's is: an upgrade cannot survive the fallback's `Bytes`
+        // body, and a chat turn is bidirectional in a way the typed endpoint
+        // model has no shape for.
+        .route(AGENT_CHAT_ROUTE, axum::routing::get(agent_chat))
         .fallback(dispatch)
         .with_state(state)
         // CSRF runs outside dispatch so it guards every route and can mint the
@@ -327,6 +333,43 @@ async fn language_server(
         return rejection;
     }
     language_server_upgrade(ws, state.apps.catalog(), &state.lsp_slots, store).await
+}
+
+/// The admin chat socket (§11.4): admin-only, one conversation per connection.
+///
+/// The auth story is the language server's, word for word — this is the *other*
+/// route that hands its holder something that runs on the server, and the same
+/// two facts apply: a failed handshake carries no readable body, so the auth
+/// refusal is the one answered with a status; and the session cookie is
+/// `SameSite=Strict`, so a cross-site page's socket carries no session and lands
+/// on that refusal.
+async fn agent_chat(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let user = match session_user(&state, &jar) {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        return rejection;
+    }
+    let Some(user) = user else {
+        // Unreachable: `AuthRequirement::admin()` has just refused every request
+        // without a user. Answered rather than unwrapped, because a run with no
+        // caller is the one thing decision 5 says cannot exist.
+        return json_error(StatusCode::UNAUTHORIZED, "this route requires a session");
+    };
+    agent_chat_upgrade(
+        ws,
+        state.apps.catalog(),
+        state.apps.agents(),
+        state.apps.evaluator(),
+        state.apps.triggers().cloned(),
+        user,
+    )
+    .await
 }
 
 /// Group endpoints by path pattern and insert them into a `matchit` router.

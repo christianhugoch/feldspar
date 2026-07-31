@@ -118,6 +118,13 @@ pub struct AppMounts {
     /// either. `None` is a process with no triggers installed, where nothing
     /// fires: a test, or the admin-only server.
     triggers: Option<Arc<sc_action::TriggerDispatcher>>,
+    /// The agent trait registry and the provider connector (§11.4), for the
+    /// admin API's agent handlers and the chat socket. Here for exactly the
+    /// reason the dispatcher above is: both of those already hold this handle,
+    /// and both must validate an agent against the *same* trait set. `None` is a
+    /// process with no agents installed — a test, or a server booted without
+    /// them — and every agent surface says so rather than pretending.
+    agents: Option<crate::agents::AgentServices>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
 }
@@ -134,6 +141,7 @@ impl AppMounts {
             catalog: Some(catalog),
             evaluator: None,
             triggers: None,
+            agents: None,
             by_subdomain: RwLock::new(HashMap::new()),
         }
     }
@@ -161,6 +169,18 @@ impl AppMounts {
     /// The trigger dispatcher, if this server has one.
     pub fn triggers(&self) -> Option<&Arc<sc_action::TriggerDispatcher>> {
         self.triggers.as_ref()
+    }
+
+    /// Attach the agent services (§11.4): the trait registry every agent is
+    /// validated against, and how its provider is connected.
+    pub fn with_agents(mut self, agents: crate::agents::AgentServices) -> AppMounts {
+        self.agents = Some(agents);
+        self
+    }
+
+    /// The agent services, if this server has them.
+    pub fn agents(&self) -> Option<&crate::agents::AgentServices> {
+        self.agents.as_ref()
     }
 
     /// Mount an app on its declared subdomain, refusing a collision.

@@ -31,6 +31,9 @@ import {
   SaltcornLogo,
 } from "./icons";
 import { useNarrowSidebar, useTheme } from "./layout";
+import { AgentChat } from "./screens/AgentChat";
+import { AgentForm } from "./screens/AgentForm";
+import { Agents } from "./screens/Agents";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
 import { FileManager } from "./screens/FileManager";
@@ -152,10 +155,13 @@ const NAV: NavItem[] = [
     matches: ["/file-stores", "/files"],
   },
   {
-    href: "#/llm-providers",
+    href: "#/agents",
     label: "Agents",
     icon: <IconRobot />,
-    matches: ["/llm-providers"],
+    // The providers list is part of this section rather than one of its own: an
+    // LLM provider exists to be pointed at by an agent, and nothing else in the
+    // admin UI has any use for one.
+    matches: ["/agents", "/llm-providers"],
   },
   { href: "#/users", label: "Users", icon: <IconUsers />, matches: ["/users"] },
   { href: "#/roles", label: "Roles", icon: <IconShieldLock />, matches: ["/roles"] },
@@ -374,6 +380,23 @@ function Screen({ route }: { route: string }) {
       .map(decodeURIComponent)
       .join("/");
     return <FileManager store={decodeURIComponent(filesMatch[1])} initialDir={dir} />;
+  }
+  if (route === "/agents/new") {
+    return <AgentForm />;
+  }
+  // A chat is addressed by the agent's **name**, not its id: it is what the run
+  // history is keyed by (§11.4) and what the socket's `start` carries, so a
+  // bookmarked chat URL says which agent it is.
+  const agentChatMatch = route.match(/^\/agents\/([^/]+)\/chat$/);
+  if (agentChatMatch) {
+    return <AgentChat agent={decodeURIComponent(agentChatMatch[1])} />;
+  }
+  const agentEditMatch = route.match(/^\/agents\/([^/]+)\/edit$/);
+  if (agentEditMatch) {
+    return <AgentForm agentId={decodeURIComponent(agentEditMatch[1])} />;
+  }
+  if (route.startsWith("/agents")) {
+    return <Agents />;
   }
   if (route === "/llm-providers/new") {
     return <LlmProviderForm />;

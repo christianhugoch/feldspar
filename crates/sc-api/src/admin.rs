@@ -533,6 +533,105 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- agents (configuration) ---------------------------------------------
+    // An agent is its own record (§11.2, decision 4): a provider, a model, a
+    // system prompt and a list of enabled traits. These endpoints are that
+    // row's lifecycle, in the shape the triggers' are — because the two records
+    // have the same problem. A stored agent that does not validate is **not in
+    // the live set**, will not answer, and is still listed here with its reason,
+    // because editing it is the repair.
+    //
+    // The chat *turn* is deliberately not here: it is a WebSocket (§11.4), and
+    // this model describes request/response pairs.
+
+    set.register(
+        Endpoint::new("listAgents", Method::Get, api().lit("agents"))
+            .output(TypeSchema::array(agent_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("createAgent", Method::Post, api().lit("agents"))
+            .input(agent_input_schema())
+            .output(agent_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateAgent",
+            Method::Put,
+            api().lit("agents").param("id", ValueType::Uuid),
+        )
+        .input(agent_input_schema())
+        .output(agent_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteAgent",
+            Method::Delete,
+            api().lit("agents").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The registered traits with the configuration each declares, so the agent
+    // form renders a form for a trait it knows nothing about — the same move
+    // `listActions` and `listLlmProviderBackends` make. `tool_names` is the one
+    // addition: a trait's tools are named from its configuration (§11.2), and an
+    // admin about to save two traits whose names would collide is better told
+    // what they are called than left to discover it from the refusal.
+    set.register(
+        Endpoint::new("listAgentTraits", Method::Get, api().lit("agent-traits"))
+            .output(TypeSchema::array(agent_trait_info_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // --- runs ---------------------------------------------------------------
+    // A chat session **is** a run (§11.4), so the history the chat panel shows
+    // and the record a triggered run leaves behind are one list. Runs are keyed
+    // by the agent's *name*, which is what `_sc_runs.subject` holds — a run
+    // outlives the agent it was of, deliberately.
+
+    set.register(
+        Endpoint::new(
+            "listRuns",
+            Method::Get,
+            api().lit("agent-runs").param("agent", ValueType::Text),
+        )
+        .output(TypeSchema::array(run_summary_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "getRun",
+            Method::Get,
+            api().lit("runs").param("id", ValueType::Uuid),
+        )
+        .output(run_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteRun",
+            Method::Delete,
+            api().lit("runs").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- files (file manager) ----------------------------------------------
 
     // Browse one directory of a store. A POST (not GET) so the directory — which
@@ -1141,6 +1240,111 @@ fn llm_backend_info_schema() -> TypeSchema {
         StructField::new("name", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
     ])
+}
+
+/// The fields of an agent's definition that an admin sets (§11.2).
+fn agent_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // The `_sc_llm_providers` **name** this agent calls through, not its id:
+        // that is what the stored row holds, so that is what round-trips.
+        StructField::new("provider", TypeSchema::text()),
+        // Null means "the provider's own default model", which is the common
+        // case and a real answer rather than a missing one.
+        StructField::new("model", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("system_prompt", TypeSchema::text()),
+        // A **list** of `{trait, config}` pairs, not a map: a trait may be
+        // enabled more than once (§11.2), and the order is the order its tools
+        // are offered to the model in.
+        StructField::new("traits", TypeSchema::array(enabled_trait_schema())),
+        // Null is admin-only, the same safe reading a trigger's takes.
+        StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+        // The sparse per-agent values (§9): `temperature`, `max_tokens`,
+        // `max_steps`. A bag rather than three fields, because they are exactly
+        // §9's sparse attributes and absent means "the provider's default",
+        // which no number could stand in for.
+        StructField::new("attributes", TypeSchema::json()),
+    ]
+}
+
+/// One enabled trait: which trait, and how this instance is configured.
+fn enabled_trait_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("trait", TypeSchema::text()),
+        StructField::new("config", TypeSchema::json()),
+    ])
+}
+
+/// One stored agent, with the reason it cannot run when there is one.
+///
+/// `error` is what makes a broken agent fixable rather than merely absent, as a
+/// trigger's and a file store's are: an agent naming a provider that was deleted
+/// or a trait configured against a dropped table is **not in the live set** and
+/// will not answer, but it is still stored, still listed and still editable.
+fn agent_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(agent_fields());
+    fields.push(StructField::new(
+        "error",
+        TypeSchema::optional(TypeSchema::text()),
+    ));
+    TypeSchema::Struct(fields)
+}
+
+/// The body accepted when creating or updating an agent: the definition's fields
+/// minus the id (server-assigned on create, taken from the path on update) and
+/// minus `error` (the server's answer, not the admin's input).
+fn agent_input_schema() -> TypeSchema {
+    TypeSchema::Struct(agent_fields())
+}
+
+/// A registered agent trait and the configuration it declares, so the agent form
+/// renders a form for a trait it has never heard of.
+fn agent_trait_info_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+    ])
+}
+
+/// One run in a list: everything except the transcript.
+///
+/// The transcript is deliberately absent. A chat's history is a list of dozens
+/// of runs and each `context` is a whole conversation, so a list carrying them
+/// would send megabytes to render a sidebar; [`run_schema`] is what the panel
+/// asks for when a run is opened.
+fn run_summary_schema() -> TypeSchema {
+    TypeSchema::Struct(vec![
+        StructField::new("id", TypeSchema::uuid()),
+        // `agent` or `workflow` (§10.3's engine shares this table).
+        StructField::new("kind", TypeSchema::text()),
+        // What the run is of: the agent's **name**.
+        StructField::new("subject", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // `running` | `done` | `failed` | `aborted`.
+        StructField::new("state", TypeSchema::text()),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("user", TypeSchema::optional(TypeSchema::uuid())),
+        StructField::new("created_at", TypeSchema::timestamp()),
+        StructField::new("updated_at", TypeSchema::timestamp()),
+    ])
+}
+
+/// One whole run: the summary plus the loop state it can be read back from.
+///
+/// `context` is passed through as JSON rather than described field by field: it
+/// is `sc-agent`'s `AgentLoop`, whose shape belongs to the loop and changes with
+/// it, and a second declaration of it here would be a second thing to keep in
+/// step. What the chat panel reads out of it — the messages — is stable.
+fn run_schema() -> TypeSchema {
+    let TypeSchema::Struct(mut fields) = run_summary_schema() else {
+        return run_summary_schema();
+    };
+    fields.push(StructField::new("context", TypeSchema::json()));
+    fields.push(StructField::new("attributes", TypeSchema::json()));
+    TypeSchema::Struct(fields)
 }
 
 /// A registered file-store backend and the settings it declares, so the admin UI

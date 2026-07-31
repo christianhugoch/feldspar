@@ -1,0 +1,610 @@
+//! The admin chat socket: one agent, one conversation, streamed (§11.4).
+//!
+//! **Why a WebSocket at all**, when everything else in the admin API is a typed
+//! request/response pair (§13.1): a chat turn is bidirectional. Text, reasoning,
+//! tool calls and tool results go out *while* a new message or a stop may come
+//! in, and the endpoint model has no shape for that. So the turn is a socket and
+//! everything around it — listing agents, listing runs, reading an old one — stays
+//! a typed endpoint, which is the same split the file-store IDE's language server
+//! made (§12.1) and is authenticated the same way: admin-only, through the session
+//! cookie, decided before the upgrade.
+//!
+//! ## The protocol
+//!
+//! The client sends, as JSON text frames:
+//!
+//! - `{"type":"start","agent":"librarian","run":"<uuid>"?}` — which agent this
+//!   socket is talking to, optionally continuing an existing run.
+//! - `{"type":"message","text":"…"}` — one user turn.
+//! - `{"type":"abort"}` — stop the turn that is running.
+//!
+//! The server sends:
+//!
+//! - `{"type":"text","delta":"…"}` / `{"type":"reasoning","delta":"…"}`
+//! - `{"type":"tool_call","id":…,"name":…,"arguments":{…}}`
+//! - `{"type":"tool_result","id":…,"name":…,"content":"…","is_error":bool}`
+//! - `{"type":"done","run":"<uuid>","state":"done"|"failed"|"aborted","answer":"…"}`
+//! - `{"type":"error","message":"…"}`
+//!
+//! ## A failure is an event, not a dropped connection
+//!
+//! A provider that refuses, a key that is wrong, an agent that names a trait
+//! configured against a table that has been dropped: each arrives as an `error`
+//! event on an **open** socket, followed by the `done` that ends the turn. A chat
+//! window that silently stops is unfixable by the person watching it, and a
+//! closed socket is indistinguishable from a network that dropped. The only
+//! things closed with a reason are the two conditions under which no chat is
+//! possible at all — a server with no catalog, or none with agents installed.
+//!
+//! ## Aborting
+//!
+//! The turn is driven inside a `select!` against the socket's own receiver, so a
+//! stop is read while the model is still streaming. Dropping the drive future
+//! drops the provider stream with it, and what the run had already done is on the
+//! row — every step wrote one (§11.2) — so the transcript the history shows after
+//! a stop is the transcript up to the stop.
+
+use std::sync::Arc;
+
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
+use futures::stream::SplitStream;
+use futures::{SinkExt, StreamExt};
+use sc_action::TriggerDispatcher;
+use sc_agent::validate::Agents;
+use sc_agent::{Agent, AgentLoop, Conclusion, Run, RunCaller, RunObserver, Runner, save_run};
+use sc_auth::User;
+use sc_catalog::Catalog;
+use sc_error::{Error, Result};
+use sc_expr::JsEvaluator;
+use sc_llm::{LlmDelta, ToolCall};
+use serde::Deserialize;
+use serde_json::{Value as Json, json};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use uuid::Uuid;
+
+use crate::agents::AgentServices;
+
+/// The route the admin UI opens its chat socket on.
+pub const AGENT_CHAT_ROUTE: &str = "/admin/agent-chat";
+
+/// How much of the first message becomes the run's description — the line a run
+/// list shows. Long enough to recognise a conversation by, short enough that a
+/// pasted document does not become the label of the run it started.
+const DESCRIPTION_CHARS: usize = 120;
+
+/// A close frame's reason is capped by the protocol; the two reasons this sends
+/// are written to fit.
+const MAX_CLOSE_REASON: usize = 120;
+
+/// What the client can say.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientMessage {
+    /// Bind this socket to an agent, optionally continuing a run of it.
+    Start {
+        /// The agent's name — what `_sc_runs.subject` holds, and what a run is
+        /// listed under.
+        agent: String,
+        /// An existing run to carry on, or `None` for a fresh conversation.
+        #[serde(default)]
+        run: Option<Uuid>,
+    },
+    /// One user turn.
+    Message {
+        /// What the person typed.
+        text: String,
+    },
+    /// Stop the turn that is running.
+    Abort,
+}
+
+/// Everything a socket needs that does not change between turns.
+struct ChatContext {
+    catalog: Arc<Catalog>,
+    services: AgentServices,
+    evaluator: Option<Arc<dyn JsEvaluator>>,
+    triggers: Option<Arc<TriggerDispatcher>>,
+    /// Who every tool in every run on this socket executes as (decision 5): the
+    /// person chatting, never the server.
+    caller: RunCaller,
+}
+
+/// Serve one chat socket for `user`.
+///
+/// The caller has already established that the request is an admin's. What is
+/// decided here is whether this *server* can chat at all; both refusals arrive as
+/// close frames rather than statuses, for the reason the language server's do — a
+/// browser cannot read the body of a failed WebSocket handshake.
+pub(crate) async fn agent_chat_upgrade(
+    ws: WebSocketUpgrade,
+    catalog: Option<&Arc<Catalog>>,
+    services: Option<&AgentServices>,
+    evaluator: Option<Arc<dyn JsEvaluator>>,
+    triggers: Option<Arc<TriggerDispatcher>>,
+    user: User,
+) -> axum::response::Response {
+    let (Some(catalog), Some(services)) = (catalog, services) else {
+        let reason = "this server has no agents installed, so there is nothing to chat with";
+        return ws.on_upgrade(move |socket| refuse(socket, reason.to_owned()));
+    };
+    let ctx = ChatContext {
+        catalog: Arc::clone(catalog),
+        services: services.clone(),
+        evaluator,
+        triggers,
+        caller: RunCaller::user(user),
+    };
+    ws.on_upgrade(move |socket| chat(socket, ctx))
+}
+
+/// Close a socket, saying why.
+async fn refuse(mut socket: WebSocket, reason: String) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::POLICY,
+            reason: fit_close_reason(reason).into(),
+        })))
+        .await;
+}
+
+/// A reason cut to what a close frame can carry, on a character boundary.
+fn fit_close_reason(reason: String) -> String {
+    if reason.len() <= MAX_CLOSE_REASON {
+        return reason;
+    }
+    let mut cut = MAX_CLOSE_REASON;
+    while cut > 0 && !reason.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut text = reason;
+    text.truncate(cut);
+    text
+}
+
+/// Read the socket until it closes, running a turn for every message.
+async fn chat(socket: WebSocket, ctx: ChatContext) {
+    let (mut sender, mut receiver) = socket.split();
+    // Events are pushed from two places — this task, and the observer the driver
+    // calls from inside the stream — so they meet in a channel rather than
+    // sharing the sink. The observer is synchronous (a watcher does not steer,
+    // §11.2), which is exactly what an unbounded sender can serve.
+    let (tx, mut rx) = unbounded_channel::<Json>();
+    let writer = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if sender.send(Message::text(event.to_string())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut agent_name: Option<String> = None;
+    let mut run: Option<Run> = None;
+
+    while let Some(Ok(message)) = receiver.next().await {
+        let text = match message {
+            Message::Text(text) => text.to_string(),
+            Message::Binary(bytes) => match String::from_utf8(bytes.to_vec()) {
+                Ok(text) => text,
+                Err(_) => continue,
+            },
+            Message::Close(_) => break,
+            // Ping/Pong are answered by axum itself.
+            Message::Ping(_) | Message::Pong(_) => continue,
+        };
+        let client = match serde_json::from_str::<ClientMessage>(&text) {
+            Ok(client) => client,
+            Err(e) => {
+                send(&tx, error_event(format!("unreadable message: {e}")));
+                continue;
+            }
+        };
+
+        match client {
+            ClientMessage::Start { agent, run: run_id } => {
+                match start(&ctx, &agent, run_id).await {
+                    Ok(existing) => {
+                        agent_name = Some(agent);
+                        run = existing;
+                    }
+                    Err(e) => send(&tx, error_event(sc_error::format_causes(&e))),
+                }
+            }
+            // Nothing is running: a stop that races the end of a turn is the
+            // normal way this arrives, and it is not an error.
+            ClientMessage::Abort => {}
+            ClientMessage::Message { text } => {
+                match turn(
+                    &ctx,
+                    agent_name.as_deref(),
+                    &mut run,
+                    text,
+                    &tx,
+                    &mut receiver,
+                )
+                .await
+                {
+                    Ok(Ended::Ok) => {}
+                    // The socket went away mid-turn. The run is on its row,
+                    // written after every step, so nothing is lost by stopping.
+                    Ok(Ended::Disconnected) => break,
+                    Err(e) => {
+                        // Everything that can go wrong before or around the loop
+                        // — an agent that is not usable, a provider that
+                        // refuses — is an event in the transcript, followed by
+                        // the `done` that releases the composer.
+                        send(&tx, error_event(sc_error::format_causes(&e)));
+                        send(
+                            &tx,
+                            json!({
+                                "type": "done",
+                                "run": run.as_ref().map(|r| r.id.0.to_string()),
+                                "state": "failed",
+                                "answer": "",
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    drop(tx);
+    let _ = writer.await;
+}
+
+/// Bind the socket to an agent, resolving the run it is to continue.
+///
+/// The agent is resolved here as well as on every turn, so a `start` naming an
+/// agent that does not exist — or one that is stored but not usable — says so
+/// while the composer is still empty rather than after the first message.
+async fn start(ctx: &ChatContext, agent: &str, run: Option<Uuid>) -> Result<Option<Run>> {
+    let agents = Agents::load(&ctx.catalog, ctx.services.registry()).await?;
+    let definition = agents.require(agent)?;
+    may_chat(&ctx.caller, definition)?;
+    let Some(id) = run else {
+        return Ok(None);
+    };
+    let existing = sc_agent::require_run(&ctx.catalog, sc_agent::RunId(id)).await?;
+    if existing.subject != definition.name {
+        return Err(Error::invalid(format!(
+            "run {id} is a run of `{}`, not of `{}`",
+            existing.subject, definition.name
+        )));
+    }
+    Ok(Some(existing))
+}
+
+/// How a turn ended, as far as the socket is concerned.
+enum Ended {
+    /// The turn ran to an ending and the socket is still there.
+    Ok,
+    /// The client went away mid-turn.
+    Disconnected,
+}
+
+/// Run one user turn, streaming it, watching for a stop.
+async fn turn(
+    ctx: &ChatContext,
+    agent_name: Option<&str>,
+    run_slot: &mut Option<Run>,
+    text: String,
+    tx: &UnboundedSender<Json>,
+    receiver: &mut SplitStream<WebSocket>,
+) -> Result<Ended> {
+    let name = agent_name.ok_or_else(|| {
+        Error::invalid("no agent has been chosen for this chat; send `start` first")
+    })?;
+
+    // Resolved per turn, not once per socket: an agent is editable while its
+    // conversations exist, so a trait added between two messages is offered on
+    // the second — and an agent that stopped validating stops answering, with
+    // the reason the admin can act on.
+    let agents = Agents::load(&ctx.catalog, ctx.services.registry()).await?;
+    let agent = agents.require(name)?;
+    may_chat(&ctx.caller, agent)?;
+
+    let provider = ctx
+        .services
+        .providers()
+        .connect(&ctx.catalog, agent)
+        .await?;
+    let observer = SocketObserver { tx: tx.clone() };
+    let mut runner = Runner::new(
+        &ctx.catalog,
+        ctx.services.registry(),
+        agent,
+        provider,
+        ctx.caller.clone(),
+    )
+    .observing(&observer);
+    if let Some(evaluator) = &ctx.evaluator {
+        runner = runner.with_evaluator(evaluator);
+    }
+    if let Some(triggers) = &ctx.triggers {
+        runner = runner.with_triggers(triggers);
+    }
+
+    // The run is created here rather than by `Runner::start`, because this is
+    // the one place that has to still hold it after the drive future is dropped:
+    // an aborted turn has a run to mark aborted.
+    let mut run = match run_slot.take() {
+        Some(mut run) if run.subject == agent.name => {
+            let mut state = run.agent_loop()?;
+            state.push_user(&text)?;
+            run.record(&state);
+            save_run(&ctx.catalog, &run).await?;
+            run
+        }
+        _ => {
+            let mut state = AgentLoop::new(agent.max_steps());
+            state.push_user(&text)?;
+            // The first message is the run's description: a history list carries
+            // no transcript (that is what `getRun` is for), so without this a
+            // list of conversations would be a list of timestamps.
+            let run = Run::new(&agent.name, &ctx.caller, &state).description(summarise(&text));
+            save_run(&ctx.catalog, &run).await?;
+            run
+        }
+    };
+
+    let ending = {
+        let driving = runner.drive(&mut run);
+        tokio::pin!(driving);
+        loop {
+            tokio::select! {
+                outcome = &mut driving => break Turn::Finished(outcome),
+                incoming = receiver.next() => match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(ClientMessage::Abort) => break Turn::Aborted,
+                            // A message that arrived while the agent is
+                            // answering is refused rather than queued: splicing
+                            // it into a history the model is already answering
+                            // is how a question gets answered before it was
+                            // asked (`AgentLoop::push_user` refuses it too).
+                            Ok(_) => send(tx, error_event(
+                                "the agent is still answering; wait for it to finish or press stop",
+                            )),
+                            Err(e) => send(tx, error_event(format!("unreadable message: {e}"))),
+                        }
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => {}
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break Turn::Disconnected,
+                }
+            }
+        }
+    };
+
+    let ended = match ending {
+        Turn::Finished(Ok(conclusion)) => {
+            send(
+                tx,
+                json!({
+                    "type": "done",
+                    "run": run.id.0.to_string(),
+                    "state": run.state.as_str(),
+                    "answer": conclusion.answer().unwrap_or(""),
+                }),
+            );
+            Ended::Ok
+        }
+        Turn::Finished(Err(e)) => {
+            // The driver has already written the failure and its reason to the
+            // row; what is left is telling the person watching, in the
+            // provider's own words.
+            send(tx, error_event(sc_error::format_causes(&e)));
+            send(
+                tx,
+                json!({
+                    "type": "done",
+                    "run": run.id.0.to_string(),
+                    "state": run.state.as_str(),
+                    "answer": "",
+                }),
+            );
+            Ended::Ok
+        }
+        Turn::Aborted => {
+            stop(ctx, &mut run).await?;
+            send(
+                tx,
+                json!({
+                    "type": "done",
+                    "run": run.id.0.to_string(),
+                    "state": run.state.as_str(),
+                    "answer": "",
+                }),
+            );
+            Ended::Ok
+        }
+        Turn::Disconnected => {
+            // The same ending, without anyone to tell. Nothing will advance this
+            // run — the drive future has gone with the connection, and nothing
+            // resumes a chat run yet — so leaving it `running` would be a row
+            // that says "still going" for ever in the history.
+            stop(ctx, &mut run).await?;
+            Ended::Disconnected
+        }
+    };
+
+    *run_slot = Some(run);
+    Ok(ended)
+}
+
+/// End `run` where it stands, and write it.
+///
+/// The transcript is left exactly as it is: every step wrote the row (§11.2), so
+/// what the agent had already done is what the history will show, and truncating
+/// it would hide the part that explains why someone pressed stop.
+async fn stop(ctx: &ChatContext, run: &mut Run) -> Result<()> {
+    let mut state = run.agent_loop()?;
+    state.abort();
+    run.record(&state);
+    save_run(&ctx.catalog, run).await
+}
+
+/// What ended the `select!` above.
+enum Turn {
+    Finished(Result<Conclusion>),
+    Aborted,
+    Disconnected,
+}
+
+/// Whether `caller` may chat with `agent`.
+///
+/// The agent's own `min_role` (§11.2), checked here because it is the agent's
+/// authority rather than the route's. The route's admin gate is the coarser one
+/// above it: today every caller that reaches this is an admin and meets every
+/// floor, and the check is still made here rather than assumed, because an agent
+/// exposed to a role is exactly the thing that must not be reachable by way of a
+/// surface that forgot to ask.
+fn may_chat(caller: &RunCaller, agent: &Agent) -> Result<()> {
+    if caller.meets_role(agent.min_role) {
+        return Ok(());
+    }
+    Err(Error::auth(format!(
+        "agent `{}` is not available at your role",
+        agent.name
+    )))
+}
+
+/// The first line of a message, cut to fit a list.
+fn summarise(text: &str) -> String {
+    let line = text.trim().lines().next().unwrap_or("").trim();
+    match line.char_indices().nth(DESCRIPTION_CHARS) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line.to_owned(),
+    }
+}
+
+/// An `error` event, the one thing that can arrive at any point in a turn.
+fn error_event(message: impl std::fmt::Display) -> Json {
+    json!({ "type": "error", "message": message.to_string() })
+}
+
+/// Queue one event for the writer. A send that fails means the socket has gone,
+/// which the read half will notice; there is nothing useful to do here.
+fn send(tx: &UnboundedSender<Json>, event: Json) {
+    let _ = tx.send(event);
+}
+
+/// The [`RunObserver`] that turns the loop's events into socket frames.
+///
+/// It watches and does not steer: every method returns nothing, so a transcript
+/// is a record of what happened rather than something the transport shaped.
+struct SocketObserver {
+    tx: UnboundedSender<Json>,
+}
+
+impl RunObserver for SocketObserver {
+    fn on_delta(&self, delta: &LlmDelta) {
+        match delta {
+            LlmDelta::Text(text) => send(&self.tx, json!({"type": "text", "delta": text})),
+            LlmDelta::Reasoning(text) => {
+                send(&self.tx, json!({"type": "reasoning", "delta": text}));
+            }
+            // Not emitted here. The same call arrives at `on_tool_call` an
+            // instant later, when the loop is about to run it, and emitting both
+            // would put every tool in the transcript twice.
+            LlmDelta::ToolCall(_) => {}
+            // The ending is the `done` event, which carries the run's state —
+            // something the stream alone cannot say.
+            LlmDelta::Stop { .. } => {}
+        }
+    }
+
+    fn on_tool_call(&self, call: &ToolCall) {
+        send(
+            &self.tx,
+            json!({
+                "type": "tool_call",
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+            }),
+        );
+    }
+
+    fn on_tool_result(&self, outcome: &sc_agent::ToolOutcome) {
+        send(
+            &self.tx,
+            json!({
+                "type": "tool_result",
+                "id": outcome.call.id,
+                "name": outcome.call.name,
+                "content": outcome.content,
+                "is_error": outcome.is_error,
+            }),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_at(min_role: Option<u8>) -> Agent {
+        let agent = Agent::new("librarian", "anthropic");
+        match min_role {
+            Some(role) => agent.min_role(role),
+            None => agent,
+        }
+    }
+
+    /// The route is admin-only today, so this is the check that would refuse a
+    /// caller the route let through — which is the point of making it here.
+    #[test]
+    fn an_agent_above_the_callers_role_is_refused() {
+        let staff = RunCaller::user(sc_auth::User::new(Uuid::new_v4(), 40).expect("a user"));
+        // Roles descend: 40 meets a floor of 80, and does not meet 10 or
+        // admin-only.
+        assert!(may_chat(&staff, &agent_at(Some(80))).is_ok());
+        assert!(may_chat(&staff, &agent_at(Some(40))).is_ok());
+        let err = may_chat(&staff, &agent_at(Some(10))).expect_err("10 is above 40");
+        assert!(err.to_string().contains("librarian"), "{err}");
+        assert!(may_chat(&staff, &agent_at(None)).is_err());
+    }
+
+    #[test]
+    fn an_admin_meets_every_floor() {
+        let admin = RunCaller::user(sc_auth::User::new(Uuid::new_v4(), 1).expect("a user"));
+        assert!(may_chat(&admin, &agent_at(None)).is_ok());
+        assert!(may_chat(&admin, &agent_at(Some(100))).is_ok());
+    }
+
+    #[test]
+    fn a_runs_description_is_the_first_line_of_what_was_asked() {
+        assert_eq!(
+            summarise("  how many books?\nand who by?  "),
+            "how many books?"
+        );
+        let long = "x".repeat(DESCRIPTION_CHARS + 10);
+        let cut = summarise(&long);
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), DESCRIPTION_CHARS + 1);
+        // A message that is only whitespace still yields a description that is
+        // not a lie about what was asked.
+        assert_eq!(summarise("   "), "");
+    }
+
+    #[test]
+    fn the_client_messages_parse_as_the_protocol_documents_them() {
+        let start: ClientMessage =
+            serde_json::from_str(r#"{"type":"start","agent":"librarian"}"#).expect("start");
+        assert!(matches!(start, ClientMessage::Start { agent, run: None } if agent == "librarian"));
+        let resumed: ClientMessage = serde_json::from_str(
+            r#"{"type":"start","agent":"a","run":"00000000-0000-0000-0000-000000000001"}"#,
+        )
+        .expect("start with a run");
+        assert!(matches!(resumed, ClientMessage::Start { run: Some(_), .. }));
+        let message: ClientMessage =
+            serde_json::from_str(r#"{"type":"message","text":"hi"}"#).expect("message");
+        assert!(matches!(message, ClientMessage::Message { text } if text == "hi"));
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(r#"{"type":"abort"}"#),
+            Ok(ClientMessage::Abort)
+        ));
+        // An unknown kind is refused rather than read as one of these.
+        assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"resume"}"#).is_err());
+    }
+}

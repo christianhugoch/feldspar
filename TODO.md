@@ -201,30 +201,35 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 4 — The chat interface in the admin UI
 
-- [ ] Typed admin endpoints for everything that is a request/response pair: `listAgents`,
+- [x] Typed admin endpoints for everything that is a request/response pair: `listAgents`,
       `saveAgent`, `deleteAgent`, `agentTraits` (the registry's specs, so the form is generic),
-      `listRuns(agent)`, `getRun(id)`, `deleteRun(id)`.
-- [ ] **The turn itself is a WebSocket**, `/admin/agent-chat`, admin-only through the same session
+      `listRuns(agent)`, `getRun(id)`, `deleteRun(id)`. *(Built as `createAgent`/`updateAgent` and
+      `listAgentTraits` — the split and the spelling every other configuration record in the admin
+      API uses; `listRuns` omits each run's transcript, which is what `getRun` is for.)*
+- [x] **The turn itself is a WebSocket**, `/admin/agent-chat`, admin-only through the same session
       middleware as the language-server route and following its precedent (§12.1): a chat turn is
       bidirectional — deltas out while a new message or an abort may come in — and the typed
       endpoint model describes pairs. Client sends `{ start | message | abort }`; server sends
       `{ text | reasoning | tool_call | tool_result | done | error }`.
-- [ ] **A failure is an event, not a dropped connection.** A provider that refuses, a key that is
+- [x] **A failure is an event, not a dropped connection.** A provider that refuses, a key that is
       wrong, a tool that panics: each renders in the transcript, because a chat window that
       silently stops is unfixable by the person watching it. Aborting closes the provider stream
       and leaves the run in a state the history can show.
-- [ ] `Agents` (list) and `AgentForm` — provider, model, system prompt, `min_role`, the sparse
+- [x] `Agents` (list) and `AgentForm` — provider, model, system prompt, `min_role`, the sparse
       attributes, and the trait picker: add a trait, and its `config_spec` renders through the
       existing `SettingsFields`, once per enabled instance.
-- [ ] `AgentChat` — transcript of user and assistant messages, streaming text, tool calls as
+- [x] `AgentChat` — transcript of user and assistant messages, streaming text, tool calls as
       collapsible entries naming the tool with its arguments and result, a composer, a stop
       button, and the agent's run history with an old run reopening read-only.
-- [ ] Tests: Rust — the socket refuses a non-admin, refuses an agent above the caller's role,
+- [x] Tests: Rust — the socket refuses a non-admin, refuses an agent above the caller's role,
       and drives a whole turn against the `FakeProvider` including a tool call and an abort;
       a provider error arrives as an `error` event on an open socket. `vitest` — the chat model
       against a stubbed socket: deltas appended in order, a tool call and its result paired,
       an error rendered rather than swallowed, abort leaving the transcript intact.
-- [ ] **Done when** an admin creates an agent in the UI, chats with it, watches the text stream and
+      *(The role refusal is a unit test of the check rather than a socket test: the route is
+      admin-only, and an admin meets every floor, so no socket can reach it today. The check is
+      still made in the socket, because the surface that forgets to ask is the one that leaks.)*
+- [x] **Done when** an admin creates an agent in the UI, chats with it, watches the text stream and
       a tool call expand with its result, stops a long answer, reloads the page and finds the
       conversation in the history.
 

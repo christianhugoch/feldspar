@@ -118,10 +118,17 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // errors raise events through the same router the admin API's do.
     let triggers = sc_server::install_triggers(&catalog, evaluator.clone()).await?;
 
+    // Agents: the built-in trait set and the two tables an agent and its runs
+    // live in (§11.2). A stored agent that does not validate is reported and
+    // dropped from the live set, exactly as a trigger that does not is — the
+    // rest of the server works and the admin can repair it in the UI.
+    let agents = sc_server::install_agents(&catalog).await?;
+
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
             .with_evaluator(evaluator)
-            .with_triggers(triggers.clone()),
+            .with_triggers(triggers.clone())
+            .with_agents(agents),
     );
     if config.base_domain.is_some() {
         mount_all(&apps).await;

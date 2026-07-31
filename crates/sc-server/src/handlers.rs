@@ -915,12 +915,15 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let id = parse_llm_provider_id(ctx.path_param("id")?)?;
-                // No `extra_referents` yet: an agent is what will reference a
-                // provider, and `_sc_agents` arrives in the next phase. Passing
-                // an empty slice is the honest state of the system today — see
-                // `delete_llm_provider`'s note, which says so rather than
-                // implying a check that does not exist.
-                let deleted = delete_llm_provider(&catalog, id, &[]).await?;
+                // The agents naming this provider are the references `sc-llm`
+                // cannot see for itself: `_sc_agents` is a layer above it, so
+                // they are collected here and passed in (the same arrangement
+                // `delete_file_store` has with applications). Deleting a
+                // provider an agent still calls through would leave that agent
+                // unable to answer, with the reason a layer away from the
+                // action that caused it.
+                let users = agents_using_provider(&catalog, id).await?;
+                let deleted = delete_llm_provider(&catalog, id, &users).await?;
                 Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
             }
         }
@@ -1020,6 +1023,164 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         "model": model,
                     }),
                 }))
+            }
+        }
+    });
+
+    // --- agents -------------------------------------------------------------
+    // The row ⇄ live-set path again (§11.2), for the third record that has it:
+    // every save goes through `save_agent`, which validates against the *same*
+    // registry the chat socket runs with, and the list carries the reason a
+    // stored agent is not usable beside it — because editing it is the repair.
+
+    reg.register("listAgents", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                // The **stored** rows, with the live set consulted only for its
+                // issues: an agent that fails validation would otherwise vanish
+                // from the screen that exists to repair it.
+                let services = agents_of(&apps)?;
+                let stored = sc_agent::list_agents(&catalog).await?;
+                let live = sc_agent::validate::Agents::load(&catalog, services.registry()).await?;
+                let out: Vec<Json> = stored
+                    .iter()
+                    .map(|agent| {
+                        let problem = live
+                            .issues()
+                            .iter()
+                            .find(|i| i.agent == agent.name)
+                            .map(|i| i.problem.clone());
+                        agent_json(agent, problem)
+                    })
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createAgent", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let services = agents_of(&apps)?;
+                let agent = agent_from_body(sc_agent::AgentId::new(), &ctx.body)?;
+                sc_agent::save_agent(&catalog, services.registry(), &agent).await?;
+                Ok(HandlerResponse::ok(agent_json(&agent, None)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateAgent", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let services = agents_of(&apps)?;
+                let id = parse_agent_id(ctx.path_param("id")?)?;
+                if sc_agent::load_agent(&catalog, id).await?.is_none() {
+                    return Err(Error::not_found(format!("no agent with id {id}")));
+                }
+                // The id is the path's, not the body's — the row's identity is
+                // not something a payload gets to reassign.
+                let agent = agent_from_body(id, &ctx.body)?;
+                sc_agent::save_agent(&catalog, services.registry(), &agent).await?;
+                Ok(HandlerResponse::ok(agent_json(&agent, None)))
+            }
+        }
+    });
+
+    reg.register("deleteAgent", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_agent_id(ctx.path_param("id")?)?;
+                if !sc_agent::delete_agent(&catalog, id).await? {
+                    return Err(Error::not_found(format!("no agent with id {id}")));
+                }
+                // Its runs are **not** deleted with it: a run is a record of what
+                // happened, its subject is the agent's name rather than its id
+                // (§11.4), and a transcript that disappeared with the definition
+                // would take the evidence with it.
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    reg.register("listAgentTraits", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let services = agents_of(&apps)?;
+                let mut out = Vec::new();
+                for trait_ in services.registry().all() {
+                    // Resolved like every other spec the admin UI renders, so a
+                    // setting whose options come from the catalog (a table name,
+                    // a trigger name) arrives as a picker rather than a text box.
+                    let spec = resolve_options(&catalog, trait_.config_spec()).await?;
+                    out.push(json!({
+                        "name": trait_.name(),
+                        "description": trait_.description(),
+                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                    }));
+                }
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    // --- runs ---------------------------------------------------------------
+
+    reg.register("listRuns", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let agent = ctx.path_param("agent")?.to_owned();
+                let out: Vec<Json> = sc_agent::list_runs(&catalog, &agent)
+                    .await?
+                    .iter()
+                    .map(run_summary_json)
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("getRun", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
+                let run = sc_agent::require_run(&catalog, id).await?;
+                Ok(HandlerResponse::ok(run_json(&run)))
+            }
+        }
+    });
+
+    reg.register("deleteRun", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
+                if !sc_agent::delete_run(&catalog, id).await? {
+                    return Err(Error::not_found(format!("no run with id {id}")));
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
             }
         }
     });
@@ -2387,6 +2548,169 @@ fn parse_llm_provider_id(raw: &str) -> Result<LlmProviderDefId> {
     uuid::Uuid::parse_str(raw)
         .map(LlmProviderDefId)
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid LLM provider id")))
+}
+
+/// One stored agent as JSON (matching `agent_schema`), with the reason it cannot
+/// run when there is one (§11.2 — a broken agent stays listed and editable).
+fn agent_json(agent: &sc_agent::Agent, problem: Option<String>) -> Json {
+    json!({
+        "id": agent.id.0,
+        "name": agent.name,
+        "description": agent.description,
+        "provider": agent.provider,
+        "model": agent.model,
+        "system_prompt": agent.system_prompt,
+        "traits": agent
+            .traits
+            .iter()
+            .map(|enabled| json!({
+                "trait": enabled.trait_,
+                "config": Json::Object(enabled.config.clone()),
+            }))
+            .collect::<Vec<_>>(),
+        "min_role": agent.min_role,
+        "attributes": Json::Object(agent.attributes.clone()),
+        "error": problem,
+    })
+}
+
+/// Rebuild an agent definition from a create/update body.
+///
+/// Nothing is defaulted quietly: an absent `traits` is an agent with no traits,
+/// which is a real agent (one that only talks), while a `traits` of the wrong
+/// shape is a refusal naming the entry — an agent half-read is one that would
+/// answer with the wrong tools.
+fn agent_from_body(id: sc_agent::AgentId, body: &Json) -> Result<sc_agent::Agent> {
+    let obj = require_object(body)?;
+    let mut agent = sc_agent::Agent::with_id(
+        id,
+        non_empty_str_field(obj, "name")?,
+        non_empty_str_field(obj, "provider")?,
+    )
+    .description(optional_str(obj, "description"))
+    .system_prompt(optional_str(obj, "system_prompt"));
+    // Absent, null or blank all mean "the provider's own default model", which
+    // is a real answer rather than a missing one — a form posts "" for a box it
+    // left alone.
+    if let Some(model) = obj.get("model").and_then(Json::as_str)
+        && !model.trim().is_empty()
+    {
+        agent = agent.model(model.trim());
+    }
+    if let Some(traits) = obj.get("traits").filter(|v| !v.is_null()) {
+        let Json::Array(entries) = traits else {
+            return Err(Error::invalid("field `traits` must be an array"));
+        };
+        for (i, entry) in entries.iter().enumerate() {
+            let Json::Object(entry) = entry else {
+                return Err(Error::invalid(format!(
+                    "trait {} must be an object of `trait` and `config`",
+                    i + 1
+                )));
+            };
+            let name = entry
+                .get("trait")
+                .and_then(Json::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| Error::invalid(format!("trait {} must name a trait", i + 1)))?;
+            agent = agent.with_trait(
+                sc_agent::EnabledTrait::new(name.trim())
+                    .configuration(object_field(entry, "config")?),
+            );
+        }
+    }
+    if let Some(min_role) = obj.get("min_role").filter(|v| !v.is_null()) {
+        let raw = min_role
+            .as_i64()
+            .ok_or_else(|| Error::invalid("field `min_role` must be a number"))?;
+        agent = agent.min_role(u8::try_from(raw).map_err(|_| {
+            Error::invalid(format!(
+                "`min_role` must be a role between 1 and 100, got {raw}"
+            ))
+        })?);
+    }
+    // The sparse per-agent values (§9): whatever the form set, nothing it did
+    // not. An empty bag means every one of them is the provider's default.
+    agent.attributes = object_field(obj, "attributes")?;
+    Ok(agent)
+}
+
+/// Parse an agent id from a path parameter.
+fn parse_agent_id(raw: &str) -> Result<sc_agent::AgentId> {
+    Ok(sc_agent::AgentId(parse_uuid(raw, "agent")?))
+}
+
+/// Parse a UUID path parameter, naming what it was meant to identify.
+fn parse_uuid(raw: &str, what: &str) -> Result<uuid::Uuid> {
+    uuid::Uuid::parse_str(raw)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid {what} id")))
+}
+
+/// One run as a list entry (matching `run_summary_schema`): everything except
+/// the transcript, which a list of dozens of conversations must not carry.
+fn run_summary_json(run: &sc_agent::Run) -> Json {
+    json!({
+        "id": run.id.0,
+        "kind": run.kind.as_str(),
+        "subject": run.subject,
+        "description": run.description,
+        "state": run.state.as_str(),
+        "error": run.error,
+        "user": run.user,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+    })
+}
+
+/// One whole run (matching `run_schema`): the summary plus the loop state the
+/// chat panel reads a transcript out of.
+fn run_json(run: &sc_agent::Run) -> Json {
+    let mut out = run_summary_json(run);
+    if let Json::Object(fields) = &mut out {
+        fields.insert("context".to_owned(), run.context.clone());
+        fields.insert(
+            "attributes".to_owned(),
+            Json::Object(run.attributes.clone()),
+        );
+    }
+    out
+}
+
+/// The agents that call through the LLM provider `id`, by name — what a delete
+/// has to refuse over.
+///
+/// By the provider's **name**, because that is what an agent stores: an agent
+/// references a provider the way a trigger references an action, so a provider
+/// renamed out from under one is already a broken agent and deleting the row is
+/// the same question.
+async fn agents_using_provider(catalog: &Catalog, id: LlmProviderDefId) -> Result<Vec<String>> {
+    let Some(def) = load_llm_provider(catalog, id).await? else {
+        return Ok(Vec::new());
+    };
+    // No `_sc_agents` table *means* no agent has ever been defined — the same
+    // reading `Agents::load` takes — so a server without agents installed
+    // deletes a provider rather than failing over a table nobody made.
+    if catalog.get(sc_agent::AGENTS_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    Ok(sc_agent::list_agents(catalog)
+        .await?
+        .into_iter()
+        .filter(|agent| agent.provider.trim() == def.name.trim())
+        .map(|agent| format!("agent `{}`", agent.name))
+        .collect())
+}
+
+/// The agent services this server was built with, or a configuration error.
+///
+/// Fails loudly rather than answering with an empty list, exactly as
+/// [`triggers_of`] does: a process that never installed agents cannot list or
+/// save one, and pretending there are none would make a save look like it
+/// worked.
+fn agents_of(apps: &AppMounts) -> Result<crate::AgentServices> {
+    apps.agents().cloned().ok_or_else(|| {
+        Error::config("this server has no agents installed, so agents cannot be managed")
+    })
 }
 
 /// The trigger dispatcher this server was built with, or a configuration error.

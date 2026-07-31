@@ -2,6 +2,89 @@
 
 Changes in reverse chronological order.
 
+## The chat interface: agents in the admin UI
+
+Agents Phase 4, completed. An admin can now create an agent in the browser, chat with it, watch
+the text stream in and a tool call expand with its arguments and its result, stop a long answer,
+reload the page and find the conversation in the history. Everything the previous three phases
+built is now reachable without writing Rust.
+
+**Two transports, split where the shapes differ.** Configuration is typed endpoints — `listAgents`
+/ `createAgent` / `updateAgent` / `deleteAgent`, `listAgentTraits`, and the run history
+(`listRuns`, `getRun`, `deleteRun`) — because each is a request and an answer. The *turn* is a
+**WebSocket** at `/admin/agent-chat`, because it is not: deltas go out while a message or a stop
+may come in, and the endpoint model (§13.1) has no shape for that. The socket follows the
+language server's precedent exactly (§12.1) — admin-only, decided from the session cookie before
+the upgrade, and the *only* refusal answered with an HTTP status, because a browser cannot read
+the body of a failed handshake.
+
+The protocol, as it settled: the client sends `start` (which agent, and optionally which run to
+continue), `message` and `abort`; the server sends `text`, `reasoning`, `tool_call`,
+`tool_result`, `done` and `error`. Four decisions inside it are worth stating, because each is a
+thing that could reasonably have gone the other way:
+
+- **A failure is an event on an open socket, never a dropped connection.** A provider that
+  refuses, a key that is wrong, an agent whose trait names a dropped table: each arrives as
+  `error` in the transcript, followed by the `done` that releases the composer. A chat window
+  that silently stops is unfixable by the person watching it, and a closed socket is
+  indistinguishable from a network that dropped. The two things that *do* close the socket are
+  the conditions under which no chat is possible at all — no catalog, or no agents installed —
+  and both close with the reason in the frame.
+- **A tool call is announced once**, at the moment the loop is about to run it, not when the model
+  streams it. Both would be truthful and the transcript would show every tool twice.
+- **Abort is read while the model is still streaming**, because the turn is driven inside a
+  `select!` against the socket's own receiver. Dropping the drive future drops the provider stream
+  with it, and every step had already written the run row (§11.2) — so the transcript after a stop
+  is the transcript up to the stop, and the run is `aborted` rather than orphaned in `running`.
+  A client that simply **goes away** mid-turn gets the same ending without the events: nothing
+  will advance that run, and a row left saying "running" would say it for ever in the history.
+- **The agent is resolved per turn, not per socket.** An agent is editable while its conversations
+  exist, so a trait added between two messages is offered on the second — and an agent that
+  stopped validating stops answering, with the reason the admin can act on rather than a tool
+  that quietly is not there.
+
+**A `ProviderConnector` seam, and why it is production code.** Decision 7 says no test in this
+tree may need an API key or spend a token, and §11.4's whole subject is what happens *after* the
+provider answers. So how an agent's provider is connected is a trait — `StoredProviders` in a
+server, a scripted `FakeProvider` in the tests — and the seam is at the *connection*: the loop,
+the tool dispatch, the run rows, the row-layer reads and the socket under test are all the
+production ones. A stub HTTP endpoint would have tested the adapter instead.
+
+**`AgentServices` is assembled once, like the trigger dispatcher.** `install_agents` bootstraps
+`_sc_agents` and `_sc_runs`, assembles `sc-core-traits`' built-in set, and reports any stored
+agent that does not validate — and the result rides on `AppMounts` beside the dispatcher and the
+evaluator, so the admin handlers and the chat socket validate against **one** registry. An agent
+that saved against one trait set and ran against another would be refused in one place and
+accepted in the other, which is exactly the bug this arrangement prevents.
+
+**Deleting an LLM provider now checks the agents that use it.** `sc-llm` cannot see `_sc_agents`
+from a layer below, so the server collects the referring agents and passes them in — the
+`extra_referents` slot Phase 1 left with an honest note saying no agent existed yet. **Deleting
+an agent does not delete its runs**: a run's subject is the agent's *name* (§11.4), and a
+transcript that vanished with the definition would take the record of what happened with it.
+
+**In the UI**: `Agents` (list — with a broken agent still listed and marked, because that screen
+is where the repair happens), `AgentForm` (provider, model, prompt, the sparse attributes, and a
+trait picker where each enabled instance renders its own `config_spec` through the existing
+`SettingsFields`, so no screen knows a specific trait and a trait can be added twice), and
+`AgentChat` (transcript, collapsible tool entries, composer, stop, and the run history with an
+old run reopening read-only and a deliberate Continue). The model behind the panel —
+`agentChat.ts` — is a socket wrapper and a pure fold over the event stream, so the part that has
+to be right is tested by `vitest` against a stubbed socket rather than a browser: deltas appended
+in order into one assistant entry, a new entry after a tool so the turn reads as it happened, a
+call paired with its result by id, an error rendered alongside what preceded it, a second message
+refused mid-turn, an abort leaving the transcript intact, and a stored run rebuilt into the same
+transcript the socket streamed.
+
+Tests: Rust — the admin API against a real Postgres (a save validated against the same registry
+the chat runs with, refusing an unknown provider, an unknown trait, a missing table and two
+traits whose tools would collide; an agent whose table was dropped still listed with its reason;
+runs listed without their transcripts, read whole, and outliving their agent); and the socket
+itself against a real listener and a real WebSocket client, driving a whole turn through the
+`FakeProvider` including a real `query_table` read of a real table, a provider that refuses, a
+stream that fails mid-answer, an abort, and the two auth refusals. `vitest` for the chat model.
+`ui/admin` gained a `test` script and `vitest`, as `ui/ide` has.
+
 ## `sc-core-traits`: writing rows, and running a trigger
 
 Agents Phase 3, completed. An agent can now be given four more grants over the world it was

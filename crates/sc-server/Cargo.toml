@@ -30,6 +30,13 @@ sc-core-actions.workspace = true
 # arrive a layer above in the next phase; this crate needs the provider seam
 # because it is the one that serves the admin API.
 sc-llm.workspace = true
+# The agents themselves (§11.2): the record, the trait seam, the loop and the
+# runs the chat socket drives. `sc-core-traits` is the built-in trait set the
+# registry is assembled from — the same arrangement `sc-core-actions` has with
+# the trigger dispatcher, and for the same reason: this crate is where the
+# registry meets the catalog, because it is the one that serves requests.
+sc-agent.workspace = true
+sc-core-traits.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-query.workspace = true
@@ -37,8 +44,13 @@ sc-types.workspace = true
 
 tokio.workspace = true
 axum.workspace = true
-# `SinkExt`/`StreamExt` over the split WebSocket the IDE's language server rides
-# on (§12.1).
+# The chat socket's client protocol, parsed rather than hand-matched (§11.4).
+serde = { workspace = true }
+# The async trait the provider connector is expressed as (§11.4) — and, in the
+# tests, the `FileStore` double the IDE's language-server route has to refuse.
+async-trait.workspace = true
+# `SinkExt`/`StreamExt` over the split WebSocket the IDE's language server and
+# the chat socket both ride on (§12.1, §11.4).
 futures.workspace = true
 axum-extra.workspace = true
 tower = { workspace = true, features = ["util"] }
@@ -54,9 +66,9 @@ rust_decimal.workspace = true
 [dev-dependencies]
 sc-test-harness.workspace = true
 tokio-tungstenite.workspace = true
-# A test-only `FileStore` double: the store with no local path, which is what the
-# IDE's language-server route has to refuse (§12.1).
-async-trait.workspace = true
+# The scripted provider (`sc-agent`'s `testing` feature, decision 7): the chat
+# socket is driven through a whole turn without a vendor and without a token.
+sc-agent = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

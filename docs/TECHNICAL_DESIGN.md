@@ -1491,6 +1491,47 @@ picker rendering each enabled trait's `config_spec` through the existing `Settin
 entries naming the tool and its arguments and result, a composer, a stop button, and the run
 history for that agent.
 
+**What was built, where it deviates** (Phase 4):
+
+- **The socket protocol, as it settled.** Client → server: `{"type":"start","agent":…,"run":…?}`
+  binds the socket to an agent and optionally continues a run; `{"type":"message","text":…}` is
+  one user turn; `{"type":"abort"}` stops the turn that is running. Server → client: `text`,
+  `reasoning`, `tool_call`, `tool_result`, `done` and `error`. `done` carries the run id and the
+  run's state (`done` | `failed` | `aborted`), which is what the client needs and the delta
+  stream alone cannot say. A successful `start` is answered with **silence** — the composer is
+  enabled optimistically and a failure arrives as `error` — because an acknowledgement would be a
+  seventh event that says only "no error".
+- **A tool call is emitted once**, from `RunObserver::on_tool_call` at the moment the loop is
+  about to run it, and the `LlmDelta::ToolCall` that precedes it by an instant is deliberately
+  not forwarded. Both are truthful; forwarding both would render every tool twice.
+- **The agent is resolved per turn**, not once per socket, so a trait added between two messages
+  is offered on the second and an agent that stopped validating stops answering with the reason
+  attached. The provider is connected per turn for the same reason.
+- **Abort, and a client that goes away, are one ending.** The turn is driven inside a `select!`
+  against the socket's own receiver, so a stop is read mid-stream; dropping the drive future drops
+  the provider stream. Either way the run is marked `aborted` and written, because nothing resumes
+  a chat run yet and a row left `running` would say so for ever.
+- **A `ProviderConnector` seam** in `sc-server` decides how an agent's provider is connected —
+  `StoredProviders` in a server, a scripted `FakeProvider` in the tests. It exists because
+  decision 7 forbids a test that needs a key, and it is placed at the *connection* so that
+  everything §11.4 is about (the loop, the tool dispatch, the run rows, the socket) is the
+  production code under test.
+- **`AgentServices` rides on `AppMounts`**, beside the trigger dispatcher and the evaluator, and
+  `install_agents` assembles it once at boot. The admin handlers and the socket therefore
+  validate against one registry; two registries would mean an agent refused in one place and
+  accepted in the other.
+- **The typed endpoints are `listAgents` / `createAgent` / `updateAgent` / `deleteAgent`,
+  `listAgentTraits`, `listRuns` / `getRun` / `deleteRun`** — the create/update split every other
+  configuration record in the admin API uses, rather than one `saveAgent`. `listRuns` returns
+  runs **without their `context`**: a history sidebar is dozens of conversations, and carrying
+  each transcript to render a list of labels is the reason `getRun` exists separately. A run's
+  `description` is set from the first line of the first message, so a list with no transcripts is
+  still a list of recognisable conversations.
+- **Deleting an LLM provider is refused while an agent names it.** The `extra_referents` slot
+  §11.1 left open is filled by the server, which can see `_sc_agents` from above. Deleting an
+  **agent**, by contrast, leaves its runs: `subject` is the name, and the transcript is the
+  record of what happened.
+
 ### 11.5 The agent as an action
 
 `run_agent` is a registered `Action` (in `sc-core-traits`, since it runs a loop whose tools
