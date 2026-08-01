@@ -20,7 +20,10 @@ and reports what it found; asked to do something it runs a trigger it was given.
 file store it reads and greps the project, edits a file, builds the application and reports the
 diagnostics from a build it broke. The same agent is reachable from a **trigger**, so a row
 insert can start it, and the run it produces is readable afterwards in the same history the chat
-panel shows.
+panel shows. And — the boundary Phase 7 revises — an agent given `manage_table_admin` **builds the
+schema it will then work on**: asked for a law firm's tables it creates the connected tables and
+their fields in one act, answers questions about the schema without seeing a row, refuses a drop
+until the admin ticks the box, and writes the access rules of §7.3 under a grant of their own.
 
 **Not the copilot.** The staged AppConstructor and the traits that build *views, triggers and
 applications* are out of scope (§11.6). Phases 1–6 build the machinery they will be written
@@ -330,7 +333,7 @@ tables — `matters` carries a key to `clients`, `time_entries` a key to `matter
 tool turns a twelve-table ERP into forty round trips, each re-sending the whole transcript and each
 able to fail halfway with no way back. One list is one turn, one transaction and one refusal.
 
-- [ ] **Extract the schema-editing rule out of `sc-server` first.** Creating a table and creating a
+- [x] **Extract the schema-editing rule out of `sc-server` first.** Creating a table and creating a
       field exist today only as closures inside `sc-server/src/handlers.rs` — `createTable`'s default
       primary key, `createField`'s `resolve_field_type` → DDL → `_sc_fields` overlay sequence,
       `parse_field_kind`, `validate_calc_field`, `needs_overlay` — and, with the access controls now
@@ -341,7 +344,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       module in `sc-api` (layer 8) beside `rows` — `schema_edit`, because `schema.rs` there already
       means `TypeSchema` — and leave the handlers as thin callers of it, exactly as the REST provider
       is a thin caller of `rows`. This is the phase's real work; the trait on top is small.
-- [ ] **A batch is one transaction and one reload.** `schema_edit::apply(catalog, &[Operation])`
+- [x] **A batch is one transaction and one reload.** `schema_edit::apply(catalog, &[Operation])`
       opens one [`Transaction`](crates/sc-db/src/driver.rs), applies every `SchemaChange` through
       it, commits, then reloads the catalog **once** — not once per operation as `create_table` and
       `create_field` do today, which for a twenty-field batch is twenty introspections. A refused
@@ -354,7 +357,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       resolved against a projected catalog, so a key pointing at a table created three operations
       earlier and a formula naming a field added two operations earlier both validate, and only then
       is any DDL issued.
-- [ ] **Dropping is new capability, not just a new caller.** There is no `dropTable` and no
+- [x] **Dropping is new capability, not just a new caller.** There is no `dropTable` and no
       `deleteField` anywhere: `SchemaChange::DropTable`/`DropColumn` render in
       [`ddl.rs`](crates/sc-db-postgres/src/ddl.rs) and nothing calls them. Add
       `Catalog::drop_table` / `Catalog::drop_field`, each deleting the overlay rows
@@ -364,16 +367,16 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       error a model cannot act on: a table another table's `Key` field references (listing those
       fields, so the model can drop them first), a primary-key field, a field a calculated field's
       expression reads.
-- [ ] **Admin API parity.** `dropTable` and `deleteField` endpoints over the same module, plus the
+- [x] **Admin API parity.** `dropTable` and `deleteField` endpoints over the same module, plus the
       delete buttons in the table and field editors. An agent must not be able to do something the
       admin UI cannot; and now that the rule is shared the endpoints are a handler each.
-- [ ] **Mounted applications re-project.** `createField` calls `apps.refresh_table` because a field
+- [x] **Mounted applications re-project.** `createField` calls `apps.refresh_table` because a field
       change alters an app's REST projection (§4, §13.2), and a schema change arriving from an agent
       must do the same or a live app serves endpoints for a column that is gone. `AppMounts` is
       `sc-server`'s, so add an object-safe `SchemaObserver` seam in `sc-catalog` that the server
       registers on the `Catalog` at boot and `schema_edit` notifies after a successful batch; the
       handlers' own `refresh_table` calls then go away rather than double-firing.
-- [ ] `describe_schema` — every non-system table with its label, description, access floors, its
+- [x] `describe_schema` — every non-system table with its label, description, access floors, its
       **ownership formula source** (not merely whether one is in effect: a tool that may write the
       formula and can only read a boolean has no way to edit one except by overwriting it blind),
       its `ownership_error` where a stored formula has stopped validating, and `rls_enabled` beside
@@ -384,7 +387,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       directions, because "what points at `clients`?" is the question a schema is asked and no single
       field answers it. **No row values, and no row counts** — a count is data, and this tool has
       checked nobody's §7.3 grant to report it.
-- [ ] `edit_schema` — one `operations` array; each item an object with an `op` enum of `create_table`,
+- [x] `edit_schema` — one `operations` array; each item an object with an `op` enum of `create_table`,
       `alter_table`, `add_field`, `alter_field`, `drop_field`, `drop_table`, and a `dry_run` argument
       on the tool that validates the whole batch and applies none of it. Three things the schema does
       rather than leaves to the model, each because a guess here costs a turn or a wrong column:
@@ -397,7 +400,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       in the description, **not** a `oneOf` discriminated union — providers vary in how well they
       handle `oneOf` in tool parameters, and Rust validation that names the missing field for the
       operation at index *n* is a better error than a schema the provider silently flattens.
-- [ ] **Configuration: four grants, checked before the batch begins.** `allow_create`,
+- [x] **Configuration: four grants, checked before the batch begins.** `allow_create`,
       `allow_edit`, `allow_drop` and `allow_access_changes` (the last two default **off**), each a
       checkbox in the trait's form — the same reason `insert_row`/`update_rows`/`delete_rows` are
       three traits rather than one. Access changes are their own grant rather than part of
@@ -412,10 +415,10 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       the built-ins that cannot, since the tables it makes do not exist when it is configured — and
       §11.3's rule is therefore restated for it: it is scoped by *what it may do*, not by *what it
       may reach*, and that difference is the phase's most load-bearing deviation.
-- [ ] **What it may never touch, regardless of grant**: `_sc_*` tables (invisible to
+- [x] **What it may never touch, regardless of grant**: `_sc_*` tables (invisible to
       `describe_schema` and refused by `edit_schema`); `users` and `_sc_roles`, which are described
       and may gain a field but are never dropped and never lose a built-in column.
-- [ ] **The access controls are writable, under their own grant** — `min_role_read`,
+- [x] **The access controls are writable, under their own grant** — `min_role_read`,
       `min_role_write`, `ownership_formula` and `rls_enabled` on `alter_table` and `create_table`.
       This does **not** cross decision 5: the caller is already an admin, and an admin sets these
       through `updateTable` today, so the agent hands its caller nothing its caller lacked. What it
@@ -437,7 +440,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       - **A formula is validated against the schema the batch ends with**, not the one it started
         from: "add an `owner` field, then set the ownership formula to `owner === user.id`" is the
         obvious thing to ask for and must not fail on the second operation.
-- [ ] **`schema_edit` owns the ownership settings too, not only the columns.** Setting these four is
+- [x] **`schema_edit` owns the ownership settings too, not only the columns.** Setting these four is
       not four writes: `updateTable` runs `validate_ownership_settings` (parse, validate against
       `schema_shape`, check `DbCapabilities::row_level_security`, check the formula translates for
       all four policy operations), then `save_table_meta`, then `sync_table_rls` — which emits
@@ -447,16 +450,16 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       [`Transaction::batch`](crates/sc-db/src/driver.rs), so it joins the batch's transaction rather
       than needing one of its own — but it is emitted **after** the column changes it may reference,
       which is the same end-of-batch ordering the formula validation uses.
-- [ ] **The caller must be an admin.** Every other trait leans on §7.3 to decide what a caller may
+- [x] **The caller must be an admin.** Every other trait leans on §7.3 to decide what a caller may
       see; a schema has no ownership formula to fall back on, and the admin API guards every
       catalog endpoint with `AuthRequirement::admin()`. So both tools refuse a run whose
       `RunCaller` is not role 1, saying so — otherwise an agent exposed to a role-80 user through a
       chat view would hand them the table editor.
-- [ ] `validate_config` has little to check that the spec cannot — there is no table to resolve —
+- [x] `validate_config` has little to check that the spec cannot — there is no table to resolve —
       but it does check the one thing that matters: that the two tool names are free, which is what
       makes a second `manage_table_admin` on the same agent refusable on save (§11.2) rather than a
       duplicate tool the model picks between.
-- [ ] Tests: Rust against a real Postgres — a two-table batch with a foreign key, asserting the key
+- [x] Tests: Rust against a real Postgres — a two-table batch with a foreign key, asserting the key
       is in the catalog and a row inserts through it; a batch whose third operation is invalid
       leaving **nothing** applied and naming index 2; the overlay rows going with a dropped table
       and field; a drop refused while another table references it, listing the referencing fields; a
@@ -474,7 +477,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       it dropping the policies and saying so in the result. In `sc-server` — `dropTable` and
       `deleteField` over the endpoints, and a mounted app whose projection loses an endpoint when an
       agent drops the field behind it, and picks up a role floor an agent tightened.
-- [ ] Docs: §11.3 gains this trait and its deviations (the trait that names no table; grants as
+- [x] Docs: §11.3 gains this trait and its deviations (the trait that names no table; grants as
       configuration rather than as separate traits; the batch-as-transaction); §7.3 records that an
       agent may now write a table's access rules, under which grant and behind which admin check,
       since a reader of §7.3 must not have to infer that from §11; §13.1 records `alter_table`'s
@@ -484,7 +487,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       rather than left contradicting this phase; and `docs/tutorial-agents.md` gains a step where the
       reader builds a small schema by asking for it, with the access-control grant among its "trips
       people up" entries.
-- [ ] **Done when** an admin creates an agent with this trait, types "create the database schema for
+- [x] **Done when** an admin creates an agent with this trait, types "create the database schema for
       a law firm's ERP system", and the tables appear in the admin UI's table list with their
       foreign keys drawn between them; asks "which tables reference clients?" and is answered from
       the schema alone; asks to drop one and is refused by name until the checkbox is ticked; and,

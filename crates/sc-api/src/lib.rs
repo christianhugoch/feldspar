@@ -18,13 +18,15 @@
 //! [`generate_client`] the admin API uses.
 //!
 //! [`rows`] holds the table row CRUD both the admin API's handlers and a
-//! provider run, [`auth`] the login vocabulary they share, and [`convert`] the
+//! provider run, [`schema_edit`] the schema-changing rule the admin handlers and
+//! an agent's `manage_table_admin` trait both go through (§3.3, §11.3), [`auth`] the login vocabulary they share, and [`convert`] the
 //! bridge from JSON to the query layer's `Value` — all kept here, below every API
 //! surface, so there is one implementation rather than one per protocol.
 
 pub mod auth;
 pub mod convert;
 pub mod rows;
+pub mod schema_edit;
 
 mod admin;
 mod endpoint;

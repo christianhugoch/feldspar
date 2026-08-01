@@ -163,6 +163,40 @@ impl Table {
         }
     }
 
+    /// A table that does not exist yet, as a schema edit **projects** it (Phase
+    /// 7): the shape the batch will leave in the database, before any DDL has
+    /// been issued.
+    ///
+    /// This is the same value [`from_physical`](Table::from_physical) will
+    /// produce once the batch commits and the catalog reloads — which is the
+    /// point: an operation later in the batch resolves against it, so a key
+    /// pointing at a table created three operations earlier validates without a
+    /// round trip to a database that has not seen either yet.
+    pub fn projected(
+        database: DbId,
+        name: impl Into<String>,
+        fields: Vec<DataField>,
+        primary_key: Vec<String>,
+    ) -> Table {
+        let name = name.into();
+        Table {
+            id: TableId(name.clone()),
+            label: name.clone(),
+            name,
+            database,
+            source: TableSource::Database,
+            fields,
+            primary_key,
+            description: String::new(),
+            access: AccessRules::default(),
+            attributes: Attrs::new(),
+            overlay: None,
+            ownership: None,
+            ownership_error: None,
+            rls_enabled: false,
+        }
+    }
+
     /// Apply an overlay row to this table (technical design §9, TODO §1.2).
     ///
     /// **The precedence rule, stated once:** the database is the authority on

@@ -287,6 +287,14 @@ pub async fn bootstrap_field_meta(catalog: &Catalog) -> Result<Table> {
 /// merged fields are read from the cached [`Table`], so without the reload an
 /// admin would set a type and watch the running server go on serving the old one.
 pub async fn save_field_meta(catalog: &Catalog, meta: &FieldMeta) -> Result<()> {
+    save_field_meta_row(catalog, meta).await?;
+    catalog.reload().await
+}
+
+/// Write the row **without reloading** — the half of [`save_field_meta`] a
+/// batch uses, which reloads once at the end rather than once per operation
+/// (Phase 7).
+pub async fn save_field_meta_row(catalog: &Catalog, meta: &FieldMeta) -> Result<()> {
     let table = meta.table_name.trim();
     let field = meta.field_name.trim();
     if table.is_empty() || field.is_empty() {
@@ -329,7 +337,7 @@ pub async fn save_field_meta(catalog: &Catalog, meta: &FieldMeta) -> Result<()> 
         );
         run(catalog, Statement::from(insert)).await?;
     }
-    catalog.reload().await
+    Ok(())
 }
 
 /// Load the overlay with this id, if it exists.
@@ -390,12 +398,21 @@ pub async fn list_field_meta_for_table(catalog: &Catalog, table: &str) -> Result
 /// field to its introspected basic type. Reloads the cache for the same reason
 /// [`save_field_meta`] does.
 pub async fn delete_field_meta(catalog: &Catalog, id: FieldMetaId) -> Result<bool> {
+    let deleted = delete_field_meta_row(catalog, id).await?;
+    if deleted {
+        catalog.reload().await?;
+    }
+    Ok(deleted)
+}
+
+/// Delete the row **without reloading** — the half of [`delete_field_meta`] a
+/// batch uses, which reloads once at the end rather than once per row (Phase 7).
+pub(crate) async fn delete_field_meta_row(catalog: &Catalog, id: FieldMetaId) -> Result<bool> {
     if load_field_meta(catalog, id).await?.is_none() {
         return Ok(false);
     }
     let delete = Delete::from(FIELD_META_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     run(catalog, Statement::from(delete)).await?;
-    catalog.reload().await?;
     Ok(true)
 }
 

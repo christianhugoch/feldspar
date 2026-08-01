@@ -358,12 +358,27 @@ async fn the_traits_endpoint_declares_each_traits_configuration() -> sc_error::R
         .find(|f| f["name"] == json!("table"))
         .expect("the table setting is declared");
     assert_eq!(table["required"], json!(true));
-    // Every trait declares at least one required setting, which is what stops a
-    // blank trait form being savable — the same property the trait registry's
-    // own test asserts, seen here through the wire shape the form renders from.
+    // Every trait that names a *target* declares it as required, which is what
+    // stops a blank trait form being savable — the same property the trait
+    // registry's own test asserts, seen here through the wire shape the form
+    // renders from.
+    //
+    // `manage_table_admin` is the exception, and the reason is §11.3's: it names
+    // no table, because the tables it makes do not exist when it is configured.
+    // Its form is four grants, each with a default, and a blank one is a
+    // meaningful (read-only) configuration rather than an incomplete one — which
+    // the wire shape has to be able to express, or the admin UI would refuse to
+    // save a valid agent.
     for trait_ in traits {
         let spec = trait_["config_spec"].as_array().unwrap();
         assert!(!spec.is_empty(), "{trait_}");
+        if trait_["name"] == json!("manage_table_admin") {
+            assert!(
+                spec.iter().all(|f| f["type"] == json!("bool")),
+                "the trait with no target is configured entirely by grants: {trait_}"
+            );
+            continue;
+        }
         assert!(
             spec.iter().any(|f| f["required"] == json!(true)),
             "{trait_}"

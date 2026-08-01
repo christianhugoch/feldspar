@@ -22,7 +22,7 @@ use sc_app::{
     Application, CodeFramework, Framework, app_source_from_config, build_application,
     list_applications,
 };
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, SchemaChanged, SchemaObserver};
 use sc_error::{Error, Result};
 
 /// One application served by this process: its record, its UI framework, and its
@@ -329,6 +329,27 @@ impl AppMounts {
     /// Write the mounts, recovering from a poisoned lock (see [`read`](Self::read)).
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<MountedApp>>> {
         self.by_subdomain.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A mounted app re-projects when the schema underneath it moves (Phase 7).
+///
+/// This used to be a `refresh_table` call in each of the three admin handlers
+/// that changed a schema, which worked only while an HTTP request was the only
+/// way to change one. Now that an **agent** can (§11.3), the notification has to
+/// come from where the change is made — `sc_api::schema_edit` — and that crate
+/// cannot name this one. So the catalog carries the seam and this is the
+/// implementation the server installs into it at boot; the handlers' own
+/// `refresh_table` calls are gone rather than double-firing beside it.
+///
+/// A **dropped** table is re-projected like any other change: an app that
+/// declared it must stop serving endpoints for a table that is not there, and
+/// [`reproject`](AppMounts::reproject) leaving a failing app on its previous
+/// mount is the right outcome — the admin sees the error and fixes the app's
+/// table subset.
+impl SchemaObserver for AppMounts {
+    fn schema_changed(&self, _catalog: &Catalog, change: &SchemaChanged) -> Result<()> {
+        self.refresh_table(change.table())
     }
 }
 

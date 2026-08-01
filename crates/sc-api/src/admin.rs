@@ -93,6 +93,27 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Drop a table: its columns, its rows and its overlay row. Distinct from
+    // `deleteTableSettings`, which forgets a *configuration* and leaves the table
+    // exactly where it was — the two verbs are a `DELETE` apart on purpose, and
+    // the settings one carries the `/settings` suffix because it is the narrower
+    // of the pair.
+    //
+    // It exists because an agent can now do this (§11.3), and an agent must not
+    // be able to do something the admin UI cannot.
+    set.register(
+        Endpoint::new(
+            "dropTable",
+            Method::Delete,
+            api().lit("tables").param("table", ValueType::Text),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "dropped",
+            TypeSchema::text(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Forget a table's configuration, returning it to the closed default. Also
     // the way an *orphan* row — one whose table is gone (§1.1) — is cleaned up,
     // which is why the path is addressed by name and does not require the table
@@ -212,6 +233,27 @@ pub fn admin_endpoints() -> EndpointSet {
         )
         .input(field_settings_schema())
         .output(field_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Drop a field: the column, its data and its overlay row. Refused by name
+    // when it is a primary key, a built-in column of `users`/`_sc_roles`, the
+    // target of another table's key, or read by a calculated field — each of
+    // which the database would otherwise refuse with an error nobody can act on.
+    set.register(
+        Endpoint::new(
+            "deleteField",
+            Method::Delete,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("fields")
+                .param("field", ValueType::Text),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "dropped",
+            TypeSchema::text(),
+        )]))
         .auth(AuthRequirement::admin()),
     );
 

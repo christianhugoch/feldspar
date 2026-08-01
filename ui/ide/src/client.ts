@@ -11,6 +11,7 @@ export type CreateTableRequest = { name: string };
 export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean };
 export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean };
 export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean };
+export type DropTableResponse = { dropped: string };
 export type DeleteTableSettingsResponse = { deleted: boolean };
 export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean }>;
 export type ListRolesResponse = Array<{ role: number; name: string; description: string; builtin: boolean }>;
@@ -22,6 +23,7 @@ export type CreateFieldRequest = { name: string; type: string; kind?: unknown | 
 export type CreateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; kind: unknown; attributes: unknown };
 export type UpdateFieldRequest = { type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null };
 export type UpdateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; kind: unknown; attributes: unknown };
+export type DeleteFieldResponse = { dropped: string };
 export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 export type ListRowsResponse = Array<unknown>;
 export type CreateRowRequest = unknown;
@@ -105,6 +107,7 @@ export interface ApiClient {
   listTables(): Promise<ListTablesResponse>;
   createTable(body: CreateTableRequest): Promise<CreateTableResponse>;
   updateTable(table: string, body: UpdateTableRequest): Promise<UpdateTableResponse>;
+  dropTable(table: string): Promise<DropTableResponse>;
   deleteTableSettings(table: string): Promise<DeleteTableSettingsResponse>;
   listOrphanTableSettings(): Promise<ListOrphanTableSettingsResponse>;
   listRoles(): Promise<ListRolesResponse>;
@@ -113,6 +116,7 @@ export interface ApiClient {
   listFields(table: string): Promise<ListFieldsResponse>;
   createField(table: string, body: CreateFieldRequest): Promise<CreateFieldResponse>;
   updateField(table: string, field: string, body: UpdateFieldRequest): Promise<UpdateFieldResponse>;
+  deleteField(table: string, field: string): Promise<DeleteFieldResponse>;
   listFieldTypes(): Promise<ListFieldTypesResponse>;
   listRows(table: string): Promise<ListRowsResponse>;
   createRow(table: string, body: CreateRowRequest): Promise<CreateRowResponse>;
@@ -267,6 +271,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("updateTable", res);
       return (await res.json()) as UpdateTableResponse;
     },
+    async dropTable(table) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("dropTable", res);
+      return (await res.json()) as DropTableResponse;
+    },
     async deleteTableSettings(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/settings`, {
         method: "DELETE",
@@ -333,6 +345,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("updateField", res);
       return (await res.json()) as UpdateFieldResponse;
+    },
+    async deleteField(table, field) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields/${field}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteField", res);
+      return (await res.json()) as DeleteFieldResponse;
     },
     async listFieldTypes() {
       const res = await doFetch(`${baseUrl}/api/field-types`, {

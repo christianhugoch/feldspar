@@ -280,6 +280,15 @@ pub async fn bootstrap_table_meta(catalog: &Catalog) -> Result<Table> {
 /// go on enforcing the old one — with the stored row and the served behaviour
 /// disagreeing until something else happened to reload.
 pub async fn save_table_meta(catalog: &Catalog, meta: &TableMeta) -> Result<()> {
+    save_table_meta_row(catalog, meta).await?;
+    catalog.reload().await
+}
+
+/// Write the row **without reloading** — the half of [`save_table_meta`] a
+/// batch uses, which reloads once at the end rather than once per operation
+/// (Phase 7). Every check [`save_table_meta`] performs is performed here; only
+/// the reload is the caller's.
+pub async fn save_table_meta_row(catalog: &Catalog, meta: &TableMeta) -> Result<()> {
     let name = meta.table_name.trim();
     if name.is_empty() {
         return Err(Error::invalid("a table overlay needs a table name"));
@@ -321,7 +330,7 @@ pub async fn save_table_meta(catalog: &Catalog, meta: &TableMeta) -> Result<()> 
         );
         run(catalog, Statement::from(insert)).await?;
     }
-    catalog.reload().await
+    Ok(())
 }
 
 /// Load the overlay with this id, if it exists.
@@ -385,12 +394,21 @@ pub async fn orphan_table_meta(catalog: &Catalog) -> Result<Vec<TableMeta>> {
 /// reverts to [`AccessRules::default`], and that must take effect now rather
 /// than at the next restart.
 pub async fn delete_table_meta(catalog: &Catalog, id: TableMetaId) -> Result<bool> {
+    let deleted = delete_table_meta_row(catalog, id).await?;
+    if deleted {
+        catalog.reload().await?;
+    }
+    Ok(deleted)
+}
+
+/// Delete the row **without reloading** — the half of [`delete_table_meta`] a
+/// batch uses, which reloads once at the end rather than once per row (Phase 7).
+pub(crate) async fn delete_table_meta_row(catalog: &Catalog, id: TableMetaId) -> Result<bool> {
     if load_table_meta(catalog, id).await?.is_none() {
         return Ok(false);
     }
     let delete = Delete::from(TABLE_META_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     run(catalog, Statement::from(delete)).await?;
-    catalog.reload().await?;
     Ok(true)
 }
 

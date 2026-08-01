@@ -21,8 +21,8 @@ use sc_agent::{
 };
 use sc_auth::User;
 use sc_catalog::{
-    Catalog, TableEvents, TableMeta, bootstrap_file_stores, bootstrap_table_meta,
-    connect_file_store_def, save_file_store, save_table_meta,
+    Catalog, TableEvents, TableMeta, bootstrap_field_meta, bootstrap_file_stores,
+    bootstrap_table_meta, connect_file_store_def, save_file_store, save_table_meta,
 };
 use sc_core_traits::builtin_traits;
 use sc_db::DatabaseDriver;
@@ -84,6 +84,7 @@ impl Env {
         let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
         let catalog = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;
         bootstrap_table_meta(&catalog).await?;
+        bootstrap_field_meta(&catalog).await?;
         bootstrap_triggers(&catalog).await?;
         bootstrap_llm_providers(&catalog).await?;
         bootstrap_file_stores(&catalog).await?;

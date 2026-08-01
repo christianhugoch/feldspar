@@ -2,6 +2,109 @@
 
 Changes in reverse chronological order.
 
+## `manage_table_admin`: the agent that builds the schema
+
+Agents Phase 7, completed. The milestone's earlier phases were held to "if this ends with a trait
+that constructs a table, something has gone wrong"; this phase revises that boundary deliberately,
+now that the machinery is proven. An agent given `manage_table_admin` creates the connected tables
+and their fields of a whole schema in one act, edits what is already there — including, under its
+own grant, the access rules of §7.3 — drops what it is granted to drop, and answers questions
+about the schema **without ever seeing a row**.
+
+**The real work was moving the rule out of `sc-server`.** Creating a table and creating a field
+existed only as closures inside the admin handlers: `createTable`'s default primary key,
+`createField`'s `resolve_field_type` → DDL → `_sc_fields` overlay sequence, `parse_field_kind`,
+`validate_calc_field`, `needs_overlay`, and `updateTable`'s `validate_ownership_settings` and
+`sync_table_rls`. `sc-core-traits` is layer 9 and cannot name `sc-server`, so a trait that
+re-implemented any of that would be a second answer to "what does creating a field mean", and the
+two would drift within a release. It is all now **`sc_api::schema_edit`** (layer 8), beside `rows`
+and for the same reason; the handlers are thin callers of it, exactly as the REST provider is a
+thin caller of `rows`. Six admin endpoints — `createTable`, `updateTable`, `createField`,
+`updateField`, and the new `dropTable`/`deleteField` — hand it one `Operation` each.
+
+**A batch is one transaction, one reload and one refusal.** `schema_edit::apply` takes an
+*ordered list* of operations, because a schema is a set of connected tables and a per-operation
+tool turns a twelve-table ERP into forty round trips. Every operation resolves against a
+**projected** catalog (`sc_catalog::SchemaProjection`), so a key pointing at a table created three
+operations earlier and an ownership formula naming a field added two operations earlier both
+validate — the batch validates against the schema it *ends* with — and only then is any DDL
+issued, through one `Transaction` (`Catalog::apply_schema_batch`), with the RLS policy SQL joining
+it at the end because it may reference columns the operations above it create. A refused operation
+rolls the whole batch back and names itself by index. The catalog reloads **once** rather than once
+per operation, which for a twenty-field batch is nineteen introspections it no longer does. The
+`_sc_tables`/`_sc_fields` overlay rows are written after the commit and cannot join that
+transaction, so `createField`'s partial-failure message — the columns exist, their settings did
+not save, edit or drop them and retry — is now the batch's, naming the operation.
+
+**Dropping is new capability, not just a new caller.** There was no `dropTable` and no
+`deleteField` anywhere: `SchemaChange::DropTable`/`DropColumn` rendered in `ddl.rs` and nothing
+called them. `Catalog::drop_table` and `Catalog::drop_field` now do, each deleting the overlay rows
+with the thing they describe — an overlay left behind would be indistinguishable from §1.1's
+deliberately-kept orphan — and each refusing **by name and before the DDL** what the database would
+otherwise refuse with a foreign-key error nobody can act on: a table another table's `Key`
+references (listing those fields), a primary key, a field a calculated field reads, a built-in
+column of `users`/`_sc_roles`. The endpoints and the admin UI's Drop table / Delete field buttons
+ship with them, because an agent must not be able to do something the admin UI cannot.
+
+**Mounted applications re-project through a seam.** `createField` used to call
+`AppMounts::refresh_table` itself, which worked only while an HTTP request was the only way to
+change a schema. `sc-catalog` now carries a `SchemaObserver` seam — the shape `TableEvents`
+already has, and for the same layering reason — that the server registers on the catalog at boot
+and `schema_edit` notifies after a successful batch. The handlers' own `refresh_table` calls are
+gone rather than double-firing beside it, and a field an *agent* drops takes the endpoints a
+mounted app projected from it with no restart.
+
+**The trait names no table, and that is the phase's most load-bearing deviation.** Every other
+built-in names its target, because "which tables may this agent see?" must be answerable off the
+agent's definition. This one cannot: the tables it makes do not exist when it is configured. So it
+is scoped by *what it may do* — four checkboxes, `allow_create`, `allow_edit`, `allow_drop` and
+`allow_access_changes`, the last two off by default — on **one** trait rather than four, because
+the operations share a batch and a batch that half-applied for want of a grant is the state the
+transaction exists to avoid. A batch containing an ungranted operation is refused whole, naming
+the operation and the checkbox. Access changes are their own grant, *above* dropping, because a
+drop announces itself and a widened role floor does not.
+
+**Both tools refuse a caller who is not an admin.** Every other trait leans on §7.3 to decide what
+a caller may see; a schema has no ownership formula to fall back on, and the admin API guards every
+catalog endpoint with `admin()`. Without this, an agent exposed to a role-80 user through a chat
+view would hand them the table editor. `_sc_*` tables are invisible to `describe_schema` and
+refused by `edit_schema`; `users` and `_sc_roles` are described and may gain a field but are never
+dropped and never lose a built-in column.
+
+**`alter_table` is read-modify-write, and omitted means leave** — a deliberate divergence from
+`updateTable`'s whole-object contract (§13.1), recorded there beside the contract it diverges from.
+The endpoint takes every setting because the admin UI edits a table it has loaded; a model has no
+loaded table, and under that contract `{op: alter_table, table: "clients", min_role_read: 40}`
+would blank the ownership formula and turn RLS off. Enabling RLS is refused unless the formula
+translates for all four operations under the GUC env; **disabling** it always succeeds and says so
+in the result, in those words, because that is the one operation here whose damage is invisible in
+the schema afterwards.
+
+**Three things the tool schema decides rather than leaving to the model**, each because a guess
+costs a turn or a wrong column: the type names are an **enum built from the live registry** (the
+same list `listFieldTypes` builds its picker from), so `varchar(255)` cannot be invented; a foreign
+key is **`references: <table>`**, with the storage type taken from the target's primary key rather
+than asked for, so the pair cannot disagree; and a created table gets the **identity primary key
+unasked**. The operation items are flat objects with per-`op` optional fields documented in their
+descriptions rather than a `oneOf` discriminated union — providers vary in how well they handle
+`oneOf`, and Rust validation naming the missing field for the operation at index *n* is a better
+error than a schema the provider silently flattens.
+
+**Tests** are Rust against a real Postgres: a two-table batch whose foreign key actually
+constrains rows; a batch whose third operation is invalid leaving nothing applied and naming
+index 2; the overlay rows going with a dropped table and a dropped field; a drop refused while
+another table references it, listing the referencing fields; a drop refused for `allow_drop` off
+and taken with it on; both tools refusing a non-admin; `_sc_agents` and `users` refused;
+`describe_schema` on a table full of rows reporting none of their values and no count of them;
+`dry_run` refusing the same way and changing nothing; an `alter_table` naming only `min_role_read`
+leaving the formula, the RLS flag, the label and the write floor exactly as they were; one batch
+that adds a field and then writes a formula naming it; RLS refused for a formula that does not
+translate with nothing written, taken for one that does with the four policies emitted and two
+callers reading different rows, and disabled again dropping them and saying so. In `sc-server`:
+`dropTable` and `deleteField` over the endpoints with their refusals, and a mounted app losing a
+`File` field's endpoints when the field is dropped and picking up a tightened role floor on the
+next request.
+
 ## The agent as a trigger body, and the agents tutorial
 
 Agents Phase 6, completed — and with it the milestone. An insert on a table can now fire a

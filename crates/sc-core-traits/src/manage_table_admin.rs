@@ -1,0 +1,984 @@
+//! `manage_table_admin` — the agent that builds the schema (§11.3, TODO Phase 7).
+//!
+//! The first **app-building** trait, and a deliberate revision of the boundary
+//! the earlier traits drew. Everything before it reaches *rows*; this one reaches
+//! the **catalog**: asked to "create the database schema for a law firm's ERP
+//! system" it creates the connected tables and their fields in one act, edits
+//! what is already there — including, under its own grant, the access rules of
+//! §7.3 — drops what it is granted to drop, and answers questions about the
+//! schema without ever seeing a row.
+//!
+//! Three things make it unlike every other built-in, each stated here because
+//! each is a rule broken on purpose:
+//!
+//! - **It names no table in its configuration.** Every other trait does, because
+//!   "which tables may this agent see?" must be answerable off the agent's
+//!   definition. This one *cannot*: the tables it makes do not exist when it is
+//!   configured. So it is scoped by **what it may do** rather than by what it may
+//!   reach — four checkboxes ([`CFG_ALLOW_CREATE`] and its siblings) — and that
+//!   difference is the phase's most load-bearing deviation.
+//! - **Its grants are configuration rather than separate traits.** `insert_row`,
+//!   `update_rows` and `delete_rows` are three traits over one table; these four
+//!   are booleans on one trait, because the operations share a **batch**:
+//!   creating `matters` with a key to an existing `clients` is a create *and* an
+//!   edit, and a batch that half-applied for want of a grant is the state the
+//!   transaction exists to avoid. A batch containing an ungranted operation is
+//!   refused **whole**, naming the operation and the checkbox that would allow it.
+//! - **The caller must be an admin.** Every other trait leans on §7.3 to decide
+//!   what a caller may see; a schema has no ownership formula to fall back on,
+//!   and the admin API guards every catalog endpoint with `admin()`. So both
+//!   tools refuse a run whose [`RunCaller`] is not role 1 — otherwise an agent
+//!   exposed to a role-80 user through a chat view would hand them the table
+//!   editor.
+//!
+//! ## Why it is two tools, and why one of them takes a list
+//!
+//! [`describe_schema`](TOOL_DESCRIBE) reads; [`edit_schema`](TOOL_EDIT) writes,
+//! taking an **ordered list of operations** rather than one operation per call. A
+//! schema is a set of *connected* tables, so a per-operation tool turns a
+//! twelve-table ERP into forty round trips, each re-sending the whole transcript
+//! and each able to fail halfway with no way back. One list is one turn, one
+//! transaction and one refusal — all of which is
+//! [`sc_api::schema_edit`](sc_api::schema_edit)'s, not this file's. What is here
+//! is the wire shape, the grants and the admin check.
+//!
+//! Three things the tool's schema decides rather than leaving to the model, each
+//! because a guess costs a turn or a wrong column: the **type names are an enum
+//! built from the live registry**, so `varchar(255)` cannot be invented; a
+//! **foreign key is `references: <table>`**, with the storage type taken from the
+//! target's primary key rather than asked for; and a **created table gets an
+//! identity primary key unasked**.
+
+use sc_agent::{AgentTrait, TraitCheck, TraitContext};
+use sc_api::schema_edit::{
+    self, ApplyOptions, FieldSettings, FieldSpec, Grants, Operation, TableSettings,
+};
+use sc_catalog::{ATTR_OWNERSHIP_FORMULA, Catalog, DataFieldKind, FieldId, Table, TableId};
+use sc_error::{Error, Result};
+use sc_llm::ToolSpec;
+use sc_types::{Attrs, BasicType, FormField};
+use serde_json::{Map, Value as Json, json};
+
+/// May create tables and fields.
+pub const CFG_ALLOW_CREATE: &str = schema_edit::GRANT_CREATE;
+/// May change what is already there.
+pub const CFG_ALLOW_EDIT: &str = schema_edit::GRANT_EDIT;
+/// May drop tables and fields. Off by default.
+pub const CFG_ALLOW_DROP: &str = schema_edit::GRANT_DROP;
+/// May write the access rules of §7.3. Off by default, and above `allow_drop` —
+/// a drop announces itself and a widened role floor does not.
+pub const CFG_ALLOW_ACCESS: &str = schema_edit::GRANT_ACCESS_CHANGES;
+
+/// The reading tool's name. Fixed rather than derived, because this trait is
+/// configured against no table to derive one from — which is also what makes a
+/// second `manage_table_admin` on one agent refusable on save (§11.2): the two
+/// instances offer the same two names, and the collision check refuses that where
+/// it is fixable rather than leaving the model to pick between duplicates.
+pub const TOOL_DESCRIBE: &str = "describe_schema";
+/// The writing tool's name.
+pub const TOOL_EDIT: &str = "edit_schema";
+
+/// Build and inspect the database schema.
+pub struct ManageTableAdmin;
+
+/// The tools this trait offers — both of them, under fixed names.
+pub fn tool_names() -> [&'static str; 2] {
+    [TOOL_DESCRIBE, TOOL_EDIT]
+}
+
+#[async_trait::async_trait]
+impl AgentTrait for ManageTableAdmin {
+    fn name(&self) -> &str {
+        "manage_table_admin"
+    }
+
+    fn description(&self) -> &str {
+        "Read and change the database schema: create, alter and drop tables and fields"
+    }
+
+    fn config_spec(&self) -> Vec<FormField> {
+        vec![
+            FormField::new(CFG_ALLOW_CREATE, BasicType::Bool)
+                .label("May create tables and fields")
+                .default_value(true),
+            FormField::new(CFG_ALLOW_EDIT, BasicType::Bool)
+                .label("May change existing tables and fields")
+                .default_value(true),
+            FormField::new(CFG_ALLOW_DROP, BasicType::Bool)
+                .label("May drop tables and fields")
+                .default_value(false),
+            FormField::new(CFG_ALLOW_ACCESS, BasicType::Bool)
+                .label("May change access rules (roles, ownership formula, row-level security)")
+                .default_value(false),
+        ]
+    }
+
+    /// There is no table to resolve, so there is little here the spec cannot
+    /// already say — which is itself the deviation §11.3 records. What is worth
+    /// stating is that a configuration granting nothing is *not* an error: the
+    /// grants bound `edit_schema` only, and an agent with none of them is a
+    /// read-only schema describer, which is a thing an admin may deliberately
+    /// want.
+    async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
+        for key in [
+            CFG_ALLOW_CREATE,
+            CFG_ALLOW_EDIT,
+            CFG_ALLOW_DROP,
+            CFG_ALLOW_ACCESS,
+        ] {
+            match check.config.get(key) {
+                None | Some(Json::Null) | Some(Json::Bool(_)) => {}
+                Some(other) => {
+                    return Err(Error::invalid(format!(
+                        "`{key}` should be true or false, got {other}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
+        let grants = grants(config);
+        let rls = catalog.primary().capabilities().row_level_security;
+        vec![
+            ToolSpec::new(
+                TOOL_DESCRIBE,
+                describe_description(catalog),
+                describe_parameters(),
+            ),
+            ToolSpec::new(TOOL_EDIT, edit_description(&grants, rls), edit_parameters()),
+        ]
+    }
+
+    async fn call(
+        &self,
+        config: &Attrs,
+        tool: &str,
+        args: &Json,
+        ctx: &mut TraitContext<'_>,
+    ) -> Result<Json> {
+        require_admin(ctx, tool)?;
+        match tool {
+            TOOL_DESCRIBE => describe(ctx.catalog, args),
+            TOOL_EDIT => edit(ctx.catalog, config, args).await,
+            other => Err(Error::invalid(format!(
+                "this trait offers `{TOOL_DESCRIBE}` and `{TOOL_EDIT}`, not `{other}`"
+            ))),
+        }
+    }
+}
+
+/// The four grants as configured; an absent checkbox reads as its default.
+fn grants(config: &Attrs) -> Grants {
+    let flag =
+        |key: &str, default: bool| config.get(key).and_then(Json::as_bool).unwrap_or(default);
+    Grants {
+        create: flag(CFG_ALLOW_CREATE, true),
+        edit: flag(CFG_ALLOW_EDIT, true),
+        drop: flag(CFG_ALLOW_DROP, false),
+        access_changes: flag(CFG_ALLOW_ACCESS, false),
+    }
+}
+
+/// Refuse a run whose caller is not an admin, in words the model can relay.
+///
+/// The check is on the **run's** caller, not on the agent's `min_role`: an agent
+/// may be reachable at role 80 for everything else it does and still must not
+/// hand that caller the schema.
+fn require_admin(ctx: &TraitContext<'_>, tool: &str) -> Result<()> {
+    if ctx.caller.role == 1 {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "`{tool}` is only available to an administrator, and this conversation is \
+         with a role-{} user. Tell them the schema can only be seen or changed by \
+         an admin.",
+        ctx.caller.role
+    )))
+}
+
+// --- describe_schema ----------------------------------------------------------
+
+/// The optional filter: describe one table instead of all of them.
+const ARG_TABLE: &str = "table";
+
+fn describe_description(catalog: &Catalog) -> String {
+    let names: Vec<String> = user_tables(catalog).into_iter().map(|t| t.name).collect();
+    let listing = match names.is_empty() {
+        true => "There are no tables yet.".to_owned(),
+        false => format!("The tables are: {}.", names.join(", ")),
+    };
+    format!(
+        "Describe the database schema: every table with its label, description, \
+         access rules (the role floors, the ownership formula and whether \
+         row-level security enforces it), every field with its type and \
+         constraints, and the relationships the foreign keys make — in both \
+         directions, so \"what points at clients?\" is answerable. \
+         {listing}\n\n\
+         This returns **no row data and no row counts**: it describes the shape of \
+         the database, never its contents. System tables (`_sc_*`) are not shown."
+    )
+}
+
+fn describe_parameters() -> Json {
+    json!({
+        "type": "object",
+        "properties": {
+            ARG_TABLE: {
+                "type": "string",
+                "description":
+                    "Describe only this table. Omit it to describe every table, \
+                     which is what you want before planning a change.",
+            },
+        },
+        "additionalProperties": false,
+    })
+}
+
+fn describe(catalog: &Catalog, args: &Json) -> Result<Json> {
+    let args = crate::table::arguments(args, &[ARG_TABLE])?;
+    let only = args
+        .get(ARG_TABLE)
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let tables = user_tables(catalog);
+    if let Some(name) = only
+        && !tables.iter().any(|t| t.name == name)
+    {
+        let names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
+        return Err(Error::not_found(format!(
+            "no table `{name}`; the tables are {}",
+            match names.is_empty() {
+                true => "none — the database has no tables yet".to_owned(),
+                false => names.join(", "),
+            }
+        )));
+    }
+    let rls_available = catalog.primary().capabilities().row_level_security;
+    let described: Vec<Json> = tables
+        .iter()
+        .filter(|t| only.is_none_or(|name| t.name == name))
+        .map(|t| describe_table(t, &tables, rls_available))
+        .collect();
+    Ok(json!({
+        "tables": described,
+        "rls_available": rls_available,
+    }))
+}
+
+/// Every table an admin would call a table: not `_sc_*`, which are invisible to
+/// this tool and refused by the other.
+fn user_tables(catalog: &Catalog) -> Vec<Table> {
+    catalog
+        .tables()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !t.is_system())
+        .collect()
+}
+
+fn describe_table(table: &Table, all: &[Table], rls_available: bool) -> Json {
+    // The formula **source**, not merely whether one is in effect: a tool that
+    // may write the formula and can only read a boolean has no way to edit one
+    // except by overwriting it blind. When the stored formula stopped validating
+    // the live one is `None` and the source is still in the attributes, which is
+    // exactly the case `ownership_error` explains.
+    let formula = table
+        .ownership
+        .as_ref()
+        .map(|f| f.source().to_owned())
+        .or_else(|| {
+            table
+                .attributes
+                .get(ATTR_OWNERSHIP_FORMULA)
+                .and_then(Json::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    let fields: Vec<Json> = table.fields.iter().map(describe_field).collect();
+    // Both directions, because "what points at `clients`?" is the question a
+    // schema is asked and no single field answers it.
+    let references: Vec<Json> = table
+        .fields
+        .iter()
+        .filter_map(|f| match &f.kind {
+            DataFieldKind::Key {
+                target_table,
+                target_field,
+                ..
+            } => Some(json!({
+                "field": f.base.name,
+                "target_table": target_table.0,
+                "target_field": target_field.0,
+            })),
+            _ => None,
+        })
+        .collect();
+    let referenced_by: Vec<Json> = all
+        .iter()
+        .flat_map(|other| {
+            other.fields.iter().filter_map(move |f| match &f.kind {
+                DataFieldKind::Key {
+                    target_table,
+                    target_field,
+                    ..
+                } if target_table.0 == table.name => Some(json!({
+                    "table": other.name,
+                    "field": f.base.name,
+                    "target_field": target_field.0,
+                })),
+                _ => None,
+            })
+        })
+        .collect();
+    json!({
+        "name": table.name,
+        "label": table.label,
+        "description": table.description,
+        "primary_key": table.primary_key,
+        "min_role_read": table.access.min_role_read,
+        "min_role_write": table.access.min_role_write,
+        "ownership_formula": formula,
+        "ownership_error": table.ownership_error,
+        "rls_enabled": table.rls_enabled,
+        // Beside `rls_enabled`, because without it the model proposes RLS to a
+        // database that will refuse it, once per conversation.
+        "rls_available": rls_available,
+        "fields": fields,
+        "references": references,
+        "referenced_by": referenced_by,
+    })
+}
+
+fn describe_field(field: &sc_catalog::DataField) -> Json {
+    let mut out = Map::new();
+    out.insert("name".to_owned(), json!(field.base.name));
+    out.insert("label".to_owned(), json!(field.base.label));
+    out.insert("type".to_owned(), json!(field.base.type_.name()));
+    out.insert(
+        "storage_type".to_owned(),
+        json!(field.base.type_.sql_type()),
+    );
+    out.insert("required".to_owned(), json!(field.required));
+    out.insert("unique".to_owned(), json!(field.unique));
+    out.insert("primary_key".to_owned(), json!(field.primary_key));
+    match &field.kind {
+        DataFieldKind::Key {
+            target_table,
+            target_field,
+            summary_field,
+        } => {
+            out.insert("references".to_owned(), json!(target_table.0));
+            out.insert("references_field".to_owned(), json!(target_field.0));
+            if let Some(summary) = summary_field {
+                out.insert("summary_field".to_owned(), json!(summary.0));
+            }
+        }
+        DataFieldKind::Calc { expression } => {
+            out.insert("calculated".to_owned(), json!(expression));
+        }
+        DataFieldKind::File { store, .. } => {
+            out.insert("file_store".to_owned(), json!(store.0));
+        }
+        DataFieldKind::Plain => {}
+    }
+    Json::Object(out)
+}
+
+// --- edit_schema ---------------------------------------------------------------
+
+/// The ordered list of operations.
+const ARG_OPERATIONS: &str = "operations";
+/// Validate the whole batch and apply none of it.
+const ARG_DRY_RUN: &str = "dry_run";
+
+fn edit_description(grants: &Grants, rls_available: bool) -> String {
+    let mut allowed: Vec<&str> = Vec::new();
+    if grants.create {
+        allowed.push("create_table");
+    }
+    if grants.edit {
+        allowed.push("alter_table, add_field, alter_field");
+    }
+    if grants.drop {
+        allowed.push("drop_field, drop_table");
+    }
+    let permitted = match allowed.is_empty() {
+        true => "You are permitted no operations at all; this tool will refuse \
+                 every batch. Say so rather than retrying."
+            .to_owned(),
+        false => format!("You are permitted: {}.", allowed.join(", ")),
+    };
+    let access = match grants.access_changes {
+        true => "You may also set a table's access rules (`min_role_read`, \
+                 `min_role_write`, `ownership_formula`, `rls_enabled`). These \
+                 change what every other user of this deployment can reach, so \
+                 say plainly what you are about to do before you do it."
+            .to_owned(),
+        false => "You may **not** set access rules; a batch naming \
+                  `min_role_read`, `min_role_write`, `ownership_formula` or \
+                  `rls_enabled` is refused whole."
+            .to_owned(),
+    };
+    let rls = match rls_available {
+        true => "",
+        false => {
+            " This database cannot enforce row-level security, so \
+                  `rls_enabled` will be refused."
+        }
+    };
+    format!(
+        "Change the database schema with an ordered list of operations, applied as \
+         **one transaction**: either all of them happen or none does, and a refused \
+         operation is named by its index in the list. Build a whole connected schema \
+         in one call rather than one table per call — a foreign key may point at a \
+         table created earlier in the same list, and a formula may name a field \
+         added earlier in it.\n\n\
+         Every created table is given an identity primary key called `id`; do not \
+         declare one. A foreign key is `references: <table name>` — its storage \
+         type comes from that table's primary key and must not be given.\n\n\
+         {permitted} {access}{rls}\n\n\
+         Call `{TOOL_DESCRIBE}` first if you are changing something that already \
+         exists; `{ARG_DRY_RUN}` validates a batch and applies none of it."
+    )
+}
+
+fn edit_parameters() -> Json {
+    let types = schema_edit::field_type_names();
+    // A flat object with per-`op` optional fields, documented in the
+    // descriptions, rather than a `oneOf` discriminated union: providers vary in
+    // how well they handle `oneOf` in tool parameters, and Rust validation that
+    // names the missing field for the operation at index *n* is a better error
+    // than a schema the provider silently flattens.
+    json!({
+        "type": "object",
+        "properties": {
+            ARG_OPERATIONS: {
+                "type": "array",
+                "description":
+                    "The operations, applied in order as one transaction.",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {
+                            "type": "string",
+                            "description": "Which operation this is.",
+                            "enum": [
+                                "create_table", "alter_table", "add_field",
+                                "alter_field", "drop_field", "drop_table",
+                            ],
+                        },
+                        "table": {
+                            "type": "string",
+                            "description":
+                                "The table. For `create_table` this is the new \
+                                 table's name: lower-case letters, digits and \
+                                 underscores, and usually plural.",
+                        },
+                        "field": {
+                            "type": "string",
+                            "description":
+                                "The field's name. Required for `add_field`, \
+                                 `alter_field` and `drop_field`.",
+                        },
+                        "type": {
+                            "type": "string",
+                            "description":
+                                "The field's type, for `add_field` and \
+                                 `alter_field`. Omit it when `references` is \
+                                 given — a foreign key takes its type from the \
+                                 table it points at.",
+                            "enum": types,
+                        },
+                        "references": {
+                            "type": "string",
+                            "description":
+                                "Make this field a foreign key onto this table's \
+                                 primary key (`add_field`).",
+                        },
+                        "summary_field": {
+                            "type": "string",
+                            "description":
+                                "A field of the referenced table to show as the \
+                                 human label when picking a row.",
+                        },
+                        "expression": {
+                            "type": "string",
+                            "description":
+                                "Make this a calculated field: a JavaScript \
+                                 expression over the row's own fields, computed on \
+                                 read with no stored column. It cannot use `user` \
+                                 or the operation flags.",
+                        },
+                        "required": {
+                            "type": "boolean",
+                            "description":
+                                "The column rejects nulls (`add_field`, and fields \
+                                 of `create_table`).",
+                        },
+                        "unique": {
+                            "type": "boolean",
+                            "description": "The column carries a unique constraint.",
+                        },
+                        "label": {
+                            "type": "string",
+                            "description":
+                                "A human label for the table or field, shown \
+                                 instead of its name.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "A human description of the table or field.",
+                        },
+                        "fields": {
+                            "type": "array",
+                            "description":
+                                "The table's fields, for `create_table`. Do not \
+                                 include `id` — every created table is given one.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "type": { "type": "string", "enum": types },
+                                    "references": { "type": "string" },
+                                    "summary_field": { "type": "string" },
+                                    "expression": { "type": "string" },
+                                    "required": { "type": "boolean" },
+                                    "unique": { "type": "boolean" },
+                                    "label": { "type": "string" },
+                                    "description": { "type": "string" },
+                                },
+                                "required": ["name"],
+                                "additionalProperties": false,
+                            },
+                        },
+                        "min_role_read": {
+                            "type": "integer",
+                            "description":
+                                "Least-privileged role that may read the table's \
+                                 rows, 1 (admin) to 100 (anyone). Needs the \
+                                 access-rules permission.",
+                            "minimum": 1,
+                            "maximum": 100,
+                        },
+                        "min_role_write": {
+                            "type": "integer",
+                            "description":
+                                "Least-privileged role that may write the table's \
+                                 rows. Needs the access-rules permission.",
+                            "minimum": 1,
+                            "maximum": 100,
+                        },
+                        "ownership_formula": {
+                            "type": "string",
+                            "description":
+                                "A JavaScript expression deciding which rows a \
+                                 caller owns, e.g. `owner === user.id`. Empty \
+                                 clears it. Needs the access-rules permission.",
+                        },
+                        "rls_enabled": {
+                            "type": "boolean",
+                            "description":
+                                "Have the database enforce the ownership formula \
+                                 with row-level-security policies. Turning it off \
+                                 removes that enforcement. Needs the access-rules \
+                                 permission.",
+                        },
+                    },
+                    "required": ["op", "table"],
+                    "additionalProperties": false,
+                },
+            },
+            ARG_DRY_RUN: {
+                "type": "boolean",
+                "description":
+                    "Validate the whole batch and apply none of it. The same \
+                     refusals, no changes.",
+            },
+        },
+        "required": [ARG_OPERATIONS],
+        "additionalProperties": false,
+    })
+}
+
+async fn edit(catalog: &Catalog, config: &Attrs, args: &Json) -> Result<Json> {
+    let args = crate::table::arguments(args, &[ARG_OPERATIONS, ARG_DRY_RUN])?;
+    let items = match args.get(ARG_OPERATIONS) {
+        Some(Json::Array(items)) if !items.is_empty() => items.clone(),
+        Some(Json::Array(_)) | None => {
+            return Err(Error::invalid(format!(
+                "`{ARG_OPERATIONS}` must list at least one operation"
+            )));
+        }
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "`{ARG_OPERATIONS}` should be a list of operations, got {other}"
+            )));
+        }
+    };
+    let dry_run = match args.get(ARG_DRY_RUN) {
+        None | Some(Json::Null) => false,
+        Some(Json::Bool(b)) => *b,
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "`{ARG_DRY_RUN}` should be true or false, got {other}"
+            )));
+        }
+    };
+
+    let mut operations = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        operations.push(
+            parse_operation(item).map_err(|e| Error::invalid(format!("operation {index}: {e}")))?,
+        );
+    }
+
+    let applied = schema_edit::apply(
+        catalog,
+        &operations,
+        &ApplyOptions {
+            grants: grants(config),
+            dry_run,
+        },
+    )
+    .await?;
+    Ok(json!({
+        "applied": !applied.dry_run,
+        "dry_run": applied.dry_run,
+        "tables_created": applied.tables_created,
+        "tables_altered": applied.tables_altered,
+        "tables_dropped": applied.tables_dropped,
+        "fields_added": applied.fields_added,
+        "fields_altered": applied.fields_altered,
+        "fields_dropped": applied.fields_dropped,
+        "notes": applied.notes,
+    }))
+}
+
+/// Turn one wire item into an [`Operation`], naming the field the operation is
+/// missing rather than reporting a shape mismatch — the whole reason the items
+/// are a flat object rather than a `oneOf`.
+fn parse_operation(item: &Json) -> Result<Operation> {
+    let obj = item
+        .as_object()
+        .ok_or_else(|| Error::invalid(format!("should be an object, got {item}")))?;
+    let op = obj
+        .get("op")
+        .and_then(Json::as_str)
+        .ok_or_else(|| Error::invalid("needs an `op`"))?
+        .trim();
+    let table = obj
+        .get("table")
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::invalid(format!("`{op}` needs a `table`")))?
+        .to_owned();
+
+    match op {
+        "create_table" => {
+            let fields = match obj.get("fields") {
+                None | Some(Json::Null) => Vec::new(),
+                Some(Json::Array(items)) => items
+                    .iter()
+                    .map(parse_field_spec)
+                    .collect::<Result<Vec<_>>>()?,
+                Some(other) => {
+                    return Err(Error::invalid(format!(
+                        "`fields` should be a list of field objects, got {other}"
+                    )));
+                }
+            };
+            Ok(Operation::CreateTable {
+                name: table,
+                settings: parse_table_settings(obj)?,
+                fields,
+            })
+        }
+        "alter_table" => Ok(Operation::AlterTable {
+            table,
+            settings: parse_table_settings(obj)?,
+        }),
+        "add_field" => {
+            // The item *is* the field, with `field` naming it — one flat shape
+            // per operation rather than an object nested inside an object whose
+            // sibling keys mean something else.
+            let mut spec = parse_field_spec(item)?;
+            spec.name = require_field(obj, op)?;
+            Ok(Operation::AddField { table, field: spec })
+        }
+        "alter_field" => Ok(Operation::AlterField {
+            table,
+            field: require_field(obj, op)?,
+            settings: parse_field_settings(obj)?,
+        }),
+        "drop_field" => Ok(Operation::DropField {
+            table,
+            field: require_field(obj, op)?,
+        }),
+        "drop_table" => Ok(Operation::DropTable { table }),
+        other => Err(Error::invalid(format!(
+            "unknown `op` `{other}`; it is one of create_table, alter_table, \
+             add_field, alter_field, drop_field, drop_table"
+        ))),
+    }
+}
+
+fn require_field(obj: &Map<String, Json>, op: &str) -> Result<String> {
+    obj.get("field")
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::invalid(format!("`{op}` needs a `field`")))
+}
+
+fn parse_table_settings(obj: &Map<String, Json>) -> Result<TableSettings> {
+    Ok(TableSettings {
+        label: optional_string(obj, "label")?,
+        description: optional_string(obj, "description")?,
+        min_role_read: optional_role(obj, "min_role_read")?,
+        min_role_write: optional_role(obj, "min_role_write")?,
+        ownership_formula: optional_string(obj, "ownership_formula")?,
+        rls_enabled: optional_bool(obj, "rls_enabled")?,
+    })
+}
+
+fn parse_field_settings(obj: &Map<String, Json>) -> Result<FieldSettings> {
+    let kind = field_kind(obj)?;
+    Ok(FieldSettings {
+        label: optional_string(obj, "label")?,
+        description: optional_string(obj, "description")?,
+        type_name: optional_string(obj, "type")?,
+        kind,
+        attributes: None,
+    })
+}
+
+fn parse_field_spec(item: &Json) -> Result<FieldSpec> {
+    let obj = item
+        .as_object()
+        .ok_or_else(|| Error::invalid(format!("a field should be an object, got {item}")))?;
+    let name = obj
+        .get("name")
+        .and_then(Json::as_str)
+        .or_else(|| obj.get("field").and_then(Json::as_str))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    Ok(FieldSpec {
+        name,
+        type_name: optional_string(obj, "type")?.unwrap_or_default(),
+        label: optional_string(obj, "label")?.unwrap_or_default(),
+        description: optional_string(obj, "description")?.unwrap_or_default(),
+        required: optional_bool(obj, "required")?.unwrap_or(false),
+        unique: optional_bool(obj, "unique")?.unwrap_or(false),
+        kind: field_kind(obj)?.unwrap_or(DataFieldKind::Plain),
+        attributes: Attrs::new(),
+    })
+}
+
+/// A field's kind from the flat item: `references` makes it a foreign key,
+/// `expression` a calculated field, and both together are a contradiction worth
+/// naming rather than resolving by precedence.
+fn field_kind(obj: &Map<String, Json>) -> Result<Option<DataFieldKind>> {
+    let references = optional_string(obj, "references")?.filter(|s| !s.trim().is_empty());
+    let expression = optional_string(obj, "expression")?.filter(|s| !s.trim().is_empty());
+    match (references, expression) {
+        (Some(_), Some(_)) => Err(Error::invalid(
+            "a field is either a reference or a calculated expression, not both",
+        )),
+        (Some(target), None) => Ok(Some(DataFieldKind::Key {
+            target_table: TableId(target.trim().to_owned()),
+            // Empty: the schema editor resolves it to the target's primary key,
+            // so the model never has to know (or guess) the column's name.
+            target_field: FieldId(String::new()),
+            summary_field: optional_string(obj, "summary_field")?
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .map(FieldId),
+        })),
+        (None, Some(expression)) => Ok(Some(DataFieldKind::Calc {
+            expression: expression.trim().to_owned(),
+        })),
+        (None, None) => Ok(None),
+    }
+}
+
+fn optional_string(obj: &Map<String, Json>, key: &str) -> Result<Option<String>> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(Error::invalid(format!(
+            "`{key}` should be a string, got {other}"
+        ))),
+    }
+}
+
+fn optional_bool(obj: &Map<String, Json>, key: &str) -> Result<Option<bool>> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Bool(b)) => Ok(Some(*b)),
+        Some(other) => Err(Error::invalid(format!(
+            "`{key}` should be true or false, got {other}"
+        ))),
+    }
+}
+
+fn optional_role(obj: &Map<String, Json>, key: &str) -> Result<Option<u8>> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Number(n)) => n
+            .as_i64()
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|r| (1..=100).contains(r))
+            .map(Some)
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "`{key}` should be a role between 1 and 100, got {n}"
+                ))
+            }),
+        Some(other) => Err(Error::invalid(format!(
+            "`{key}` should be a number between 1 and 100, got {other}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(pairs: &[(&str, bool)]) -> Attrs {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), json!(v)))
+            .collect()
+    }
+
+    #[test]
+    fn dropping_and_access_changes_are_off_unless_asked_for() {
+        // An empty configuration is the safe one: it can build, it cannot
+        // destroy, and it cannot widen anybody's access.
+        let g = grants(&Attrs::new());
+        assert!(g.create && g.edit);
+        assert!(!g.drop && !g.access_changes);
+
+        let g = grants(&config(&[(CFG_ALLOW_DROP, true), (CFG_ALLOW_ACCESS, true)]));
+        assert!(g.drop && g.access_changes);
+
+        let g = grants(&config(&[
+            (CFG_ALLOW_CREATE, false),
+            (CFG_ALLOW_EDIT, false),
+        ]));
+        assert!(!g.create && !g.edit);
+    }
+
+    #[test]
+    fn a_reference_needs_no_type_and_no_target_column() {
+        let item = json!({
+            "op": "add_field", "table": "matters",
+            "field": "client", "references": "clients",
+        });
+        let Operation::AddField { table, field } = parse_operation(&item).unwrap() else {
+            panic!("an add_field");
+        };
+        assert_eq!(table, "matters");
+        assert_eq!(field.name, "client");
+        // No type was given and none was invented: the storage type comes from
+        // the target's primary key, resolved by the schema editor.
+        assert!(field.type_name.is_empty());
+        match field.kind {
+            DataFieldKind::Key {
+                target_table,
+                target_field,
+                ..
+            } => {
+                assert_eq!(target_table.0, "clients");
+                assert!(target_field.0.is_empty());
+            }
+            other => panic!("a key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_operation_missing_its_field_is_told_which_field() {
+        let err = parse_operation(&json!({ "op": "drop_field", "table": "clients" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`drop_field` needs a `field`"), "{err}");
+        let err = parse_operation(&json!({ "op": "add_field" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a `table`"), "{err}");
+        let err = parse_operation(&json!({ "op": "invent_table", "table": "x" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("create_table"), "{err}");
+    }
+
+    #[test]
+    fn omitted_settings_are_none_rather_than_reset() {
+        let Operation::AlterTable { settings, .. } = parse_operation(&json!({
+            "op": "alter_table", "table": "clients", "min_role_read": 40,
+        }))
+        .unwrap() else {
+            panic!("an alter_table");
+        };
+        assert_eq!(settings.min_role_read, Some(40));
+        // The three settings the caller did not name are `None` — "leave it" —
+        // which is the whole divergence from `updateTable`'s whole-object
+        // contract (§13.1).
+        assert_eq!(settings.min_role_write, None);
+        assert_eq!(settings.ownership_formula, None);
+        assert_eq!(settings.rls_enabled, None);
+        assert_eq!(settings.label, None);
+    }
+
+    #[test]
+    fn a_field_cannot_be_a_reference_and_a_formula_at_once() {
+        let err = parse_operation(&json!({
+            "op": "add_field", "table": "t", "field": "f",
+            "references": "clients", "expression": "1 + 1",
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn the_type_enum_in_the_schema_is_the_live_registry() {
+        let params = edit_parameters();
+        let types = params["properties"][ARG_OPERATIONS]["items"]["properties"]["type"]["enum"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let expected: Vec<Json> = schema_edit::field_type_names()
+            .into_iter()
+            .map(Json::String)
+            .collect();
+        assert_eq!(types, expected);
+        assert!(!types.is_empty());
+        // The nested `create_table` field list uses the same enum, so a type is
+        // legal in one place exactly when it is legal in the other.
+        assert_eq!(
+            params["properties"][ARG_OPERATIONS]["items"]["properties"]["fields"]["items"]["properties"]
+                ["type"]["enum"],
+            Json::Array(expected)
+        );
+    }
+
+    #[test]
+    fn the_description_says_what_the_grants_do_not_allow() {
+        let text = edit_description(&Grants::none(), true);
+        assert!(text.contains("no operations at all"), "{text}");
+        assert!(text.contains("may **not** set access rules"), "{text}");
+        let text = edit_description(&Grants::all(), false);
+        assert!(text.contains("create_table"), "{text}");
+        // A database that cannot enforce RLS says so once, in the description,
+        // rather than refusing it once per conversation.
+        assert!(text.contains("cannot enforce row-level security"), "{text}");
+    }
+}

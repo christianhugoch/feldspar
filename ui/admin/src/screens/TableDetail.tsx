@@ -130,16 +130,40 @@ export function TableDetail({ table }: { table: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [table]);
 
+  /**
+   * Drop the table, its columns, its rows and its settings row.
+   *
+   * Confirmed in the browser because it is the one irreversible thing on this
+   * screen — and the server's own refusal (another table's key still points
+   * here) is shown as it came, since it names the fields to remove first.
+   */
+  const dropTable = async () => {
+    if (!window.confirm(`Drop the table "${table}" and every row in it? This cannot be undone.`)) {
+      return;
+    }
+    try {
+      await api.dropTable(table);
+      navigate("/tables");
+    } catch (err) {
+      setError(errorMessage(err, "Could not drop the table."));
+    }
+  };
+
   return (
     <>
       <PageHeader
         pretitle="Table"
         title={settings?.label || table}
         actions={
-          <Button variant="outline-secondary" onClick={() => navigate("/tables")}>
-            <IconArrowLeft className="icon-2" />
-            Tables
-          </Button>
+          <>
+            <Button variant="outline-danger" className="me-2" onClick={dropTable}>
+              Drop table
+            </Button>
+            <Button variant="outline-secondary" onClick={() => navigate("/tables")}>
+              <IconArrowLeft className="icon-2" />
+              Tables
+            </Button>
+          </>
         }
       />
       <PageBody>
@@ -480,6 +504,29 @@ function Fields({
     }
   };
 
+  /**
+   * Drop a field: the column, its data and its settings row.
+   *
+   * The server's refusal is shown as it came rather than replaced with a generic
+   * message — "it is referenced by `matters.client`" is the only version of
+   * "no" that says what to do next.
+   */
+  const drop = async (field: string) => {
+    if (!window.confirm(`Drop the field "${field}" and the data in it? This cannot be undone.`)) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteField(table, field);
+      onChange();
+    } catch (err) {
+      setError(errorMessage(err, "Could not drop the field."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Card>
       <Card.Header>Fields</Card.Header>
@@ -492,6 +539,7 @@ function Fields({
               <th>Type</th>
               <th>Kind</th>
               <th>Nullable</th>
+              <th className="text-end">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -503,6 +551,16 @@ function Fields({
                 </td>
                 <td>{kindLabel(f.kind)}</td>
                 <td>{f.nullable ? "yes" : "no"}</td>
+                <td className="text-end">
+                  <Button
+                    size="sm"
+                    variant="outline-danger"
+                    disabled={busy}
+                    onClick={() => void drop(f.name)}
+                  >
+                    Delete
+                  </Button>
+                </td>
               </tr>
             ))}
           </tbody>

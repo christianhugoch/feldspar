@@ -23,6 +23,7 @@ use sc_query::{SqlDialect, Statement, render_policy_expr};
 
 use crate::caller::CallerContext;
 use crate::catalog::Catalog;
+use crate::projection::SchemaProjection;
 use crate::table::Table;
 
 /// The GUC carrying the caller's role number on the 1–100 scale. Policies read
@@ -96,7 +97,11 @@ fn map_policy_violation(e: Error) -> Error {
 /// rule moves into the database too:
 /// `current_setting('sc.role', true)::int <= <min_role_op> OR (<formula>)`.
 pub async fn enable_rls(catalog: &Catalog, table: &Table) -> Result<()> {
-    let sql = enable_rls_sql(catalog, table)?;
+    let sql = enable_rls_sql(
+        catalog.primary().dialect(),
+        &SchemaProjection::live(catalog)?,
+        table,
+    )?;
     run_ddl(catalog, &sql).await
 }
 
@@ -104,28 +109,37 @@ pub async fn enable_rls(catalog: &Catalog, table: &Table) -> Result<()> {
 /// flags, idempotently. A dropped table takes its policies with it, so this is
 /// only for a table that still exists and is being un-secured.
 pub async fn disable_rls(catalog: &Catalog, table_name: &str) -> Result<()> {
-    let sql = disable_rls_sql(catalog, table_name);
+    let sql = disable_rls_sql(catalog.primary().dialect(), table_name);
     run_ddl(catalog, &sql).await
 }
 
 /// The DDL that [`enable_rls`] runs, as one script — pure so it is unit-tested
-/// without a database.
-pub(crate) fn enable_rls_sql(catalog: &Catalog, table: &Table) -> Result<String> {
+/// without a database, **and** so a batch of schema changes can put it in its own
+/// transaction rather than running it in a second one (Phase 7).
+///
+/// Everything it needs off the schema comes from the [`SchemaProjection`], not
+/// the catalog: enabling RLS at the end of a batch that added the field the
+/// formula names must see that field, and the cache will not have it until the
+/// batch commits and reloads.
+pub fn enable_rls_sql(
+    dialect: &dyn SqlDialect,
+    projection: &SchemaProjection,
+    table: &Table,
+) -> Result<String> {
     let formula = table.ownership.as_ref().ok_or_else(|| {
         Error::invalid(format!(
             "cannot enable row-level security on `{}`: it has no live ownership formula",
             table.name
         ))
     })?;
-    let dialect = catalog.primary().dialect();
-    let shape = catalog.schema_shape()?;
+    let shape = projection.shape();
     // A policy on `table` that queries a child table (a Ↄ-aggregation, Phase 7)
     // whose own policy queries back would make Postgres raise "infinite
     // recursion detected in policy" at query time — refuse at enablement,
     // naming the cycle, instead (principle 5, no silent failures).
-    check_no_policy_cycle(catalog, table, &shape)?;
+    check_no_policy_cycle(projection, table, &shape)?;
     let env = UserEnv::Guc {
-        field_types: catalog.user_field_types()?,
+        field_types: projection.user_field_types(),
     };
     let ident = dialect.quote_ident(&table.name);
 
@@ -147,9 +161,10 @@ pub(crate) fn enable_rls_sql(catalog: &Catalog, table: &Table) -> Result<String>
     Ok(out)
 }
 
-/// The DDL that [`disable_rls`] runs.
-pub(crate) fn disable_rls_sql(catalog: &Catalog, table_name: &str) -> String {
-    let ident = catalog.primary().dialect().quote_ident(table_name);
+/// The DDL that [`disable_rls`] runs — public for the same reason
+/// [`enable_rls_sql`] is.
+pub fn disable_rls_sql(dialect: &dyn SqlDialect, table_name: &str) -> String {
+    let ident = dialect.quote_ident(table_name);
     let mut out = String::new();
     for (op, _) in POLICY_OPS {
         out.push_str(&format!(
@@ -175,14 +190,19 @@ pub(crate) fn disable_rls_sql(catalog: &Catalog, table_name: &str) -> String {
 /// B's policy. A cycle reachable from `table` back to `table` is what Postgres
 /// reports as infinite recursion; here it is a named, refused error with the
 /// standard fix in the message.
-fn check_no_policy_cycle(catalog: &Catalog, table: &Table, shape: &SchemaShape) -> Result<()> {
-    let tables = catalog.tables()?;
+fn check_no_policy_cycle(
+    projection: &SchemaProjection,
+    table: &Table,
+    shape: &SchemaShape,
+) -> Result<()> {
     // The nodes: every RLS-enforced table, plus `table` being enabled now.
-    let enforced: std::collections::BTreeMap<String, Table> = tables
-        .into_iter()
+    let mut enforced: std::collections::BTreeMap<String, Table> = projection
+        .tables()
+        .iter()
         .filter(|t| t.rls_enabled || t.name == table.name)
-        .map(|t| (t.name.clone(), t))
+        .map(|t| (t.name.clone(), t.clone()))
         .collect();
+    enforced.insert(table.name.clone(), table.clone());
 
     // References restricted to enforced tables (a reference to an unenforced
     // table cannot recurse — it has no policy).

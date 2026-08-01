@@ -21,7 +21,7 @@
 //!
 //! ## The set
 //!
-//! Twelve traits over three things an agent can be given. **Tables**:
+//! Thirteen traits over four things an agent can be given. **Tables**:
 //! [`QueryTable`] reads one, and [`InsertRow`], [`UpdateRows`] and
 //! [`DeleteRows`] are three separate opt-in grants over one — so a read-only
 //! agent is the default shape and each way of changing data is a deliberate act
@@ -33,7 +33,10 @@
 //! sub-directory), [`BuildApplication`] builds the application whose source that
 //! is and hands back its diagnostics, and [`RunProjectScript`] runs a script the
 //! project's own `package.json` declares — which is the bounded thing that ships
-//! instead of a shell (decision 6).
+//! instead of a shell (decision 6). And **the schema itself**:
+//! [`ManageTableAdmin`] describes and edits the catalog — the first
+//! *app-building* trait, and the first that does not name a table in its
+//! configuration, because the tables it makes do not exist when it is configured.
 //!
 //! ## And one thing that is not a trait
 //!
@@ -51,10 +54,16 @@
 //! - **It names its target in its configuration.** There is no trait that can
 //!   reach *any* table, because "which tables may this agent see?" is the first
 //!   question an admin needs to be able to answer off the agent's definition.
+//!   **[`ManageTableAdmin`] is the one exception**, and a deliberate one: a
+//!   trait that creates tables cannot name them in advance, so it is scoped by
+//!   *what it may do* — four grants — rather than by what it may reach, and it
+//!   refuses any caller who is not an admin (§11.3).
 //! - **Its tool names are derived from that configuration** (`query_books`, not
 //!   `query`), so one trait enabled twice offers two distinguishable tools —
 //!   which is what makes a collision refusable on save (§11.2). See
-//!   [`tool_names`].
+//!   [`tool_names`]. `ManageTableAdmin`'s two names are fixed for the same
+//!   reason it names no table; enabling it twice therefore *collides*, which is
+//!   the intended outcome.
 //! - **Its tool is described by what it is configured against**: the table's own
 //!   fields, with their types, in the description *and* in the JSON schema. A
 //!   model left to guess a column name will guess, and the guess costs a turn.
@@ -77,6 +86,7 @@ mod edit_file;
 mod files;
 mod insert_row;
 mod list_files;
+mod manage_table_admin;
 mod query_table;
 mod read_file;
 mod run_agent;
@@ -103,6 +113,10 @@ pub use delete_rows::DeleteRows;
 pub use edit_file::EditFile;
 pub use insert_row::InsertRow;
 pub use list_files::ListFiles;
+pub use manage_table_admin::{
+    CFG_ALLOW_ACCESS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP, CFG_ALLOW_EDIT, ManageTableAdmin,
+    TOOL_DESCRIBE, TOOL_EDIT,
+};
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
 pub use read_file::{CFG_MAX_CHARS, DEFAULT_MAX_CHARS, ReadFile};
 pub use run_agent::{CFG_AGENT, CFG_PROMPT, RunAgent};
@@ -123,6 +137,7 @@ pub mod tool_names {
     pub use crate::edit_file::tool_name as edit_file;
     pub use crate::insert_row::tool_name as insert_row;
     pub use crate::list_files::tool_name as list_files;
+    pub use crate::manage_table_admin::tool_names as manage_table_admin;
     pub use crate::query_table::tool_name as query_table;
     pub use crate::read_file::tool_name as read_file;
     pub use crate::run_project_script::tool_name as run_project_script;
@@ -179,6 +194,7 @@ pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(SearchFiles))?;
     registry.register(Arc::new(BuildApplication))?;
     registry.register(Arc::new(RunProjectScript))?;
+    registry.register(Arc::new(ManageTableAdmin))?;
     Ok(())
 }
 
@@ -197,6 +213,7 @@ mod tests {
                 "edit_file",
                 "insert_row",
                 "list_files",
+                "manage_table_admin",
                 "query_table",
                 "read_file",
                 "run_project_script",
@@ -208,13 +225,21 @@ mod tests {
         );
         // Every one of them describes itself and its configuration as data,
         // which is what lets the admin UI render a form for a trait it has never
-        // heard of — and every one names something required, so a blank form
-        // cannot be saved.
+        // heard of — and every one that names a *target* names it as required, so
+        // a blank form cannot be saved.
+        //
+        // `manage_table_admin` is the exception, and the reason is the phase's
+        // point: it names no table, because the tables it makes do not exist when
+        // it is configured. Its form is four grants, each with a default, and a
+        // blank one is a meaningful (read-only) configuration rather than an
+        // incomplete one.
         for trait_ in registry.all() {
             assert!(!trait_.description().is_empty(), "{}", trait_.name());
             let spec = trait_.config_spec();
             assert!(!spec.is_empty(), "{}", trait_.name());
-            assert!(spec.iter().any(|f| f.required), "{}", trait_.name());
+            if trait_.name() != "manage_table_admin" {
+                assert!(spec.iter().any(|f| f.required), "{}", trait_.name());
+            }
         }
     }
 
@@ -273,6 +298,17 @@ mod tests {
         // source is in is the application's own configuration (§13.3), and
         // asking the admin for it twice would be two places to get it wrong.
         assert_eq!(spec("build_application"), vec![CFG_APPLICATION]);
+        // The trait that names no table: four grants, scoping it by what it may
+        // do rather than by what it may reach (§11.3).
+        assert_eq!(
+            spec("manage_table_admin"),
+            vec![
+                CFG_ALLOW_CREATE,
+                CFG_ALLOW_EDIT,
+                CFG_ALLOW_DROP,
+                CFG_ALLOW_ACCESS
+            ]
+        );
     }
 
     /// Every tool name a built-in derives carries **what it does** and **what it
@@ -321,5 +357,14 @@ mod tests {
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
+        // `manage_table_admin`'s names are fixed rather than derived, and say
+        // the same two things every deployment's do.
+        assert_eq!(
+            tool_names::manage_table_admin(),
+            ["describe_schema", "edit_schema"]
+        );
+        for name in tool_names::manage_table_admin() {
+            assert!(!names.iter().any(|n| n == name));
+        }
     }
 }

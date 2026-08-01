@@ -24,21 +24,23 @@ mod events;
 mod field;
 mod field_meta;
 mod file_stores;
+mod observer;
 mod prefetch;
+mod projection;
 mod provider;
 mod rls;
 mod table;
 mod table_meta;
 
 pub use caller::CallerContext;
-pub use catalog::Catalog;
+pub use catalog::{Catalog, SchemaStep};
 pub use events::{TableEvents, TableWrite, WriteOp};
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
 pub use field_meta::{
     FIELD_META_TABLE, FieldMeta, FieldMetaId, KIND_CALC, KIND_FILE, KIND_KEY, KIND_PLAIN,
     bootstrap_field_meta, delete_field_meta, file_kind_config_spec, key_kind_config_spec,
     list_field_meta, list_field_meta_for_table, load_field_meta, load_field_meta_by_field,
-    save_field_meta,
+    save_field_meta, save_field_meta_row,
 };
 pub use file_stores::{
     FILE_STORES_TABLE, FileStoreConnections, QUERY_FILE_STORES, bootstrap_file_stores,
@@ -46,14 +48,16 @@ pub use file_stores::{
     connect_file_store_def, delete_file_store, file_store_field_references, list_file_stores,
     load_file_store, load_file_store_by_name, resolve_options, save_file_store,
 };
+pub use observer::{SchemaChanged, SchemaObserver};
 pub use prefetch::prefetch_bindings;
+pub use projection::SchemaProjection;
 pub use provider::{DriverTableProvider, TableProvider};
-pub use rls::{ROLE_GUC, disable_rls, enable_rls, run_in_context};
+pub use rls::{ROLE_GUC, disable_rls, disable_rls_sql, enable_rls, enable_rls_sql, run_in_context};
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
     ATTR_OWNERSHIP_FORMULA, ATTR_RLS_ENABLED, TABLE_META_TABLE, TableMeta, TableMetaId,
     bootstrap_table_meta, delete_table_meta, list_table_meta, load_table_meta,
-    load_table_meta_by_name, orphan_table_meta, save_table_meta,
+    load_table_meta_by_name, orphan_table_meta, save_table_meta, save_table_meta_row,
 };
 
 #[cfg(test)]
