@@ -20,15 +20,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use sc_action::{EventKind, Trigger, TriggerDispatcher, save_trigger};
+use sc_agent::testing::{FakeProvider, Reply};
+use sc_agent::{Agent, ProviderConnector};
 use sc_app::{ApiConfig, Application, AssetBundle, CodeFramework, FrameworkRef, TriggerRef};
 use sc_auth::{ROLE_ADMIN, Role, SessionStore, create_user, save_role};
 use sc_catalog::{Catalog, TableId};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
+use sc_error::Result;
+use sc_llm::{LlmProvider, LlmProviderDef};
 use sc_server::{
     AppMounts, CSRF_COOKIE, CSRF_HEADER, MountedApp, ServerConfig, admin_handlers,
     build_router_with_apps, default_js_evaluator, install_triggers,
@@ -174,13 +179,46 @@ fn audit_trigger(name: &str, min_role: Option<u8>) -> Trigger {
     trigger
 }
 
+/// The trigger whose body is an agent: a `none` trigger an editor may call,
+/// with a prompt built from what was posted to it.
+fn summarise_trigger() -> Trigger {
+    Trigger::new("summarise", EventKind::None, "run_agent")
+        .config("agent", "summariser")
+        .config("prompt", "`Summarise the post \"${payload.title}\"`")
+        .min_role(ROLE_EDITOR)
+}
+
 fn blog_app() -> Application {
     Application::new("Blog", "blog", FrameworkRef::new("code"))
         .with_table(TableId("posts".to_owned()))
         .with_api(ApiConfig::new("rest", "/api"))
-        // The exposed subset: two of the server's three triggers.
+        // The exposed subset: two of the server's three audit triggers, plus the
+        // one whose action is an agent — which §11.5 claims needs no change to
+        // §13.2 to be exposed like any other.
         .with_trigger(TriggerRef::new("visit_logged"))
         .with_trigger(TriggerRef::new("purge_audit"))
+        .with_trigger(TriggerRef::new("summarise"))
+}
+
+/// The agent the `summarise` trigger runs: no traits, so what is being tested is
+/// the path from an app's endpoint to a run, not what an agent can reach.
+fn summariser() -> Agent {
+    Agent::new("summariser", "house").system_prompt("You summarise blog posts.")
+}
+
+/// What the scripted model answers a triggered run with.
+const AGENT_ANSWER: &str = "A post about homepages.";
+
+/// A connector handing out a fresh script per run — a triggered run connects
+/// once, and several calls in one test must each get a model with something left
+/// to say.
+struct Scripted;
+
+#[async_trait]
+impl ProviderConnector for Scripted {
+    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
+        Ok(Arc::new(FakeProvider::new([Reply::says(AGENT_ANSWER)])) as Arc<dyn LlmProvider>)
+    }
 }
 
 struct Server {
@@ -239,14 +277,31 @@ async fn setup() -> sc_error::Result<Server> {
     create_user(&catalog, READER, PASSWORD, ROLE_READER).await?;
 
     let evaluator = default_js_evaluator();
-    let dispatcher = install_triggers(&catalog, evaluator.clone()).await?;
 
-    // Three triggers: one an editor may call, one nobody has decided the access
-    // of (so: admins), and one the application does not expose at all.
+    // The agent surface comes up first, because `run_agent` is one of the
+    // actions the dispatcher's registry has to contain (§11.5). Its provider is
+    // scripted: no test in this tree spends a token.
+    sc_llm::bootstrap_llm_providers(&catalog).await?;
+    sc_llm::save_llm_provider(
+        &catalog,
+        &LlmProviderDef::anthropic("house", "sk-ant-test", "claude-sonnet-4-5"),
+    )
+    .await?;
+    let agents = sc_server::install_agents(&catalog)
+        .await?
+        .with_providers(Arc::new(Scripted));
+    sc_agent::save_agent(&catalog, agents.registry(), &summariser()).await?;
+
+    let dispatcher = install_triggers(&catalog, evaluator.clone(), &agents).await?;
+
+    // Four triggers: one an editor may call, one nobody has decided the access
+    // of (so: admins), one the application does not expose at all, and one whose
+    // action runs an agent.
     for trigger in [
         audit_trigger("visit_logged", Some(ROLE_EDITOR)),
         audit_trigger("purge_audit", None),
         audit_trigger("internal_only", Some(ROLE_READER)),
+        summarise_trigger(),
     ] {
         save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
     }
@@ -374,6 +429,78 @@ async fn the_triggers_own_min_role_guards_the_endpoint() -> sc_error::Result<()>
         server.audit().await,
         vec![("cleanup".to_owned(), ADMIN.to_owned())]
     );
+    Ok(())
+}
+
+/// §11.5's claim, tested rather than asserted: an application exposes a trigger
+/// whose action is an **agent** exactly as it exposes any other, with no change
+/// to §13.2. The endpoint is the same `POST {mount}/actions/{name}`, the guard is
+/// the same `min_role`, the body is the event's payload — and what comes back is
+/// the agent's answer plus the id of a run that is readable afterwards.
+#[tokio::test]
+async fn an_app_can_expose_a_trigger_whose_action_is_an_agent() -> sc_error::Result<()> {
+    let server = setup().await?;
+
+    // The trigger's own floor guards it, as it guards the ones that write rows:
+    // a reader is below it, and nothing runs.
+    let mut reader = server.app_client();
+    reader.login(READER).await;
+    let (status, _) = reader
+        .send("POST", "/api/actions/summarise", Some(json!({})))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        sc_agent::list_runs(&server.catalog, "summariser")
+            .await?
+            .len(),
+        0
+    );
+
+    let mut editor = server.app_client();
+    editor.login(EDITOR).await;
+    let (status, body) = editor
+        .send(
+            "POST",
+            "/api/actions/summarise",
+            Some(json!({ "title": "homepage" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The action's result: the agent's final message and the run it left behind.
+    // Not a stream — a caller who wants deltas is a chat client (§11.5).
+    assert_eq!(body["agent"], json!("summariser"));
+    assert_eq!(body["answer"], json!(AGENT_ANSWER));
+    assert_eq!(body["conclusion"], json!("answered"));
+    let run_id = body["run"].as_str().expect("a run id").to_owned();
+
+    // And that id resolves to the run the chat panel's history reads, with the
+    // prompt the formula built from the posted payload at the top of it.
+    let run = sc_agent::require_run(
+        &server.catalog,
+        sc_agent::RunId(run_id.parse().expect("a uuid")),
+    )
+    .await?;
+    assert_eq!(run.subject, "summariser");
+    assert_eq!(run.state, sc_agent::RunState::Done);
+    // A trigger-started run carries the trigger's authority, so there is no user
+    // on it — not even the editor whose request caused it (decision 5).
+    assert_eq!(run.user, None);
+    assert!(run.description.contains("summarise"), "{run:?}");
+    let messages = run.agent_loop()?.messages().to_vec();
+    let sc_llm::LlmMessage::User { content } = &messages[0] else {
+        panic!("the run should open with the prompt: {messages:?}")
+    };
+    assert_eq!(content, r#"Summarise the post "homepage""#);
+    let sc_llm::LlmMessage::Assistant { content, .. } = &messages[1] else {
+        panic!("the model's answer should follow it: {messages:?}")
+    };
+    assert_eq!(content, AGENT_ANSWER);
+
+    // The app's generated client gets a typed method for it too: an agent-backed
+    // endpoint is not a special case anywhere in §13.2.
+    let ts = sc_app::app_client_with(&blog_app(), &server.catalog, Some(&server.dispatcher))?;
+    assert!(ts.contains("runSummarise("), "{ts}");
     Ok(())
 }
 

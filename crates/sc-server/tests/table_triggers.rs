@@ -161,7 +161,8 @@ async fn setup() -> sc_error::Result<Server> {
     // The boot path itself: the built-in actions, the stored triggers, and the
     // dispatcher installed into the catalog. Before this call nothing observes a
     // write — which is exactly what every other test in this suite relies on.
-    let dispatcher = install_triggers(&catalog, default_js_evaluator()).await?;
+    let agents = sc_server::install_agents(&catalog).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
 
     let apps = Arc::new(AppMounts::new(catalog.clone()));
     let router = build_router(

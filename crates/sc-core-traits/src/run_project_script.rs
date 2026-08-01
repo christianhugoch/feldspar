@@ -142,7 +142,9 @@ impl AgentTrait for RunProjectScript {
         let declared = declared_scripts(&manifest)?;
         if !declared.iter().any(|s| s == &script) {
             return Err(Error::invalid(match declared.is_empty() {
-                true => format!("that `package.json` declares no scripts, so `{script}` cannot be run"),
+                true => {
+                    format!("that `package.json` declares no scripts, so `{script}` cannot be run")
+                }
                 false => format!(
                     "`{script}` is not a script this project declares. It declares: {}.",
                     declared.join(", ")
@@ -153,13 +155,16 @@ impl AgentTrait for RunProjectScript {
         // The bundler's requirement, for the bundler's reason (§13.3): `npm` is
         // an external process handed a working directory, so the store must have
         // one. An object store cannot host a project that runs.
-        let dir = store.local_path(&manifest_path)?.and_then(|p| p.parent().map(|d| d.to_path_buf())).ok_or_else(|| {
-            Error::config(format!(
-                "{} has no local path, so no script can be run in it; \
+        let dir = store
+            .local_path(&manifest_path)?
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .ok_or_else(|| {
+                Error::config(format!(
+                    "{} has no local path, so no script can be run in it; \
                  a project that runs lives in a local file store",
-                scope.label()
-            ))
-        })?;
+                    scope.label()
+                ))
+            })?;
 
         let child = Command::new("npm")
             .arg("run")
@@ -187,7 +192,10 @@ impl AgentTrait for RunProjectScript {
                 }));
             }
             Ok(result) => result.map_err(|e| {
-                Error::config(format!("could not run `npm run {script}` in {}: {e}", dir.display()))
+                Error::config(format!(
+                    "could not run `npm run {script}` in {}: {e}",
+                    dir.display()
+                ))
             })?,
         };
 
@@ -204,8 +212,11 @@ impl AgentTrait for RunProjectScript {
 
 /// The script names a `package.json` declares.
 fn declared_scripts(manifest: &[u8]) -> Result<Vec<String>> {
-    let json: Json = serde_json::from_slice(manifest)
-        .map_err(|e| Error::invalid(format!("that project's `package.json` is not valid JSON: {e}")))?;
+    let json: Json = serde_json::from_slice(manifest).map_err(|e| {
+        Error::invalid(format!(
+            "that project's `package.json` is not valid JSON: {e}"
+        ))
+    })?;
     Ok(match json.get("scripts") {
         Some(Json::Object(scripts)) => scripts.keys().cloned().collect(),
         _ => Vec::new(),

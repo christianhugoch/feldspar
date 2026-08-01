@@ -337,6 +337,35 @@ impl<'a> Runner<'a> {
     }
 }
 
+/// How a run gets the provider it talks to.
+///
+/// In a deployment this is [`StoredProviders`], which is [`connect`]: the agent
+/// names an `_sc_llm_providers` record, that record is loaded and connected, and
+/// the agent's `model` overrides the provider's default. It is a **trait** rather
+/// than that function called directly because everything built on top of a run —
+/// the chat socket's deltas and aborts (§11.4), the `run_agent` action a trigger
+/// fires (§11.5) — has to be testable against a script rather than a vendor
+/// (decision 7, [`FakeProvider`](crate::testing::FakeProvider)), and pointing a
+/// real adapter at a stub endpoint would test the adapter instead.
+///
+/// The seam is at the **connection**, not inside the loop: whatever answers, the
+/// driver, the run storage and everything above them are the production ones.
+#[async_trait::async_trait]
+pub trait ProviderConnector: Send + Sync {
+    /// The connected provider for `agent`, or why there is none.
+    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>>;
+}
+
+/// The production connector: the provider the agent's definition names.
+pub struct StoredProviders;
+
+#[async_trait::async_trait]
+impl ProviderConnector for StoredProviders {
+    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
+        connect(catalog, agent).await
+    }
+}
+
 /// The connected provider for `agent`, resolved from its stored definition.
 ///
 /// Separate from [`Runner::new`] so a caller that runs several turns connects

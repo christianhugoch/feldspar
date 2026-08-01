@@ -74,9 +74,7 @@ impl AgentTrait for BuildApplication {
         let subdomain = configured_application(check.config)?;
         let app = load_application_by_subdomain(check.catalog, &subdomain)
             .await?
-            .ok_or_else(|| {
-                Error::invalid(format!("no application is served at `{subdomain}`"))
-            })?;
+            .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
         // Resolving the source is what says "this framework builds from a file
         // store"; a static app has nothing to build and the admin should hear it
         // here, not from a tool call.
@@ -187,8 +185,9 @@ fn diagnostics(log: &str) -> Vec<Json> {
         r"^(\S[^(]*)\((\d+),(\d+)\):\s*(?:error|warning)\s+([A-Za-z]+\d+):\s*(.+)$",
     );
     // `src/App.tsx:12:5: ERROR: Expected ";"` — esbuild and its imitators.
-    let positioned =
-        regex_lite::Regex::new(r"^\s*(?:\[[^\]]*\]\s*)?([^\s:]+\.[A-Za-z0-9]+):(\d+):(\d+):\s*(?:(?:ERROR|WARNING|error|warning):\s*)?(\S.*)$");
+    let positioned = regex_lite::Regex::new(
+        r"^\s*(?:\[[^\]]*\]\s*)?([^\s:]+\.[A-Za-z0-9]+):(\d+):(\d+):\s*(?:(?:ERROR|WARNING|error|warning):\s*)?(\S.*)$",
+    );
     // `╭─[ src/main.ts:2:1 ]` — rolldown's boxed report, whose message is the
     // line above the frame.
     let frame = regex_lite::Regex::new(r"[╭┌][─-]*\[\s*([^\s\]]+?):(\d+):(\d+)\s*\]");

@@ -148,7 +148,8 @@ async fn setup() -> sc_error::Result<Server> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator()).await?;
+    let agents = sc_server::install_agents(&catalog).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
 
     let apps = Arc::new(AppMounts::new(catalog.clone()).with_triggers(dispatcher.clone()));
     let router = build_router_with_apps(
@@ -580,12 +581,16 @@ async fn the_actions_describe_their_own_settings() -> sc_error::Result<()> {
     let actions = actions.as_array().cloned().unwrap_or_default();
 
     let names: Vec<&str> = actions.iter().filter_map(|a| a["name"].as_str()).collect();
+    // `run_agent` is among them although it is not one of `sc-core-actions`'
+    // built-ins (§11.5): a server registers it beside them from the assembled
+    // agent services, and the trigger form must offer it like any other.
     assert_eq!(
         names,
         vec![
             "delete_rows",
             "fetch",
             "insert_row",
+            "run_agent",
             "run_js_code",
             "update_rows"
         ]

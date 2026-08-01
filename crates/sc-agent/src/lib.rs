@@ -54,7 +54,7 @@ pub use agent::{
     EnabledTrait,
 };
 pub use agent_trait::{AgentTrait, RunCaller, TraitCheck, TraitContext, Turn};
-pub use driver::{RunObserver, Runner, connect};
+pub use driver::{ProviderConnector, RunObserver, Runner, StoredProviders, connect};
 pub use machine::{AgentLoop, Conclusion, Step, ToolOutcome};
 pub use registry::AgentRegistry;
 pub use run::{Run, RunId, RunKind, RunState};

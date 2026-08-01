@@ -279,29 +279,37 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 6 — The agent as a trigger body, and documentation
 
-- [ ] `run_agent`: a registered `Action` in `sc-core-traits` taking an agent name and a **prompt
+- [x] `run_agent`: a registered `Action` in `sc-core-traits` taking an agent name and a **prompt
       formula** evaluated in the event's scope (§10.1), so a row insert starts an agent with a
       prompt derived from the row. It runs with the trigger's authority (decision 5) and returns
       the final assistant message plus the run id. It does **not** stream — an action returns a
-      value, and a caller who wants deltas is a chat client.
-- [ ] `validate_config` resolves the agent by name and the formula in the event's scope, on save
+      value, and a caller who wants deltas is a chat client. *(Registered separately from
+      `sc-core-actions`' set, through `register_agent_actions`, because it needs the assembled
+      trait registry and the deployment's provider connector — which moved down to `sc-agent` as
+      `ProviderConnector` so this crate can reach it. `install_agents` therefore runs before
+      `install_triggers`.)*
+- [x] `validate_config` resolves the agent by name and the formula in the event's scope, on save
       and on load, so a trigger naming a deleted agent leaves the live set with a reason instead of
       failing when a row is inserted.
-- [ ] An application may expose such a trigger as `POST {mount}/actions/{name}` under the trigger's
+- [x] An application may expose such a trigger as `POST {mount}/actions/{name}` under the trigger's
       own `min_role` (§13.2), with no change to §13.2 — confirm this by test rather than by
-      assertion.
-- [ ] A new tutorial, `docs/tutorial-agents.md`: connect a provider, build a data agent over the
+      assertion. *(`app_trigger_api.rs`: the same endpoint, the same guard, the same generated
+      client method — and the run id in the answer resolves to the run.)*
+- [x] A new tutorial, `docs/tutorial-agents.md`: connect a provider, build a data agent over the
       to-do app's table, chat with it, add `run_trigger`, then point a second agent at the store
       and have it change the app's code. Written as the other tutorials are — the reader's screen,
       and a "trips people up" section (the redacted key, a trait configured against a renamed
-      table, `max_steps`, and the fact that a tool sees only what its caller may see).
-- [ ] §11 revised to describe what was **built** where it deviates from what was planned — the
+      table, `max_steps`, and the fact that a tool sees only what its caller may see). *(Plus a
+      sixth step for `run_agent` itself, and the triggers tutorial now points at it.)*
+- [x] §11 revised to describe what was **built** where it deviates from what was planned — the
       rig APIs that turned out to be wrong or missing, the socket protocol as it settled, and any
       trait whose configuration changed shape. This is the step the last two milestones proved is
-      easy to skip and expensive to skip.
-- [ ] Tests: `repo_hygiene.rs` asserts the new tutorial still teaches each step of the loop and
+      easy to skip and expensive to skip. *(Phases 1, 3, 4 and 5 recorded theirs as they landed;
+      this phase added §11.2's — `tools` taking the catalog, `TraitContext`'s two capabilities,
+      the machine/driver split — and §11.5's.)*
+- [x] Tests: `repo_hygiene.rs` asserts the new tutorial still teaches each step of the loop and
       that §11 still records each deviation.
-- [ ] **Done when** an insert on a table fires a trigger that runs an agent, the row's data reaches
+- [x] **Done when** an insert on a table fires a trigger that runs an agent, the row's data reaches
       the prompt, and the run is readable afterwards in the chat panel's history.
 
 ---
@@ -311,6 +319,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Streaming from `run_agent`.** A triggered run's deltas are not observable while it runs, only
   afterwards from its run row. Watching one live wants the chat socket to be able to attach to a
   run it did not start.
+- **`run_trigger` inside a triggered run.** A run started by `run_agent` is given no dispatcher,
+  so that one tool answers with a configuration error instead of closing a trigger → agent →
+  trigger cycle nothing counts the depth of. Making it work means a run carrying a firing chain
+  (`Event::firing`'s, through `RunCaller` into the tool's caller context), which is the same
+  mechanism §10.3's engine will want and is worth doing once, there.
 - **Conversation compaction.** A long chat grows its context until the provider refuses. The run
   row holds everything; nothing summarises or truncates it yet.
 - **Prompt caching.** Both providers support it and rig exposes Anthropic's cache control; using

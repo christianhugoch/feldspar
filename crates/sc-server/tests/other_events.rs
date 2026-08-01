@@ -139,7 +139,8 @@ async fn setup() -> sc_error::Result<Server> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator()).await?;
+    let agents = sc_server::install_agents(&catalog).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
 
     // The dispatcher rides on the mount registry, which is the handle the router
     // and the admin handlers both already hold — so a login or an error raised by

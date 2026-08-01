@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## The agent as a trigger body, and the agents tutorial
+
+Agents Phase 6, completed — and with it the milestone. An insert on a table can now fire a
+trigger whose action is an **agent**: the row's data reaches the prompt, the agent's tools run,
+and the run it leaves behind is readable afterwards in the chat panel's history.
+
+**`run_agent` is one more registered action**, taking an agent's name and a **prompt formula**
+evaluated in the event's scope — the same language as an `only_if`, a `where` and every field
+value, reading `row`, `old`, `user` and `payload` under the same rule. So an agent becomes a
+trigger body through machinery that already existed (§10.2) and stays editable as an agent. It
+returns the final assistant message, the run id and a `conclusion` (`answered` | `max_steps` |
+`aborted`); it does **not** stream, because an action returns a value and a caller who wants
+deltas is a chat client.
+
+**It lives in `sc-core-traits`, and is registered apart from the built-in actions.** Same layer
+as the traits and for the same reason — it drives a loop whose tools reach the row layer — but
+through `register_agent_actions`, because it needs two things no other action does: the trait
+registry the agents were validated against (one registry, or an agent would be accepted by the
+admin API and refused by the trigger) and how this deployment connects a provider. The visible
+consequence is a boot order: `install_agents` now runs before `install_triggers`, which takes the
+assembled `AgentServices`. The `ProviderConnector` seam moved down from `sc-server` to `sc-agent`
+so this crate can reach it, which is also what keeps decision 7 intact — every test here drives a
+whole run against a script rather than a vendor.
+
+**Checked on save and on load, like everything else configured.** The agent must resolve by name
+and the prompt must resolve in the scope the trigger's event will give it, so `` `${row.title}` ``
+on a `none` trigger is a message on the form rather than a firing that fails, and an agent deleted
+afterwards leaves the trigger out of the live set with a reason on it. The agent is resolved
+against **storage** at save time and against the live set at fire time — `run_trigger`'s split
+read the other way round: one broken thing produces one error, in the place it can be fixed.
+
+**A triggered run carries the trigger's authority** (decision 5) and records no user, which is
+what an audit needs to be able to say. The agent's own `min_role` is the floor on who may *chat*
+with it and does not gate this; what guards a triggered run is the trigger's `min_role` — which
+is also what guards it when an application exposes it as `POST {mount}/actions/{name}`, with no
+change to §13.2 at all. That claim is now a test rather than a sentence: the same endpoint, the
+same 403 for a role below the floor, the same generated `runSummarise()` client method, and the
+run id in the answer resolving to a run whose first message is what the prompt formula built.
+
+**What a triggered run cannot do is run a trigger.** It is given no dispatcher, so an agent whose
+traits include `run_trigger` answers that one tool with a configuration error the model reads and
+reports. Handing the dispatcher back down into an action it is running would close a
+trigger → agent → trigger cycle with nothing counting the depth, since a tool call is not a firing
+and carries no chain. Carried past the milestone with the fix named: a run that carries a firing
+chain, which §10.3's engine will want anyway.
+
+**Two documents.** `docs/tutorial-agents.md` walks an admin from an API key to an agent that reads
+their tasks, runs their triggers, edits their app's source and then runs on its own — with a
+"trips people up" section for the redacted key, a trait whose table was renamed, `max_steps`, and
+the fact that a tool sees only what its caller may see. And §11 now records what was *built* where
+it deviates from what was planned: §11.2's (`AgentTrait::tools` takes the catalog, `TraitContext`
+carries the evaluator and the dispatcher, the machine and the driver are two types, `RunCaller`
+has no default) and §11.5's, beside the blocks Phases 1, 3, 4 and 5 wrote as they landed.
+`repo_hygiene.rs` asserts both — that the tutorial still teaches each step of the loop, and that
+every phase's deviations are still written down.
+
 ## Coding traits: an agent that can build the application
 
 Agents Phase 5, completed. An agent pointed at a file store can now read, list, grep and edit the

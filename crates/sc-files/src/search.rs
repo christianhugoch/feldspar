@@ -37,14 +37,8 @@ use sc_error::{Error, Result};
 /// difference that there are ten thousand of them. A search *rooted* at
 /// `dist` still searches it: the exclusion is on descent, not on the root the
 /// caller named.
-pub const DEFAULT_EXCLUDED_DIRS: [&str; 6] = [
-    ".git",
-    "node_modules",
-    "dist",
-    "build",
-    "target",
-    ".venv",
-];
+pub const DEFAULT_EXCLUDED_DIRS: [&str; 6] =
+    [".git", "node_modules", "dist", "build", "target", ".venv"];
 
 /// The default ceiling on matches returned.
 pub const DEFAULT_MAX_RESULTS: usize = 100;
@@ -96,7 +90,10 @@ impl SearchQuery {
             glob: None,
             dir: String::new(),
             max_results: DEFAULT_MAX_RESULTS,
-            exclude_dirs: DEFAULT_EXCLUDED_DIRS.iter().map(|d| (*d).to_owned()).collect(),
+            exclude_dirs: DEFAULT_EXCLUDED_DIRS
+                .iter()
+                .map(|d| (*d).to_owned())
+                .collect(),
         }
     }
 
@@ -171,8 +168,7 @@ pub async fn search_store(
                 if query.exclude_dirs.iter().any(|d| d == &entry.name) {
                     continue;
                 }
-                let child_floor =
-                    crate::effective_min_role(store, floor, &entry.path).await?;
+                let child_floor = crate::effective_min_role(store, floor, &entry.path).await?;
                 directories.push((entry.path, child_floor));
                 continue;
             }
@@ -238,7 +234,9 @@ impl Matcher {
         let regex = regex_lite::RegexBuilder::new(&source)
             .case_insensitive(!query.case_sensitive)
             .build()
-            .map_err(|e| Error::invalid(format!("`{}` is not a valid search: {e}", query.pattern)))?;
+            .map_err(|e| {
+                Error::invalid(format!("`{}` is not a valid search: {e}", query.pattern))
+            })?;
         Ok(Matcher { regex })
     }
 

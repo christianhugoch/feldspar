@@ -99,8 +99,11 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
     // field to the *use* first (the mistake), build, read the diagnostic, then
     // declare the field and build clean.
     let provider = Arc::new(FakeProvider::new([
-        Reply::calls("search_files_apps_web", json!({"pattern": "interface Todo"}))
-            .with_preamble("Let me find where the type is declared."),
+        Reply::calls(
+            "search_files_apps_web",
+            json!({"pattern": "interface Todo"}),
+        )
+        .with_preamble("Let me find where the type is declared."),
         Reply::calls(
             "edit_file_apps_web",
             json!({

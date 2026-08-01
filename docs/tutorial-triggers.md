@@ -268,3 +268,8 @@ You now have the server acting on its own: on writes, on request, and on a clock
 pairing is [tutorial-ownership.md](tutorial-ownership.md)'s formula language, which is the same
 language these triggers are configured in — `only_if`, a `where`, and every field value are all
 the one expression syntax, evaluated the same way, over the event instead of over a row.
+
+Then [tutorial-agents.md](tutorial-agents.md), which adds one more action to the table above:
+`run_agent`, whose configuration is an agent's name and a prompt formula over the same event. An
+agent is a configured LLM loop that can read your tables, run the triggers you built here, and
+edit your app's source — and hanging one off a trigger is how it runs when nobody is watching.

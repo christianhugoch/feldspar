@@ -237,7 +237,11 @@ async fn a_search_finds_a_literal_and_a_regex_across_directories() -> Result<()>
     let env = Env::new().await?;
     let dir = env.with_file_store("code", None).await?;
     env.put(&dir, "src/app.ts", "export function todo() {}\n")?;
-    env.put(&dir, "src/deep/list.tsx", "// TODO: paginate\nconst n = 1;\n")?;
+    env.put(
+        &dir,
+        "src/deep/list.tsx",
+        "// TODO: paginate\nconst n = 1;\n",
+    )?;
     env.put(&dir, "readme.md", "nothing here\n")?;
     // Not descended into, so a store with a dependency tree in it is still
     // searchable.

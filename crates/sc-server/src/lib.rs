@@ -31,9 +31,10 @@ mod security;
 mod serve;
 mod triggers;
 
-pub use agents::{AgentServices, ProviderConnector, StoredProviders, install_agents};
+pub use agents::{AgentServices, install_agents};
 pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
 pub use chat::AGENT_CHAT_ROUTE;
+pub use sc_agent::{ProviderConnector, StoredProviders};
 
 /// The server's JavaScript evaluator: the `deno_core`-backed engine ownership
 /// formulas' reified path runs on (§7.3). Constructed once at boot and shared —

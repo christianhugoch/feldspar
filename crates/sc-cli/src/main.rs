@@ -110,19 +110,22 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // language evaluated the same way.
     let evaluator = sc_server::default_js_evaluator();
 
-    // Triggers: the built-in actions, the stored trigger set, and the dispatcher
-    // installed into the catalog — after which a row write raises an event.
-    // Before it, nothing observes writes, which is what keeps `build-app` and
-    // every other command from firing anything. It comes before the mounts
-    // because the mount registry carries the dispatcher: an app's login and its
-    // errors raise events through the same router the admin API's do.
-    let triggers = sc_server::install_triggers(&catalog, evaluator.clone()).await?;
-
     // Agents: the built-in trait set and the two tables an agent and its runs
     // live in (§11.2). A stored agent that does not validate is reported and
     // dropped from the live set, exactly as a trigger that does not is — the
-    // rest of the server works and the admin can repair it in the UI.
+    // rest of the server works and the admin can repair it in the UI. It comes
+    // before the triggers because `run_agent` is one of the actions a trigger
+    // may name (§11.5), and it needs the assembled trait set.
     let agents = sc_server::install_agents(&catalog).await?;
+
+    // Triggers: the built-in actions plus `run_agent`, the stored trigger set,
+    // and the dispatcher installed into the catalog — after which a row write
+    // raises an event. Before it, nothing observes writes, which is what keeps
+    // `build-app` and every other command from firing anything. It comes before
+    // the mounts because the mount registry carries the dispatcher: an app's
+    // login and its errors raise events through the same router the admin API's
+    // do.
+    let triggers = sc_server::install_triggers(&catalog, evaluator.clone(), &agents).await?;
 
     let apps = Arc::new(
         AppMounts::new(catalog.clone())

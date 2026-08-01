@@ -451,7 +451,10 @@ mod tests {
         }
         // Not UTF-8: it has no lines, and "matched at line 3" of a PNG is noise.
         store
-            .write("logo.png", Bytes::from_static(&[0xff, 0xfe, b't', b'o', 0x00]))
+            .write(
+                "logo.png",
+                Bytes::from_static(&[0xff, 0xfe, b't', b'o', 0x00]),
+            )
             .await
             .unwrap();
         (base, store)
@@ -521,14 +524,9 @@ mod tests {
         assert_eq!(paths, ["src/app.ts"]);
 
         // The store's own floor composes the same way: above it, nothing at all.
-        let found = search_store(
-            &store,
-            Some(1),
-            ROLE_PUBLIC,
-            &SearchQuery::literal("todo"),
-        )
-        .await
-        .unwrap();
+        let found = search_store(&store, Some(1), ROLE_PUBLIC, &SearchQuery::literal("todo"))
+            .await
+            .unwrap();
         assert!(found.hits.is_empty());
     }
 

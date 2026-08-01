@@ -20,7 +20,16 @@ use sc_core_actions::builtin_actions;
 use sc_error::{Context, Result};
 use sc_expr::JsEvaluator;
 
+use crate::agents::AgentServices;
+
 /// Install the trigger dispatcher into `catalog` and return it.
+///
+/// The **agent services come first** (§11.5): `run_agent` is one of the actions
+/// a trigger may name, and it needs the assembled trait registry and this
+/// deployment's provider connector — so `install_agents` runs before this, not
+/// after it. That is the whole ordering constraint between the two, and it
+/// points this way because a trait never needs a trigger dispatcher at
+/// registration time while an agent-running action always needs the traits.
 ///
 /// Fails only on the things a server must not start without: the built-in action
 /// set not assembling (a TLS stack that will not initialise, §10.1), the
@@ -32,11 +41,18 @@ use sc_expr::JsEvaluator;
 pub async fn install_triggers(
     catalog: &Arc<Catalog>,
     evaluator: Arc<dyn JsEvaluator>,
+    agents: &AgentServices,
 ) -> Result<Arc<TriggerDispatcher>> {
     bootstrap_triggers(catalog)
         .await
         .context("ensuring the triggers table exists")?;
-    let registry = builtin_actions().context("registering the built-in actions")?;
+    let mut registry = builtin_actions().context("registering the built-in actions")?;
+    sc_core_traits::register_agent_actions(
+        &mut registry,
+        Arc::clone(agents.registry()),
+        Arc::clone(agents.providers()),
+    )
+    .context("registering the agent action")?;
     let dispatcher = Arc::new(TriggerDispatcher::new(Arc::new(registry)).with_evaluator(evaluator));
     dispatcher
         .reload(catalog)

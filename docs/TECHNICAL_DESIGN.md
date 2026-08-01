@@ -1345,6 +1345,33 @@ against its `config_spec` and then its `validate_config`, `min_role` is on the 1
 names do not collide); and an agent that fails validation is dropped from the live set **with
 its reason kept**, remaining stored, listed and editable, because editing it is the repair.
 
+**What was built, where it deviates from the above** (Phase 2):
+
+- **`AgentTrait::tools` takes the catalog** — `tools(&self, catalog: &Catalog, cfg: &Attrs)`. A
+  tool's description *and* its JSON schema are generated from the thing it is configured against
+  (§11.3): `query_books` tells the model which fields it may filter on, with their types, rather
+  than leaving it to guess, and a declaration built from the configuration alone could say none
+  of that. It stays infallible: a trait whose table has since been dropped still returns its tool
+  under the name the configuration gives it, because dropping it silently would turn "this agent
+  names a table that is gone" into "this agent has no tools", and only the first is repairable.
+- **`TraitContext` carries two optional capabilities** beside the catalog, the caller and the
+  run: the JavaScript evaluator (a read of a table whose ownership formula does not translate
+  decides per row in V8, §7.3) and the trigger dispatcher (§11.3's `run_trigger`). Both are
+  `Option`, because a run may be driven from a context that has neither, and a tool that needs
+  one and has not got it says so — `require_evaluator`, `require_triggers` — rather than reading
+  anyway or finding a second way to fire an event.
+- **The machine and the driver are two types.** `AgentLoop` owns every decision and performs no
+  IO (`next_step()` → `CallModel | CallTools | Done`); `Runner` is the only thing that performs
+  one, and is where the caller, the observer, the evaluator and the dispatcher are supplied. So
+  there is exactly one place a step ends, and therefore exactly one place a run is saved.
+- **`RunCaller` has two shapes and no default** — `user(u)` and `system()` — and `Run::new` takes
+  one. Decision 5 puts the difference between a chat turn's authority and a trigger's at exactly
+  one place; a constructor with a default would have made it two, one of them invisible.
+- **A run ends in a `Conclusion` of `Answered`, `MaxSteps` or `Aborted`**, and only a failure of
+  the loop *itself* is an `Err`. Hitting the step budget is not an error — the transcript is
+  intact and the number that stopped it is the admin's own — but it is not an answer either, so
+  it needs a name of its own rather than an empty string.
+
 ### 11.3 The built-in traits (`sc-core-traits`)
 
 Deliberately few, and split by what they touch. Each names its target in its configuration —
@@ -1539,11 +1566,12 @@ history for that agent.
   against the socket's own receiver, so a stop is read mid-stream; dropping the drive future drops
   the provider stream. Either way the run is marked `aborted` and written, because nothing resumes
   a chat run yet and a row left `running` would say so for ever.
-- **A `ProviderConnector` seam** in `sc-server` decides how an agent's provider is connected —
+- **A `ProviderConnector` seam** decides how an agent's provider is connected —
   `StoredProviders` in a server, a scripted `FakeProvider` in the tests. It exists because
   decision 7 forbids a test that needs a key, and it is placed at the *connection* so that
   everything §11.4 is about (the loop, the tool dispatch, the run rows, the socket) is the
-  production code under test.
+  production code under test. (Phase 4 put it in `sc-server`; Phase 6 moved it down to
+  `sc-agent`, since `run_agent` needs the same seam and sits below the server — see §11.5.)
 - **`AgentServices` rides on `AppMounts`**, beside the trigger dispatcher and the evaluator, and
   `install_agents` assembles it once at boot. The admin handlers and the socket therefore
   validate against one registry; two registries would mean an agent refused in one place and
@@ -1571,6 +1599,44 @@ the same `_sc_runs` row the chat interface reads, so a triggered run is inspecta
 
 Its result is the agent's final assistant message plus the run id. It does **not** stream: an
 action returns a value (§10.1), and a caller who wants the deltas is a chat client.
+
+**What was built, where it deviates from the above** (Phase 6):
+
+- **`ProviderConnector` moved down to `sc-agent`.** §11.4 placed the seam in `sc-server`, but
+  `run_agent` needs it for the same reason (decision 7: no test may need a key) and lives below
+  the server. `sc-server` re-exports it and `AgentServices` carries it unchanged.
+- **`run_agent` is registered apart from the built-in action set**, through
+  `sc_core_traits::register_agent_actions`, because it needs two things assembled first that no
+  other action does: the trait registry the agents were validated against — one registry, or an
+  agent would be accepted by the admin API and refused by the trigger — and this deployment's
+  provider connector. The visible consequence is a **boot order**: `install_agents` runs before
+  `install_triggers`, which now takes the assembled `AgentServices`.
+- **The result carries a `conclusion`** beside the answer and the run id: `answered`,
+  `max_steps` or `aborted`. A run stopped by its step budget has no answer and is not a failure,
+  and without a word for that a caller would read the empty string as a reply.
+- **The prompt formula's value is rendered as text**: a string is itself, anything else is its
+  JSON text, and **nothing at all** — null, or blank — is refused *before* a provider is
+  connected, because an agent asked an empty question spends a call to answer nothing
+  (principle 5). Prompts are best written as template literals: arithmetic in this language is
+  null-guarded, so `'…' + row.title` over a null column computes null and is then refused.
+- **The agent is resolved against storage on save and against the live set at fire time** — the
+  same split `run_trigger` uses in the other direction (§11.3). An agent that is stored but does
+  not currently validate is a repairable state, and the trigger that names it should not also be
+  invalid: one broken thing, one error, in the place it can be fixed. Firing then reports the
+  agent's own validation message.
+- **A triggered run is given no trigger dispatcher.** An agent whose traits include
+  `run_trigger` answers that one tool with `require_triggers`' configuration error, which the
+  model reads as a tool result. Handing the dispatcher back down into an action it is itself
+  running would close a trigger → agent → trigger cycle with nothing counting the depth, since a
+  tool call is not a firing and carries no chain. Chat is where an agent runs triggers, until a
+  run carries a firing chain of its own.
+- **The run is created with a description naming the trigger.** `Runner::start` cannot give one,
+  and a history sidebar of triggered runs would otherwise be a list of timestamps.
+- **The agent's `min_role` does not gate a triggered run.** It is the floor on who may *chat*
+  with an agent; a trigger-started run carries the trigger's authority and clears every floor
+  (decision 5 read the other way round). What guards it is the trigger's own `min_role`, which is
+  also what guards it when an application exposes it as `POST {mount}/actions/{name}` — pinned by
+  test rather than asserted, and needing no change to §13.2.
 
 ### 11.6 Copilot & AppConstructor
 

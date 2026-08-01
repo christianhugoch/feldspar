@@ -163,6 +163,49 @@ fn tutorials_are_cross_linked() {
         triggers.contains("tutorial-ownership.md"),
         "the triggers tutorial builds on the ownership tutorial and should link it"
     );
+    assert!(
+        triggers.contains("tutorial-agents.md"),
+        "the triggers tutorial should point at the agents tutorial as a next step"
+    );
+    let agents = read(&root, "docs/tutorial-agents.md");
+    assert!(
+        agents.contains("tutorial-triggers.md"),
+        "the agents tutorial builds on the triggers tutorial and should link it"
+    );
+}
+
+/// The agents tutorial has to teach **the whole loop**, because every step of it
+/// is a screen an admin has to be able to find — and a tutorial that quietly
+/// lost one of them would still read fine. Each fragment below is one step:
+/// connect a provider, give an agent a table, watch a tool call happen, hand it
+/// a trigger, point it at code, and hang it off a trigger of its own.
+#[test]
+fn the_agents_tutorial_teaches_each_step_of_the_loop() {
+    let root = workspace_root();
+    let agents = read(&root, "docs/tutorial-agents.md");
+    for fragment in [
+        "Test connection",    // the provider, checked before it is saved
+        "query_table",        // the grant that lets an agent read a table
+        "query_tasks",        // …and the tool name its configuration derives
+        "tool call",          // what the transcript shows happening
+        "Stop",               // the abort, mid-answer
+        "History",            // …and where the run is afterwards
+        "run_trigger",        // the grant that lets an agent act
+        "min_role",           // …still gated by the trigger's own floor
+        "search_files",       // the coding loop: grep,
+        "edit_file",          // …edit,
+        "build_application",  // …build, and read the diagnostics
+        "run_project_script", // …run a script, because there is no shell
+        "run_agent",          // the agent as a trigger body (§11.5)
+        "template literal",   // …whose prompt is a formula, written the safe way
+        "max_steps",          // the seatbelt
+        "sentinel",           // the redacted key
+    ] {
+        assert!(
+            agents.contains(fragment),
+            "the agents tutorial should cover `{fragment}`"
+        );
+    }
 }
 
 /// The React tutorial is where an admin learns the edit loop, and since the IDE
@@ -217,6 +260,50 @@ fn the_design_records_what_the_ide_milestone_actually_built() {
             design.contains(fragment),
             "§12.1 should record `{fragment}`"
         );
+    }
+}
+
+/// §11 is the agents milestone's design section, and the milestone deviated from
+/// it in places that are load-bearing — a stop reason no vendor sends, a socket
+/// protocol that settled differently, a trait signature that had to grow a
+/// catalog, a seam that moved a layer down. The last two milestones proved this
+/// is the step that is easy to skip and expensive to skip: a design document
+/// that still described the plan would mislead the next person to read it.
+///
+/// Each phase records its own deviations, so this asserts that every phase's
+/// block is still there and still names the thing that surprised it.
+#[test]
+fn the_design_records_what_the_agents_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        // Every phase writes its deviations down under the same heading.
+        "**What was built, where it deviates from the above** (Phase 1",
+        "**What was built, where it deviates** (Phase 2)",
+        "**What was built, where it deviates** (Phase 3, `query_table`)",
+        "**What was built, where it deviates** (Phase 3, the write traits)",
+        "**What was built, where it deviates** (Phase 3, `run_trigger`)",
+        "**What was built, where it deviates** (Phase 4)",
+        "**What was built, where it deviates** (Phase 5, the coding traits)",
+        "**What was built, where it deviates from the above** (Phase 6)",
+        // §11.1: the rig APIs that turned out to be wrong or missing.
+        "`StopReason` has two variants", // no vendor sends one when streaming
+        "merges consecutive tool results", // a wire-format obligation
+        "defaults `max_tokens` to 4096", // …and a vendor requirement
+        "`reqwest` moved to 0.13",       // one HTTP client in the build
+        // §11.2: the extension point as it settled.
+        "`AgentTrait::tools` takes the catalog",
+        "`RunCaller` has two shapes and no default",
+        // §11.4: the socket protocol as it settled.
+        "The socket protocol, as it settled",
+        "A tool call is emitted once",
+        "answered with **silence**",
+        // §11.5: the agent as a trigger body.
+        "`ProviderConnector` moved down to `sc-agent`",
+        "registered apart from the built-in action set",
+        "triggered run is given no trigger dispatcher",
+    ] {
+        assert!(design.contains(fragment), "§11 should record `{fragment}`");
     }
 }
 

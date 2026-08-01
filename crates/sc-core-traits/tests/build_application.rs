@@ -125,7 +125,10 @@ async fn a_build_that_succeeds_says_so_and_carries_what_the_tools_said() -> Resu
         .await?;
     assert_eq!(report["built"], json!(true), "{report}");
     assert!(
-        report["output"].as_str().unwrap().contains("built 3 modules"),
+        report["output"]
+            .as_str()
+            .unwrap()
+            .contains("built 3 modules"),
         "{report}"
     );
     assert!(report["diagnostics"].as_array().unwrap().is_empty());
@@ -139,7 +142,10 @@ async fn an_application_that_is_not_there_leaves_the_agent_invalid_with_a_reason
 
     // Never existed: refused on save, and on load, naming the subdomain.
     let err = env
-        .check("build_application", &config(&[(CFG_APPLICATION, json!("gone"))]))
+        .check(
+            "build_application",
+            &config(&[(CFG_APPLICATION, json!("gone"))]),
+        )
         .await
         .unwrap_err()
         .to_string();
@@ -157,10 +163,6 @@ async fn an_application_that_is_not_there_leaves_the_agent_invalid_with_a_reason
     .await?;
 
     // And a blank setting is refused as a blank setting.
-    assert!(
-        env.check("build_application", &config(&[]))
-            .await
-            .is_err()
-    );
+    assert!(env.check("build_application", &config(&[])).await.is_err());
     Ok(())
 }

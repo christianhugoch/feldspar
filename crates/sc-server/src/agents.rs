@@ -10,43 +10,18 @@
 //! configuration is validated against, and **how an agent's provider is
 //! connected**. The second is a seam rather than a call because every test of
 //! the chat socket has to drive a whole turn without a vendor and without
-//! spending a token (decision 7) — see [`ProviderConnector`].
+//! spending a token (decision 7) — see
+//! [`ProviderConnector`](sc_agent::ProviderConnector), which lives in `sc-agent`
+//! because the `run_agent` action (§11.5) needs the same seam for the same
+//! reason and sits below this crate.
 
 use std::sync::Arc;
 
-use sc_agent::{Agent, AgentRegistry, bootstrap_agents, bootstrap_runs};
+use sc_agent::{
+    AgentRegistry, ProviderConnector, StoredProviders, bootstrap_agents, bootstrap_runs,
+};
 use sc_catalog::Catalog;
 use sc_error::{Context, Result};
-use sc_llm::LlmProvider;
-
-/// How a run gets the provider it talks to.
-///
-/// In a server this is [`StoredProviders`]: the agent names an
-/// `_sc_llm_providers` record, that record is loaded and connected, and the
-/// agent's `model` overrides the provider's default. It is a **trait** rather
-/// than that function called directly because the whole of §11.4 — deltas
-/// arriving in order, a tool call rendering with its result, an abort, a
-/// provider that refuses — has to be testable against a script (decision 7,
-/// `sc_agent::testing::FakeProvider`), and pointing a real adapter at a stub
-/// endpoint would test the adapter rather than the socket.
-///
-/// The seam is at the *connection*, not inside the loop: whatever answers, the
-/// driver, the run storage and the socket are the production ones.
-#[async_trait::async_trait]
-pub trait ProviderConnector: Send + Sync {
-    /// The connected provider for `agent`, or why there is none.
-    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>>;
-}
-
-/// The production connector: the provider the agent's definition names.
-pub struct StoredProviders;
-
-#[async_trait::async_trait]
-impl ProviderConnector for StoredProviders {
-    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
-        sc_agent::connect(catalog, agent).await
-    }
-}
 
 /// Everything the agent surface needs that is not a request: which traits exist,
 /// and how to reach a model.

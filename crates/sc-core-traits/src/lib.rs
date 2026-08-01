@@ -35,6 +35,17 @@
 //! project's own `package.json` declares — which is the bounded thing that ships
 //! instead of a shell (decision 6).
 //!
+//! ## And one thing that is not a trait
+//!
+//! [`RunAgent`] is an `Action`, not an [`AgentTrait`](sc_agent::AgentTrait): it
+//! is how a **trigger runs an agent** (§11.5), the other direction from
+//! [`RunTrigger`]. It is in this crate for the same reason everything else here
+//! is — it drives a loop whose tools reach the row layer — and it is registered
+//! through [`register_agent_actions`] rather than with `sc-core-actions`' set,
+//! because it needs two things assembled first that no other action does: the
+//! trait registry the agents were validated against, and how this deployment
+//! connects a provider.
+//!
 //! ## What every trait here has in common
 //!
 //! - **It names its target in its configuration.** There is no trait that can
@@ -68,6 +79,7 @@ mod insert_row;
 mod list_files;
 mod query_table;
 mod read_file;
+mod run_agent;
 mod run_project_script;
 mod run_trigger;
 mod search_files;
@@ -78,7 +90,8 @@ mod write_file;
 
 use std::sync::Arc;
 
-use sc_agent::AgentRegistry;
+use sc_action::ActionRegistry;
+use sc_agent::{AgentRegistry, ProviderConnector};
 use sc_error::Result;
 
 pub use table::{CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE};
@@ -92,6 +105,7 @@ pub use insert_row::InsertRow;
 pub use list_files::ListFiles;
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
 pub use read_file::{CFG_MAX_CHARS, DEFAULT_MAX_CHARS, ReadFile};
+pub use run_agent::{CFG_AGENT, CFG_PROMPT, RunAgent};
 pub use run_project_script::{
     CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS, RunProjectScript,
 };
@@ -134,6 +148,24 @@ pub fn builtin_traits() -> Result<AgentRegistry> {
 /// Fails if one of the names is already taken, as any duplicate registration
 /// does: which implementation answers to `query_table` must not depend on load
 /// order.
+/// Register the actions that **run** an agent, rather than the traits an agent
+/// runs (§11.5).
+///
+/// There is exactly one — [`RunAgent`] — and it lives in this crate for the
+/// reason the traits do: it drives a loop whose tools reach the row layer. It is
+/// registered separately from `sc-core-actions`' built-in set because it needs
+/// two things assembled first: the trait registry the agents were validated
+/// against, and how this deployment connects a provider. A server calls
+/// [`builtin_traits`], puts the result in its agent services, and passes both
+/// here while building the action registry the trigger dispatcher will hold.
+pub fn register_agent_actions(
+    registry: &mut ActionRegistry,
+    traits: Arc<AgentRegistry>,
+    providers: Arc<dyn ProviderConnector>,
+) -> Result<()> {
+    registry.register(Arc::new(RunAgent::new(traits, providers)))
+}
+
 pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(QueryTable))?;
     registry.register(Arc::new(InsertRow))?;
