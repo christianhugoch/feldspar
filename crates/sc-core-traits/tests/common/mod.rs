@@ -12,6 +12,7 @@
 //! test that stubbed it out would be testing nothing.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sc_action::{ActionRegistry, TriggerDispatcher, bootstrap_triggers};
@@ -19,12 +20,16 @@ use sc_agent::{
     AgentRegistry, RunCaller, RunId, TraitCheck, TraitContext, bootstrap_agents, bootstrap_runs,
 };
 use sc_auth::User;
-use sc_catalog::{Catalog, TableEvents, TableMeta, bootstrap_table_meta, save_table_meta};
+use sc_catalog::{
+    Catalog, TableEvents, TableMeta, bootstrap_file_stores, bootstrap_table_meta,
+    connect_file_store_def, save_file_store, save_table_meta,
+};
 use sc_core_traits::builtin_traits;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
 use sc_expr::{DenoEvaluator, JsEvaluator};
+use sc_files::FileStoreDef;
 use sc_llm::{LlmProviderDef, ToolSpec, bootstrap_llm_providers, save_llm_provider};
 use sc_query::Value;
 use sc_test_harness::TestDb;
@@ -81,8 +86,12 @@ impl Env {
         bootstrap_table_meta(&catalog).await?;
         bootstrap_triggers(&catalog).await?;
         bootstrap_llm_providers(&catalog).await?;
+        bootstrap_file_stores(&catalog).await?;
         bootstrap_agents(&catalog).await?;
         bootstrap_runs(&catalog).await?;
+        // The applications table, for `build_application`: the trait resolves
+        // the app it builds from its stored row.
+        sc_app::bootstrap(&catalog).await?;
         save_llm_provider(
             &catalog,
             &LlmProviderDef::anthropic("main", "sk-ant-not-a-real-key", "claude-sonnet-4-5"),
@@ -96,6 +105,63 @@ impl Env {
             evaluator: None,
             dispatcher: None,
         })
+    }
+
+    /// Define and connect a **local** file store rooted at a fresh temporary
+    /// directory, returning that directory.
+    ///
+    /// A real store on a real disk, for the reason every other test here uses a
+    /// real database: the coding traits' whole job is what happens when bytes
+    /// meet paths, and a stubbed store would confirm only that the seam was
+    /// called.
+    pub async fn with_file_store(&self, name: &str, min_role: Option<u8>) -> Result<PathBuf> {
+        let dir = temp_dir(name);
+        std::fs::create_dir_all(&dir).map_err(|e| Error::config(e.to_string()))?;
+        let mut def = FileStoreDef::local(name, dir.to_string_lossy());
+        def.min_role = min_role;
+        save_file_store(&self.catalog, &def).await?;
+        connect_file_store_def(&self.catalog, &def)?;
+        Ok(dir)
+    }
+
+    /// Write a file into a store's directory, creating parents — the arrange
+    /// half of a coding-trait test.
+    pub fn put(&self, dir: &Path, rel: &str, contents: &str) -> Result<()> {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::config(e.to_string()))?;
+        }
+        std::fs::write(&path, contents).map_err(|e| Error::config(e.to_string()))
+    }
+
+    /// Read a file back out of a store's directory — the assert half.
+    pub fn slurp(&self, dir: &Path, rel: &str) -> Result<String> {
+        std::fs::read_to_string(dir.join(rel)).map_err(|e| Error::config(e.to_string()))
+    }
+
+    /// Call a named tool of a trait that offers several, as `caller`.
+    ///
+    /// [`Env::call`] takes the first tool, which is every trait in this crate;
+    /// this exists so a test can name the tool it means and therefore assert that
+    /// the name the configuration derives is the name that works.
+    pub async fn call_tool(
+        &self,
+        trait_: &str,
+        config: &Attrs,
+        tool: &str,
+        args: Json,
+        caller: &RunCaller,
+    ) -> Result<Json> {
+        let trait_ = self.registry.require(trait_)?.clone();
+        let mut ctx = TraitContext {
+            catalog: &self.catalog,
+            caller,
+            agent: "librarian",
+            run: RunId::new(),
+            evaluator: self.evaluator.as_ref(),
+            triggers: self.dispatcher.as_ref(),
+        };
+        trait_.call(config, tool, &args, &mut ctx).await
     }
 
     /// Give the tools the real JavaScript engine — what a table whose ownership
@@ -199,6 +265,24 @@ impl Env {
         let rows = sc_api::rows::list_rows(&self.catalog, &table).await?;
         Ok(rows.as_array().cloned().unwrap_or_default())
     }
+}
+
+/// A fresh, unique temporary directory to root a store at.
+///
+/// Unique on process, clock *and* a counter: two tests starting in the same tick
+/// on different threads would otherwise share a store root and fail on each
+/// other's files — rarely, and therefore confusingly.
+pub fn temp_dir(name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::env::temp_dir().join(format!(
+        "sc-core-traits-{name}-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }
 
 /// A configuration from `(key, value)` pairs.

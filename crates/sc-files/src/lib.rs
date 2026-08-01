@@ -20,6 +20,7 @@ mod def;
 mod git;
 mod local;
 mod reference;
+mod search;
 mod store;
 pub mod xattr;
 
@@ -40,6 +41,10 @@ pub use git::{
 };
 pub use local::LocalFileStore;
 pub use reference::{mime_for_path, validate_file_path};
+pub use search::{
+    DEFAULT_EXCLUDED_DIRS, DEFAULT_MAX_RESULTS, MAX_FILE_BYTES, MAX_FILES_SCANNED, MAX_LINE_CHARS,
+    SearchHit, SearchOutcome, SearchQuery, glob_matches, search_store,
+};
 pub use store::{Entry, FileMeta, FileStore};
 
 #[cfg(test)]
@@ -425,5 +430,121 @@ mod tests {
         // An admin sees everything.
         let admin = filter_visible(&store, None, all, 1).await.unwrap();
         assert_eq!(admin.len(), 2);
+    }
+
+    // --- the store-side search ----------------------------------------------
+
+    /// A small project to search: two source files, one binary, and a
+    /// dependency directory that must not be walked.
+    async fn searchable() -> (std::path::PathBuf, LocalFileStore) {
+        let (base, store) = temp_store();
+        for (path, bytes) in [
+            ("src/app.ts", &b"export function todo() {}\n"[..]),
+            ("src/deep/list.tsx", b"// TODO: paginate\nconst n = 1;\n"),
+            ("readme.md", b"nothing to see\n"),
+            ("node_modules/pkg/index.js", b"todo everywhere\n"),
+        ] {
+            store
+                .write(path, Bytes::copy_from_slice(bytes))
+                .await
+                .unwrap();
+        }
+        // Not UTF-8: it has no lines, and "matched at line 3" of a PNG is noise.
+        store
+            .write("logo.png", Bytes::from_static(&[0xff, 0xfe, b't', b'o', 0x00]))
+            .await
+            .unwrap();
+        (base, store)
+    }
+
+    #[tokio::test]
+    async fn a_search_walks_the_tree_and_skips_what_it_should() {
+        let (_base, store) = searchable().await;
+        let found = search_store(&store, None, 1, &SearchQuery::literal("todo"))
+            .await
+            .unwrap();
+        let mut paths: Vec<&str> = found.hits.iter().map(|h| h.path.as_str()).collect();
+        paths.sort();
+        // `node_modules` is not descended into and the binary is not scanned, so
+        // a store with a dependency tree in it is still searchable.
+        assert_eq!(paths, ["src/app.ts", "src/deep/list.tsx"]);
+        assert!(!found.truncated);
+
+        // Line and column are 1-based, and the line comes back whole.
+        let hit = found
+            .hits
+            .iter()
+            .find(|h| h.path == "src/app.ts")
+            .expect("the source file");
+        assert_eq!(hit.line, 1);
+        assert_eq!(hit.column, 17);
+        assert_eq!(hit.text, "export function todo() {}");
+    }
+
+    #[tokio::test]
+    async fn a_search_can_be_narrowed_by_directory_and_by_glob() {
+        let (_base, store) = searchable().await;
+
+        let mut query = SearchQuery::literal("todo");
+        query.dir = "src/deep".to_owned();
+        let found = search_store(&store, None, 1, &query).await.unwrap();
+        let paths: Vec<&str> = found.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, ["src/deep/list.tsx"]);
+
+        let mut query = SearchQuery::literal("todo");
+        query.glob = Some("*.ts".to_owned());
+        let found = search_store(&store, None, 1, &query).await.unwrap();
+        let paths: Vec<&str> = found.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, ["src/app.ts"]);
+    }
+
+    #[tokio::test]
+    async fn a_search_cannot_report_a_line_the_caller_could_not_have_read() {
+        let (_base, store) = searchable().await;
+        store
+            .set_meta(
+                "src/deep",
+                &FileMeta {
+                    min_role: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // The restricted directory is not walked for a caller who could not open
+        // it — otherwise its contents would leak one matching line at a time.
+        let found = search_store(&store, None, ROLE_PUBLIC, &SearchQuery::literal("todo"))
+            .await
+            .unwrap();
+        let paths: Vec<&str> = found.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, ["src/app.ts"]);
+
+        // The store's own floor composes the same way: above it, nothing at all.
+        let found = search_store(
+            &store,
+            Some(1),
+            ROLE_PUBLIC,
+            &SearchQuery::literal("todo"),
+        )
+        .await
+        .unwrap();
+        assert!(found.hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_search_that_hit_its_ceiling_says_so() {
+        let (_base, store) = temp_store();
+        for n in 0..10 {
+            store
+                .write(&format!("f{n}.ts"), Bytes::from_static(b"needle\nneedle\n"))
+                .await
+                .unwrap();
+        }
+        let mut query = SearchQuery::literal("needle");
+        query.max_results = 5;
+        let found = search_store(&store, None, 1, &query).await.unwrap();
+        assert_eq!(found.hits.len(), 5);
+        assert!(found.truncated);
     }
 }

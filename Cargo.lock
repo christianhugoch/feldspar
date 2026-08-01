@@ -3006,9 +3006,12 @@ name = "sc-core-traits"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "regex-lite",
  "sc-action",
  "sc-agent",
  "sc-api",
+ "sc-app",
  "sc-auth",
  "sc-catalog",
  "sc-core-actions",
@@ -3016,6 +3019,7 @@ dependencies = [
  "sc-db-postgres",
  "sc-error",
  "sc-expr",
+ "sc-files",
  "sc-llm",
  "sc-query",
  "sc-test-harness",
@@ -3087,6 +3091,7 @@ dependencies = [
  "bytes",
  "fsquirrel",
  "mime_guess",
+ "regex-lite",
  "sc-error",
  "sc-types",
  "serde",

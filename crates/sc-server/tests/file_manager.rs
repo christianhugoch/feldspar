@@ -329,3 +329,111 @@ async fn xattr_metadata_round_trips_through_the_connected_store() -> sc_error::R
 
     Ok(())
 }
+
+/// The store-side search, through the endpoint the IDE's find-in-files runs on
+/// (§12.1, TODO Phase 5).
+///
+/// Walking the tree through the filesystem provider is one request per
+/// directory; this is the same walk done where the bytes are, in one. What is
+/// pinned here is the contract the client codes against: literal and regex, the
+/// glob, the 1-based line and column, and `truncated` — which a caller must
+/// report, because "5 matches" without it claims there were only five.
+#[tokio::test]
+async fn find_in_files_searches_the_store_server_side() -> sc_error::Result<()> {
+    let (mut client, store, _db) = setup().await?;
+
+    for (path, text) in [
+        ("src/app.ts", "export function todo() {}\n"),
+        ("src/deep/list.tsx", "// TODO: paginate\nconst n = 1;\n"),
+        ("readme.md", "nothing here\n"),
+        ("node_modules/pkg/index.js", "todo\n"),
+    ] {
+        store
+            .write(path, bytes::Bytes::from(text.as_bytes().to_vec()))
+            .await?;
+    }
+
+    // A literal, case-insensitive by default, across directories — and not into
+    // `node_modules`.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/search",
+            Some(json!({ "pattern": "todo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut paths: Vec<&str> = body["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["path"].as_str().unwrap())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, ["src/app.ts", "src/deep/list.tsx"]);
+    assert_eq!(body["truncated"], json!(false));
+
+    // A regular expression, narrowed by a glob, with the position the editor
+    // needs to put a cursor on it.
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/search",
+            Some(json!({
+                "pattern": "function\\s+\\w+",
+                "regex": true,
+                "glob": "*.ts",
+            })),
+        )
+        .await;
+    let matches = body["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1, "{body}");
+    assert_eq!(matches[0]["path"], json!("src/app.ts"));
+    assert_eq!(matches[0]["line"], json!(1));
+    assert_eq!(matches[0]["column"], json!(8));
+    assert_eq!(matches[0]["length"], json!(13));
+    assert_eq!(matches[0]["text"], json!("export function todo() {}"));
+
+    // Whole-word and case, which the search box's two toggles send.
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/search",
+            Some(json!({ "pattern": "TODO", "case_sensitive": true })),
+        )
+        .await;
+    assert_eq!(body["matches"].as_array().unwrap().len(), 1);
+
+    // The bound, and the flag that says it was reached.
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/search",
+            Some(json!({ "pattern": "todo", "max_results": 1 })),
+        )
+        .await;
+    assert_eq!(body["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(body["truncated"], json!(true));
+
+    // A pattern that is not a valid regex is refused with the engine's reason
+    // rather than returning nothing.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/search",
+            Some(json!({ "pattern": "foo(", "regex": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // And a store that is not there is a 404, like every other file endpoint.
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/nope/search",
+            Some(json!({ "pattern": "todo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}

@@ -1213,6 +1213,68 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("searchFiles", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let obj = require_object(&ctx.body)?;
+                let dir = obj.get("dir").and_then(Json::as_str).unwrap_or("");
+                let role = caller_role(&ctx);
+                // The directory the search starts in is reached like any other,
+                // so a search rooted somewhere the caller may not go is refused
+                // rather than quietly returning nothing.
+                check_access(store.as_ref(), floor, dir, role).await?;
+
+                let glob = obj
+                    .get("glob")
+                    .and_then(Json::as_str)
+                    .map(str::trim)
+                    .filter(|g| !g.is_empty())
+                    .map(str::to_owned);
+                let flag = |key: &str| obj.get(key).and_then(Json::as_bool).unwrap_or(false);
+                let max_results = match obj.get("max_results").and_then(Json::as_i64) {
+                    Some(n) if n >= 1 => n as usize,
+                    _ => sc_files::DEFAULT_MAX_RESULTS,
+                };
+                let query = sc_files::SearchQuery {
+                    pattern: non_empty_str_field(obj, "pattern")?.to_owned(),
+                    regex: flag("regex"),
+                    case_sensitive: flag("case_sensitive"),
+                    whole_word: flag("whole_word"),
+                    glob,
+                    dir: dir.to_owned(),
+                    max_results,
+                    ..sc_files::SearchQuery::literal("")
+                };
+                // The caller's own role, so the walk skips what a listing would
+                // have hidden: a search must not report a line out of a file the
+                // caller could not open.
+                let found = sc_files::search_store(store.as_ref(), floor, role, &query).await?;
+                let matches: Vec<Json> = found
+                    .hits
+                    .iter()
+                    .map(|hit| {
+                        json!({
+                            "path": hit.path,
+                            "line": hit.line,
+                            "column": hit.column,
+                            "length": hit.length,
+                            "text": hit.text,
+                        })
+                    })
+                    .collect();
+                Ok(HandlerResponse::ok(json!({
+                    "matches": matches,
+                    "files_searched": found.files_scanned,
+                    "truncated": found.truncated,
+                })))
+            }
+        }
+    });
+
     reg.register("readFile", {
         let catalog = catalog.clone();
         move |ctx| {

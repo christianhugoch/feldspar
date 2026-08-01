@@ -21,13 +21,19 @@
 //!
 //! ## The set
 //!
-//! Five traits over two things an agent can be given. **Tables**: [`QueryTable`]
-//! reads one, and [`InsertRow`], [`UpdateRows`] and [`DeleteRows`] are three
-//! separate opt-in grants over one — so a read-only agent is the default shape
-//! and each way of changing data is a deliberate act with a form field attached.
-//! **Actions**: [`RunTrigger`] exposes one configured trigger, which is what
-//! connects an agent to the whole of §10 (and, once §10.3 lands, to workflows
-//! unchanged, because a workflow is a trigger).
+//! Twelve traits over three things an agent can be given. **Tables**:
+//! [`QueryTable`] reads one, and [`InsertRow`], [`UpdateRows`] and
+//! [`DeleteRows`] are three separate opt-in grants over one — so a read-only
+//! agent is the default shape and each way of changing data is a deliberate act
+//! with a form field attached. **Actions**: [`RunTrigger`] exposes one configured
+//! trigger, which is what connects an agent to the whole of §10 (and, once §10.3
+//! lands, to workflows unchanged, because a workflow is a trigger). **Code**:
+//! [`ReadFile`], [`ListFiles`], [`SearchFiles`], [`WriteFile`] and [`EditFile`]
+//! work inside one configured file store (optionally rooted at a
+//! sub-directory), [`BuildApplication`] builds the application whose source that
+//! is and hands back its diagnostics, and [`RunProjectScript`] runs a script the
+//! project's own `package.json` declares — which is the bounded thing that ships
+//! instead of a shell (decision 6).
 //!
 //! ## What every trait here has in common
 //!
@@ -54,13 +60,21 @@
 //!   whose world changed underneath it leaves the live set with a reason instead
 //!   of failing mid-conversation.
 
+mod build_application;
 mod delete_rows;
+mod edit_file;
+mod files;
 mod insert_row;
+mod list_files;
 mod query_table;
+mod read_file;
+mod run_project_script;
 mod run_trigger;
+mod search_files;
 mod table;
 mod update_rows;
 mod write;
+mod write_file;
 
 use std::sync::Arc;
 
@@ -69,21 +83,39 @@ use sc_error::Result;
 
 pub use table::{CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE};
 
+pub use files::{CFG_ROOT, CFG_STORE, FileScope, configured_scope, slugify};
+
+pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use delete_rows::DeleteRows;
+pub use edit_file::EditFile;
 pub use insert_row::InsertRow;
+pub use list_files::ListFiles;
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
+pub use read_file::{CFG_MAX_CHARS, DEFAULT_MAX_CHARS, ReadFile};
+pub use run_project_script::{
+    CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS, RunProjectScript,
+};
 pub use run_trigger::{CFG_TRIGGER, RunTrigger};
+pub use search_files::{CFG_MAX_RESULTS, SearchFiles};
 pub use update_rows::{DEFAULT_MAX_WRITE_ROWS, UpdateRows};
+pub use write_file::WriteFile;
 
 /// What each built-in trait calls the tool it derives from its configuration —
 /// the answer to "what will this be called?" the admin UI wants before an agent
 /// is saved and the collision check (§11.2) wants at the moment of saving.
 pub mod tool_names {
+    pub use crate::build_application::tool_name as build_application;
     pub use crate::delete_rows::tool_name as delete_rows;
+    pub use crate::edit_file::tool_name as edit_file;
     pub use crate::insert_row::tool_name as insert_row;
+    pub use crate::list_files::tool_name as list_files;
     pub use crate::query_table::tool_name as query_table;
+    pub use crate::read_file::tool_name as read_file;
+    pub use crate::run_project_script::tool_name as run_project_script;
     pub use crate::run_trigger::tool_name as run_trigger;
+    pub use crate::search_files::tool_name as search_files;
     pub use crate::update_rows::tool_name as update_rows;
+    pub use crate::write_file::tool_name as write_file;
 }
 
 /// The built-in trait set a server installs.
@@ -108,6 +140,13 @@ pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(UpdateRows))?;
     registry.register(Arc::new(DeleteRows))?;
     registry.register(Arc::new(RunTrigger))?;
+    registry.register(Arc::new(ReadFile))?;
+    registry.register(Arc::new(WriteFile))?;
+    registry.register(Arc::new(ListFiles))?;
+    registry.register(Arc::new(EditFile))?;
+    registry.register(Arc::new(SearchFiles))?;
+    registry.register(Arc::new(BuildApplication))?;
+    registry.register(Arc::new(RunProjectScript))?;
     Ok(())
 }
 
@@ -121,11 +160,18 @@ mod tests {
         assert_eq!(
             registry.names(),
             vec![
+                "build_application",
                 "delete_rows",
+                "edit_file",
                 "insert_row",
+                "list_files",
                 "query_table",
+                "read_file",
+                "run_project_script",
                 "run_trigger",
+                "search_files",
                 "update_rows",
+                "write_file",
             ]
         );
         // Every one of them describes itself and its configuration as data,
@@ -174,6 +220,27 @@ mod tests {
         );
         assert_eq!(spec("delete_rows"), vec![CFG_TABLE, CFG_MAX_ROWS]);
         assert_eq!(spec("run_trigger"), vec![CFG_TRIGGER]);
+
+        // Every coding trait is configured with the same scope — one store, and
+        // optionally one directory in it — so an admin who has configured one
+        // has configured all of them, and a path means the same thing to each.
+        // The ones that bring something back add the bound on how much.
+        assert_eq!(spec("read_file"), vec![CFG_STORE, CFG_ROOT, CFG_MAX_CHARS]);
+        assert_eq!(spec("write_file"), vec![CFG_STORE, CFG_ROOT]);
+        assert_eq!(spec("list_files"), vec![CFG_STORE, CFG_ROOT]);
+        assert_eq!(spec("edit_file"), vec![CFG_STORE, CFG_ROOT]);
+        assert_eq!(
+            spec("search_files"),
+            vec![CFG_STORE, CFG_ROOT, CFG_MAX_RESULTS]
+        );
+        assert_eq!(
+            spec("run_project_script"),
+            vec![CFG_STORE, CFG_ROOT, CFG_TIMEOUT]
+        );
+        // The build names an application rather than a store: which store the
+        // source is in is the application's own configuration (§13.3), and
+        // asking the admin for it twice would be two places to get it wrong.
+        assert_eq!(spec("build_application"), vec![CFG_APPLICATION]);
     }
 
     /// Every tool name a built-in derives carries **what it does** and **what it
@@ -185,12 +252,23 @@ mod tests {
     /// an agent could not have both.
     #[test]
     fn the_derived_tool_names_are_distinct_and_say_what_they_do() {
+        let scope = FileScope {
+            store: "app-src".to_owned(),
+            root: "web".to_owned(),
+        };
         let names = [
             tool_names::query_table("books"),
             tool_names::insert_row("books"),
             tool_names::update_rows("books"),
             tool_names::delete_rows("books"),
             tool_names::run_trigger("reindex"),
+            tool_names::read_file(&scope),
+            tool_names::write_file(&scope),
+            tool_names::list_files(&scope),
+            tool_names::edit_file(&scope),
+            tool_names::search_files(&scope),
+            tool_names::run_project_script(&scope),
+            tool_names::build_application("todo"),
         ];
         assert_eq!(
             names,
@@ -200,6 +278,13 @@ mod tests {
                 "update_books",
                 "delete_from_books",
                 "run_reindex",
+                "read_file_app_src_web",
+                "write_file_app_src_web",
+                "list_files_app_src_web",
+                "edit_file_app_src_web",
+                "search_files_app_src_web",
+                "run_script_app_src_web",
+                "build_todo",
             ]
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();

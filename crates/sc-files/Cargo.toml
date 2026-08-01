@@ -15,6 +15,11 @@ sc-error.workspace = true
 sc-types.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+# The store-side search (§11.3): a find-in-files pattern is a regular expression
+# — or a literal escaped into one — and `regex-lite` is the engine already in the
+# tree for the `String` type's `regex` attribute. Correct matching is what a
+# search needs; the full crate's SIMD machinery is not.
+regex-lite.workspace = true
 # Extension → MIME mapping for a `File` field's MIME allow-list (§3.5).
 mime_guess.workspace = true
 serde = { workspace = true }

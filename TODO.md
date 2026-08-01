@@ -235,34 +235,47 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 5 — Coding traits: building code in a file store
 
-- [ ] The coding traits work inside **one configured file store**, optionally rooted at a
+- [x] The coding traits work inside **one configured file store**, optionally rooted at a
       subdirectory, through the `FileStore` trait and §9's access rules — the same capability the
       file manager and the IDE already have, handed to a model. A path that escapes the configured
-      root is an error, exactly as it is for the byte-level methods.
-- [ ] `read_file`, `write_file`, `list_files`, and `edit_file` — **exact-string replacement**, the
+      root is an error, exactly as it is for the byte-level methods. *(Six traits share one
+      `FileScope`; each is a separate grant with its own form, as the write traits are, and each
+      derives its tool name from the scope so two directories are two tools and the same one twice
+      is refused on save.)*
+- [x] `read_file`, `write_file`, `list_files`, and `edit_file` — **exact-string replacement**, the
       edit that can be verified before it is applied: a match that is absent or ambiguous is an
       error the model can read and retry, whereas a fuzzy edit is a corrupted file nobody noticed.
-- [ ] `search_files` — a **server-side** search over the store (a literal or a regex, with a file
+      *(`replace_all` is the explicit opt-in for the rename-through-a-file case, so ambiguity is
+      never resolved silently.)*
+- [x] `search_files` — a **server-side** search over the store (a literal or a regex, with a file
       glob and a bounded result count). This is also the endpoint the IDE's find-in-files wanted
       (carried past the last milestone), so expose it as an admin endpoint too and switch the IDE's
-      search over to it.
-- [ ] `build_application` — builds the application whose source is that store, returning the
+      search over to it. *(`sc_files::search_store` is the one walk; the trait, the
+      `searchFiles` endpoint and the IDE's search provider all run it, and the IDE's registration
+      replaces the tree-walking provider for the `file` scheme.)*
+- [x] `build_application` — builds the application whose source is that store, returning the
       build's **diagnostics** as the tool result. A failed build is the most useful thing the model
       can be told, so the report is passed through structurally, not reduced to "build failed".
-- [ ] `run_project_script` — `npm run <script>` for a script that **already exists** in the
+      *(Configured with the application's subdomain rather than the store: which store the source
+      is in is the application's own configuration. It builds but does not **mount** — publishing
+      is the admin's, §13.2.)*
+- [x] `run_project_script` — `npm run <script>` for a script that **already exists** in the
       project's `package.json`, so the runnable set is the project's own and the model chooses from
       it rather than composing a command. Bounded timeout and captured output, both streams, as
       `run_build` carries them. **No `run_command`, no shell** (decision 6).
-- [ ] Tests: Rust against a real local store — read/write/list round-trip; `edit_file` applying a
+- [x] Tests: Rust against a real local store — read/write/list round-trip; `edit_file` applying a
       unique match, refusing an absent one and refusing an ambiguous one; a path escaping the
       configured subdirectory refused; `search_files` finding a literal and a regex across
       directories with the result bound respected; `build_application` on a deliberately broken
       project returning the diagnostics with file and line; `run_project_script` refusing a script
       not in `package.json` and running one that is. `vitest` — the IDE's search using the new
-      endpoint.
-- [ ] **Done when** an agent pointed at the React tutorial's store is asked to add a field to the
+      endpoint. *(Plus: the §9 access rule on a listing and on a search — the same store gives two
+      callers two answers — and the whole cycle below as one run.)*
+- [x] **Done when** an agent pointed at the React tutorial's store is asked to add a field to the
       to-do app, greps for where the type is declared, edits the file, builds, reads the type error
       it caused, fixes it and builds clean — with every step visible in the chat transcript.
+      *(Pinned as `coding_agent.rs`: a real store, a real application row and a real bundler, with
+      only the provider scripted.)*
 
 ## Phase 6 — The agent as a trigger body, and documentation
 

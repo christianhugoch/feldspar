@@ -2,6 +2,79 @@
 
 Changes in reverse chronological order.
 
+## Coding traits: an agent that can build the application
+
+Agents Phase 5, completed. An agent pointed at a file store can now read, list, grep and edit the
+project in it, build the application whose source it is, and run one of that project's own
+`package.json` scripts — and the whole cycle works: the end-to-end test has an agent grep for
+where a type is declared, edit the file, build, read the type error it caused, fix it and build
+clean, with every step in the run's transcript.
+
+**Seven traits, one scope.** `read_file`, `write_file`, `list_files`, `edit_file`,
+`search_files` and `run_project_script` are each configured with the same two settings — a file
+store (a pick-list, resolved from the catalog like every other store setting) and an optional
+sub-directory — and `build_application` names an application by its subdomain. Separate grants
+rather than one "code" trait, for Phase 3's reason: a read-only agent is the default shape, and
+an admin reading a definition can see that it may edit `web/` and may not run anything without
+reading any code. Tool names are derived from the scope (`edit_file_apps_web`, `build_todo`), so
+one trait enabled over two directories is two distinguishable tools and the same directory twice
+is a collision refused **on save**.
+
+**The configured sub-directory is a second confinement.** The store already refuses a path that
+escapes *it*; the root refuses one that escapes the *directory the admin gave the agent* — by
+any spelling, `../x`, `web/../x` or `/../x` — and every path the model is shown is relative to
+that root, because a prefix it may not change is one it will eventually send back and be refused
+for. Access is §9's rule unchanged, applied with the run's caller: a directory a user cannot open
+is not listed, not searched and not read through an agent, which is pinned by a test where the
+same store gives two callers two answers.
+
+**`edit_file` is exact-string replacement, and the refusals are the feature.** A match that is
+absent is an error saying so with the file's length ("read it again"); a match that appears twice
+is an error saying *twice* and telling the model to include more surrounding lines, or to set
+`replace_all` if it really means both. Neither writes anything. The alternative — a fuzzy edit —
+is a corrupted file nobody notices until much later, and a model that can read the refusal can
+recover from it in one turn.
+
+**A failed build is the most useful thing an agent can be told**, so `build_application` returns
+it as a *result* rather than an error: `built: false`, the tools' own output, and the
+file/line/message triples parsed out of it (the Rust sibling of the IDE's `buildDiagnostics.ts`,
+understanding the same three shapes — `tsc`, esbuild's one-liner, rolldown's boxed frame).
+It builds the **stored** application through the same `sc_app::build_application` the admin's
+Build button runs, so there is one build path and one set of diagnostics to explain. It does
+**not** mount what it built: mounting is the server's (§13.2), and an agent's build answers "does
+this compile?", not "serve this to the world" — an admin publishes the result by pressing Build,
+which is also where they get to look at the diff first.
+
+**No shell, and `run_project_script` is why there does not need to be one** (decision 6). It runs
+`npm run <script>` for a script the project's own `package.json` already declares; the refusal
+for anything else names the scripts that exist. So the runnable set is the project's, the model
+chooses from a list rather than composing a command line, there is no way to pass arguments, and
+a script that hangs is killed at the configured timeout with the run reporting that rather than
+holding the conversation open.
+
+**The search is one endpoint, shared three ways.** `sc_files::search_store` walks the store where
+the bytes are — literal or regex, case and whole-word, a file glob, bounded in results, file size
+and files visited, skipping binaries and not descending into `node_modules`, `.git`, `dist`,
+`build`, `target` or `.venv` — and applies `filter_visible` per directory, so a search cannot
+report a line out of a file the caller could not have opened. On top of it sit the
+`search_files` trait and a new admin endpoint, `POST /api/file-stores/{store}/search`, which is
+the endpoint the IDE's find-in-files wanted (carried past the last milestone): the workbench's
+search now registers a provider that asks the store in **one request** instead of walking the
+tree through the filesystem provider a directory at a time. Two details settled there: the
+endpoint narrows by a single glob, so a query naming several is searched whole and filtered in
+the client (a wrong answer is worse than a slower one), and the client's glob rule is the
+server's rule spelled the same way, because two rules that disagreed would make an answer depend
+on how many patterns were typed.
+
+Tests: Rust — `sc-files` for the walk (excluded directories, binary files skipped, the access
+rule on a search, the bound reported), `sc-core-traits` against a real local store for
+read/write/list, `edit_file`'s three outcomes, the escaping path, the search, the two callers,
+and `run_project_script`'s refusal and its run; `build_application` against a real application
+row and a stand-in bundler that fails the way `tsc` does; and the whole grep-edit-build-fix-build
+cycle as one run against the scripted `FakeProvider`. `sc-server` drives the new endpoint through
+the assembled router. `vitest` — the IDE's search: which globs the server narrows by and which
+are applied to what it returns, the glob rule, and a truncated search reporting that it was.
+
 ## The chat interface: agents in the admin UI
 
 Agents Phase 4, completed. An admin can now create an agent in the browser, chat with it, watch

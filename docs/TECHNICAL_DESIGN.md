@@ -1449,6 +1449,34 @@ back door. `run_project_script` is the bounded version and the one that ships: i
 set of runnable commands is the project's own and the model chooses from it rather than
 composing one.
 
+**What was built, where it deviates** (Phase 5, the coding traits):
+
+- **Six traits share one `FileScope`** (a store plus an optional sub-directory), and each is a
+  separate grant with its own form entry — the shape the three write traits already have, for the
+  same reason. Tool names are derived from the scope (`edit_file_apps_web`), so one trait over two
+  directories is two tools and the same directory twice is a collision refused on save; a derived
+  name longer than the 64 characters both vendors accept is refused there too, rather than by the
+  vendor mid-conversation.
+- **The configured root is a *second* confinement**, above the store's own. A path that would
+  leave it is refused by any spelling, and every path reported back to the model is relative to
+  it — a prefix the model may not change is one it will eventually send back and be refused for.
+- **`build_application` is configured with the application's subdomain**, not with a store: which
+  store the source is in is the application's own configuration (§13.2/§13.3), and asking the
+  admin for it twice would be two places to get it wrong. It builds through the same
+  `sc_app::build_application` the admin's Build button runs but does **not** mount the result —
+  mounting is the server's, and an agent's build answers "does this compile?" rather than "serve
+  this". A failed build comes back as a **result** (`built: false`, the tools' output, and the
+  file/line/message triples parsed out of it) rather than an error, so what the model reads is a
+  list of diagnostics rather than a sentence.
+- **The search is `sc_files::search_store`**, one walk with three callers: the `search_files`
+  trait, the new admin endpoint `POST /api/file-stores/{store}/search`, and the IDE's search
+  provider, which registers for the `file` scheme and thereby *replaces* the tree-walking provider
+  the search-service override installs. It applies `filter_visible` per directory, so a search
+  cannot report a line out of a file the caller could not have opened, and it does not descend
+  into `node_modules`, `.git`, `dist`, `build`, `target` or `.venv`. The endpoint narrows by a
+  **single** glob; a query naming several is searched whole and filtered in the client, because
+  sending the first of several would silently drop the files the others named.
+
 ### 11.4 Chat: runs, transport, UI
 
 **A chat session is a run.** `_sc_runs` (§9) is created by this milestone with the shape the

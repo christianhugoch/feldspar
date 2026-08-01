@@ -653,6 +653,33 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Search a store's text files, server-side. This is the endpoint the IDE's
+    // find-in-files runs on (§12.1): walking the tree through the filesystem
+    // provider is one request per directory, and the same walk done where the
+    // bytes are is one request in total. `search_files` (§11.3) runs the same
+    // search, so what a person finds in the editor is what a model finds.
+    set.register(
+        Endpoint::new(
+            "searchFiles",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("search"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("pattern", TypeSchema::text()),
+            StructField::new("regex", TypeSchema::optional(TypeSchema::bool())),
+            StructField::new("case_sensitive", TypeSchema::optional(TypeSchema::bool())),
+            StructField::new("whole_word", TypeSchema::optional(TypeSchema::bool())),
+            StructField::new("glob", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("dir", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("max_results", TypeSchema::optional(TypeSchema::int())),
+        ]))
+        .output(file_search_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // Read one file's bytes (download) — base64 always, plus a UTF-8 `text`
     // shortcut when the contents decode cleanly (for the text editor).
     set.register(
@@ -1387,6 +1414,29 @@ fn file_entry_schema() -> TypeSchema {
         StructField::new("path", TypeSchema::text()),
         StructField::new("is_dir", TypeSchema::bool()),
         StructField::new("size", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// What a search found: the matching lines, and whether a ceiling cut it short.
+///
+/// `truncated` is not decoration. A caller that renders results without it tells
+/// the reader there is nothing else, which is false exactly when it matters — and
+/// it is the difference between "no other uses of this symbol" and "the first
+/// hundred uses of this symbol".
+fn file_search_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new(
+            "matches",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("path", TypeSchema::text()),
+                StructField::new("line", TypeSchema::int()),
+                StructField::new("column", TypeSchema::int()),
+                StructField::new("length", TypeSchema::int()),
+                StructField::new("text", TypeSchema::text()),
+            ])),
+        ),
+        StructField::new("files_searched", TypeSchema::int()),
+        StructField::new("truncated", TypeSchema::bool()),
     ])
 }
 

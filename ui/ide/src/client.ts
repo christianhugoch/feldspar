@@ -60,6 +60,8 @@ export type GetRunResponse = { id: string; kind: string; subject: string; descri
 export type DeleteRunResponse = { deleted: boolean };
 export type BrowseFilesRequest = { dir: string };
 export type BrowseFilesResponse = Array<{ name: string; path: string; is_dir: boolean; size?: number | null }>;
+export type SearchFilesRequest = { pattern: string; regex?: boolean | null; case_sensitive?: boolean | null; whole_word?: boolean | null; glob?: string | null; dir?: string | null; max_results?: number | null };
+export type SearchFilesResponse = { matches: Array<{ path: string; line: number; column: number; length: number; text: string }>; files_searched: number; truncated: boolean };
 export type ReadFileRequest = { path: string };
 export type ReadFileResponse = { path: string; size: number; base64: string; text?: string | null };
 export type WriteFileRequest = { path: string; base64?: string | null; text?: string | null };
@@ -138,6 +140,7 @@ export interface ApiClient {
   getRun(id: string): Promise<GetRunResponse>;
   deleteRun(id: string): Promise<DeleteRunResponse>;
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
+  searchFiles(store: string, body: SearchFilesRequest): Promise<SearchFilesResponse>;
   readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
   writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
   makeDirectory(store: string, body: MakeDirectoryRequest): Promise<MakeDirectoryResponse>;
@@ -558,6 +561,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("browseFiles", res);
       return (await res.json()) as BrowseFilesResponse;
+    },
+    async searchFiles(store, body) {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/search`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("searchFiles", res);
+      return (await res.json()) as SearchFilesResponse;
     },
     async readFile(store, body) {
       const res = await doFetch(`${baseUrl}/api/file-stores/${store}/read`, {

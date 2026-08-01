@@ -53,6 +53,7 @@ import { api } from "./api";
 import { activateSaltcornExtension, declareSaltcornExtension } from "./extension";
 import { storeGit, type FileStoreSummary } from "./git";
 import { configureWorkers } from "./workers";
+import { registerStoreSearch } from "./searchProvider";
 import { registerStoreFilesystem, storeFolderUri } from "./workspace";
 
 /**
@@ -163,5 +164,9 @@ export async function bootWorkbench(
   const extension = declareSaltcornExtension();
   const git = storeGit(summary, api);
   await initializeVscodeApi(services, container, constructionOptions(store), environment);
+  // After `initialize`, because it registers with a service that must exist by
+  // then: find-in-files stops walking the tree a directory at a time and asks
+  // the store instead (§12.1).
+  await registerStoreSearch(store, api);
   await activateSaltcornExtension(extension, files, provider, git);
 }

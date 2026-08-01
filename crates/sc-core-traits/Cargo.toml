@@ -35,8 +35,23 @@ sc-expr.workspace = true
 sc-types.workspace = true
 # `ToolSpec`: what a trait offers the model.
 sc-llm.workspace = true
+# The file stores the coding traits work in (§11.3): the same `FileStore` trait
+# and the same §9 access rules the file manager and the IDE go through, and the
+# store-side search both they and `search_files` run.
+sc-files.workspace = true
+# The application `build_application` builds — resolved from its stored row and
+# built by the same `sc_app::build_application` the admin's Build button runs, so
+# there is one build path and one set of diagnostics to explain.
+sc-app.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 serde_json.workspace = true
+# Parsing a build log's diagnostics into file/line/message — the Rust sibling of
+# the IDE's `buildDiagnostics.ts`.
+regex-lite.workspace = true
+# `process` spawns `npm run <script>` and `time` bounds it; a script that hangs
+# must not hold a conversation open (§11.3).
+tokio = { workspace = true, features = ["process", "time"] }
 
 [dev-dependencies]
 # Every trait is pinned against a real database (principle 4) and, where a table's
