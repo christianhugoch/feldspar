@@ -25,14 +25,51 @@ export function agentChatUrl(location: { protocol: string; host: string }): stri
   return `${scheme}//${location.host}${AGENT_CHAT_ROUTE}`;
 }
 
-/** One event the server sends. The six of §11.4, and nothing else. */
+/** One event the server sends. The six of §11.4, plus `controls` (below). */
 export type ServerEvent =
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
   | { type: "tool_call"; id: string; name: string; arguments: unknown }
   | { type: "tool_result"; id: string; name: string; content: string; is_error: boolean }
   | { type: "done"; run: string | null; state: string; answer: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "controls"; controls: unknown };
+
+/** One control a trait puts in the composer, beside the send button.
+ *
+ * The composer is the only place a person can say anything to an agent, so it
+ * is where a trait's *modes* belong: "search the web for this one", "which
+ * branch am I working on", "run it after you write it". A dropdown of a store's
+ * directories set once beats the same sentence typed into every message, and a
+ * toggle is a thing the model should be told rather than guess.
+ *
+ * Nothing declares one yet: no built-in trait has a mode. The shape is here —
+ * and rendered — because the alternative is a composer whose toolbar row does
+ * not exist and has to be invented under a trait that needs it. A control is
+ * therefore **data**: a trait declares it the way it declares a tool's schema,
+ * the server forwards the declaration in a `controls` event, and the panel
+ * renders whatever arrives without knowing which trait sent it — the same rule
+ * §11.2 sets for the trait config form.
+ *
+ * The two kinds are the two the toolbar of every chat interface has: a toggle
+ * (a mode that is on or off) and a select (one of several). Both carry a value
+ * that travels with the *next* message, which is what makes them a modifier on
+ * what the person is about to say rather than a button that does something on
+ * its own. A control that acts immediately would be a client→server frame of
+ * its own, and is deliberately not invented until a trait asks for one. */
+export type ComposerControl =
+  | { kind: "toggle"; name: string; label: string; title?: string; default?: boolean }
+  | {
+      kind: "select";
+      name: string;
+      label?: string;
+      title?: string;
+      options: { value: string; label: string }[];
+      default?: string;
+    };
+
+/** What a control is currently set to, as it travels with a message. */
+export type ControlValue = string | boolean;
 
 /** One entry in the transcript as the panel renders it. */
 export type Entry =
@@ -60,11 +97,92 @@ export type ChatState = {
   runId: string | null;
   /** How the last turn ended, for the line under the transcript. */
   lastState: string | null;
+  /** What the agent's traits put in the composer's toolbar. Empty until one
+   * declares something, which no built-in trait does yet. */
+  controls: ComposerControl[];
+  /** What each of those is set to, keyed by control name. */
+  controlValues: Record<string, ControlValue>;
 };
 
 /** A conversation with nothing in it yet. */
 export function emptyChat(): ChatState {
-  return { entries: [], running: false, runId: null, lastState: null };
+  return {
+    entries: [],
+    running: false,
+    runId: null,
+    lastState: null,
+    controls: [],
+    controlValues: {},
+  };
+}
+
+/** The controls in a `controls` event, with anything unreadable dropped.
+ *
+ * A declaration comes off the socket, so it is checked here rather than
+ * trusted: a trait that ships a malformed control should cost the composer that
+ * one button, not the whole toolbar and not the transcript. */
+export function normalizeControls(value: unknown): ComposerControl[] {
+  if (!Array.isArray(value)) return [];
+  const controls: ComposerControl[] = [];
+  for (const raw of value) {
+    const control = raw as Partial<ComposerControl> & Record<string, unknown>;
+    if (typeof control?.name !== "string" || control.name === "") continue;
+    if (control.kind === "toggle") {
+      if (typeof control.label !== "string") continue;
+      controls.push({
+        kind: "toggle",
+        name: control.name,
+        label: control.label,
+        title: typeof control.title === "string" ? control.title : undefined,
+        default: control.default === true,
+      });
+    } else if (control.kind === "select") {
+      const options = Array.isArray(control.options)
+        ? control.options.filter(
+            (option): option is { value: string; label: string } =>
+              typeof (option as { value?: unknown })?.value === "string" &&
+              typeof (option as { label?: unknown })?.label === "string",
+          )
+        : [];
+      // A select with nothing to select is a dead control, not a narrow one.
+      if (options.length === 0) continue;
+      controls.push({
+        kind: "select",
+        name: control.name,
+        label: typeof control.label === "string" ? control.label : undefined,
+        title: typeof control.title === "string" ? control.title : undefined,
+        options,
+        default: typeof control.default === "string" ? control.default : undefined,
+      });
+    }
+  }
+  return controls;
+}
+
+/** What the controls start at, keeping whatever the person had already chosen.
+ *
+ * The declaration can arrive again mid-conversation (a trait whose options
+ * depend on what the last turn did), and a dropdown that reset itself every
+ * time would lose a choice made two messages ago. A value is kept only while
+ * the control is still offered *and* still accepts it. */
+export function defaultControlValues(
+  controls: ComposerControl[],
+  previous: Record<string, ControlValue> = {},
+): Record<string, ControlValue> {
+  const values: Record<string, ControlValue> = {};
+  for (const control of controls) {
+    const had = previous[control.name];
+    if (control.kind === "toggle") {
+      values[control.name] = typeof had === "boolean" ? had : control.default === true;
+    } else {
+      const keeps = typeof had === "string" && control.options.some((o) => o.value === had);
+      values[control.name] = keeps
+        ? had
+        : (control.options.find((o) => o.value === control.default)?.value ??
+          control.options[0].value);
+    }
+  }
+  return values;
 }
 
 /** Add what the person just said, and mark the turn as running.
@@ -116,6 +234,14 @@ export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
       // Appended, never replacing: a failure after two paragraphs and a tool
       // call is read alongside them, not instead of them.
       return { ...state, entries: [...state.entries, { kind: "error", message: event.message }] };
+    case "controls": {
+      const controls = normalizeControls(event.controls);
+      return {
+        ...state,
+        controls,
+        controlValues: defaultControlValues(controls, state.controlValues),
+      };
+    }
     case "done":
       return {
         ...state,
@@ -163,6 +289,46 @@ export function parseEvent(data: string): ServerEvent | null {
     // fall through
   }
   return null;
+}
+
+/** A run of prose, or a fenced code block, in what the agent said. */
+export type Block =
+  | { kind: "prose"; text: string }
+  | { kind: "code"; language: string; text: string };
+
+/** Split an answer on ``` fences.
+ *
+ * Not a Markdown renderer, and deliberately not the beginning of one: an agent
+ * that reads and writes files answers with code, and code set in the body font
+ * with its indentation collapsed is the one part of an answer that is unusable
+ * rather than merely plain. Everything else — headings, lists, emphasis — is
+ * still legible as it was typed, so it stays as typed.
+ *
+ * An unterminated fence is still a code block: a streaming answer is read while
+ * the fence is still open, and waiting for the closing one would reformat the
+ * paragraph under the reader every time a turn finished. */
+export function splitCodeBlocks(text: string): Block[] {
+  const blocks: Block[] = [];
+  const fence = /^```([^\n`]*)\n?/gm;
+  let at = 0;
+  let match: RegExpExecArray | null;
+  while ((match = fence.exec(text)) !== null) {
+    const prose = text.slice(at, match.index);
+    if (prose.trim() !== "") blocks.push({ kind: "prose", text: prose.replace(/\n+$/, "") });
+    const start = match.index + match[0].length;
+    const close = fence.exec(text);
+    const end = close ? close.index : text.length;
+    const code = text.slice(start, end).replace(/\n$/, "");
+    if (code !== "") blocks.push({ kind: "code", language: match[1].trim(), text: code });
+    if (!close) return blocks;
+    // A `null` from `exec` has already rewound `lastIndex` to 0, so an
+    // unterminated fence must leave the loop rather than search again from the
+    // top — which is the same fence, for ever.
+    at = close.index + close[0].length;
+  }
+  const rest = text.slice(at);
+  if (rest.trim() !== "") blocks.push({ kind: "prose", text: rest.replace(/\n+$/, "") });
+  return blocks;
 }
 
 /** The transcript of a **stored** run, rebuilt from `_sc_runs.context`.
@@ -231,7 +397,8 @@ export interface SocketLike {
 export class ChatSession {
   private state: ChatState = emptyChat();
   private open = false;
-  /** Messages typed before the socket opened, sent in order once it does. */
+  /** Message frames composed before the socket opened, sent in order once it
+   * does — each already carrying the controls it was composed with. */
   private pending: string[] = [];
 
   constructor(
@@ -253,8 +420,8 @@ export class ChatSession {
       this.socket.send(
         JSON.stringify({ type: "start", agent: this.agent, run: this.state.runId }),
       );
-      for (const text of this.pending.splice(0)) {
-        this.socket.send(JSON.stringify({ type: "message", text }));
+      for (const frame of this.pending.splice(0)) {
+        this.socket.send(frame);
       }
     };
     socket.onmessage = (event) => {
@@ -296,11 +463,36 @@ export class ChatSession {
   send(text: string): void {
     if (this.state.running || text.trim() === "") return;
     this.update(applyUserMessage(this.state, text));
+    const frame = this.messageFrame(text);
     if (this.open) {
-      this.socket.send(JSON.stringify({ type: "message", text }));
+      this.socket.send(frame);
     } else {
-      this.pending.push(text);
+      // Frozen now rather than on send: the controls belong to the message that
+      // was composed with them, not to whatever they say when the socket opens.
+      this.pending.push(frame);
     }
+  }
+
+  /** Set one composer control. Takes effect on the *next* message: a control is
+   * a modifier on what is about to be said, and a turn already in flight was
+   * sent with the values it was sent with. */
+  setControl(name: string, value: ControlValue): void {
+    if (!this.state.controls.some((control) => control.name === name)) return;
+    this.update({
+      ...this.state,
+      controlValues: { ...this.state.controlValues, [name]: value },
+    });
+  }
+
+  /** One `message` frame, carrying the controls only when there are any — so an
+   * agent with no modes sends exactly the frame it sent before them. */
+  private messageFrame(text: string): string {
+    const values = this.state.controlValues;
+    return JSON.stringify(
+      Object.keys(values).length > 0
+        ? { type: "message", text, controls: values }
+        : { type: "message", text },
+    );
   }
 
   /** Stop the turn. The transcript stays exactly as it is — the server ends the

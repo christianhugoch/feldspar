@@ -178,6 +178,94 @@ export function IconArrowLeft(props: IconProps) {
   );
 }
 
+export function IconChevronDown(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 9l6 6l6 -6" />
+    </Svg>
+  );
+}
+
+/** Send, on the chat composer's button — the arrow every chat box sends with. */
+export function IconArrowUp(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 5l0 14" />
+      <path d="M18 11l-6 -6" />
+      <path d="M6 11l6 -6" />
+    </Svg>
+  );
+}
+
+/** Stop, in the same place the send button was, while a turn runs. */
+export function IconPlayerStop(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 5m0 2a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z" />
+    </Svg>
+  );
+}
+
+export function IconMessagePlus(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12.4 3a5.34 5.34 0 0 1 4.906 3.239a5.333 5.333 0 0 1 -1.195 10.6a4.26 4.26 0 0 1 -5.28 1.863l-2.831 2.29v-2.99h-.007a4.26 4.26 0 0 1 -2.65 -6.084a5.333 5.333 0 0 1 2.19 -8.865" />
+      <path d="M15 11h-6" />
+      <path d="M12 8v6" />
+    </Svg>
+  );
+}
+
+export function IconTrash(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 7l16 0" />
+      <path d="M10 11l0 6" />
+      <path d="M14 11l0 6" />
+      <path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12" />
+      <path d="M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3" />
+    </Svg>
+  );
+}
+
+/** A tool call, in the transcript. */
+export function IconTool(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M7 10h3v-3l-3.5 -3.5a6 6 0 0 1 8 8l6 6a2 2 0 0 1 -3 3l-6 -6a6 6 0 0 1 -8 -8l3.5 3.5" />
+    </Svg>
+  );
+}
+
+/** The agent's reasoning, above what it said. */
+export function IconSparkles(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6z" />
+    </Svg>
+  );
+}
+
+export function IconAlertTriangle(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 9v4" />
+      <path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z" />
+      <path d="M12 16h.01" />
+    </Svg>
+  );
+}
+
+/** Show/hide the chat's conversation rail. */
+export function IconLayoutSidebar(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z" />
+      <path d="M9 4l0 16" />
+    </Svg>
+  );
+}
+
 /** The Saltcorn logo (`src/vendor/saltcorn-logo.svg`, the January 2023 mark).
  *
  * An `<img>` rather than inline SVG: it is brand art, not an icon — three fixed

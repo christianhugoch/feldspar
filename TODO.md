@@ -502,6 +502,11 @@ able to fail halfway with no way back. One list is one turn, one transaction and
 
 ## Carried past this milestone
 
+- **The server half of the composer's controls.** The chat panel renders trait-declared toggles and
+  selects in the composer and sends their values with the message (`ComposerControl` in
+  `ui/admin/src/agentChat.ts`, §11.4). Nothing declares one: `AgentTrait` has no `controls(&config)`
+  yet, the socket sends no `controls` event, and the values a message carries are ignored on the way
+  in. The first trait that wants a mode is what should add all three.
 - **Streaming from `run_agent`.** A triggered run's deltas are not observable while it runs, only
   afterwards from its run row. Watching one live wants the chat socket to be able to attach to a
   run it did not start.

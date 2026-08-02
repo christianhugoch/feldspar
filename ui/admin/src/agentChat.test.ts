@@ -13,9 +13,12 @@ import {
   AGENT_CHAT_ROUTE,
   ChatSession,
   agentChatUrl,
+  defaultControlValues,
   emptyChat,
   applyEvent,
   applyUserMessage,
+  normalizeControls,
+  splitCodeBlocks,
   transcriptFromRun,
   type Entry,
   type ServerEvent,
@@ -307,5 +310,122 @@ describe("reopening a stored run", () => {
     expect(transcriptFromRun(null)).toEqual([]);
     expect(transcriptFromRun({})).toEqual([]);
     expect(transcriptFromRun({ messages: "nonsense" })).toEqual([]);
+  });
+});
+
+describe("the composer's controls", () => {
+  const declared = [
+    { kind: "toggle", name: "web", label: "Search the web", default: true },
+    {
+      kind: "select",
+      name: "branch",
+      label: "Branch",
+      options: [
+        { value: "main", label: "main" },
+        { value: "next", label: "next" },
+      ],
+      default: "next",
+    },
+  ];
+
+  it("takes what a trait declares, and drops what it cannot render", () => {
+    const controls = normalizeControls([
+      ...declared,
+      { kind: "toggle", name: "no-label" },
+      { kind: "select", name: "empty", options: [] },
+      { kind: "carousel", name: "wat", label: "no" },
+      "nonsense",
+    ]);
+    // One malformed control costs the composer that control, not the toolbar.
+    expect(controls.map((c) => c.name)).toEqual(["web", "branch"]);
+    expect(normalizeControls(undefined)).toEqual([]);
+  });
+
+  it("starts each control where its declaration says", () => {
+    expect(defaultControlValues(normalizeControls(declared))).toEqual({
+      web: true,
+      branch: "next",
+    });
+  });
+
+  it("keeps a choice already made when the declaration arrives again", () => {
+    const controls = normalizeControls(declared);
+    const chosen = { web: false, branch: "main" };
+    expect(defaultControlValues(controls, chosen)).toEqual(chosen);
+    // …but not one the redeclared control no longer offers.
+    const narrowed = normalizeControls([
+      { kind: "select", name: "branch", options: [{ value: "next", label: "next" }] },
+    ]);
+    expect(defaultControlValues(narrowed, chosen)).toEqual({ branch: "next" });
+  });
+
+  it("sends the controls with the message they were composed with", () => {
+    const { socket, chat } = session();
+    socket.deliver({ type: "controls", controls: declared });
+    chat.setControl("web", false);
+    // A control nobody declared is not a control.
+    chat.setControl("nonexistent", "x");
+    chat.send("what changed?");
+
+    const message = socket.messages().find((m) => m.type === "message");
+    expect(message).toEqual({
+      type: "message",
+      text: "what changed?",
+      controls: { web: false, branch: "next" },
+    });
+  });
+
+  it("says nothing about controls when the agent has none", () => {
+    const { socket, chat } = session();
+    chat.send("hello");
+    expect(socket.messages().find((m) => m.type === "message")).toEqual({
+      type: "message",
+      text: "hello",
+    });
+  });
+
+  it("freezes the controls a queued message was composed with", () => {
+    // Typed before the socket opened: the frame belongs to the message, so a
+    // control changed while it waits does not rewrite what was asked.
+    const socket = new StubSocket();
+    const chat = new ChatSession(socket, "librarian", () => {});
+    socket.deliver({ type: "controls", controls: declared });
+    chat.send("first");
+    chat.setControl("web", false);
+    socket.onopen?.();
+
+    expect(socket.messages()[1]).toEqual({
+      type: "message",
+      text: "first",
+      controls: { web: true, branch: "next" },
+    });
+  });
+});
+
+describe("code in an answer", () => {
+  it("separates fenced code from the prose around it", () => {
+    expect(
+      splitCodeBlocks("Here it is:\n\n```rust\nfn main() {}\n```\n\nThat is all."),
+    ).toEqual([
+      { kind: "prose", text: "Here it is:" },
+      { kind: "code", language: "rust", text: "fn main() {}" },
+      { kind: "prose", text: "\nThat is all." },
+    ]);
+  });
+
+  it("treats a fence that is still open as code", () => {
+    // A streaming answer is read while the fence is open; waiting for the close
+    // would reformat the paragraph under the reader when the turn ends.
+    expect(splitCodeBlocks("wait:\n```\nSELECT 1")).toEqual([
+      { kind: "prose", text: "wait:" },
+      { kind: "code", language: "", text: "SELECT 1" },
+    ]);
+  });
+
+  it("leaves an answer with no code as one run of prose", () => {
+    expect(splitCodeBlocks("There is one: Dune.")).toEqual([
+      { kind: "prose", text: "There is one: Dune." },
+    ]);
+    expect(splitCodeBlocks("")).toEqual([]);
   });
 });

@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## The agent chat is a chat interface, not a page of cards
+
+The chat panel worked and looked like the rest of the admin: a bordered card holding the
+transcript, a textarea and three buttons in its footer, a second card of history beside it, all
+inside a page that scrolled as a whole. Everything a hosted coding agent's web UI does — Kimi,
+z.ai — it did not, and the difference is not decoration: a card in a scrolling page means the box
+you type into moves away from you as the answer grows, which is the one thing a chat must not do.
+
+**The screen now claims the viewport.** The transcript scrolls inside it, the composer stays where
+the hand left it, and the page furniture (Tabler's footer) is out of the way. It is the one admin
+screen not built from `PageHeader` + cards, and it says so for itself: `admin.css` keys the
+full-height rules off `:has(> .chat-page)` rather than threading a prop through the router for one
+route, and a Rust test asserts the class names in the screen and the rules in the stylesheet still
+agree — a divergence no compiler would notice, whose symptom is the composer below the fold.
+
+**The transcript reads as a conversation.** What the person said is a tinted bubble, bounded and
+right-aligned; what the agent said is full-width prose with no bubble at all, because it is the
+content of the page and a border around every answer is a border around everything. Fenced code in
+an answer is rendered as a code block with a Copy button — not a Markdown renderer, and
+deliberately not the beginning of one, but an agent that reads and writes files answers with code,
+and code in the body font with its indentation collapsed is the one part of an answer that cannot
+be read at all. An unterminated fence is still a block, so a streaming answer does not reflow under
+the reader when the turn ends. Reasoning is a quiet disclosure above the answer; a tool call is one
+quiet pill naming the tool, with three animating dots while it runs, opening onto its arguments and
+its result.
+
+**History is a rail, not a card.** Past conversations sit on the left where a chat interface keeps
+them, grouped Today / Yesterday / Previous 7 days / Previous 30 days / Older — a list of forty
+timestamps is not a list anyone reads — with the destructive delete revealed on hover rather than
+sitting under the pointer of someone reaching for the conversation. It collapses, and below
+Tabler's `lg` breakpoint it slides over the transcript as a drawer instead of taking half the
+screen. The transcript follows a streaming turn only while the reader is *at* the bottom of it: a
+tool-using turn that runs for a minute must not yank the view back down from what it said two tool
+calls ago.
+
+**The composer is a capsule with a toolbar row inside it**, and that row is the point. A trait may
+in future contribute **buttons and dropdowns to the box a message is written in** — "search the web
+for this one", "which branch am I working on" — so the shape is in place now rather than being
+retrofitted by redesigning the composer under the first trait that wants one:
+
+- `ComposerControl` is **data**, of two kinds: a `toggle` and a `select`. A trait declares controls
+  the way it declares a tool's schema; the server forwards them in a `controls` event; the panel
+  renders whatever arrives and never knows which trait sent it — §11.2's rule for the trait config
+  form, applied where a trait speaks to a person mid-conversation.
+- A control's value **travels with the next message** (`{"type":"message","text":…,"controls":…}`),
+  which is what makes it a modifier on what is about to be said rather than a button that does
+  something on its own. A control that acts immediately would be a client frame of its own and is
+  not invented until a trait asks for one. An agent with no controls sends exactly the frame it sent
+  before, so nothing changes for the traits that exist.
+- A declaration that arrives again mid-conversation **keeps a choice already made**, unless the
+  redeclared control no longer offers it; a queued message keeps the controls it was *composed*
+  with; and a malformed control costs the composer that one control rather than the toolbar.
+
+No trait declares a control yet — no built-in trait has a mode — and no server change was needed:
+unknown fields are ignored on the way in, and the event simply never arrives.
+
 ## One `coding` trait instead of six
 
 `read_file`, `write_file`, `list_files`, `edit_file`, `search_files` and `run_project_script` were

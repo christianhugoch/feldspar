@@ -1,28 +1,49 @@
-// The chat panel: a transcript, a composer, a stop button, and the agent's run
-// history (§11.4).
+// The chat panel: a transcript, a composer, and the agent's run history (§11.4).
 //
 // Everything about *what* the transcript is lives in `agentChat.ts` — the
-// socket, the event fold, the rebuild of a stored run — and is tested there
-// against a stub. This file is the rendering and the three buttons, which is
-// the split that lets the interesting half be tested without a browser.
+// socket, the event fold, the rebuild of a stored run, the composer's controls
+// — and is tested there against a stub. This file is the rendering, which is the
+// split that lets the interesting half be tested without a browser.
 //
-// Two decisions visible on screen:
+// The screen is the one page in the admin that is not a page of cards, because
+// a chat is not a document that scrolls: the transcript scrolls *inside* the
+// viewport and the composer never moves, which is the shape every hosted agent
+// (Kimi, z.ai, and the rest) has converged on and the shape a long tool-using
+// turn needs. The measurements are in `admin.css` under "The agent chat".
 //
-//   - **A tool call is a collapsible entry**, naming the tool, holding its
-//     arguments and its result. Collapsed by default because a transcript is
-//     read for what the agent *said*; expandable because when it goes wrong,
-//     what it did is the only thing that explains it.
+// What is on screen, and why:
+//
+//   - **A rail of past conversations**, on the left where a chat interface keeps
+//     it, rather than a card beside the transcript: it is navigation between
+//     conversations, not part of the one being read. Grouped by age, because a
+//     list of forty timestamps is not a list anyone reads.
+//   - **The person's messages are bubbles; the agent's are not.** The agent's
+//     answer is the content of the page. A border around it is a border around
+//     everything, and the asymmetry is what makes the two readable at a glance.
+//   - **A tool call is one quiet line**, naming the tool, opening onto its
+//     arguments and its result. Collapsed because a transcript is read for what
+//     the agent *said*; expandable because when it goes wrong, what it did is
+//     the only thing that explains it.
+//   - **The composer is a capsule with a toolbar row inside it**, and the
+//     toolbar is where a trait's own controls go (`ComposerControl`). Nothing
+//     declares one yet; the row exists because a mode that modifies the message
+//     being written belongs in the box it is being written in, and retrofitting
+//     that means redesigning the composer rather than filling in a slot.
 //   - **An old run reopens read-only.** It is a record of what happened, and a
 //     composer under it would invite an edit to history. Continuing one is a
 //     deliberate act — the Continue button, which reconnects the socket to that
 //     run.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import Alert from "react-bootstrap/Alert";
-import Button from "react-bootstrap/Button";
-import Card from "react-bootstrap/Card";
-import Form from "react-bootstrap/Form";
-import Spinner from "react-bootstrap/Spinner";
 
 import { api, errorMessage } from "../api";
 import type { ListRunsResponse } from "../client";
@@ -30,14 +51,29 @@ import {
   ChatSession,
   agentChatUrl,
   emptyChat,
+  splitCodeBlocks,
   transcriptFromRun,
   type ChatState,
+  type ComposerControl,
+  type ControlValue,
   type Entry,
   type SocketLike,
 } from "../agentChat";
 import { navigate } from "../App";
-import { IconArrowLeft } from "../icons";
-import { PageBody, PageHeader, StatusBadge, type Tone } from "../layout";
+import {
+  IconAlertTriangle,
+  IconArrowLeft,
+  IconArrowUp,
+  IconChevronDown,
+  IconLayoutSidebar,
+  IconMessagePlus,
+  IconPlayerStop,
+  IconRobot,
+  IconSparkles,
+  IconTool,
+  IconTrash,
+} from "../icons";
+import { StatusBadge, type Tone } from "../layout";
 
 type RunItem = ListRunsResponse[number];
 
@@ -68,14 +104,38 @@ function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? "";
 }
 
+/** Which heading a conversation sits under in the rail.
+ *
+ * Age, not date: the question the rail answers is "the one I had this morning",
+ * and four headings answer it where forty timestamps do not. */
+function ageGroup(when: Date, now: Date): string {
+  const days = Math.floor((startOfDay(now) - startOfDay(when)) / 86_400_000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "Previous 7 days";
+  if (days < 30) return "Previous 30 days";
+  return "Older";
+}
+
+function startOfDay(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
 export function AgentChat({ agent }: { agent: string }) {
   const [chat, setChat] = useState<ChatState>(emptyChat());
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [viewing, setViewing] = useState<{ run: RunItem; entries: Entry[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // The rail starts open where there is room for it beside the transcript, and
+  // shut where it would cover it (below Tabler's `lg`, it is a drawer).
+  const [railOpen, setRailOpen] = useState(() => window.innerWidth >= 992);
   const session = useRef<ChatSession | null>(null);
-  const bottom = useRef<HTMLDivElement | null>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  // Whether the reader is at the bottom of the transcript. A turn that streams
+  // for a minute must not yank the view back down while someone is reading what
+  // it said two tool calls ago — so it follows only when they were following.
+  const following = useRef(true);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -101,6 +161,7 @@ export function AgentChat({ agent }: { agent: string }) {
         entries: run?.entries ?? [],
       });
       setChat(session.current.current());
+      following.current = true;
     },
     [agent],
   );
@@ -120,13 +181,26 @@ export function AgentChat({ agent }: { agent: string }) {
     if (!running) void loadRuns();
   }, [running, loadRuns]);
 
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
-  }, [chat.entries]);
+  const entries = viewing ? viewing.entries : chat.entries;
+
+  // After the DOM has grown, not after React has decided to: `scrollHeight` is
+  // only right once the new text is laid out.
+  useLayoutEffect(() => {
+    const element = scroller.current;
+    if (element && following.current) element.scrollTop = element.scrollHeight;
+  }, [entries, running]);
+
+  const onScroll = () => {
+    const element = scroller.current;
+    if (!element) return;
+    following.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+  };
 
   const send = () => {
     const text = draft;
     setDraft("");
+    following.current = true;
     session.current?.send(text);
   };
 
@@ -134,6 +208,7 @@ export function AgentChat({ agent }: { agent: string }) {
     setError(null);
     try {
       const whole = await api.getRun(run.id);
+      following.current = true;
       setViewing({ run, entries: transcriptFromRun(whole.context) });
     } catch (err) {
       setError(errorMessage(err, "Could not open that conversation."));
@@ -159,196 +234,405 @@ export function AgentChat({ agent }: { agent: string }) {
     }
   };
 
-  const entries = viewing ? viewing.entries : chat.entries;
+  const newConversation = () => {
+    setViewing(null);
+    setError(null);
+    connect();
+  };
+
+  const currentRun = viewing?.run.id ?? chat.runId;
 
   return (
-    <>
-      <PageHeader
-        pretitle="Agents"
-        title={agent}
-        actions={
-          <>
-            <Button variant="outline-secondary" onClick={() => navigate("/agents")}>
-              <IconArrowLeft className="icon-2" />
-              Back
-            </Button>
-            <Button
-              variant="outline-secondary"
-              onClick={() => {
-                setViewing(null);
-                connect();
-              }}
-            >
-              New conversation
-            </Button>
-          </>
-        }
-      />
-      <PageBody>
-        {error && <Alert variant="danger">{error}</Alert>}
+    <div className="chat-page">
+      {railOpen && (
+        <ConversationRail
+          runs={runs}
+          current={currentRun}
+          onOpen={(run) => void openRun(run)}
+          onDelete={(run) => void removeRun(run)}
+          onNew={newConversation}
+        />
+      )}
 
-        <div className="row">
-          <div className="col-lg-8">
-            <Card className="mb-3">
-              <Card.Body>
-                {entries.length === 0 && (
-                  <p className="text-muted mb-0">
-                    Ask this agent something. Everything it does — every table it reads, every
-                    trigger it runs — happens as you.
-                  </p>
-                )}
-                {entries.map((entry, i) => (
-                  <TranscriptEntry key={i} entry={entry} />
-                ))}
-                {chat.running && !viewing && (
-                  <div className="text-muted small d-flex align-items-center gap-2">
-                    <Spinner animation="border" size="sm" role="status" />
-                    Thinking…
-                  </div>
-                )}
-                <div ref={bottom} />
-              </Card.Body>
-
-              {viewing ? (
-                <Card.Footer className="d-flex align-items-center justify-content-between">
-                  <span className="text-muted small">
-                    A past conversation, shown as it happened.{" "}
-                    <StatusBadge tone={stateTone(viewing.run.state)} title={viewing.run.error ?? undefined}>
-                      {viewing.run.state}
-                    </StatusBadge>
-                  </span>
-                  <Button size="sm" onClick={continueRun}>
-                    Continue this conversation
-                  </Button>
-                </Card.Footer>
-              ) : (
-                <Card.Footer>
-                  <Form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      send();
-                    }}
-                  >
-                    <Form.Control
-                      as="textarea"
-                      rows={3}
-                      value={draft}
-                      placeholder="Ask the agent…"
-                      disabled={chat.running}
-                      onChange={(e) => setDraft(e.target.value)}
-                      // Enter sends, Shift+Enter is a newline — the convention
-                      // every chat box in the world has taught.
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          send();
-                        }
-                      }}
-                    />
-                    <div className="btn-list mt-2">
-                      <Button type="submit" disabled={chat.running || draft.trim() === ""}>
-                        Send
-                      </Button>
-                      <Button
-                        variant="outline-danger"
-                        disabled={!chat.running}
-                        onClick={() => session.current?.abort()}
-                      >
-                        Stop
-                      </Button>
-                      {chat.lastState && chat.lastState !== "done" && (
-                        <span className="align-self-center">
-                          <StatusBadge tone={stateTone(chat.lastState)}>
-                            {chat.lastState}
-                          </StatusBadge>
-                        </span>
-                      )}
-                    </div>
-                  </Form>
-                </Card.Footer>
-              )}
-            </Card>
+      <div className="chat-main">
+        <div className="chat-topbar">
+          <button
+            type="button"
+            className="btn btn-icon btn-ghost-secondary btn-sm"
+            aria-label={railOpen ? "Hide conversations" : "Show conversations"}
+            aria-pressed={railOpen}
+            title={railOpen ? "Hide conversations" : "Show conversations"}
+            onClick={() => setRailOpen((open) => !open)}
+          >
+            <IconLayoutSidebar className="icon-2" />
+          </button>
+          <button
+            type="button"
+            className="btn btn-icon btn-ghost-secondary btn-sm"
+            aria-label="Back to agents"
+            title="Back to agents"
+            onClick={() => navigate("/agents")}
+          >
+            <IconArrowLeft className="icon-2" />
+          </button>
+          <div className="me-auto overflow-hidden">
+            <div className="fw-medium text-truncate">{agent}</div>
           </div>
+          {chat.lastState && chat.lastState !== "done" && !viewing && (
+            <StatusBadge tone={stateTone(chat.lastState)}>{chat.lastState}</StatusBadge>
+          )}
+          <button
+            type="button"
+            className="btn btn-sm btn-outline-secondary"
+            onClick={newConversation}
+          >
+            <IconMessagePlus className="icon-2" />
+            New chat
+          </button>
+        </div>
 
-          <div className="col-lg-4">
-            <Card>
-              <Card.Header>History</Card.Header>
-              <div className="list-group list-group-flush">
-                {runs.length === 0 && (
-                  <div className="list-group-item text-muted">
-                    No conversations yet.
-                  </div>
-                )}
-                {runs.map((run) => (
-                  <div
-                    key={run.id}
-                    className={
-                      run.id === (viewing?.run.id ?? chat.runId)
-                        ? "list-group-item active"
-                        : "list-group-item"
-                    }
-                  >
-                    <div className="d-flex justify-content-between align-items-start gap-2">
-                      <button
-                        type="button"
-                        className="btn btn-link p-0 text-start text-break"
-                        onClick={() => void openRun(run)}
-                      >
-                        {run.description || "(no first message)"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-link p-0 text-danger"
-                        aria-label="Delete this conversation"
-                        onClick={() => void removeRun(run)}
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <div className="text-muted small mt-1">
-                      <StatusBadge tone={stateTone(run.state)} title={run.error ?? undefined}>
-                        {run.state}
-                      </StatusBadge>{" "}
-                      {new Date(run.created_at).toLocaleString()}
-                    </div>
-                  </div>
-                ))}
+        <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
+          <div className="chat-column py-4">
+            {error && (
+              <Alert variant="danger" dismissible onClose={() => setError(null)}>
+                {error}
+              </Alert>
+            )}
+            {entries.length === 0 && !error && <EmptyTranscript agent={agent} />}
+            {entries.map((entry, i) => (
+              <TranscriptEntry key={i} entry={entry} />
+            ))}
+            {chat.running && !viewing && (
+              <div className="chat-thinking mb-3">
+                <span className="chat-dot" />
+                <span className="chat-dot" />
+                <span className="chat-dot" />
+                <span className="ms-1">Working…</span>
               </div>
-            </Card>
+            )}
           </div>
         </div>
-      </PageBody>
-    </>
+
+        <div className="chat-dock">
+          <div className="chat-column">
+            {viewing ? (
+              <PastConversationBar
+                run={viewing.run}
+                onContinue={continueRun}
+                onNew={newConversation}
+              />
+            ) : (
+              <Composer
+                draft={draft}
+                running={chat.running}
+                controls={chat.controls}
+                values={chat.controlValues}
+                onDraft={setDraft}
+                onControl={(name, value) => session.current?.setControl(name, value)}
+                onSend={send}
+                onAbort={() => session.current?.abort()}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The rail: New chat, then this agent's conversations newest first. */
+function ConversationRail({
+  runs,
+  current,
+  onOpen,
+  onDelete,
+  onNew,
+}: {
+  runs: RunItem[];
+  current: string | null;
+  onOpen: (run: RunItem) => void;
+  onDelete: (run: RunItem) => void;
+  onNew: () => void;
+}) {
+  const groups = useMemo(() => {
+    const now = new Date();
+    const out: { title: string; runs: RunItem[] }[] = [];
+    for (const run of runs) {
+      const title = ageGroup(new Date(run.created_at), now);
+      const last = out[out.length - 1];
+      if (last?.title === title) last.runs.push(run);
+      else out.push({ title, runs: [run] });
+    }
+    return out;
+  }, [runs]);
+
+  return (
+    <aside className="chat-history" aria-label="Conversations">
+      <div className="p-2">
+        <button type="button" className="btn btn-sm btn-outline-secondary w-100" onClick={onNew}>
+          <IconMessagePlus className="icon-2" />
+          New chat
+        </button>
+      </div>
+      <div className="chat-history-list">
+        {runs.length === 0 && (
+          <div className="text-secondary small px-2 py-1">No conversations yet.</div>
+        )}
+        {groups.map((group) => (
+          <div key={group.title} className="mt-2">
+            <div className="text-secondary text-uppercase fw-bold px-2 mb-1" style={{ fontSize: "0.6875rem" }}>
+              {group.title}
+            </div>
+            {group.runs.map((run) => (
+              <div
+                key={run.id}
+                className={run.id === current ? "chat-history-item active" : "chat-history-item"}
+              >
+                <button
+                  type="button"
+                  className="btn btn-link p-0 border-0 text-reset text-decoration-none w-100 text-start"
+                  onClick={() => onOpen(run)}
+                >
+                  <span className="chat-history-title">
+                    {run.description || "(no first message)"}
+                  </span>
+                </button>
+                <div className="d-flex align-items-center gap-1 mt-1">
+                  <StatusBadge tone={stateTone(run.state)} title={run.error ?? undefined}>
+                    {run.state}
+                  </StatusBadge>
+                  <span className="text-secondary" style={{ fontSize: "0.6875rem" }}>
+                    {new Date(run.created_at).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="chat-history-delete"
+                  aria-label="Delete this conversation"
+                  title="Delete this conversation"
+                  onClick={() => onDelete(run)}
+                >
+                  <IconTrash className="icon-2" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+/** Nothing said yet: whose chat this is, and what talking to it means. */
+function EmptyTranscript({ agent }: { agent: string }) {
+  return (
+    <div className="chat-empty">
+      <div className="chat-empty-icon">
+        <IconRobot className="icon-2" />
+      </div>
+      <h3 className="mb-1">{agent}</h3>
+      <p className="text-secondary mb-0" style={{ maxWidth: "26rem" }}>
+        Ask this agent something. Everything it does — every table it reads, every trigger it
+        runs — happens as you.
+      </p>
+    </div>
+  );
+}
+
+/** The read-only foot of a conversation opened from the history. */
+function PastConversationBar({
+  run,
+  onContinue,
+  onNew,
+}: {
+  run: RunItem;
+  onContinue: () => void;
+  onNew: () => void;
+}) {
+  return (
+    <div className="chat-composer d-flex align-items-center gap-2 flex-wrap">
+      <span className="text-secondary small me-auto">
+        A past conversation, shown as it happened.{" "}
+        <StatusBadge tone={stateTone(run.state)} title={run.error ?? undefined}>
+          {run.state}
+        </StatusBadge>
+      </span>
+      <button type="button" className="btn btn-sm btn-ghost-secondary" onClick={onNew}>
+        New chat
+      </button>
+      <button type="button" className="btn btn-sm btn-primary" onClick={onContinue}>
+        Continue this conversation
+      </button>
+    </div>
+  );
+}
+
+/** The entry box: the text, and under it the toolbar — a trait's controls on
+ * the left, send (or stop) on the right, in the same place either way. */
+function Composer({
+  draft,
+  running,
+  controls,
+  values,
+  onDraft,
+  onControl,
+  onSend,
+  onAbort,
+}: {
+  draft: string;
+  running: boolean;
+  controls: ComposerControl[];
+  values: Record<string, ControlValue>;
+  onDraft: (text: string) => void;
+  onControl: (name: string, value: ControlValue) => void;
+  onSend: () => void;
+  onAbort: () => void;
+}) {
+  const box = useRef<HTMLTextAreaElement | null>(null);
+
+  // Grow with what is typed, up to the height `admin.css` caps it at — a
+  // three-line box that scrolls hides the beginning of a long instruction,
+  // which is exactly the message worth re-reading before sending.
+  useLayoutEffect(() => {
+    const element = box.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  }, [draft]);
+
+  return (
+    <form
+      className="chat-composer"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSend();
+      }}
+    >
+      <textarea
+        ref={box}
+        rows={1}
+        value={draft}
+        aria-label="Message"
+        placeholder={running ? "Waiting for the agent…" : "Ask the agent…"}
+        disabled={running}
+        onChange={(e) => onDraft(e.target.value)}
+        // Enter sends, Shift+Enter is a newline — the convention every chat box
+        // in the world has taught.
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            onSend();
+          }
+        }}
+      />
+      <div className="chat-composer-bar">
+        <div className="chat-composer-controls">
+          {controls.map((control) => (
+            <ComposerControlView
+              key={control.name}
+              control={control}
+              value={values[control.name]}
+              onChange={onControl}
+            />
+          ))}
+        </div>
+        <span className="chat-hint ms-auto d-none d-sm-inline">
+          {running ? "Running" : "Enter to send"}
+        </span>
+        {running ? (
+          <button
+            type="button"
+            className="chat-send chat-send-stop"
+            aria-label="Stop the agent"
+            title="Stop"
+            onClick={onAbort}
+          >
+            <IconPlayerStop className="icon-2" />
+          </button>
+        ) : (
+          <button
+            type="submit"
+            className="chat-send"
+            aria-label="Send"
+            title="Send"
+            disabled={draft.trim() === ""}
+          >
+            <IconArrowUp className="icon-2" />
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}
+
+/** One trait-declared control, rendered from its declaration alone — the panel
+ * knows the two kinds, never which trait sent them (§11.2's rule for the trait
+ * config form, in the place a trait speaks to the person mid-conversation). */
+function ComposerControlView({
+  control,
+  value,
+  onChange,
+}: {
+  control: ComposerControl;
+  value: ControlValue | undefined;
+  onChange: (name: string, value: ControlValue) => void;
+}) {
+  if (control.kind === "toggle") {
+    const on = value === true;
+    return (
+      <button
+        type="button"
+        className="chat-control-toggle"
+        aria-pressed={on}
+        title={control.title}
+        onClick={() => onChange(control.name, !on)}
+      >
+        {control.label}
+      </button>
+    );
+  }
+  return (
+    <select
+      className="chat-control-select"
+      aria-label={control.label ?? control.name}
+      title={control.title}
+      value={typeof value === "string" ? value : control.options[0].value}
+      onChange={(e) => onChange(control.name, e.target.value)}
+    >
+      {control.options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {control.label ? `${control.label}: ${option.label}` : option.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
 /** One entry of the transcript. */
 function TranscriptEntry({ entry }: { entry: Entry }) {
-  const [open, setOpen] = useState(false);
-
   if (entry.kind === "user") {
     return (
-      <div className="mb-3">
-        <div className="text-muted small">You</div>
-        <div className="text-break" style={{ whiteSpace: "pre-wrap" }}>
-          {entry.text}
-        </div>
+      <div className="chat-turn chat-turn-user">
+        <div className="chat-bubble">{entry.text}</div>
       </div>
     );
   }
   if (entry.kind === "assistant") {
     return (
-      <div className="mb-3">
-        <div className="text-muted small">Agent</div>
+      <div className="chat-turn">
         {entry.reasoning && (
-          <details className="text-muted small mb-1">
-            <summary>Reasoning</summary>
-            <div style={{ whiteSpace: "pre-wrap" }}>{entry.reasoning}</div>
+          <details className="chat-reasoning">
+            <summary>
+              <IconSparkles className="icon-2" />
+              Reasoning
+            </summary>
+            <div className="chat-reasoning-text">{entry.reasoning}</div>
           </details>
         )}
-        <div className="text-break" style={{ whiteSpace: "pre-wrap" }}>
-          {entry.text}
-        </div>
+        <AgentText text={entry.text} />
       </div>
     );
   }
@@ -356,33 +640,116 @@ function TranscriptEntry({ entry }: { entry: Entry }) {
     // In the transcript, where it happened: a chat that silently stopped would
     // be unfixable by the person watching it.
     return (
-      <Alert variant="danger" className="py-2">
-        <div className="text-break small mb-0">{entry.message}</div>
+      <Alert variant="danger" className="py-2 d-flex align-items-start gap-2">
+        <IconAlertTriangle className="icon-2 flex-shrink-0 mt-1" />
+        <div className="text-break small">{entry.message}</div>
       </Alert>
     );
   }
+  return <ToolEntry entry={entry} />;
+}
+
+/** What the agent said: prose as typed, fenced code as code. */
+function AgentText({ text }: { text: string }) {
+  const blocks = useMemo(() => splitCodeBlocks(text), [text]);
+  if (blocks.length === 0) return null;
   return (
-    <div className="mb-3">
+    <>
+      {blocks.map((block, i) =>
+        block.kind === "prose" ? (
+          <div key={i} className="chat-prose">
+            {block.text}
+          </div>
+        ) : (
+          <CodeBlock key={i} language={block.language} text={block.text} />
+        ),
+      )}
+    </>
+  );
+}
+
+/** A fenced block, with the one thing anyone does to code on a web page. */
+function CodeBlock({ language, text }: { language: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    void navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => setCopied(false),
+    );
+  };
+
+  return (
+    <div className="chat-code">
+      <div className="chat-code-head">
+        <span>{language || "code"}</span>
+        <button type="button" className="btn btn-sm btn-ghost-secondary py-0" onClick={copy}>
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre>{text}</pre>
+    </div>
+  );
+}
+
+/** A tool call: the line, and what it opens onto. */
+function ToolEntry({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
+  const [open, setOpen] = useState(false);
+  const running = entry.result === null;
+
+  return (
+    <div className="chat-tool">
       <button
         type="button"
-        className="btn btn-sm btn-outline-secondary"
+        className="chat-tool-head"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
-        {entry.isError ? "⚠ " : ""}
-        {entry.name}
-        {entry.result === null ? " — running…" : ""}
+        {entry.isError ? (
+          <IconAlertTriangle className="icon-2 text-danger flex-shrink-0" />
+        ) : (
+          <IconTool className="icon-2 flex-shrink-0" />
+        )}
+        <span className="chat-tool-name">{entry.name}</span>
+        {running && <RunningDots />}
+        <IconChevronDown className="icon-2 chat-tool-caret flex-shrink-0" />
       </button>
       {open && (
-        <div className="mt-2">
-          <div className="text-muted small">Arguments</div>
-          <pre className="small text-break">{pretty(entry.args)}</pre>
-          <div className="text-muted small">Result</div>
-          <pre className={`small text-break${entry.isError ? " text-danger" : ""}`}>
-            {entry.result === null ? "(still running)" : pretty(entry.result)}
-          </pre>
+        <div className="chat-tool-body">
+          <Labelled label="Arguments">
+            <pre>{pretty(entry.args)}</pre>
+          </Labelled>
+          <Labelled label="Result">
+            <pre className={entry.isError ? "text-danger" : undefined}>
+              {running ? "(still running)" : pretty(entry.result)}
+            </pre>
+          </Labelled>
         </div>
       )}
+    </div>
+  );
+}
+
+function RunningDots() {
+  return (
+    <span className="chat-thinking" aria-label="running">
+      <span className="chat-dot" />
+      <span className="chat-dot" />
+      <span className="chat-dot" />
+    </span>
+  );
+}
+
+function Labelled({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="mb-1">
+      <div className="text-secondary" style={{ fontSize: "0.6875rem" }}>
+        {label}
+      </div>
+      {children}
     </div>
   );
 }

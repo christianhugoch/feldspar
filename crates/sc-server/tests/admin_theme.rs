@@ -120,6 +120,47 @@ fn the_narrow_sidebar_moves_the_page_with_it() {
     );
 }
 
+/// The chat screen (§11.4) is the one admin page that claims the viewport: the
+/// transcript scrolls inside it and the composer never moves. That is a
+/// contract between two files — a class name in `AgentChat.tsx` and the rules
+/// `admin.css` keys on it — and nothing in the build would notice them
+/// diverging. A renamed class gives back a page that scrolls as a whole, with
+/// the box you type into somewhere below the fold.
+#[test]
+fn the_chat_screen_and_its_full_height_rules_agree() {
+    let css = read("src/admin.css");
+    let screen = read("src/screens/AgentChat.tsx");
+
+    for class in [
+        // The screen's own root, which the wrapper's rules select on.
+        "chat-page",
+        // The transcript's scroll box, and the dock that stays put beneath it.
+        "chat-scroll",
+        "chat-dock",
+        // The entry box, and the row inside it a trait's controls land in
+        // (`ComposerControl` in `agentChat.ts`).
+        "chat-composer",
+        "chat-composer-controls",
+    ] {
+        assert!(
+            screen.contains(&format!("\"{class}")),
+            "AgentChat.tsx should render `.{class}`"
+        );
+        assert!(
+            css.contains(&format!(".{class}")),
+            "admin.css has no rules for `.{class}`, which AgentChat.tsx renders"
+        );
+    }
+
+    // The wrapper is a flex column only for this screen, selected by what it
+    // contains — the alternative was a prop threaded through the router for one
+    // route. Without it the scroll box has no height to be `flex: 1` of.
+    assert!(
+        css.contains(".page-wrapper:has(> .chat-page)"),
+        "admin.css should give the page wrapper a fixed height when it holds a chat"
+    );
+}
+
 #[test]
 fn the_logo_is_vendored_and_not_auto_darkened() {
     let logo = read("src/vendor/saltcorn-logo.svg");

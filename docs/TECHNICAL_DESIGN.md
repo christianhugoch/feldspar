@@ -1695,6 +1695,29 @@ history for that agent.
   **agent**, by contrast, leaves its runs: `subject` is the name, and the transcript is the
   record of what happened.
 
+**What was built, where it deviates** (the chat screen, redesigned):
+
+- **The chat is the one admin screen that owns the viewport**, rather than a card in a scrolling
+  page: the transcript scrolls inside it and the composer does not move. A composer that drifts
+  down the page as an answer streams is the one thing a chat interface must not do, and it is why
+  every hosted agent UI has this shape. `admin.css` keys the rules off `:has(> .chat-page)` so the
+  screen declares its own layout rather than the shell learning which routes are chats, and a test
+  in `sc-server` asserts the class names and the rules still agree.
+- **Asymmetric turns.** The person's message is a tinted bubble; the agent's answer is full-width
+  prose with no container, because it is the page's content. Fenced code is rendered as code with a
+  copy button (`splitCodeBlocks`) — not a Markdown renderer, and not the start of one; code with
+  its indentation collapsed is the only part of an answer that is unreadable rather than merely
+  plain. History moved to a rail on the left, grouped by age.
+- **The composer has a toolbar row, and `ComposerControl` is what goes in it.** A trait may
+  contribute **toggles and selects to the box the message is written in**; each is declared as data
+  (the way a tool's schema is), forwarded by a `controls` server event, and rendered by a panel
+  that never learns which trait sent it — §11.2's rule for the trait config form, applied where a
+  trait speaks to a person mid-conversation. A control's value travels **with the next message**
+  (`message` gains an optional `controls` object), which makes it a modifier on what is about to be
+  said; a control that *acts* on its own would be a client frame of its own and is not invented
+  until a trait asks for one. Nothing declares a control yet — the client half exists because
+  retrofitting it means redesigning the composer rather than filling a slot.
+
 ### 11.5 The agent as an action
 
 `run_agent` is a registered `Action` (in `sc-core-traits`, since it runs a loop whose tools
