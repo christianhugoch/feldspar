@@ -1,12 +1,14 @@
-//! What every coding trait shares: the file store it works in, and the paths it
+//! What every coding tool shares: the file store it works in, and the paths it
 //! will accept (§11.3, TODO Phase 5).
 //!
 //! `read_file`, `write_file`, `list_files`, `edit_file`, `search_files` and
-//! `run_project_script` are six grants over one **scope** — a configured file
-//! store, optionally rooted at a sub-directory — and the scope is here rather
-//! than copied six times for the reason [`crate::table`] gives: each of them is a
+//! `run_script` are six tools over one **scope** — a configured file store,
+//! optionally rooted at a sub-directory — and the scope is here rather than in
+//! any one of them for the reason [`crate::table`] gives: each of them is a
 //! promise to the model, and a path that means one thing to `read_file` and
-//! another to `edit_file` is a model that cannot use either.
+//! another to `edit_file` is a model that cannot use either. That the six now
+//! share a *single configuration* as well ([`crate::Coding`]) is the same
+//! argument taken one step further.
 //!
 //! ## The root, and what it is for
 //!
@@ -53,8 +55,8 @@ pub const ARG_PATH: &str = "path";
 /// than by the vendor mid-conversation.
 pub const MAX_TOOL_NAME: usize = 64;
 
-/// The two settings every coding trait declares, in the order the form shows
-/// them.
+/// The two settings the coding trait declares first, in the order the form
+/// shows them.
 ///
 /// The store is a [`server_query`](FormField::server_query) pick-list, like every
 /// other setting in the tree that names a store: an admin choosing from the
@@ -232,7 +234,7 @@ pub async fn open_at(
     Ok((store, path))
 }
 
-/// The save-and-load check every coding trait makes: the store is one this
+/// The save-and-load check the coding trait makes: the store is one this
 /// deployment has, and the root is a path inside it.
 ///
 /// Checked against the **definition** as well as the live connection, for

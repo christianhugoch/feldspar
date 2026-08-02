@@ -184,22 +184,24 @@ fn the_agents_tutorial_teaches_each_step_of_the_loop() {
     let root = workspace_root();
     let agents = read(&root, "docs/tutorial-agents.md");
     for fragment in [
-        "Test connection",    // the provider, checked before it is saved
-        "query_table",        // the grant that lets an agent read a table
-        "query_tasks",        // …and the tool name its configuration derives
-        "tool call",          // what the transcript shows happening
-        "Stop",               // the abort, mid-answer
-        "History",            // …and where the run is afterwards
-        "run_trigger",        // the grant that lets an agent act
-        "min_role",           // …still gated by the trigger's own floor
-        "search_files",       // the coding loop: grep,
-        "edit_file",          // …edit,
-        "build_application",  // …build, and read the diagnostics
-        "run_project_script", // …run a script, because there is no shell
-        "run_agent",          // the agent as a trigger body (§11.5)
-        "template literal",   // …whose prompt is a formula, written the safe way
-        "max_steps",          // the seatbelt
-        "sentinel",           // the redacted key
+        "Test connection",             // the provider, checked before it is saved
+        "query_table",                 // the grant that lets an agent read a table
+        "query_tasks",                 // …and the tool name its configuration derives
+        "tool call",                   // what the transcript shows happening
+        "Stop",                        // the abort, mid-answer
+        "History",                     // …and where the run is afterwards
+        "run_trigger",                 // the grant that lets an agent act
+        "min_role",                    // …still gated by the trigger's own floor
+        "`coding`",                    // the one trait the whole coding loop is
+        "search_files",                // …grep,
+        "edit_file",                   // …edit,
+        "build_application",           // …build, and read the diagnostics
+        "May create and change files", // the checkbox the edits are behind
+        "no shell",                    // …and the script grant that ships instead of one
+        "run_agent",                   // the agent as a trigger body (§11.5)
+        "template literal",            // …whose prompt is a formula, written the safe way
+        "max_steps",                   // the seatbelt
+        "sentinel",                    // the redacted key
     ] {
         assert!(
             agents.contains(fragment),

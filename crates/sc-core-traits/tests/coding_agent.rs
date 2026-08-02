@@ -20,7 +20,7 @@ use common::Env;
 use sc_agent::testing::{FakeProvider, Reply};
 use sc_agent::{Agent, EnabledTrait, RunCaller, Runner, save_agent};
 use sc_app::{Application, FrameworkRef, save_application};
-use sc_core_traits::{CFG_APPLICATION, CFG_ROOT, CFG_STORE};
+use sc_core_traits::{CFG_APPLICATION, CFG_MAY_EDIT, CFG_ROOT, CFG_STORE};
 use sc_error::Result;
 use serde_json::{Value as Json, json};
 
@@ -79,19 +79,17 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
     );
     save_application(&env.catalog, &app).await?;
 
-    // The agent: the coding traits over the app's source directory, plus the
-    // build. Five enabled traits, each with the same scope — which is what an
-    // admin fills in once per grant.
-    let scope = |t: &str| {
-        EnabledTrait::new(t)
-            .config(CFG_STORE, "apps")
-            .config(CFG_ROOT, "web")
-    };
+    // The agent: **one** `coding` trait over the app's source directory, with the
+    // edit grant ticked, plus the build. Two enabled traits, and the scope filled
+    // in once — which is the shape this used to need five rows of.
     let agent = Agent::new("coder", "main")
         .system_prompt("You maintain the to-do app.")
-        .with_trait(scope("search_files"))
-        .with_trait(scope("read_file"))
-        .with_trait(scope("edit_file"))
+        .with_trait(
+            EnabledTrait::new("coding")
+                .config(CFG_STORE, "apps")
+                .config(CFG_ROOT, "web")
+                .config(CFG_MAY_EDIT, true),
+        )
         .with_trait(EnabledTrait::new("build_application").config(CFG_APPLICATION, "todo"));
     save_agent(&env.catalog, &env.registry, &agent).await?;
 
@@ -139,14 +137,18 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
         Some("Added a `done` field to Todo. The app builds.")
     );
 
-    // Every tool was offered under the name its configuration derives.
+    // Every tool was offered under the name its configuration derives — the six
+    // the one `coding` trait contributes, in its order, and then the build's.
+    // `run_script_apps_web` is not among them: that grant was left off.
     let requests = provider.requests();
     let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         offered,
         vec![
-            "search_files_apps_web",
             "read_file_apps_web",
+            "list_files_apps_web",
+            "search_files_apps_web",
+            "write_file_apps_web",
             "edit_file_apps_web",
             "build_todo",
         ]
@@ -213,7 +215,7 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
 async fn an_agent_whose_store_is_missing_is_refused_on_save_with_the_reason() -> Result<()> {
     let env = Env::new().await?;
     let agent = Agent::new("coder", "main").with_trait(
-        EnabledTrait::new("read_file")
+        EnabledTrait::new("coding")
             .config(CFG_STORE, "not-a-store")
             .config(CFG_ROOT, ""),
     );
@@ -222,34 +224,34 @@ async fn an_agent_whose_store_is_missing_is_refused_on_save_with_the_reason() ->
         .unwrap_err()
         .to_string();
     assert!(err.contains("not-a-store"), "{err}");
-    assert!(err.contains("read_file"), "{err}");
+    assert!(err.contains("coding"), "{err}");
     Ok(())
 }
 
-/// Two instances of one coding trait over the **same** scope derive the same
-/// tool name, and that clash is refused where it can be fixed (§11.2).
+/// Two `coding` traits over the **same** scope derive the same tool names, and
+/// that clash is refused where it can be fixed (§11.2).
 #[tokio::test]
 async fn two_instances_over_one_scope_collide_on_save() -> Result<()> {
     let env = Env::new().await?;
     env.with_file_store("apps", None).await?;
-    let read = |root: &str| {
-        EnabledTrait::new("read_file")
+    let coding = |root: &str| {
+        EnabledTrait::new("coding")
             .config(CFG_STORE, "apps")
             .config(CFG_ROOT, root)
     };
 
-    // Two directories: two distinguishable tools, which is the point of deriving
-    // the name from the configuration.
+    // Two directories: two distinguishable sets of tools, which is the point of
+    // deriving the names from the configuration.
     let ok = Agent::new("coder", "main")
-        .with_trait(read("web"))
-        .with_trait(read("docs"));
+        .with_trait(coding("web"))
+        .with_trait(coding("docs"));
     save_agent(&env.catalog, &env.registry, &ok).await?;
 
-    // The same directory twice: one name, refused on save rather than discovered
-    // when the model picks the tool that is not there.
+    // The same directory twice: one set of names, refused on save rather than
+    // discovered when the model picks the tool that is not there.
     let clash = Agent::new("twice", "main")
-        .with_trait(read("web"))
-        .with_trait(read("web"));
+        .with_trait(coding("web"))
+        .with_trait(coding("web"));
     let err = save_agent(&env.catalog, &env.registry, &clash)
         .await
         .unwrap_err()

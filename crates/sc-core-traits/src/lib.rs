@@ -21,22 +21,23 @@
 //!
 //! ## The set
 //!
-//! Thirteen traits over four things an agent can be given. **Tables**:
+//! Eight traits over four things an agent can be given. **Tables**:
 //! [`QueryTable`] reads one, and [`InsertRow`], [`UpdateRows`] and
 //! [`DeleteRows`] are three separate opt-in grants over one — so a read-only
 //! agent is the default shape and each way of changing data is a deliberate act
 //! with a form field attached. **Actions**: [`RunTrigger`] exposes one configured
 //! trigger, which is what connects an agent to the whole of §10 (and, once §10.3
 //! lands, to workflows unchanged, because a workflow is a trigger). **Code**:
-//! [`ReadFile`], [`ListFiles`], [`SearchFiles`], [`WriteFile`] and [`EditFile`]
-//! work inside one configured file store (optionally rooted at a
-//! sub-directory), [`BuildApplication`] builds the application whose source that
-//! is and hands back its diagnostics, and [`RunProjectScript`] runs a script the
-//! project's own `package.json` declares — which is the bounded thing that ships
-//! instead of a shell (decision 6). And **the schema itself**:
-//! [`ManageTableAdmin`] describes and edits the catalog — the first
-//! *app-building* trait, and the first that does not name a table in its
-//! configuration, because the tables it makes do not exist when it is configured.
+//! [`Coding`] is the whole loop over one configured file store (optionally
+//! rooted at a sub-directory) — reading, listing and searching always, writing
+//! and editing under one checkbox, and running a script the project's own
+//! `package.json` declares under another, which is the bounded thing that ships
+//! instead of a shell (decision 6) — and [`BuildApplication`] builds the
+//! application whose source that store is and hands back its diagnostics. And
+//! **the schema itself**: [`ManageTableAdmin`] describes and edits the catalog —
+//! the first *app-building* trait, and the first that does not name a table in
+//! its configuration, because the tables it makes do not exist when it is
+//! configured.
 //!
 //! ## And one thing that is not a trait
 //!
@@ -64,6 +65,10 @@
 //!   [`tool_names`]. `ManageTableAdmin`'s two names are fixed for the same
 //!   reason it names no table; enabling it twice therefore *collides*, which is
 //!   the intended outcome.
+//! - **A trait may offer several tools, and may withhold some of them.**
+//!   [`Coding`] offers six over one scope and declares only the ones its grants
+//!   allow, which is how "may this agent change the source?" became a checkbox
+//!   rather than a second trait with the same form on it.
 //! - **Its tool is described by what it is configured against**: the table's own
 //!   fields, with their types, in the description *and* in the JSON schema. A
 //!   model left to guess a column name will guess, and the guess costs a turn.
@@ -81,22 +86,17 @@
 //!   of failing mid-conversation.
 
 mod build_application;
+mod coding;
 mod delete_rows;
-mod edit_file;
 mod files;
 mod insert_row;
-mod list_files;
 mod manage_table_admin;
 mod query_table;
-mod read_file;
 mod run_agent;
-mod run_project_script;
 mod run_trigger;
-mod search_files;
 mod table;
 mod update_rows;
 mod write;
-mod write_file;
 
 use std::sync::Arc;
 
@@ -109,42 +109,38 @@ pub use table::{CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE};
 pub use files::{CFG_ROOT, CFG_STORE, FileScope, configured_scope, slugify};
 
 pub use build_application::{BuildApplication, CFG_APPLICATION};
+pub use coding::{
+    CFG_MAX_CHARS, CFG_MAX_RESULTS, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_TIMEOUT, Coding,
+    DEFAULT_MAX_CHARS, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS,
+};
 pub use delete_rows::DeleteRows;
-pub use edit_file::EditFile;
 pub use insert_row::InsertRow;
-pub use list_files::ListFiles;
 pub use manage_table_admin::{
     CFG_ALLOW_ACCESS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP, CFG_ALLOW_EDIT, ManageTableAdmin,
     TOOL_DESCRIBE, TOOL_EDIT,
 };
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
-pub use read_file::{CFG_MAX_CHARS, DEFAULT_MAX_CHARS, ReadFile};
 pub use run_agent::{CFG_AGENT, CFG_PROMPT, RunAgent};
-pub use run_project_script::{
-    CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS, RunProjectScript,
-};
 pub use run_trigger::{CFG_TRIGGER, RunTrigger};
-pub use search_files::{CFG_MAX_RESULTS, SearchFiles};
 pub use update_rows::{DEFAULT_MAX_WRITE_ROWS, UpdateRows};
-pub use write_file::WriteFile;
 
 /// What each built-in trait calls the tool it derives from its configuration —
 /// the answer to "what will this be called?" the admin UI wants before an agent
 /// is saved and the collision check (§11.2) wants at the moment of saving.
 pub mod tool_names {
     pub use crate::build_application::tool_name as build_application;
+    pub use crate::coding::tool_names as coding;
+    pub use crate::coding::{
+        edit_file_tool_name as edit_file, list_files_tool_name as list_files,
+        read_file_tool_name as read_file, run_script_tool_name as run_project_script,
+        search_files_tool_name as search_files, write_file_tool_name as write_file,
+    };
     pub use crate::delete_rows::tool_name as delete_rows;
-    pub use crate::edit_file::tool_name as edit_file;
     pub use crate::insert_row::tool_name as insert_row;
-    pub use crate::list_files::tool_name as list_files;
     pub use crate::manage_table_admin::tool_names as manage_table_admin;
     pub use crate::query_table::tool_name as query_table;
-    pub use crate::read_file::tool_name as read_file;
-    pub use crate::run_project_script::tool_name as run_project_script;
     pub use crate::run_trigger::tool_name as run_trigger;
-    pub use crate::search_files::tool_name as search_files;
     pub use crate::update_rows::tool_name as update_rows;
-    pub use crate::write_file::tool_name as write_file;
 }
 
 /// The built-in trait set a server installs.
@@ -187,13 +183,8 @@ pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(UpdateRows))?;
     registry.register(Arc::new(DeleteRows))?;
     registry.register(Arc::new(RunTrigger))?;
-    registry.register(Arc::new(ReadFile))?;
-    registry.register(Arc::new(WriteFile))?;
-    registry.register(Arc::new(ListFiles))?;
-    registry.register(Arc::new(EditFile))?;
-    registry.register(Arc::new(SearchFiles))?;
+    registry.register(Arc::new(Coding))?;
     registry.register(Arc::new(BuildApplication))?;
-    registry.register(Arc::new(RunProjectScript))?;
     registry.register(Arc::new(ManageTableAdmin))?;
     Ok(())
 }
@@ -209,24 +200,20 @@ mod tests {
             registry.names(),
             vec![
                 "build_application",
+                "coding",
                 "delete_rows",
-                "edit_file",
                 "insert_row",
-                "list_files",
                 "manage_table_admin",
                 "query_table",
-                "read_file",
-                "run_project_script",
                 "run_trigger",
-                "search_files",
                 "update_rows",
-                "write_file",
             ]
         );
         // Every one of them describes itself and its configuration as data,
         // which is what lets the admin UI render a form for a trait it has never
         // heard of — and every one that names a *target* names it as required, so
-        // a blank form cannot be saved.
+        // a blank form cannot be saved. `coding` names one too (its store); what
+        // its blank checkboxes then decide is what it may *do* there.
         //
         // `manage_table_admin` is the exception, and the reason is the phase's
         // point: it names no table, because the tables it makes do not exist when
@@ -278,21 +265,22 @@ mod tests {
         assert_eq!(spec("delete_rows"), vec![CFG_TABLE, CFG_MAX_ROWS]);
         assert_eq!(spec("run_trigger"), vec![CFG_TRIGGER]);
 
-        // Every coding trait is configured with the same scope — one store, and
-        // optionally one directory in it — so an admin who has configured one
-        // has configured all of them, and a path means the same thing to each.
-        // The ones that bring something back add the bound on how much.
-        assert_eq!(spec("read_file"), vec![CFG_STORE, CFG_ROOT, CFG_MAX_CHARS]);
-        assert_eq!(spec("write_file"), vec![CFG_STORE, CFG_ROOT]);
-        assert_eq!(spec("list_files"), vec![CFG_STORE, CFG_ROOT]);
-        assert_eq!(spec("edit_file"), vec![CFG_STORE, CFG_ROOT]);
+        // The whole coding loop is **one** form: the scope filled in once — one
+        // store, optionally one directory in it — then what the agent may do
+        // there, then the bound on each thing that brings something back. Six
+        // tools, one place to say where they work, so the scope cannot disagree
+        // with itself.
         assert_eq!(
-            spec("search_files"),
-            vec![CFG_STORE, CFG_ROOT, CFG_MAX_RESULTS]
-        );
-        assert_eq!(
-            spec("run_project_script"),
-            vec![CFG_STORE, CFG_ROOT, CFG_TIMEOUT]
+            spec("coding"),
+            vec![
+                CFG_STORE,
+                CFG_ROOT,
+                CFG_MAY_EDIT,
+                CFG_MAY_RUN_SCRIPTS,
+                CFG_MAX_CHARS,
+                CFG_MAX_RESULTS,
+                CFG_TIMEOUT
+            ]
         );
         // The build names an application rather than a store: which store the
         // source is in is the application's own configuration (§13.3), and
@@ -357,6 +345,20 @@ mod tests {
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
+        // The six file names above are `coding`'s whole set, which is what the
+        // collision check compares when the trait is enabled twice: two
+        // instances over one scope produce these same six and are refused.
+        assert_eq!(
+            tool_names::coding(&scope),
+            [
+                tool_names::read_file(&scope),
+                tool_names::list_files(&scope),
+                tool_names::search_files(&scope),
+                tool_names::write_file(&scope),
+                tool_names::edit_file(&scope),
+                tool_names::run_project_script(&scope),
+            ]
+        );
         // `manage_table_admin`'s names are fixed rather than derived, and say
         // the same two things every deployment's do.
         assert_eq!(

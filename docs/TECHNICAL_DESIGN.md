@@ -1476,43 +1476,57 @@ once §10.3 lands, becomes callable the same way, because a workflow is a trigge
   is the action's business, and a closed schema here would be this crate guessing at another
   crate's contract — a guess the vendor enforces by refusing the call.
 
-**Code.** The coding traits work inside **one configured file store**, optionally rooted at a
-subdirectory, through the `FileStore` trait and §9's access rules — so they are the same
-capability the file manager and the IDE already have, handed to a model:
-`read_file`, `write_file`, `edit_file` (exact-string replacement, which is the edit that can be
-verified before it is applied), `list_files`, `search_files` (a server-side search, which is
-also the endpoint the IDE's find-in-files wanted), and `build_application` for the application
-whose source is that store, returning the build's diagnostics as the tool result — a failed
-build is the most useful thing the model can be told.
+**Code.** The `coding` trait works inside **one configured file store**, optionally rooted at a
+subdirectory, through the `FileStore` trait and §9's access rules — so it is the same
+capability the file manager and the IDE already have, handed to a model. It contributes six
+tools from that one configuration: `read_file`, `list_files` and `search_files` (a server-side
+search, which is also the endpoint the IDE's find-in-files wanted) always; `write_file` and
+`edit_file` (exact-string replacement, which is the edit that can be verified before it is
+applied) under a **checkbox**; and the script runner under a second one. Beside it,
+`build_application` builds the application whose source that store is, returning the build's
+diagnostics as the tool result — a failed build is the most useful thing the model can be told —
+and it stays its own trait because it is configured against an *application*, not a store.
 
 **No shell.** There is no `run_command` trait. Handing a model a shell on the server is the
 same decision the IDE milestone declined to take for a terminal, and it should not arrive by the
-back door. `run_project_script` is the bounded version and the one that ships: it runs
+back door. The script grant is the bounded version and the one that ships: it runs
 `npm run <script>` for a script that **already exists** in the project's `package.json`, so the
 set of runnable commands is the project's own and the model chooses from it rather than
 composing one.
 
 **What was built, where it deviates** (Phase 5, the coding traits):
 
-- **Six traits share one `FileScope`** (a store plus an optional sub-directory), and each is a
-  separate grant with its own form entry — the shape the three write traits already have, for the
-  same reason. Tool names are derived from the scope (`edit_file_apps_web`), so one trait over two
-  directories is two tools and the same directory twice is a collision refused on save; a derived
-  name longer than the 64 characters both vendors accept is refused there too, rather than by the
-  vendor mid-conversation.
+- **One trait, `coding`, offers six tools over one `FileScope`** (a store plus an optional
+  sub-directory). It shipped as six separate traits — the shape the three write traits have — and
+  was consolidated afterwards, because that shape put the *same* store and the *same* root on six
+  forms: an admin configured one scope six times, and a change of mind about the root was six
+  edits, five of which could be forgotten. What was worth keeping from the six is that a
+  read-only agent is the default shape, and that survives as two checkboxes on the one form:
+  `may_edit` adds `write_file` and `edit_file`, `may_run_scripts` adds the script runner, and
+  both are off by default. A withheld tool is **not declared to the model**, and a call that
+  arrives for one anyway (from a stale transcript) is refused naming the checkbox — the
+  `manage_table_admin` shape, for the `manage_table_admin` reason: grants that share a scope
+  belong on one trait, not on several that can disagree about where they point. Tool names are
+  still derived from the scope (`edit_file_apps_web`), so the trait over two directories is two
+  sets of tools and the same directory twice is a collision refused on save; a derived name longer
+  than the 64 characters both vendors accept is refused there too, rather than by the vendor
+  mid-conversation.
 - **The configured root is a *second* confinement**, above the store's own. A path that would
   leave it is refused by any spelling, and every path reported back to the model is relative to
   it — a prefix the model may not change is one it will eventually send back and be refused for.
 - **`build_application` is configured with the application's subdomain**, not with a store: which
   store the source is in is the application's own configuration (§13.2/§13.3), and asking the
-  admin for it twice would be two places to get it wrong. It builds through the same
+  admin for it twice would be two places to get it wrong. That is also why it stayed out of
+  `coding` when the rest were folded together: it is scoped on a different axis, and an agent
+  building two applications out of one source tree would otherwise need two `coding` instances,
+  which would then collide on the file tools' names. It builds through the same
   `sc_app::build_application` the admin's Build button runs but does **not** mount the result —
   mounting is the server's, and an agent's build answers "does this compile?" rather than "serve
   this". A failed build comes back as a **result** (`built: false`, the tools' output, and the
   file/line/message triples parsed out of it) rather than an error, so what the model reads is a
   list of diagnostics rather than a sentence.
-- **The search is `sc_files::search_store`**, one walk with three callers: the `search_files`
-  trait, the new admin endpoint `POST /api/file-stores/{store}/search`, and the IDE's search
+- **The search is `sc_files::search_store`**, one walk with three callers: the `coding` trait's
+  `search_files` tool, the new admin endpoint `POST /api/file-stores/{store}/search`, and the IDE's search
   provider, which registers for the `file` scheme and thereby *replaces* the tree-walking provider
   the search-service override installs. It applies `filter_visible` per directory, so a search
   cannot report a line out of a file the caller could not have opened, and it does not descend

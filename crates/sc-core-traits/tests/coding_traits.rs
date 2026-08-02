@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! The coding traits against a **real local file store** (§11.3, TODO Phase 5).
+//! The `coding` trait against a **real local file store** (§11.3, TODO Phase 5).
 //!
 //! Real directories and real bytes, for the reason the other suites use a real
-//! database: what these traits do *is* the meeting of paths and bytes, so a
+//! database: what this trait does *is* the meeting of paths and bytes, so a
 //! stubbed store would confirm only that the seam was called. What is pinned
 //! here is the behaviour a model depends on and an admin relies on:
 //!
@@ -19,22 +19,28 @@
 //!   cannot open a directory cannot learn its contents through an agent either;
 //! - `run_project_script` refusing a script `package.json` does not declare and
 //!   running one it does;
+//! - **the two grants**: an agent whose `may_edit` is off is offered no writing
+//!   tool and is refused one it calls anyway, naming the checkbox — and the same
+//!   for `may_run_scripts`;
+//! - one configured scope feeding **every** tool, so the six of them cannot
+//!   disagree about where they work;
 //! - a trait configured against a store that is gone leaving its agent invalid
 //!   **with a reason**.
 //!
-//! `build_application` has its own suite (`build_application.rs`), because it
-//! needs an application row and a bundler to run.
+//! `build_application` has its own suite (`build_application.rs`) and its own
+//! trait, because it is configured against an application rather than a store.
 
 mod common;
 
 use common::{Env, as_user, config};
 use sc_agent::RunCaller;
 use sc_core_traits::{
-    CFG_MAX_CHARS, CFG_MAX_RESULTS, CFG_ROOT, CFG_STORE, CFG_TIMEOUT, FileScope, tool_names,
+    CFG_MAX_CHARS, CFG_MAX_RESULTS, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_ROOT, CFG_STORE,
+    CFG_TIMEOUT, FileScope, configured_scope, tool_names,
 };
 use sc_error::Result;
 use sc_files::FileMeta;
-use serde_json::json;
+use serde_json::{Value as Json, json};
 
 /// The scope every test in this file is configured against.
 fn scope(store: &str, root: &str) -> FileScope {
@@ -44,14 +50,56 @@ fn scope(store: &str, root: &str) -> FileScope {
     }
 }
 
-/// A store-and-root configuration.
+/// A scope with **both grants on** — the coding agent an admin sets up when they
+/// mean the agent to change something.
 fn at(store: &str, root: &str) -> sc_types::Attrs {
-    config(&[(CFG_STORE, json!(store)), (CFG_ROOT, json!(root))])
+    config(&[
+        (CFG_STORE, json!(store)),
+        (CFG_ROOT, json!(root)),
+        (CFG_MAY_EDIT, json!(true)),
+        (CFG_MAY_RUN_SCRIPTS, json!(true)),
+    ])
 }
 
 /// The admin, who clears every rule — the caller a chat with an admin has.
 fn admin() -> RunCaller {
     RunCaller::system()
+}
+
+/// One of `coding`'s tools, by the short name this file calls it: the trait
+/// derives the real one from the scope, and going through that derivation is
+/// what asserts the model would have found it.
+fn tool(kind: &str, config: &sc_types::Attrs) -> String {
+    let scope = configured_scope(config).expect("a configured scope");
+    match kind {
+        "read_file" => tool_names::read_file(&scope),
+        "list_files" => tool_names::list_files(&scope),
+        "search_files" => tool_names::search_files(&scope),
+        "write_file" => tool_names::write_file(&scope),
+        "edit_file" => tool_names::edit_file(&scope),
+        "run_project_script" => tool_names::run_project_script(&scope),
+        other => panic!("no such coding tool: {other}"),
+    }
+}
+
+/// Call one of `coding`'s tools under the name its configuration derives.
+async fn call(
+    env: &Env,
+    config: &sc_types::Attrs,
+    kind: &str,
+    args: Json,
+    caller: &RunCaller,
+) -> Result<Json> {
+    env.call_tool("coding", config, &tool(kind, config), args, caller)
+        .await
+}
+
+/// The names of the tools one configuration offers the model.
+fn offered(env: &Env, config: &sc_types::Attrs) -> Vec<String> {
+    env.tools("coding", config)
+        .into_iter()
+        .map(|t| t.name)
+        .collect()
 }
 
 #[tokio::test]
@@ -61,27 +109,30 @@ async fn a_file_written_by_the_agent_is_read_and_listed_back() -> Result<()> {
     env.put(&dir, "src/existing.ts", "export const a = 1;\n")?;
 
     let cfg = at("code", "");
-    let written = env
-        .call(
-            "write_file",
-            &cfg,
-            json!({"path": "src/app.ts", "content": "export const app = 2;\n"}),
-            &admin(),
-        )
-        .await?;
+    let written = call(
+        &env,
+        &cfg,
+        "write_file",
+        json!({"path": "src/app.ts", "content": "export const app = 2;\n"}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(written["written"], json!(true));
     // The write went through the store, so it is on the disk the store roots at.
     assert_eq!(env.slurp(&dir, "src/app.ts")?, "export const app = 2;\n");
 
-    let read = env
-        .call("read_file", &cfg, json!({"path": "src/app.ts"}), &admin())
-        .await?;
+    let read = call(
+        &env,
+        &cfg,
+        "read_file",
+        json!({"path": "src/app.ts"}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(read["text"], json!("export const app = 2;\n"));
     assert_eq!(read["truncated"], json!(false));
 
-    let listed = env
-        .call("list_files", &cfg, json!({"dir": "src"}), &admin())
-        .await?;
+    let listed = call(&env, &cfg, "list_files", json!({"dir": "src"}), &admin()).await?;
     let mut paths: Vec<&str> = listed["entries"]
         .as_array()
         .unwrap()
@@ -104,31 +155,36 @@ async fn a_read_is_bounded_and_says_when_it_truncated() -> Result<()> {
         (CFG_ROOT, json!("")),
         (CFG_MAX_CHARS, json!(100)),
     ]);
-    let read = env
-        .call("read_file", &cfg, json!({"path": "big.txt"}), &admin())
-        .await?;
+    let read = call(
+        &env,
+        &cfg,
+        "read_file",
+        json!({"path": "big.txt"}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(read["text"].as_str().unwrap().len(), 100);
     assert_eq!(read["truncated"], json!(true));
     assert_eq!(read["bytes"], json!(500));
 
     // The model may ask for less, and cannot ask for more than the ceiling.
-    let read = env
-        .call(
-            "read_file",
-            &cfg,
-            json!({"path": "big.txt", "max_chars": 5}),
-            &admin(),
-        )
-        .await?;
+    let read = call(
+        &env,
+        &cfg,
+        "read_file",
+        json!({"path": "big.txt", "max_chars": 5}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(read["text"], json!("xxxxx"));
-    let read = env
-        .call(
-            "read_file",
-            &cfg,
-            json!({"path": "big.txt", "max_chars": 5000}),
-            &admin(),
-        )
-        .await?;
+    let read = call(
+        &env,
+        &cfg,
+        "read_file",
+        json!({"path": "big.txt", "max_chars": 5000}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(read["text"].as_str().unwrap().len(), 100);
     Ok(())
 }
@@ -145,14 +201,14 @@ async fn an_edit_applies_a_unique_match_and_refuses_the_other_two_cases() -> Res
     let cfg = at("code", "");
 
     // Unique: applied, and the file on disk has changed.
-    let edited = env
-        .call(
-            "edit_file",
-            &cfg,
-            json!({"path": "src/app.ts", "find": "const b = 2;", "replace": "const b = 20;"}),
-            &admin(),
-        )
-        .await?;
+    let edited = call(
+        &env,
+        &cfg,
+        "edit_file",
+        json!({"path": "src/app.ts", "find": "const b = 2;", "replace": "const b = 20;"}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(edited["replacements"], json!(1));
     assert_eq!(
         env.slurp(&dir, "src/app.ts")?,
@@ -160,30 +216,30 @@ async fn an_edit_applies_a_unique_match_and_refuses_the_other_two_cases() -> Res
     );
 
     // Absent: refused, and the file is untouched.
-    let err = env
-        .call(
-            "edit_file",
-            &cfg,
-            json!({"path": "src/app.ts", "find": "const zz = 9;", "replace": "x"}),
-            &admin(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = call(
+        &env,
+        &cfg,
+        "edit_file",
+        json!({"path": "src/app.ts", "find": "const zz = 9;", "replace": "x"}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("does not appear"), "{err}");
 
     // Ambiguous: refused, with the count and the way out — and, again, nothing
     // written. A fuzzy edit here would be a corrupted file nobody noticed.
-    let err = env
-        .call(
-            "edit_file",
-            &cfg,
-            json!({"path": "src/app.ts", "find": "const a", "replace": "let a"}),
-            &admin(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = call(
+        &env,
+        &cfg,
+        "edit_file",
+        json!({"path": "src/app.ts", "find": "const a", "replace": "let a"}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("2 times"), "{err}");
     assert_eq!(
         env.slurp(&dir, "src/app.ts")?,
@@ -201,32 +257,29 @@ async fn a_path_that_escapes_the_configured_sub_directory_is_refused() -> Result
 
     // The agent is confined to `web`, so `web/app.ts` is `app.ts` to it…
     let cfg = at("code", "web");
-    let read = env
-        .call("read_file", &cfg, json!({"path": "app.ts"}), &admin())
-        .await?;
+    let read = call(&env, &cfg, "read_file", json!({"path": "app.ts"}), &admin()).await?;
     assert_eq!(read["text"], json!("inside\n"));
 
     // …and the file one level up is not reachable, by any spelling. The store
     // itself would have served it: this is the configured root refusing.
     for path in ["../secrets.txt", "web/../secrets.txt", "/../secrets.txt"] {
-        let err = env
-            .call("read_file", &cfg, json!({"path": path}), &admin())
+        let err = call(&env, &cfg, "read_file", json!({"path": path}), &admin())
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("outside"), "{path}: {err}");
     }
     // A write cannot climb out either.
-    let err = env
-        .call(
-            "write_file",
-            &cfg,
-            json!({"path": "../planted.ts", "content": "no"}),
-            &admin(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = call(
+        &env,
+        &cfg,
+        "write_file",
+        json!({"path": "../planted.ts", "content": "no"}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("outside"), "{err}");
     assert!(!dir.join("planted.ts").exists());
     Ok(())
@@ -248,9 +301,14 @@ async fn a_search_finds_a_literal_and_a_regex_across_directories() -> Result<()>
     env.put(&dir, "node_modules/pkg/index.js", "todo\n")?;
 
     let cfg = at("code", "");
-    let found = env
-        .call("search_files", &cfg, json!({"pattern": "todo"}), &admin())
-        .await?;
+    let found = call(
+        &env,
+        &cfg,
+        "search_files",
+        json!({"pattern": "todo"}),
+        &admin(),
+    )
+    .await?;
     let mut paths: Vec<&str> = found["matches"]
         .as_array()
         .unwrap()
@@ -262,27 +320,27 @@ async fn a_search_finds_a_literal_and_a_regex_across_directories() -> Result<()>
     assert_eq!(found["more_matches_available"], json!(false));
 
     // A regular expression, narrowed by a glob to one kind of file.
-    let found = env
-        .call(
-            "search_files",
-            &cfg,
-            json!({"pattern": r"function\s+\w+", "regex": true, "glob": "*.ts"}),
-            &admin(),
-        )
-        .await?;
+    let found = call(
+        &env,
+        &cfg,
+        "search_files",
+        json!({"pattern": r"function\s+\w+", "regex": true, "glob": "*.ts"}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(found["count"], json!(1));
     assert_eq!(found["matches"][0]["path"], json!("src/app.ts"));
     assert_eq!(found["matches"][0]["line"], json!(1));
 
     // Case matters when asked for.
-    let found = env
-        .call(
-            "search_files",
-            &cfg,
-            json!({"pattern": "TODO", "case_sensitive": true}),
-            &admin(),
-        )
-        .await?;
+    let found = call(
+        &env,
+        &cfg,
+        "search_files",
+        json!({"pattern": "TODO", "case_sensitive": true}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(found["count"], json!(1));
     assert_eq!(found["matches"][0]["path"], json!("src/deep/list.tsx"));
     Ok(())
@@ -300,9 +358,14 @@ async fn a_search_respects_its_bound_and_reports_that_it_did() -> Result<()> {
         (CFG_ROOT, json!("")),
         (CFG_MAX_RESULTS, json!(5)),
     ]);
-    let found = env
-        .call("search_files", &cfg, json!({"pattern": "needle"}), &admin())
-        .await?;
+    let found = call(
+        &env,
+        &cfg,
+        "search_files",
+        json!({"pattern": "needle"}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(found["count"], json!(5));
     // The whole point of the flag: a caller told "5 matches" and not told there
     // were more would report a complete answer that is not one.
@@ -332,7 +395,7 @@ async fn a_directory_the_caller_may_not_open_is_neither_listed_nor_searched() ->
     let cfg = at("code", "");
     let reader = as_user("ada@example.com");
 
-    let listed = env.call("list_files", &cfg, json!({}), &reader).await?;
+    let listed = call(&env, &cfg, "list_files", json!({}), &reader).await?;
     let names: Vec<&str> = listed["entries"]
         .as_array()
         .unwrap()
@@ -343,9 +406,14 @@ async fn a_directory_the_caller_may_not_open_is_neither_listed_nor_searched() ->
 
     // The same rule on the search: a match inside a directory this caller cannot
     // open would leak, one line at a time, exactly what the rule was set to hide.
-    let found = env
-        .call("search_files", &cfg, json!({"pattern": "secret"}), &reader)
-        .await?;
+    let found = call(
+        &env,
+        &cfg,
+        "search_files",
+        json!({"pattern": "secret"}),
+        &reader,
+    )
+    .await?;
     let paths: Vec<&str> = found["matches"]
         .as_array()
         .unwrap()
@@ -355,22 +423,27 @@ async fn a_directory_the_caller_may_not_open_is_neither_listed_nor_searched() ->
     assert_eq!(paths, ["public/open.ts"]);
 
     // The admin, who clears every rule, sees both.
-    let found = env
-        .call("search_files", &cfg, json!({"pattern": "secret"}), &admin())
-        .await?;
+    let found = call(
+        &env,
+        &cfg,
+        "search_files",
+        json!({"pattern": "secret"}),
+        &admin(),
+    )
+    .await?;
     assert_eq!(found["count"], json!(2));
 
     // And reading the file directly is refused rather than silently empty.
-    let err = env
-        .call(
-            "read_file",
-            &cfg,
-            json!({"path": "private/closed.ts"}),
-            &reader,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = call(
+        &env,
+        &cfg,
+        "read_file",
+        json!({"path": "private/closed.ts"}),
+        &reader,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("not permitted"), "{err}");
     Ok(())
 }
@@ -387,47 +460,48 @@ async fn only_a_script_the_project_declares_can_be_run() -> Result<()> {
     let cfg = config(&[
         (CFG_STORE, json!("code")),
         (CFG_ROOT, json!("web")),
+        (CFG_MAY_RUN_SCRIPTS, json!(true)),
         (CFG_TIMEOUT, json!(120)),
     ]);
 
     // A script the project does not declare is refused, and the refusal names
     // the ones it does — which is what makes the mistake recoverable.
-    let err = env
-        .call(
-            "run_project_script",
-            &cfg,
-            json!({"script": "rm-rf-everything"}),
-            &admin(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = call(
+        &env,
+        &cfg,
+        "run_project_script",
+        json!({"script": "rm-rf-everything"}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("not a script this project declares"), "{err}");
     assert!(err.contains("greet"), "{err}");
 
     // There is no shell: arguments of the model's own are not part of the tool.
-    let err = env
-        .call(
-            "run_project_script",
-            &cfg,
-            json!({"script": "greet", "args": ["--force"]}),
-            &admin(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = call(
+        &env,
+        &cfg,
+        "run_project_script",
+        json!({"script": "greet", "args": ["--force"]}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("args"), "{err}");
 
     // And one it does declare runs, with its output captured.
     if which_npm() {
-        let ran = env
-            .call(
-                "run_project_script",
-                &cfg,
-                json!({"script": "greet"}),
-                &admin(),
-            )
-            .await?;
+        let ran = call(
+            &env,
+            &cfg,
+            "run_project_script",
+            json!({"script": "greet"}),
+            &admin(),
+        )
+        .await?;
         assert_eq!(ran["succeeded"], json!(true), "{ran}");
         assert_eq!(ran["timed_out"], json!(false));
         assert!(
@@ -446,17 +520,17 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
     let env = Env::new().await?;
     env.with_file_store("code", None).await?;
 
-    // The configured store: valid, and its tool is named after it.
+    // The configured store: valid, and every tool is named after it.
     let cfg = at("code", "web");
-    env.check("read_file", &cfg).await?;
+    env.check("coding", &cfg).await?;
     assert_eq!(
-        env.tools("read_file", &cfg)[0].name,
-        tool_names::read_file(&scope("code", "web"))
+        offered(&env, &cfg),
+        tool_names::coding(&scope("code", "web"))
     );
 
     // One that never existed: refused on save *and* on load, naming it.
     let err = env
-        .check("read_file", &at("gone", ""))
+        .check("coding", &at("gone", ""))
         .await
         .unwrap_err()
         .to_string();
@@ -466,7 +540,7 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
     // discovered here, where the admin can shorten the sub-directory, rather
     // than by the vendor in the middle of a conversation.
     let err = env
-        .check("read_file", &at("code", &"a/".repeat(40)))
+        .check("coding", &at("code", &"a/".repeat(40)))
         .await
         .unwrap_err()
         .to_string();
@@ -474,43 +548,184 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
     Ok(())
 }
 
+/// One scope, filled in once, feeding **every** tool — the whole point of there
+/// being one coding trait rather than six.
 #[tokio::test]
-async fn every_coding_trait_names_its_tool_after_its_scope() -> Result<()> {
+async fn one_configured_scope_names_and_reaches_every_tool() -> Result<()> {
     let env = Env::new().await?;
     env.with_file_store("app-src", None).await?;
     let cfg = at("app-src", "web");
     let web = scope("app-src", "web");
 
     // The names the model chooses between, and the names the collision check
-    // (§11.2) compares: one trait enabled twice over two scopes is two tools.
-    let named = |trait_: &str| env.tools(trait_, &cfg)[0].name.clone();
-    assert_eq!(named("read_file"), tool_names::read_file(&web));
-    assert_eq!(named("write_file"), tool_names::write_file(&web));
-    assert_eq!(named("list_files"), tool_names::list_files(&web));
-    assert_eq!(named("edit_file"), tool_names::edit_file(&web));
-    assert_eq!(named("search_files"), tool_names::search_files(&web));
+    // (§11.2) compares: the trait enabled twice over two scopes is two sets.
     assert_eq!(
-        named("run_project_script"),
-        tool_names::run_project_script(&web)
+        offered(&env, &cfg),
+        [
+            tool_names::read_file(&web),
+            tool_names::list_files(&web),
+            tool_names::search_files(&web),
+            tool_names::write_file(&web),
+            tool_names::edit_file(&web),
+            tool_names::run_project_script(&web),
+        ]
     );
-    assert_eq!(named("read_file"), "read_file_app_src_web");
+    assert_eq!(offered(&env, &cfg)[0], "read_file_app_src_web");
 
-    // Each is callable under the name its own configuration derived — the
-    // property that makes two instances distinguishable rather than one of them
-    // unreachable.
+    // And every one of them is reached under the name this configuration
+    // derived — the property that makes two instances distinguishable rather
+    // than one of them unreachable.
     let dir = env.with_file_store("other", None).await?;
     env.put(&dir, "a.txt", "hello\n")?;
     let other = at("other", "");
-    let read = env
+    let read = call(
+        &env,
+        &other,
+        "read_file",
+        json!({"path": "a.txt"}),
+        &admin(),
+    )
+    .await?;
+    assert_eq!(read["text"], json!("hello\n"));
+
+    // A name from *another* instance's scope is not this one's tool, and the
+    // refusal says which names are.
+    let err = env
         .call_tool(
-            "read_file",
+            "coding",
             &other,
-            &tool_names::read_file(&scope("other", "")),
+            &tool_names::read_file(&web),
             json!({"path": "a.txt"}),
             &admin(),
         )
-        .await?;
-    assert_eq!(read["text"], json!("hello\n"));
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("read_file_other"), "{err}");
+    Ok(())
+}
+
+/// The edit grant: off, and the trait is a reader — the tools that change the
+/// source are not declared, and one called anyway is refused **naming the
+/// checkbox**, which is the only form of that refusal an admin can act on.
+#[tokio::test]
+async fn the_edit_grant_decides_whether_the_source_can_be_changed() -> Result<()> {
+    let env = Env::new().await?;
+    let dir = env.with_file_store("code", None).await?;
+    env.put(&dir, "src/app.ts", "const a = 1;\n")?;
+
+    let reading = config(&[(CFG_STORE, json!("code")), (CFG_ROOT, json!(""))]);
+    let web = scope("code", "");
+    assert_eq!(
+        offered(&env, &reading),
+        [
+            tool_names::read_file(&web),
+            tool_names::list_files(&web),
+            tool_names::search_files(&web),
+        ]
+    );
+    // Reading still works — that is what "read-only" means here.
+    let read = call(
+        &env,
+        &reading,
+        "read_file",
+        json!({"path": "src/app.ts"}),
+        &admin(),
+    )
+    .await?;
+    assert_eq!(read["text"], json!("const a = 1;\n"));
+
+    for (kind, args) in [
+        (
+            "write_file",
+            json!({"path": "src/app.ts", "content": "gone\n"}),
+        ),
+        (
+            "edit_file",
+            json!({"path": "src/app.ts", "find": "const a = 1;", "replace": "const a = 2;"}),
+        ),
+    ] {
+        let err = call(&env, &reading, kind, args, &admin())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(CFG_MAY_EDIT), "{kind}: {err}");
+        // Refused before anything was written, not after.
+        assert_eq!(env.slurp(&dir, "src/app.ts")?, "const a = 1;\n");
+    }
+
+    // Ticked, the same configuration offers the two writing tools and they work.
+    let writing = at("code", "");
+    assert!(offered(&env, &writing).contains(&tool_names::edit_file(&web)));
+    call(
+        &env,
+        &writing,
+        "edit_file",
+        json!({"path": "src/app.ts", "find": "const a = 1;", "replace": "const a = 2;"}),
+        &admin(),
+    )
+    .await?;
+    assert_eq!(env.slurp(&dir, "src/app.ts")?, "const a = 2;\n");
+    Ok(())
+}
+
+/// The script grant is its own, and separate from the edit one: running a
+/// script executes code, and an agent trusted to change a file is not
+/// automatically trusted to run one.
+#[tokio::test]
+async fn running_a_script_is_a_grant_of_its_own() -> Result<()> {
+    let env = Env::new().await?;
+    let dir = env.with_file_store("code", None).await?;
+    env.put(
+        &dir,
+        "package.json",
+        r#"{"name":"todo","scripts":{"greet":"echo hi"}}"#,
+    )?;
+
+    // Editing granted, running not: five tools, and the script refused by name.
+    let editing = config(&[
+        (CFG_STORE, json!("code")),
+        (CFG_ROOT, json!("")),
+        (CFG_MAY_EDIT, json!(true)),
+    ]);
+    let names = offered(&env, &editing);
+    assert_eq!(names.len(), 5, "{names:?}");
+    assert!(
+        !names.contains(&tool_names::run_project_script(&scope("code", ""))),
+        "{names:?}"
+    );
+    let err = call(
+        &env,
+        &editing,
+        "run_project_script",
+        json!({"script": "greet"}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains(CFG_MAY_RUN_SCRIPTS), "{err}");
+
+    // …and granted on its own, without the edit, it is the sixth tool.
+    let running = config(&[
+        (CFG_STORE, json!("code")),
+        (CFG_ROOT, json!("")),
+        (CFG_MAY_RUN_SCRIPTS, json!(true)),
+    ]);
+    let names = offered(&env, &running);
+    assert_eq!(names.len(), 4, "{names:?}");
+    assert!(names.contains(&tool_names::run_project_script(&scope("code", ""))));
+    let err = call(
+        &env,
+        &running,
+        "write_file",
+        json!({"path": "a.ts", "content": "x"}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains(CFG_MAY_EDIT), "{err}");
     Ok(())
 }
 
@@ -521,21 +736,20 @@ async fn an_argument_no_tool_takes_is_refused_by_name() -> Result<()> {
     env.put(&dir, "a.txt", "hello\n")?;
     let cfg = at("code", "");
 
-    let err = env
-        .call(
-            "read_file",
-            &cfg,
-            json!({"path": "a.txt", "encoding": "utf16"}),
-            &admin(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = call(
+        &env,
+        &cfg,
+        "read_file",
+        json!({"path": "a.txt", "encoding": "utf16"}),
+        &admin(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("encoding"), "{err}");
 
     // A missing required argument is named too, rather than defaulted.
-    let err = env
-        .call("read_file", &cfg, json!({}), &admin())
+    let err = call(&env, &cfg, "read_file", json!({}), &admin())
         .await
         .unwrap_err()
         .to_string();

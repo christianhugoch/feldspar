@@ -2,6 +2,50 @@
 
 Changes in reverse chronological order.
 
+## One `coding` trait instead of six
+
+`read_file`, `write_file`, `list_files`, `edit_file`, `search_files` and `run_project_script` were
+six agent traits with the *same* configuration on each: a file store and a sub-directory. An admin
+building a coding agent therefore answered one question six times, and a change of mind about the
+root was six edits, five of which could be forgotten — while the capability actually being granted
+was one thing, "this agent works on the code in `web/todo`". They are now a single trait,
+**`coding`**, with one form.
+
+**What may be done there is a checkbox, not a separate trait.** Reading, listing and searching come
+with the trait; **`may_edit`** adds `write_file` and `edit_file`, and **`may_run_scripts`** adds the
+script runner. Both default to off, so a read-only coding agent remains the default shape — the one
+property of the six separate grants worth keeping. Running a script is its own grant rather than
+part of the edit one because it executes code the agent did not write. This is
+`manage_table_admin`'s shape for `manage_table_admin`'s reason: grants that share a scope belong on
+one trait rather than on several that can disagree about where they point.
+
+A withheld tool is **not declared to the model** — it plans around reading rather than trying an
+edit and being refused — and a call that arrives for one anyway is refused naming the checkbox that
+would allow it, because "an administrator must turn on `may_edit`" is something a user can act on
+and "not permitted" is not.
+
+**The tool names are unchanged**, and still derived from the scope: `read_file_apps_web`,
+`edit_file_apps_web`, `run_script_apps_web`. So the trait enabled twice over two directories is two
+distinguishable sets of tools, the same directory twice still collides and is refused on save
+(§11.2), and every derived name — not just the shortest — is checked against the 64 characters both
+vendors accept. The three bounds that were spread across the old traits (`max_chars` on the read,
+`max_results` on the search, `timeout_seconds` on the script) are three fields on the one form.
+
+**`build_application` stays its own trait.** It is configured on a different axis — an
+application's subdomain, not a store — and folding it in would mean an agent that builds two
+applications out of one source tree needed two `coding` instances, which would then collide on the
+file tools' names.
+
+No compatibility shim: the prototype has no stored agents to migrate, and the six old trait names
+are simply gone. The six tool implementations moved to `src/coding/` as ordinary modules — same
+behaviour, same errors, same descriptions — with `files.rs`'s scope, path-resolution and §9 access
+plumbing untouched. Tests: the grants pinned both ways (what is offered, and what a call whose
+grant is off is told), one scope reaching every tool, a name from another instance's scope refused
+with the names that do work, and the existing coding suite — round trip, the three edit outcomes,
+the confinement, the search's bound, the access rule on a listing and a search, the script refusal
+— re-run through the one trait. The `coding_agent.rs` end-to-end run now configures two traits
+where it configured five.
+
 ## `manage_table_admin`: the agent that builds the schema
 
 Agents Phase 7, completed. The milestone's earlier phases were held to "if this ends with a trait

@@ -157,20 +157,23 @@ You maintain a React + TypeScript app. Read before you edit, build after you edi
 you broke.
 ```
 
-Add six traits. Every one of them takes the same two settings, so an admin who has configured one
-has configured all of them:
+Add the `coding` trait. One trait, one form: **where** the agent works, and **what it may do**
+there.
 
-| Trait | File store | Sub-directory |
-|---|---|---|
-| `list_files` | `apps` | `todo` |
-| `search_files` | `apps` | `todo` |
-| `read_file` | `apps` | `todo` |
-| `edit_file` | `apps` | `todo` |
-| `write_file` | `apps` | `todo` |
-| `run_project_script` | `apps` | `todo` |
+| Setting | Value |
+|---|---|
+| File store | `apps` |
+| Sub-directory | `todo` |
+| May create and change files | ✔ |
+| May run the project's `package.json` scripts | ✔ |
 
-…and one more that names the application instead, because which store the source is in is the
-*application's* own configuration:
+Reading, listing and searching come with the trait. The two checkboxes are the grants: leave them
+both off and you have an agent that can explain your code and nothing else, which is a thing you
+may deliberately want. Tick the first and it gains `write_file` and `edit_file`; tick the second
+and it gains `run_script`.
+
+…and add one more trait, which names the application instead, because which store the source is in
+is the *application's* own configuration:
 
 | Trait | Setting | Value |
 |---|---|---|
@@ -184,20 +187,24 @@ build comes back **not** as "build failed" but as the diagnostics themselves, fi
 message, which is the most useful thing a model can be told. It reads its own type error and
 fixes it.
 
-Four things about that set:
+Five things about that set:
 
 - **`edit_file` is exact-string replacement.** A match that is absent, or that appears twice, is
   an error the model reads and retries — never a fuzzy edit, which is a corrupted file nobody
   notices. `replace_all` is the explicit opt-in for the rename-through-a-file case.
 - **The sub-directory is a confinement**, not a convenience. A path that escapes it is refused by
   any spelling, and every path the model is shown is relative to it.
+- **A tool it was not granted is a tool it never sees.** With **May create and change files**
+  unticked, `write_file` and `edit_file` are not declared to the model at all, so it plans around
+  reading rather than trying an edit and being refused.
 - **`build_application` builds, it does not publish.** An agent's build answers "does this
   compile?"; mounting what it built is still your **Build** button, which is also where you get to
   look at the diff first.
-- **There is no shell.** `run_project_script` runs `npm run <script>` for a script your
+- **There is no shell.** The script grant runs `npm run <script>` for a script your
   `package.json` already declares, and refuses anything else by listing the scripts that exist.
   The runnable set is the project's own; the model chooses from it rather than composing a
-  command line.
+  command line. It is a **separate** checkbox from the edit grant, because running a script
+  executes code the agent did not write.
 
 ## Step 6 — An agent as a trigger body
 
@@ -300,10 +307,8 @@ reached by asking for it.
 | `update_rows` | a table, the fields it may change | updates the rows a `where` selects |
 | `delete_rows` | a table, a row bound | deletes the rows a `where` selects |
 | `run_trigger` | one trigger | runs it, with a payload it supplies |
-| `list_files` / `read_file` / `search_files` | a store and a sub-directory | browses, reads, greps |
-| `write_file` / `edit_file` | a store and a sub-directory | writes and edits |
+| `coding` | a store, a sub-directory, two grants and three bounds | browses, reads and greps the code; writes and edits it under **May create and change files**; runs one `package.json` script under **May run the project's scripts** |
 | `build_application` | an application's subdomain | builds it, and gets the diagnostics |
-| `run_project_script` | a store, a sub-directory, a timeout | runs one `package.json` script |
 | `manage_table_admin` | four grants, and **no table** | describes and edits the schema itself |
 
 Each is a grant. Adding one is a decision you can read off the agent's page later.

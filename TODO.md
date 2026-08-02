@@ -243,10 +243,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] The coding traits work inside **one configured file store**, optionally rooted at a
       subdirectory, through the `FileStore` trait and §9's access rules — the same capability the
       file manager and the IDE already have, handed to a model. A path that escapes the configured
-      root is an error, exactly as it is for the byte-level methods. *(Six traits share one
-      `FileScope`; each is a separate grant with its own form, as the write traits are, and each
-      derives its tool name from the scope so two directories are two tools and the same one twice
-      is refused on save.)*
+      root is an error, exactly as it is for the byte-level methods. *(Shipped as six traits
+      sharing one `FileScope`, one form each; **since consolidated into the single `coding`
+      trait** — one scope, filled in once, and two checkboxes (`may_edit`, `may_run_scripts`) for
+      what may be done in it. Every tool name is still derived from the scope, so two directories
+      are two sets of tools and the same one twice is refused on save.)*
 - [x] `read_file`, `write_file`, `list_files`, and `edit_file` — **exact-string replacement**, the
       edit that can be verified before it is applied: a match that is absent or ambiguous is an
       error the model can read and retry, whereas a fuzzy edit is a corrupted file nobody noticed.
@@ -267,7 +268,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] `run_project_script` — `npm run <script>` for a script that **already exists** in the
       project's `package.json`, so the runnable set is the project's own and the model chooses from
       it rather than composing a command. Bounded timeout and captured output, both streams, as
-      `run_build` carries them. **No `run_command`, no shell** (decision 6).
+      `run_build` carries them. **No `run_command`, no shell** (decision 6). *(Now the `coding`
+      trait's `run_script` tool, behind its own `may_run_scripts` grant: running a script executes
+      code the agent did not write, so it is not included in the edit grant.)*
 - [x] Tests: Rust against a real local store — read/write/list round-trip; `edit_file` applying a
       unique match, refusing an absent one and refusing an ambiguous one; a path escaping the
       configured subdirectory refused; `search_files` finding a literal and a regex across

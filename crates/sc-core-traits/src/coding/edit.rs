@@ -19,17 +19,12 @@
 //! occurrence *is* the intent (renaming an identifier through a file). It is
 //! opt-in, so ambiguity is never resolved silently.
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
-use sc_catalog::Catalog;
+use sc_agent::TraitContext;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
-use sc_types::{Attrs, FormField};
 use serde_json::{Value as Json, json};
 
-use crate::files::{
-    ARG_PATH, FileScope, check_scope, check_tool_name, configured_scope, open_at,
-    optional_bool_arg, scope_as_written, scope_fields, string_arg,
-};
+use crate::files::{ARG_PATH, FileScope, open_at, optional_bool_arg, string_arg};
 use crate::table::arguments;
 
 /// The text to find, exactly.
@@ -39,107 +34,78 @@ const ARG_REPLACE: &str = "replace";
 /// Whether every occurrence is meant.
 const ARG_ALL: &str = "replace_all";
 
-/// Replace an exact string in one file of a configured file store.
-pub struct EditFile;
-
-/// The tool one `edit_file` instance offers, derived from its scope.
+/// The tool one configured scope offers, derived from it.
 pub fn tool_name(scope: &FileScope) -> String {
     format!("edit_file_{}", scope.slug())
 }
 
-#[async_trait::async_trait]
-impl AgentTrait for EditFile {
-    fn name(&self) -> &str {
-        "edit_file"
-    }
-
-    fn description(&self) -> &str {
-        "Replace an exact string in a file of one file store"
-    }
-
-    fn config_spec(&self) -> Vec<FormField> {
-        scope_fields()
-    }
-
-    async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
-        let scope = check_scope(check).await?;
-        check_tool_name(&tool_name(&scope))
-    }
-
-    fn tools(&self, _catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
-        let scope = scope_as_written(config);
-        vec![ToolSpec::new(
-            tool_name(&scope),
-            format!(
-                "Change part of a file in {} by replacing an exact string. \
-                 `{ARG_FIND}` must appear **exactly once** in the file, \
-                 character for character including indentation and line breaks; \
-                 if it appears more than once the call is refused and you should \
-                 include more of the surrounding lines to make it unique, and if \
-                 it does not appear at all the file is not what you think it is — \
-                 read it again. Set `{ARG_ALL}` only when you mean every \
-                 occurrence.",
-                scope.label()
-            ),
-            json!({
-                "type": "object",
-                "properties": {
-                    ARG_PATH: {
-                        "type": "string",
-                        "description": "The file to edit, relative to the root of this store.",
-                    },
-                    ARG_FIND: {
-                        "type": "string",
-                        "description":
-                            "The exact text to replace, as it appears in the file.",
-                    },
-                    ARG_REPLACE: {
-                        "type": "string",
-                        "description":
-                            "The text to put in its place. An empty string deletes it.",
-                    },
-                    ARG_ALL: {
-                        "type": "boolean",
-                        "description":
-                            "Replace every occurrence instead of requiring exactly one.",
-                    },
+/// The tool this scope's exact-string edit contributes.
+pub fn spec(scope: &FileScope) -> ToolSpec {
+    ToolSpec::new(
+        tool_name(scope),
+        format!(
+            "Change part of a file in {} by replacing an exact string. \
+             `{ARG_FIND}` must appear **exactly once** in the file, \
+             character for character including indentation and line breaks; \
+             if it appears more than once the call is refused and you should \
+             include more of the surrounding lines to make it unique, and if \
+             it does not appear at all the file is not what you think it is — \
+             read it again. Set `{ARG_ALL}` only when you mean every \
+             occurrence.",
+            scope.label()
+        ),
+        json!({
+            "type": "object",
+            "properties": {
+                ARG_PATH: {
+                    "type": "string",
+                    "description": "The file to edit, relative to the root of this store.",
                 },
-                "required": [ARG_PATH, ARG_FIND, ARG_REPLACE],
-                "additionalProperties": false,
-            }),
-        )]
-    }
+                ARG_FIND: {
+                    "type": "string",
+                    "description":
+                        "The exact text to replace, as it appears in the file.",
+                },
+                ARG_REPLACE: {
+                    "type": "string",
+                    "description":
+                        "The text to put in its place. An empty string deletes it.",
+                },
+                ARG_ALL: {
+                    "type": "boolean",
+                    "description":
+                        "Replace every occurrence instead of requiring exactly one.",
+                },
+            },
+            "required": [ARG_PATH, ARG_FIND, ARG_REPLACE],
+            "additionalProperties": false,
+        }),
+    )
+}
 
-    async fn call(
-        &self,
-        config: &Attrs,
-        _tool: &str,
-        args: &Json,
-        ctx: &mut TraitContext<'_>,
-    ) -> Result<Json> {
-        let scope = configured_scope(config)?;
-        let args = arguments(args, &[ARG_PATH, ARG_FIND, ARG_REPLACE, ARG_ALL])?;
-        let rel = string_arg(&args, ARG_PATH)?;
-        let find = string_arg(&args, ARG_FIND)?;
-        let replace = string_arg(&args, ARG_REPLACE)?;
-        let all = optional_bool_arg(&args, ARG_ALL, false)?;
+/// Apply one exact-string edit, as the run's caller.
+pub async fn call(scope: &FileScope, args: &Json, ctx: &mut TraitContext<'_>) -> Result<Json> {
+    let args = arguments(args, &[ARG_PATH, ARG_FIND, ARG_REPLACE, ARG_ALL])?;
+    let rel = string_arg(&args, ARG_PATH)?;
+    let find = string_arg(&args, ARG_FIND)?;
+    let replace = string_arg(&args, ARG_REPLACE)?;
+    let all = optional_bool_arg(&args, ARG_ALL, false)?;
 
-        let (store, path) = open_at(&scope, ctx, &rel).await?;
-        let bytes = store.read(&path).await?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| Error::invalid(format!("`{rel}` is not a text file")))?;
+    let (store, path) = open_at(scope, ctx, &rel).await?;
+    let bytes = store.read(&path).await?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| Error::invalid(format!("`{rel}` is not a text file")))?;
 
-        let edited = apply(text, &find, &replace, all, &rel)?;
-        let replacements = edited.replacements;
-        store
-            .write(&path, bytes::Bytes::from(edited.text.into_bytes()))
-            .await?;
-        Ok(json!({
-            "path": rel,
-            "replacements": replacements,
-            "edited": true,
-        }))
-    }
+    let edited = apply(text, &find, &replace, all, &rel)?;
+    let replacements = edited.replacements;
+    store
+        .write(&path, bytes::Bytes::from(edited.text.into_bytes()))
+        .await?;
+    Ok(json!({
+        "path": rel,
+        "replacements": replacements,
+        "edited": true,
+    }))
 }
 
 /// The result of a successful edit.
