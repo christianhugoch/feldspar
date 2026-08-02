@@ -14,6 +14,8 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "./api";
+import { PoppedChats } from "./PoppedChats";
+import { useChatWindows } from "./chatWindows";
 import type { AuthStatusResponse } from "./client";
 import {
   IconApps,
@@ -173,6 +175,14 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, toggleTheme] = useTheme();
   const [narrow, toggleNarrow] = useNarrowSidebar();
+  // A docked chat covers the bottom-right corner of whatever is underneath it.
+  // For most screens that is an overlay doing what an overlay does; for the
+  // chat *screen* it would be a window sitting on the send button of the page's
+  // own composer, so the page is told how much of the corner is taken and keeps
+  // clear of it (`admin.css`). Minimized windows are two rows of pixels along
+  // the very bottom and are not worth narrowing a transcript for.
+  const docked = useChatWindows().filter((chat) => chat.mode === "docked").length;
+  const corner = docked === 0 ? "" : ` chat-corner-taken chat-corner-${Math.min(docked, 3)}`;
 
   // A tap on a sidebar link should close the sidebar it was in; on a wide
   // screen the collapse is not rendered as a drawer, so this is a no-op there.
@@ -190,7 +200,7 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
     // `sidebar-narrow` is the whole of the icons-only mode: it is on `.page`
     // because both the sidebar's width and the page wrapper's matching offset
     // hang off it (see `admin.css`), and they have to change together.
-    <div className={narrow ? "page sidebar-narrow" : "page"}>
+    <div className={`page${narrow ? " sidebar-narrow" : ""}${corner}`}>
       <aside className="navbar navbar-vertical navbar-expand-lg" data-bs-theme="dark">
         <div className="container-fluid">
           <button
@@ -311,6 +321,11 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
           </div>
         </footer>
       </div>
+
+      {/* Outside the routed screen, and outside the page wrapper: a popped-out
+          chat is furniture of the whole admin, and it stays in the corner while
+          everything above changes underneath it (`PoppedChats.tsx`). */}
+      <PoppedChats />
     </div>
   );
 }

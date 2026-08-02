@@ -33,6 +33,14 @@
 //     composer under it would invite an edit to history. Continuing one is a
 //     deliberate act — the Continue button, which reconnects the socket to that
 //     run.
+//
+// The same component is also the **popped-out window** (`chatWindows.ts`): the
+// pop-out button in the top right hands the conversation to the store and the
+// shell re-renders it in the corner, where the rest of the admin can be
+// navigated underneath it. Two renderings of one chat, not two chats: the only
+// differences are the chrome (a window's title bar carries minimize / full
+// screen / close where the page's carries Back and pop-out) and the rail, which
+// a 24rem window has no room for and a full-screen one does.
 
 import {
   useCallback,
@@ -61,17 +69,28 @@ import {
 } from "../agentChat";
 import { navigate } from "../App";
 import {
+  MAX_CHAT_WINDOWS,
+  popOutChat,
+  useChatWindows,
+  type ChatWindowMode,
+} from "../chatWindows";
+import {
   IconAlertTriangle,
   IconArrowLeft,
   IconArrowUp,
+  IconArrowsDiagonal,
+  IconArrowsDiagonalMinimize,
   IconChevronDown,
   IconLayoutSidebar,
   IconMessagePlus,
+  IconMinus,
+  IconPictureInPicture,
   IconPlayerStop,
   IconRobot,
   IconSparkles,
   IconTool,
   IconTrash,
+  IconX,
 } from "../icons";
 import { StatusBadge, type Tone } from "../layout";
 
@@ -121,15 +140,39 @@ function startOfDay(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
 
-export function AgentChat({ agent }: { agent: string }) {
+/** The window a popped-out chat is in: how it is showing, and the three things
+ * the person can do to it. Absent when the chat is the page. */
+export type ChatFrame = {
+  mode: ChatWindowMode;
+  onMinimize: () => void;
+  onRestore: () => void;
+  onFullScreen: () => void;
+  onClose: () => void;
+};
+
+export function AgentChat({
+  agent,
+  initial,
+  frame,
+}: {
+  agent: string;
+  /** The conversation this chat opens on — a popped-out window continuing what
+   * the page was showing. A fresh chat when absent. */
+  initial?: { runId: string | null; entries: Entry[] };
+  frame?: ChatFrame;
+}) {
   const [chat, setChat] = useState<ChatState>(emptyChat());
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [viewing, setViewing] = useState<{ run: RunItem; entries: Entry[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   // The rail starts open where there is room for it beside the transcript, and
-  // shut where it would cover it (below Tabler's `lg`, it is a drawer).
-  const [railOpen, setRailOpen] = useState(() => window.innerWidth >= 992);
+  // shut where it would cover it (below Tabler's `lg`, it is a drawer; in a
+  // window there is no room for it at all until it goes full screen).
+  const [railOpen, setRailOpen] = useState(() => !frame && window.innerWidth >= 992);
+  // Read once, on the mount that opens the socket: a prop rebuilt on every
+  // render of the shell would otherwise reconnect the chat under the person.
+  const opening = useRef(initial);
   const session = useRef<ChatSession | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
   // Whether the reader is at the bottom of the transcript. A turn that streams
@@ -147,7 +190,7 @@ export function AgentChat({ agent }: { agent: string }) {
 
   /** Open a socket for this agent, optionally continuing `run`. */
   const connect = useCallback(
-    (run?: { id: string; entries: Entry[] }) => {
+    (run?: { id: string | null; entries: Entry[] }) => {
       session.current?.close();
       // A browser `WebSocket` *is* a `SocketLike` — it sends, it closes, and it
       // calls the four handlers. TypeScript will not agree, because its handler
@@ -168,7 +211,8 @@ export function AgentChat({ agent }: { agent: string }) {
 
   useEffect(() => {
     void loadRuns();
-    connect();
+    const from = opening.current;
+    connect(from ? { id: from.runId, entries: from.entries } : undefined);
     return () => {
       session.current?.close();
       session.current = null;
@@ -184,11 +228,15 @@ export function AgentChat({ agent }: { agent: string }) {
   const entries = viewing ? viewing.entries : chat.entries;
 
   // After the DOM has grown, not after React has decided to: `scrollHeight` is
-  // only right once the new text is laid out.
+  // only right once the new text is laid out. `mode` is in here because a
+  // minimized window's transcript is hidden rather than unmounted (it is still
+  // a live socket), and a box with no layout has no scroll height to set — so
+  // the one that matters is the pass right after it comes back.
+  const mode = frame?.mode;
   useLayoutEffect(() => {
     const element = scroller.current;
     if (element && following.current) element.scrollTop = element.scrollHeight;
-  }, [entries, running]);
+  }, [entries, running, mode]);
 
   const onScroll = () => {
     const element = scroller.current;
@@ -242,9 +290,31 @@ export function AgentChat({ agent }: { agent: string }) {
 
   const currentRun = viewing?.run.id ?? chat.runId;
 
-  return (
-    <div className="chat-page">
-      {railOpen && (
+  // The rail is 17rem of navigation between conversations: it belongs beside a
+  // transcript that has the page, and not inside a window a third that width.
+  const railAvailable = !frame || frame.mode === "full";
+  const showRail = railOpen && railAvailable;
+
+  const railToggle = (
+    <button
+      type="button"
+      className="btn btn-icon btn-ghost-secondary btn-sm"
+      aria-label={showRail ? "Hide conversations" : "Show conversations"}
+      aria-pressed={showRail}
+      title={showRail ? "Hide conversations" : "Show conversations"}
+      onClick={() => setRailOpen((open) => !open)}
+    >
+      <IconLayoutSidebar className="icon-2" />
+    </button>
+  );
+
+  const status = chat.lastState && chat.lastState !== "done" && !viewing && (
+    <StatusBadge tone={stateTone(chat.lastState)}>{chat.lastState}</StatusBadge>
+  );
+
+  const body = (
+    <div className={frame ? "chat-surface" : "chat-page chat-surface"}>
+      {showRail && (
         <ConversationRail
           runs={runs}
           current={currentRun}
@@ -255,41 +325,45 @@ export function AgentChat({ agent }: { agent: string }) {
       )}
 
       <div className="chat-main">
-        <div className="chat-topbar">
-          <button
-            type="button"
-            className="btn btn-icon btn-ghost-secondary btn-sm"
-            aria-label={railOpen ? "Hide conversations" : "Show conversations"}
-            aria-pressed={railOpen}
-            title={railOpen ? "Hide conversations" : "Show conversations"}
-            onClick={() => setRailOpen((open) => !open)}
-          >
-            <IconLayoutSidebar className="icon-2" />
-          </button>
-          <button
-            type="button"
-            className="btn btn-icon btn-ghost-secondary btn-sm"
-            aria-label="Back to agents"
-            title="Back to agents"
-            onClick={() => navigate("/agents")}
-          >
-            <IconArrowLeft className="icon-2" />
-          </button>
-          <div className="me-auto overflow-hidden">
-            <div className="fw-medium text-truncate">{agent}</div>
+        {!frame && (
+          <div className="chat-topbar">
+            {railToggle}
+            <button
+              type="button"
+              className="btn btn-icon btn-ghost-secondary btn-sm"
+              aria-label="Back to agents"
+              title="Back to agents"
+              onClick={() => navigate("/agents")}
+            >
+              <IconArrowLeft className="icon-2" />
+            </button>
+            <div className="me-auto overflow-hidden">
+              <div className="fw-medium text-truncate">{agent}</div>
+            </div>
+            {status}
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-secondary"
+              onClick={newConversation}
+            >
+              <IconMessagePlus className="icon-2" />
+              New chat
+            </button>
+            <PopOutButton
+              running={chat.running}
+              onPopOut={() =>
+                popOut({
+                  agent,
+                  // A past conversation pops out as itself and comes back to
+                  // life: a window is somewhere to carry on, and a read-only
+                  // one would be a window with nothing to do in it.
+                  runId: viewing ? viewing.run.id : chat.runId,
+                  entries: viewing ? viewing.entries : chat.entries,
+                })
+              }
+            />
           </div>
-          {chat.lastState && chat.lastState !== "done" && !viewing && (
-            <StatusBadge tone={stateTone(chat.lastState)}>{chat.lastState}</StatusBadge>
-          )}
-          <button
-            type="button"
-            className="btn btn-sm btn-outline-secondary"
-            onClick={newConversation}
-          >
-            <IconMessagePlus className="icon-2" />
-            New chat
-          </button>
-        </div>
+        )}
 
         <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
           <div className="chat-column py-4">
@@ -338,6 +412,113 @@ export function AgentChat({ agent }: { agent: string }) {
       </div>
     </div>
   );
+
+  if (!frame) return body;
+
+  // A window's title bar is the page's top bar with different furniture, and it
+  // stays visible when the body does not — a minimized chat *is* its title bar.
+  return (
+    <>
+      <div className="chat-window-head">
+        {frame.mode === "full" && railToggle}
+        <div className="chat-window-title text-truncate">{agent}</div>
+        {status}
+        {frame.mode !== "minimized" && (
+          <button
+            type="button"
+            className="btn btn-icon btn-ghost-secondary btn-sm"
+            aria-label="New chat"
+            title="New chat"
+            onClick={newConversation}
+          >
+            <IconMessagePlus className="icon-2" />
+          </button>
+        )}
+        {frame.mode === "minimized" ? (
+          <button
+            type="button"
+            className="btn btn-icon btn-ghost-secondary btn-sm"
+            aria-label="Show this chat"
+            title="Show this chat"
+            onClick={frame.onRestore}
+          >
+            <IconArrowUp className="icon-2" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-icon btn-ghost-secondary btn-sm"
+            aria-label="Minimize this chat"
+            title="Minimize"
+            onClick={frame.onMinimize}
+          >
+            <IconMinus className="icon-2" />
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn btn-icon btn-ghost-secondary btn-sm"
+          aria-label={frame.mode === "full" ? "Leave full screen" : "Full screen"}
+          title={frame.mode === "full" ? "Leave full screen" : "Full screen"}
+          onClick={frame.mode === "full" ? frame.onRestore : frame.onFullScreen}
+        >
+          {frame.mode === "full" ? (
+            <IconArrowsDiagonalMinimize className="icon-2" />
+          ) : (
+            <IconArrowsDiagonal className="icon-2" />
+          )}
+        </button>
+        <button
+          type="button"
+          className="btn btn-icon btn-ghost-secondary btn-sm"
+          aria-label="Close this chat"
+          title="Close"
+          onClick={frame.onClose}
+        >
+          <IconX className="icon-2" />
+        </button>
+      </div>
+      {body}
+    </>
+  );
+}
+
+/** Pop the chat out of the page and into the corner, then leave the page.
+ *
+ * Leaving is the point of the button rather than a side effect of it: staying
+ * would leave the same conversation on screen twice, one of them about to be
+ * navigated away from, and the whole reason to pop a chat out is to go
+ * somewhere else with it.
+ *
+ * Refused mid-turn. Popping out closes this socket and opens another, and a
+ * turn in flight is answered down the one being closed — so the honest button
+ * is one that says to wait rather than one that quietly loses an answer.
+ */
+function PopOutButton({ running, onPopOut }: { running: boolean; onPopOut: () => void }) {
+  const room = useChatWindows().length < MAX_CHAT_WINDOWS;
+  const why = running
+    ? "Wait for the agent to finish before popping this chat out"
+    : room
+      ? "Pop out"
+      : `Close one of the ${MAX_CHAT_WINDOWS} popped-out chats first`;
+  return (
+    <button
+      type="button"
+      className="btn btn-icon btn-ghost-secondary btn-sm"
+      aria-label="Pop out this chat"
+      title={why}
+      disabled={running || !room}
+      onClick={onPopOut}
+    >
+      <IconPictureInPicture className="icon-2" />
+    </button>
+  );
+}
+
+/** Hand the conversation to the store, and leave the page it was on. */
+function popOut(chat: { agent: string; runId: string | null; entries: Entry[] }): void {
+  popOutChat(chat);
+  navigate("/agents");
 }
 
 /** The rail: New chat, then this agent's conversations newest first. */

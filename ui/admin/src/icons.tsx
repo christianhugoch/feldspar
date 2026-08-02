@@ -266,6 +266,60 @@ export function IconLayoutSidebar(props: IconProps) {
   );
 }
 
+/** Pop the chat out of the page and into the corner: a frame with a smaller
+ * frame in the bottom-right of it, which is the picture the overlay is. */
+export function IconPictureInPicture(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M11 19h-6a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v4" />
+      <path d="M13 14a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-6a1 1 0 0 1 -1 -1z" />
+    </Svg>
+  );
+}
+
+/** Minimize a popped-out chat to its title bar. */
+export function IconMinus(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 12l14 0" />
+    </Svg>
+  );
+}
+
+/** Give a popped-out chat the screen. */
+export function IconArrowsDiagonal(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M16 4l4 0l0 4" />
+      <path d="M14 10l6 -6" />
+      <path d="M8 20l-4 0l0 -4" />
+      <path d="M10 14l-6 6" />
+    </Svg>
+  );
+}
+
+/** Give it back — the same button, in the same place, once it has the screen. */
+export function IconArrowsDiagonalMinimize(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M18 10h-4v-4" />
+      <path d="M20 4l-6 6" />
+      <path d="M6 14h4v4" />
+      <path d="M4 20l6 -6" />
+    </Svg>
+  );
+}
+
+/** Close. */
+export function IconX(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M18 6l-12 12" />
+      <path d="M6 6l12 12" />
+    </Svg>
+  );
+}
+
 /** The Saltcorn logo (`src/vendor/saltcorn-logo.svg`, the January 2023 mark).
  *
  * An `<img>` rather than inline SVG: it is brand art, not an icon — three fixed

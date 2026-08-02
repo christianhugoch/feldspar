@@ -30,6 +30,27 @@ body,
   white-space: pre-wrap;
 }
 
+/* Tabler's icon-only button has no box.
+ *
+ * `.btn-icon` zeroes the horizontal padding and then `.btn-icon .icon` pulls the
+ * glyph back in by `calc(-1 * var(--tblr-btn-padding-x))` on every side — which
+ * on `.btn-sm` is 0.5rem against a 1rem icon, so the content box comes out zero
+ * wide and the button is two pixels of border with the icon overflowing it. It
+ * *looks* almost right and is nearly impossible to hit, and two of them side by
+ * side (a chat window's title bar has four) overlap each other.
+ *
+ * The padding is restated as the button's own vertical padding, which makes an
+ * icon button square at every size, and the icon's negative margin — whose only
+ * job was to cancel the horizontal padding that is no longer there — goes. */
+.btn-icon {
+  padding-left: var(--tblr-btn-padding-y);
+  padding-right: var(--tblr-btn-padding-y);
+}
+
+.btn-icon .icon {
+  margin: 0;
+}
+
 /* Match the brand wordmark to the sidebar's menu links. */
 div.navbar-brand > a > span {
   color: var(--tblr-navbar-color);
@@ -127,7 +148,13 @@ div.navbar-brand > a:hover {
   display: none;
 }
 
-.chat-page {
+/* The transcript and everything around it. Both renderings of a chat have it —
+   the page, and a popped-out window (see "Popped-out chats" at the foot of this
+   file) — so the rules that make a chat a chat hang off `.chat-surface`, and
+   `.chat-page` is the extra fact that *this* one has the viewport, which is
+   what the wrapper's `:has()` rules above select on. A window must not carry
+   `.chat-page`: it would tell the whole admin it is a chat screen. */
+.chat-surface {
   display: flex;
   flex: 1;
   min-height: 0;
@@ -601,4 +628,196 @@ div.navbar-brand > a:hover {
   border-radius: 50%;
   background: var(--tblr-bg-surface-secondary);
   color: var(--tblr-secondary);
+}
+
+/* ------------------------------------------------------------------ *
+ * Popped-out chats (`chatWindows.ts`, `PoppedChats.tsx`)
+ *
+ * A chat popped out of its page lives in the bottom-right corner while the
+ * admin is used around it — Gmail's popped-out reply, for the same reason: the
+ * conversation is *about* the thing you now want to go and look at, and a chat
+ * that only exists at its own URL makes that a choice between the two.
+ *
+ * Three modes, and the important thing about them is what they are not: they
+ * are not three places in the DOM. Every window stays a child of the row below,
+ * in the order it was opened, and a mode is a class — because each window holds
+ * a live socket and a transcript that exists nowhere else until the turn ends,
+ * and a window that moved in the DOM would drop the conversation on the way.
+ * Full screen is therefore a `position: fixed` centred window that is, in the
+ * markup, still standing in the row; minimizing hides the body rather than
+ * unmounting it.
+ * ------------------------------------------------------------------ */
+
+/* The row along the bottom, anchored to the corner and growing left.
+   `row-reverse` against a list rendered newest-first is what makes the *oldest*
+   window the one that slides off a screen too narrow for all of them: laid out
+   from the right edge, the overflow goes out of the left. Visually the order is
+   still oldest to newest, left to right. */
+.chat-window-row {
+  position: fixed;
+  right: 1.5rem;
+  bottom: 0;
+  flex-direction: row-reverse;
+  /* Above Tabler's sidebar (1030) and below Bootstrap's modals (1055): a chat
+     floats over the admin, and a dialog the admin opens is still on top of it.
+     This is also the stacking context the backdrop and the full-screen window
+     order themselves inside — which is why those two use 1 and 2 rather than
+     numbers that would have to beat everything on the page. */
+  z-index: 1045;
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+  max-width: calc(100vw - 3rem);
+  /* The row spans the corner, but only the windows in it are clickable: the
+     gap between two chats is page, and must stay page. */
+  pointer-events: none;
+}
+
+.chat-window {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 24rem;
+  max-width: calc(100vw - 2rem);
+  height: min(32rem, calc(100vh - 4rem));
+  min-height: 0;
+  overflow: hidden;
+  background: var(--tblr-body-bg);
+  border: var(--tblr-border-width) solid var(--tblr-border-color);
+  /* It sits *on* the bottom edge, so there is no bottom to draw. */
+  border-bottom: 0;
+  border-radius: var(--tblr-border-radius-lg) var(--tblr-border-radius-lg) 0 0;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.25);
+}
+
+/* Minimized: the title bar, and nothing else — a thin bar along the bottom of
+   the screen. The body is hidden rather than unmounted, so minimizing a chat is
+   not a slower way of closing it. */
+.chat-window-minimized {
+  width: 15rem;
+  height: auto;
+}
+
+.chat-window-minimized .chat-surface {
+  display: none;
+}
+
+/* Full screen: a centred modal over a dimmed page. Only one window can be here
+   at a time (`setChatWindowMode`), because two would be one modal behind
+   another. */
+.chat-window-full {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(64rem, calc(100vw - 3rem));
+  height: min(48rem, calc(100vh - 3rem));
+  max-width: none;
+  border-bottom: var(--tblr-border-width) solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius-lg);
+  z-index: 2;
+}
+
+/* Rendered inside the row, not beside it: the row is a stacking context, so a
+   backdrop outside it could only ever be under the whole corner or over all of
+   it. Inside, it dims the page *and* the other windows — which is what a full
+   screen chat means — while the one that asked for it stays above. */
+.chat-window-backdrop {
+  pointer-events: auto;
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* The title bar: the agent, and what can be done to the window it is in. Tinted
+   rather than plain, because it is the one part of a window that is always
+   visible and it is what a minimized chat is reduced to. */
+.chat-window-head {
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  flex-shrink: 0;
+  padding: 0.25rem 0.375rem 0.25rem 0.75rem;
+  background: var(--tblr-bg-surface-secondary);
+  border-bottom: var(--tblr-border-width) solid var(--tblr-border-color);
+}
+
+.chat-window-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+/* Inside a window the measure is the window: `.chat-column`'s 46rem is wider
+   than the whole thing, so all it has left to give is the gutter. */
+.chat-window .chat-column {
+  padding: 0 0.75rem;
+}
+
+.chat-window .chat-dock {
+  padding: 0.25rem 0 0.5rem;
+}
+
+/* The greeting is centred in the room a fresh chat has; in a window that room
+   is the window, and 65vh of it is a scroll bar over an empty transcript. */
+.chat-window .chat-empty {
+  min-height: 0;
+  padding: 1.5rem 1rem;
+}
+
+/* The corner belongs to the windows while any of them is docked, and the chat
+   screen is the one page that had something there: its composer is pinned to
+   the bottom of the transcript column with the send button at the right-hand
+   end of it, so a window docked over that corner is a page whose primary
+   control cannot be clicked. Every other screen is a document with a chat
+   floating over the bottom of it, which is what a floating chat is for.
+
+   How much to keep clear is how wide the row actually is, which is how many
+   windows are docked (`App.tsx` counts them) — capped, because three windows
+   are wider than most screens and a transcript squeezed to nothing would be a
+   worse answer than an overlapped one. At the cap, close a window. */
+.chat-corner-taken .chat-page {
+  padding-right: min(var(--chat-corner), calc(100% - 22rem));
+}
+
+.chat-corner-1 {
+  --chat-corner: 26rem;
+}
+
+.chat-corner-2 {
+  --chat-corner: 51rem;
+}
+
+.chat-corner-3 {
+  --chat-corner: 76rem;
+}
+
+/* On a phone one window is the screen's worth of room. A second and third still
+   open — they are in the corner of a layout that no longer has corners — and
+   they sit off to the left until one is closed. Minimized, all three fit. */
+@media (max-width: 575.98px) {
+  .chat-window-row {
+    right: 0.5rem;
+    gap: 0.5rem;
+    max-width: calc(100vw - 1rem);
+  }
+
+  .chat-window {
+    width: calc(100vw - 1rem);
+    height: min(32rem, calc(100vh - 2rem));
+  }
+
+  .chat-window-minimized {
+    width: 11rem;
+  }
+
+  /* A window this wide is not beside the page, it is over it — there is no
+     corner left to keep clear, and reserving one would only narrow the
+     transcript underneath. */
+  .chat-corner-taken .chat-page {
+    padding-right: 0;
+  }
 }

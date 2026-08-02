@@ -2,6 +2,54 @@
 
 Changes in reverse chronological order.
 
+## A chat can be popped out of its page and kept in the corner
+
+A conversation with an agent is almost always *about* something else in the admin — the table it
+just described, the trigger it says is failing, the build it broke. Until now the chat was a page,
+so following any of that up meant leaving the conversation: the transcript is at
+`#/agents/x/chat` and nothing else is.
+
+**The chat now pops out.** A button in the top right of the chat page hands the conversation to a
+store that outlives the router, and it reappears as a window in the bottom-right corner while the
+page navigates on to wherever the answer pointed. Gmail's popped-out reply, with Gmail's three
+controls on the window's title bar: minimize to a thin bar along the bottom, full screen to a
+centred modal over a dimmed page (the same button brings it back, as does Escape), and close. Up
+to three sit alongside each other along the bottom, oldest on the left.
+
+**A window is the same chat, not a second one.** `AgentChat` renders both, and the differences are
+the chrome and the conversation rail — 17rem of navigation between conversations belongs beside a
+transcript that has the page, not inside a window a third that width, so it returns when the
+window goes full screen. What a window does *not* do is move: every mode is a class on an element
+that stays where it was rendered, because each window holds a live socket and a transcript that
+exists nowhere else until the turn ends, and a window that changed parent on its way to full
+screen would drop the conversation to get there. Minimizing hides the transcript rather than
+unmounting it, for the same reason.
+
+**Popping out mid-turn is refused**, with the button saying why. It closes one socket and opens
+another, and the answer being streamed is coming down the one being closed — a button that quietly
+lost an answer would be worse than one that asks you to wait. Popping out a conversation reopened
+from the history brings it back to life rather than carrying the read-only view across: a window
+is somewhere to carry on. A run already open in a window is raised rather than opened twice, which
+is what keeps one conversation from being written by two sockets.
+
+**The chat screen keeps clear of the corner** while a window is docked over it. Every other screen
+is a document with a chat floating over the bottom of it, which is what a floating chat is for —
+but the chat screen's composer is pinned to that exact corner, so a window there is a page whose
+send button cannot be clicked. It gives up as much width as the row of windows actually occupies,
+capped, because three windows are wider than most screens.
+
+Also fixed, because a title bar with four of them made it impossible to ignore: **Tabler's
+icon-only buttons had no box.** `.btn-icon` zeroes the horizontal padding and then pulls the icon
+back in by that same padding on every side, which on `.btn-sm` leaves the button two pixels of
+border with the glyph overflowing it — it looked nearly right and was nearly impossible to hit,
+and two side by side overlapped. Every icon button in the admin is now square and hittable.
+
+`chatWindows.ts` holds the model — which windows exist, what mode each is in, one full screen at a
+time, the ceiling — as pure transitions over plain data, so it is tested without a browser the way
+the transcript is (`chatWindows.test.ts`). A Rust test keeps the class names in the two components
+and the rules in `admin.css` from drifting apart, including the one that fails silently: a window
+must not carry `.chat-page`, which would tell the whole admin it is a chat screen.
+
 ## The agent chat is a chat interface, not a page of cards
 
 The chat panel worked and looked like the rest of the admin: a bordered card holding the

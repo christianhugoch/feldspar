@@ -161,6 +161,78 @@ fn the_chat_screen_and_its_full_height_rules_agree() {
     );
 }
 
+/// A chat can be popped out of its page into a window in the bottom-right
+/// corner, which the rest of the admin is then navigated underneath. That is
+/// three files agreeing — the store (`chatWindows.ts`), the windows
+/// (`PoppedChats.tsx`) and the chat itself, which renders both the page and the
+/// inside of a window — and two of the agreements fail silently.
+#[test]
+fn a_popped_out_chat_has_its_window_and_its_rules() {
+    let css = read("src/admin.css");
+    let windows = read("src/PoppedChats.tsx");
+    let screen = read("src/screens/AgentChat.tsx");
+
+    // The corner is furniture of the whole shell, not of a route: rendered by
+    // `App.tsx` outside the routed screen, which is the only reason a window
+    // survives navigating away from the chat it was popped out of.
+    let app = read("src/App.tsx");
+    assert!(
+        app.contains("<PoppedChats />"),
+        "App.tsx should render the popped-out chats outside the routed screen"
+    );
+
+    for (file, source, class) in [
+        // The row along the bottom, and one window in it.
+        ("PoppedChats.tsx", &windows, "chat-window-row"),
+        ("PoppedChats.tsx", &windows, "chat-window"),
+        // The dimmed page behind a full-screen chat.
+        ("PoppedChats.tsx", &windows, "chat-window-backdrop"),
+        // The title bar, which is what a minimized chat is reduced to.
+        ("AgentChat.tsx", &screen, "chat-window-head"),
+        ("AgentChat.tsx", &screen, "chat-window-title"),
+        // The transcript and its furniture, shared by the page and the window.
+        ("AgentChat.tsx", &screen, "chat-surface"),
+    ] {
+        assert!(
+            source.contains(&format!("\"{class}")) || source.contains(&format!("`{class}")),
+            "{file} should render `.{class}`"
+        );
+        assert!(
+            css.contains(&format!(".{class}")),
+            "admin.css has no rules for `.{class}`, which {file} renders"
+        );
+    }
+
+    // A window's mode is a class on a window that never moves in the DOM — each
+    // one holds a live socket and an unsaved transcript, so a mode that changed
+    // where the window is rendered would drop the conversation to get there.
+    assert!(
+        windows.contains("chat-window-${chat.mode}"),
+        "PoppedChats.tsx should express a window's mode as a class, not as a different tree"
+    );
+    for mode in ["minimized", "full"] {
+        assert!(
+            css.contains(&format!(".chat-window-{mode}")),
+            "admin.css has no rules for a `{mode}` chat window"
+        );
+    }
+    // Minimizing hides the body; it must not unmount it, and the rule is the
+    // half of that promise the markup cannot state.
+    assert!(
+        css.contains(".chat-window-minimized .chat-surface"),
+        "a minimized window should hide its transcript in CSS, keeping the socket alive"
+    );
+
+    // `.page:has(.chat-page)` puts the whole admin into the full-height chat
+    // layout. A window is inside `.page` on every route, so it takes the shared
+    // `.chat-surface` and leaves `.chat-page` to the screen that really is one.
+    assert!(
+        screen.contains(r#"frame ? "chat-surface" : "chat-page chat-surface""#),
+        "a popped-out chat must not carry `.chat-page` — it would claim the viewport \
+         on whatever screen it is floating over"
+    );
+}
+
 #[test]
 fn the_logo_is_vendored_and_not_auto_darkened() {
     let logo = read("src/vendor/saltcorn-logo.svg");
