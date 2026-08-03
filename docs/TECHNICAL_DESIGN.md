@@ -1525,6 +1525,14 @@ composing one.
   this". A failed build comes back as a **result** (`built: false`, the tools' output, and the
   file/line/message triples parsed out of it) rather than an error, so what the model reads is a
   list of diagnostics rather than a sentence.
+- **An application arrives with an agent made of these two.** `coding` over its source tree and
+  `build_application` on its subdomain is the combination that builds an app, so creating an
+  application creates exactly that agent rather than leaving an admin to assemble it from the two
+  forms. Which traits, and how they are configured, is the **framework's** declaration and is
+  documented with the frameworks (§13.3); what matters here is that nothing about these traits is
+  special-cased for it — it is the same registry, the same configuration and the same save-time
+  validation an admin's own agent goes through, and an admin edits or deletes the result like any
+  other agent.
 - **The search is `sc_files::search_store`**, one walk with three callers: the `coding` trait's
   `search_files` tool, the new admin endpoint `POST /api/file-stores/{store}/search`, and the IDE's search
   provider, which registers for the `file` scheme and thereby *replaces* the tree-walking provider
@@ -2315,6 +2323,40 @@ A framework also supplies the **default CSP** for an app that does not state one
 (`framework_default_csp`), because a framework that chooses the build tooling knows what that
 tooling's output needs — `react` supplies the policy below, `code` and anything unrecognised
 get the strict baseline. A stated policy always wins.
+
+#### The agent that builds the application
+
+**Creating an application creates the agent that will build it, and which agent that is belongs
+to the framework** (`framework_builder_agent`, beside `framework_config_spec` and
+`framework_default_csp`). It cannot be a property of applications in general: a code framework's
+app *is* a source tree in a file store, so its builder is a coding agent (§11.3) scoped to that
+tree and able to build that one application; a framework that rendered from the catalog would
+want a different set of traits, and one serving something it does not own wants none at all and
+says so by declaring nothing. Resolved from the framework's **name**, like every other framework
+declaration, because an application is created long before there is a built instance to ask.
+
+Both registered frameworks declare a coding agent over the source directory
+`app_source_from_config` resolves — `react`'s derived project directory, `code`'s stated one —
+plus `build_application` on the app's own subdomain. So the grant is per application, not per
+store: two apps sharing a store are two agents, neither able to edit the other's source. `may_edit`
+is on, because changing the source is what the agent is for; `may_run_scripts` is **off**, because
+running the project's other scripts executes code the agent did not write and building has its own
+tool. The system prompt is the framework's too, which is where a convention a model would otherwise
+break on its first edit gets stated — for `react`, that `src/saltcorn/` is generated and rewritten
+on every build.
+
+What the framework declares is *data*: trait names and their configuration (`BuilderAgentSpec`),
+because the traits live in `sc-core-traits` two layers above `sc-app` and a framework can only name
+them, exactly as an application names its API providers. Assembling that into an `Agent` and storing
+it is the server's, on `createApplication`, after the scaffold — the agent is pointed at the project
+the scaffold has just written. It is **not** fatal to the creation and is reported beside it
+(`agent` / `agent_error` on the create response, as `scaffolded` / `scaffold_error` are): a
+deployment with no LLM provider connected still gets its application and is told in one sentence why
+it has no builder agent. Nor does it choose a model — which provider a deployment has connected is
+not something a framework can know, so the server takes the first connected one and the admin
+changes it on the agent like any other. An agent of that name already present is left alone: the
+name is derived from the subdomain (`build-todo`), so an application re-created on a subdomain meets
+its own old builder with the admin's edits to it intact.
 
 The opinions the scaffold hard-codes, and the reasoning that has to hold for them to stay
 hard-coded:

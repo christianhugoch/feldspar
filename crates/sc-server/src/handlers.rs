@@ -31,8 +31,9 @@ use sc_api::schema_edit;
 use sc_app::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
     app_source_from_config, applications_using_file_store, delete_application,
-    framework_config_spec, framework_default_csp, list_applications, load_application,
-    registered_framework_info, require_scaffoldable, save_application, scaffold_app,
+    framework_builder_agent, framework_config_spec, framework_default_csp, list_applications,
+    load_application, registered_framework_info, require_scaffoldable, save_application,
+    scaffold_app,
 };
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, any_user_exists,
@@ -1606,6 +1607,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // app's endpoints, exposed triggers included, so the scaffold
                 // resolves them against the same live set a mount would.
                 let scaffold = scaffold_new_app(&catalog, &app, apps.triggers()).await;
+                // ...and the agent that will build it, which its framework
+                // declares (§13.3). After the scaffold, deliberately: the agent is
+                // pointed at the project the scaffold just wrote. Non-fatal for
+                // the same reason — an application with no builder agent is one
+                // the admin creates an agent for, not one that failed to exist.
+                let agent = create_builder_agent(&catalog, &apps, &app).await;
                 if let Some(obj) = body.as_object_mut() {
                     match &scaffold {
                         Ok(Some(report)) => {
@@ -1614,6 +1621,15 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         Ok(None) => {}
                         Err(e) => {
                             obj.insert("scaffold_error".to_owned(), json!(e.causes()));
+                        }
+                    }
+                    match &agent {
+                        Ok(Some(name)) => {
+                            obj.insert("agent".to_owned(), json!(name));
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            obj.insert("agent_error".to_owned(), json!(e.causes()));
                         }
                     }
                 }
@@ -1947,6 +1963,70 @@ async fn scaffold_new_app(
         return Ok(None);
     }
     scaffold_app(catalog, app, dispatcher).await.map(Some)
+}
+
+/// Create the agent that builds a newly created application, returning its name.
+///
+/// **Which agent it is belongs to the framework** ([`framework_builder_agent`]),
+/// which is where the knowledge sits: a code framework's application is a source
+/// tree, so its builder is a coding agent over that tree, and a framework with no
+/// source tree declares nothing. This function is only the part that needs to know
+/// agents exist at all — assembling the declaration into a record and storing it —
+/// because `sc-app` is a layer below `sc-agent`'s trait registry.
+///
+/// `Ok(None)` is "nothing to do, and that is not news": a framework that declares
+/// no builder, a server assembled without agents, or an agent of that name already
+/// there (a re-created application meets its own old builder, which still points
+/// at the same subdomain). An `Err` is news the admin should hear — no provider is
+/// connected, or the agent did not validate — and is reported *beside* the created
+/// application, never instead of it: the row is saved and valid either way.
+async fn create_builder_agent(
+    catalog: &Catalog,
+    apps: &AppMounts,
+    app: &Application,
+) -> Result<Option<String>> {
+    let Some(spec) = framework_builder_agent(&app.framework, app) else {
+        return Ok(None);
+    };
+    let Some(services) = apps.agents() else {
+        return Ok(None);
+    };
+    if sc_agent::load_agent_by_name(catalog, &spec.name)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    // An agent needs a provider that is connected, and a framework cannot know
+    // which one a deployment has. The first by name is a choice, not a
+    // preference — the admin can change it on the agent — but a deployment with
+    // none is a thing to say out loud rather than a silently agent-less
+    // application.
+    let provider = list_llm_providers(catalog)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            Error::config(format!(
+                "no LLM provider is connected, so the `{}` agent that builds this \
+                 application was not created; connect a provider and create it from \
+                 the Agents screen",
+                spec.name
+            ))
+        })?;
+
+    let mut agent = sc_agent::Agent::new(&spec.name, &provider.name)
+        .description(spec.description)
+        .system_prompt(spec.system_prompt);
+    for enabled in spec.traits {
+        agent = agent
+            .with_trait(sc_agent::EnabledTrait::new(enabled.trait_).configuration(enabled.config));
+    }
+    // The same save the Agents screen makes, so the same validation applies: a
+    // builder agent this server would refuse to run is not one it quietly stores.
+    sc_agent::save_agent(catalog, services.registry(), &agent).await?;
+    Ok(Some(agent.name))
 }
 
 /// Parse an [`Application`] from a create/update body (matching

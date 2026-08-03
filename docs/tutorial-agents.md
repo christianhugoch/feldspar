@@ -150,7 +150,15 @@ than truncating it.
 
 ## Step 5 — An agent that changes your app's code
 
-Make a second agent, `coder`, over the same provider, with this system prompt:
+**You may already have one.** Creating an application creates the agent that builds it: if you made
+the to-do app with a provider already connected, there is an agent called `build-todo` in the list,
+scoped to that app's source and able to build it. Which agent an application gets is its
+*framework's* declaration, so a React app's is a coding agent over the project directory the
+framework derived. Open it and look at the two traits below — it is an ordinary agent, and yours to
+edit, re-point or delete.
+
+Build it by hand anyway, once, because the settings are worth understanding. Make a second agent,
+`coder`, over the same provider, with this system prompt:
 
 ```
 You maintain a React + TypeScript app. Read before you edit, build after you edit, and fix what
@@ -355,6 +363,11 @@ Each is a grant. Adding one is a decision you can read off the agent's page late
 - **A refused batch applies nothing.** Twelve operations, the fifth invalid, and none of the
   twelve happened — the message names operation 4 and what was wrong with it. Ask the agent to
   fix that one and resend; there is nothing half-built to clean up first.
+- **An application created before you connected a provider has no builder agent.** The agent an
+  application comes with needs a provider to point at, so an app made on a fresh install is
+  created — and says so in the banner — without one. Connect a provider and build the agent by
+  hand as Step 5 does; nothing re-runs it for you, because an application you have since edited is
+  not one to quietly add an agent to.
 - **Nothing here is encrypted at rest.** Provider keys sit in the primary database like every
   other configuration value. Treat a database dump accordingly.
 

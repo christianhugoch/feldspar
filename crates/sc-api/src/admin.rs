@@ -1570,13 +1570,16 @@ fn app_source_schema() -> TypeSchema {
     ])
 }
 
-/// A freshly created application, plus what scaffolding it did (§2.3).
+/// A freshly created application, plus what scaffolding it did (§2.3) and which
+/// agent was created to build it (§13.3).
 ///
 /// Only `create` carries these: a `react` app's project is generated on its first
 /// save, and the admin should see that it happened — or why it did not — without
 /// a second request. `scaffolded` is a summary line; `scaffold_error` explains a
 /// scaffold that was refused (an occupied directory, an unreachable store) on an
 /// application that was nonetheless created, since the row is valid either way.
+/// `agent` and `agent_error` report the builder agent the same way: its name, or
+/// why the deployment could not create one (no LLM provider connected).
 fn created_application_schema() -> TypeSchema {
     let TypeSchema::Struct(mut fields) = application_schema() else {
         unreachable!("application_schema is a struct")
@@ -1587,6 +1590,18 @@ fn created_application_schema() -> TypeSchema {
     ));
     fields.push(StructField::new(
         "scaffold_error",
+        TypeSchema::optional(TypeSchema::text()),
+    ));
+    // The agent that builds this application, which its framework declares
+    // (§13.3): its name when one was created, or why one was not — the same
+    // alongside-not-instead-of reporting the scaffold gets, and for the same
+    // reason. The application is created either way.
+    fields.push(StructField::new(
+        "agent",
+        TypeSchema::optional(TypeSchema::text()),
+    ));
+    fields.push(StructField::new(
+        "agent_error",
         TypeSchema::optional(TypeSchema::text()),
     ));
     TypeSchema::Struct(fields)

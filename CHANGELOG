@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## An application is created with the agent that builds it
+
+Creating an application now creates an agent for building it, and **which agent that is belongs to
+the framework**. `framework_builder_agent` sits beside the framework's other declarations — its
+settings, its default CSP — and answers the same way, from the framework's name, because an
+application is created long before there is a built instance to ask.
+
+Both code frameworks declare the same shape, because it is what building an app of theirs consists
+of: the `coding` trait scoped to the source directory `app_source_from_config` resolves — React's
+derived project directory, `code`'s stated one — and `build_application` on the app's own
+subdomain. So a new React application called Todo arrives with an agent called `build-todo` that
+can read, search and edit `apps/todo` and build the Todo application, and nothing else: two apps
+sharing a store are two agents, neither able to touch the other's source. `may_edit` is on, since
+changing the source is the point of it; `may_run_scripts` stays off, since running the project's
+other scripts executes code the agent did not write and building has its own tool. The system
+prompt is the framework's too — React's says that `src/saltcorn/` is generated and rewritten on
+every build, which is the convention a model would otherwise break with its first edit.
+
+**What the framework declares is data.** The traits live two layers above `sc-app`, so a framework
+names them and their settings (`BuilderAgentSpec`) exactly as an application names its API
+providers; the server assembles that into an agent and saves it through the same `save_agent` the
+Agents screen calls, so the same validation applies and the result is an ordinary agent an admin
+can edit, re-point or delete. Because the names are strings on one side and Rust on the other,
+`sc-core-traits` — the one layer that can see both — holds them to each other in a test, which is
+what turns a renamed setting into a build failure instead of an `agent_error` on every application
+created afterwards.
+
+**It is created beside the application, never instead of it.** The creation response carries `agent`
+or `agent_error` the way it already carries `scaffolded` / `scaffold_error`, and the form's banner
+reports both: a deployment with no LLM provider connected still gets its application and is told in
+one sentence why it has no builder agent. Which provider it uses is not something a framework can
+know, so the server takes the first connected one and the admin changes it like any other setting.
+An agent of that name already there is left alone — the name comes from the subdomain, so an
+application re-created on one meets its own old builder with the admin's edits to it intact.
+
 ## A chat can be popped out of its page and kept in the corner
 
 A conversation with an agent is almost always *about* something else in the admin — the table it

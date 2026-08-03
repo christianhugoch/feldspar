@@ -185,21 +185,30 @@ export function ApplicationForm({ appId }: { appId?: string }) {
       } else {
         const created = await api.createApplication(body);
         // Creating a React application also creates its project on the server
-        // (§2.3). That is news the admin should see, and so is a scaffold that
-        // was refused — on an application that was still created, because the row
-        // is valid either way. The list screen owns the banner, so the message is
+        // (§2.3), and creating any application creates the agent that builds it
+        // (§13.3). Both are news the admin should see, and so is either one being
+        // refused — on an application that was still created, because the row is
+        // valid either way. The list screen owns the banner, so the message is
         // handed to it rather than shown here on a screen about to unmount.
-        if (created.scaffold_error) {
+        const done: string[] = [];
+        const refused: string[] = [];
+        if (created.scaffolded) {
+          done.push(
+            `${created.scaffolded}. Build it to install its dependencies and serve it.`,
+          );
+        }
+        if (created.scaffold_error) refused.push(created.scaffold_error);
+        if (created.agent) {
+          done.push(`Its builder agent, ${created.agent}, is ready to chat with.`);
+        }
+        if (created.agent_error) refused.push(created.agent_error);
+        if (done.length || refused.length) {
           setNotice({
-            ok: false,
-            title: `Application created, but its project was not — ${created.name}`,
-            text: created.scaffold_error,
-          });
-        } else if (created.scaffolded) {
-          setNotice({
-            ok: true,
-            title: `Application created — ${created.name}`,
-            text: `${created.scaffolded}. Build it to install its dependencies and serve it.`,
+            ok: refused.length === 0,
+            title: refused.length
+              ? `Application created, but not everything with it — ${created.name}`
+              : `Application created — ${created.name}`,
+            text: [...refused, ...done].join(" "),
           });
         }
       }

@@ -500,6 +500,56 @@ able to fail halfway with no way back. One list is one turn, one transaction and
 
 ---
 
+## Phase 8 — the agent an application is created with
+
+Phases 1–7 made an agent something an admin assembles: pick a provider, pick traits, fill in each
+trait's form. For the one agent every code application wants — a coding agent over its own source
+that can build it — that assembly is a form the admin fills in with facts the application already
+holds. So creating an application creates it, and **which agent it is belongs to the framework**,
+because nothing else knows what building an app of that kind consists of.
+
+- [x] `framework_builder_agent(fw, app) -> Option<BuilderAgentSpec>` in `sc-app`, beside
+      `framework_config_spec` and `framework_default_csp` and resolved the same way — from the
+      framework's **name**, since an application is created long before there is a built instance
+      to ask. `None` is a real answer: a framework with no source tree has no builder to declare
+      and nothing fails over it.
+- [x] The spec is **data** (`BuilderAgentSpec`: a name, a description, a system prompt and
+      `BuilderTrait`s of trait-name + `Attrs`), because the traits are `sc-core-traits`' and that is
+      two layers above `sc-app`. A framework names them exactly as an application names its API
+      providers. Assembling one into an `Agent` and storing it is the server's, which is the layer
+      that knows agents exist.
+- [x] Both code frameworks declare the same shape, since it is what building one of their apps
+      consists of: `coding` scoped to the source directory `app_source_from_config` resolves —
+      react's derived project directory, `code`'s stated one — plus `build_application` on the app's
+      own subdomain. The grant is therefore per **application**, not per store: two apps in one
+      store are two agents, neither able to edit the other's source. `may_edit` on (it is the
+      point); `may_run_scripts` **off** (it runs code the agent did not write, and building has its
+      own tool). The system prompt is the framework's, which is where react states that
+      `src/saltcorn/` is generated and must not be hand-edited.
+- [x] Created on `createApplication`, **after** the scaffold — the agent is pointed at the project
+      the scaffold just wrote — through the same `save_agent` the Agents screen calls, so the same
+      validation applies and the result is an ordinary agent to edit or delete. Reported *beside*
+      the application (`agent` / `agent_error`, as `scaffolded` / `scaffold_error` already are) and
+      never instead of it: a deployment with no LLM provider connected still gets its application
+      and hears in one sentence why it has no builder. The provider is the first connected one,
+      because a framework cannot know which a deployment has; the admin changes it like any other
+      setting. An agent of that name already there is left alone — the name is the subdomain's
+      (`build-todo`), so an application re-created on a subdomain meets its own old builder with the
+      admin's edits intact.
+- [x] Tests: `sc-app` — the spec each framework declares (scope, grants, build target, prompt) and
+      the `None` cases. **`sc-core-traits` holds the two halves to each other**, since it is the one
+      layer that sees both: every declared trait name resolves in the built-in registry and every
+      declared setting validates against that trait's own `config_spec`, which turns a renamed
+      setting into a build failure instead of an `agent_error` on every application created
+      afterwards. `sc-server` end-to-end over HTTP — a created React app's agent stored, usable and
+      scoped to its project directory; a `code` app's to its stated source; no provider connected
+      leaving the application created and the reason reported; and a re-created application not
+      overwriting the admin's edited builder.
+- [x] **Done when** an admin creates an application and finds, without configuring anything, an
+      agent that can read, edit and build exactly that application's source.
+
+---
+
 ## Carried past this milestone
 
 - **The server half of the composer's controls.** The chat panel renders trait-declared toggles and

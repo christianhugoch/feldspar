@@ -34,11 +34,19 @@
 //! [`load_application`] / [`list_applications`] / [`delete_application`] are the
 //! row ⇄ [`Application`] path. Saving is not building or mounting: an app that is
 //! saved but unbuilt is a normal state.
+//!
+//! An application is also created with the **agent that builds it**, and which
+//! agent that is belongs to its framework: [`framework_builder_agent`] is the
+//! declaration, beside the framework's settings and its default CSP. Both code
+//! frameworks declare a coding agent over the source tree they build from; the
+//! record itself is created by the server, which is the layer that knows agents
+//! exist.
 
 mod api;
 mod application;
 mod applications;
 mod build;
+mod builder_agent;
 mod framework;
 mod react;
 mod scaffold;
@@ -59,6 +67,11 @@ pub use applications::{
 pub use build::{
     AppSource, BuildReport, app_source_from_config, build_app, build_application,
     build_code_framework, emit_client, run_build,
+};
+pub use builder_agent::{
+    BuilderAgentSpec, BuilderTrait, TRAIT_BUILD_APPLICATION, TRAIT_CFG_APPLICATION,
+    TRAIT_CFG_MAY_EDIT, TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_ROOT, TRAIT_CFG_STORE, TRAIT_CODING,
+    builder_agent_name, framework_builder_agent,
 };
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
