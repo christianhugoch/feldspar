@@ -84,13 +84,27 @@ export function Applications() {
   };
 
   const remove = async (app: AppItem) => {
-    if (!window.confirm(`Delete application "${app.name}"? This cannot be undone.`)) {
+    if (
+      !window.confirm(
+        `Delete application "${app.name}"? The agent created to build it is deleted ` +
+          `with it. This cannot be undone.`,
+      )
+    ) {
       return;
     }
     setError(null);
     try {
-      await api.deleteApplication(app.id);
+      // The agent goes with the application (§13.3), so say which one went: an
+      // admin who edited that agent should not have to notice its absence.
+      const result = await api.deleteApplication(app.id);
       await load();
+      if (result.agent) {
+        setOutcome({
+          ok: true,
+          title: `Application deleted — ${app.name}`,
+          text: `Its builder agent, ${result.agent}, was deleted with it. Its past runs are kept.`,
+        });
+      }
     } catch (err) {
       setError(errorMessage(err, "Could not delete the application."));
     }

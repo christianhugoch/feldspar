@@ -326,6 +326,61 @@ async fn an_agent_of_that_name_already_there_is_left_alone() -> sc_error::Result
     let tmp = TempDir::new("again");
     let (mut admin, _catalog, _db) = setup(&tmp, true).await?;
 
+    // An agent already called `build-todo`, made by the admin for their own
+    // reasons before any application claimed that subdomain.
+    let (status, mine) = admin
+        .send(
+            "POST",
+            "/api/agents",
+            Some(json!({
+                "name": "build-todo",
+                "description": "mine",
+                "provider": "house",
+                "system_prompt": "Mine, not the framework's.",
+                "traits": [],
+                "attributes": {}
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{mine}");
+    let agent_id = mine["id"].as_str().unwrap().to_owned();
+
+    let (status, created) = admin
+        .send(
+            "POST",
+            "/api/applications",
+            Some(react_body("Todo", "todo", "todo")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let app_id = created["id"].as_str().unwrap().to_owned();
+
+    // Nothing is reported, because nothing was created — and the admin's agent
+    // is untouched rather than replaced by the framework's.
+    assert_eq!(created.get("agent"), None, "{created}");
+    assert_eq!(created.get("agent_error"), None, "{created}");
+    let after = agent(&mut admin, "build-todo").await;
+    assert_eq!(after["system_prompt"], json!("Mine, not the framework's."));
+    assert_eq!(after["id"], json!(agent_id));
+
+    // And deleting the application does not take it either: it shares the name
+    // but does not build that application, so it is not that application's.
+    let (status, deleted) = admin
+        .send("DELETE", &format!("/api/applications/{app_id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted.get("agent"), None, "{deleted}");
+    let survived = agent(&mut admin, "build-todo").await;
+    assert_eq!(survived["id"], json!(agent_id));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn deleting_an_application_deletes_the_agent_that_built_it() -> sc_error::Result<()> {
+    let tmp = TempDir::new("delete");
+    let (mut admin, _catalog, _db) = setup(&tmp, true).await?;
+
     let (status, created) = admin
         .send(
             "POST",
@@ -335,13 +390,85 @@ async fn an_agent_of_that_name_already_there_is_left_alone() -> sc_error::Result
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["agent"], json!("build-todo"));
 
-    // The admin edits the agent — a longer prompt, say — and then the
-    // application is deleted and re-created on the same subdomain.
+    // A second application, whose agent must be left exactly where it is: one
+    // delete button takes one application's agent.
+    let (status, other) = admin
+        .send(
+            "POST",
+            "/api/applications",
+            Some(code_body("Blog", "blog", "web")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+
+    // The admin's edits to the builder do not buy it survival: an agent that
+    // still names this application is still this application's.
+    let stored = agent(&mut admin, "build-todo").await;
+    let mut edited = stored.clone();
+    edited["system_prompt"] = json!("Edited, but still the builder.");
+    edited.as_object_mut().unwrap().remove("error");
+    edited.as_object_mut().unwrap().remove("id");
+    let agent_id = stored["id"].as_str().unwrap().to_owned();
+    let (status, saved) = admin
+        .send("PUT", &format!("/api/agents/{agent_id}"), Some(edited))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (status, deleted) = admin
+        .send("DELETE", &format!("/api/applications/{id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["deleted"], json!(true));
+    // Named in the answer, so the screen can say what went with it rather than
+    // leaving the admin to notice an agent missing.
+    assert_eq!(deleted["agent"], json!("build-todo"), "{deleted}");
+
+    let (status, agents) = admin.send("GET", "/api/agents", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["build-blog"], "{agents}");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_builder_re_pointed_at_another_application_survives() -> sc_error::Result<()> {
+    let tmp = TempDir::new("repointed");
+    let (mut admin, _catalog, _db) = setup(&tmp, true).await?;
+
+    for body in [
+        react_body("Todo", "todo", "todo"),
+        code_body("Blog", "blog", "web"),
+    ] {
+        let (status, created) = admin.send("POST", "/api/applications", Some(body)).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+    }
+    let (_, apps) = admin.send("GET", "/api/applications", None).await;
+    let todo_id = apps
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["subdomain"] == json!("todo"))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The admin re-points `build-todo` at the blog instead. It is now doing
+    // another job, and deleting the to-do application must not take it.
     let stored = agent(&mut admin, "build-todo").await;
     let agent_id = stored["id"].as_str().unwrap().to_owned();
     let mut edited = stored.clone();
-    edited["system_prompt"] = json!("Mine, edited.");
+    edited["traits"] = json!([
+        { "trait": "build_application", "config": { "application": "blog" } }
+    ]);
     edited.as_object_mut().unwrap().remove("error");
     edited.as_object_mut().unwrap().remove("id");
     let (status, saved) = admin
@@ -349,26 +476,13 @@ async fn an_agent_of_that_name_already_there_is_left_alone() -> sc_error::Result
         .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
 
-    let (status, _) = admin
-        .send("DELETE", &format!("/api/applications/{id}"), None)
+    let (status, deleted) = admin
+        .send("DELETE", &format!("/api/applications/{todo_id}"), None)
         .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, again) = admin
-        .send(
-            "POST",
-            "/api/applications",
-            Some(react_body("Todo", "todo", "todo")),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED, "{again}");
-
-    // Nothing is reported, because nothing was created — and the admin's own
-    // prompt is still there rather than reset to the framework's.
-    assert_eq!(again.get("agent"), None, "{again}");
-    assert_eq!(again.get("agent_error"), None, "{again}");
-    let after = agent(&mut admin, "build-todo").await;
-    assert_eq!(after["system_prompt"], json!("Mine, edited."));
-    assert_eq!(after["id"], json!(agent_id));
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted.get("agent"), None, "{deleted}");
+    let survived = agent(&mut admin, "build-todo").await;
+    assert_eq!(survived["id"], json!(agent_id));
 
     Ok(())
 }

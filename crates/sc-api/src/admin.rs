@@ -896,10 +896,14 @@ pub fn admin_endpoints() -> EndpointSet {
             Method::Delete,
             api().lit("applications").param("id", ValueType::Uuid),
         )
-        .output(TypeSchema::struct_of([StructField::new(
-            "deleted",
-            TypeSchema::bool(),
-        )]))
+        // `agent` names the builder agent that was deleted with the application
+        // (§13.3), when there was one to delete — an application's builder can do
+        // nothing once the application is gone, and the admin should be told it
+        // went rather than discover it missing.
+        .output(TypeSchema::struct_of([
+            StructField::new("deleted", TypeSchema::bool()),
+            StructField::new("agent", TypeSchema::optional(TypeSchema::text())),
+        ]))
         .auth(AuthRequirement::admin()),
     );
 

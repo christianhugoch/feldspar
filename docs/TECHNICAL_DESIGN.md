@@ -2355,8 +2355,20 @@ deployment with no LLM provider connected still gets its application and is told
 it has no builder agent. Nor does it choose a model — which provider a deployment has connected is
 not something a framework can know, so the server takes the first connected one and the admin
 changes it on the agent like any other. An agent of that name already present is left alone: the
-name is derived from the subdomain (`build-todo`), so an application re-created on a subdomain meets
-its own old builder with the admin's edits to it intact.
+name is derived from the subdomain (`build-todo`), so an admin who had already made one under that
+name keeps theirs.
+
+**Deleting the application deletes it**, because a builder scoped to an application can do nothing
+once the application is gone — left behind it is an entry in the agents list whose only remaining
+property is that it does not work, and the admin who deleted the application is the one who would
+have to clean it up. The check is the **trait, not the name**: only an agent still carrying
+`build_application` for that subdomain is that application's builder, so an agent an admin made
+themselves under that name, or re-pointed at another application, survives a delete button pressed
+on a different screen. Edits to the real builder do not buy it survival — an agent that still names
+this application is still this application's — and its **runs are kept**, as they are when an agent
+is deleted directly (§11.4): a transcript is a record of what happened, and the application being
+gone does not make it not have happened. The delete response names the agent that went, so this is
+something the admin is told rather than something they notice.
 
 The opinions the scaffold hard-codes, and the reasoning that has to hold for them to stay
 hard-coded:

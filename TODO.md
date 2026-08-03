@@ -533,9 +533,15 @@ because nothing else knows what building an app of that kind consists of.
       never instead of it: a deployment with no LLM provider connected still gets its application
       and hears in one sentence why it has no builder. The provider is the first connected one,
       because a framework cannot know which a deployment has; the admin changes it like any other
-      setting. An agent of that name already there is left alone — the name is the subdomain's
-      (`build-todo`), so an application re-created on a subdomain meets its own old builder with the
-      admin's edits intact.
+      setting. An agent of that name already there is left alone — an admin who had already made a
+      `build-todo` keeps theirs.
+- [x] **Deleted with the application**, since a builder scoped to one can do nothing once it is
+      gone and would otherwise sit in the agents list as a broken record of something that no
+      longer exists. The check is the **trait, not the name**: only an agent still carrying
+      `build_application` for that subdomain is that application's, so one an admin made themselves
+      under the name — or re-pointed at another application — survives a delete pressed on a
+      different screen, while edits to the real builder do not buy it survival. Its runs are kept,
+      as `deleteAgent`'s are, and the delete response names what went.
 - [x] Tests: `sc-app` — the spec each framework declares (scope, grants, build target, prompt) and
       the `None` cases. **`sc-core-traits` holds the two halves to each other**, since it is the one
       layer that sees both: every declared trait name resolves in the built-in registry and every
@@ -543,8 +549,10 @@ because nothing else knows what building an app of that kind consists of.
       setting into a build failure instead of an `agent_error` on every application created
       afterwards. `sc-server` end-to-end over HTTP — a created React app's agent stored, usable and
       scoped to its project directory; a `code` app's to its stated source; no provider connected
-      leaving the application created and the reason reported; and a re-created application not
-      overwriting the admin's edited builder.
+      leaving the application created and the reason reported; an admin's own agent of that name
+      neither overwritten on create nor taken on delete; a deleted application taking its builder
+      and leaving another application's alone; and a builder re-pointed at another application
+      surviving.
 - [x] **Done when** an admin creates an application and finds, without configuring anything, an
       agent that can read, edit and build exactly that application's source.
 

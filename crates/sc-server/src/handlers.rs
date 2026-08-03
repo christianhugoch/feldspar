@@ -30,7 +30,7 @@ use sc_api::rows::{self, require_object};
 use sc_api::schema_edit;
 use sc_app::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
-    app_source_from_config, applications_using_file_store, delete_application,
+    app_source_from_config, applications_using_file_store, builder_agent_name, delete_application,
     framework_builder_agent, framework_config_spec, framework_default_csp, list_applications,
     load_application, registered_framework_info, require_scaffoldable, save_application,
     scaffold_app,
@@ -1674,7 +1674,19 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 if !deleted {
                     return Err(Error::not_found(format!("no application with id {id}")));
                 }
-                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+                // The agent created to build it goes with it (§13.3). An
+                // application's builder has nothing to build once the application
+                // is gone — it would sit in the agents list as a broken record of
+                // something that no longer exists, and the admin who deleted the
+                // application is the one who would have to clean it up.
+                let mut body = json!({ "deleted": true });
+                if let Some(app) = &existing
+                    && let Some(name) = delete_builder_agent(&catalog, app).await?
+                    && let Some(obj) = body.as_object_mut()
+                {
+                    obj.insert("agent".to_owned(), json!(name));
+                }
+                Ok(HandlerResponse::ok(body))
             }
         }
     });
@@ -2027,6 +2039,52 @@ async fn create_builder_agent(
     // builder agent this server would refuse to run is not one it quietly stores.
     sc_agent::save_agent(catalog, services.registry(), &agent).await?;
     Ok(Some(agent.name))
+}
+
+/// Delete the agent created to build `app`, returning its name if one went.
+///
+/// The other half of [`create_builder_agent`]: an application's builder is scoped
+/// to that application and can do nothing once it is gone, so leaving it behind
+/// would leave the admin who deleted the application an agent to clean up whose
+/// only remaining property is that it does not work.
+///
+/// **It deletes that application's builder, not every agent that shares its
+/// name.** The name is the derivation ([`builder_agent_name`]), but the check is
+/// the trait: only an agent still carrying `build_application` for *this*
+/// subdomain is one. So an agent an admin created themselves under that name, or
+/// re-pointed at something else, survives the deletion — a delete button on one
+/// screen must not silently take an agent that is doing another job. What an
+/// admin's edits to the real builder cannot buy it is survival: an agent that
+/// still names this application is still this application's.
+///
+/// Its **runs are not deleted**, as `deleteAgent` does not delete them either: a
+/// transcript is a record of what happened, and what happened does not stop
+/// having happened because the application was removed.
+async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Option<String>> {
+    // No `_sc_agents` table *means* no agent has ever been defined — the same
+    // reading `Agents::load` takes — so a server without agents installed deletes
+    // an application rather than failing over a table nobody made.
+    if catalog.get(sc_agent::AGENTS_TABLE)?.is_none() {
+        return Ok(None);
+    }
+    let name = builder_agent_name(app);
+    let Some(agent) = sc_agent::load_agent_by_name(catalog, &name).await? else {
+        return Ok(None);
+    };
+    let subdomain = app.subdomain.trim();
+    let builds_this_app = agent.traits.iter().any(|t| {
+        t.trait_ == sc_app::TRAIT_BUILD_APPLICATION
+            && t.config
+                .get(sc_app::TRAIT_CFG_APPLICATION)
+                .and_then(Json::as_str)
+                .map(str::trim)
+                == Some(subdomain)
+    });
+    if !builds_this_app {
+        return Ok(None);
+    }
+    sc_agent::delete_agent(catalog, agent.id).await?;
+    Ok(Some(name))
 }
 
 /// Parse an [`Application`] from a create/update body (matching

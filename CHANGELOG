@@ -34,8 +34,17 @@ or `agent_error` the way it already carries `scaffolded` / `scaffold_error`, and
 reports both: a deployment with no LLM provider connected still gets its application and is told in
 one sentence why it has no builder agent. Which provider it uses is not something a framework can
 know, so the server takes the first connected one and the admin changes it like any other setting.
-An agent of that name already there is left alone — the name comes from the subdomain, so an
-application re-created on one meets its own old builder with the admin's edits to it intact.
+An agent of that name already there is left alone — an admin who had already made a `build-todo`
+keeps theirs.
+
+**Deleting the application deletes the agent**, because a builder scoped to an application can do
+nothing once the application is gone; left behind, it is an entry in the agents list whose only
+remaining property is that it does not work. What decides it is the trait rather than the name: only
+an agent still carrying `build_application` for that subdomain is that application's builder, so an
+agent an admin made themselves under that name, or re-pointed at another application, survives —
+while edits to the real builder do not buy it survival, since an agent that still names this
+application is still this application's. Its runs are kept, as they are when an agent is deleted
+directly, and the delete response names what went so the list screen can say so.
 
 ## A chat can be popped out of its page and kept in the corner
 
