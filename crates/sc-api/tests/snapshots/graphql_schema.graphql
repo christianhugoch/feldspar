@@ -74,7 +74,7 @@ type Departments {
 	"""
 	Rows of `employees` whose `department` references this row.
 	"""
-	employees_by_department(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]!
+	employees_by_department(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]
 	"""
 	Aggregates over the rows of `employees` that reference this row — computed by the database as a correlated subquery, not by fetching them.
 	"""
@@ -82,7 +82,7 @@ type Departments {
 	"""
 	Rows of `employees` whose `managed_department` references this row.
 	"""
-	employees_by_managed_department(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]!
+	employees_by_managed_department(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]
 	"""
 	Aggregates over the rows of `employees` that reference this row — computed by the database as a correlated subquery, not by fetching them.
 	"""

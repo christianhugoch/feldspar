@@ -40,6 +40,9 @@ async-graphql.workspace = true
 # description defines as base64 text — a JSON array of byte numbers would be
 # neither that nor usable by a client.
 base64.workspace = true
+# The GraphQL child-list `DataLoader` dispatches its batch from a spawned task,
+# so this crate needs a spawner. Only `rt` — the runtime itself is the server's.
+tokio = { workspace = true, features = ["rt"] }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

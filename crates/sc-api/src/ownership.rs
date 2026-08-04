@@ -191,17 +191,33 @@ pub async fn read_row_values_as(
             .await?;
             let limit = query.limit.unwrap_or(u64::MAX);
             let offset = query.offset.unwrap_or(0);
+            // A per-partition bound is a bound, so it waits for the evaluator
+            // for exactly the same reason: "three employees each" counted over
+            // rows the caller may not see is three of somebody else's.
+            let mut counted: BTreeMap<String, u64> = BTreeMap::new();
             let mut passed = 0_u64;
             let mut granted = Vec::new();
             for values in fetched {
                 if granted.len() as u64 >= limit {
                     break;
                 }
-                if allowed(evaluator, formula, Operation::Read, user, &values).await {
-                    passed += 1;
-                    if passed > offset {
-                        granted.push(values);
+                if !allowed(evaluator, formula, Operation::Read, user, &values).await {
+                    continue;
+                }
+                if let Some(part) = &query.partition {
+                    let n = counted
+                        .entry(rows::group_key(values.get(&part.by)))
+                        .or_insert(0);
+                    *n += 1;
+                    let skip = part.offset.unwrap_or(0);
+                    let last = skip.saturating_add(part.limit.unwrap_or(u64::MAX));
+                    if *n <= skip || *n > last {
+                        continue;
                     }
+                }
+                passed += 1;
+                if passed > offset {
+                    granted.push(values);
                 }
             }
             Ok(granted)

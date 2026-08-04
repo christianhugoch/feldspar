@@ -36,6 +36,7 @@
 mod args;
 mod build;
 mod context;
+mod loader;
 pub mod names;
 mod resolve;
 #[cfg(test)]
@@ -44,6 +45,7 @@ mod types;
 
 use std::sync::Arc;
 
+use async_graphql::dataloader::DataLoader;
 use async_graphql::dynamic::Schema;
 use async_trait::async_trait;
 use sc_auth::User;
@@ -207,16 +209,18 @@ impl GraphqlProvider {
         if let Some(name) = body.get("operationName").and_then(Json::as_str) {
             request = request.operation_name(name);
         }
-        let response = self
-            .schema
-            .execute(request.data(context::RequestContext {
-                catalog: Arc::clone(cat),
-                user: user.cloned(),
-                evaluator: self.evaluator.clone(),
-                row_cap: self.row_cap,
-                file_mount: self.file_mount.clone(),
-            }))
-            .await;
+        let rc = context::RequestContext {
+            catalog: Arc::clone(cat),
+            user: user.cloned(),
+            evaluator: self.evaluator.clone(),
+            row_cap: self.row_cap,
+            file_mount: self.file_mount.clone(),
+        };
+        // One loader per request, holding that request's own context: a batched
+        // child read is the same read as an unbatched one, by the same caller,
+        // and only the shape of the statement differs.
+        let loader = DataLoader::new(loader::ChildLoader::new(rc.clone()), tokio::spawn);
+        let response = self.schema.execute(request.data(loader).data(rc)).await;
         // The legacy `application/json` rule: 200 with the errors in the body.
         // `application/graphql-response+json` needs content negotiation, and
         // `ApiRequest` carries no headers to negotiate with.

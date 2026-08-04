@@ -41,6 +41,11 @@ pub const DEFAULT_ROW_CAP: u64 = 500;
 pub const DEFAULT_FILE_MOUNT: &str = "/api";
 
 /// Everything one GraphQL request resolves against.
+///
+/// Cloneable because the child-list [`DataLoader`](async_graphql::dataloader::DataLoader)
+/// holds one too: batching changes the shape of a statement, never who is
+/// asking, so the loader reads through the same context its resolvers do.
+#[derive(Clone)]
 pub struct RequestContext {
     /// The catalog every read goes through.
     pub catalog: Arc<Catalog>,

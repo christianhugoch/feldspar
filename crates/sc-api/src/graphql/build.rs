@@ -14,9 +14,9 @@
 //!
 //! What each field *does* is [`resolve`](super::resolve)'s business; this module
 //! decides only which resolver a field gets. Reads — the root list, `_by_pk`, a
-//! row's columns and its outgoing Ⱶ-joins — are wired to real ones; the child
-//! lists (Phase 4) and the aggregates (Phase 5) still answer "not implemented
-//! yet", which is a better placeholder than a plausible zero.
+//! row's columns, its outgoing Ⱶ-joins and its child lists — are wired to real
+//! ones; the aggregates (Phase 5) still answer "not implemented yet", which is a
+//! better placeholder than a plausible zero.
 
 use async_graphql::dynamic::{
     Enum, Field, FieldFuture, InputObject, InputValue, Object, Scalar, Schema, TypeRef,
@@ -197,8 +197,13 @@ fn row_object(table: &Table, t: &TableNames, names: &SchemaNames) -> Object {
             list_arguments(
                 Field::new(
                     &rel.list_field,
-                    TypeRef::named_nn_list_nn(&child.object),
-                    not_implemented(&format!("{}.{}", t.object, rel.list_field)),
+                    // Nullable, where the root list is not: the child's own
+                    // access rules decide this field, and a caller refused by
+                    // them must lose *this field*, not the parent row that a
+                    // non-null list would propagate the error up to. Partial
+                    // results are the point of the deviation.
+                    TypeRef::named_nn_list(&child.object),
+                    resolve::child_list_field(&rel.child_table, &rel.key_field, &rel.parent_field),
                 ),
                 child,
             )

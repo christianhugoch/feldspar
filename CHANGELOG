@@ -2,6 +2,49 @@
 
 Changes in reverse chronological order.
 
+## GraphQL child lists, one query per level
+
+`departments { name employees { name } }` answers, and it answers in **two**
+statements rather than one plus one per department. The child field resolves through
+`async_graphql::dataloader::DataLoader`: each parent's resolver only says which rows it wants
+— the relation, this field's arguments, this parent's key — and the loader turns the siblings
+that asked the same thing into one `SELECT … WHERE department IN (…)`.
+
+**What makes two loads one read** is the key: relation, arguments, parent. Two siblings share
+the first two and collapse; the *same* relation asked twice under different `where` arguments
+does not, because it is a different question, and it gets its own read and its own answer.
+Neither a `RowQuery` nor a `Value` is hashable — they carry expressions, floats and decimals —
+so the batch key is their `Debug` rendering, which is structural, deterministic, and
+distinguishes `Int(1)` from `Text("1")` so no parent can be handed another's children.
+
+**A `limit` on a child list is per parent**, which is what `row_number()` was added to
+`sc-query` for: "three employees each" is not "three employees". It arrives as a new
+`RowQuery::partition`, and the row layer renders it by numbering the rows *inside* the read —
+the same read the ownership predicate is ANDed into — and comparing the numbering outside it.
+So the window can never rank a row the caller may not see. The JavaScript-evaluator path,
+which already withheld `limit`/`offset` until after the evaluator had spoken, now withholds
+the per-parent bound for exactly the same reason.
+
+**A child list nobody bounded is an error when it reaches the cap, where a root list simply
+truncates.** The difference is not inconsistency: a root list's cap bounds the response the
+caller asked for, while a child list's cap is *shared between the parents*, so reaching it
+means some department's list was cut short and nothing in the response says whose. The
+message names the relation and says that a `limit` is what bounds each parent on its own.
+
+**The child's rules are the child's.** The read is `ownership::read_row_values_as` over the
+child table, so a caller who may not read `employees` is refused there — not because this
+provider remembered to check. That refusal is an error on *that field* with every parent still
+returned, which required one deviation from Hasura's shape: a child list field is nullable
+(`[Employees!]`, not `[Employees!]!`), because GraphQL propagates an error on a non-null field
+up to its parent, and a query for departments should not lose the departments over the
+employees. Partial results are the point.
+
+One thing came back from the Ⱶ-join side: a child list *behind* a join (`department { employees
+{ … } }`) only works if the parent's query projected the joined row's key, so the selection
+walk now projects it — the same reason a `File` field on the far side of a join already
+projected one. Where the relation is keyed on something other than the primary key the
+resolver refuses by name rather than answering an empty list.
+
 ## GraphQL reads rows
 
 The GraphQL provider's root fields now answer. `departments(where: …, order_by: …, limit: …,

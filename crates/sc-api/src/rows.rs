@@ -20,7 +20,8 @@ use sc_db::Row;
 use sc_error::{Error, Repr, Result};
 use sc_expr::{CalcFields, Env, Formula, TranslateError, UserEnv, translate_value};
 use sc_query::{
-    Assignment, Delete, Expr, Insert, OrderBy, Projection, Select, Source, Statement, Update, Value,
+    Assignment, BinOp, Delete, Expr, Insert, OrderBy, Projection, Select, Source, Statement,
+    Update, Value,
 };
 use sc_types::{BasicType, TypeRef};
 use serde_json::{Map, Value as Json, json};
@@ -108,7 +109,38 @@ pub struct RowQuery {
     /// path already uses for the join values a formula reads — one query serves
     /// the row and everything derived from it.
     pub extra: Vec<Projection>,
+    /// A bound applied **within each group** of rows rather than to the read as
+    /// a whole. `None` for every ordinary read.
+    pub partition: Option<Partition>,
 }
+
+/// At most `limit` rows for each distinct value of `by`, after skipping
+/// `offset` of them, in the query's own order.
+///
+/// The one thing a batched child list needs that `LIMIT` cannot express: one
+/// `SELECT` answers `employees(limit: 3)` for *every* department at once, and
+/// "three each" is not "three". It lowers to `row_number() OVER (PARTITION BY
+/// … ORDER BY …)` numbered inside the read and filtered outside it — after the
+/// ownership predicate has been ANDed in, so the numbering never counts a row
+/// the caller may not see.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Partition {
+    /// The column the rows are grouped by — a child table's key, in the one
+    /// case that needs this.
+    pub by: String,
+    /// The most rows to return per group.
+    pub limit: Option<u64>,
+    /// How many rows to skip in each group first.
+    pub offset: Option<u64>,
+}
+
+/// The alias the per-partition row number rides back under. Structural — chosen
+/// here, never user data — and prefixed so it cannot be a column of a table an
+/// admin declared.
+const PARTITION_ROW_NUMBER: &str = "_sc_rn";
+
+/// The alias the partitioned read's inner query is exposed under. Same rule.
+const PARTITION_SOURCE: &str = "_sc_part";
 
 impl RowQuery {
     /// Every row, unordered and unbounded.
@@ -143,6 +175,12 @@ impl RowQuery {
     /// Project `extra` alongside the row's own columns.
     pub fn projecting(mut self, extra: Vec<Projection>) -> RowQuery {
         self.extra = extra;
+        self
+    }
+
+    /// Bound the rows *within each group* of `partition` rather than as a whole.
+    pub fn per_partition(mut self, partition: Partition) -> RowQuery {
+        self.partition = Some(partition);
         self
     }
 
@@ -204,14 +242,59 @@ fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Sel
     let mut columns = vec![Projection::all()];
     columns.extend(calc_projections(catalog, table)?);
     columns.extend(query.extra.iter().cloned());
-    let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
+    let Some(partition) = &query.partition else {
+        let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
+        if let Some(filter) = query.filter.clone() {
+            select = select.filter(filter);
+        }
+        select.order = query.order.clone();
+        select.limit = query.limit;
+        select.offset = query.offset;
+        return Ok(select);
+    };
+
+    // A per-group bound is not a `LIMIT`: the rows have to be *numbered* first,
+    // inside the same read that the filter (and so the ownership predicate)
+    // applies to, and the numbering compared afterwards. Hence the wrap.
+    columns.push(Projection::expr_as(
+        Expr::row_number(vec![Expr::col(partition.by.clone())], query.order.clone()),
+        PARTITION_ROW_NUMBER,
+    ));
+    let mut inner = Select::from(Source::table(table.name.clone())).columns(columns);
     if let Some(filter) = query.filter.clone() {
-        select = select.filter(filter);
+        inner = inner.filter(filter);
     }
+    let mut select = Select::from(Source::Subquery {
+        query: Box::new(inner),
+        alias: PARTITION_SOURCE.to_owned(),
+    });
+    let rn = || Expr::col(PARTITION_ROW_NUMBER);
+    let skip = partition.offset.unwrap_or(0);
+    let mut bound = (skip > 0).then(|| Expr::binary(BinOp::Gt, rn(), Expr::lit(skip as i64)));
+    if let Some(take) = partition.limit {
+        let last = skip.saturating_add(take);
+        let within = Expr::binary(BinOp::Le, rn(), Expr::lit(last as i64));
+        bound = Some(match bound {
+            Some(b) => b.and(within),
+            None => within,
+        });
+    }
+    select.filter = bound;
     select.order = query.order.clone();
     select.limit = query.limit;
     select.offset = query.offset;
     Ok(select)
+}
+
+/// The text a row (or a caller looking one up) is grouped by on one column.
+///
+/// [`Value`] is not `Hash` — it carries floats and decimals — and a key column
+/// is small, so grouping goes through its `Debug` rendering, which distinguishes
+/// `Int(1)` from `Text("1")` and so cannot collapse two different keys into one
+/// bucket. An absent column groups as `NULL`, which is where it belongs: a child
+/// row whose key is null belongs to no parent.
+pub(crate) fn group_key(value: Option<&Value>) -> String {
+    format!("{:?}", value.unwrap_or(&Value::Null))
 }
 
 /// One fetched row as a map from column name to its value.

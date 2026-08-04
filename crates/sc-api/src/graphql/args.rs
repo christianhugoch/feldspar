@@ -31,7 +31,7 @@ use sc_error::{Error, Result};
 use sc_query::{BinOp, Expr, InSet, OrderBy, UnOp, Value};
 use serde_json::Value as Json;
 
-use crate::rows::{self, RowQuery};
+use crate::rows::{self, Partition, RowQuery};
 
 /// The list-field argument names, shared with the schema builder so the two
 /// cannot drift.
@@ -55,6 +55,52 @@ const NOT: &str = "_not";
 /// permission — a list field with no bound is how a table ends up streamed into
 /// a response by accident.
 pub fn row_query(table: &Table, ctx: &ResolverContext<'_>, row_cap: u64) -> Result<RowQuery> {
+    let mut query = filtered_and_ordered(table, ctx)?;
+    let (limit, offset) = bounds(ctx)?;
+    query = query.limit(limit.map_or(row_cap, |n| n.min(row_cap)));
+    if let Some(n) = offset {
+        query = query.offset(n);
+    }
+    Ok(query)
+}
+
+/// A **child** list field's arguments, for a read that answers one parent per
+/// group in a single statement.
+///
+/// The difference from [`row_query`] is what `limit` means. On a root list it
+/// bounds the read; on a child list it bounds *each parent's* children, so it
+/// becomes a [`Partition`] over the child's key column and the read itself
+/// stays unbounded — one `SELECT … WHERE key IN (…)` still answers every parent.
+///
+/// When the caller names no bound at all there is nothing to partition by, so
+/// the read takes the application's row cap as a whole. That cap is shared
+/// between the parents, which is why hitting it is an **error** here where the
+/// root list simply truncates: nobody can tell which parent's list was cut
+/// short, so answering would be answering wrongly.
+pub fn child_row_query(
+    table: &Table,
+    ctx: &ResolverContext<'_>,
+    key_field: &str,
+    row_cap: u64,
+) -> Result<RowQuery> {
+    let query = filtered_and_ordered(table, ctx)?;
+    let (limit, offset) = bounds(ctx)?;
+    if limit.is_none() && offset.is_none() {
+        return Ok(query.limit(row_cap));
+    }
+    Ok(query.per_partition(Partition {
+        by: key_field.to_owned(),
+        // A per-parent bound is still held to the cap, and an `offset` with no
+        // `limit` takes the cap as its bound — the same rule the root list's
+        // absent `limit` follows.
+        limit: Some(limit.unwrap_or(row_cap).min(row_cap)),
+        offset,
+    }))
+}
+
+/// The `where` and `order_by` halves of a list field's arguments — the part
+/// that means the same thing wherever the rows come from.
+fn filtered_and_ordered(table: &Table, ctx: &ResolverContext<'_>) -> Result<RowQuery> {
     let mut query = RowQuery::new();
     if let Some(arg) = ctx.args.get(ARG_WHERE)
         && let Some(expr) = where_expr(table, arg.as_value(), None)?
@@ -64,17 +110,21 @@ pub fn row_query(table: &Table, ctx: &ResolverContext<'_>, row_cap: u64) -> Resu
     if let Some(arg) = ctx.args.get(ARG_ORDER_BY) {
         query = query.order_by(order_by(table, arg.as_value())?);
     }
-    let limit = match ctx.args.get(ARG_LIMIT) {
-        Some(arg) => bound(arg.as_value(), ARG_LIMIT)?.map_or(row_cap, |n| n.min(row_cap)),
-        None => row_cap,
-    };
-    query = query.limit(limit);
-    if let Some(arg) = ctx.args.get(ARG_OFFSET)
-        && let Some(n) = bound(arg.as_value(), ARG_OFFSET)?
-    {
-        query = query.offset(n);
-    }
     Ok(query)
+}
+
+/// The `limit` and `offset` a caller named, unclamped: what they *asked* for,
+/// which the two callers above bound differently.
+fn bounds(ctx: &ResolverContext<'_>) -> Result<(Option<u64>, Option<u64>)> {
+    let limit = match ctx.args.get(ARG_LIMIT) {
+        Some(arg) => bound(arg.as_value(), ARG_LIMIT)?,
+        None => None,
+    };
+    let offset = match ctx.args.get(ARG_OFFSET) {
+        Some(arg) => bound(arg.as_value(), ARG_OFFSET)?,
+        None => None,
+    };
+    Ok((limit, offset))
 }
 
 /// A `limit`/`offset` argument: absent or null is `None`, a negative one is an

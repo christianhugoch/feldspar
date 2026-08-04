@@ -167,16 +167,19 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
       plus a hand-written `WHERE` would; a joinfield selection issues **one** query (asserted by
       counting statements, not by timing); a null key yields `null` rather than an error.
 
-## Phase 4 — Child lists, batched
+## Phase 4 — Child lists, batched ✅
 
-- [ ] Inverse-relation list fields resolved through `async_graphql::dataloader::DataLoader`,
+- [x] Inverse-relation list fields resolved through `async_graphql::dataloader::DataLoader`,
       keyed by (relation, the field's arguments, parent key) so siblings collapse into one
       `SELECT … WHERE key IN (…)` per level — never one per parent.
-- [ ] Per-parent `limit`/`offset` via Phase 1's `row_number()` window; without one, a child
+- [x] Per-parent `limit`/`offset` via Phase 1's `row_number()` window; without one, a child
       list is bounded by the application's row cap and says so in the error when it is hit,
-      rather than streaming a table into a response.
-- [ ] The child read applies the **child table's** access rules and ownership, not the parent's.
-- [ ] Tests (real Postgres): a query over N parents issues one child query, not N (statement
+      rather than streaming a table into a response. (The window is a `RowQuery::partition`,
+      so it is numbered *inside* the read the ownership predicate is ANDed into.)
+- [x] The child read applies the **child table's** access rules and ownership, not the parent's.
+      A child list field is therefore **nullable**, deviating from Hasura: a non-null one
+      would propagate the child's refusal up and null the parent.
+- [x] Tests (real Postgres): a query over N parents issues one child query, not N (statement
       count); per-parent `limit` returns the first k children *of each* parent; a child table
       the caller may not read is an error on that field with the parents still returned, which
       is what GraphQL partial results are for.

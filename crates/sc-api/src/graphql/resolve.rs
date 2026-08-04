@@ -25,9 +25,17 @@
 //! row, and a null there ends the walk before any leaf is looked at. That is the
 //! Ⱶ operator's own contract and it is what a GraphQL caller expects of a
 //! nullable object field.
+//!
+//! **An incoming key is batched, not walked.** A child list cannot be projected
+//! — it is many rows, not one value — so it is the one thing here that costs a
+//! second statement. It costs exactly one: [`child_list_field`] says only which
+//! rows this parent wants, and [`ChildLoader`](super::loader::ChildLoader)
+//! answers every sibling that asked the same thing together.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use async_graphql::dataloader::DataLoader;
 use async_graphql::dynamic::{FieldFuture, FieldValue, ResolverContext};
 use async_graphql::{SelectionField, Value as GqlValue};
 use base64::Engine;
@@ -38,6 +46,7 @@ use sc_query::{Projection, Value};
 
 use super::args;
 use super::context::{RequestContext, request_context};
+use super::loader::{ChildKey, ChildLoader, ChildRequest};
 use crate::convert::value_to_json;
 use crate::ownership;
 use crate::rows::{self, RowQuery};
@@ -51,6 +60,7 @@ pub type Resolver =
 ///
 /// A joined row is the same type with the join prefix stripped from its keys, so
 /// the row object's field resolvers are written once and work at every depth.
+#[derive(Clone)]
 pub struct RowValue {
     /// The table these values are a row of.
     table: String,
@@ -68,7 +78,7 @@ impl RowValue {
     }
 
     /// The value of one column, if this row carries it.
-    fn get(&self, column: &str) -> Option<&Value> {
+    pub(super) fn get(&self, column: &str) -> Option<&Value> {
         self.values.get(column)
     }
 
@@ -186,6 +196,65 @@ pub fn key_field(column: impl Into<String>, target: impl Into<String>) -> Resolv
                 return Ok(None);
             }
             Ok(Some(FieldValue::owned_any(joined)))
+        })
+    })
+}
+
+/// An incoming key: the child rows referencing this one, **batched**.
+///
+/// The resolver runs once per parent, and each run only says *which* rows it
+/// wants — the relation, this field's arguments, and this parent's key. The
+/// [`ChildLoader`] turns the siblings that ask the same thing into one
+/// `SELECT … WHERE key IN (…)`, so a level of a query costs a statement rather
+/// than a statement per row.
+///
+/// The rules applied are the **child's**: the load reads through
+/// `ownership::read_row_values_as` over the child table, so a caller who may not
+/// read it is refused there. Because this field is nullable, that refusal is an
+/// error on the field with the rest of the response intact — which is what
+/// GraphQL's partial results are for.
+pub fn child_list_field(
+    child_table: impl Into<String>,
+    key_field: impl Into<String>,
+    parent_field: impl Into<String>,
+) -> Resolver {
+    let child_table = child_table.into();
+    let key_field = key_field.into();
+    let parent_field = parent_field.into();
+    Box::new(move |ctx| {
+        let (child_table, key_field, parent_field) =
+            (child_table.clone(), key_field.clone(), parent_field.clone());
+        FieldFuture::new(async move {
+            let rc = request_context(&ctx)?;
+            let row = parent_row(&ctx)?;
+            // The column the child key references has to have come back with
+            // the parent row. When it did not, the parent was reached through a
+            // Ⱶ-join that did not project it — a mistake in this provider, and
+            // an empty list would hide it.
+            let Some(parent) = row.get(&parent_field) else {
+                return Err(async_graphql::Error::new(format!(
+                    "`{}`.`{parent_field}` was not read, so its `{child_table}` cannot be",
+                    row.table
+                )));
+            };
+            // A parent whose referenced column is null has no children: nothing
+            // can equal a null key.
+            if parent.is_null() {
+                return Ok(Some(FieldValue::list(Vec::<FieldValue<'static>>::new())));
+            }
+            let child = rc.table(&child_table)?;
+            let query = args::child_row_query(&child, &ctx, &key_field, rc.row_cap)?
+                .projecting(join_projections(&rc.catalog, &child, ctx.ctx.field())?);
+            let request = Arc::new(ChildRequest::new(&child.name, &key_field, query));
+            let rows = ctx
+                .data::<DataLoader<ChildLoader>>()?
+                .load_one(ChildKey::new(request, parent.clone()))
+                .await
+                .map_err(|e| async_graphql::Error::new(e.to_string()))?
+                .unwrap_or_default();
+            Ok(Some(FieldValue::list(
+                rows.iter().cloned().map(FieldValue::owned_any),
+            )))
         })
     })
 }
@@ -316,6 +385,10 @@ fn collect_join_leaves(
             continue;
         }
         let Some(field) = table.field(name) else {
+            // Not a column: an inverse relation (a child list or a child
+            // aggregate), which is resolved by a read of its own correlated
+            // against this row's key. So the key is what has to ride back.
+            push_key(table, prefix, out);
             continue;
         };
         let ident = match prefix {
@@ -339,18 +412,26 @@ fn collect_join_leaves(
             // address its bytes by, so it is projected alongside the path.
             DataFieldKind::File { .. } if prefix.is_some() => {
                 push_leaf(prefix, &ident, out);
-                if let Ok(pk) = rows::single_pk(table) {
-                    let key = match prefix {
-                        Some(prefix) => format!("{prefix}{JOIN}{pk}"),
-                        None => pk,
-                    };
-                    push_leaf(prefix, &key, out);
-                }
+                push_key(table, prefix, out);
             }
             _ => push_leaf(prefix, &ident, out),
         }
     }
     Ok(())
+}
+
+/// Record this table's primary key at the current depth: what a `File` field is
+/// addressed by and what a child list correlates against, neither of which the
+/// caller named. A relation keyed on some *other* unique column is not covered
+/// here; the child-list resolver refuses rather than answering an empty list.
+fn push_key(table: &Table, prefix: Option<&str>, out: &mut Vec<String>) {
+    if let Ok(pk) = rows::single_pk(table) {
+        let ident = match prefix {
+            Some(prefix) => format!("{prefix}{JOIN}{pk}"),
+            None => pk,
+        };
+        push_leaf(prefix, &ident, out);
+    }
 }
 
 /// Record a leaf, but only when it is actually behind a join — a column of the

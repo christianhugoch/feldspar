@@ -202,8 +202,8 @@ type Departments {
   name: String!
   # outgoing key — a Ⱶ-join, resolved as a correlated scalar subquery
   manager: Users
-  # incoming key — the child rows
-  employees(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]!
+  # incoming key — the child rows (nullable: see the deviations)
+  employees(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]
   # incoming key — aggregated, constrained by the child predicate
   employees_aggregate(where: EmployeesBoolExp): EmployeesAggregate!
 }
@@ -231,6 +231,15 @@ input EmployeesBoolExp {
 - **`count(distinct: Column)`** as an argument rather than Hasura's `count(columns: [..], distinct: Bool)`,
   because `count(DISTINCT a, b)` is not what `sc_query::Expr::Agg` spells and a single column
   is what the Ↄ chain's `.distinct(…)` supports.
+- **A child list field is nullable**, where Hasura's is not. The child read applies the
+  *child* table's access rules, and GraphQL propagates an error on a non-null field up to
+  its parent: a caller who may not read `employees` would lose the departments too. The
+  refusal belongs on the field that was refused, which is what partial results are for. A
+  child list that resolves is still a list of non-null rows (`[Employees!]`), and the root
+  list stays `[Departments!]!` — an error there is the whole query's.
+- **A child list's `limit`/`offset` are per parent**, which is what one batched read makes
+  possible and what `row_number() OVER (PARTITION BY …)` implements. Hasura means the same
+  thing; it is stated here because "three each" and "three" are different SQL.
 - **Names.** GraphQL names are `/[_A-Za-z][_0-9A-Za-z]*/`, which Ⱶ and Ↄ are not, so an
   inverse relation is `<child>` when the child has exactly one key field pointing here, and
   `<child>_by_<key>` when it has more than one or when `<child>` collides with a field name
