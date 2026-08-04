@@ -119,29 +119,29 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 2 — `sc-api::graphql`: names, types, and the empty provider
 
-- [ ] Add `async-graphql` (`features = ["dynamic-schema", "dataloader"]`, `default-features =
+- [x] Add `async-graphql` (`features = ["dynamic-schema", "dataloader"]`, `default-features =
       false`) to the workspace dependencies with the version pin and the reasoning of decision 1
       written where `Cargo.toml`'s other decisions are.
-- [ ] **`names.rs`: every GraphQL name derived in one place** — object type per table, row
+- [x] **`names.rs`: every GraphQL name derived in one place** — object type per table, row
       fields, `_by_pk`, `_aggregate`, the `BoolExp` / `OrderBy` / `SelectColumn` inputs, and the
       inverse-relation rule of decision 6 (using `SchemaProjection::referencing_fields`). A
       table or field whose name is not a valid GraphQL name is omitted and reported. Pure
       functions, unit-tested, no schema building.
-- [ ] **Type mapping**: `BasicType` → GraphQL scalars, with custom scalars where GraphQL has
+- [x] **Type mapping**: `BasicType` → GraphQL scalars, with custom scalars where GraphQL has
       nothing (`Date`, `UUID`, `JSON`, and a `Decimal`/`BigInt` that does not silently become a
       lossy `Float`). Key fields project as the target table's object type; `File` fields
       project as the string path plus the URL the REST provider already serves the bytes at —
       a GraphQL field must not become a second file-download path.
-- [ ] **`GraphqlProvider`**, implementing `ApiProvider` beside `RestProvider`: `name()` is
+- [x] **`GraphqlProvider`**, implementing `ApiProvider` beside `RestProvider`: `name()` is
       `"graphql"`, `mount()` defaults to `/graphql`, and `endpoints()` carries the two real
       endpoints — `POST {mount}` (`{query, variables, operationName}` in, GraphQL response out)
       and `GET {mount}/schema.graphql` (the SDL, as `text/plain` through `ApiResponse::file`) —
       so the provider participates in the shared endpoint model and TypeScript generation like
       everything else.
-- [ ] Build the schema in `project()` from the app's declared tables: object types, input types
+- [x] Build the schema in `project()` from the app's declared tables: object types, input types
       and a `Query` root whose resolvers all return "not implemented" for now. `finish()`
       failing is a **mount failure** naming the table that caused it, never a half-served schema.
-- [ ] Tests: an SDL **snapshot** for a small fixed schema (a parent, a child with two keys back
+- [x] Tests: an SDL **snapshot** for a small fixed schema (a parent, a child with two keys back
       to it, a File field, a table with a non-GraphQL name) — the one test that will catch every
       accidental change to the wire contract in the phases that follow.
 

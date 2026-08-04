@@ -1,0 +1,352 @@
+scalar BigInt
+
+input BigIntComparison {
+	eq: BigInt
+	ne: BigInt
+	gt: BigInt
+	gte: BigInt
+	lt: BigInt
+	lte: BigInt
+	in: [BigInt!]
+	nin: [BigInt!]
+	is_null: Boolean
+}
+
+input BooleanComparison {
+	eq: Boolean
+	ne: Boolean
+	gt: Boolean
+	gte: Boolean
+	lt: Boolean
+	lte: Boolean
+	in: [Boolean!]
+	nin: [Boolean!]
+	is_null: Boolean
+}
+
+scalar Bytes
+
+input BytesComparison {
+	eq: Bytes
+	ne: Bytes
+	gt: Bytes
+	gte: Bytes
+	lt: Bytes
+	lte: Bytes
+	in: [Bytes!]
+	nin: [Bytes!]
+	is_null: Boolean
+}
+
+scalar Date
+
+input DateComparison {
+	eq: Date
+	ne: Date
+	gt: Date
+	gte: Date
+	lt: Date
+	lte: Date
+	in: [Date!]
+	nin: [Date!]
+	is_null: Boolean
+}
+
+scalar Decimal
+
+input DecimalComparison {
+	eq: Decimal
+	ne: Decimal
+	gt: Decimal
+	gte: Decimal
+	lt: Decimal
+	lte: Decimal
+	in: [Decimal!]
+	nin: [Decimal!]
+	is_null: Boolean
+}
+
+type Departments {
+	id: BigInt!
+	name: String!
+	founded: Date
+	logo: FileValue
+	"""
+	Rows of `employees` whose `department` references this row.
+	"""
+	employees_by_department(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]!
+	"""
+	Aggregates over the rows of `employees` that reference this row — computed by the database as a correlated subquery, not by fetching them.
+	"""
+	employees_by_department_aggregate(where: EmployeesBoolExp): EmployeesAggregate!
+	"""
+	Rows of `employees` whose `managed_department` references this row.
+	"""
+	employees_by_managed_department(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]!
+	"""
+	Aggregates over the rows of `employees` that reference this row — computed by the database as a correlated subquery, not by fetching them.
+	"""
+	employees_by_managed_department_aggregate(where: EmployeesBoolExp): EmployeesAggregate!
+}
+
+type DepartmentsAggregate {
+	count(distinct: DepartmentsSelectColumn): Int!
+	sum: DepartmentsNumericFields!
+	avg: DepartmentsAvgFields!
+	min: DepartmentsComparableFields!
+	max: DepartmentsComparableFields!
+}
+
+type DepartmentsAvgFields {
+	id: Decimal
+}
+
+input DepartmentsBoolExp {
+	_and: [DepartmentsBoolExp!]
+	_or: [DepartmentsBoolExp!]
+	_not: DepartmentsBoolExp
+	id: BigIntComparison
+	name: StringComparison
+	founded: DateComparison
+	logo: StringComparison
+}
+
+type DepartmentsComparableFields {
+	id: BigInt
+	name: String
+	founded: Date
+}
+
+type DepartmentsNumericFields {
+	id: BigInt
+}
+
+input DepartmentsOrderBy {
+	id: OrderDirection
+	name: OrderDirection
+	founded: OrderDirection
+	logo: OrderDirection
+}
+
+enum DepartmentsSelectColumn {
+	id
+	name
+	founded
+	logo
+}
+
+type Employees {
+	id: BigInt!
+	name: String!
+	salary: Decimal
+	hours: Float
+	active: Boolean
+	profile: JSON
+	token: UUID
+	department: Departments
+	managed_department: Departments
+}
+
+type EmployeesAggregate {
+	count(distinct: EmployeesSelectColumn): Int!
+	sum: EmployeesNumericFields!
+	avg: EmployeesAvgFields!
+	min: EmployeesComparableFields!
+	max: EmployeesComparableFields!
+}
+
+type EmployeesAvgFields {
+	id: Decimal
+	salary: Decimal
+	hours: Float
+	department: Decimal
+	managed_department: Decimal
+}
+
+input EmployeesBoolExp {
+	_and: [EmployeesBoolExp!]
+	_or: [EmployeesBoolExp!]
+	_not: EmployeesBoolExp
+	id: BigIntComparison
+	name: StringComparison
+	salary: DecimalComparison
+	hours: FloatComparison
+	active: BooleanComparison
+	profile: JSONComparison
+	token: UUIDComparison
+	department: BigIntComparison
+	managed_department: BigIntComparison
+}
+
+type EmployeesComparableFields {
+	id: BigInt
+	name: String
+	salary: Decimal
+	hours: Float
+	active: Boolean
+	token: UUID
+	department: BigInt
+	managed_department: BigInt
+}
+
+type EmployeesNumericFields {
+	id: BigInt
+	salary: Decimal
+	hours: Float
+	department: BigInt
+	managed_department: BigInt
+}
+
+input EmployeesOrderBy {
+	id: OrderDirection
+	name: OrderDirection
+	salary: OrderDirection
+	hours: OrderDirection
+	active: OrderDirection
+	profile: OrderDirection
+	token: OrderDirection
+	department: OrderDirection
+	managed_department: OrderDirection
+}
+
+enum EmployeesSelectColumn {
+	id
+	name
+	salary
+	hours
+	active
+	profile
+	token
+	department
+	managed_department
+}
+
+"""
+A file reference: its path within its store, and the URL its bytes are served at by this application's REST API.
+"""
+type FileValue {
+	path: String!
+	url: String!
+}
+
+input FloatComparison {
+	eq: Float
+	ne: Float
+	gt: Float
+	gte: Float
+	lt: Float
+	lte: Float
+	in: [Float!]
+	nin: [Float!]
+	is_null: Boolean
+}
+
+scalar JSON
+
+input JSONComparison {
+	eq: JSON
+	ne: JSON
+	in: [JSON!]
+	nin: [JSON!]
+	is_null: Boolean
+}
+
+enum OrderDirection {
+	asc
+	desc
+}
+
+type Query {
+	"""
+	Rows of `departments`.
+	"""
+	departments(where: DepartmentsBoolExp, order_by: [DepartmentsOrderBy!], limit: Int, offset: Int): [Departments!]!
+	"""
+	The row of `departments` with this primary key.
+	"""
+	departments_by_pk(id: BigInt!): Departments
+	"""
+	Aggregates over the rows of `departments`.
+	"""
+	departments_aggregate(where: DepartmentsBoolExp): DepartmentsAggregate!
+	"""
+	Rows of `employees`.
+	"""
+	employees(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]!
+	"""
+	The row of `employees` with this primary key.
+	"""
+	employees_by_pk(id: BigInt!): Employees
+	"""
+	Aggregates over the rows of `employees`.
+	"""
+	employees_aggregate(where: EmployeesBoolExp): EmployeesAggregate!
+}
+
+input StringComparison {
+	eq: String
+	ne: String
+	gt: String
+	gte: String
+	lt: String
+	lte: String
+	in: [String!]
+	nin: [String!]
+	is_null: Boolean
+	like: String
+	ilike: String
+}
+
+scalar Time
+
+input TimeComparison {
+	eq: Time
+	ne: Time
+	gt: Time
+	gte: Time
+	lt: Time
+	lte: Time
+	in: [Time!]
+	nin: [Time!]
+	is_null: Boolean
+}
+
+scalar Timestamp
+
+input TimestampComparison {
+	eq: Timestamp
+	ne: Timestamp
+	gt: Timestamp
+	gte: Timestamp
+	lt: Timestamp
+	lte: Timestamp
+	in: [Timestamp!]
+	nin: [Timestamp!]
+	is_null: Boolean
+}
+
+scalar UUID
+
+input UUIDComparison {
+	eq: UUID
+	ne: UUID
+	gt: UUID
+	gte: UUID
+	lt: UUID
+	lte: UUID
+	in: [UUID!]
+	nin: [UUID!]
+	is_null: Boolean
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: Query
+}

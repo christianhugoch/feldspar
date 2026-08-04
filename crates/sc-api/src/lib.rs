@@ -30,6 +30,7 @@ pub mod schema_edit;
 
 mod admin;
 mod endpoint;
+mod graphql;
 mod ownership;
 mod provider;
 mod rest;
@@ -39,6 +40,9 @@ mod typescript;
 pub use admin::{ADMIN_API_PREFIX, admin_endpoints};
 pub use endpoint::{
     AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec,
+};
+pub use graphql::{
+    DEFAULT_MOUNT as GRAPHQL_DEFAULT_MOUNT, GRAPHQL_PROVIDER, GraphqlProvider, SchemaNames,
 };
 pub use ownership::{
     caller_context, caller_context_at, delete_row_as, insert_row_as, read_rows_as, update_row_as,

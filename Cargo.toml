@@ -178,6 +178,34 @@ matchit = "0.8"
 # already builds, so this adds no new code to the tree.
 tokio-tungstenite = "0.29"
 
+# --- GraphQL -----------------------------------------------------------------
+#
+# GraphQL library decision (TODO "GraphQL API" decision 1): **async-graphql**
+# with the `dynamic-schema` feature. Our schema is *data* — an admin or an agent
+# creates a table at runtime and the API must have it at the next mount — which
+# rules out every macro-driven library (`juniper`) outright, since a
+# compile-time schema means generating Rust and restarting the server.
+# `async_graphql::dynamic` builds a schema from runtime values and brings
+# parsing, validation, variable coercion, introspection, `sdl()`, error
+# formatting and the depth/complexity limits with it; `apollo-compiler`, the
+# runner-up, parses and validates but does not execute, and would have us write
+# variable coercion and the error format for no capability we lack. The full
+# survey is §1 of docs/GRAPHQL_API.md.
+#
+# **The stable 7.2 line, not the 8.0 release candidates.** 8.0 is at `-rc` and
+# an API surface this central is not somewhere to track a release candidate.
+#
+# `default-features = false` drops the web-framework integrations, the
+# playground HTML and the tracing/opentelemetry extensions: this crate is
+# transport-agnostic (`ApiRequest`/`ApiResponse`, never axum types), the
+# explorer is an admin screen rather than a CDN-loaded GraphiQL, and the
+# application CSP is `default-src 'self'`. `dataloader` is the batching the
+# level-batched executor keys child lists through (decision 3).
+async-graphql = { version = "7.2", default-features = false, features = [
+    "dynamic-schema",
+    "dataloader",
+] }
+
 # --- HTTP client -------------------------------------------------------------
 #
 # Client decision (TODO Phase 3, the `fetch` action): **reqwest**, with

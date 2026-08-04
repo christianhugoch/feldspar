@@ -2,6 +2,53 @@
 
 Changes in reverse chronological order.
 
+## The GraphQL schema, before anything answers it
+
+`sc-api` gains a **GraphQL provider** beside the REST one — `POST /graphql` and
+`GET /graphql/schema.graphql`, two endpoints because that is genuinely all a GraphQL API is —
+and every field of it refuses. That is the point of the phase: the deliverable is the
+*contract*, and a resolver that returns a plausible zero is worse than one that says it is not
+implemented, for the same reason decision 5 forbids a quiet zero from an aggregate.
+
+**`async-graphql` 7.2 with `dynamic-schema`**, pinned in the workspace with its reasoning. Our
+schema is data — an admin or an agent creates a table at runtime and the API must have it at
+the next mount — which rules out every macro-driven library, since a compile-time schema means
+generating Rust and restarting the server. `default-features = false` drops the web-framework
+integrations and the CDN playground: this crate speaks `ApiRequest`/`ApiResponse` and never
+axum types, and an application's CSP is `default-src 'self'`.
+
+**Names are derived in one place, and an underivable name is an omission with a diagnostic.**
+GraphQL names are `/[_A-Za-z][_0-9A-Za-z]*/`, which Ⱶ and Ↄ are not, so there is a derivation —
+and the derivation never mangles. Mangling invents collisions: two tables that differ only in
+the characters being stripped become one type, and a schema that quietly answers for the wrong
+table is worse than one that admits it is missing a table. PascalCasing a type name can collide
+too, so that is checked and reported the same way. The inverse-relation rule is the one a caller
+notices: a child is `<child>` when exactly one of its keys points here and `<child>_by_<key>`
+when more than one does or when a column already has the name — the same disambiguation Ↄ
+spells, arrived at from the other direction.
+
+**The type mapping's rule is that a scalar must not lose information silently.** GraphQL's `Int`
+is 32 bits by specification and ours are `bigint`, so an integer column is a `BigInt` scalar,
+not an `Int` that works until the ids get large; a decimal is a string-carried `Decimal`, not
+the `Float` that would round it. That rule then decided something Hasura does differently:
+**`avg` gets its own result type**. Hasura shares one `NumericFields` between `sum` and `avg`,
+but the mean of a `BigInt` column is not a `BigInt`, and a schema that says it is has promised
+to round somebody's number. A `Key` projects as the target table's object type; a `File`
+projects as a path and the URL the *REST* provider already serves the bytes at, because a
+GraphQL field must not become a second file-download path.
+
+Both endpoints are public, and that is the same decision as decision 4 rather than a relaxation:
+the schema describes what the *application* exposes, and the gate is the table's own — its role
+floor and its ownership formula, at resolve time. An endpoint-level gate here would be a second,
+coarser rule that disagreed with the first. Introspection stays on for the same reason it is
+safe: it describes the tables REST already exposes.
+
+The SDL is checked in as a snapshot over a deliberately awkward fixture — a child with two keys
+back to its parent, a `File` field, a column of every scalar family, and a table whose name
+GraphQL cannot spell so that its *absence* is part of the contract too. Every later phase of
+this milestone edits the schema builder; the snapshot is what will say whether anything else
+moved with it.
+
 ## One builder for "an aggregate over a child table"
 
 The GraphQL milestone's first phase, and it is a refactor rather than an invention: the

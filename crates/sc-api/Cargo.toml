@@ -32,6 +32,10 @@ sc-types.workspace = true
 # for: it is the body type the `FileStore` trait itself speaks.
 sc-files.workspace = true
 bytes.workspace = true
+# The GraphQL provider's schema, parser, validator and executor (§13.4). Built
+# through `async_graphql::dynamic`, because an application's schema is its
+# tables and those change at runtime; see the workspace pin for the decision.
+async-graphql.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
