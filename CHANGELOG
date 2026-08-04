@@ -2,6 +2,44 @@
 
 Changes in reverse chronological order.
 
+## A plan for the GraphQL API
+
+The agents milestone is finished and archived to `docs/TODO-post-mvp-6.md`; `TODO.md` is now the
+seventh: a **GraphQL provider** beside the REST one. The reason it is worth a milestone is not
+protocol coverage — it is that REST cannot express a *shape* a caller chooses, and in particular
+cannot answer "for each department, the number of employees earning below 50 000" without a route
+invented per question.
+
+`docs/GRAPHQL_API.md` records the survey behind it. On the Rust side the choice is
+**`async-graphql` 7.2 with the `dynamic-schema` feature**: our schema is data — an admin or an
+agent creates a table at runtime and the API must have it at the next mount — which rules out
+every macro-driven library, `juniper` included, since a compile-time schema means generating Rust
+and restarting the server. `apollo-compiler` parses and validates but does not execute, and would
+have us write variable coercion, introspection and the error format for no capability we lack; it
+stays as the fallback if we ever own execution. Seaography 2.0 builds the same thing over SeaORM
+and is the prior art that the dynamic API carries a real schema. On the browser side, an
+application's `default-src 'self'` decides more than taste: the generated client is a
+dependency-free `fetch` wrapper emitted beside the typed REST client, the build writes
+`schema.graphql` from `Schema::sdl()` so `gql.tada` types queries with no codegen step, and the
+explorer is an **admin screen** rather than the CDN-loaded GraphiQL every server ships.
+
+**The aggregations already exist.** `sc-expr`'s Ↄ inverse-relation chains (docs/AGG_EXPRS.md)
+translate exactly the motivating question into one correlated subquery, so the provider lowers a
+GraphQL aggregate selection into the same builder and projects it as another column of the parent
+`SELECT` — the constrained child count is computed by the database, in the query that fetched the
+parents. That makes the plan's first phase a refactor rather than an invention: expose the
+subquery builder structurally, and make the translator call it too, so the formula path and the
+wire path cannot drift. Reads stay on `ownership::read_rows_as` and writes on the row layer's own
+entry points, so §7.3 applies because it is the same code.
+
+Two rules the plan will not compromise on, both of them about aggregates being a new way to
+observe rows: an aggregate must never count a row the caller may not read (under RLS the
+correlated subquery is subject to the child's policies — a property to test, not assume; without
+RLS the child's ownership predicate is ANDed into the subquery), and a child ownership formula
+that cannot be translated **refuses** the aggregate rather than returning a number computed over
+rows the caller cannot see. Depth and complexity limits are mandatory rather than advisable: an
+arbitrary query language is an arbitrary cost, which REST's fixed routes never were.
+
 ## An application is created with the agent that builds it
 
 Creating an application now creates an agent for building it, and **which agent that is belongs to

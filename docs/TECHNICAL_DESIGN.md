@@ -2465,6 +2465,19 @@ All API access flows through the same authorization layer (§7), so an API calle
 the rows a user of that role/ownership would, and every provider participates in the shared
 TypeScript consumer generation (§13.1).
 
+**The GraphQL provider** is the second one, and it exists for what REST cannot express: a shape
+the *caller* chooses — rows, values reached through outgoing keys, and aggregations over child
+tables qualified by a predicate on the child ("for each department, the employees earning below
+50 000"). It is built on `async-graphql`'s **dynamic** schema, because an application's schema is
+runtime data rather than Rust types, and it aggregates by lowering a selection into the *same*
+correlated subquery `sc-expr`'s Ↄ chains translate to (§6.2, §7.3), projected as another column
+of the parent `SELECT`. Reads go through `sc-api`'s ownership entry points and writes through its
+row layer, so an aggregate is subject to the child table's own access rules — an untranslatable
+child ownership formula refuses the aggregate rather than counting rows the caller may not read —
+and depth/complexity limits are configured rather than optional. The library survey, the schema
+shape, the authorization rules and the rejected alternatives are recorded in
+[GRAPHQL_API.md](./GRAPHQL_API.md).
+
 ### 13.5 Serving: TLS certificates and readiness notification
 
 The HTTP server (`sc-server`) terminates TLS in-process so a deployment needs no external
