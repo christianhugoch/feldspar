@@ -964,7 +964,7 @@ impl ApiProvider for RestProvider {
     async fn handle(
         &self,
         req: ApiRequest,
-        cat: &Catalog,
+        cat: &Arc<Catalog>,
         user: Option<&User>,
     ) -> Result<ApiResponse> {
         let (endpoint, params) = match self.resolve(&req) {

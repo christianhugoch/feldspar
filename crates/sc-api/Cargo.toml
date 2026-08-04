@@ -36,6 +36,10 @@ bytes.workspace = true
 # through `async_graphql::dynamic`, because an application's schema is its
 # tables and those change at runtime; see the workspace pin for the decision.
 async-graphql.workspace = true
+# A `bytea` column crosses the GraphQL wire as the `Bytes` scalar, which its own
+# description defines as base64 text — a JSON array of byte numbers would be
+# neither that nor usable by a client.
+base64.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

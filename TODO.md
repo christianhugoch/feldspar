@@ -145,21 +145,25 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
       to it, a File field, a table with a non-GraphQL name) — the one test that will catch every
       accidental change to the wire contract in the phases that follow.
 
-## Phase 3 — Reading rows: filters, ordering, paging, joinfields
+## Phase 3 — Reading rows: filters, ordering, paging, joinfields ✅
 
-- [ ] **`BoolExp` → `sc_query::Expr`.** Per-type comparison inputs (`eq`/`ne`/`gt`/`gte`/`lt`/
+- [x] **`BoolExp` → `sc_query::Expr`.** Per-type comparison inputs (`eq`/`ne`/`gt`/`gte`/`lt`/
       `lte`/`in`/`nin`/`is_null`, plus `like`/`ilike` for text), `_and`/`_or`/`_not`, and every
       literal coerced against the field's declared type through the row layer's own
-      `rows::column_value`, so a Date filter binds a date and not a string.
-- [ ] **`order_by`, `limit`, `offset`** onto `rows::RowQuery`, with `limit` clamped to the
+      `rows::column_value`, so a Date filter binds a date and not a string. (A `like`/`ilike`
+      pattern is bound as text instead: it is a pattern, not a value of the column, and holding
+      it to the column's attribute rules would refuse well-formed queries.)
+- [x] **`order_by`, `limit`, `offset`** onto `rows::RowQuery`, with `limit` clamped to the
       application's configured cap rather than trusted.
-- [ ] Root fields resolve through **`ownership::read_rows_as`** — the same entry point the
+- [x] Root fields resolve through **`ownership::read_rows_as`** — the same entry point the
       agent's `query_table` uses — so role floors, ownership formulae and RLS routing are not
-      re-decided here. `_by_pk` is that query with a primary-key equality.
-- [ ] **Outgoing keys are Ⱶ-joins, projected not fetched**: a requested `manager { email }`
+      re-decided here. `_by_pk` is that query with a primary-key equality. (`read_rows_as`
+      became a rendering of a new `read_row_values_as`: the GraphQL read needs the values typed
+      and needs the extra projections it asked for, which the JSON shape drops.)
+- [x] **Outgoing keys are Ⱶ-joins, projected not fetched**: a requested `manager { email }`
       adds `join_path_expr`'s correlated subquery to the same `SELECT`, one column per
       requested leaf. Only the requested leaves — the resolver reads the selection set.
-- [ ] Tests (real Postgres): filters, ordering and paging return what the equivalent REST call
+- [x] Tests (real Postgres): filters, ordering and paging return what the equivalent REST call
       plus a hand-written `WHERE` would; a joinfield selection issues **one** query (asserted by
       counting statements, not by timing); a null key yields `null` rather than an error.
 

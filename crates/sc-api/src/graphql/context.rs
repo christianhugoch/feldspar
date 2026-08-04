@@ -1,0 +1,88 @@
+//! What a GraphQL resolver knows that the schema does not.
+//!
+//! The schema is built once, at mount, from the application's tables. Everything
+//! else a resolver needs — the catalog to ask, who is asking, the evaluator an
+//! untranslatable ownership formula runs on, the cap a list is bounded by —
+//! arrives with the *request*, and `async-graphql`'s resolvers are `'static`
+//! closures, so it arrives as request [`Data`](async_graphql::Data) rather than
+//! as a captured reference.
+//!
+//! That is the whole reason [`ApiProvider::handle`](crate::ApiProvider::handle)
+//! takes the catalog as the `Arc` the server already holds: a provider that only
+//! reads it borrows and pays nothing, and this one clones it into one
+//! [`RequestContext`] per request.
+//!
+//! Nothing here decides access. The context carries the caller; the *rule* is
+//! [`ownership`](crate::ownership)'s, and this provider reaches it through the
+//! same entry points every other reader does.
+
+use std::sync::Arc;
+
+use async_graphql::dynamic::ResolverContext;
+use sc_auth::User;
+use sc_catalog::{Catalog, Table};
+use sc_error::Result;
+use sc_expr::JsEvaluator;
+
+use crate::ownership;
+
+/// The most rows a list field yields when the caller names no `limit`, and the
+/// ceiling a `limit` they *do* name is clamped to.
+///
+/// A GraphQL list field with no bound is a request to stream a table into a
+/// response; a default that is set is what keeps that from being an accident.
+/// Phase 7 makes it per-application configuration — this is the default it will
+/// have.
+pub const DEFAULT_ROW_CAP: u64 = 500;
+
+/// The mount an application's `File` bytes are served from when nobody says
+/// otherwise — the REST provider's own default. A GraphQL `File` field is a path
+/// and *that* URL; it never becomes a second download path.
+pub const DEFAULT_FILE_MOUNT: &str = "/api";
+
+/// Everything one GraphQL request resolves against.
+pub struct RequestContext {
+    /// The catalog every read goes through.
+    pub catalog: Arc<Catalog>,
+    /// The authenticated caller, or `None` for an anonymous one.
+    pub user: Option<User>,
+    /// The engine an untranslatable ownership formula needs (§7.3). Absent is
+    /// not "allow": the read fails closed with a configuration error.
+    pub evaluator: Option<Arc<dyn JsEvaluator>>,
+    /// The list-field row cap for this application.
+    pub row_cap: u64,
+    /// The REST mount a `File` field's URL is built against.
+    pub file_mount: String,
+}
+
+impl RequestContext {
+    /// The caller's role — theirs, or public when nobody is logged in.
+    pub fn role(&self) -> u8 {
+        ownership::caller_role(self.user.as_ref())
+    }
+
+    /// The caller as the ownership layer wants them.
+    pub fn user(&self) -> Option<&User> {
+        self.user.as_ref()
+    }
+
+    /// The evaluator seam, as the ownership layer wants it.
+    pub fn evaluator(&self) -> Option<&Arc<dyn JsEvaluator>> {
+        self.evaluator.as_ref()
+    }
+
+    /// One of the application's tables, resolved against the **live** catalog.
+    ///
+    /// Resolved per request rather than captured at mount, because the catalog
+    /// is what a schema edit changes: a column added this morning is in the row
+    /// the resolver reads, without the schema having to be rebuilt for it.
+    pub fn table(&self, name: &str) -> Result<Table> {
+        self.catalog.require(name)
+    }
+}
+
+/// The request context, or the GraphQL error saying the provider was executed
+/// without one — a wiring mistake, not a caller's.
+pub fn request_context<'a>(ctx: &ResolverContext<'a>) -> async_graphql::Result<&'a RequestContext> {
+    ctx.data::<RequestContext>()
+}

@@ -19,7 +19,7 @@ use serde_json::{Value as Json, json};
 use uuid::Uuid;
 
 /// A catalog over a per-test database holding one `posts` table.
-async fn catalog_with_posts(db: &TestDb) -> Result<Catalog> {
+async fn catalog_with_posts(db: &TestDb) -> Result<Arc<Catalog>> {
     db.client()
         .await?
         .batch_execute(
@@ -32,7 +32,9 @@ async fn catalog_with_posts(db: &TestDb) -> Result<Catalog> {
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
 
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
-    Catalog::init(driver as Arc<dyn DatabaseDriver>).await
+    Ok(Arc::new(
+        Catalog::init(driver as Arc<dyn DatabaseDriver>).await?,
+    ))
 }
 
 /// A provider over the app's declared table subset — `posts` only.

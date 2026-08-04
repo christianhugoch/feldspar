@@ -5,9 +5,16 @@
 //! schema-building code can be asked about — no catalog, no database, no
 //! overlay — so a test reads as the schema it is about.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use sc_catalog::{
-    AccessRules, DataField, DataFieldKind, DbId, FieldId, FileStoreId, Table, TableId, TableSource,
+    AccessRules, Catalog, DataField, DataFieldKind, DbId, FieldId, FileStoreId, Table, TableId,
+    TableSource,
 };
+use sc_db::{DatabaseDriver, DbCapabilities, PhysicalTable, RowStream, SchemaChange, Transaction};
+use sc_error::{Error, Result};
+use sc_query::{SqlDialect, Statement};
 use sc_types::{Attrs, BasicType, TypeRef};
 
 /// A table with `fields`, whose primary key is `id` when it has such a column.
@@ -61,6 +68,64 @@ pub fn key_field(name: &str, target_table: &str, target_field: &str) -> DataFiel
         summary_field: None,
     };
     field
+}
+
+/// A catalog over a database with no tables in it.
+///
+/// The routing, the SDL and the document's own validation are decided before a
+/// single row is read, and this is what lets those be tested here rather than
+/// only against Postgres. A resolver that *does* reach for a table finds it
+/// missing and says so — which is itself worth asserting: it proves the read
+/// goes to the live catalog rather than to something captured at mount.
+pub async fn empty_catalog() -> Arc<Catalog> {
+    Arc::new(
+        Catalog::init(Arc::new(EmptyDriver) as Arc<dyn DatabaseDriver>)
+            .await
+            .expect("an empty catalog"),
+    )
+}
+
+/// A driver over nothing: it introspects to no tables and refuses to run
+/// anything, so a test that accidentally depended on a query fails loudly.
+struct EmptyDriver;
+
+/// The dialect the empty driver reports; no statement ever reaches it.
+struct EmptyDialect;
+
+impl SqlDialect for EmptyDialect {
+    fn quote_ident(&self, ident: &str) -> String {
+        format!("\"{}\"", ident.replace('"', "\"\""))
+    }
+    fn placeholder(&self, position: usize) -> String {
+        format!("${position}")
+    }
+}
+
+#[async_trait]
+impl DatabaseDriver for EmptyDriver {
+    async fn introspect(&self) -> Result<Vec<PhysicalTable>> {
+        Ok(Vec::new())
+    }
+
+    async fn query(&self, _stmt: &Statement) -> Result<RowStream> {
+        Err(Error::msg("this test's catalog has no database behind it"))
+    }
+
+    async fn apply_schema(&self, _change: &SchemaChange) -> Result<()> {
+        Err(Error::msg("this test's catalog has no database behind it"))
+    }
+
+    async fn begin(&self) -> Result<Box<dyn Transaction>> {
+        Err(Error::msg("this test's catalog has no database behind it"))
+    }
+
+    fn capabilities(&self) -> DbCapabilities {
+        DbCapabilities::none()
+    }
+
+    fn dialect(&self) -> &dyn SqlDialect {
+        &EmptyDialect
+    }
 }
 
 /// A `File` column in the named store.

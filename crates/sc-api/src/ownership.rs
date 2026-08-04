@@ -116,15 +116,43 @@ pub async fn read_rows_as(
     user: Option<&User>,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
 ) -> Result<Json> {
+    let granted = read_row_values_as(cat, table, query, role, user, evaluator).await?;
+    Ok(Json::Array(
+        granted
+            .iter()
+            .map(|values| table_row_json(table, values))
+            .collect(),
+    ))
+}
+
+/// [`read_rows_as`] as **query values** rather than as the JSON wire shape —
+/// the same rule, the same statements, read by a caller that needs the values
+/// typed and needs the [`RowQuery::extra`](rows::RowQuery::extra) projections
+/// it asked for.
+///
+/// The GraphQL provider is that caller (§13.4): a `Decimal` must reach the wire
+/// exact rather than through a JSON number, and a requested `manager { email }`
+/// rides back as an aliased extra column that the row's JSON rendering would
+/// drop. Sharing the *function* rather than the rule is the whole point — this
+/// is where "meets the floor OR the formula grants it" lives, and
+/// [`read_rows_as`] is now a rendering of it.
+pub async fn read_row_values_as(
+    cat: &Catalog,
+    table: &Table,
+    query: &rows::RowQuery,
+    role: u8,
+    user: Option<&User>,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<Vec<BTreeMap<String, Value>>> {
     // The database enforces this table's ownership: run the read in a
     // caller-context transaction and let the policies decide, exactly as the
     // REST provider's RLS path does.
     if table.rls_enabled {
         let ctx = caller_context_at(role, user);
-        return rows::list_rows_query(cat, table, query, Some(&ctx)).await;
+        return rows::list_row_values(cat, table, query, Some(&ctx)).await;
     }
     if role <= table.access.min_role_read {
-        return rows::list_rows_query(cat, table, query, None).await;
+        return rows::list_row_values(cat, table, query, None).await;
     }
     let Some(formula) = &table.ownership else {
         return Err(Error::auth(format!("you may not read `{}`", table.name)));
@@ -142,12 +170,13 @@ pub async fn read_rows_as(
     ) {
         // The database filters, and the caller's own filter, ordering and bound
         // ride along in the same statement.
-        Ok(pred) => rows::list_rows_query(cat, table, &query.clone().and_filter(pred), None).await,
+        Ok(pred) => rows::list_row_values(cat, table, &query.clone().and_filter(pred), None).await,
         // The formula needs JavaScript. The filter and the ordering still go to
         // the database — the ordering survives because filtering preserves it —
-        // but the **bound does not**: a `LIMIT` applied before the evaluator has
-        // spoken would count rows the caller may not see, and answer "10 rows"
-        // with three. So it is applied here, after.
+        // but the **bound does not**: a `LIMIT`/`OFFSET` applied before the
+        // evaluator has spoken would count rows the caller may not see, and
+        // answer "10 rows" with three (or page past rows that were never
+        // theirs). So both are applied here, after.
         Err(TranslateError::Untranslatable(_)) => {
             let evaluator = require_evaluator(evaluator)?;
             let fetched = fetch_rows_with_joins(
@@ -157,19 +186,25 @@ pub async fn read_rows_as(
                 &shape,
                 query.filter.clone(),
                 &query.order,
+                &query.extra,
             )
             .await?;
             let limit = query.limit.unwrap_or(u64::MAX);
+            let offset = query.offset.unwrap_or(0);
+            let mut passed = 0_u64;
             let mut granted = Vec::new();
             for values in fetched {
                 if granted.len() as u64 >= limit {
                     break;
                 }
                 if allowed(evaluator, formula, Operation::Read, user, &values).await {
-                    granted.push(table_row_json(table, &values));
+                    passed += 1;
+                    if passed > offset {
+                        granted.push(values);
+                    }
                 }
             }
-            Ok(Json::Array(granted))
+            Ok(granted)
         }
         Err(e) => Err(e.into()),
     }
@@ -361,7 +396,8 @@ pub(crate) async fn list_owned_rows(
         // values projected alongside and let the evaluator decide per row.
         Err(TranslateError::Untranslatable(_)) => {
             let evaluator = require_evaluator(evaluator)?;
-            let fetched = fetch_rows_with_joins(cat, table, formula, &shape, None, &[]).await?;
+            let fetched =
+                fetch_rows_with_joins(cat, table, formula, &shape, None, &[], &[]).await?;
             let mut granted = Vec::with_capacity(fetched.len());
             for values in fetched {
                 if allowed(evaluator, formula, Operation::Read, user, &values).await {
@@ -437,7 +473,8 @@ pub(crate) async fn fetch_row_values(
     let shape = cat.schema_shape()?;
     let pk = rows::single_pk(table)?;
     let filter = rows::pk_filter(table, &pk, id)?;
-    let mut fetched = fetch_rows_with_joins(cat, table, formula, &shape, Some(filter), &[]).await?;
+    let mut fetched =
+        fetch_rows_with_joins(cat, table, formula, &shape, Some(filter), &[], &[]).await?;
     Ok(fetched.drain(..).next())
 }
 
@@ -510,6 +547,7 @@ async fn fetch_rows_with_joins(
     shape: &sc_expr::SchemaShape,
     filter: Option<Expr>,
     order: &[OrderBy],
+    extra: &[Projection],
 ) -> Result<Vec<BTreeMap<String, Value>>> {
     let analysis = formula.validate(shape, &table.name)?;
     let mut columns = vec![Projection::all()];
@@ -517,6 +555,10 @@ async fn fetch_rows_with_joins(
         let expr = join_path_expr(shape, &table.name, &path.ident).map_err(Error::from)?;
         columns.push(Projection::expr_as(expr, path.ident.clone()));
     }
+    // The caller's own extra projections ride in the same statement as the
+    // formula's; a GraphQL Ⱶ-join and an ownership Ⱶ-join are the same kind of
+    // column and there is no reason for the reified path to cost two queries.
+    columns.extend(extra.iter().cloned());
     let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
     if let Some(filter) = filter {
         select = select.filter(filter);
@@ -528,16 +570,7 @@ async fn fetch_rows_with_joins(
         .await?
         .try_collect()
         .await?;
-    Ok(fetched
-        .iter()
-        .map(|row| {
-            row.columns()
-                .iter()
-                .cloned()
-                .zip(row.values().iter().cloned())
-                .collect()
-        })
-        .collect())
+    Ok(fetched.iter().map(crate::rows::row_values).collect())
 }
 
 /// The evaluator, or the loud configuration error. Fail closed: a deployment

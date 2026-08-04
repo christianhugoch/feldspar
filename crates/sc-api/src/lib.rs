@@ -42,10 +42,12 @@ pub use endpoint::{
     AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec,
 };
 pub use graphql::{
-    DEFAULT_MOUNT as GRAPHQL_DEFAULT_MOUNT, GRAPHQL_PROVIDER, GraphqlProvider, SchemaNames,
+    DEFAULT_FILE_MOUNT as GRAPHQL_DEFAULT_FILE_MOUNT, DEFAULT_MOUNT as GRAPHQL_DEFAULT_MOUNT,
+    DEFAULT_ROW_CAP as GRAPHQL_DEFAULT_ROW_CAP, GRAPHQL_PROVIDER, GraphqlProvider, SchemaNames,
 };
 pub use ownership::{
-    caller_context, caller_context_at, delete_row_as, insert_row_as, read_rows_as, update_row_as,
+    caller_context, caller_context_at, delete_row_as, insert_row_as, read_row_values_as,
+    read_rows_as, update_row_as,
 };
 pub use provider::{ApiProvider, ApiRequest, ApiResponse, RawBody, SessionAction};
 pub use rest::{REST_PROVIDER, RestProvider, op_name};

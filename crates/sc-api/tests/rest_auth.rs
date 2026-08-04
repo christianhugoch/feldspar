@@ -18,7 +18,7 @@ use sc_test_harness::TestDb;
 use serde_json::json;
 
 /// A catalog with a bootstrapped `users` table and one `posts` table.
-async fn catalog(db: &TestDb) -> Result<Catalog> {
+async fn catalog(db: &TestDb) -> Result<Arc<Catalog>> {
     // The local test template may carry `users` tables from a v1 database; the
     // catalog keys tables by name alone, so clear them to reach the clean state
     // the MVP assumes. A no-op against CI's empty template.
@@ -40,7 +40,7 @@ async fn catalog(db: &TestDb) -> Result<Catalog> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let cat = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;
     bootstrap(&cat).await?;
-    Ok(cat)
+    Ok(Arc::new(cat))
 }
 
 fn provider(cat: &Catalog) -> Result<RestProvider> {

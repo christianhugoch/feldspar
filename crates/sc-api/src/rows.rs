@@ -97,6 +97,17 @@ pub struct RowQuery {
     pub order: Vec<OrderBy>,
     /// The most rows to return.
     pub limit: Option<u64>,
+    /// How many rows to skip first.
+    pub offset: Option<u64>,
+    /// Extra projections computed in the **same** `SELECT` as the row, each
+    /// aliased to the name the caller will read the value back by.
+    ///
+    /// What a GraphQL `manager { email }` lowers to (§13.4): the Ⱶ-join's
+    /// correlated subquery, projected as another column of this query rather
+    /// than fetched in a second one. It is the same trick ownership's reified
+    /// path already uses for the join values a formula reads — one query serves
+    /// the row and everything derived from it.
+    pub extra: Vec<Projection>,
 }
 
 impl RowQuery {
@@ -120,6 +131,18 @@ impl RowQuery {
     /// Return at most `n` rows.
     pub fn limit(mut self, n: u64) -> RowQuery {
         self.limit = Some(n);
+        self
+    }
+
+    /// Skip the first `n` rows.
+    pub fn offset(mut self, n: u64) -> RowQuery {
+        self.offset = Some(n);
+        self
+    }
+
+    /// Project `extra` alongside the row's own columns.
+    pub fn projecting(mut self, extra: Vec<Projection>) -> RowQuery {
+        self.extra = extra;
         self
     }
 
@@ -152,18 +175,52 @@ pub async fn list_rows_query(
     Ok(Json::Array(rows.iter().map(row_to_json).collect()))
 }
 
+/// [`list_rows_query`] as **query values** keyed by column rather than as the
+/// JSON wire shape — the same statement, the same RLS routing, read by a caller
+/// that needs the values typed.
+///
+/// A GraphQL read is that caller: `Decimal` must reach the wire exact rather
+/// than through a JSON number, and the [`RowQuery::extra`] projections it adds
+/// are not columns of the table, so the JSON renderer would drop them.
+pub async fn list_row_values(
+    catalog: &Catalog,
+    table: &Table,
+    query: &RowQuery,
+    context: Option<&CallerContext>,
+) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
+    let rows = run_read(
+        catalog,
+        table,
+        &read_select(catalog, table, query)?,
+        context,
+    )
+    .await?;
+    Ok(rows.iter().map(row_values).collect())
+}
+
 /// The `SELECT` one [`RowQuery`] renders to: every column plus the calculated
-/// fields, filtered, ordered and bounded.
+/// fields and the query's own extra projections, filtered, ordered and bounded.
 fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Select> {
     let mut columns = vec![Projection::all()];
     columns.extend(calc_projections(catalog, table)?);
+    columns.extend(query.extra.iter().cloned());
     let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
     if let Some(filter) = query.filter.clone() {
         select = select.filter(filter);
     }
     select.order = query.order.clone();
     select.limit = query.limit;
+    select.offset = query.offset;
     Ok(select)
+}
+
+/// One fetched row as a map from column name to its value.
+pub(crate) fn row_values(row: &Row) -> std::collections::BTreeMap<String, Value> {
+    row.columns()
+        .iter()
+        .cloned()
+        .zip(row.values().iter().cloned())
+        .collect()
 }
 
 /// The rows of `table` matching `filter` as **query values** keyed by column,
@@ -187,16 +244,7 @@ pub async fn select_values(
         select = select.filter(filter);
     }
     let fetched = run_read(catalog, table, &select, context).await?;
-    Ok(fetched
-        .iter()
-        .map(|row| {
-            row.columns()
-                .iter()
-                .cloned()
-                .zip(row.values().iter().cloned())
-                .collect()
-        })
-        .collect())
+    Ok(fetched.iter().map(row_values).collect())
 }
 
 /// Insert a row from a JSON object, returning the inserted row (with any

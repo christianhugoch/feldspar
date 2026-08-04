@@ -18,8 +18,7 @@
 //! through `sc-api`'s row and ownership entry points and writes through the row
 //! layer's own, so coercion, rich-type validation, `File`-field checks, table
 //! events and §7.3 apply *because they are the same code* — not because this
-//! provider remembered to do them. (Phases 3 onward; this phase serves the
-//! contract and refuses every field honestly.)
+//! provider remembered to do them.
 //!
 //! **One schema per application, not per role** (decision 4). Hasura compiles a
 //! schema per role; we authorize at resolve time and refuse with a GraphQL error
@@ -28,27 +27,36 @@
 //! both endpoints are [`Public`](crate::AuthRequirement::Public): the gate is
 //! the table's, at resolve time, not the endpoint's.
 //!
-//! The three pieces: [`names`] derives every GraphQL name (and reports what it
-//! could not name), [`types`] maps a column onto the wire, and [`build`] folds
-//! the tables into an `async_graphql::dynamic::Schema`.
+//! The pieces: [`names`] derives every GraphQL name (and reports what it could
+//! not name), [`types`] maps a column onto the wire, [`build`] folds the tables
+//! into an `async_graphql::dynamic::Schema`, [`args`] lowers a field's
+//! `where`/`order_by`/`limit`/`offset` onto the row layer's own `RowQuery`, and
+//! [`resolve`] is what the fields do.
 
+mod args;
 mod build;
+mod context;
 pub mod names;
+mod resolve;
 #[cfg(test)]
 mod testing;
 mod types;
+
+use std::sync::Arc;
 
 use async_graphql::dynamic::Schema;
 use async_trait::async_trait;
 use sc_auth::User;
 use sc_catalog::{Catalog, Table};
 use sc_error::Result;
+use sc_expr::JsEvaluator;
 use serde_json::{Value as Json, json};
 
 use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSpec};
 use crate::provider::{ApiProvider, ApiRequest, ApiResponse};
 use crate::schema::{StructField, TypeSchema};
 
+pub use context::{DEFAULT_FILE_MOUNT, DEFAULT_ROW_CAP};
 pub use names::SchemaNames;
 
 /// The provider's registered name.
@@ -72,6 +80,16 @@ pub struct GraphqlProvider {
     endpoints: EndpointSet,
     schema: Schema,
     diagnostics: Vec<String>,
+    /// The engine an untranslatable ownership formula's reified path runs on
+    /// (§7.3), injected by the server exactly as it is into the REST provider.
+    /// Absent is not "allow": such a read fails closed.
+    evaluator: Option<Arc<dyn JsEvaluator>>,
+    /// The ceiling a list field's `limit` is clamped to, and the bound an absent
+    /// `limit` takes.
+    row_cap: u64,
+    /// The REST mount a `File` field's `url` is built against — the bytes are
+    /// served there, and a GraphQL field does not become a second way to them.
+    file_mount: String,
 }
 
 impl GraphqlProvider {
@@ -128,7 +146,32 @@ impl GraphqlProvider {
             endpoints,
             schema,
             diagnostics: names.diagnostics().to_vec(),
+            evaluator: None,
+            row_cap: DEFAULT_ROW_CAP,
+            file_mount: DEFAULT_FILE_MOUNT.to_owned(),
         })
+    }
+
+    /// Inject the JavaScript evaluator an untranslatable ownership formula needs
+    /// (§7.3) — the *same* engine the REST provider is given, so the two
+    /// providers over one application cannot disagree about a row.
+    pub fn with_evaluator(mut self, evaluator: Arc<dyn JsEvaluator>) -> GraphqlProvider {
+        self.evaluator = Some(evaluator);
+        self
+    }
+
+    /// Set the row cap: the bound a list field takes when the caller names no
+    /// `limit`, and the ceiling one they do name is clamped to.
+    pub fn with_row_cap(mut self, cap: u64) -> GraphqlProvider {
+        self.row_cap = cap;
+        self
+    }
+
+    /// Point `File` fields' `url` at the application's REST mount. A GraphQL
+    /// `File` field is a path and *that* URL; it never serves the bytes itself.
+    pub fn with_file_mount(mut self, mount: impl Into<String>) -> GraphqlProvider {
+        self.file_mount = normalize_mount(&mount.into());
+        self
     }
 
     /// The schema's SDL — what `GET {mount}/schema.graphql` serves and what the
@@ -145,8 +188,13 @@ impl GraphqlProvider {
         &self.diagnostics
     }
 
-    /// Execute one GraphQL request body.
-    async fn execute(&self, body: &Json) -> ApiResponse {
+    /// Execute one GraphQL request body on behalf of one caller.
+    ///
+    /// The catalog and the caller travel as request **data** rather than as
+    /// captured state, because the executor's field resolvers are `'static`
+    /// closures: they are built once, at mount, and everything about *this*
+    /// request has to reach them through here.
+    async fn execute(&self, body: &Json, cat: &Arc<Catalog>, user: Option<&User>) -> ApiResponse {
         let Some(query) = body.get("query").and_then(Json::as_str) else {
             // A missing document is not a GraphQL error (there is no document to
             // report it against), so it is an ordinary request error.
@@ -159,7 +207,16 @@ impl GraphqlProvider {
         if let Some(name) = body.get("operationName").and_then(Json::as_str) {
             request = request.operation_name(name);
         }
-        let response = self.schema.execute(request).await;
+        let response = self
+            .schema
+            .execute(request.data(context::RequestContext {
+                catalog: Arc::clone(cat),
+                user: user.cloned(),
+                evaluator: self.evaluator.clone(),
+                row_cap: self.row_cap,
+                file_mount: self.file_mount.clone(),
+            }))
+            .await;
         // The legacy `application/json` rule: 200 with the errors in the body.
         // `application/graphql-response+json` needs content negotiation, and
         // `ApiRequest` carries no headers to negotiate with.
@@ -187,19 +244,21 @@ impl ApiProvider for GraphqlProvider {
     async fn handle(
         &self,
         req: ApiRequest,
-        _cat: &Catalog,
-        _user: Option<&User>,
+        cat: &Arc<Catalog>,
+        user: Option<&User>,
     ) -> Result<ApiResponse> {
-        // The catalog and the caller join this in Phase 3, where there is a row
-        // to read and a rule to enforce; today the two endpoints are the
-        // document and the schema, and neither consults either.
-        Ok(self.route(&req).await)
+        Ok(self.route(&req, cat, user).await)
     }
 }
 
 impl GraphqlProvider {
     /// Route one request to the SDL or to the executor.
-    async fn route(&self, req: &ApiRequest) -> ApiResponse {
+    async fn route(
+        &self,
+        req: &ApiRequest,
+        cat: &Arc<Catalog>,
+        user: Option<&User>,
+    ) -> ApiResponse {
         let schema_path = format!("{}/{SCHEMA_SEGMENT}", self.mount.trim_end_matches('/'));
         if req.method == Method::Get && req.path == schema_path {
             return ApiResponse::file(self.sdl(), "text/plain; charset=utf-8");
@@ -213,7 +272,7 @@ impl GraphqlProvider {
                 json!({ "error": "a GraphQL request is a POST" }),
             );
         }
-        self.execute(&req.body).await
+        self.execute(&req.body, cat, user).await
     }
 }
 
@@ -292,12 +351,17 @@ mod tests {
         assert_eq!(p.mount(), "/graphql");
     }
 
-    /// Run `route` on a request, on a current-thread runtime.
+    /// Run `route` on a request, on a current-thread runtime, as an anonymous
+    /// caller over a catalog with no tables in it.
     fn route(p: &GraphqlProvider, req: ApiRequest) -> ApiResponse {
         tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .expect("runtime")
-            .block_on(p.route(&req))
+            .block_on(async {
+                let cat = crate::graphql::testing::empty_catalog().await;
+                p.route(&req, &cat, None).await
+            })
     }
 
     #[test]
@@ -325,15 +389,32 @@ mod tests {
         let response = route(
             &provider(),
             ApiRequest::new(Method::Post, "/graphql")
+                .body(json!({ "query": "{ departments { nope } }" })),
+        );
+        assert_eq!(response.status, 200);
+        let errors = response.body.get("errors").expect("errors in the body");
+        assert!(format!("{errors}").contains("nope"), "{}", response.body);
+    }
+
+    #[test]
+    fn a_read_resolves_against_the_live_catalog_not_the_mounted_schema() {
+        // The schema is built from the application's declared tables; the *rows*
+        // come from the catalog as it is when the request arrives. Here the
+        // catalog has no `departments`, and the read says so rather than
+        // answering from something captured at mount time.
+        let response = route(
+            &provider(),
+            ApiRequest::new(Method::Post, "/graphql")
                 .body(json!({ "query": "{ departments { id } }" })),
         );
         assert_eq!(response.status, 200);
         let errors = response.body.get("errors").expect("errors in the body");
         assert!(
-            format!("{errors}").contains("not implemented"),
+            format!("{errors}").contains("departments"),
             "{}",
             response.body
         );
+        assert!(response.body["data"].is_null(), "{}", response.body);
     }
 
     #[test]

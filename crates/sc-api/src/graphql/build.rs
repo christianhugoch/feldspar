@@ -12,10 +12,11 @@
 //! `sum` and `avg`; the mean of a `BigInt` column is not a `BigInt`, and a
 //! schema that says it is has promised to round somebody's number.
 //!
-//! Every resolver built here answers "not implemented yet". That is deliberate
-//! and temporary: this phase's deliverable is the *contract* — the SDL — and a
-//! field that returns an honest error is a better placeholder than a field that
-//! returns a plausible zero.
+//! What each field *does* is [`resolve`](super::resolve)'s business; this module
+//! decides only which resolver a field gets. Reads — the root list, `_by_pk`, a
+//! row's columns and its outgoing Ⱶ-joins — are wired to real ones; the child
+//! lists (Phase 4) and the aggregates (Phase 5) still answer "not implemented
+//! yet", which is a better placeholder than a plausible zero.
 
 use async_graphql::dynamic::{
     Enum, Field, FieldFuture, InputObject, InputValue, Object, Scalar, Schema, TypeRef,
@@ -23,22 +24,14 @@ use async_graphql::dynamic::{
 use sc_catalog::{DataField, DataFieldKind, Table};
 use sc_error::{Error, Result};
 
+use super::args::{ARG_DISTINCT, ARG_LIMIT, ARG_OFFSET, ARG_ORDER_BY, ARG_WHERE};
 use super::names::{
     self, FILE_VALUE, ORDER_DIRECTION, QUERY_ROOT, SCALAR_NAMES, SchemaNames, TableNames,
     comparison_type_name,
 };
+use super::resolve;
 use super::types::{CUSTOM_SCALARS, column_scalar, field_type, scalar_name};
 use crate::schema::ValueType;
-
-/// The list-field arguments every collection takes.
-const ARG_WHERE: &str = "where";
-const ARG_ORDER_BY: &str = "order_by";
-const ARG_LIMIT: &str = "limit";
-const ARG_OFFSET: &str = "offset";
-/// `count(distinct: …)` — one column, because `count(DISTINCT a, b)` is not what
-/// `sc_query::Expr::Agg` spells and a single column is what the Ↄ chain's
-/// `.distinct(…)` supports.
-const ARG_DISTINCT: &str = "distinct";
 
 /// Build the application's schema from the tables its names were derived from.
 ///
@@ -145,12 +138,12 @@ fn file_value_object() -> Object {
         .field(Field::new(
             "path",
             TypeRef::named_nn(TypeRef::STRING),
-            not_implemented("FileValue.path"),
+            resolve::file_part("path"),
         ))
         .field(Field::new(
             "url",
             TypeRef::named_nn(TypeRef::STRING),
-            not_implemented("FileValue.url"),
+            resolve::file_part("url"),
         ))
 }
 
@@ -193,7 +186,7 @@ fn row_object(table: &Table, t: &TableNames, names: &SchemaNames) -> Object {
         object = object.field(Field::new(
             name,
             field_type(field, names),
-            not_implemented(&format!("{}.{name}", t.object)),
+            row_field_resolver(field, names),
         ));
     }
     for rel in &t.relations {
@@ -229,6 +222,24 @@ fn row_object(table: &Table, t: &TableNames, names: &SchemaNames) -> Object {
         );
     }
     object
+}
+
+/// Which resolver one row field gets — decided by the same match
+/// [`field_type`] uses, so the type a field promises and the value it produces
+/// cannot disagree.
+fn row_field_resolver(field: &DataField, names: &SchemaNames) -> resolve::Resolver {
+    let name = &field.base.name;
+    match &field.kind {
+        // A key whose target this application exposes resolves *through* the
+        // parent query's projected Ⱶ-join; one whose target it does not carries
+        // the column's own value, exactly as its type says.
+        DataFieldKind::Key { target_table, .. } => match names.get(&target_table.0) {
+            Some(_) => resolve::key_field(name, &target_table.0),
+            None => resolve::column_field(name),
+        },
+        DataFieldKind::File { .. } => resolve::file_field(name),
+        DataFieldKind::Plain | DataFieldKind::Calc { .. } => resolve::column_field(name),
+    }
 }
 
 /// `where` / `order_by` / `limit` / `offset` on a collection field.
@@ -415,7 +426,7 @@ fn add_root_fields(query: Object, table: &Table, t: &TableNames) -> Object {
             Field::new(
                 &t.list_field,
                 TypeRef::named_nn_list_nn(&t.object),
-                not_implemented(&t.list_field),
+                resolve::list_field(&t.table),
             ),
             t,
         )
@@ -433,7 +444,7 @@ fn add_root_fields(query: Object, table: &Table, t: &TableNames) -> Object {
             Field::new(
                 &t.by_pk_field,
                 TypeRef::named(&t.object),
-                not_implemented(&t.by_pk_field),
+                resolve::by_pk_field(&t.table, &pk),
             )
             .argument(InputValue::new(&pk, TypeRef::named_nn(scalar)))
             .description(format!("The row of `{}` with this primary key.", t.table)),
@@ -617,16 +628,17 @@ mod tests {
     }
 
     #[test]
-    fn every_resolver_refuses_rather_than_answering_zero() {
-        // The phase's honest placeholder. A field that returned a plausible
-        // number here would be the exact failure decision 5 forbids.
+    fn an_unimplemented_field_refuses_rather_than_answering_zero() {
+        // The honest placeholder the phases that are still to come stand on. A
+        // field that returned a plausible number here would be the exact
+        // failure decision 5 forbids.
         let tables = [table_of("departments", vec![id_field()])];
         let names = SchemaNames::derive(&tables);
         let schema = build_schema(&tables, &names).expect("builds");
         let response = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
-            .block_on(schema.execute("{ departments { id } }"));
+            .block_on(schema.execute("{ departments_aggregate { count } }"));
         assert!(!response.errors.is_empty(), "{response:?}");
         assert!(
             response.errors[0].message.contains("not implemented"),

@@ -21,6 +21,7 @@ use sc_catalog::Catalog;
 use sc_error::Result;
 use serde_json::Value as Json;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::endpoint::{EndpointSet, Method};
 
@@ -216,10 +217,17 @@ pub trait ApiProvider: Send + Sync {
     /// Handle one request. `user` is the authenticated caller, or `None` for an
     /// anonymous one; the provider is responsible for enforcing each endpoint's
     /// auth requirement.
+    ///
+    /// The catalog arrives as the `Arc` the server already holds rather than as
+    /// a bare reference, because a provider may need to *hand it on* to code it
+    /// does not own for the length of the request: the GraphQL executor's field
+    /// resolvers are `'static` closures, so the catalog reaches them as request
+    /// data or not at all. A provider that only reads it borrows through the
+    /// `Arc` and pays nothing.
     async fn handle(
         &self,
         req: ApiRequest,
-        cat: &Catalog,
+        cat: &Arc<Catalog>,
         user: Option<&User>,
     ) -> Result<ApiResponse>;
 }

@@ -2,6 +2,54 @@
 
 Changes in reverse chronological order.
 
+## GraphQL reads rows
+
+The GraphQL provider's root fields now answer. `departments(where: …, order_by: …, limit: …,
+offset: …)`, `departments_by_pk(id: …)`, a row's columns, and — the part that matters —
+its outgoing keys.
+
+**Not a second data path, demonstrated rather than asserted.** A root list is
+`ownership::read_row_values_as`: the same function the agent's `query_table` reads through, the
+same "meets the role floor OR the ownership formula grants this row", the same RLS routing into
+a caller-context transaction. `_by_pk` is that query with a primary-key equality ANDed in.
+`read_rows_as` did not move; it became a *rendering* of the new values-returning entry point,
+because a GraphQL read needs two things the JSON wire shape cannot give it — a `Decimal` that
+stays exact rather than passing through a JSON number, and the extra projected columns a
+joinfield rides back on.
+
+**An outgoing key is projected, not fetched.** A requested `manager { email }` reads the
+selection set, asks `sc-expr` for the Ⱶ-join's correlated subquery, and projects it as another
+column of the *same* `SELECT`, aliased by the join path itself (`managerⱵemail`); the `manager`
+resolver then hands its children that row with the prefix stripped, so a second hop composes by
+doing exactly the same thing again. Only the leaves the caller named are projected. The test
+that this is true counts statements rather than milliseconds — it records the SQL the catalog
+runs, asserts there was one of it, and asserts which columns it asked for. A joinfield that
+quietly became a query per parent would still be fast on four rows.
+
+A null foreign key is `null`, not an error and not an object of nulls: the key column rides back
+with the row and ends the walk before a leaf is looked at. That is the Ⱶ operator's own contract.
+
+**Filter literals are coerced against the column, not against JSON.** `{ due: { lt: "2026-01-01" } }`
+binds a *date*, because the value goes through `rows::column_value` — the same function an
+insert's body goes through — so the comparison the database performs is the one the column's
+type means. The deliberate exception is `like`/`ilike`, whose argument is a pattern rather than
+a value: holding `"%urgent%"` to a `String` field's `options` or `regex` attribute would refuse
+a perfectly well-formed query. Null semantics are SQL's — `eq`/`ne` are `=` and `<>`, and
+`is_null` is how nullness is asked about — because a null-safe `eq` here would make the same
+filter mean different things in a `where` and in an ownership formula.
+
+**A `limit` is a request, not a permission.** An absent one becomes the application's row cap
+and a present one is clamped to it, so a list field with no bound cannot be how a table ends up
+streamed into a response by accident. (Phase 7 makes the cap configuration; this is the default
+it will have.)
+
+One shape change reaches outside this provider: `ApiProvider::handle` now takes the catalog as
+the `Arc` the server already holds. `async-graphql`'s field resolvers are `'static` closures
+built once at mount, so the catalog reaches them as request data or not at all; a provider that
+only reads it borrows through the `Arc` and pays nothing. The resolvers look the table up in the
+live catalog on every request, which is what keeps the schema *data*: a column added this
+morning is in the row the resolver reads.
+
 ## The GraphQL schema, before anything answers it
 
 `sc-api` gains a **GraphQL provider** beside the REST one — `POST /graphql` and
