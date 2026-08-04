@@ -31,6 +31,7 @@ mod formula;
 #[cfg(feature = "eval")]
 mod normalise;
 mod shape;
+mod subquery;
 mod translate;
 
 pub use agg::{AggUse, INVERSE};
@@ -41,7 +42,8 @@ pub use eval::DenoEvaluator;
 pub use eval::{CodeCall, FormulaCall, JsEvaluator, value_from_json, value_to_json};
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
+pub use subquery::{AggFunc, AggregateSpec, correlated_aggregate, correlation};
 pub use translate::{
     AmbientValues, CalcFields, Env, Operation, TranslateError, USER_GUC, UserEnv, join_path_expr,
-    translate, translate_value,
+    join_path_expr_rooted, translate, translate_value,
 };

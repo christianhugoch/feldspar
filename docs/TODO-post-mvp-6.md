@@ -1,15 +1,15 @@
 # Saltcorn v2 — Agents TODO
 
 Ordered, checkable task list for the sixth milestone after the MVP. Earlier lists are archived
-in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
-[docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
-[docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
-rich types and File fields), [docs/TODO-post-mvp-3.md](./docs/TODO-post-mvp-3.md) (ownership
+in [docs/TODO-mvp.md](./TODO-mvp.md) (the MVP),
+[docs/TODO-post-mvp-1.md](./TODO-post-mvp-1.md) (file stores + the React framework),
+[docs/TODO-post-mvp-2.md](./TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
+rich types and File fields), [docs/TODO-post-mvp-3.md](./TODO-post-mvp-3.md) (ownership
 formulae, calculated fields and row-level security),
-[docs/TODO-post-mvp-4.md](./docs/TODO-post-mvp-4.md) (actions and triggers) and
-[docs/TODO-post-mvp-5.md](./docs/TODO-post-mvp-5.md) (the file-store IDE); scope and rationale
-remain in [docs/GOALS.md](./docs/GOALS.md) and
-[docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) (**§11**, rewritten for this milestone).
+[docs/TODO-post-mvp-4.md](./TODO-post-mvp-4.md) (actions and triggers) and
+[docs/TODO-post-mvp-5.md](./TODO-post-mvp-5.md) (the file-store IDE); scope and rationale
+remain in [docs/GOALS.md](./GOALS.md) and
+[docs/TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md) (**§11**, rewritten for this milestone).
 
 **Milestone definition of done:** an admin connects an **LLM provider** (an Anthropic key, or any
 OpenAI-compatible endpoint speaking the Responses API), creates an **agent** — a name, that
@@ -597,9 +597,9 @@ because nothing else knows what building an app of that kind consists of.
   a ChatGPT-like view for end users is §11's other front-end and waits for view patterns.
 - **The durable workflow engine** (§10.3). `_sc_runs` is created in its shape, deliberately, but
   nothing resumes or retries.
-- Everything still listed as out of scope in [docs/TODO-mvp.md](./docs/TODO-mvp.md),
-  [docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md),
-  [docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md),
-  [docs/TODO-post-mvp-3.md](./docs/TODO-post-mvp-3.md),
-  [docs/TODO-post-mvp-4.md](./docs/TODO-post-mvp-4.md) and
-  [docs/TODO-post-mvp-5.md](./docs/TODO-post-mvp-5.md)
+- Everything still listed as out of scope in [docs/TODO-mvp.md](./TODO-mvp.md),
+  [docs/TODO-post-mvp-1.md](./TODO-post-mvp-1.md),
+  [docs/TODO-post-mvp-2.md](./TODO-post-mvp-2.md),
+  [docs/TODO-post-mvp-3.md](./TODO-post-mvp-3.md),
+  [docs/TODO-post-mvp-4.md](./TODO-post-mvp-4.md) and
+  [docs/TODO-post-mvp-5.md](./TODO-post-mvp-5.md)

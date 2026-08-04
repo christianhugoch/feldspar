@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## One builder for "an aggregate over a child table"
+
+The GraphQL milestone's first phase, and it is a refactor rather than an invention: the
+correlated-subquery builder that `employeesↃdepartment.filter(r => r.salary < 50000).length`
+has always lowered to is now a **public function over an explicit spec**, and the formula
+translator calls it too.
+
+The alternative was tempting and wrong. A GraphQL aggregate selection could have been turned
+into JavaScript source — `"employeesↃdepartment.filter(r => r.salary < 50000).length"` — and
+fed to the existing parser; the translator parameterises literals, so there would have been no
+injection. But it would have made correctness depend on JS-escaping user data into a source
+string, to reach a subquery builder that was private only by accident. So `sc-expr` grows
+`correlated_aggregate(AggregateSpec)`: child table, key field, parent (a table name *or* an
+alias, because a GraphQL child aggregate correlates to whatever the parent query called the
+parent), parent field, alias, function, `DISTINCT`, the value expression and an extra predicate
+already qualified with the alias.
+
+What the builder carries is the part that would have drifted. The empty relation's answer is a
+property of the function, not of the caller — `sum` is `0` and `avg`/`min`/`max` are `null`,
+per AGG_EXPRS.md's semantics table — and a second implementation of that table would eventually
+disagree with the first, quietly, in the direction of a number nobody checks. `Translator::
+aggregation` now assembles a spec and asks; the Ↄ path's golden SQL strings and the reified-
+evaluator parity tests are the proof that nothing changed, and a new test asserts the two entry
+points produce the *identical* `Expr` — not merely SQL that matches today. The two paths that
+still build their own subquery (`includes`, which is a membership test, and `maxBy`/`minBy`,
+which picks a row rather than aggregating) correlate through the same `correlation` function.
+
+Two smaller pieces the later phases need. `sc-query` gains `Expr::Window` — `func(args) OVER
+(PARTITION BY … ORDER BY …)`, with the name structural as `Agg::func` is — because `row_number()`
+partitioned by the parent key is the only way to give a *nested child list* a per-parent `limit`
+in one round trip: `Agg` has no `OVER` and there is no `LATERAL`. And `join_path_expr_rooted`
+exposes what the translator has always done internally for an aggregation arrow's
+`r.publisherⱵname`: the same join path correlated from a subquery's **alias** rather than from
+a table's own name, which is exactly what a GraphQL filter over a child table is written
+against.
+
 ## A plan for the GraphQL API
 
 The agents milestone is finished and archived to `docs/TODO-post-mvp-6.md`; `TODO.md` is now the

@@ -93,26 +93,26 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 1 — The shared aggregation builder (`sc-expr`, `sc-query`)
 
-- [ ] **`sc-query`: `row_number() OVER (PARTITION BY … ORDER BY …)`.** `Expr::Agg` has no
+- [x] **`sc-query`: `row_number() OVER (PARTITION BY … ORDER BY …)`.** `Expr::Agg` has no
       `OVER` and there is no `LATERAL`, so a nested child list cannot be given a per-parent
       `limit` in one round trip today. Add the narrowest thing that does: a window form
       carrying partition keys and an order, rendered by the Postgres dialect, with the function
       name structural (chosen by code) exactly as `Agg::func` is. Unit tests for the rendered
       SQL and for serde round-tripping.
-- [ ] **`sc-expr`: expose the correlated-aggregate builder.** A public spec — child table, key
+- [x] **`sc-expr`: expose the correlated-aggregate builder.** A public spec — child table, key
       field, parent field, alias, aggregate function, `DISTINCT`, the value expression and an
       optional extra predicate already qualified with the alias — and one function returning the
       `sc_query::Expr` for it, carrying the coalesce/null semantics of AGG_EXPRS.md's table.
-- [ ] **Refactor the translator onto it.** `Translator::aggregation`'s `scalar_sub`/`bare_agg`
+- [x] **Refactor the translator onto it.** `Translator::aggregation`'s `scalar_sub`/`bare_agg`
       paths call the new function rather than building their own subquery, so the Ↄ path and
       the GraphQL path cannot drift. The existing `sc-expr` aggregation tests are the proof
       that the refactor changed nothing; add one asserting the two entry points produce the
       identical `Expr` for the same aggregate.
-- [ ] **`sc-expr`: a public alias-rooted join-path expression.** `join_path_expr` roots at a
+- [x] **`sc-expr`: a public alias-rooted join-path expression.** `join_path_expr` roots at a
       table; a child predicate on `r.managerⱵname` needs the same expression rooted at the
       subquery's alias (`join_value_rooted`, today private). Expose it, since the GraphQL
       filter over a child table needs exactly it.
-- [ ] Tests: the builder produces the documented SQL for `count`, `count(DISTINCT c)`, `sum`
+- [x] Tests: the builder produces the documented SQL for `count`, `count(DISTINCT c)`, `sum`
       (coalesced to 0), `avg`/`min`/`max` (null on no rows), each with and without an extra
       predicate; and the motivating query — employees per department below a salary — renders
       one correlated `count(*)` with the salary bound as a parameter, not inlined.

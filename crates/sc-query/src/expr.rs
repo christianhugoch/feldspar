@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Value;
+use crate::{OrderBy, Value};
 
 /// A table-qualified column reference.
 ///
@@ -193,6 +193,31 @@ pub enum Expr {
         /// Argument expressions; empty renders as `*` (only valid for `count`).
         args: Vec<Expr>,
     },
+    /// A window function call: `func(args…) OVER (PARTITION BY … ORDER BY …)`.
+    ///
+    /// The narrowest form that gives a *child list* a per-parent `limit` in one
+    /// round trip: `row_number() OVER (PARTITION BY key ORDER BY …)` numbers
+    /// each parent's children, and the outer query keeps the first *k*.
+    /// [`Agg`](Expr::Agg) has no `OVER` and there is no `LATERAL`, so without
+    /// this a nested list costs a query per parent.
+    ///
+    /// `func` is **structural** — chosen by code, exactly as [`Agg::func`] and
+    /// [`Func::name`] are — never user data. Both frames are omitted when
+    /// empty, so `func() OVER ()` is expressible (the whole result as one
+    /// partition).
+    ///
+    /// [`Agg::func`]: Expr::Agg
+    /// [`Func::name`]: Expr::Func
+    Window {
+        /// Window function name (`row_number`, `rank`, `sum`, …).
+        func: String,
+        /// Argument expressions; empty for `row_number()`.
+        args: Vec<Expr>,
+        /// `PARTITION BY` keys; empty for one partition over everything.
+        partition: Vec<Expr>,
+        /// The window's `ORDER BY`; empty for an unordered frame.
+        order: Vec<OrderBy>,
+    },
     /// An `IN` test.
     In {
         /// The expression being tested.
@@ -262,6 +287,17 @@ impl Expr {
     /// Build a unary expression.
     pub fn unary(op: UnOp, e: Expr) -> Self {
         Expr::Unary { op, e: Box::new(e) }
+    }
+
+    /// `row_number() OVER (PARTITION BY … ORDER BY …)` — the per-parent
+    /// numbering a batched child list is paged by.
+    pub fn row_number(partition: Vec<Expr>, order: Vec<OrderBy>) -> Self {
+        Expr::Window {
+            func: "row_number".into(),
+            args: Vec::new(),
+            partition,
+            order,
+        }
     }
 
     /// `self = other`.

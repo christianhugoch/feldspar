@@ -55,6 +55,7 @@ use crate::analyze::{Ambient, GLOBALS, JOIN, OpFlag};
 use crate::ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 use crate::formula::Formula;
 use crate::shape::SchemaShape;
+use crate::subquery::{AggFunc, AggregateSpec, correlated_aggregate, correlation};
 
 /// The GUC that carries the logged-in user as a JSON object in
 /// [`UserEnv::Guc`] mode. Phase 6 issues `SET LOCAL sc.user = '<json>'` per
@@ -308,17 +309,43 @@ pub fn join_path_expr(
     table: &str,
     ident: &str,
 ) -> Result<QExpr, TranslateError> {
+    join_path_expr_rooted(shape, table, table, ident)
+}
+
+/// [`join_path_expr`] correlated from an arbitrary **alias** rather than from
+/// the table's own name.
+///
+/// A join path is rooted somewhere: `publisherⱵname` on `books` reads
+/// `books.publisher`, but the same path evaluated for a row of a *subquery* —
+/// a child list's alias, an aggregate's alias — has to read
+/// `<alias>.publisher` instead. The translator has always needed both (an
+/// aggregation arrow's `r.publisherⱵname` is the aliased case); this is that
+/// same rooting, exposed, because a GraphQL filter over a child table is
+/// written against the subquery's alias too.
+///
+/// `root_table` is the table `root_alias` names — the schema shape is consulted
+/// by table, and an alias is not one.
+///
+/// Aliases inside the returned expression are numbered from `_sc_j1` per call,
+/// so a caller composing two of these into *nested* positions must keep them
+/// apart itself; siblings in one statement are separate scopes and are fine.
+pub fn join_path_expr_rooted(
+    shape: &SchemaShape,
+    root_alias: &str,
+    root_table: &str,
+    ident: &str,
+) -> Result<QExpr, TranslateError> {
     // The env is irrelevant to a join path (no ambient object inside it);
     // anonymous-and-empty is the cheapest to construct.
     let user = UserEnv::Inline(None);
     let mut tr = Translator {
         env: &Env::new(&user),
         shape,
-        table,
+        table: root_table,
         aliases: 0,
         child_scopes: Vec::new(),
     };
-    tr.join_value(ident)
+    tr.join_value_rooted(root_alias, root_table, ident)
 }
 
 /// Fold the operation flags to constants and simplify what the constants
@@ -764,68 +791,67 @@ impl<'a> Translator<'a> {
     /// child table (§7.3, Phase 7). The terminal picks the SQL form; `filter`
     /// predicates fold into the subquery's `WHERE`, and the value expression
     /// comes from the terminal's selector or a preceding `map`.
+    ///
+    /// The subquery itself is [`subquery::correlated_aggregate`]'s to build —
+    /// the same function the GraphQL provider calls for the same question, so
+    /// the two paths cannot drift apart on the empty-relation semantics.
     fn aggregation(&mut self, chain: &Chain) -> Result<QExpr, TranslateError> {
         let rel = chain
             .resolve(self.shape, self.table)
             .map_err(TranslateError::Error)?;
         self.aliases += 1;
         let alias = format!("_sc_a{}", self.aliases);
-        // Correlate the child key back to the parent's referenced column.
-        let corr = QExpr::binary(
-            QBinOp::Eq,
-            QExpr::qcol(alias.clone(), rel.key_field.clone()),
-            QExpr::qcol(self.table.to_string(), rel.parent_field.clone()),
-        );
-        let mut base = corr;
+        // What the chain's `filter` steps constrain the child rows by; the
+        // correlation back to the parent is the builder's own business.
+        let mut extra: Option<QExpr> = None;
         for f in &chain.filters {
             let p = self.child_predicate(&alias, &rel.child_table, f)?;
-            base = base.and(p);
+            extra = and_opt(extra, p);
         }
         match &chain.terminal {
             Terminal::Length => {
-                let proj = if chain.distinct {
-                    let v = self.require_value(chain, &rel, &alias)?;
-                    agg_fn("count", true, vec![v])
+                let value = if chain.distinct {
+                    Some(self.require_value(chain, &rel, &alias)?)
                 } else {
-                    agg_fn("count", false, vec![])
+                    None
                 };
-                Ok(self.scalar_sub(&rel, &alias, proj, base))
+                self.agg(&rel, &alias, AggFunc::Count, chain.distinct, value, extra)
             }
             Terminal::Sum(_) => {
                 let v = self.require_value(chain, &rel, &alias)?;
-                let sum = agg_fn("sum", chain.distinct, vec![v]);
-                Ok(coalesce(
-                    self.scalar_sub(&rel, &alias, sum, base),
-                    QExpr::lit(0_i64),
-                ))
+                self.agg(&rel, &alias, AggFunc::Sum, chain.distinct, Some(v), extra)
             }
-            Terminal::Avg(_) => self.bare_agg("avg", chain, &rel, &alias, base),
-            Terminal::Min(_) => self.bare_agg("min", chain, &rel, &alias, base),
-            Terminal::Max(_) => self.bare_agg("max", chain, &rel, &alias, base),
+            Terminal::Avg(_) => self.bare_agg(AggFunc::Avg, chain, &rel, &alias, extra),
+            Terminal::Min(_) => self.bare_agg(AggFunc::Min, chain, &rel, &alias, extra),
+            Terminal::Max(_) => self.bare_agg(AggFunc::Max, chain, &rel, &alias, extra),
             Terminal::Some(pred) => {
                 let p = self.child_predicate(&alias, &rel.child_table, pred)?;
                 let count =
-                    self.scalar_sub(&rel, &alias, agg_fn("count", false, vec![]), base.and(p));
+                    self.agg(&rel, &alias, AggFunc::Count, false, None, and_opt(extra, p))?;
                 Ok(QExpr::binary(QBinOp::Gt, count, QExpr::lit(0_i64)))
             }
             Terminal::Every(pred) => {
                 // No child fails the predicate: count of rows where the
                 // predicate is not provenly true is zero.
                 let p = self.child_predicate(&alias, &rel.child_table, pred)?;
-                let count = self.scalar_sub(
+                let count = self.agg(
                     &rel,
                     &alias,
-                    agg_fn("count", false, vec![]),
-                    base.and(not_pred(p)),
-                );
+                    AggFunc::Count,
+                    false,
+                    None,
+                    and_opt(extra, not_pred(p)),
+                )?;
                 Ok(QExpr::binary(QBinOp::Eq, count, QExpr::lit(0_i64)))
             }
             Terminal::Includes(x) => {
+                // Not an aggregate — a membership test over the child values —
+                // but correlated by the same predicate the builder uses.
                 let value = self.mapped_value(chain, &rel, &alias)?;
                 let needle = self.value(x)?;
                 let sub = Select::from(Source::table_as(rel.child_table.clone(), alias.clone()))
                     .columns(vec![Projection::expr(value)])
-                    .filter(base);
+                    .filter(self.correlated(&rel, &alias, extra));
                 Ok(QExpr::In {
                     e: Box::new(needle),
                     set: InSet::Subquery(Box::new(sub)),
@@ -834,30 +860,68 @@ impl<'a> Translator<'a> {
             Terminal::Join(sep) => {
                 let value = self.mapped_value(chain, &rel, &alias)?;
                 let separator = self.value(sep)?;
-                let agg = agg_fn("string_agg", chain.distinct, vec![value, separator]);
-                Ok(coalesce(
-                    self.scalar_sub(&rel, &alias, agg, base),
-                    QExpr::lit(""),
-                ))
+                self.agg(
+                    &rel,
+                    &alias,
+                    AggFunc::StringAgg { separator },
+                    chain.distinct,
+                    Some(value),
+                    extra,
+                )
             }
             Terminal::MaxBy(sel) | Terminal::MinBy(sel) => {
-                self.ordered_selection(chain, &rel, &alias, sel, base)
+                self.ordered_selection(chain, &rel, &alias, sel, extra)
             }
         }
     }
 
-    /// `avg`/`min`/`max`: a bare aggregate subquery (empty → SQL NULL, matching
-    /// the semantics table).
+    /// Build one correlated aggregate over `rel` through the shared builder,
+    /// correlated to the table this formula is written on.
+    fn agg(
+        &self,
+        rel: &Relation,
+        alias: &str,
+        func: AggFunc,
+        distinct: bool,
+        value: Option<QExpr>,
+        filter: Option<QExpr>,
+    ) -> Result<QExpr, TranslateError> {
+        correlated_aggregate(AggregateSpec {
+            child_table: rel.child_table.clone(),
+            key_field: rel.key_field.clone(),
+            parent: self.table.to_string(),
+            parent_field: rel.parent_field.clone(),
+            alias: alias.to_string(),
+            func,
+            distinct,
+            value,
+            filter,
+        })
+        .map_err(TranslateError::Error)
+    }
+
+    /// The `WHERE` for a child subquery the builder does not build: the
+    /// correlation, plus whatever else constrains the child rows.
+    fn correlated(&self, rel: &Relation, alias: &str, filter: Option<QExpr>) -> QExpr {
+        let corr = correlation(alias, &rel.key_field, self.table, &rel.parent_field);
+        match filter {
+            Some(p) => corr.and(p),
+            None => corr,
+        }
+    }
+
+    /// `avg`/`min`/`max`: a bare aggregate (empty → SQL NULL, matching the
+    /// semantics table).
     fn bare_agg(
         &mut self,
-        func: &str,
+        func: AggFunc,
         chain: &Chain,
         rel: &Relation,
         alias: &str,
-        base: QExpr,
+        filter: Option<QExpr>,
     ) -> Result<QExpr, TranslateError> {
         let v = self.require_value(chain, rel, alias)?;
-        Ok(self.scalar_sub(rel, alias, agg_fn(func, chain.distinct, vec![v]), base))
+        self.agg(rel, alias, func, chain.distinct, Some(v), filter)
     }
 
     /// The ordered-selection subquery for `maxBy`/`minBy`: the accessed member,
@@ -869,7 +933,7 @@ impl<'a> Translator<'a> {
         rel: &Relation,
         alias: &str,
         sel: &Selector,
-        base: QExpr,
+        filter: Option<QExpr>,
     ) -> Result<QExpr, TranslateError> {
         let Some(pk) = &rel.child_pk else {
             return untranslatable(
@@ -886,7 +950,9 @@ impl<'a> Translator<'a> {
             QExpr::qcol(alias.to_string(), member.to_string())
         };
         // Ignore rows with a null key, as every other aggregate does.
-        let filter = base.and(QExpr::unary(QUnOp::IsNotNull, key.clone()));
+        let filter = self
+            .correlated(rel, alias, filter)
+            .and(QExpr::unary(QUnOp::IsNotNull, key.clone()));
         let desc = matches!(chain.terminal, Terminal::MaxBy(_));
         let ob = |e: QExpr| {
             if desc {
@@ -901,15 +967,6 @@ impl<'a> Translator<'a> {
             .limit(1);
         sub.order = vec![ob(key), ob(QExpr::qcol(alias.to_string(), pk.clone()))];
         Ok(QExpr::Subquery(Box::new(sub)))
-    }
-
-    /// Build a scalar subquery selecting `proj` from the aliased child table
-    /// under `filter`.
-    fn scalar_sub(&self, rel: &Relation, alias: &str, proj: QExpr, filter: QExpr) -> QExpr {
-        let sub = Select::from(Source::table_as(rel.child_table.clone(), alias.to_string()))
-            .columns(vec![Projection::expr(proj)])
-            .filter(filter);
-        QExpr::Subquery(Box::new(sub))
     }
 
     /// The value a value-aggregate (`sum`/`avg`/`min`/`max`, or `count(DISTINCT
@@ -1126,21 +1183,12 @@ fn guc_raw() -> QExpr {
     }
 }
 
-/// An aggregate call `func([DISTINCT] args)`.
-fn agg_fn(func: &str, distinct: bool, args: Vec<QExpr>) -> QExpr {
-    QExpr::Agg {
-        func: func.to_string(),
-        distinct,
-        args,
-    }
-}
-
-/// `COALESCE(expr, default)`.
-fn coalesce(expr: QExpr, default: QExpr) -> QExpr {
-    QExpr::Func {
-        name: "COALESCE".into(),
-        args: vec![expr, default],
-    }
+/// Accumulate a child predicate onto whatever was already there.
+fn and_opt(acc: Option<QExpr>, p: QExpr) -> Option<QExpr> {
+    Some(match acc {
+        None => p,
+        Some(e) => e.and(p),
+    })
 }
 
 /// The selector a value-aggregating terminal carries, if any.
@@ -1809,6 +1857,87 @@ mod tests {
         assert!(
             sql.contains("SELECT count(*) FROM \"reviews\""),
             "got: {sql}"
+        );
+    }
+
+    /// The `sc_query::Expr` a value-position formula translates to on `books`.
+    fn value_expr(src: &str) -> QExpr {
+        let formula = Formula::parse(src).unwrap();
+        let anon = UserEnv::Inline(None);
+        translate_value(&formula, &Env::new(&anon), &shape(), "books").unwrap()
+    }
+
+    /// The same aggregate asked for through the builder: `reviews` correlated
+    /// to `books`, at the alias the translator numbers first.
+    fn built(func: AggFunc, value: Option<QExpr>, filter: Option<QExpr>) -> QExpr {
+        correlated_aggregate(AggregateSpec {
+            child_table: "reviews".into(),
+            key_field: "book".into(),
+            parent: "books".into(),
+            parent_field: "id".into(),
+            alias: "_sc_a1".into(),
+            func,
+            distinct: false,
+            value,
+            filter,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_formula_path_and_the_builder_produce_the_identical_expr() {
+        // The point of the refactor: a Ↄ chain and a caller that asks the
+        // builder the same question get the *same tree*, not merely SQL that
+        // happens to match today. If the two ever drift, this fails.
+        assert_eq!(
+            value_expr("reviewsↃbook.length"),
+            built(AggFunc::Count, None, None)
+        );
+        assert_eq!(
+            value_expr("reviewsↃbook.sum(\"rating\")"),
+            built(AggFunc::Sum, Some(QExpr::qcol("_sc_a1", "rating")), None)
+        );
+        assert_eq!(
+            value_expr("reviewsↃbook.avg(\"rating\")"),
+            built(AggFunc::Avg, Some(QExpr::qcol("_sc_a1", "rating")), None)
+        );
+        // …and with a child predicate, which is the GraphQL `where` argument's
+        // shape: the constraint is the subquery's, not the caller's.
+        assert_eq!(
+            value_expr("reviewsↃbook.filter(r => r.rating >= 3).length"),
+            built(
+                AggFunc::Count,
+                None,
+                Some(QExpr::binary(
+                    QBinOp::Ge,
+                    QExpr::qcol("_sc_a1", "rating"),
+                    QExpr::lit(3_i64),
+                )),
+            )
+        );
+    }
+
+    #[test]
+    fn a_join_path_can_be_rooted_at_an_alias() {
+        // What a GraphQL filter over a *child* table needs: the same join
+        // path, correlated from the subquery's alias rather than from the
+        // table's own name.
+        let expr = join_path_expr_rooted(&shape(), "_sc_a1", "books", "publisherⱵname").unwrap();
+        let stmt: Statement = Select::from(Source::table("books"))
+            .columns(vec![Projection::expr(expr)])
+            .into();
+        let (sql, _) = Pg.render(&stmt).unwrap();
+        assert_eq!(
+            sql,
+            "SELECT (SELECT \"_sc_j1\".\"name\" FROM \"publishers\" AS \"_sc_j1\" \
+             WHERE (\"_sc_j1\".\"id\" = \"_sc_a1\".\"publisher\")) FROM \"books\""
+        );
+
+        // Rooting at the table's own name is what the table-rooted entry point
+        // already did — one implementation, so they cannot disagree.
+        assert_eq!(
+            join_path_expr(&shape(), "books", "publisherⱵname").unwrap(),
+            join_path_expr_rooted(&shape(), "books", "books", "publisherⱵname").unwrap()
         );
     }
 

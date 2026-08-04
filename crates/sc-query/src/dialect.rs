@@ -439,6 +439,46 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
                 self.push(")");
                 Ok(())
             }
+            Expr::Window {
+                func,
+                args,
+                partition,
+                order,
+            } => {
+                // As for `Func`/`Agg`, the name comes from the AST, not a caller.
+                self.push(func);
+                self.push("(");
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.push(", ");
+                    }
+                    self.expr(a)?;
+                }
+                self.push(") OVER (");
+                if !partition.is_empty() {
+                    self.push("PARTITION BY ");
+                    for (i, p) in partition.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        self.expr(p)?;
+                    }
+                }
+                if !order.is_empty() {
+                    if !partition.is_empty() {
+                        self.push(" ");
+                    }
+                    self.push("ORDER BY ");
+                    for (i, o) in order.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        self.order_by(o)?;
+                    }
+                }
+                self.push(")");
+                Ok(())
+            }
             Expr::In { e, set } => {
                 self.push("(");
                 self.expr(e)?;
@@ -807,6 +847,74 @@ mod tests {
         let (sql, _) =
             render(Select::from(Source::table("t")).filter(distinct.eq(Expr::lit(1_i64))));
         assert!(sql.contains("count(DISTINCT \"x\")"), "got: {sql}");
+    }
+
+    #[test]
+    fn a_window_function_renders_its_partition_and_order() {
+        // The shape a per-parent child `limit` is built on: number each
+        // parent's children, then keep the first k in the outer query.
+        let rn = Expr::row_number(
+            vec![Expr::qcol("c", "parent")],
+            vec![
+                OrderBy::desc(Expr::qcol("c", "created")),
+                OrderBy::asc(Expr::qcol("c", "id")),
+            ],
+        );
+        let (sql, _) = render(
+            Select::from(Source::table_as("children", "c")).columns(vec![Projection::Expr {
+                expr: rn,
+                alias: Some("_sc_rn".into()),
+            }]),
+        );
+        assert_eq!(
+            sql,
+            "SELECT row_number() OVER (PARTITION BY \"c\".\"parent\" \
+             ORDER BY \"c\".\"created\" DESC, \"c\".\"id\" ASC) AS \"_sc_rn\" \
+             FROM \"children\" AS \"c\""
+        );
+    }
+
+    #[test]
+    fn a_window_function_renders_with_either_frame_clause_missing() {
+        // An unpartitioned running total, and an unordered frame: each clause
+        // is omitted rather than rendered empty, which would not parse.
+        let running = Expr::Window {
+            func: "sum".into(),
+            args: vec![Expr::col("amount")],
+            partition: vec![],
+            order: vec![OrderBy::asc(Expr::col("id"))],
+        };
+        let (sql, _) =
+            render(Select::from(Source::table("t")).columns(vec![Projection::expr(running)]));
+        assert_eq!(
+            sql,
+            "SELECT sum(\"amount\") OVER (ORDER BY \"id\" ASC) FROM \"t\""
+        );
+
+        let total = Expr::Window {
+            func: "count".into(),
+            args: vec![],
+            partition: vec![Expr::col("g")],
+            order: vec![],
+        };
+        let (sql, _) =
+            render(Select::from(Source::table("t")).columns(vec![Projection::expr(total)]));
+        assert_eq!(sql, "SELECT count() OVER (PARTITION BY \"g\") FROM \"t\"");
+    }
+
+    #[test]
+    fn a_window_functions_arguments_are_still_parameterised() {
+        // Nothing about `OVER` exempts a literal from the bind list.
+        let w = Expr::Window {
+            func: "lag".into(),
+            args: vec![Expr::col("x"), Expr::lit(1_i64)],
+            partition: vec![Expr::col("g")],
+            order: vec![OrderBy::asc(Expr::col("id"))],
+        };
+        let (sql, binds) =
+            render(Select::from(Source::table("t")).columns(vec![Projection::expr(w)]));
+        assert!(sql.contains("lag(\"x\", $1) OVER"), "got: {sql}");
+        assert_eq!(binds, vec![Value::Int(1)]);
     }
 
     #[test]

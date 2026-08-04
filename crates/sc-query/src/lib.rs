@@ -131,6 +131,25 @@ mod tests {
     }
 
     #[test]
+    fn a_window_expression_round_trips_through_serde() {
+        // A window carries an `OrderBy` inside an `Expr`, the one place the two
+        // modules refer to each other — so it is worth asserting the AST is
+        // still plain, serializable data (§4).
+        let stmt: Statement = Select::from(Source::table_as("c", "c"))
+            .columns(vec![Projection::Expr {
+                expr: Expr::row_number(
+                    vec![Expr::qcol("c", "parent")],
+                    vec![OrderBy::desc(Expr::qcol("c", "id"))],
+                ),
+                alias: Some("rn".into()),
+            }])
+            .into();
+        let json = serde_json::to_string(&stmt).expect("serialize");
+        let back: Statement = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(stmt, back);
+    }
+
+    #[test]
     fn statement_round_trips_through_serde() {
         let stmt: Statement = Select::from(Source::table("users"))
             .filter(Expr::col("email").eq(Expr::lit("a@b.c")))
