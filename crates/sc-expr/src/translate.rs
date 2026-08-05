@@ -258,7 +258,32 @@ pub fn translate(
     shape: &SchemaShape,
     table: &str,
 ) -> Result<QExpr, TranslateError> {
+    translate_rooted(formula, op, env, shape, table, table)
+}
+
+/// [`translate`] with the formula's own row read through `root` — an **alias**
+/// — rather than through the table's name.
+///
+/// A predicate evaluated *inside* a subquery that aliased the table cannot name
+/// the table: `FROM "employees" "_sc_a1"` hides `employees`, so a translated
+/// ownership formula that says `"employees"."owner"` is an error rather than a
+/// filter. The GraphQL provider needs exactly this — a child table's ownership
+/// predicate ANDed into the `WHERE` of a correlated aggregate over it — and it
+/// is the same rooting [`join_path_expr_rooted`] already exposes for a join
+/// path, applied to a whole formula.
+///
+/// `table` is still the shape's key: an alias is not a table, and the fields
+/// are looked up by the real name.
+pub fn translate_rooted(
+    formula: &Formula,
+    op: Operation,
+    env: &Env<'_>,
+    shape: &SchemaShape,
+    table: &str,
+    root: &str,
+) -> Result<QExpr, TranslateError> {
     let mut tr = translator(env, shape, table)?;
+    tr.root = root;
     let folded = fold(formula.ast(), op, &mut Vec::new());
     tr.predicate(&folded)
 }
@@ -293,6 +318,7 @@ fn translator<'a>(
         env,
         shape,
         table,
+        root: table,
         aliases: 0,
         child_scopes: Vec::new(),
     })
@@ -342,6 +368,7 @@ pub fn join_path_expr_rooted(
         env: &Env::new(&user),
         shape,
         table: root_table,
+        root: root_alias,
         aliases: 0,
         child_scopes: Vec::new(),
     };
@@ -444,6 +471,13 @@ struct Translator<'a> {
     env: &'a Env<'a>,
     shape: &'a SchemaShape,
     table: &'a str,
+    /// How the formula's own row is **named** in SQL: the table itself, or the
+    /// alias it was given by the query the predicate is being embedded in (see
+    /// [`translate_rooted`]). Every reference to a column of this row — a bare
+    /// field, the root of a Ⱶ-join path, the parent side of a Ↄ-aggregation's
+    /// correlation — goes through this rather than through
+    /// [`table`](Self::table), which stays the shape's key.
+    root: &'a str,
     /// Counter for join-subquery aliases. Prefixed `_sc_` because user tables
     /// cannot start with it (§9 reserves the prefix), so an alias can never
     /// shadow a real table a correlated column reference points at.
@@ -670,7 +704,7 @@ impl<'a> Translator<'a> {
         if let Some(table_shape) = self.shape.tables.get(self.table)
             && table_shape.fields.contains_key(name)
         {
-            return Ok(QExpr::qcol(self.table, name));
+            return Ok(QExpr::qcol(self.root, name));
         }
         if name.contains(JOIN) {
             return self.join_value(name);
@@ -698,7 +732,7 @@ impl<'a> Translator<'a> {
     /// nothing is granted — which *is* the Ⱶ optional-chaining contract, for
     /// free.
     fn join_value(&mut self, ident: &str) -> Result<QExpr, TranslateError> {
-        let (root_alias, root_table) = (self.table.to_string(), self.table.to_string());
+        let (root_alias, root_table) = (self.root.to_string(), self.table.to_string());
         self.join_value_rooted(&root_alias, &root_table, ident)
     }
 
@@ -889,7 +923,7 @@ impl<'a> Translator<'a> {
         correlated_aggregate(AggregateSpec {
             child_table: rel.child_table.clone(),
             key_field: rel.key_field.clone(),
-            parent: self.table.to_string(),
+            parent: self.root.to_string(),
             parent_field: rel.parent_field.clone(),
             alias: alias.to_string(),
             func,
@@ -903,7 +937,7 @@ impl<'a> Translator<'a> {
     /// The `WHERE` for a child subquery the builder does not build: the
     /// correlation, plus whatever else constrains the child rows.
     fn correlated(&self, rel: &Relation, alias: &str, filter: Option<QExpr>) -> QExpr {
-        let corr = correlation(alias, &rel.key_field, self.table, &rel.parent_field);
+        let corr = correlation(alias, &rel.key_field, self.root, &rel.parent_field);
         match filter {
             Some(p) => corr.and(p),
             None => corr,
@@ -1443,6 +1477,65 @@ mod tests {
             .unwrap_or_else(|| panic!("unexpected statement shape: {sql}"))
             .to_string();
         (clause, binds)
+    }
+
+    #[test]
+    fn a_rooted_translation_names_the_alias_everywhere_the_row_is_read() {
+        // What a child table's ownership predicate needs to be usable inside a
+        // correlated aggregate over it: `FROM "books" "_sc_g1"` hides `books`,
+        // so every reference to the row — a column, the root of a Ⱶ-join, the
+        // parent side of a Ↄ-correlation — has to say `_sc_g1` instead.
+        let env = inline_user(&[("id", Value::Text("u1".into()))]);
+        let formula = Formula::parse(
+            "owner === user.id && publisherⱵname === 'Acme' && reviewsↃbook.length > 0",
+        )
+        .unwrap();
+        let pred = translate_rooted(
+            &formula,
+            Operation::Read,
+            &Env::new(&env),
+            &shape(),
+            "books",
+            "_sc_g1",
+        )
+        .unwrap();
+        let stmt: Statement = Select::from(Source::table_as("books", "_sc_g1"))
+            .filter(pred)
+            .into();
+        let (sql, _) = Pg.render(&stmt).unwrap();
+        assert!(sql.contains("\"_sc_g1\".\"owner\""), "{sql}");
+        assert!(sql.contains("\"_sc_g1\".\"publisher\""), "{sql}");
+        // (`_sc_a2`: the join path took the first alias of this translation.)
+        assert!(
+            sql.contains("\"_sc_a2\".\"book\" = \"_sc_g1\".\"id\""),
+            "{sql}"
+        );
+        // The table's own name is nowhere but in the `FROM`.
+        assert_eq!(sql.matches("\"books\"").count(), 1, "{sql}");
+    }
+
+    #[test]
+    fn an_unrooted_translation_is_the_rooted_one_at_the_tables_own_name() {
+        // `translate` is `translate_rooted` with the table as its own root, so
+        // there is one translator and not two.
+        let env = inline_user(&[("id", Value::Text("u1".into()))]);
+        let formula = Formula::parse("owner === user.id").unwrap();
+        let plain = translate(
+            &formula,
+            Operation::Read,
+            &Env::new(&env),
+            &shape(),
+            "books",
+        );
+        let rooted = translate_rooted(
+            &formula,
+            Operation::Read,
+            &Env::new(&env),
+            &shape(),
+            "books",
+            "books",
+        );
+        assert_eq!(plain.unwrap(), rooted.unwrap());
     }
 
     fn err_of(src: &str, op: Operation, env: &UserEnv) -> TranslateError {

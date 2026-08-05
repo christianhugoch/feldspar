@@ -2,6 +2,56 @@
 
 Changes in reverse chronological order.
 
+## GraphQL aggregates, computed by the database in the query that asked
+
+The milestone's motivating question answers, and it answers in one statement:
+
+```graphql
+departments {
+  name
+  employees_aggregate(where: { salary: { lt: 50000 } }) { count }
+}
+```
+
+Each requested aggregate becomes a correlated subquery **projected as another column of the
+departments query** — `(SELECT count(*) FROM "employees" "_sc_g1" WHERE "_sc_g1"."department" =
+"departments"."id" AND "_sc_g1"."salary" < $1) AS "employees_aggregate.count"` — so a query
+over N departments costs one read, not N, and the child's predicate is folded into the
+subquery's `WHERE` rather than applied to rows fetched and discarded. The rule is not "the root
+projects the aggregates" but "whichever read reaches the row projects them", so a batched child
+list carries its own: `departments { employees { tasks_aggregate { count } } }` is still two
+statements.
+
+**The provider does not aggregate.** Every expression comes from `sc-expr`'s builders — the
+same ones a Ↄ-chain in a calculated field or an ownership formula goes through — so `sum` over
+no rows is `0` and `avg` over no rows is null wherever the question is asked. The correlated
+form was already there; a root `X_aggregate` needed the uncorrelated one, and rather than write
+a second decision table `correlated_aggregate` and the new `aggregate_expr` share the one that
+says what each function answers over an empty relation.
+
+**Where the values ride back** is the selection's own response-key path: `count`,
+`total.salary`, `employees_aggregate.count`. That is what makes an alias work — the same
+relation aggregated twice under different `where` arguments gets two subqueries with two
+aliases and two response keys, and the resolvers find their values by stripping their own key
+the way a Ⱶ-joined row already strips its own prefix. A response key is a GraphQL name, so
+nothing a caller writes reaches SQL as anything but a quoted alias.
+
+**An aggregate never counts a row the caller may not read**, and where that cannot be arranged
+it is a refusal naming the table rather than a number. A count is computed by the database over
+whatever the `WHERE` leaves, so the rule has to *be* a predicate: the role floor admits
+everything, a translatable ownership formula becomes a predicate ANDed into the subquery, and
+an **untranslatable** one — a formula only the JavaScript evaluator can decide — refuses. This
+is where `sc-expr` grew `translate_rooted`: a predicate evaluated inside a subquery that
+aliased the table cannot name the table, so the whole formula is translated rooted at the
+alias, exactly as `join_path_expr_rooted` already did for a single join path. A child table
+under RLS whose parent's read is not a caller-context transaction refuses for the same reason —
+its policies would not apply, and the number would be whatever they make of no caller. A silent
+`0` is worse than a refusal, because nobody investigates it.
+
+One narrowing on the wire: Postgres widens `sum(bigint)` to `numeric`, and the schema promises
+`BigInt`. The sum comes back as the number the SDL says it is, and a sum that genuinely does
+not fit in 64 bits stays an exact decimal rather than being truncated into a wrong one.
+
 ## GraphQL child lists, one query per level
 
 `departments { name employees { name } }` answers, and it answers in **two**

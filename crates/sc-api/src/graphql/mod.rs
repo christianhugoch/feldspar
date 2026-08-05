@@ -30,9 +30,11 @@
 //! The pieces: [`names`] derives every GraphQL name (and reports what it could
 //! not name), [`types`] maps a column onto the wire, [`build`] folds the tables
 //! into an `async_graphql::dynamic::Schema`, [`args`] lowers a field's
-//! `where`/`order_by`/`limit`/`offset` onto the row layer's own `RowQuery`, and
-//! [`resolve`] is what the fields do.
+//! `where`/`order_by`/`limit`/`offset` onto the row layer's own `RowQuery`,
+//! [`agg`] lowers an aggregate selection onto `sc-expr`'s aggregate builders,
+//! and [`resolve`] is what the fields do.
 
+mod agg;
 mod args;
 mod build;
 mod context;
@@ -81,6 +83,10 @@ pub struct GraphqlProvider {
     mount: String,
     endpoints: EndpointSet,
     schema: Schema,
+    /// The derived names the schema was built from, shared with every request:
+    /// a resolver reading a selection set has to know which relation a field
+    /// name is, and this is where that was decided.
+    names: Arc<SchemaNames>,
     diagnostics: Vec<String>,
     /// The engine an untranslatable ownership formula's reified path runs on
     /// (§7.3), injected by the server exactly as it is into the REST provider.
@@ -148,6 +154,7 @@ impl GraphqlProvider {
             endpoints,
             schema,
             diagnostics: names.diagnostics().to_vec(),
+            names: Arc::new(names),
             evaluator: None,
             row_cap: DEFAULT_ROW_CAP,
             file_mount: DEFAULT_FILE_MOUNT.to_owned(),
@@ -211,6 +218,7 @@ impl GraphqlProvider {
         }
         let rc = context::RequestContext {
             catalog: Arc::clone(cat),
+            names: Arc::clone(&self.names),
             user: user.cloned(),
             evaluator: self.evaluator.clone(),
             row_cap: self.row_cap,

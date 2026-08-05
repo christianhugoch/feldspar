@@ -24,6 +24,7 @@ use sc_catalog::{Catalog, Table};
 use sc_error::Result;
 use sc_expr::JsEvaluator;
 
+use super::names::SchemaNames;
 use crate::ownership;
 
 /// The most rows a list field yields when the caller names no `limit`, and the
@@ -49,6 +50,15 @@ pub const DEFAULT_FILE_MOUNT: &str = "/api";
 pub struct RequestContext {
     /// The catalog every read goes through.
     pub catalog: Arc<Catalog>,
+    /// The names this schema was built from — shared, not rebuilt, because the
+    /// schema a caller is querying is the one those names describe.
+    ///
+    /// A resolver reaches for them for one thing: a selection set names a
+    /// relation (`employees_aggregate`), and only the derivation knows which
+    /// relation that is. Deriving it again per request would be a second rule
+    /// for the same question, which is what [`names`](super::names)' whole
+    /// module doc argues against.
+    pub names: Arc<SchemaNames>,
     /// The authenticated caller, or `None` for an anonymous one.
     pub user: Option<User>,
     /// The engine an untranslatable ownership formula needs (§7.3). Absent is

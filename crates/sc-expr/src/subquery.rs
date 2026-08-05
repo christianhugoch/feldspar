@@ -143,33 +143,7 @@ pub fn correlated_aggregate(spec: AggregateSpec) -> Result<Expr> {
         where_clause = where_clause.and(p);
     }
 
-    let needs_value = |v: Option<Expr>| -> Result<Expr> {
-        v.ok_or_else(|| {
-            Error::invalid(format!(
-                "aggregate `{}` over `{child_table}` needs a value expression",
-                func.name()
-            ))
-        })
-    };
-
-    // The projection, and what an empty relation must yield in its place.
-    let (args, empty) = match &func {
-        AggFunc::Count => match value {
-            None if distinct => {
-                return Err(Error::invalid(format!(
-                    "`count(DISTINCT …)` over `{child_table}` needs a value expression"
-                )));
-            }
-            None => (vec![], None),
-            Some(v) => (vec![v], None),
-        },
-        AggFunc::Sum => (vec![needs_value(value)?], Some(Expr::lit(0_i64))),
-        AggFunc::Avg | AggFunc::Min | AggFunc::Max => (vec![needs_value(value)?], None),
-        AggFunc::StringAgg { separator } => (
-            vec![needs_value(value)?, separator.clone()],
-            Some(Expr::lit("")),
-        ),
-    };
+    let (args, empty) = agg_parts(&func, distinct, value, &child_table)?;
 
     let sub = Select::from(Source::table_as(child_table, alias))
         .columns(vec![Projection::expr(Expr::Agg {
@@ -183,6 +157,71 @@ pub fn correlated_aggregate(spec: AggregateSpec) -> Result<Expr> {
     Ok(match empty {
         Some(default) => coalesce(sub, default),
         None => sub,
+    })
+}
+
+/// The same aggregate over rows the **enclosing** query already selects: no
+/// subquery and no correlation, because there is nothing to correlate to.
+///
+/// A GraphQL root aggregate (`employees_aggregate(where: …) { sum { salary } }`)
+/// is this one: the rows are the ones the caller's filter and the table's
+/// ownership predicate leave, and the aggregate is a projection of that same
+/// `SELECT`. It shares its decision table with [`correlated_aggregate`], so the
+/// empty-relation answers of AGG_EXPRS.md's table — `sum` is `0`, `avg`/`min`/
+/// `max` are null — are the same answers whichever way the question is asked.
+///
+/// `subject` names the table being aggregated, for the error an impossible spec
+/// produces.
+pub fn aggregate_expr(
+    func: &AggFunc,
+    distinct: bool,
+    value: Option<Expr>,
+    subject: &str,
+) -> Result<Expr> {
+    let (args, empty) = agg_parts(func, distinct, value, subject)?;
+    let agg = Expr::Agg {
+        func: func.name().to_string(),
+        distinct,
+        args,
+    };
+    Ok(match empty {
+        Some(default) => coalesce(agg, default),
+        None => agg,
+    })
+}
+
+/// The aggregate's arguments, and what an empty relation must yield in its
+/// place — the semantics table of docs/AGG_EXPRS.md, in one place.
+fn agg_parts(
+    func: &AggFunc,
+    distinct: bool,
+    value: Option<Expr>,
+    subject: &str,
+) -> Result<(Vec<Expr>, Option<Expr>)> {
+    let needs_value = |v: Option<Expr>| -> Result<Expr> {
+        v.ok_or_else(|| {
+            Error::invalid(format!(
+                "aggregate `{}` over `{subject}` needs a value expression",
+                func.name()
+            ))
+        })
+    };
+    Ok(match func {
+        AggFunc::Count => match value {
+            None if distinct => {
+                return Err(Error::invalid(format!(
+                    "`count(DISTINCT …)` over `{subject}` needs a value expression"
+                )));
+            }
+            None => (vec![], None),
+            Some(v) => (vec![v], None),
+        },
+        AggFunc::Sum => (vec![needs_value(value)?], Some(Expr::lit(0_i64))),
+        AggFunc::Avg | AggFunc::Min | AggFunc::Max => (vec![needs_value(value)?], None),
+        AggFunc::StringAgg { separator } => (
+            vec![needs_value(value)?, separator.clone()],
+            Some(Expr::lit("")),
+        ),
     })
 }
 
@@ -371,6 +410,57 @@ mod tests {
             sql.contains("AND (\"_sc_a1\".\"salary\" < $1)"),
             "got: {sql}"
         );
+    }
+
+    /// The bare aggregate as the sole projection of a select over the child.
+    fn bare(func: AggFunc, distinct: bool, value: Option<Expr>) -> (String, Vec<Value>) {
+        let expr = aggregate_expr(&func, distinct, value, "employees").expect("build");
+        let stmt: Statement = Select::from(Source::table("employees"))
+            .columns(vec![Projection::expr(expr)])
+            .into();
+        let (sql, binds) = Pg.render(&stmt).unwrap();
+        let projection = sql
+            .strip_prefix("SELECT ")
+            .and_then(|s| s.strip_suffix(" FROM \"employees\""))
+            .unwrap_or_else(|| panic!("unexpected statement shape: {sql}"))
+            .to_string();
+        (projection, binds)
+    }
+
+    #[test]
+    fn an_uncorrelated_aggregate_carries_the_same_empty_relation_answers() {
+        // The GraphQL root aggregate's form: no subquery, because the rows are
+        // the enclosing statement's own — but the same semantics table, since
+        // both spellings go through `agg_parts`.
+        assert_eq!(bare(AggFunc::Count, false, None).0, "count(*)");
+        assert_eq!(
+            bare(AggFunc::Count, true, Some(Expr::col("department"))).0,
+            "count(DISTINCT \"department\")"
+        );
+        let (sql, binds) = bare(AggFunc::Sum, false, Some(Expr::col("salary")));
+        assert_eq!(sql, "COALESCE(sum(\"salary\"), $1)");
+        assert_eq!(binds, vec![Value::Int(0)]);
+        // …and the three that answer null over no rows do not coalesce.
+        for func in [AggFunc::Avg, AggFunc::Min, AggFunc::Max] {
+            let name = match func {
+                AggFunc::Avg => "avg",
+                AggFunc::Min => "min",
+                _ => "max",
+            };
+            assert_eq!(
+                bare(func, false, Some(Expr::col("salary"))).0,
+                format!("{name}(\"salary\")")
+            );
+        }
+    }
+
+    #[test]
+    fn an_uncorrelated_aggregate_refuses_the_same_impossible_specs() {
+        // One decision table, so a value-less `sum` is a mistake wherever it is
+        // made — and the message names the table it was about.
+        let err = aggregate_expr(&AggFunc::Sum, false, None, "employees").unwrap_err();
+        assert!(format!("{err}").contains("employees"), "{err}");
+        assert!(aggregate_expr(&AggFunc::Count, true, None, "employees").is_err());
     }
 
     #[test]

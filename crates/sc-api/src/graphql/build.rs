@@ -13,13 +13,13 @@
 //! schema that says it is has promised to round somebody's number.
 //!
 //! What each field *does* is [`resolve`](super::resolve)'s business; this module
-//! decides only which resolver a field gets. Reads — the root list, `_by_pk`, a
-//! row's columns, its outgoing Ⱶ-joins and its child lists — are wired to real
-//! ones; the aggregates (Phase 5) still answer "not implemented yet", which is a
-//! better placeholder than a plausible zero.
+//! decides only which resolver a field gets — and the aggregate result objects
+//! are the one place where that mapping is not obvious: `sum` and `avg` are
+//! *groups*, whose columns are the values, while `count` is a value itself, so
+//! they take different resolvers over the same flat set of computed columns.
 
 use async_graphql::dynamic::{
-    Enum, Field, FieldFuture, InputObject, InputValue, Object, Scalar, Schema, TypeRef,
+    Enum, Field, InputObject, InputValue, Object, Scalar, Schema, TypeRef,
 };
 use sc_catalog::{DataField, DataFieldKind, Table};
 use sc_error::{Error, Result};
@@ -103,25 +103,6 @@ fn schema_error(err: async_graphql::dynamic::SchemaError, names: &SchemaNames) -
             "the GraphQL schema for table `{table}` could not be built: {message}"
         )),
         None => Error::config(format!("the GraphQL schema could not be built: {message}")),
-    }
-}
-
-/// A resolver that refuses, naming the field. Phases 3 onwards replace these one
-/// at a time; until then a caller is told the truth rather than handed a zero.
-fn not_implemented(
-    what: &str,
-) -> impl for<'a> Fn(async_graphql::dynamic::ResolverContext<'a>) -> FieldFuture<'a>
-+ Send
-+ Sync
-+ 'static {
-    let what = what.to_owned();
-    move |_| {
-        let what = what.clone();
-        FieldFuture::new(async move {
-            Err::<Option<async_graphql::Value>, _>(async_graphql::Error::new(format!(
-                "the GraphQL field `{what}` is not implemented yet"
-            )))
-        })
     }
 }
 
@@ -216,7 +197,7 @@ fn row_object(table: &Table, t: &TableNames, names: &SchemaNames) -> Object {
             Field::new(
                 &rel.aggregate_field,
                 TypeRef::named_nn(&child.aggregate_object),
-                not_implemented(&format!("{}.{}", t.object, rel.aggregate_field)),
+                resolve::child_aggregate_field(&rel.child_table),
             )
             .argument(InputValue::new(ARG_WHERE, TypeRef::named(&child.bool_exp)))
             .description(format!(
@@ -310,7 +291,7 @@ fn aggregate_object(table: &Table, t: &TableNames) -> Object {
         Field::new(
             "count",
             TypeRef::named_nn(TypeRef::INT),
-            not_implemented(&format!("{}.count", t.aggregate_object)),
+            resolve::agg_value_field(TypeRef::INT),
         )
         .argument(InputValue::new(
             ARG_DISTINCT,
@@ -322,7 +303,7 @@ fn aggregate_object(table: &Table, t: &TableNames) -> Object {
             object = object.field(Field::new(
                 name,
                 TypeRef::named_nn(ty),
-                not_implemented(&format!("{}.{name}", t.aggregate_object)),
+                resolve::agg_group_field(),
             ));
         }
     }
@@ -331,7 +312,7 @@ fn aggregate_object(table: &Table, t: &TableNames) -> Object {
             object = object.field(Field::new(
                 name,
                 TypeRef::named_nn(&t.comparable_object),
-                not_implemented(&format!("{}.{name}", t.aggregate_object)),
+                resolve::agg_group_field(),
             ));
         }
     }
@@ -372,7 +353,7 @@ fn numeric_fields_object(
         object = object.field(Field::new(
             name,
             TypeRef::named(scalar),
-            not_implemented(&format!("{type_name}.{name}")),
+            resolve::agg_value_field(scalar),
         ));
         any = true;
     }
@@ -388,7 +369,7 @@ fn comparable_fields_object(table: &Table, t: &TableNames) -> Option<Object> {
         object = object.field(Field::new(
             name,
             TypeRef::named(column_scalar(field)),
-            not_implemented(&format!("{}.{name}", t.comparable_object)),
+            resolve::agg_value_field(column_scalar(field)),
         ));
         any = true;
     }
@@ -460,7 +441,7 @@ fn add_root_fields(query: Object, table: &Table, t: &TableNames) -> Object {
         Field::new(
             &t.aggregate_field,
             TypeRef::named_nn(&t.aggregate_object),
-            not_implemented(&t.aggregate_field),
+            resolve::aggregate_field(&t.table),
         )
         .argument(InputValue::new(ARG_WHERE, TypeRef::named(&t.bool_exp)))
         .description(format!("Aggregates over the rows of `{}`.", t.table)),
@@ -633,10 +614,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unimplemented_field_refuses_rather_than_answering_zero() {
-        // The honest placeholder the phases that are still to come stand on. A
-        // field that returned a plausible number here would be the exact
-        // failure decision 5 forbids.
+    fn an_aggregate_is_wired_to_the_read_path_not_to_a_placeholder() {
+        // Executed without a request context, `count` fails reaching for the
+        // caller it is to be authorized against — which is the proof that it
+        // *is* a read of rows, rather than a number this module invented. A
+        // plausible zero here would be the exact failure decision 5 forbids.
         let tables = [table_of("departments", vec![id_field()])];
         let names = SchemaNames::derive(&tables);
         let schema = build_schema(&tables, &names).expect("builds");
@@ -646,7 +628,7 @@ mod tests {
             .block_on(schema.execute("{ departments_aggregate { count } }"));
         assert!(!response.errors.is_empty(), "{response:?}");
         assert!(
-            response.errors[0].message.contains("not implemented"),
+            response.errors[0].message.contains("RequestContext"),
             "{:?}",
             response.errors
         );

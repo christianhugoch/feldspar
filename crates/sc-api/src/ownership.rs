@@ -33,7 +33,7 @@ use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_expr::{
     Env, Formula, FormulaCall, JsEvaluator, Operation, TranslateError, UserEnv, join_path_expr,
-    translate,
+    translate, translate_rooted,
 };
 use sc_query::{Expr, OrderBy, Projection, Select, Source, Value};
 use serde_json::{Map, Value as Json};
@@ -223,6 +223,106 @@ pub async fn read_row_values_as(
             Ok(granted)
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// How this caller's permission to read `table` can be expressed **inside** a
+/// statement — the form an aggregate needs, because an aggregate observes rows
+/// without returning them.
+///
+/// A read that returns rows can decide row by row (the reified path); an
+/// aggregate cannot. `count(*)` is computed by the database over whatever the
+/// `WHERE` leaves, so either the rule is a predicate the `WHERE` can carry or
+/// there is no honest answer at all.
+pub enum AggregateGuard {
+    /// The rule is the database's: `table` has RLS, so its policies decide —
+    /// but only inside a caller-context transaction, which the statement
+    /// carrying the aggregate therefore has to run in.
+    InContext,
+    /// The rule is this predicate (`None` for a caller at or above the floor,
+    /// who is restricted by nothing).
+    Predicate(Option<Expr>),
+}
+
+/// The guard restricting an aggregate over `table` to the rows this caller may
+/// read, with the table's columns named through `root` — its own name for an
+/// aggregate over the table itself, or a subquery alias for a correlated one.
+///
+/// The two refusals are the point (docs/GRAPHQL_API.md §5):
+///
+/// - A caller the floor does not admit and no formula extends may not read the
+///   table, so they may not count it either.
+/// - An **untranslatable** formula refuses the aggregate, naming the table. A
+///   formula only the evaluator can decide cannot filter rows inside a
+///   statement, and a count over rows the caller cannot see is a leak that a
+///   plausible number hides. A refusal is loud; a wrong number is not.
+pub fn aggregate_guard(
+    cat: &Catalog,
+    table: &Table,
+    root: &str,
+    role: u8,
+    user: Option<&User>,
+) -> Result<AggregateGuard> {
+    if table.rls_enabled {
+        return Ok(AggregateGuard::InContext);
+    }
+    if role <= table.access.min_role_read {
+        return Ok(AggregateGuard::Predicate(None));
+    }
+    let Some(formula) = &table.ownership else {
+        return Err(Error::auth(format!("you may not read `{}`", table.name)));
+    };
+    let shape = cat.schema_shape()?;
+    let env = UserEnv::Inline(user_values(user));
+    let calc = table.calc_formulas();
+    match translate_rooted(
+        formula,
+        Operation::Read,
+        &Env::new(&env).with_calc(&calc),
+        &shape,
+        &table.name,
+        root,
+    ) {
+        Ok(pred) => Ok(AggregateGuard::Predicate(Some(pred))),
+        Err(TranslateError::Untranslatable(what)) => Err(Error::invalid(format!(
+            "`{}` cannot be aggregated for you: its ownership formula ({what}) has to be \
+             decided row by row, and an aggregate over rows you may not read would be a \
+             number nobody can check",
+            table.name
+        ))),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// One aggregate read over `table` — the caller's `aggregates`, over the rows
+/// `filter` leaves that this caller may read.
+///
+/// [`read_row_values_as`]'s sibling for a question about rows rather than about
+/// a row, and the same rule: the floor, the formula, or the database's own
+/// policies, chosen by [`aggregate_guard`]. What it will not do is fall back to
+/// the evaluator — see there.
+pub async fn aggregate_values_as(
+    cat: &Catalog,
+    table: &Table,
+    aggregates: Vec<Projection>,
+    filter: Option<Expr>,
+    role: u8,
+    user: Option<&User>,
+) -> Result<BTreeMap<String, Value>> {
+    match aggregate_guard(cat, table, &table.name, role, user)? {
+        AggregateGuard::InContext => {
+            let ctx = caller_context_at(role, user);
+            rows::aggregate_values(cat, table, aggregates, filter, Some(&ctx)).await
+        }
+        AggregateGuard::Predicate(pred) => {
+            // Both, or whichever there is: `Option::or` on the tail, since with
+            // one of them absent the other is the whole filter.
+            let filter = match (filter, pred) {
+                (Some(a), Some(b)) => Some(a.and(b)),
+                (a, b) => a.or(b),
+            };
+            rows::aggregate_values(cat, table, aggregates, filter, None).await
+        }
     }
 }
 

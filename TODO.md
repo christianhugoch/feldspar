@@ -184,22 +184,32 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
       the caller may not read is an error on that field with the parents still returned, which
       is what GraphQL partial results are for.
 
-## Phase 5 — Aggregates, including the constrained child aggregate
+## Phase 5 — Aggregates, including the constrained child aggregate ✅
 
-- [ ] `X_aggregate` at the root: `count(distinct: Column)`, `sum`/`avg` over numeric fields,
-      `min`/`max` over comparable ones, filtered by the same `BoolExp`.
-- [ ] **The milestone's motivating case**: `employees_aggregate(where: …)` *inside* a parent
+- [x] `X_aggregate` at the root: `count(distinct: Column)`, `sum`/`avg` over numeric fields,
+      `min`/`max` over comparable ones, filtered by the same `BoolExp`. (One statement of its
+      own, through a new `ownership::aggregate_values_as` — the rule for an aggregate has to
+      *be* a predicate, so an untranslatable ownership formula refuses rather than counting
+      rows the caller may not read.)
+- [x] **The milestone's motivating case**: `employees_aggregate(where: …)` *inside* a parent
       selection lowers, through Phase 1's builder, to a correlated subquery projected as another
       column of the parent query — no extra round trip, the child predicate folded into the
-      subquery's `WHERE`.
-- [ ] Multiple aggregates in one selection are multiple columns of the one query; the same
+      subquery's `WHERE`. The rule is "whichever read reaches the row projects them", so a
+      batched child list carries its own aggregates too.
+- [x] Multiple aggregates in one selection are multiple columns of the one query; the same
       relation aggregated twice under different `where` arguments gets two subqueries with
-      distinct aliases and distinct response keys.
-- [ ] Aggregates over a **filtered** parent list are aggregates over that filter — the parent's
+      distinct aliases (`_sc_g…`, kept out of the translator's own `_sc_a…` namespace) and
+      distinct response keys.
+- [x] Aggregates over a **filtered** parent list are aggregates over that filter — the parent's
       `WHERE` is not silently dropped.
-- [ ] Tests (real Postgres): the department/salary query returns the same numbers as a
+- [x] Tests (real Postgres): the department/salary query returns the same numbers as a
       hand-written SQL `count(*) FILTER`; `sum` over no rows is `0` and `avg` over no rows is
       `null`, matching AGG_EXPRS.md's semantics table exactly; the whole thing is one statement.
+
+Carried into Phase 7: a child table under RLS whose parent's read is **not** a caller-context
+transaction currently *refuses* the aggregate (its policies would not apply, and the count
+would be whatever they make of no caller). Phase 7's "the whole read runs inside the
+caller-context transaction" turns that refusal into an answer.
 
 ## Phase 6 — Mutations
 

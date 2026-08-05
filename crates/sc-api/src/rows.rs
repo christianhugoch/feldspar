@@ -236,6 +236,35 @@ pub async fn list_row_values(
     Ok(rows.iter().map(row_values).collect())
 }
 
+/// The one row an **aggregate** read returns: `aggregates` projected over the
+/// rows of `table` that `filter` leaves, with no `GROUP BY`.
+///
+/// The counterpart of [`list_row_values`] for a question about rows rather than
+/// about a row. It is a separate function because an aggregate `SELECT` is not a
+/// row read with extra columns: `SELECT *, count(*)` is not a legal statement,
+/// and the calculated fields have nothing to compute over here. Every projection
+/// is the caller's, aliased by the key it will be read back under — the
+/// expressions themselves come from `sc_expr`'s shared builder, so the wire and
+/// a formula answer the same question the same way.
+///
+/// A scalar aggregate always has exactly one row; an empty result would mean the
+/// database answered something else, and the empty map that comes back then
+/// resolves as nulls rather than as invented zeroes.
+pub async fn aggregate_values(
+    catalog: &Catalog,
+    table: &Table,
+    aggregates: Vec<Projection>,
+    filter: Option<Expr>,
+    context: Option<&CallerContext>,
+) -> Result<std::collections::BTreeMap<String, Value>> {
+    let mut select = Select::from(Source::table(table.name.clone())).columns(aggregates);
+    if let Some(filter) = filter {
+        select = select.filter(filter);
+    }
+    let rows = run_read(catalog, table, &select, context).await?;
+    Ok(rows.first().map(row_values).unwrap_or_default())
+}
+
 /// The `SELECT` one [`RowQuery`] renders to: every column plus the calculated
 /// fields and the query's own extra projections, filtered, ordered and bounded.
 fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Select> {

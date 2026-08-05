@@ -31,6 +31,15 @@
 //! second statement. It costs exactly one: [`child_list_field`] says only which
 //! rows this parent wants, and [`ChildLoader`](super::loader::ChildLoader)
 //! answers every sibling that asked the same thing together.
+//!
+//! **An incoming key *aggregated* is one value again**, so it goes back to
+//! being projected: `employees_aggregate(where: …) { count }` is a correlated
+//! subquery in the same `SELECT` as the parent row, and
+//! [`child_aggregate_field`] issues no query at all — it reads the column the
+//! parent's read already computed. The root `X_aggregate` has no parent to ride
+//! with and runs one statement of its own. Either way the *rows* being counted
+//! are the ones the caller may read, because the child's rule is folded into
+//! the subquery's `WHERE` and a rule that cannot be folded refuses.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,14 +48,17 @@ use async_graphql::dataloader::DataLoader;
 use async_graphql::dynamic::{FieldFuture, FieldValue, ResolverContext};
 use async_graphql::{SelectionField, Value as GqlValue};
 use base64::Engine;
-use sc_catalog::{Catalog, DataFieldKind, Table};
+use rust_decimal::prelude::ToPrimitive;
+use sc_catalog::{DataFieldKind, Table};
 use sc_error::{Error, Result};
 use sc_expr::JOIN;
-use sc_query::{Projection, Value};
+use sc_query::{Expr, Projection, Value};
 
+use super::agg;
 use super::args;
 use super::context::{RequestContext, request_context};
 use super::loader::{ChildKey, ChildLoader, ChildRequest};
+use super::names::{self, RelationNames};
 use crate::convert::value_to_json;
 use crate::ownership;
 use crate::rows::{self, RowQuery};
@@ -85,19 +97,62 @@ impl RowValue {
     /// The row on the other side of a Ⱶ-join: every key that starts with
     /// `field` + Ⱶ, with that prefix removed.
     fn joined(&self, field: &str, table: &str) -> RowValue {
-        let prefix = format!("{field}{JOIN}");
         RowValue {
             table: table.to_owned(),
-            values: self
-                .values
-                .iter()
-                .filter_map(|(k, v)| {
-                    k.strip_prefix(&prefix)
-                        .map(|rest| (rest.to_owned(), v.clone()))
-                })
-                .collect(),
+            values: strip_prefix(&self.values, &format!("{field}{JOIN}")),
         }
     }
+
+    /// The aggregate values this row's query computed under one response key —
+    /// the correlated subqueries projected beside its columns.
+    fn aggregate(&self, key: &str) -> AggValues {
+        AggValues {
+            values: strip_prefix(&self.values, &format!("{key}{}", agg::RESPONSE_SEP)),
+        }
+    }
+}
+
+/// The values one aggregate selection produced, keyed by response-key path
+/// relative to wherever they are being read from.
+///
+/// The aggregate object's fields resolve out of this the way a row's fields
+/// resolve out of a [`RowValue`], and for the same reason: `sum { salary }` is
+/// two levels of GraphQL over one flat `SELECT`, so each level strips its own
+/// response key and hands the rest down.
+#[derive(Clone, Default)]
+pub struct AggValues {
+    values: BTreeMap<String, Value>,
+}
+
+impl AggValues {
+    /// The values under one response key, with that key stripped.
+    fn nested(&self, key: &str) -> AggValues {
+        AggValues {
+            values: strip_prefix(&self.values, &format!("{key}{}", agg::RESPONSE_SEP)),
+        }
+    }
+
+    /// One value, if the selection that produced these asked for it.
+    fn get(&self, key: &str) -> Option<&Value> {
+        self.values.get(key)
+    }
+
+    /// Whether anything at all came back under this key.
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// The entries of `values` whose keys start with `prefix`, with it removed —
+/// how one flat `SELECT` answers a nested GraphQL selection at every level.
+fn strip_prefix(values: &BTreeMap<String, Value>, prefix: &str) -> BTreeMap<String, Value> {
+    values
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix(prefix)
+                .map(|rest| (rest.to_owned(), v.clone()))
+        })
+        .collect()
 }
 
 /// A `File` field on the wire: the stored path, and the URL the **REST**
@@ -244,7 +299,7 @@ pub fn child_list_field(
             }
             let child = rc.table(&child_table)?;
             let query = args::child_row_query(&child, &ctx, &key_field, rc.row_cap)?
-                .projecting(join_projections(&rc.catalog, &child, ctx.ctx.field())?);
+                .projecting(read_projections(rc, &child, ctx.ctx.field())?);
             let request = Arc::new(ChildRequest::new(&child.name, &key_field, query));
             let rows = ctx
                 .data::<DataLoader<ChildLoader>>()?
@@ -257,6 +312,142 @@ pub fn child_list_field(
             )))
         })
     })
+}
+
+/// The root `X_aggregate` field: one statement, answering every value the
+/// selection asked for over the rows this caller may read.
+///
+/// Not a read of rows followed by arithmetic — the database aggregates, over
+/// the caller's `where` ANDed with whatever [`ownership::aggregate_values_as`]
+/// decides this caller may see. A rule that cannot be expressed as a predicate
+/// refuses there, naming the table, rather than answering a number computed
+/// over rows the caller cannot read.
+pub fn aggregate_field(table: impl Into<String>) -> Resolver {
+    let table = table.into();
+    Box::new(move |ctx| {
+        let table = table.clone();
+        FieldFuture::new(async move {
+            let rc = request_context(&ctx)?;
+            let table = rc.table(&table)?;
+            let selections = agg::selections(&table, ctx.ctx.field())?;
+            let projections = agg::root_projections(&table, &selections)?;
+            // `{ departments_aggregate { __typename } }` asks for no value, and
+            // a `SELECT` with no columns is not a statement.
+            if projections.is_empty() {
+                return Ok(Some(FieldValue::owned_any(AggValues::default())));
+            }
+            let filter = match ctx.args.get(args::ARG_WHERE) {
+                Some(arg) => args::where_expr(&table, arg.as_value(), None)?,
+                None => None,
+            };
+            let values = ownership::aggregate_values_as(
+                &rc.catalog,
+                &table,
+                projections,
+                filter,
+                rc.role(),
+                rc.user(),
+            )
+            .await?;
+            Ok(Some(FieldValue::owned_any(AggValues { values })))
+        })
+    })
+}
+
+/// A child `X_aggregate` field: the values the parent's **own** `SELECT`
+/// already computed for this row.
+///
+/// This resolver issues no query. The correlated subqueries were projected as
+/// columns of the parent read (see [`collect_child_aggregate`]), so the whole of
+/// `departments { name employees_aggregate(where: …) { count } }` is one
+/// statement — which is the milestone's motivating case.
+///
+/// A row reached through a Ⱶ-join carries only what its parent's query
+/// projected, and an aggregate correlated to *it* was not projected: that is a
+/// refusal naming the table, because the alternative is a query per row.
+pub fn child_aggregate_field(child_table: impl Into<String>) -> Resolver {
+    let child_table = child_table.into();
+    Box::new(move |ctx| {
+        let child_table = child_table.clone();
+        FieldFuture::new(async move {
+            let row = parent_row(&ctx)?;
+            let field = ctx.ctx.field();
+            let values = row.aggregate(&agg::response_key(&field));
+            if values.is_empty() && asks_for_values(&field) {
+                return Err(async_graphql::Error::new(format!(
+                    "the aggregate over `{child_table}` was not computed for this row: it is \
+                     projected into the query that reads the parent, and a row reached through \
+                     a join is not read by one — ask for it on a `{}` read directly",
+                    row.table
+                )));
+            }
+            Ok(Some(FieldValue::owned_any(values)))
+        })
+    })
+}
+
+/// One aggregate value: `count`, or a column of a `sum`/`avg`/`min`/`max`,
+/// carried as the `wire` scalar the schema promised for it.
+pub fn agg_value_field(wire: impl Into<String>) -> Resolver {
+    let wire = wire.into();
+    Box::new(move |ctx| {
+        let wire = wire.clone();
+        FieldFuture::new(async move {
+            let values = parent_agg(&ctx)?;
+            let key = agg::response_key(&ctx.ctx.field());
+            Ok(values
+                .get(&key)
+                .map(|v| FieldValue::value(scalar_as(&wire, v))))
+        })
+    })
+}
+
+/// A value as the scalar the schema said this field is.
+///
+/// One narrowing, and it is Postgres' doing: `sum` over a `bigint` column is
+/// `numeric`, because a sum can outgrow what it sums. The schema types that
+/// field `BigInt` — a JSON number — and a caller typed against the SDL must not
+/// be handed the string an exact decimal rides back as. A sum that genuinely
+/// does not fit in 64 bits stays a decimal rather than being truncated into
+/// one: the promise was `BigInt`, and a wrong number would be worse than an
+/// unexpected shape.
+fn scalar_as(wire: &str, value: &Value) -> GqlValue {
+    match (wire, value) {
+        (names::BIG_INT, Value::Decimal(d)) if d.is_integer() => match d.to_i64() {
+            Some(n) => GqlValue::Number(n.into()),
+            None => scalar(value),
+        },
+        _ => scalar(value),
+    }
+}
+
+/// `sum` / `avg` / `min` / `max`: the values computed under this function, one
+/// response key down.
+pub fn agg_group_field() -> Resolver {
+    Box::new(move |ctx| {
+        FieldFuture::new(async move {
+            let values = parent_agg(&ctx)?;
+            let key = agg::response_key(&ctx.ctx.field());
+            Ok(Some(FieldValue::owned_any(values.nested(&key))))
+        })
+    })
+}
+
+/// Whether a selection set asks for anything but introspection.
+fn asks_for_values(field: &SelectionField<'_>) -> bool {
+    field
+        .selection_set()
+        .any(|sub| !sub.name().starts_with("__"))
+}
+
+/// The parent aggregate values, or the error saying a resolver was attached to
+/// something that is not one.
+fn parent_agg<'a>(ctx: &ResolverContext<'a>) -> async_graphql::Result<&'a AggValues> {
+    ctx.parent_value
+        .try_downcast_ref::<AggValues>()
+        .map_err(|_| {
+            async_graphql::Error::new("this GraphQL field is not resolving over an aggregate")
+        })
 }
 
 /// A `File` column: its stored path and the REST URL for its bytes.
@@ -321,7 +512,7 @@ pub fn file_part(part: &'static str) -> Resolver {
 /// plus the Ⱶ-join projections their selection set implies.
 fn read_query(rc: &RequestContext, table: &Table, ctx: &ResolverContext<'_>) -> Result<RowQuery> {
     let query = args::row_query(table, ctx, rc.row_cap)?;
-    Ok(query.projecting(join_projections(&rc.catalog, table, ctx.ctx.field())?))
+    Ok(query.projecting(read_projections(rc, table, ctx.ctx.field())?))
 }
 
 /// Run one read and wrap its rows for the executor.
@@ -345,39 +536,57 @@ async fn read(
         .collect())
 }
 
+/// Everything one read has to project beyond the row's own columns, collected
+/// while walking the selection set.
+#[derive(Default)]
+struct Extras {
+    /// The Ⱶ-join leaves, as join-path identifiers.
+    idents: Vec<String>,
+    /// The correlated aggregates, already built.
+    aggregates: Vec<Projection>,
+    /// How many subquery aliases the aggregates have taken, so the next one is
+    /// distinct within this statement.
+    aliases: usize,
+}
+
 /// The extra projections a selection set asks for: one correlated subquery per
-/// requested leaf behind a `Key` field, aliased by the join path itself.
-fn join_projections(
-    cat: &Catalog,
+/// requested leaf behind a `Key` field, aliased by the join path itself, and
+/// one per requested child aggregate, aliased by its response key.
+///
+/// Both are the same trick — the answer to a question about a *related* row,
+/// computed as another column of this row's `SELECT` rather than as another
+/// statement.
+fn read_projections(
+    rc: &RequestContext,
     table: &Table,
     selection: SelectionField<'_>,
 ) -> Result<Vec<Projection>> {
-    let mut idents = Vec::new();
-    collect_join_leaves(cat, table, selection, None, &mut idents)?;
-    if idents.is_empty() {
-        return Ok(Vec::new());
+    let mut extras = Extras::default();
+    collect_extras(rc, table, selection, None, &mut extras)?;
+    let mut out = extras.aggregates;
+    if extras.idents.is_empty() {
+        return Ok(out);
     }
-    let shape = cat.schema_shape()?;
-    idents
-        .into_iter()
-        .map(|ident| {
-            let expr = sc_expr::join_path_expr(&shape, &table.name, &ident).map_err(Error::from)?;
-            Ok(Projection::expr_as(expr, ident))
-        })
-        .collect()
+    let shape = rc.catalog.schema_shape()?;
+    for ident in extras.idents {
+        let expr = sc_expr::join_path_expr(&shape, &table.name, &ident).map_err(Error::from)?;
+        out.push(Projection::expr_as(expr, ident));
+    }
+    Ok(out)
 }
 
-/// Walk a selection set collecting the Ⱶ-join identifiers it implies.
+/// Walk a selection set collecting what the read has to project.
 ///
 /// `prefix` is the join path reached so far — `None` at the row itself, where a
 /// scalar needs no projection because `SELECT *` already has it.
-fn collect_join_leaves(
-    cat: &Catalog,
+fn collect_extras(
+    rc: &RequestContext,
     table: &Table,
     selection: SelectionField<'_>,
     prefix: Option<&str>,
-    out: &mut Vec<String>,
+    out: &mut Extras,
 ) -> Result<()> {
+    let cat = &rc.catalog;
     for sub in selection.selection_set() {
         let name = sub.name();
         // Introspection fields (`__typename`) name no column.
@@ -385,10 +594,19 @@ fn collect_join_leaves(
             continue;
         }
         let Some(field) = table.field(name) else {
-            // Not a column: an inverse relation (a child list or a child
-            // aggregate), which is resolved by a read of its own correlated
-            // against this row's key. So the key is what has to ride back.
-            push_key(table, prefix, out);
+            // Not a column: an inverse relation. A child **aggregate** over a
+            // row this query reads is computed by this query, as another
+            // column of it (the milestone's motivating case).
+            if prefix.is_none()
+                && let Some(rel) = aggregate_relation(rc, table, name)
+            {
+                collect_child_aggregate(rc, table, &rel, sub, out)?;
+                continue;
+            }
+            // A child **list** is many rows, not a value, so it is read by a
+            // query of its own correlated against this row's key — and the key
+            // is what has to ride back for that.
+            push_key(table, prefix, &mut out.idents);
             continue;
         };
         let ident = match prefix {
@@ -400,23 +618,113 @@ fn collect_join_leaves(
                 let Ok(target) = cat.require(&target_table.0) else {
                     // A key out of the application's own tables carries its own
                     // value, which `SELECT *` (or the leaf below) already has.
-                    push_leaf(prefix, &ident, out);
+                    push_leaf(prefix, &ident, &mut out.idents);
                     continue;
                 };
                 // The foreign key's own value, so a null relation can be
                 // answered as `null` without looking at a single leaf.
-                push_leaf(prefix, &ident, out);
-                collect_join_leaves(cat, &target, sub, Some(&ident), out)?;
+                push_leaf(prefix, &ident, &mut out.idents);
+                collect_extras(rc, &target, sub, Some(&ident), out)?;
             }
             // A `File` on the far side of a join needs the *target* row's key to
             // address its bytes by, so it is projected alongside the path.
             DataFieldKind::File { .. } if prefix.is_some() => {
-                push_leaf(prefix, &ident, out);
-                push_key(table, prefix, out);
+                push_leaf(prefix, &ident, &mut out.idents);
+                push_key(table, prefix, &mut out.idents);
             }
-            _ => push_leaf(prefix, &ident, out),
+            _ => push_leaf(prefix, &ident, &mut out.idents),
         }
     }
+    Ok(())
+}
+
+/// The inverse relation one field name is the aggregate of, if it is one.
+///
+/// Asked of the **derived names** rather than re-derived here: which child
+/// table `employees_aggregate` means, and which of its keys points back, was
+/// decided once when the schema was built, and a second derivation is a second
+/// answer waiting to disagree.
+fn aggregate_relation(rc: &RequestContext, table: &Table, field: &str) -> Option<RelationNames> {
+    rc.names
+        .get(&table.name)?
+        .relations
+        .iter()
+        .find(|r| r.aggregate_field == field)
+        .cloned()
+}
+
+/// Build the correlated subqueries one child-aggregate selection asks for, as
+/// columns of the parent's own read.
+///
+/// Two things are folded into each subquery's `WHERE` beside the correlation:
+/// the caller's `where` argument, and — this is the load-bearing part — the
+/// **child** table's own read rule. An aggregate must never count a row the
+/// caller may not read, and the only place that can be enforced for a count is
+/// inside the count.
+fn collect_child_aggregate(
+    rc: &RequestContext,
+    parent: &Table,
+    rel: &RelationNames,
+    field: SelectionField<'_>,
+    out: &mut Extras,
+) -> Result<()> {
+    let child = rc.table(&rel.child_table)?;
+    let selections = agg::selections(&child, field)?;
+    if selections.is_empty() {
+        return Ok(());
+    }
+    let arguments = field
+        .arguments()
+        .map_err(|e| Error::invalid(format!("`{}`: {e}", rel.aggregate_field)))?;
+    let filter = arguments
+        .iter()
+        .find(|(name, _)| name.as_str() == args::ARG_WHERE)
+        .map(|(_, value)| value.clone());
+    let response_key = agg::response_key(&field);
+    let correlation = agg::Correlation {
+        child: &child,
+        key_field: &rel.key_field,
+        parent: &parent.name,
+        parent_field: &rel.parent_field,
+        response_key: &response_key,
+    };
+    let projections = agg::child_projections(
+        &correlation,
+        &selections,
+        &mut out.aliases,
+        |alias| -> Result<Option<Expr>> {
+            let mut predicate = match &filter {
+                Some(value) => args::where_expr(&child, value, Some(alias))?,
+                None => None,
+            };
+            match ownership::aggregate_guard(&rc.catalog, &child, alias, rc.role(), rc.user())? {
+                ownership::AggregateGuard::Predicate(guard) => {
+                    // Both, or whichever there is (`Option::or` on the tail).
+                    predicate = match (predicate, guard) {
+                        (Some(a), Some(b)) => Some(a.and(b)),
+                        (a, b) => a.or(b),
+                    };
+                }
+                // The child's rule is its RLS policies, and a policy only
+                // applies inside a caller-context transaction. The parent's
+                // read is one exactly when the parent is RLS-enabled too; when
+                // it is not, the subquery would run with no caller set and
+                // count whatever the policies make of that — which is a number
+                // nobody should trust. Say so instead.
+                ownership::AggregateGuard::InContext if parent.rls_enabled => {}
+                ownership::AggregateGuard::InContext => {
+                    return Err(Error::invalid(format!(
+                        "the aggregate over `{}` cannot be computed inside a read of `{}`: \
+                         `{}` is protected by row-level security, whose policies apply only \
+                         inside a caller transaction, and a read of `{}` is not one",
+                        child.name, parent.name, child.name, parent.name
+                    )));
+                }
+            }
+            Ok(predicate)
+        },
+    )?;
+    out.aggregates.extend(projections);
     Ok(())
 }
 
