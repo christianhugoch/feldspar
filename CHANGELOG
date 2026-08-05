@@ -2,6 +2,56 @@
 
 Changes in reverse chronological order.
 
+## GraphQL: the whole read is the caller's, and a query has a price
+
+Phase 5 left one thing refused: a child table under row-level security, counted inside a parent
+read that was **not** a caller-context transaction. Its policies would have run with no caller
+set, and answered whatever they make of nobody — so the aggregate said so instead of answering.
+It answers now. A read that projects a correlated subquery over a protected table asks for the
+transaction its own table did not need: `RowQuery::in_caller_context` says the *statement*
+reaches RLS, and `rows::in_context` — which has always been "the table decides" — now grants a
+transaction to a statement that reaches one. A restricted caller's `departments { name
+employees_aggregate { count } }` counts their own employees, per department, in one statement;
+an anonymous caller counts none, because an unset GUC has never meant "no restriction".
+
+**A key is not a way around a floor.** Auditing that path turned up a real leak: an outgoing
+`Key` projects a Ⱶ-join subquery over the target table, and nothing was checking that the caller
+may read the *target*. `employees { department { name } }` handed over departments to a caller
+whose `{ departments { name } }` was refused by name. `ownership::join_guard` is the rule now,
+and it is the sibling of `aggregate_guard`: the caller meets the target's read floor, or the
+target's policies decide inside the caller's transaction, or it refuses naming the table. There
+is deliberately no third option. A join subquery is built from the schema shape and has no
+`WHERE` this provider owns, so an ownership *formula* — which decides row by row — cannot be
+carried into it, and a caller whose access comes from one is told to query the table directly
+rather than handed a row the formula withholds, one column at a time.
+
+**Four limits, per application, with defaults that are set** (`GraphqlLimits`). Depth and
+complexity are `async-graphql` validation rules compiled into the schema, so a too-deep or
+too-wide document is refused with **no statement issued** — asserted by counting statements, not
+by reading the message. The row cap bounds every list field, an absent `limit` taking it and a
+larger one clamped to it. The fourth is counted rather than predicted: the number of database
+round trips is not a property of a document, because one child list field is one statement per
+level however many parents asked for it, so `StatementBudget` is charged at each read and write
+and refuses the one that would exceed it — the point of a budget being the work not done. The
+defaults admit the standard introspection query, which is deeper than anything written by hand,
+because **introspection stays on**: the SDL is served at `{mount}/schema.graphql` and describes
+tables the application already exposes over REST.
+
+The two library refusals are rewritten to name the bound they hit. "Query is nested too deep."
+is true and useless to the person holding the query; the bound is this application's
+configuration, and this is the only place that knows it.
+
+**Nothing a caller writes reaches SQL as an identifier**, and there are tests that say so rather
+than a comment. A response key is a GraphQL name by the parser's own grammar, so an alias
+spelling a SQL fragment is not a document; the test asserts the stronger thing — that the
+statement is byte-for-byte identical apart from the aggregate's own result alias, which *is* the
+response key by design. A fragment produces the same read as the selection it stands for. A
+variable is a value: it is coerced against the column and bound as a parameter, so
+`'; DROP TABLE employees; --` matches nothing and leaves the table where it was. The one place a
+caller's input is genuinely about an identifier — `count(distinct: Column)` — is an enum in the
+schema and is checked against the catalog again anyway, because the catalog is the only thing
+that may decide a column name.
+
 ## GraphQL mutations, which are the row layer with a second front door
 
 `insert_X(object:)`, `update_X_by_pk(pk_columns:, set:)` and `delete_X_by_pk(id:)` are in every

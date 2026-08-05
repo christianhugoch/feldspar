@@ -150,6 +150,10 @@ impl ChildLoader {
         };
         let request = &first.request;
         let table = self.ctx.table(&request.child_table)?;
+        // One batch is one statement, however many parents asked for it —
+        // which is exactly why the budget is charged here and not in the
+        // resolver that queued the load.
+        self.ctx.charge(&request.child_table)?;
 
         // One membership test over the distinct parents, so a parent that two
         // fields of the document asked about is still one bound value.
@@ -175,13 +179,13 @@ impl ChildLoader {
         // Without a per-parent bound the cap is shared between the parents, so
         // reaching it means somebody's list was cut short and nobody can tell
         // whose. Saying so is the only honest answer.
-        if request.query.partition.is_none() && rows.len() as u64 >= self.ctx.row_cap {
+        if request.query.partition.is_none() && rows.len() as u64 >= self.ctx.limits.row_cap {
             return Err(Error::invalid(format!(
                 "reading `{}` for {} parent rows reached this application's row cap of {}; \
                  give the field a `limit`, which bounds each parent's list on its own",
                 request.child_table,
                 seen.len(),
-                self.ctx.row_cap
+                self.ctx.limits.row_cap
             )));
         }
 

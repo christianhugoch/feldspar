@@ -33,13 +33,16 @@
 //! `where`/`order_by`/`limit`/`offset` onto the row layer's own `RowQuery`,
 //! [`agg`] lowers an aggregate selection onto `sc-expr`'s aggregate builders,
 //! [`resolve`] is what the query fields do, [`mutate`] is what the mutation
-//! fields do, and [`errors`] labels a write's refusal so a form can act on it.
+//! fields do, [`errors`] labels a write's refusal so a form can act on it, and
+//! [`limits`] is what one operation is allowed to cost — because the caller
+//! writes the query here, which is the one thing REST never let them do.
 
 mod agg;
 mod args;
 mod build;
 mod context;
 mod errors;
+pub mod limits;
 mod loader;
 mod mutate;
 pub mod names;
@@ -63,7 +66,11 @@ use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method
 use crate::provider::{ApiProvider, ApiRequest, ApiResponse};
 use crate::schema::{StructField, TypeSchema};
 
-pub use context::{DEFAULT_FILE_MOUNT, DEFAULT_ROW_CAP};
+pub use context::DEFAULT_FILE_MOUNT;
+pub use limits::{
+    DEFAULT_MAX_COMPLEXITY, DEFAULT_MAX_DEPTH, DEFAULT_ROW_CAP, DEFAULT_STATEMENT_BUDGET,
+    GraphqlLimits,
+};
 pub use names::SchemaNames;
 
 /// The provider's registered name.
@@ -95,9 +102,10 @@ pub struct GraphqlProvider {
     /// (§7.3), injected by the server exactly as it is into the REST provider.
     /// Absent is not "allow": such a read fails closed.
     evaluator: Option<Arc<dyn JsEvaluator>>,
-    /// The ceiling a list field's `limit` is clamped to, and the bound an absent
-    /// `limit` takes.
-    row_cap: u64,
+    /// What this application allows one operation to cost — depth, complexity,
+    /// rows and statements. Two of the four are compiled into the schema, so a
+    /// change to them rebuilds it; see [`GraphqlProvider::with_limits`].
+    limits: GraphqlLimits,
     /// The REST mount a `File` field's `url` is built against — the bytes are
     /// served there, and a GraphQL field does not become a second way to them.
     file_mount: String,
@@ -116,9 +124,26 @@ impl GraphqlProvider {
     /// one that refuses to start: the half nobody notices is the half that is
     /// wrong.
     pub fn project(mount: impl Into<String>, tables: &[Table]) -> Result<GraphqlProvider> {
+        GraphqlProvider::project_with(mount, tables, GraphqlLimits::default())
+    }
+
+    /// [`project`](Self::project) under an application's own [`GraphqlLimits`].
+    ///
+    /// The limits are taken here rather than set afterwards because two of them
+    /// are properties of the **schema**: `limit_depth` and `limit_complexity`
+    /// are `async-graphql` validation rules, applied to a document before any
+    /// resolver runs, and a schema is built once at mount. The other two are
+    /// per-request and could be set either way; they travel together because
+    /// splitting "the limits" across two places is how one of them ends up
+    /// configured and the other forgotten.
+    pub fn project_with(
+        mount: impl Into<String>,
+        tables: &[Table],
+        limits: GraphqlLimits,
+    ) -> Result<GraphqlProvider> {
         let mount = normalize_mount(&mount.into());
         let names = SchemaNames::derive(tables);
-        let schema = build::build_schema(tables, &names)?;
+        let schema = build::build_schema(tables, &names, limits)?;
 
         let mut endpoints = EndpointSet::new();
         endpoints.register(
@@ -159,7 +184,7 @@ impl GraphqlProvider {
             diagnostics: names.diagnostics().to_vec(),
             names: Arc::new(names),
             evaluator: None,
-            row_cap: DEFAULT_ROW_CAP,
+            limits,
             file_mount: DEFAULT_FILE_MOUNT.to_owned(),
         })
     }
@@ -174,9 +199,24 @@ impl GraphqlProvider {
 
     /// Set the row cap: the bound a list field takes when the caller names no
     /// `limit`, and the ceiling one they do name is clamped to.
+    ///
+    /// Settable after the fact, unlike the depth and complexity bounds, because
+    /// it is applied per read rather than compiled into the schema.
     pub fn with_row_cap(mut self, cap: u64) -> GraphqlProvider {
-        self.row_cap = cap;
+        self.limits.row_cap = cap;
         self
+    }
+
+    /// Set the statement budget: the most database statements one operation may
+    /// issue. Per request, so likewise settable after the schema is built.
+    pub fn with_statement_budget(mut self, statements: usize) -> GraphqlProvider {
+        self.limits.statement_budget = statements;
+        self
+    }
+
+    /// The limits this projection serves under.
+    pub fn limits(&self) -> GraphqlLimits {
+        self.limits
     }
 
     /// Point `File` fields' `url` at the application's REST mount. A GraphQL
@@ -224,14 +264,19 @@ impl GraphqlProvider {
             names: Arc::clone(&self.names),
             user: user.cloned(),
             evaluator: self.evaluator.clone(),
-            row_cap: self.row_cap,
+            limits: self.limits,
+            // One budget per request, because the budget is the operation's:
+            // sharing it across requests would let one caller's query refuse
+            // another's, and a fresh one per field would bound nothing.
+            budget: Arc::new(limits::StatementBudget::new(self.limits.statement_budget)),
             file_mount: self.file_mount.clone(),
         };
         // One loader per request, holding that request's own context: a batched
         // child read is the same read as an unbatched one, by the same caller,
         // and only the shape of the statement differs.
         let loader = DataLoader::new(loader::ChildLoader::new(rc.clone()), tokio::spawn);
-        let response = self.schema.execute(request.data(loader).data(rc)).await;
+        let mut response = self.schema.execute(request.data(loader).data(rc)).await;
+        limits::name_the_bound(&mut response.errors, self.limits);
         // The legacy `application/json` rule: 200 with the errors in the body.
         // `application/graphql-response+json` needs content negotiation, and
         // `ApiRequest` carries no headers to negotiate with.

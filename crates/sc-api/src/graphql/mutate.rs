@@ -116,6 +116,7 @@ async fn insert(
     ctx: &ResolverContext<'_>,
 ) -> Result<Option<FieldValue<'static>>> {
     let body = object_arg(table, ctx, ARG_OBJECT)?;
+    rc.charge(&table.name)?;
     let written = ownership::insert_row_as(
         &rc.catalog,
         table,
@@ -139,6 +140,7 @@ async fn update(
     let keys = object_arg(table, ctx, ARG_PK_COLUMNS)?;
     let id = pk_text(table, pk, &keys)?;
     let body = object_arg(table, ctx, ARG_SET)?;
+    rc.charge(&table.name)?;
     let written = ownership::update_row_as(
         &rc.catalog,
         table,
@@ -164,6 +166,7 @@ async fn delete(
         .get(pk)
         .ok_or_else(|| Error::invalid(format!("`{pk}` is required")))?;
     let id = key_text(table, pk, key.as_value())?;
+    rc.charge(&table.name)?;
     let removed = ownership::delete_row_as(
         &rc.catalog,
         table,

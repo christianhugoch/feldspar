@@ -26,6 +26,14 @@
 //! Ⱶ operator's own contract and it is what a GraphQL caller expects of a
 //! nullable object field.
 //!
+//! **The joined row is still a read of the other table**, so its read rule holds
+//! ([`ownership::join_guard`]): a key is not a way around a floor that a list
+//! field over the same table enforces. The one shape a projected join cannot
+//! carry is an ownership *formula* — the subquery comes from the schema shape
+//! and there is no `WHERE` here to AND a predicate into — so a caller whose
+//! access to the target is a formula's is refused by name, exactly as decision
+//! 5 refuses an untranslatable aggregate. A wrong row is worse than a refusal.
+//!
 //! **An incoming key is batched, not walked.** A child list cannot be projected
 //! — it is many rows, not one value — so it is the one thing here that costs a
 //! second statement. It costs exactly one: [`child_list_field`] says only which
@@ -260,8 +268,8 @@ pub(super) async fn read_one(
     value: Value,
     ctx: &ResolverContext<'_>,
 ) -> Result<Option<FieldValue<'static>>> {
-    let query = RowQuery::new()
-        .projecting(read_projections(rc, table, ctx.ctx.field())?)
+    let query = read_projections(rc, table, ctx.ctx.field())?
+        .onto(RowQuery::new())
         .and_filter(Expr::col(pk).eq(Expr::lit(value)))
         .limit(1);
     Ok(read(rc, table, &query).await?.into_iter().next())
@@ -358,8 +366,8 @@ pub fn child_list_field(
                 return Ok(Some(FieldValue::list(Vec::<FieldValue<'static>>::new())));
             }
             let child = rc.table(&child_table)?;
-            let query = args::child_row_query(&child, &ctx, &key_field, rc.row_cap)?
-                .projecting(read_projections(rc, &child, ctx.ctx.field())?);
+            let query = args::child_row_query(&child, &ctx, &key_field, rc.limits.row_cap)?;
+            let query = read_projections(rc, &child, ctx.ctx.field())?.onto(query);
             let request = Arc::new(ChildRequest::new(&child.name, &key_field, query));
             let rows = ctx
                 .data::<DataLoader<ChildLoader>>()?
@@ -400,6 +408,9 @@ pub fn aggregate_field(table: impl Into<String>) -> Resolver {
                 Some(arg) => args::where_expr(&table, arg.as_value(), None)?,
                 None => None,
             };
+            // A root aggregate is a statement of its own — it has no parent
+            // read to ride in — so it is charged like one.
+            rc.charge(&table.name)?;
             let values = ownership::aggregate_values_as(
                 &rc.catalog,
                 &table,
@@ -580,8 +591,8 @@ pub fn file_part(part: &'static str) -> Resolver {
 /// The [`RowQuery`] behind one list (or `_by_pk`) field: the caller's arguments,
 /// plus the Ⱶ-join projections their selection set implies.
 fn read_query(rc: &RequestContext, table: &Table, ctx: &ResolverContext<'_>) -> Result<RowQuery> {
-    let query = args::row_query(table, ctx, rc.row_cap)?;
-    Ok(query.projecting(read_projections(rc, table, ctx.ctx.field())?))
+    let query = args::row_query(table, ctx, rc.limits.row_cap)?;
+    Ok(read_projections(rc, table, ctx.ctx.field())?.onto(query))
 }
 
 /// Run one read and wrap its rows for the executor.
@@ -590,6 +601,7 @@ async fn read(
     table: &Table,
     query: &RowQuery,
 ) -> Result<Vec<FieldValue<'static>>> {
+    rc.charge(&table.name)?;
     let rows = ownership::read_row_values_as(
         &rc.catalog,
         table,
@@ -616,32 +628,59 @@ struct Extras {
     /// How many subquery aliases the aggregates have taken, so the next one is
     /// distinct within this statement.
     aliases: usize,
+    /// Whether any of them reaches an RLS-protected table, and so whether the
+    /// whole statement has to be a caller-context one.
+    in_caller_context: bool,
 }
 
-/// The extra projections a selection set asks for: one correlated subquery per
-/// requested leaf behind a `Key` field, aliased by the join path itself, and
-/// one per requested child aggregate, aliased by its response key.
+/// The extra projections a selection set asks for, and whether they oblige the
+/// read to run in the caller's transaction.
 ///
-/// Both are the same trick — the answer to a question about a *related* row,
-/// computed as another column of this row's `SELECT` rather than as another
-/// statement.
+/// One correlated subquery per requested leaf behind a `Key` field, aliased by
+/// the join path itself, and one per requested child aggregate, aliased by its
+/// response key. Both are the same trick — the answer to a question about a
+/// *related* row, computed as another column of this row's `SELECT` rather than
+/// as another statement.
+///
+/// Which is exactly why the caller context is decided here too: a subquery over
+/// a table whose ownership is the database's runs *that* table's policies, and
+/// they only exist inside a transaction that has set the caller GUCs (§7.3).
+struct ReadPlan {
+    /// The extra columns of the `SELECT`.
+    extra: Vec<Projection>,
+    /// Whether the statement has to run with the caller's GUCs set.
+    in_caller_context: bool,
+}
+
+impl ReadPlan {
+    /// This plan applied to a query: its projections, and its answer to whether
+    /// the read is a caller-context one.
+    fn onto(self, query: RowQuery) -> RowQuery {
+        query
+            .projecting(self.extra)
+            .requiring_caller_context(self.in_caller_context)
+    }
+}
+
 fn read_projections(
     rc: &RequestContext,
     table: &Table,
     selection: SelectionField<'_>,
-) -> Result<Vec<Projection>> {
+) -> Result<ReadPlan> {
     let mut extras = Extras::default();
     collect_extras(rc, table, selection, None, &mut extras)?;
     let mut out = extras.aggregates;
-    if extras.idents.is_empty() {
-        return Ok(out);
+    if !extras.idents.is_empty() {
+        let shape = rc.catalog.schema_shape()?;
+        for ident in extras.idents {
+            let expr = sc_expr::join_path_expr(&shape, &table.name, &ident).map_err(Error::from)?;
+            out.push(Projection::expr_as(expr, ident));
+        }
     }
-    let shape = rc.catalog.schema_shape()?;
-    for ident in extras.idents {
-        let expr = sc_expr::join_path_expr(&shape, &table.name, &ident).map_err(Error::from)?;
-        out.push(Projection::expr_as(expr, ident));
-    }
-    Ok(out)
+    Ok(ReadPlan {
+        extra: out,
+        in_caller_context: extras.in_caller_context,
+    })
 }
 
 /// Walk a selection set collecting what the read has to project.
@@ -693,6 +732,21 @@ fn collect_extras(
                 // The foreign key's own value, so a null relation can be
                 // answered as `null` without looking at a single leaf.
                 push_leaf(prefix, &ident, &mut out.idents);
+                // A joined row is *read*, so the target's read rule holds — a
+                // key must not become a way around the floor that a list field
+                // over the same table enforces. Only when the caller actually
+                // asks for a value of it: `manager { __typename }` reads
+                // nothing and answers from the schema.
+                if asks_for_values(&sub) {
+                    match ownership::join_guard(&target, rc.role())? {
+                        ownership::JoinAccess::Unrestricted => {}
+                        // The target's policies decide what the subquery sees,
+                        // and outside a caller transaction they see no caller
+                        // and yield nothing — which would answer
+                        // `manager { email }` with a silent null.
+                        ownership::JoinAccess::InContext => out.in_caller_context = true,
+                    }
+                }
                 collect_extras(rc, &target, sub, Some(&ident), out)?;
             }
             // A `File` on the far side of a join needs the *target* row's key to
@@ -757,6 +811,7 @@ fn collect_child_aggregate(
         parent_field: &rel.parent_field,
         response_key: &response_key,
     };
+    let mut needs_context = false;
     let projections = agg::child_projections(
         &correlation,
         &selections,
@@ -775,24 +830,17 @@ fn collect_child_aggregate(
                     };
                 }
                 // The child's rule is its RLS policies, and a policy only
-                // applies inside a caller-context transaction. The parent's
-                // read is one exactly when the parent is RLS-enabled too; when
-                // it is not, the subquery would run with no caller set and
-                // count whatever the policies make of that — which is a number
-                // nobody should trust. Say so instead.
-                ownership::AggregateGuard::InContext if parent.rls_enabled => {}
-                ownership::AggregateGuard::InContext => {
-                    return Err(Error::invalid(format!(
-                        "the aggregate over `{}` cannot be computed inside a read of `{}`: \
-                         `{}` is protected by row-level security, whose policies apply only \
-                         inside a caller transaction, and a read of `{}` is not one",
-                        child.name, parent.name, child.name, parent.name
-                    )));
-                }
+                // applies inside a caller-context transaction. So the *parent's*
+                // read becomes one — the subquery is a column of it, and there
+                // is no other statement for the policies to run in. Without
+                // that the policies would see no caller and count whatever they
+                // make of it, which is a number nobody should trust.
+                ownership::AggregateGuard::InContext => needs_context = true,
             }
             Ok(predicate)
         },
     )?;
+    out.in_caller_context |= needs_context;
     out.aggregates.extend(projections);
     Ok(())
 }

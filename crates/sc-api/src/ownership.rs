@@ -147,12 +147,18 @@ pub async fn read_row_values_as(
     // The database enforces this table's ownership: run the read in a
     // caller-context transaction and let the policies decide, exactly as the
     // REST provider's RLS path does.
+    //
+    // A read of an *unprotected* table needs the same transaction when one of
+    // its own projections reaches a protected one — a correlated aggregate over
+    // an RLS child (§13.4). The context is built either way and the row layer
+    // decides whether the statement is wrapped, so the two rules stay in the one
+    // place that knows them.
+    let ctx = (table.rls_enabled || query.in_caller_context).then(|| caller_context_at(role, user));
     if table.rls_enabled {
-        let ctx = caller_context_at(role, user);
-        return rows::list_row_values(cat, table, query, Some(&ctx)).await;
+        return rows::list_row_values(cat, table, query, ctx.as_ref()).await;
     }
     if role <= table.access.min_role_read {
-        return rows::list_row_values(cat, table, query, None).await;
+        return rows::list_row_values(cat, table, query, ctx.as_ref()).await;
     }
     let Some(formula) = &table.ownership else {
         return Err(Error::auth(format!("you may not read `{}`", table.name)));
@@ -170,7 +176,9 @@ pub async fn read_row_values_as(
     ) {
         // The database filters, and the caller's own filter, ordering and bound
         // ride along in the same statement.
-        Ok(pred) => rows::list_row_values(cat, table, &query.clone().and_filter(pred), None).await,
+        Ok(pred) => {
+            rows::list_row_values(cat, table, &query.clone().and_filter(pred), ctx.as_ref()).await
+        }
         // The formula needs JavaScript. The filter and the ordering still go to
         // the database — the ordering survives because filtering preserves it —
         // but the **bound does not**: a `LIMIT`/`OFFSET` applied before the
@@ -184,9 +192,12 @@ pub async fn read_row_values_as(
                 table,
                 formula,
                 &shape,
-                query.filter.clone(),
-                &query.order,
-                &query.extra,
+                FetchShape {
+                    filter: query.filter.clone(),
+                    order: &query.order,
+                    extra: &query.extra,
+                    context: ctx.as_ref(),
+                },
             )
             .await?;
             let limit = query.limit.unwrap_or(u64::MAX);
@@ -291,6 +302,58 @@ pub fn aggregate_guard(
             table.name
         ))),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// How this caller's permission to read `table` can be carried by a **Ⱶ-join**
+/// — a correlated subquery over `table` projected as a column of some *other*
+/// table's read.
+///
+/// The sibling of [`AggregateGuard`], for the other thing a read does inside
+/// somebody else's statement. It has one fewer option, and that is the whole
+/// point: a join subquery is built by [`join_path_expr`] out of the schema
+/// shape, and there is nowhere in it to AND a predicate. So the rule can be
+/// carried by the database's own policies or it cannot be carried at all.
+pub enum JoinAccess {
+    /// The caller meets the table's read floor, so nothing restricts the join.
+    Unrestricted,
+    /// The table's rule is the database's: its policies decide, inside a
+    /// caller-context transaction the enclosing statement therefore has to run
+    /// in.
+    InContext,
+}
+
+/// Whether a Ⱶ-join into `table` may be projected for this caller.
+///
+/// A joined row is *read*, and the values it yields are the target table's, so
+/// the target table's read rule has to hold — the same argument
+/// [`read_row_values_as`] makes for a list and [`aggregate_guard`] makes for a
+/// count. Two refusals, both naming the table:
+///
+/// - A caller the floor does not admit and no formula extends may not read the
+///   table, so they may not read it through a key either.
+/// - A caller whose access comes from an **ownership formula** is refused too,
+///   translatable or not. A formula decides *which rows*, and a join subquery
+///   has no `WHERE` this provider owns to put that decision in; answering
+///   anyway would hand the caller a row they do not own, one column at a time,
+///   which is the quietest possible leak. Reading the table directly still
+///   works and still applies the formula.
+pub fn join_guard(table: &Table, role: u8) -> Result<JoinAccess> {
+    if table.rls_enabled {
+        return Ok(JoinAccess::InContext);
+    }
+    if role <= table.access.min_role_read {
+        return Ok(JoinAccess::Unrestricted);
+    }
+    match &table.ownership {
+        Some(_) => Err(Error::invalid(format!(
+            "`{}` cannot be read through a key by you: your access to it comes from its \
+             ownership formula, which decides row by row, and a related row is read as a \
+             subquery of another table's query with no room for that decision — query \
+             `{}` directly instead",
+            table.name, table.name
+        ))),
+        None => Err(Error::auth(format!("you may not read `{}`", table.name))),
     }
 }
 
@@ -513,7 +576,7 @@ pub(crate) async fn list_owned_rows(
         Err(TranslateError::Untranslatable(_)) => {
             let evaluator = require_evaluator(evaluator)?;
             let fetched =
-                fetch_rows_with_joins(cat, table, formula, &shape, None, &[], &[]).await?;
+                fetch_rows_with_joins(cat, table, formula, &shape, FetchShape::default()).await?;
             let mut granted = Vec::with_capacity(fetched.len());
             for values in fetched {
                 if allowed(evaluator, formula, Operation::Read, user, &values).await {
@@ -589,8 +652,17 @@ pub(crate) async fn fetch_row_values(
     let shape = cat.schema_shape()?;
     let pk = rows::single_pk(table)?;
     let filter = rows::pk_filter(table, &pk, id)?;
-    let mut fetched =
-        fetch_rows_with_joins(cat, table, formula, &shape, Some(filter), &[], &[]).await?;
+    let mut fetched = fetch_rows_with_joins(
+        cat,
+        table,
+        formula,
+        &shape,
+        FetchShape {
+            filter: Some(filter),
+            ..FetchShape::default()
+        },
+    )
+    .await?;
     Ok(fetched.drain(..).next())
 }
 
@@ -656,15 +728,35 @@ async fn allowed(
 /// Ⱶ-join path the formula uses, aliased as the join identifier itself — the
 /// correlated subselect from the symbolic translator, reused as a projection.
 /// One query serves both the row data and the evaluator's bindings.
+/// The rest of the read [`fetch_rows_with_joins`] performs, beside the formula's
+/// own join projections — grouped because they travel together and because a
+/// list of eight positional arguments is a list nobody reads.
+#[derive(Default)]
+struct FetchShape<'a> {
+    /// `WHERE`, if the caller has one.
+    filter: Option<Expr>,
+    /// `ORDER BY`. The bound is deliberately *not* here: it cannot be applied
+    /// before the evaluator has spoken (see the caller).
+    order: &'a [OrderBy],
+    /// Extra projections of the caller's own, in the same statement.
+    extra: &'a [Projection],
+    /// The caller context, when one of `extra` reaches an RLS-protected table.
+    context: Option<&'a CallerContext>,
+}
+
 async fn fetch_rows_with_joins(
     cat: &Catalog,
     table: &Table,
     formula: &Formula,
     shape: &sc_expr::SchemaShape,
-    filter: Option<Expr>,
-    order: &[OrderBy],
-    extra: &[Projection],
+    read: FetchShape<'_>,
 ) -> Result<Vec<BTreeMap<String, Value>>> {
+    let FetchShape {
+        filter,
+        order,
+        extra,
+        context,
+    } = read;
     let analysis = formula.validate(shape, &table.name)?;
     let mut columns = vec![Projection::all()];
     for path in &analysis.join_paths {
@@ -680,12 +772,11 @@ async fn fetch_rows_with_joins(
         select = select.filter(filter);
     }
     select.order = order.to_vec();
-    let fetched: Vec<Row> = cat
-        .provider(table)
-        .query(&select)
-        .await?
-        .try_collect()
-        .await?;
+    // `context` is `Some` only when one of `extra`'s projections reaches an
+    // RLS-protected table; the row layer decides what to do with it, so this
+    // path cannot disagree with the symbolic one about when a statement is a
+    // caller-context statement.
+    let fetched: Vec<Row> = rows::run_read(cat, table, &select, context, context.is_some()).await?;
     Ok(fetched.iter().map(crate::rows::row_values).collect())
 }
 

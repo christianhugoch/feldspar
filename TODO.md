@@ -206,10 +206,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
       hand-written SQL `count(*) FILTER`; `sum` over no rows is `0` and `avg` over no rows is
       `null`, matching AGG_EXPRS.md's semantics table exactly; the whole thing is one statement.
 
-Carried into Phase 7: a child table under RLS whose parent's read is **not** a caller-context
-transaction currently *refuses* the aggregate (its policies would not apply, and the count
-would be whatever they make of no caller). Phase 7's "the whole read runs inside the
-caller-context transaction" turns that refusal into an answer.
+Carried into Phase 7 and discharged there: a child table under RLS whose parent's read was
+**not** a caller-context transaction used to *refuse* the aggregate (its policies would not
+apply, and the count would be whatever they make of no caller). Phase 7's "the whole read runs
+inside the caller-context transaction" turned that refusal into an answer.
 
 ## Phase 6 — Mutations ✅
 
@@ -239,25 +239,39 @@ removed and refuses a selection reaching past them. That needed `delete_row_guar
 the row it had already read for the delete event instead of `{"deleted": true}`; the REST
 projection now wraps its own acknowledgement at its own boundary, where that contract belongs.
 
-## Phase 7 — Authorization, cost, and the refusals
+## Phase 7 — Authorization, cost, and the refusals ✅
 
-- [ ] **RLS**: the whole read — parent, joinfields and aggregate subqueries — runs inside the
+- [x] **RLS**: the whole read — parent, joinfields and aggregate subqueries — runs inside the
       caller-context transaction, so the child tables' policies apply to the correlated
       subqueries. Test it, on a FORCE'd child table: the count a restricted caller sees counts
-      only their own rows.
-- [ ] **Non-RLS ownership**: the child's translated ownership predicate is ANDed into the
+      only their own rows. (`RowQuery::in_caller_context` says the *statement* reaches a
+      protected table; `rows::in_context` — always "the table decides" — now also grants the
+      transaction to a statement that reaches one. Phase 5's carried refusal is gone.)
+- [x] **Non-RLS ownership**: the child's translated ownership predicate is ANDed into the
       aggregate's subquery `WHERE`; an **untranslatable** formula refuses the aggregate with an
-      error naming the table (decision 5).
-- [ ] **Limits**: `limit_depth` and `limit_complexity` on the schema, a row cap per list field
+      error naming the table (decision 5). Landed in Phase 5; its leak tests are in
+      `graphql_aggregates.rs`, where the aggregates they bound are.
+- [x] **Limits**: `limit_depth` and `limit_complexity` on the schema, a row cap per list field
       and an overall statement budget, all configured per application with defaults that are
-      set. Introspection stays on.
-- [ ] Aliases, fragments and variables are the *user's* input and must not reach SQL as
+      set. Introspection stays on. (`GraphqlLimits`, taken by `GraphqlProvider::project_with`
+      because two of the four are schema properties. The library's two terse refusals are
+      rewritten to name the bound they hit.)
+- [x] Aliases, fragments and variables are the *user's* input and must not reach SQL as
       identifiers: response keys come from the operation, column names come from the catalog,
       and the test asserts that a field alias spelling a SQL fragment changes nothing but the
       response key.
-- [ ] Tests: a table-level leak test per rule above — for each, a caller who may not read the
+- [x] Tests: a table-level leak test per rule above — for each, a caller who may not read the
       child rows, asserting the *refusal or the reduced count*, never the full one; and a
       too-deep and a too-expensive query, each refused before a statement is issued.
+
+Found while writing those leak tests, and fixed here rather than carried: an outgoing `Key`
+projected a Ⱶ-join over its target **without checking that the caller may read the target**, so
+`employees { department { name } }` answered for a caller whose `{ departments { name } }` was
+refused by name. `ownership::join_guard` is the rule now — the floor, or the target's own
+policies inside the caller's transaction, or a refusal naming the table. There is no third
+option: a join subquery is built from the schema shape and has no `WHERE` this provider owns, so
+an ownership *formula* cannot be folded into it, and a caller whose access comes from one is
+told to query the table directly instead of being handed a withheld row one column at a time.
 
 ## Phase 8 — Wiring: enabling it, generating for it
 

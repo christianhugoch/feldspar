@@ -24,17 +24,9 @@ use sc_catalog::{Catalog, Table};
 use sc_error::Result;
 use sc_expr::JsEvaluator;
 
+use super::limits::{GraphqlLimits, StatementBudget};
 use super::names::SchemaNames;
 use crate::ownership;
-
-/// The most rows a list field yields when the caller names no `limit`, and the
-/// ceiling a `limit` they *do* name is clamped to.
-///
-/// A GraphQL list field with no bound is a request to stream a table into a
-/// response; a default that is set is what keeps that from being an accident.
-/// Phase 7 makes it per-application configuration — this is the default it will
-/// have.
-pub const DEFAULT_ROW_CAP: u64 = 500;
 
 /// The mount an application's `File` bytes are served from when nobody says
 /// otherwise — the REST provider's own default. A GraphQL `File` field is a path
@@ -64,8 +56,12 @@ pub struct RequestContext {
     /// The engine an untranslatable ownership formula needs (§7.3). Absent is
     /// not "allow": the read fails closed with a configuration error.
     pub evaluator: Option<Arc<dyn JsEvaluator>>,
-    /// The list-field row cap for this application.
-    pub row_cap: u64,
+    /// What this application allows one operation to cost.
+    pub limits: GraphqlLimits,
+    /// The statements *this request* has left to spend — shared, because the
+    /// budget is the operation's and not a field's, and `Arc` because the child
+    /// loader holds the same one.
+    pub budget: Arc<StatementBudget>,
     /// The REST mount a `File` field's URL is built against.
     pub file_mount: String,
 }
@@ -93,6 +89,13 @@ impl RequestContext {
     /// the resolver reads, without the schema having to be rebuilt for it.
     pub fn table(&self, name: &str) -> Result<Table> {
         self.catalog.require(name)
+    }
+
+    /// Charge one statement about to be issued for `what` against this request's
+    /// budget, or refuse it. Called at the point a read is about to run, so the
+    /// refusal is the work not done.
+    pub fn charge(&self, what: &str) -> Result<()> {
+        self.budget.charge(what)
     }
 }
 

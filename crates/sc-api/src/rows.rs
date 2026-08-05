@@ -112,6 +112,21 @@ pub struct RowQuery {
     /// A bound applied **within each group** of rows rather than to the read as
     /// a whole. `None` for every ordinary read.
     pub partition: Option<Partition>,
+    /// Whether this read must run inside a caller-context transaction even
+    /// though its own table is not protected by row-level security.
+    ///
+    /// Ordinarily the **table** decides (see `in_context`): its policies are the
+    /// only thing a `SET LOCAL` here would be read by. But an [`extra`](Self::extra)
+    /// projection can be a correlated subquery over a *different* table — a
+    /// GraphQL `employees_aggregate { count }` inside a `departments` read
+    /// (§13.4) — and if that table is RLS-protected, its policies apply to the
+    /// subquery and see whatever an unset GUC makes of them: no caller, so no
+    /// rows, so a count of zero nobody would investigate. Setting this makes the
+    /// statement a caller-context one so the child's policies decide as they
+    /// would in a read of their own.
+    ///
+    /// It only ever *adds* a transaction; it never removes a table's own.
+    pub in_caller_context: bool,
 }
 
 /// At most `limit` rows for each distinct value of `by`, after skipping
@@ -184,6 +199,14 @@ impl RowQuery {
         self
     }
 
+    /// Require this read to run inside a caller-context transaction — see
+    /// [`in_caller_context`](Self::in_caller_context). `false` leaves the
+    /// decision where it normally lives, with the table.
+    pub fn requiring_caller_context(mut self, required: bool) -> RowQuery {
+        self.in_caller_context = required;
+        self
+    }
+
     /// This query with `extra` ANDed into its filter — how an ownership
     /// predicate joins a caller's own one without either being able to drop the
     /// other.
@@ -208,6 +231,7 @@ pub async fn list_rows_query(
         table,
         &read_select(catalog, table, query)?,
         context,
+        query.in_caller_context,
     )
     .await?;
     Ok(Json::Array(rows.iter().map(row_to_json).collect()))
@@ -231,6 +255,7 @@ pub async fn list_row_values(
         table,
         &read_select(catalog, table, query)?,
         context,
+        query.in_caller_context,
     )
     .await?;
     Ok(rows.iter().map(row_values).collect())
@@ -261,7 +286,7 @@ pub async fn aggregate_values(
     if let Some(filter) = filter {
         select = select.filter(filter);
     }
-    let rows = run_read(catalog, table, &select, context).await?;
+    let rows = run_read(catalog, table, &select, context, false).await?;
     Ok(rows.first().map(row_values).unwrap_or_default())
 }
 
@@ -355,7 +380,7 @@ pub async fn select_values(
     if let Some(filter) = filter {
         select = select.filter(filter);
     }
-    let fetched = run_read(catalog, table, &select, context).await?;
+    let fetched = run_read(catalog, table, &select, context, false).await?;
     Ok(fetched.iter().map(row_values).collect())
 }
 
@@ -611,7 +636,7 @@ pub(crate) async fn read_field_ctx(
     let select = Select::from(Source::table(table.name.clone()))
         .columns(vec![Projection::expr(Expr::col(column))])
         .filter(pk_filter(table, &pk, id)?);
-    let rows = run_read(catalog, table, &select, context).await?;
+    let rows = run_read(catalog, table, &select, context, false).await?;
     let row = rows
         .into_iter()
         .next()
@@ -843,7 +868,8 @@ pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
 }
 
 /// Whether this statement runs inside a caller-context transaction: **the table
-/// decides**, not the caller.
+/// decides**, not the caller — unless the statement itself reaches a table that
+/// does.
 ///
 /// It used to be "whenever a context was given", which worked only while the
 /// context existed for RLS alone. Now the caller travels with every write (an
@@ -851,20 +877,30 @@ pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
 /// silently wrap it in a transaction and a `SET LOCAL` no policy will ever read.
 /// A context is still *required* to reach the policies: without one they see
 /// `NULL` and deny, which is the fail-closed shape §7.3 depends on.
-fn in_context<'a>(table: &Table, context: Option<&'a CallerContext>) -> Option<&'a CallerContext> {
-    context.filter(|_| table.rls_enabled)
+///
+/// `reaches_rls` is the second half of that rule, and it is a property of the
+/// *statement*: a read of an ordinary table that projects a correlated subquery
+/// over an RLS-protected one runs that table's policies, so it needs the GUCs
+/// too (see [`RowQuery::in_caller_context`]).
+fn in_context<'a>(
+    table: &Table,
+    context: Option<&'a CallerContext>,
+    reaches_rls: bool,
+) -> Option<&'a CallerContext> {
+    context.filter(|_| table.rls_enabled || reaches_rls)
 }
 
 /// Run a `SELECT`, collecting its rows — through an RLS caller-context
-/// transaction on an RLS table (§7.3), else on a pooled connection via the
-/// table's provider.
-async fn run_read(
+/// transaction on an RLS table (§7.3) or one whose subqueries reach one, else on
+/// a pooled connection via the table's provider.
+pub(crate) async fn run_read(
     catalog: &Catalog,
     table: &Table,
     select: &Select,
     context: Option<&CallerContext>,
+    reaches_rls: bool,
 ) -> Result<Vec<Row>> {
-    match in_context(table, context) {
+    match in_context(table, context, reaches_rls) {
         Some(context) => {
             sc_catalog::run_in_context(
                 catalog,
@@ -892,7 +928,7 @@ async fn run_write(
     statement: Statement,
     context: Option<&CallerContext>,
 ) -> Result<Vec<Row>> {
-    match in_context(table, context) {
+    match in_context(table, context, false) {
         Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
         None => {
             catalog
@@ -944,8 +980,26 @@ mod tests {
     #[test]
     fn the_table_decides_the_caller_context_transaction_not_the_caller() {
         let caller = CallerContext::anonymous(1);
-        assert!(in_context(&table(true), Some(&caller)).is_some());
-        assert!(in_context(&table(false), Some(&caller)).is_none());
-        assert!(in_context(&table(true), None).is_none());
+        assert!(in_context(&table(true), Some(&caller), false).is_some());
+        assert!(in_context(&table(false), Some(&caller), false).is_none());
+        assert!(in_context(&table(true), None, false).is_none());
+    }
+
+    /// …and the one thing that is *not* the table's business: a statement whose
+    /// own subqueries reach a protected table.
+    ///
+    /// A GraphQL read of an ordinary `departments` that projects
+    /// `employees_aggregate { count }` over an RLS-protected `employees` runs
+    /// the employees' policies inside the departments' statement. Without the
+    /// GUCs those policies see no caller and grant nothing, and the aggregate
+    /// comes back `0` — a number that looks like an answer. So the *statement*
+    /// gets to ask for the transaction the table did not need.
+    #[test]
+    fn a_statement_reaching_a_protected_table_asks_for_the_transaction_itself() {
+        let caller = CallerContext::anonymous(1);
+        assert!(in_context(&table(false), Some(&caller), true).is_some());
+        // Still fail-closed on the other half: no context is no transaction,
+        // whatever the statement reaches.
+        assert!(in_context(&table(false), None, true).is_none());
     }
 }

@@ -264,7 +264,8 @@ tables decided by the database inside a caller-context transaction. The provider
 route every read and write through `sc-api`'s existing entry points (`ownership::read_rows_as`,
 `rows::create_row_ctx`, …) rather than to build its own `SELECT`.
 
-Three things are genuinely new, because aggregates are a new way to observe rows:
+Four things are genuinely new, because an aggregate and a projected join are both new ways to
+observe rows:
 
 1. **An aggregate must never count a row the caller may not read.** Under RLS the correlated
    subquery runs inside the caller's transaction, so the child table's own policies apply to
@@ -273,11 +274,20 @@ Three things are genuinely new, because aggregates are a new way to observe rows
 2. **An untranslatable child ownership formula refuses the aggregate.** A formula that only
    the reified evaluator can decide cannot filter rows inside a subquery; the honest answer
    is an error naming the table, not a count over rows the caller cannot see.
-3. **Depth and complexity limits are mandatory**, and a nested-relation query is the reason.
+3. **A Ⱶ-join is a read of the table it reaches**, so that table's read rule holds — a key is
+   not a way around a floor a list field over the same table enforces. Two options only: the
+   caller meets the target's floor, or the target is RLS-enabled and its policies decide inside
+   the caller's transaction. A target whose access comes from an ownership **formula** is
+   refused by name, translatable or not: the join subquery is built from the schema shape by
+   `join_path_expr` and there is no `WHERE` the provider owns to fold the predicate into, so
+   answering would hand over a withheld row one column at a time.
+4. **Depth and complexity limits are mandatory**, and a nested-relation query is the reason.
    `limit_depth` / `limit_complexity` on the schema builder, plus a per-query row cap on
-   every list field, configured per application with defaults that are set rather than
-   absent. An unbounded GraphQL endpoint is a denial-of-service surface that REST's fixed
-   routes never were.
+   every list field and a per-request budget of reads and writes, configured per application
+   with defaults that are set rather than absent. An unbounded GraphQL endpoint is a
+   denial-of-service surface that REST's fixed routes never were. The first two are validation
+   rules, so they refuse **before a statement is issued**; the budget is counted as it is spent,
+   because the number of round trips is a property of execution rather than of the document.
 
 Introspection stays **on**: it describes the tables the application already exposes over
 REST, and every tool on the browser side needs it.

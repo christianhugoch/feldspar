@@ -25,6 +25,7 @@ use sc_catalog::{DataField, DataFieldKind, Table};
 use sc_error::{Error, Result};
 
 use super::args::{ARG_DISTINCT, ARG_LIMIT, ARG_OFFSET, ARG_ORDER_BY, ARG_WHERE};
+use super::limits::GraphqlLimits;
 use super::mutate::{self, ARG_OBJECT, ARG_PK_COLUMNS, ARG_SET};
 use super::names::{
     self, FILE_VALUE, MUTATION_ROOT, ORDER_DIRECTION, QUERY_ROOT, SCALAR_NAMES, SchemaNames,
@@ -40,7 +41,11 @@ use crate::schema::ValueType;
 /// application that cannot describe its own API must not come up answering some
 /// of it. Where `async-graphql`'s own error names a type, the message names the
 /// table that type came from — the thing an admin can actually act on.
-pub fn build_schema(tables: &[Table], names: &SchemaNames) -> Result<Schema> {
+pub fn build_schema(
+    tables: &[Table],
+    names: &SchemaNames,
+    limits: GraphqlLimits,
+) -> Result<Schema> {
     if names.tables().is_empty() {
         return Err(Error::config(
             "this application exposes no tables that can be projected into GraphQL, so its \
@@ -55,7 +60,14 @@ pub fn build_schema(tables: &[Table], names: &SchemaNames) -> Result<Schema> {
     // columns would produce.
     let (mutation, mutation_inputs) = mutation_types(tables, names);
 
-    let mut builder = Schema::build(QUERY_ROOT, mutation.as_ref().map(|_| MUTATION_ROOT), None);
+    let mut builder = Schema::build(QUERY_ROOT, mutation.as_ref().map(|_| MUTATION_ROOT), None)
+        // Both are *validation* rules: they run over the parsed document before
+        // a single resolver does, so a query that is too deep or too wide is
+        // refused without a statement being issued. That is the whole property
+        // — a cheap refusal, not an expensive one (docs/GRAPHQL_API.md §6).
+        .limit_depth(limits.max_depth)
+        .limit_complexity(limits.max_complexity);
+    // Introspection is deliberately *not* disabled: see `limits`' module doc.
     for input in mutation_inputs {
         builder = builder.register(input);
     }
@@ -621,7 +633,9 @@ mod tests {
 
     fn sdl_of(tables: &[Table]) -> String {
         let names = SchemaNames::derive(tables);
-        build_schema(tables, &names).expect("schema builds").sdl()
+        build_schema(tables, &names, GraphqlLimits::default())
+            .expect("schema builds")
+            .sdl()
     }
 
     /// The body of one SDL block, so a test can assert what is *not* in a type
@@ -639,7 +653,7 @@ mod tests {
         // Not an empty schema served cheerfully: a GraphQL API with no fields
         // is a configuration mistake, and this is where it is named.
         let names = SchemaNames::derive(&[]);
-        let err = build_schema(&[], &names).unwrap_err();
+        let err = build_schema(&[], &names, GraphqlLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("no tables"), "{err}");
     }
 
@@ -769,7 +783,7 @@ mod tests {
         // plausible zero here would be the exact failure decision 5 forbids.
         let tables = [table_of("departments", vec![id_field()])];
         let names = SchemaNames::derive(&tables);
-        let schema = build_schema(&tables, &names).expect("builds");
+        let schema = build_schema(&tables, &names, GraphqlLimits::default()).expect("builds");
         let response = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
@@ -892,7 +906,7 @@ mod tests {
             vec![id_field(), plain_field("name")],
         )];
         let names = SchemaNames::derive(&tables);
-        let schema = build_schema(&tables, &names).expect("builds");
+        let schema = build_schema(&tables, &names, GraphqlLimits::default()).expect("builds");
         let response = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
@@ -913,7 +927,7 @@ mod tests {
         // every browser tool needs it.
         let tables = [table_of("departments", vec![id_field()])];
         let names = SchemaNames::derive(&tables);
-        let schema = build_schema(&tables, &names).expect("builds");
+        let schema = build_schema(&tables, &names, GraphqlLimits::default()).expect("builds");
         let response = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
