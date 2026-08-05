@@ -32,13 +32,16 @@
 //! into an `async_graphql::dynamic::Schema`, [`args`] lowers a field's
 //! `where`/`order_by`/`limit`/`offset` onto the row layer's own `RowQuery`,
 //! [`agg`] lowers an aggregate selection onto `sc-expr`'s aggregate builders,
-//! and [`resolve`] is what the fields do.
+//! [`resolve`] is what the query fields do, [`mutate`] is what the mutation
+//! fields do, and [`errors`] labels a write's refusal so a form can act on it.
 
 mod agg;
 mod args;
 mod build;
 mod context;
+mod errors;
 mod loader;
+mod mutate;
 pub mod names;
 mod resolve;
 #[cfg(test)]

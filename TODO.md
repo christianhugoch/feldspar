@@ -211,21 +211,33 @@ transaction currently *refuses* the aggregate (its policies would not apply, and
 would be whatever they make of no caller). Phase 7's "the whole read runs inside the
 caller-context transaction" turns that refusal into an answer.
 
-## Phase 6 — Mutations
+## Phase 6 — Mutations ✅
 
-- [ ] `insert_X(object:)`, `update_X_by_pk(pk_columns:, set:)`, `delete_X_by_pk(…)`, each a thin
-      call into `rows::create_row_ctx` / `ownership::update_row_as` / `ownership::delete_row_as`
+- [x] `insert_X(object:)`, `update_X_by_pk(pk_columns:, set:)`, `delete_X_by_pk(…)`, each a thin
+      call into `ownership::insert_row_as` / `update_row_as` / `delete_row_as` (which are
+      `rows::create_row_ctx` / `update_row_guarded` / `delete_row_guarded` plus §7.3's rule)
       with the caller's context — so a rich type's rule, a `File` field's checks and the table's
       triggers all fire exactly as they do for a REST caller.
-- [ ] The row layer's refusal is the GraphQL error, with its own message and a machine-readable
-      `extensions.code`; a validation failure names the field it was about.
-- [ ] Mutations exist only for tables the caller's application exposes for writing; a table
+- [x] The row layer's refusal is the GraphQL error, with its own message and a machine-readable
+      `extensions.code`; a validation failure names the field it was about (`extensions.field`,
+      lifted out of the row layer's own `` `column`: … `` message and only reported when the
+      name is really a column of the table).
+- [x] Mutations exist only for tables the caller's application exposes for writing; a table
       whose `min_role_write` nobody meets still appears in the schema and refuses at resolve
-      time (decision 4).
-- [ ] Tests (real Postgres): an insert through GraphQL and an insert through REST produce
+      time (decision 4). What a table does *not* get is a mutation the row layer could not
+      carry out: no `update`/`delete` without a single primary key, no insert with no writable
+      column.
+- [x] Tests (real Postgres): an insert through GraphQL and an insert through REST produce
       identical rows and identical events; an update that would move a row out of the caller's
       ownership is refused on the *proposed* row as §7.3 requires; a `File` field cannot be set
       to a path outside its store.
+
+An insert and an update answer with the row **read back** through the same read `_by_pk`
+performs, so a selection reaching through a key or into a child aggregate is answered rather
+than nulled. A delete has no row left to read, so it answers with the columns the row layer
+removed and refuses a selection reaching past them. That needed `delete_row_guarded` to return
+the row it had already read for the delete event instead of `{"deleted": true}`; the REST
+projection now wraps its own acknowledgement at its own boundary, where that contract belongs.
 
 ## Phase 7 — Authorization, cost, and the refusals
 

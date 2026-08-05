@@ -25,9 +25,10 @@ use sc_catalog::{DataField, DataFieldKind, Table};
 use sc_error::{Error, Result};
 
 use super::args::{ARG_DISTINCT, ARG_LIMIT, ARG_OFFSET, ARG_ORDER_BY, ARG_WHERE};
+use super::mutate::{self, ARG_OBJECT, ARG_PK_COLUMNS, ARG_SET};
 use super::names::{
-    self, FILE_VALUE, ORDER_DIRECTION, QUERY_ROOT, SCALAR_NAMES, SchemaNames, TableNames,
-    comparison_type_name,
+    self, FILE_VALUE, MUTATION_ROOT, ORDER_DIRECTION, QUERY_ROOT, SCALAR_NAMES, SchemaNames,
+    TableNames, comparison_type_name,
 };
 use super::resolve;
 use super::types::{CUSTOM_SCALARS, column_scalar, field_type, scalar_name};
@@ -48,7 +49,16 @@ pub fn build_schema(tables: &[Table], names: &SchemaNames) -> Result<Schema> {
         ));
     }
 
-    let mut builder = Schema::build(QUERY_ROOT, None, None);
+    // The mutation half is decided first: `Schema::build` has to be told whether
+    // there is a `Mutation` root at all, and a root with no fields on it will
+    // not build — which is what an application of nothing but calculated
+    // columns would produce.
+    let (mutation, mutation_inputs) = mutation_types(tables, names);
+
+    let mut builder = Schema::build(QUERY_ROOT, mutation.as_ref().map(|_| MUTATION_ROOT), None);
+    for input in mutation_inputs {
+        builder = builder.register(input);
+    }
 
     // The scalars GraphQL does not have, and the two enums/objects that are the
     // same for every table.
@@ -84,10 +94,11 @@ pub fn build_schema(tables: &[Table], names: &SchemaNames) -> Result<Schema> {
         query = add_root_fields(query, table, t);
     }
 
-    builder
-        .register(query)
-        .finish()
-        .map_err(|e| schema_error(e, names))
+    builder = builder.register(query);
+    if let Some(mutation) = mutation {
+        builder = builder.register(mutation);
+    }
+    builder.finish().map_err(|e| schema_error(e, names))
 }
 
 /// An `async-graphql` schema error, attributed to the table it came from.
@@ -448,6 +459,158 @@ fn add_root_fields(query: Object, table: &Table, t: &TableNames) -> Object {
     )
 }
 
+/// The `Mutation` root and the input types its arguments are typed by, or
+/// `None` when this application has nothing to write.
+///
+/// Every exposed table contributes its three mutations — the schema describes
+/// what the *application* exposes, not what one caller may do with it
+/// (decision 4), so a table this caller's role cannot write is here and refuses
+/// at resolve time. What a table does *not* contribute is a mutation the row
+/// layer could never carry out: an insert with no writable column to name, or an
+/// update or delete on a table with no single primary key to address a row by —
+/// the same rule that decides whether `X_by_pk` exists.
+fn mutation_types(tables: &[Table], names: &SchemaNames) -> (Option<Object>, Vec<InputObject>) {
+    let mut mutation = Object::new(MUTATION_ROOT);
+    let mut inputs = Vec::new();
+    let mut any = false;
+
+    for t in names.tables() {
+        let Some(table) = tables.iter().find(|x| x.name == t.table) else {
+            continue;
+        };
+        if let Some(input) = write_input(table, t, &t.insert_input, WriteInput::Insert) {
+            inputs.push(input);
+            mutation = mutation.field(
+                Field::new(
+                    &t.insert_field,
+                    TypeRef::named(&t.object),
+                    mutate::insert_field(&t.table),
+                )
+                .argument(InputValue::new(
+                    ARG_OBJECT,
+                    TypeRef::named_nn(&t.insert_input),
+                ))
+                .description(format!("Insert one row of `{}`.", t.table)),
+            );
+            any = true;
+        }
+        // A row is addressed the way `_by_pk` addresses it, or not at all.
+        let pk = crate::rows::single_pk(table)
+            .ok()
+            .filter(|pk| t.fields.contains(pk))
+            .and_then(|pk| table.field(&pk).map(|f| (pk.clone(), column_scalar(f))));
+        let Some((pk, scalar)) = pk else {
+            continue;
+        };
+        if let Some(input) = write_input(table, t, &t.set_input, WriteInput::Set { pk: &pk }) {
+            inputs.push(input);
+            inputs.push(
+                InputObject::new(&t.pk_columns)
+                    .field(InputValue::new(&pk, TypeRef::named_nn(scalar))),
+            );
+            mutation = mutation.field(
+                Field::new(
+                    &t.update_by_pk_field,
+                    TypeRef::named(&t.object),
+                    mutate::update_by_pk_field(&t.table, &pk),
+                )
+                .argument(InputValue::new(
+                    ARG_PK_COLUMNS,
+                    TypeRef::named_nn(&t.pk_columns),
+                ))
+                .argument(InputValue::new(ARG_SET, TypeRef::named_nn(&t.set_input)))
+                .description(format!(
+                    "Update the row of `{}` with this primary key.",
+                    t.table
+                )),
+            );
+        }
+        mutation = mutation.field(
+            Field::new(
+                &t.delete_by_pk_field,
+                TypeRef::named(&t.object),
+                mutate::delete_by_pk_field(&t.table, &pk),
+            )
+            .argument(InputValue::new(&pk, TypeRef::named_nn(scalar)))
+            .description(format!(
+                "Delete the row of `{}` with this primary key, returning the columns it had.",
+                t.table
+            )),
+        );
+        any = true;
+    }
+    (any.then_some(mutation), inputs)
+}
+
+/// Which write an input object is for — the two differ by exactly one column.
+enum WriteInput<'a> {
+    /// `insert_X(object:)`: every writable column.
+    Insert,
+    /// `update_X_by_pk(set:)`: every writable column but the primary key, which
+    /// addresses the row rather than being written to it (the row layer drops a
+    /// primary key from an update's assignments, and a schema that offered it
+    /// would be promising something that silently does nothing).
+    Set { pk: &'a str },
+}
+
+/// `input XInsertInput` / `input XSetInput`, or `None` when it would be empty —
+/// which GraphQL does not allow, and which is honest: there is nothing to write.
+///
+/// **Every field is nullable**, including one whose column is `NOT NULL`. What is
+/// required of an insert is not what is required of the *caller*: a column with a
+/// database default, a sequence-backed primary key or a trigger-filled column is
+/// `NOT NULL` and must not be demanded here. The row layer and the database
+/// decide, and the message they give names the column.
+fn write_input(
+    table: &Table,
+    t: &TableNames,
+    type_name: &str,
+    kind: WriteInput<'_>,
+) -> Option<InputObject> {
+    let skip = match kind {
+        WriteInput::Insert => "",
+        WriteInput::Set { pk } => pk,
+    };
+    let mut input = InputObject::new(type_name);
+    let mut any = false;
+    for field in writable_columns(table, t).filter(|f| f.base.name != skip) {
+        input = input.field(InputValue::new(
+            &field.base.name,
+            TypeRef::named(write_scalar(field)),
+        ));
+        any = true;
+    }
+    any.then_some(input)
+}
+
+/// The columns a caller may write: the exposed ones that are not calculated.
+///
+/// A calculated field has no column behind it, and the row layer refuses a write
+/// to one by name (`reject_calc_writes`). Leaving it out of the input type turns
+/// that runtime refusal into something a caller's editor tells them, which is
+/// the whole point of publishing an SDL.
+fn writable_columns<'a>(
+    table: &'a Table,
+    t: &'a TableNames,
+) -> impl Iterator<Item = &'a DataField> {
+    t.fields
+        .iter()
+        .filter_map(move |name| table.field(name))
+        .filter(|f| !matches!(f.kind, DataFieldKind::Calc { .. }))
+}
+
+/// The scalar a column is **written** as, which is not always the one it is read
+/// as: a `File` field reads as a `FileValue` (a path and the URL its bytes are
+/// served at) and is written as the path alone. There is nothing to write to a
+/// URL — the bytes go to the REST provider's upload endpoint, which is the one
+/// door into a file store.
+fn write_scalar(field: &DataField) -> &'static str {
+    match field.kind {
+        DataFieldKind::File { .. } => TypeRef::STRING,
+        _ => column_scalar(field),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +622,16 @@ mod tests {
     fn sdl_of(tables: &[Table]) -> String {
         let names = SchemaNames::derive(tables);
         build_schema(tables, &names).expect("schema builds").sdl()
+    }
+
+    /// The body of one SDL block, so a test can assert what is *not* in a type
+    /// without the rest of the schema answering for it.
+    fn between(sdl: &str, opening: &str) -> String {
+        sdl.split(opening)
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .unwrap_or_else(|| panic!("no `{opening}` in {sdl}"))
+            .to_owned()
     }
 
     #[test]
@@ -536,19 +709,9 @@ mod tests {
         )]);
         assert!(sdl.contains("type EmployeesNumericFields {"), "{sdl}");
         assert!(sdl.contains("type EmployeesAvgFields {"), "{sdl}");
-        let numeric = sdl
-            .split("type EmployeesNumericFields {")
-            .nth(1)
-            .and_then(|s| s.split('}').next())
-            .unwrap_or_default()
-            .to_owned();
+        let numeric = between(&sdl, "type EmployeesNumericFields {");
         assert!(numeric.contains("salary: BigInt"), "{numeric}");
-        let avg = sdl
-            .split("type EmployeesAvgFields {")
-            .nth(1)
-            .and_then(|s| s.split('}').next())
-            .unwrap_or_default()
-            .to_owned();
+        let avg = between(&sdl, "type EmployeesAvgFields {");
         assert!(avg.contains("salary: Decimal"), "{avg}");
     }
 
@@ -557,12 +720,7 @@ mod tests {
         // GraphQL has no empty object type, so the fields that would need one
         // are simply absent rather than pointing at an unbuildable type.
         let sdl = sdl_of(&[table_of("notes", vec![plain_field("body")])]);
-        let agg = sdl
-            .split("type NotesAggregate {")
-            .nth(1)
-            .and_then(|s| s.split('}').next())
-            .unwrap_or_default()
-            .to_owned();
+        let agg = between(&sdl, "type NotesAggregate {");
         assert!(agg.contains("count("), "{agg}");
         assert!(!agg.contains("sum"), "{agg}");
         assert!(!agg.contains("avg"), "{agg}");
@@ -588,12 +746,7 @@ mod tests {
         let sdl = sdl_of(&[table_of("notes", vec![plain_field("body")])]);
         assert!(sdl.contains("input StringComparison {"), "{sdl}");
         assert!(sdl.contains("input BigIntComparison {"), "{sdl}");
-        let string_cmp = sdl
-            .split("input StringComparison {")
-            .nth(1)
-            .and_then(|s| s.split('}').next())
-            .unwrap_or_default()
-            .to_owned();
+        let string_cmp = between(&sdl, "input StringComparison {");
         for op in [
             "eq", "ne", "gt", "gte", "lt", "lte", "in", "nin", "is_null", "like", "ilike",
         ] {
@@ -603,12 +756,7 @@ mod tests {
             );
         }
         // JSON has no ordering, so it has no ordered comparisons.
-        let json_cmp = sdl
-            .split("input JSONComparison {")
-            .nth(1)
-            .and_then(|s| s.split('}').next())
-            .unwrap_or_default()
-            .to_owned();
+        let json_cmp = between(&sdl, "input JSONComparison {");
         assert!(json_cmp.contains("eq"), "{json_cmp}");
         assert!(!json_cmp.contains("gte"), "{json_cmp}");
     }
@@ -626,6 +774,131 @@ mod tests {
             .build()
             .expect("runtime")
             .block_on(schema.execute("{ departments_aggregate { count } }"));
+        assert!(!response.errors.is_empty(), "{response:?}");
+        assert!(
+            response.errors[0].message.contains("RequestContext"),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
+    fn every_table_gets_its_three_mutations() {
+        // Decision 4: one schema per application, not per role. Whether *this*
+        // caller may write is decided at resolve time; the schema says what the
+        // application exposes.
+        let sdl = sdl_of(&[table_of(
+            "departments",
+            vec![id_field(), plain_field("name")],
+        )]);
+        assert!(
+            sdl.contains("insert_departments(object: DepartmentsInsertInput!): Departments"),
+            "{sdl}"
+        );
+        assert!(
+            sdl.contains(
+                "update_departments_by_pk(pk_columns: DepartmentsPkColumns!, \
+                 set: DepartmentsSetInput!): Departments"
+            ),
+            "{sdl}"
+        );
+        assert!(
+            sdl.contains("delete_departments_by_pk(id: BigInt!): Departments"),
+            "{sdl}"
+        );
+        assert!(sdl.contains("mutation: Mutation"), "{sdl}");
+    }
+
+    #[test]
+    fn an_insert_demands_no_column_the_database_can_fill_itself() {
+        // `id` is `NOT NULL`, and requiring it on the wire would refuse every
+        // insert into a table with a sequence.
+        let sdl = sdl_of(&[table_of(
+            "departments",
+            vec![id_field(), plain_field("name")],
+        )]);
+        let insert = between(&sdl, "input DepartmentsInsertInput {");
+        assert!(insert.contains("id: BigInt"), "{insert}");
+        assert!(!insert.contains("BigInt!"), "{insert}");
+    }
+
+    #[test]
+    fn the_primary_key_addresses_an_update_rather_than_being_set_by_it() {
+        let sdl = sdl_of(&[table_of(
+            "departments",
+            vec![id_field(), plain_field("name")],
+        )]);
+        let set = between(&sdl, "input DepartmentsSetInput {");
+        assert!(set.contains("name"), "{set}");
+        assert!(!set.contains("id"), "{set}");
+        // …and it is what `pk_columns` carries, non-null.
+        let keys = between(&sdl, "input DepartmentsPkColumns {");
+        assert!(keys.contains("id: BigInt!"), "{keys}");
+    }
+
+    #[test]
+    fn a_table_with_no_single_primary_key_can_only_be_inserted_into() {
+        // The same rule `_by_pk` follows: with nothing to address a row by, an
+        // update and a delete would be promises the row layer cannot keep.
+        let sdl = sdl_of(&[table_of("notes", vec![plain_field("body")])]);
+        assert!(
+            sdl.contains("insert_notes(object: NotesInsertInput!)"),
+            "{sdl}"
+        );
+        assert!(!sdl.contains("update_notes_by_pk"), "{sdl}");
+        assert!(!sdl.contains("delete_notes_by_pk"), "{sdl}");
+        assert!(!sdl.contains("NotesPkColumns"), "{sdl}");
+    }
+
+    #[test]
+    fn a_file_field_is_written_as_its_path_and_read_as_a_url() {
+        // There is nothing to write to a URL: the bytes go through the REST
+        // provider's upload endpoint, which is the one door into a store.
+        let sdl = sdl_of(&[table_of(
+            "avatars",
+            vec![id_field(), file_field("image", "uploads")],
+        )]);
+        assert!(sdl.contains("image: FileValue"), "{sdl}");
+        let insert = between(&sdl, "input AvatarsInsertInput {");
+        assert!(insert.contains("image: String"), "{insert}");
+    }
+
+    #[test]
+    fn a_calculated_field_is_not_offered_to_a_write() {
+        // The row layer refuses a write to one by name; leaving it out of the
+        // input type is that refusal, moved to where a caller's editor sees it.
+        let mut total = plain_field("total");
+        total.kind = DataFieldKind::Calc {
+            expression: "1".to_owned(),
+        };
+        let sdl = sdl_of(&[table_of(
+            "invoices",
+            vec![id_field(), plain_field("ref"), total],
+        )]);
+        assert!(sdl.contains("total: String"), "{sdl}");
+        let insert = between(&sdl, "input InvoicesInsertInput {");
+        assert!(insert.contains("ref"), "{insert}");
+        assert!(!insert.contains("total"), "{insert}");
+    }
+
+    #[test]
+    fn a_mutation_is_wired_to_the_write_path_not_to_a_placeholder() {
+        // The same proof the aggregate gets: executed with no request context,
+        // the field fails reaching for the caller it would write as. A mutation
+        // that cheerfully returned `null` here would be a write that never
+        // happened and never said so.
+        let tables = [table_of(
+            "departments",
+            vec![id_field(), plain_field("name")],
+        )];
+        let names = SchemaNames::derive(&tables);
+        let schema = build_schema(&tables, &names).expect("builds");
+        let response = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(
+                schema.execute("mutation { insert_departments(object: { name: \"x\" }) { id } }"),
+            );
         assert!(!response.errors.is_empty(), "{response:?}");
         assert!(
             response.errors[0].message.contains("RequestContext"),

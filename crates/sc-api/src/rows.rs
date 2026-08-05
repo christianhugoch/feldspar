@@ -24,7 +24,7 @@ use sc_query::{
     Update, Value,
 };
 use sc_types::{BasicType, TypeRef};
-use serde_json::{Map, Value as Json, json};
+use serde_json::{Map, Value as Json};
 
 use crate::convert::{json_to_value, value_to_json};
 
@@ -463,8 +463,16 @@ pub(crate) async fn update_row_guarded(
     Ok(row)
 }
 
-/// Delete the row of `table` whose primary key is `id`. Deleting a row that is
-/// not there is a [`NotFound`](Error::NotFound), not a silent success.
+/// Delete the row of `table` whose primary key is `id`, returning **the row as
+/// it was**. Deleting a row that is not there is a
+/// [`NotFound`](Error::NotFound), not a silent success.
+///
+/// The statement has to read the row back anyway — a delete event carries the
+/// only copy of it anyone will ever get — so returning it costs nothing and is
+/// the one moment it can be had. What a *caller* does with it is theirs to
+/// decide: the REST projection answers `{"deleted": true}`, because that is its
+/// wire contract, and the GraphQL one answers with the row, because that is
+/// what `delete_X_by_pk: X` promised. Neither shape belongs here.
 pub async fn delete_row(catalog: &Catalog, table: &Table, id: &str) -> Result<Json> {
     delete_row_guarded(catalog, table, id, None, None).await
 }
@@ -495,7 +503,7 @@ pub(crate) async fn delete_row_guarded(
     };
     let row = row_to_json(row);
     emit(catalog, table, WriteOp::Delete, &row, None, context).await;
-    Ok(json!({ "deleted": true }))
+    Ok(row)
 }
 
 /// Raise the event one committed write is (§10.2), if anything is listening.
@@ -752,6 +760,41 @@ fn validate_file_write(
     }
     sc_files::validate_file_path(path, folder.as_deref(), mime_allow)
         .map_err(|e| field_error(column, e))
+}
+
+/// A row the database **returned** — an insert's or a delete's `RETURNING` —
+/// back as the typed values a reader works in.
+///
+/// The inverse of [`row_to_json`], and deliberately not [`column_value`]: these
+/// values came out of the column, so there is nothing to validate them against.
+/// Holding a returned row to the field's attribute rules would refuse a row the
+/// database already holds — a `max_length` tightened after the row was written
+/// is the admin's problem to fix, not a reason a delete cannot say what it
+/// removed.
+///
+/// A column the table does not declare, and one whose text will not parse as
+/// its declared type, is carried as the JSON it arrived as rather than dropped:
+/// a value nobody asked about must not silently disappear on the way back.
+pub(crate) fn json_row_values(
+    table: &Table,
+    row: &Json,
+) -> std::collections::BTreeMap<String, Value> {
+    let mut values = std::collections::BTreeMap::new();
+    let Json::Object(obj) = row else {
+        return values;
+    };
+    for (name, json) in obj {
+        let typed = table
+            .field(name)
+            .map(|field| storage_type(&field.base.type_))
+            .and_then(|basic| sc_types::json_to_value(&basic, json).ok())
+            .unwrap_or_else(|| match json {
+                Json::Null => Value::Null,
+                other => Value::Json(other.clone()),
+            });
+        values.insert(name.clone(), typed);
+    }
+    values
 }
 
 /// The basic (storage) type a JSON value is coerced through: the type itself for

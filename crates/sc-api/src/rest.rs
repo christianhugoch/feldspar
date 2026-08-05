@@ -588,16 +588,16 @@ impl RestProvider {
                 match formula(meets_write) {
                     Err(()) => return Ok(forbidden(user)),
                     Ok(None) => {
-                        ApiResponse::ok(rows::delete_row_ctx(cat, &table, id, Some(&caller)).await?)
+                        rows::delete_row_ctx(cat, &table, id, Some(&caller)).await?;
+                        deleted()
                     }
                     Ok(Some(f)) => {
                         self.owned_row(cat, &table, f, Operation::Delete, user, id)
                             .await?;
                         let guard =
                             ownership::write_guard(cat, &table, f, Operation::Delete, user)?;
-                        ApiResponse::ok(
-                            rows::delete_row_guarded(cat, &table, id, guard, Some(&caller)).await?,
-                        )
+                        rows::delete_row_guarded(cat, &table, id, guard, Some(&caller)).await?;
+                        deleted()
                     }
                 }
             }
@@ -738,9 +738,10 @@ impl RestProvider {
             RestOp::Update => ApiResponse::ok(
                 rows::update_row_guarded(cat, table, id()?, body, None, Some(&ctx)).await?,
             ),
-            RestOp::Delete => ApiResponse::ok(
-                rows::delete_row_guarded(cat, table, id()?, None, Some(&ctx)).await?,
-            ),
+            RestOp::Delete => {
+                rows::delete_row_guarded(cat, table, id()?, None, Some(&ctx)).await?;
+                deleted()
+            }
             RestOp::Download { field } => {
                 download_ctx(cat, table, field, id()?, role, &ctx).await?
             }
@@ -763,6 +764,17 @@ impl RestProvider {
             }
         })
     }
+}
+
+/// What a `DELETE` answers with.
+///
+/// The row layer hands back the row as it was — the only copy of it anyone will
+/// ever get — and this projection deliberately does not: a REST `DELETE`
+/// acknowledges, and a caller who wanted the row could have read it. The
+/// GraphQL projection makes the other choice, which is why the shape is decided
+/// here rather than in the row layer.
+fn deleted() -> ApiResponse {
+    ApiResponse::ok(json!({ "deleted": true }))
 }
 
 /// The rejection a caller below the floor gets when no formula extends access:

@@ -78,14 +78,43 @@ pub struct RowValue {
     table: String,
     /// Column (or stripped join path) → value.
     values: BTreeMap<String, Value>,
+    /// Which statement produced them.
+    origin: Origin,
+}
+
+/// Where a row the resolvers are walking came from — which decides what an
+/// *absent* value means.
+///
+/// A read projects exactly what the selection set asked for, so a missing join
+/// leaf there means the caller did not ask for it. A write returns the row it
+/// wrote and nothing else, so a missing join leaf there means the question was
+/// asked and cannot be answered — and answering `null` would be inventing an
+/// absent relation. The two need different answers, so the row says which it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A `SELECT` that was given the selection set (every read, and the row an
+    /// insert or an update reads back).
+    Read,
+    /// A write's `RETURNING`: the row's own columns, and nothing beside them.
+    Write,
 }
 
 impl RowValue {
-    /// A row of `table`.
+    /// A row of `table`, read.
     pub fn new(table: impl Into<String>, values: BTreeMap<String, Value>) -> RowValue {
         RowValue {
             table: table.into(),
             values,
+            origin: Origin::Read,
+        }
+    }
+
+    /// A row of `table` as a write returned it — see [`Origin`].
+    pub(super) fn written(table: impl Into<String>, values: BTreeMap<String, Value>) -> RowValue {
+        RowValue {
+            table: table.into(),
+            values,
+            origin: Origin::Write,
         }
     }
 
@@ -100,6 +129,7 @@ impl RowValue {
         RowValue {
             table: table.to_owned(),
             values: strip_prefix(&self.values, &format!("{field}{JOIN}")),
+            origin: self.origin,
         }
     }
 
@@ -212,12 +242,29 @@ pub fn by_pk_field(table: impl Into<String>, pk: impl Into<String>) -> Resolver 
                 .get(&pk)
                 .ok_or_else(|| Error::invalid(format!("`{pk}` is required")))?;
             let value = args::key_value(&table, &pk, key.as_value())?;
-            let query = read_query(rc, &table, &ctx)?
-                .and_filter(sc_query::Expr::col(&pk).eq(sc_query::Expr::lit(value)))
-                .limit(1);
-            Ok(read(rc, &table, &query).await?.into_iter().next())
+            Ok(read_one(rc, &table, &pk, value, &ctx).await?)
         })
     })
+}
+
+/// One row of `table` addressed by its primary key, projected for the selection
+/// set of the field being resolved.
+///
+/// What `_by_pk` answers with — and what a mutation reads its written row back
+/// through, which is why it is shared: the row a write returns and the row a
+/// query returns are then the *same* row, produced by the same rule.
+pub(super) async fn read_one(
+    rc: &RequestContext,
+    table: &Table,
+    pk: &str,
+    value: Value,
+    ctx: &ResolverContext<'_>,
+) -> Result<Option<FieldValue<'static>>> {
+    let query = RowQuery::new()
+        .projecting(read_projections(rc, table, ctx.ctx.field())?)
+        .and_filter(Expr::col(pk).eq(Expr::lit(value)))
+        .limit(1);
+    Ok(read(rc, table, &query).await?.into_iter().next())
 }
 
 /// One stored, calculated or unexposed-key column.
@@ -248,6 +295,19 @@ pub fn key_field(column: impl Into<String>, target: impl Into<String>) -> Resolv
             }
             let joined = row.joined(&column, &target);
             if joined.values.is_empty() {
+                // Nothing came back under this join. On a read that means the
+                // caller asked for no leaf of it (`{ __typename }`), which is
+                // not a relation to invent. On a **write's** returned row it
+                // means the question was asked and the statement that answered
+                // it did not project the join — a `null` there would say "no
+                // related row", which is a different and wrong answer.
+                if row.origin == Origin::Write && asks_for_values(&ctx.ctx.field()) {
+                    return Err(async_graphql::Error::new(format!(
+                        "`{column}` cannot be followed on a row a mutation returned: a write \
+                         answers with the row it wrote, and the related row is not part of it — \
+                         read `{target}` in a query, or ask for the key's own value"
+                    )));
+                }
                 return Ok(None);
             }
             Ok(Some(FieldValue::owned_any(joined)))
@@ -374,12 +434,21 @@ pub fn child_aggregate_field(child_table: impl Into<String>) -> Resolver {
             let field = ctx.ctx.field();
             let values = row.aggregate(&agg::response_key(&field));
             if values.is_empty() && asks_for_values(&field) {
-                return Err(async_graphql::Error::new(format!(
-                    "the aggregate over `{child_table}` was not computed for this row: it is \
-                     projected into the query that reads the parent, and a row reached through \
-                     a join is not read by one — ask for it on a `{}` read directly",
-                    row.table
-                )));
+                return Err(async_graphql::Error::new(match row.origin {
+                    Origin::Read => format!(
+                        "the aggregate over `{child_table}` was not computed for this row: it \
+                         is projected into the query that reads the parent, and a row reached \
+                         through a join is not read by one — ask for it on a `{}` read directly",
+                        row.table
+                    ),
+                    Origin::Write => format!(
+                        "the aggregate over `{child_table}` cannot be computed on a row a \
+                         mutation returned: it is projected into the query that *reads* the \
+                         parent, and a write answers with the row it wrote — ask for it in a \
+                         query over `{}`",
+                        row.table
+                    ),
+                }));
             }
             Ok(Some(FieldValue::owned_any(values)))
         })

@@ -570,15 +570,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
                 let id = ctx.path_param("id")?;
-                Ok(HandlerResponse::ok(
-                    rows::delete_row_ctx(
-                        &catalog,
-                        &table,
-                        id,
-                        Some(&admin_caller(ctx.user.as_ref())),
-                    )
-                    .await?,
-                ))
+                // The row layer hands back the row it removed; the admin API
+                // acknowledges, as it does for every other delete it serves.
+                rows::delete_row_ctx(&catalog, &table, id, Some(&admin_caller(ctx.user.as_ref())))
+                    .await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
             }
         }
     });

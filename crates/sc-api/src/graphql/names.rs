@@ -179,6 +179,17 @@ pub struct TableNames {
     pub order_by: String,
     /// The column enum: `DepartmentsSelectColumn`.
     pub select_column: String,
+    /// The insert mutation's argument: `DepartmentsInsertInput`.
+    pub insert_input: String,
+    /// The update mutation's `set` argument: `DepartmentsSetInput`.
+    ///
+    /// Separate from [`insert_input`](TableNames::insert_input) because the two
+    /// are not the same set of columns: the primary key addresses the row of an
+    /// update and is not reassignable through its body, so it is absent here and
+    /// present there.
+    pub set_input: String,
+    /// The update mutation's `pk_columns` argument: `DepartmentsPkColumns`.
+    pub pk_columns: String,
     /// The root list field: `departments`.
     pub list_field: String,
     /// The root single-row field: `departments_by_pk`.
@@ -200,7 +211,7 @@ pub struct TableNames {
 
 impl TableNames {
     /// The type names this table defines — what a collision is checked over.
-    fn type_names(&self) -> [&str; 8] {
+    fn type_names(&self) -> [&str; 11] {
         [
             &self.object,
             &self.aggregate_object,
@@ -210,6 +221,9 @@ impl TableNames {
             &self.bool_exp,
             &self.order_by,
             &self.select_column,
+            &self.insert_input,
+            &self.set_input,
+            &self.pk_columns,
         ]
     }
 
@@ -241,6 +255,9 @@ impl TableNames {
             bool_exp: format!("{object}BoolExp"),
             order_by: format!("{object}OrderBy"),
             select_column: format!("{object}SelectColumn"),
+            insert_input: format!("{object}InsertInput"),
+            set_input: format!("{object}SetInput"),
+            pk_columns: format!("{object}PkColumns"),
             object,
             list_field: name.clone(),
             by_pk_field: format!("{name}_by_pk"),
@@ -513,6 +530,9 @@ mod tests {
         assert_eq!(d.bool_exp, "DepartmentsBoolExp");
         assert_eq!(d.order_by, "DepartmentsOrderBy");
         assert_eq!(d.select_column, "DepartmentsSelectColumn");
+        assert_eq!(d.insert_input, "DepartmentsInsertInput");
+        assert_eq!(d.set_input, "DepartmentsSetInput");
+        assert_eq!(d.pk_columns, "DepartmentsPkColumns");
         assert_eq!(d.list_field, "departments");
         assert_eq!(d.by_pk_field, "departments_by_pk");
         assert_eq!(d.aggregate_field, "departments_aggregate");

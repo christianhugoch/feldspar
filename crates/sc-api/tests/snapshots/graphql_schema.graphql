@@ -117,6 +117,13 @@ type DepartmentsComparableFields {
 	founded: Date
 }
 
+input DepartmentsInsertInput {
+	id: BigInt
+	name: String
+	founded: Date
+	logo: String
+}
+
 type DepartmentsNumericFields {
 	id: BigInt
 }
@@ -128,11 +135,21 @@ input DepartmentsOrderBy {
 	logo: OrderDirection
 }
 
+input DepartmentsPkColumns {
+	id: BigInt!
+}
+
 enum DepartmentsSelectColumn {
 	id
 	name
 	founded
 	logo
+}
+
+input DepartmentsSetInput {
+	name: String
+	founded: Date
+	logo: String
 }
 
 type Employees {
@@ -189,6 +206,18 @@ type EmployeesComparableFields {
 	managed_department: BigInt
 }
 
+input EmployeesInsertInput {
+	id: BigInt
+	name: String
+	salary: Decimal
+	hours: Float
+	active: Boolean
+	profile: JSON
+	token: UUID
+	department: BigInt
+	managed_department: BigInt
+}
+
 type EmployeesNumericFields {
 	id: BigInt
 	salary: Decimal
@@ -209,6 +238,10 @@ input EmployeesOrderBy {
 	managed_department: OrderDirection
 }
 
+input EmployeesPkColumns {
+	id: BigInt!
+}
+
 enum EmployeesSelectColumn {
 	id
 	name
@@ -219,6 +252,17 @@ enum EmployeesSelectColumn {
 	token
 	department
 	managed_department
+}
+
+input EmployeesSetInput {
+	name: String
+	salary: Decimal
+	hours: Float
+	active: Boolean
+	profile: JSON
+	token: UUID
+	department: BigInt
+	managed_department: BigInt
 }
 
 """
@@ -249,6 +293,33 @@ input JSONComparison {
 	in: [JSON!]
 	nin: [JSON!]
 	is_null: Boolean
+}
+
+type Mutation {
+	"""
+	Insert one row of `departments`.
+	"""
+	insert_departments(object: DepartmentsInsertInput!): Departments
+	"""
+	Update the row of `departments` with this primary key.
+	"""
+	update_departments_by_pk(pk_columns: DepartmentsPkColumns!, set: DepartmentsSetInput!): Departments
+	"""
+	Delete the row of `departments` with this primary key, returning the columns it had.
+	"""
+	delete_departments_by_pk(id: BigInt!): Departments
+	"""
+	Insert one row of `employees`.
+	"""
+	insert_employees(object: EmployeesInsertInput!): Employees
+	"""
+	Update the row of `employees` with this primary key.
+	"""
+	update_employees_by_pk(pk_columns: EmployeesPkColumns!, set: EmployeesSetInput!): Employees
+	"""
+	Delete the row of `employees` with this primary key, returning the columns it had.
+	"""
+	delete_employees_by_pk(id: BigInt!): Employees
 }
 
 enum OrderDirection {
@@ -349,4 +420,5 @@ Directs the executor to skip this field or fragment when the `if` argument is tr
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
 	query: Query
+	mutation: Mutation
 }

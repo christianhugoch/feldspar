@@ -2,6 +2,54 @@
 
 Changes in reverse chronological order.
 
+## GraphQL mutations, which are the row layer with a second front door
+
+`insert_X(object:)`, `update_X_by_pk(pk_columns:, set:)` and `delete_X_by_pk(id:)` are in every
+application's schema, and each is a thin call into `ownership::insert_row_as` /
+`update_row_as` / `delete_row_as` — the same entry points the agent's write tools use, which go
+through `rows::create_row_ctx` / `update_row_guarded` / `delete_row_guarded`. So a rich type's
+`max_length`, a `File` field's store and folder rules, §7.3's "granted on the existing row *and*
+on the row as it would become", RLS's `WITH CHECK` and the table's triggers all fire for a
+GraphQL caller **because they are the same code**, not because this provider remembered them. A
+test inserts the same row over GraphQL and over REST and compares the rows *and the events they
+raised*; nothing in the GraphQL module coerces a value or decides who may write.
+
+**A refusal is labelled, not just worded.** A mutation is run by an application on behalf of
+somebody filling in a form, and that application has to tell "this row is not yours" from "the
+server fell over" without parsing English. So a write's error carries
+`extensions.code` (`BAD_USER_INPUT` / `FORBIDDEN` / `NOT_FOUND` / `CONFIGURATION_ERROR` /
+`INTERNAL_SERVER_ERROR` — the conventional GraphQL vocabulary, not one invented here),
+`extensions.table`, and `extensions.field` for a validation failure. The field name is lifted
+out of the row layer's own `` `age`: must be at most 120 `` — the message it already writes
+because it is shown to a *user* — and is only reported when the name it finds is really a column
+of the table, since a `field` pointing at an input that does not exist is worse than none.
+
+**An insert and an update answer with the row read back.** A write's `RETURNING` carries the
+row's own columns and nothing else, because it was never given the selection set — so a
+`manager { email }` on the result would have to be answered `null`, which says "no manager"
+rather than "not asked". Instead the response is projected by the *same* read `_by_pk` performs,
+which is why `insert_projects(object: …) { name tasks_aggregate { count } }` works and returns
+what a query would have. A delete has no row left to read, so it answers with the columns the
+row layer removed and **refuses** a selection reaching past them.
+
+That last one needed the row layer to stop deciding a wire shape: `delete_row_guarded` returned
+`{"deleted": true}` while holding the row it had just read for the delete event — the only copy
+of it anyone will ever get. It now returns the row, and the REST projection wraps it in its own
+acknowledgement at its own boundary, where that contract belongs.
+
+**Every table gets its mutations, and the schema is still one** (decision 4). A table whose
+`min_role_write` this caller does not meet is in the SDL and refuses at resolve time naming
+itself, because a caller who gains a role should not need a different schema. What a table does
+*not* get is a mutation the row layer could never carry out: no `update`/`delete` without a
+single primary key to address a row by (the rule `_by_pk` already follows), and no insert
+without a writable column to name. `XInsertInput` and `XSetInput` differ by exactly the primary
+key, which addresses an update rather than being set by it; a calculated field is in neither,
+turning a runtime refusal into something a caller's editor tells them; and a `File` field is
+written as its path and read as a `FileValue`, because there is nothing to write to a URL. Every
+input field is nullable, including one whose column is `NOT NULL`: what is required of an insert
+is not what is required of the *caller*, and demanding a sequence-backed key would refuse every
+insert into a table that has one.
+
 ## GraphQL aggregates, computed by the database in the query that asked
 
 The milestone's motivating question answers, and it answers in one statement:
