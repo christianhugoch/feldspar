@@ -2,6 +2,54 @@
 
 Changes in reverse chronological order.
 
+## GraphQL, enabled: an application turns it on and its build types itself against it
+
+Everything before this was a provider nobody could reach. An application now enables `graphql`
+beside `rest` — two mounts, one subdomain, one table subset, one authorization layer — because
+`app_providers_with` builds it from the *same* resolved tables and the *same* JavaScript
+evaluator the REST projection gets. Not "also configured the same way": the same values, so the
+two APIs over one application cannot disagree about which tables exist or about a row an
+ownership formula decides. A `File` field's `url` points at the REST mount the bytes are already
+served from, so the second protocol does not become a second download path.
+
+**Two providers on one mount is refused.** The mount check only ever refused `/`; a request
+resolves to the longest matching mount, so REST and GraphQL both on `/api` is a whole API that
+is mounted, generated a client for, and unreachable — with nothing to say so. It is named at
+save time now, like every other configuration error.
+
+**The provider list is served, not remembered.** `listApiProviders` returns what
+`app_providers_with` switches on, and the application form renders it as a select. A provider
+name was the one field of an application whose typo survived the save and turned up later as
+"unknown API provider" from a mount that failed; a picker built from the same list cannot offer
+a name that will not mount. Picking one fills an empty mount with that provider's usual
+sub-path, and a stored name this server does not register stays selected rather than being
+silently rewritten to something else.
+
+**The build writes the schema into the app's source tree.** `src/saltcorn/schema.graphql`, from
+`Schema::sdl()` of the projection that will actually be mounted, beside `client.ts` and
+`hooks.ts` and regenerated with them — so a column added in the admin UI is in the contract the
+app compiles against at the next build, with nobody exporting an SDL by hand. Only for an
+application that enables the provider: a `schema.graphql` in the tree of an app that serves no
+GraphQL is a file every editor would believe and no server would honour.
+
+**The client is a hundred lines of `fetch` and no dependency** (decision 7). `graphql(document,
+variables)` posts to the app's own mount with the session cookie and the same double-submit CSRF
+header the REST client carries, and throws the server's own errors — a GraphQL endpoint answers
+`200` with the errors in the body, so a status code says nothing. `graphqlRequest` returns the
+whole response for the case where a partial result *is* the answer, which is what Phase 4's
+nullable child lists produce. The types are TypeScript's own work: `gql.tada` is configured in
+the generated `tsconfig.json` against the emitted SDL — a language-service plugin `tsc` ignores,
+so nothing was added to `package.json` and the project builds identically whether or not the
+developer installs it. There is no codegen step to run, and a query the schema no longer answers
+fails the app's own `tsc --noEmit`.
+
+Proved by running it: a scaffolded project whose page issues the milestone's query — a
+department, its employees, and a constrained aggregate over them — installs, type-checks and
+builds; and through the assembled router, one application answers that query on `/graphql`
+while `/api` answers the REST call for the same rows in the same session, with a column added
+through the admin API appearing in the served SDL on the *next request* over the
+`SchemaObserver` seam, no restart and no rebuild.
+
 ## GraphQL: the whole read is the caller's, and a query has a price
 
 Phase 5 left one thing refused: a child table under row-level security, counted inside a parent

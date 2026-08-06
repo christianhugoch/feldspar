@@ -273,28 +273,42 @@ option: a join subquery is built from the schema shape and has no `WHERE` this p
 an ownership *formula* cannot be folded into it, and a caller whose access comes from one is
 told to query the table directly instead of being handed a withheld row one column at a time.
 
-## Phase 8 — Wiring: enabling it, generating for it
+## Phase 8 — Wiring: enabling it, generating for it ✅
 
-- [ ] `app_providers_with` builds a `GraphqlProvider` for `"graphql"` (the `match` in
+- [x] `app_providers_with` builds a `GraphqlProvider` for `"graphql"` (the `match` in
       `crates/sc-app/src/api.rs` that today knows one name), sharing the evaluator and the
       resolved table set with the REST one; `validate_api_mounts` already refuses a colliding
       mount, and the test that proves REST and GraphQL coexist at `/api` and `/graphql` belongs
-      with it.
-- [ ] The admin's application form offers the **registered provider names as a select** rather
+      with it. (It did *not* refuse one — it only refused `/`. It does now: two providers on one
+      mount is a whole API that is mounted, generated a client for and unreachable, because a
+      request resolves to the longest matching mount and the tie has a loser.)
+- [x] The admin's application form offers the **registered provider names as a select** rather
       than a free-text box, listed by the server so `graphql` is discoverable and a typo is not
-      a mount failure discovered later.
-- [ ] **The build writes `src/saltcorn/schema.graphql`** from `Schema::sdl()` alongside
+      a mount failure discovered later. (`listApiProviders` over
+      `sc_app::registered_api_provider_info` — the same list `app_providers_with` switches on,
+      so a name offered is a name that mounts. Picking one fills an empty mount with its usual
+      sub-path; a stored name this server does not register stays selected rather than being
+      silently changed.)
+- [x] **The build writes `src/saltcorn/schema.graphql`** from `Schema::sdl()` alongside
       `client.ts` and `hooks.ts`, for applications that enable the provider — and only for
       those.
-- [ ] **The generated browser client**: a dependency-free `graphql<TData, TVars>(document,
+- [x] **The generated browser client**: a dependency-free `graphql<TData, TVars>(document,
       variables)` over `fetch` in `src/saltcorn/`, carrying the app's mount, credentials and the
       CSRF handling the REST client already does; plus a `gql.tada` configuration pointed at the
       emitted SDL so a query's result and variables are typed by TypeScript itself with no
       codegen step. The scaffold's `tsc --noEmit` is what makes a stale query a build failure.
-- [ ] Tests: `crates/sc-server/tests/` — an application with both providers serves REST and
+- [x] Tests: `crates/sc-server/tests/` — an application with both providers serves REST and
       GraphQL on one subdomain, a table added afterwards appears in the schema at the next mount
       (the `SchemaObserver` path, no restart), and the scaffolded project type-checks against a
       query using an aggregate field.
+
+The type-check test is in `crates/sc-app/tests/graphql_scaffold.rs` rather than
+`crates/sc-server/tests/`: it needs a real Node toolchain, and that is where the tests that run
+one already live. It skips when `npm` is not on `PATH` and runs by default otherwise, like the
+tutorial build beside it. `crates/sc-server/tests/graphql_serving.rs` has the other two, and the
+schema-moves-live one is a **column** added through the admin API rather than a table: a new
+table is not in an application's declared subset until the app is saved again, which is an
+ordinary remount, while a column is the case that used to go unnoticed until a restart.
 
 ## Phase 9 — The explorer in the admin UI
 

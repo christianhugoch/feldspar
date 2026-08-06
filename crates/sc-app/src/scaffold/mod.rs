@@ -26,7 +26,7 @@ use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
 use tokio::process::Command;
 
-use crate::api::{app_endpoints_with, app_tables};
+use crate::api::{app_endpoints_with, app_graphql, app_tables};
 use crate::application::Application;
 use crate::build::{AppSource, app_source_from_config};
 use crate::react::REACT_FRAMEWORK;
@@ -89,7 +89,8 @@ pub async fn scaffold_app(
 
     let tables = app_tables(app, cat)?;
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
-    let generated = files::project_files(&project, &tables, &endpoints);
+    let graphql = app_graphql(app, cat)?;
+    let generated = files::project_files(&project, &tables, &endpoints, graphql.as_ref());
 
     let mut written = Vec::with_capacity(generated.len());
     for file in &generated {
@@ -158,8 +159,9 @@ pub fn require_api_provider(app: &Application) -> Result<()> {
     )))
 }
 
-/// Rewrite the generated runtime (`src/saltcorn/`) for `app`, leaving every other
-/// file alone.
+/// Rewrite the generated runtime (`src/saltcorn/`) for `app` — the typed client,
+/// the hooks, and the GraphQL client and schema of an app that enables that
+/// provider — leaving every other file alone.
 ///
 /// Run on **every build**, which is what keeps the hooks and the client honest
 /// when the app's tables change: adding a table in the admin UI makes
@@ -180,9 +182,14 @@ pub async fn emit_react_runtime(
     let store = cat.require_file_store(&source.store.0)?;
     let tables = app_tables(app, cat)?;
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
+    // Regenerated on every build for the same reason the hooks are: an admin who
+    // enables the GraphQL provider, or adds a table to the app, gets a schema
+    // describing what is actually mounted at the next build — with nobody
+    // exporting an SDL by hand.
+    let graphql = app_graphql(app, cat)?;
 
     let mut written = Vec::new();
-    for file in files::runtime_files(&tables, &endpoints) {
+    for file in files::runtime_files(&tables, &endpoints, graphql.as_ref()) {
         let path = format!("{project}/{}", file.path);
         store
             .write(&path, Bytes::from(file.contents.into_bytes()))

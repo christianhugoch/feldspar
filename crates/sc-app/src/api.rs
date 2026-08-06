@@ -17,14 +17,79 @@
 use std::sync::Arc;
 
 use sc_action::{Trigger, TriggerDispatcher};
-use sc_api::{ApiProvider, EndpointSet, REST_PROVIDER, RestProvider, generate_client, op_name};
+use sc_api::{
+    ApiProvider, EndpointSet, GRAPHQL_PROVIDER, GraphqlProvider, REST_PROVIDER, RestProvider,
+    generate_client, op_name,
+};
 use sc_catalog::{Catalog, Table};
 use sc_error::{Error, Result};
 
 use crate::application::Application;
 use crate::framework::framework_serves_ui;
 
-/// Check that no API provider claims a path the app's UI needs (§13.2/§13.4).
+/// How an API provider presents itself to an admin enabling one: a human name
+/// and a sentence saying what protocol they get.
+///
+/// The sibling of [`FrameworkInfo`](crate::FrameworkInfo), and it exists for the
+/// same reason: the admin's application form offers the registered names as a
+/// **list** rather than a free-text box, so `graphql` is discoverable and a typo
+/// is refused at the keyboard rather than surfacing later as a mount failure on
+/// a saved application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiProviderInfo {
+    /// The registry key, as stored in an [`ApiConfig`](crate::ApiConfig).
+    pub name: String,
+    /// A human-facing name.
+    pub label: String,
+    /// One sentence: what this provider serves, and what a caller does with it.
+    pub description: String,
+    /// The sub-path this provider is usually mounted at — what the form fills in
+    /// when the admin picks it.
+    pub default_mount: String,
+}
+
+/// Every registered API provider with its presentation, in the order an admin
+/// should be offered them.
+///
+/// **This is the list [`app_providers_with`] switches on**, so a provider that
+/// is offered is a provider that mounts: the two cannot drift, because the
+/// unknown-provider error is written from this list.
+pub fn registered_api_provider_info() -> Vec<ApiProviderInfo> {
+    vec![
+        ApiProviderInfo {
+            name: REST_PROVIDER.to_owned(),
+            label: "REST".to_owned(),
+            description: "A route per operation over the app's tables and exposed \
+                          triggers, with a typed TypeScript client generated from it. \
+                          The one to take unless you know you want the other."
+                .to_owned(),
+            default_mount: "/api".to_owned(),
+        },
+        ApiProviderInfo {
+            name: GRAPHQL_PROVIDER.to_owned(),
+            label: "GraphQL".to_owned(),
+            description: "One endpoint the caller writes the shape of: nested \
+                          relations and constrained child aggregates in one round \
+                          trip, with the SDL served beside it. Sits alongside REST \
+                          rather than replacing it."
+                .to_owned(),
+            default_mount: sc_api::GRAPHQL_DEFAULT_MOUNT.to_owned(),
+        },
+    ]
+}
+
+/// The registered provider names, comma-separated — what an error naming what is
+/// available says.
+fn registered_provider_names() -> String {
+    registered_api_provider_info()
+        .iter()
+        .map(|p| format!("`{}`", p.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Check that no API provider claims a path the app's UI needs, and that no two
+/// claim the same one (§13.2/§13.4).
 ///
 /// A provider mounted at `/` claims **every** path — that is what a root mount
 /// means — so an app whose framework serves a UI would answer `GET /` from its
@@ -35,6 +100,13 @@ use crate::framework::framework_serves_ui;
 /// It is refused only when there is a UI to lose: an app whose framework
 /// declares [`serves_ui`](crate::Framework::serves_ui) `false` is an API-only
 /// app, and `/` is exactly the right mount for it.
+///
+/// Two providers on one mount is refused whatever the framework serves, because
+/// there is no arrangement in which it is what the admin meant: the router
+/// resolves a request to **one** provider by longest matching mount, so the
+/// loser of the tie is a whole API that is mounted, generated a client for, and
+/// unreachable. REST and GraphQL coexisting on one application is the point of
+/// this milestone — on `/api` and `/graphql`, not twice on `/api`.
 pub fn validate_api_mounts(app: &Application) -> Result<()> {
     check_api_mounts(app, framework_serves_ui(&app.framework.name))
 }
@@ -42,11 +114,16 @@ pub fn validate_api_mounts(app: &Application) -> Result<()> {
 /// [`validate_api_mounts`] with the framework's answer supplied — the whole rule,
 /// with the registry lookup lifted out so it is one decision on one input.
 fn check_api_mounts(app: &Application, serves_ui: bool) -> Result<()> {
-    if !serves_ui {
-        return Ok(());
-    }
-    for api in &app.apis {
-        if api.mount == "/" {
+    for (i, api) in app.apis.iter().enumerate() {
+        if let Some(other) = app.apis[..i].iter().find(|a| a.mount == api.mount) {
+            return Err(Error::invalid(format!(
+                "application `{}` mounts both its `{}` and `{}` APIs at `{}`; a request \
+                 resolves to one provider, so the other would be unreachable — give \
+                 them separate sub-paths",
+                app.name, other.provider, api.provider, api.mount
+            )));
+        }
+        if serves_ui && api.mount == "/" {
             return Err(Error::invalid(format!(
                 "application `{}` mounts its `{}` API at `/`, which claims every path \
                  and would leave the `{}` framework's UI unreachable; mount the API on \
@@ -131,8 +208,8 @@ pub fn app_triggers(
 /// Build the API providers an application enables, each on its own sub-path
 /// (design §13.4).
 ///
-/// The MVP registers one provider name, `rest`; an unknown name is a
-/// configuration error rather than a silently skipped API.
+/// [`registered_api_provider_info`] is the list of names this understands; an
+/// unknown one is a configuration error rather than a silently skipped API.
 ///
 /// The mounts are checked first ([`validate_api_mounts`]), so an app saved before
 /// that check existed fails to build and to mount — with the reason — rather than
@@ -174,13 +251,89 @@ pub fn app_providers_with(
                 }
                 Ok(Box::new(provider) as Box<dyn ApiProvider>)
             }
+            GRAPHQL_PROVIDER => {
+                let mut provider = graphql_provider(app, &api.mount, &tables)?;
+                if let Some(evaluator) = &evaluator {
+                    provider = provider.with_evaluator(evaluator.clone());
+                }
+                Ok(Box::new(provider) as Box<dyn ApiProvider>)
+            }
             other => Err(Error::config(format!(
                 "application `{}` enables unknown API provider `{other}`; \
-                 the MVP ships only `{REST_PROVIDER}`",
-                app.name
+                 this server registers {}",
+                app.name,
+                registered_provider_names()
             ))),
         })
         .collect()
+}
+
+/// Project `app`'s GraphQL API at `mount` over `tables` — the one place a
+/// [`GraphqlProvider`] is built for an application.
+///
+/// Shared by the mount path ([`app_providers_with`]) and the build path
+/// ([`app_graphql_sdl`]) so the SDL a build writes into the app's source tree is
+/// the SDL its running mount answers introspection with. Two constructions with
+/// the same arguments would be the same schema *by coincidence*; one is the same
+/// schema because it is the same call.
+///
+/// The tables are the app's declared subset, already resolved — the same value
+/// the REST provider is projected from, so one application cannot expose two
+/// different table subsets through its two APIs.
+fn graphql_provider(app: &Application, mount: &str, tables: &[Table]) -> Result<GraphqlProvider> {
+    // A schema that will not build is a mount failure naming the table that
+    // caused it: an application whose API is half described is worse than one
+    // that refuses to come up, because the half nobody notices is the wrong one.
+    let provider = GraphqlProvider::project(mount, tables).map_err(|e| {
+        Error::config(format!(
+            "application `{}` cannot project its GraphQL API: {e}",
+            app.name
+        ))
+    })?;
+    // A `File` field answers with its path and the URL the *REST* provider
+    // serves the bytes at, so a GraphQL field never becomes a second download
+    // path. An application with no REST provider has no such URL to give; the
+    // provider's default mount is what the field then names, which is at least
+    // honest about where the bytes would be served from.
+    Ok(
+        match app.apis.iter().find(|a| a.provider == REST_PROVIDER) {
+            Some(rest) => provider.with_file_mount(&rest.mount),
+            None => provider,
+        },
+    )
+}
+
+/// An application's GraphQL API as its **build** needs to know it: where it is
+/// mounted, and the SDL of the schema served there.
+///
+/// Both, together, because the two generated files need one each and they have
+/// to describe the same API: the client posts to `mount`, and `schema.graphql`
+/// is what `gql.tada` type-checks the documents it posts against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppGraphql {
+    /// The sub-path the provider is mounted at within the application.
+    pub mount: String,
+    /// The schema's SDL — `Schema::sdl()` of the projection that will be mounted.
+    pub sdl: String,
+}
+
+/// The application's GraphQL projection, or `None` for an application that does
+/// not enable the provider.
+///
+/// This is what the build writes into the app's source tree beside the generated
+/// REST client. The SDL is the file `gql.tada` type-checks the app's own queries
+/// against, so a query the schema no longer answers is a **build failure** in
+/// the app's own `tsc --noEmit` rather than an error at run time.
+pub fn app_graphql(app: &Application, cat: &Catalog) -> Result<Option<AppGraphql>> {
+    let Some(api) = app.apis.iter().find(|a| a.provider == GRAPHQL_PROVIDER) else {
+        return Ok(None);
+    };
+    let tables = app_tables(app, cat)?;
+    let provider = graphql_provider(app, &api.mount, &tables)?;
+    Ok(Some(AppGraphql {
+        mount: provider.mount(),
+        sdl: provider.sdl(),
+    }))
 }
 
 /// The application's whole API surface: every enabled provider's projection,
@@ -277,5 +430,70 @@ mod mount_tests {
         }
         // Unknown: assume there is a UI to protect — the safe direction.
         assert!(framework_serves_ui("something-else"));
+    }
+
+    /// REST at `/api` and GraphQL at `/graphql` on one application — the
+    /// arrangement this milestone exists to make possible, and the only mount
+    /// check it has to pass.
+    #[test]
+    fn rest_and_graphql_coexist_on_separate_sub_paths() {
+        let app = Application::new("myapp", "myapp", FrameworkRef::new(REACT_FRAMEWORK))
+            .with_api(ApiConfig::new(REST_PROVIDER, "/api"))
+            .with_api(ApiConfig::new(GRAPHQL_PROVIDER, "/graphql"));
+        validate_api_mounts(&app).unwrap();
+    }
+
+    #[test]
+    fn two_providers_on_one_mount_are_refused_naming_both() {
+        // Not a stylistic objection: the router resolves a path to one provider,
+        // so the loser is a whole API that is mounted and unreachable.
+        let app = Application::new("myapp", "myapp", FrameworkRef::new(REACT_FRAMEWORK))
+            .with_api(ApiConfig::new(REST_PROVIDER, "/api"))
+            .with_api(ApiConfig::new(GRAPHQL_PROVIDER, "/api"));
+        let msg = validate_api_mounts(&app).unwrap_err().to_string();
+        assert!(msg.contains(REST_PROVIDER), "{msg}");
+        assert!(msg.contains(GRAPHQL_PROVIDER), "{msg}");
+        assert!(msg.contains("/api"), "{msg}");
+    }
+
+    #[test]
+    fn a_colliding_mount_is_refused_even_for_an_api_only_app() {
+        // The `/` rule is the framework's to waive; this one is not — an
+        // unreachable API is unreachable whatever the framework serves.
+        let app = Application::new("myapp", "myapp", FrameworkRef::new("headless"))
+            .with_api(ApiConfig::new(REST_PROVIDER, "/"))
+            .with_api(ApiConfig::new(GRAPHQL_PROVIDER, "/"));
+        assert!(check_api_mounts(&app, false).is_err());
+    }
+
+    /// Every offered provider is a provider that mounts. The list drives the
+    /// admin's select, so a name in it that `app_providers_with` does not know
+    /// would be a configuration error an admin was *invited* to make.
+    #[test]
+    fn every_offered_provider_name_is_one_the_mount_path_switches_on() {
+        let names: Vec<String> = registered_api_provider_info()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(names.contains(&REST_PROVIDER.to_owned()), "{names:?}");
+        assert!(names.contains(&GRAPHQL_PROVIDER.to_owned()), "{names:?}");
+        for info in registered_api_provider_info() {
+            assert!(
+                matches!(info.name.as_str(), REST_PROVIDER | GRAPHQL_PROVIDER),
+                "`{}` is offered but `app_providers_with` does not build it",
+                info.name
+            );
+            assert!(info.default_mount.starts_with('/'), "{info:?}");
+            assert!(
+                !info.label.is_empty() && !info.description.is_empty(),
+                "{info:?}"
+            );
+        }
+        // And the error an unknown name gets names what is available.
+        let listed = registered_provider_names();
+        assert!(
+            listed.contains(REST_PROVIDER) && listed.contains(GRAPHQL_PROVIDER),
+            "{listed}"
+        );
     }
 }

@@ -32,8 +32,8 @@ use sc_app::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
     app_source_from_config, applications_using_file_store, builder_agent_name, delete_application,
     framework_builder_agent, framework_config_spec, framework_default_csp, list_applications,
-    load_application, registered_framework_info, require_scaffoldable, save_application,
-    scaffold_app,
+    load_application, registered_api_provider_info, registered_framework_info,
+    require_scaffoldable, save_application, scaffold_app,
 };
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, any_user_exists,
@@ -1739,6 +1739,27 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
+    });
+
+    // --- API providers ------------------------------------------------------
+
+    // The names an application may enable, so the form offers them rather than
+    // asking the admin to remember them. This is the *same* list
+    // `app_providers_with` switches on, so a name offered here is a name that
+    // mounts — which is the whole point of listing them from the server.
+    reg.register("listApiProviders", |_ctx| async move {
+        let out: Vec<Json> = registered_api_provider_info()
+            .into_iter()
+            .map(|info| {
+                json!({
+                    "name": info.name,
+                    "label": info.label,
+                    "description": info.description,
+                    "default_mount": info.default_mount,
+                })
+            })
+            .collect();
+        Ok(HandlerResponse::ok(Json::Array(out)))
     });
 
     // --- users --------------------------------------------------------------

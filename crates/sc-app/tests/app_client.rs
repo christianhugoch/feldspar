@@ -156,17 +156,44 @@ async fn an_unknown_api_provider_is_a_configuration_error() -> Result<()> {
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
 
-    // GraphQL is in the design but not the MVP; enabling it fails loudly rather
-    // than serving an app with a silently missing API.
+    // gRPC is in the design and not built; enabling it fails loudly rather than
+    // serving an app with a silently missing API — and the refusal names what
+    // this server *does* register, which is the list the admin form offers.
     let app = Application::new("Blog", "blog", code_framework())
         .with_table(TableId("posts".to_owned()))
-        .with_api(ApiConfig::new("graphql", "/graphql"));
+        .with_api(ApiConfig::new("grpc", "/grpc"));
     let err = app_providers(&app, &cat)
         .map(|_| ())
         .expect_err("an unknown provider must fail");
     let msg = err.to_string();
-    assert!(msg.contains("graphql"), "{msg}");
+    assert!(msg.contains("grpc"), "{msg}");
     assert!(msg.contains("rest"), "{msg}");
+    assert!(msg.contains("graphql"), "{msg}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn both_registered_providers_project_over_one_application() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+
+    // The milestone's arrangement: REST and GraphQL on one app, over the same
+    // declared tables, each on its own sub-path — and one endpoint set with both
+    // providers' operations in it, which is what the app's client is generated
+    // from.
+    let app = Application::new("Blog", "blog", code_framework())
+        .with_table(TableId("posts".to_owned()))
+        .with_api(ApiConfig::new("rest", "/api"))
+        .with_api(ApiConfig::new("graphql", "/graphql"));
+
+    let providers = app_providers(&app, &cat)?;
+    let mounts: Vec<String> = providers.iter().map(|p| p.mount()).collect();
+    assert_eq!(mounts, ["/api", "/graphql"]);
+
+    let endpoints = app_endpoints(&app, &cat)?;
+    assert!(endpoints.find("listPosts").is_some());
+    assert!(endpoints.find("graphqlQuery").is_some());
+    assert!(endpoints.find("graphqlSchema").is_some());
     Ok(())
 }
 

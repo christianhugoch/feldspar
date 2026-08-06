@@ -44,7 +44,8 @@ pub use endpoint::{
 pub use graphql::{
     DEFAULT_FILE_MOUNT as GRAPHQL_DEFAULT_FILE_MOUNT, DEFAULT_MAX_COMPLEXITY, DEFAULT_MAX_DEPTH,
     DEFAULT_MOUNT as GRAPHQL_DEFAULT_MOUNT, DEFAULT_ROW_CAP as GRAPHQL_DEFAULT_ROW_CAP,
-    DEFAULT_STATEMENT_BUDGET, GRAPHQL_PROVIDER, GraphqlLimits, GraphqlProvider, SchemaNames,
+    DEFAULT_STATEMENT_BUDGET, GRAPHQL_CLIENT_FILE, GRAPHQL_PROVIDER, GRAPHQL_SCHEMA_FILE,
+    GraphqlLimits, GraphqlProvider, SchemaNames, generate_graphql_client,
 };
 pub use ownership::{
     caller_context, caller_context_at, delete_row_as, insert_row_as, read_row_values_as,

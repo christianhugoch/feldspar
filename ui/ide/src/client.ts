@@ -86,6 +86,7 @@ export type UpdateApplicationResponse = { id: string; name: string; description:
 export type DeleteApplicationResponse = { deleted: boolean; agent?: string | null };
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
+export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string }>;
 export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
 export type CreateUserRequest = { email: string; password: string; role: number };
 export type CreateUserResponse = { id: string; email: string; role: number };
@@ -158,6 +159,7 @@ export interface ApiClient {
   deleteApplication(id: string): Promise<DeleteApplicationResponse>;
   buildApplication(id: string): Promise<BuildApplicationResponse>;
   listFrameworks(): Promise<ListFrameworksResponse>;
+  listApiProviders(): Promise<ListApiProvidersResponse>;
   listUsers(): Promise<ListUsersResponse>;
   createUser(body: CreateUserRequest): Promise<CreateUserResponse>;
   listTriggers(): Promise<ListTriggersResponse>;
@@ -703,6 +705,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listFrameworks", res);
       return (await res.json()) as ListFrameworksResponse;
+    },
+    async listApiProviders() {
+      const res = await doFetch(`${baseUrl}/api/api-providers`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listApiProviders", res);
+      return (await res.json()) as ListApiProvidersResponse;
     },
     async listUsers() {
       const res = await doFetch(`${baseUrl}/api/users`, {

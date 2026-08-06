@@ -8,7 +8,7 @@
 // subdomain, its table and file-store subsets, its enabled APIs, its static
 // directories, and its CSP.
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Card from "react-bootstrap/Card";
@@ -20,6 +20,7 @@ import Spinner from "react-bootstrap/Spinner";
 import { api, errorMessage } from "../api";
 import type {
   CreateApplicationRequest,
+  ListApiProvidersResponse,
   ListApplicationsResponse,
   ListFrameworksResponse,
   ListTriggersResponse,
@@ -33,6 +34,7 @@ import { SettingsFields, asString, buildConfig, readConfig } from "../settings";
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
 type TriggerItem = ListTriggersResponse[number];
+type ApiProviderInfo = ListApiProvidersResponse[number];
 
 /** A `{ provider, mount }` API row, edited as a repeatable list. */
 type ApiRow = { provider: string; mount: string };
@@ -78,6 +80,10 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   // a name that does not resolve is an application that will not mount, and the
   // list is right here to choose from (unlike tables, which are not).
   const [allTriggers, setAllTriggers] = useState<TriggerItem[]>([]);
+  // The API providers this server registers, for the same reason: a provider name
+  // is the one field of an application whose typo survives the save and turns up
+  // later as "unknown API provider" from a mount that failed.
+  const [allProviders, setAllProviders] = useState<ApiProviderInfo[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -110,6 +116,9 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         // applications: the picker is simply empty, and an app that already
         // names a trigger keeps naming it.
         const trigs = await api.listTriggers().catch(() => [] as TriggerItem[]);
+        // Likewise: a server that cannot list its providers still edits
+        // applications, with the provider box falling back to free text.
+        const provs = await api.listApiProviders().catch(() => [] as ApiProviderInfo[]);
         let existing: AppItem | undefined;
         if (appId) {
           existing = (await api.listApplications()).find((a) => a.id === appId);
@@ -121,6 +130,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         if (cancelled) return;
         setFrameworks(fws);
         setAllTriggers(trigs);
+        setAllProviders(provs);
         if (existing) {
           setName(existing.name);
           setDescription(existing.description);
@@ -427,11 +437,48 @@ export function ApplicationForm({ appId }: { appId?: string }) {
             title="APIs"
             rows={apis}
             columns={[
-              { key: "provider", label: "Provider", placeholder: "rest" },
+              {
+                key: "provider",
+                label: "Provider",
+                placeholder: "rest",
+                // The registered names, from the server. An empty list — a server
+                // that could not list them — leaves this the text box it was: a
+                // picker that cannot be populated should not become a field that
+                // cannot be filled in.
+                options: allProviders.map((p) => ({ value: p.name, label: p.label })),
+              },
               { key: "mount", label: "Mount", placeholder: "/api" },
             ]}
             onChange={setApis}
             blank={{ provider: "", mount: "" }}
+            // Picking a provider fills an *empty* mount with that provider's usual
+            // sub-path, so the common case is one click. An admin who has typed a
+            // mount keeps it.
+            derive={(row, key) =>
+              key === "provider" && !row.mount.trim()
+                ? {
+                    ...row,
+                    mount:
+                      allProviders.find((p) => p.name === row.provider)?.default_mount ??
+                      "",
+                  }
+                : row
+            }
+            help={
+              allProviders.length > 0 ? (
+                <>
+                  {allProviders.map((p) => (
+                    <div key={p.name}>
+                      <code>{p.name}</code> — {p.description}
+                    </div>
+                  ))}
+                  <div className="mt-1">
+                    Each provider is mounted on its own sub-path; two on the same one
+                    is refused, because a request resolves to only one of them.
+                  </div>
+                </>
+              ) : undefined
+            }
           />
 
           <RepeatableRows
@@ -477,15 +524,33 @@ function RepeatableRows<T extends Record<string, string>>({
   columns,
   blank,
   onChange,
+  derive,
+  help,
 }: {
   title: string;
   rows: T[];
-  columns: { key: keyof T & string; label: string; placeholder?: string }[];
+  columns: {
+    key: keyof T & string;
+    label: string;
+    placeholder?: string;
+    /** Render a select over these instead of a text box. */
+    options?: { value: string; label: string }[];
+  }[];
   blank: T;
   onChange: (rows: T[]) => void;
+  /** Fill in the rest of a row after one of its cells is edited. */
+  derive?: (row: T, key: keyof T & string) => T;
+  /** Explanatory text under the rows. */
+  help?: ReactNode;
 }) {
   const setCell = (index: number, key: keyof T & string, value: string) => {
-    onChange(rows.map((r, i) => (i === index ? { ...r, [key]: value } : r)));
+    onChange(
+      rows.map((r, i) => {
+        if (i !== index) return r;
+        const next = { ...r, [key]: value } as T;
+        return derive ? derive(next, key) : next;
+      }),
+    );
   };
   return (
     <Card className="mb-3">
@@ -506,11 +571,31 @@ function RepeatableRows<T extends Record<string, string>>({
             {columns.map((col) => (
               <Col key={col.key}>
                 <Form.Label className="small mb-1">{col.label}</Form.Label>
-                <Form.Control
-                  value={row[col.key]}
-                  placeholder={col.placeholder}
-                  onChange={(e) => setCell(index, col.key, e.target.value)}
-                />
+                {col.options && col.options.length > 0 ? (
+                  <Form.Select
+                    value={row[col.key]}
+                    onChange={(e) => setCell(index, col.key, e.target.value)}
+                  >
+                    <option value="">Choose…</option>
+                    {col.options.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                    {/* A stored value this server does not register — a provider
+                        from a plugin that is gone, or an older name. Kept as an
+                        option so opening the form does not silently change it. */}
+                    {row[col.key] && !col.options.some((o) => o.value === row[col.key]) && (
+                      <option value={row[col.key]}>{row[col.key]} (not registered)</option>
+                    )}
+                  </Form.Select>
+                ) : (
+                  <Form.Control
+                    value={row[col.key]}
+                    placeholder={col.placeholder}
+                    onChange={(e) => setCell(index, col.key, e.target.value)}
+                  />
+                )}
               </Col>
             ))}
             <Col xs="auto">
@@ -523,6 +608,7 @@ function RepeatableRows<T extends Record<string, string>>({
             </Col>
           </Row>
         ))}
+        {help && <Form.Text muted>{help}</Form.Text>}
       </Card.Body>
     </Card>
   );

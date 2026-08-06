@@ -933,6 +933,18 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // --- API providers ------------------------------------------------------
+    // The registered API providers, so the application form offers them as a
+    // **list** rather than a free-text box (§13.4). A provider name is the one
+    // field of an application whose typo is not caught until the app is mounted,
+    // where it becomes "unknown API provider" on a save that appeared to work.
+    // The same move `listFrameworks` makes, for the same reason.
+    set.register(
+        Endpoint::new("listApiProviders", Method::Get, api().lit("api-providers"))
+            .output(TypeSchema::array(api_provider_info_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- users --------------------------------------------------------------
 
     set.register(
@@ -1708,6 +1720,23 @@ fn framework_info_schema() -> TypeSchema {
         StructField::new("label", TypeSchema::text()),
         StructField::new("description", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+    ])
+}
+
+/// A registered API provider as the application form needs it: the name it is
+/// stored under, how to present it, and the sub-path it is usually mounted at.
+///
+/// No `config_spec`: a provider is enabled with a name and a mount, and both are
+/// fields of the `ApiConfig` row the form already edits. If a provider ever
+/// takes settings of its own, this is where they would arrive.
+fn api_provider_info_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // What the form fills the mount box in with when this provider is
+        // picked, so the common case is no typing at all.
+        StructField::new("default_mount", TypeSchema::text()),
     ])
 }
 
