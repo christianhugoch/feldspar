@@ -85,6 +85,8 @@ export type UpdateApplicationRequest = { name: string; description: string; subd
 export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null };
 export type DeleteApplicationResponse = { deleted: boolean; agent?: string | null };
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
+export type RunApplicationGraphqlRequest = { query: string; variables?: unknown | null; operationName?: string | null };
+export type RunApplicationGraphqlResponse = unknown;
 export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string }>;
 export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
@@ -158,6 +160,7 @@ export interface ApiClient {
   updateApplication(id: string, body: UpdateApplicationRequest): Promise<UpdateApplicationResponse>;
   deleteApplication(id: string): Promise<DeleteApplicationResponse>;
   buildApplication(id: string): Promise<BuildApplicationResponse>;
+  runApplicationGraphql(id: string, body: RunApplicationGraphqlRequest): Promise<RunApplicationGraphqlResponse>;
   listFrameworks(): Promise<ListFrameworksResponse>;
   listApiProviders(): Promise<ListApiProvidersResponse>;
   listUsers(): Promise<ListUsersResponse>;
@@ -697,6 +700,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("buildApplication", res);
       return (await res.json()) as BuildApplicationResponse;
+    },
+    async runApplicationGraphql(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/graphql`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("runApplicationGraphql", res);
+      return (await res.json()) as RunApplicationGraphqlResponse;
     },
     async listFrameworks() {
       const res = await doFetch(`${baseUrl}/api/frameworks`, {

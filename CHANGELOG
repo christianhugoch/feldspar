@@ -2,6 +2,46 @@
 
 Changes in reverse chronological order.
 
+## An explorer for it, with no more authority than the admin holding it
+
+An application that enables GraphQL now has a screen: a query editor, a variables pane, a
+response pane, and its own schema browsed from introspection, reached from a **GraphQL** button
+on the applications list (and only on the rows that have one — a row should not offer a dead
+end). It opens on something runnable, because a click on a root field in the schema pane writes
+the query for it, naming the leaf columns and nothing that would need a nested selection set.
+
+**Not GraphiQL, and not a `fetch` to the app either.** The admin SPA is served under
+`default-src 'self'`, so the CDN bundle every GraphQL server ships cannot load; vendoring
+GraphiQL into each *application* would be a large dependency in a bundle whose users never see
+this screen. The same policy's `connect-src 'self'` also forbids the admin page from calling
+`staff.example.com/graphql` at all, and relaxing it so one screen may talk to every subdomain is
+a poor trade for a debugging tool. So the screen posts to `runApplicationGraphql`, an admin
+endpoint that finds the application's **mounted** GraphQL provider and calls the very
+`ApiProvider::handle` a request to that subdomain reaches. The schema, the limits, the row layer
+and the §7 authorization are not restated anywhere — the handler's only decision is who is
+asking, and it answers `ctx.user`: the signed-in admin.
+
+**Which the screen says, in as many words.** An admin clears every table's role floor and every
+ownership rule, so a query that works in the explorer is not evidence that it works for the
+application's users. The caption names the person the queries run as and says this shows the
+most any caller can see — an explorer quietly holding more authority than the caller being
+debugged is a trap, and the sentence lives in the tested model rather than in the markup so that
+it cannot quietly go missing.
+
+The panes are the parts that have to be right, so they are a model (`graphqlExplorer.ts`) rather
+than a component: malformed variables are refused *here*, naming the pane they came from, rather
+than coming back as "invalid JSON body" from a round trip; a GraphQL endpoint answers `200` with
+its errors in the body, so a refusal is rendered as a refusal; and a **partial** result — Phase
+4's nullable child list, parents returned with the child table's refusal on that field — is
+rendered as both panes at once, because showing either half alone would hide the design.
+
+Proved against a real server as well as in `vitest`: the same document through the explorer and
+through the application's own mount, in the same admin's session, is the same answer;
+introspection through it describes the application's schema and not a table outside its declared
+subset, which is neither browsable nor answerable; a write through it is the row layer's write,
+read back over REST; and an application that is not built, or that does not enable the provider,
+is told which of the two it is.
+
 ## GraphQL, enabled: an application turns it on and its build types itself against it
 
 Everything before this was a provider nobody could reach. An application now enables `graphql`

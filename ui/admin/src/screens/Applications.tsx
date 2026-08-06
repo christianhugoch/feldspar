@@ -16,6 +16,7 @@ import Table from "react-bootstrap/Table";
 import { api, errorMessage } from "../api";
 import type { ListApplicationsResponse } from "../client";
 import { ideUrl, navigate } from "../App";
+import { graphqlMount } from "../graphqlExplorer";
 import { IconPlus } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import { takeNotice, type Notice } from "../notice";
@@ -193,6 +194,19 @@ export function Applications() {
                     </td>
                     <td className="text-end">
                       <div className="btn-list justify-content-end flex-nowrap">
+                        {/* Only for an app that enables the provider: the
+                            explorer has nothing to show for one that does not,
+                            and the row should not offer a dead end. */}
+                        {graphqlMount(app.apis) && (
+                          <Button
+                            size="sm"
+                            variant="outline-secondary"
+                            href={`#/applications/${encodeURIComponent(app.id)}/graphql`}
+                            title="Run GraphQL queries against this application"
+                          >
+                            GraphQL
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="outline-secondary"

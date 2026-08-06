@@ -310,16 +310,31 @@ schema-moves-live one is a **column** added through the admin API rather than a 
 table is not in an application's declared subset until the app is saved again, which is an
 ordinary remount, while a column is the case that used to go unnoticed until a restart.
 
-## Phase 9 — The explorer in the admin UI
+## Phase 9 — The explorer in the admin UI ✅
 
-- [ ] A screen per application with a GraphQL provider: query editor, variables, response pane,
+- [x] A screen per application with a GraphQL provider: query editor, variables, response pane,
       and the schema browsed from introspection — bundled with the admin SPA, because
       `default-src 'self'` forbids the CDN GraphiQL every server ships and vendoring GraphiQL
       into every *application* is a dependency an app did not ask for.
-- [ ] It runs as the logged-in admin against the application's own mount, and says so — an
+- [x] It runs as the logged-in admin against the application's own mount, and says so — an
       explorer that quietly holds more authority than the caller being debugged is a trap.
-- [ ] Tests: `vitest` over the screen's model (document + variables → request, response →
+- [x] Tests: `vitest` over the screen's model (document + variables → request, response →
       panes, an error response rendered as an error), with the socketless parts stubbed.
+
+The same `default-src 'self'` that rules out GraphiQL also rules out the obvious way to reach
+the application: `connect-src 'self'` means the admin page cannot `fetch` its own subdomains, and
+relaxing the admin's policy so one screen may talk to every app is a poor trade for a debugging
+tool. So the screen posts to an **admin endpoint** — `runApplicationGraphql`, which finds the
+app's *mounted* GraphQL provider and calls the very `ApiProvider::handle` a request to
+`staff.example.com/graphql` reaches, with `ctx.user` as the caller. The explorer therefore has
+exactly the authority of the person driving it, and the only thing the handler decides is who is
+asking. An application that is not mounted, or that does not enable the provider, is told which
+of the two it is rather than answering emptily.
+
+`crates/sc-server/tests/admin_graphql_explorer.rs` is what holds that: the same document through
+the explorer and through the app's own mount in the same admin's session is the *same answer*;
+introspection through it describes the application's schema and not a table outside its declared
+subset; a write through it is the row layer's write, read back over REST.
 
 ## Phase 10 — Documentation
 

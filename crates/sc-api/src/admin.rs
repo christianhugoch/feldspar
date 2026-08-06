@@ -924,6 +924,44 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Run one GraphQL operation against a **mounted** application's own GraphQL
+    // provider — what the admin UI's explorer (§13.4) is built on.
+    //
+    // It is an admin endpoint rather than a browser request to the app's mount
+    // because the admin SPA is served under `connect-src 'self'`: a `fetch` from
+    // the base domain to `blog.example.com/graphql` is a cross-origin request
+    // the page's own policy forbids, and relaxing that policy to let one screen
+    // talk to every subdomain is a poor trade for a debugging tool.
+    //
+    // **The operation runs as the signed-in admin**, through the very same
+    // `ApiProvider::handle` a request to the app's mount reaches — same schema,
+    // same limits, same authorization at resolve time. The explorer therefore
+    // has exactly the authority of the person using it, which is the property
+    // that makes it a debugging tool rather than a back door; the screen says so
+    // in as many words.
+    //
+    // The output is `json`: a GraphQL response is `{data, errors, extensions}`
+    // whose `data` is the shape the *caller's document* asked for, which no
+    // `TypeSchema` can describe ahead of time. That is the same reason the
+    // provider's own `graphqlQuery` endpoint declares it.
+    set.register(
+        Endpoint::new(
+            "runApplicationGraphql",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("graphql"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("query", TypeSchema::text()),
+            StructField::new("variables", TypeSchema::optional(TypeSchema::json())),
+            StructField::new("operationName", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- frameworks ---------------------------------------------------------
     // The registered frameworks with their settings spec, so the create/edit
     // form can render controls for a framework it knows nothing about (§13.3).

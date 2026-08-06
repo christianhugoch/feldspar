@@ -15,7 +15,7 @@
 //! (composite keys are post-MVP), and `createTable` gives a new table a default
 //! identity `id` key so the row editor has something to address.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -28,6 +28,7 @@ use sc_action::{
 use sc_api::auth::{credentials, user_summary_json};
 use sc_api::rows::{self, require_object};
 use sc_api::schema_edit;
+use sc_api::{ApiRequest, GRAPHQL_PROVIDER, Method as ApiMethod};
 use sc_app::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
     app_source_from_config, applications_using_file_store, builder_agent_name, delete_application,
@@ -1707,6 +1708,70 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     "git_repo": report.git_repo,
                     "log": build_log(&report),
                 })))
+            }
+        }
+    });
+
+    // The admin UI's GraphQL explorer (§13.4): one operation, run against the
+    // application's **mounted** GraphQL provider.
+    //
+    // Everything this handler does is find that provider and hand it the body.
+    // The document is executed by `ApiProvider::handle` — the same entry point a
+    // request to `staff.example.com/graphql` reaches — so the schema, the
+    // limits, the row layer and the §7 authorization are not restated here and
+    // cannot drift from what the application serves. The one thing this handler
+    // chooses is *who is asking*, and it chooses `ctx.user`: the signed-in
+    // admin, with their own role and their own ownership. An explorer holding
+    // authority the person driving it does not have would be a way to read rows
+    // through a screen that were refused through the API.
+    //
+    // A GraphQL endpoint answers `200` with its errors in the body, so the
+    // provider's response — status and all — is passed through as it stands
+    // rather than being re-judged here.
+    reg.register("runApplicationGraphql", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let app = load_application(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
+                // The *mounted* app, not the stored row: an application whose
+                // record enables GraphQL but which has never been built serves
+                // nothing, and "no such provider" would be a misleading way to
+                // say so.
+                let mounted = apps.get(&app.subdomain).ok_or_else(|| {
+                    Error::invalid(format!(
+                        "application `{}` is not mounted, so it serves no GraphQL yet — build it \
+                         first",
+                        app.name
+                    ))
+                })?;
+                let provider = mounted
+                    .providers
+                    .iter()
+                    .find(|p| p.name() == GRAPHQL_PROVIDER)
+                    .ok_or_else(|| {
+                        Error::invalid(format!(
+                            "application `{}` does not enable the `{GRAPHQL_PROVIDER}` API \
+                             provider",
+                            app.name
+                        ))
+                    })?;
+                let req = ApiRequest {
+                    method: ApiMethod::Post,
+                    // The provider routes on its own mount, so this is that
+                    // mount and never a path a request chose.
+                    path: provider.mount(),
+                    query: HashMap::new(),
+                    body: ctx.body.clone(),
+                    raw: None,
+                };
+                let resp = provider.handle(req, &catalog, ctx.user.as_ref()).await?;
+                Ok(HandlerResponse::ok(resp.body).with_status(resp.status))
             }
         }
     });

@@ -42,6 +42,7 @@ import { FileManager } from "./screens/FileManager";
 import { FileStores } from "./screens/FileStores";
 import { FileStoreForm } from "./screens/FileStoreForm";
 import { FirstUser } from "./screens/FirstUser";
+import { GraphqlExplorer } from "./screens/GraphqlExplorer";
 import { LlmProviders } from "./screens/LlmProviders";
 import { LlmProviderForm } from "./screens/LlmProviderForm";
 import { Login } from "./screens/Login";
@@ -310,7 +311,7 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
       </aside>
 
       <div className="page-wrapper">
-        <Screen route={route} />
+        <Screen route={route} user={user} />
         <footer className="footer footer-transparent d-print-none">
           <div className="container-xl">
             <div className="row text-center align-items-center flex-row-reverse">
@@ -349,14 +350,22 @@ function ThemeToggle({ theme, onToggle }: { theme: string; onToggle: () => void 
   );
 }
 
-/** Resolve the current hash route to a screen. */
-function Screen({ route }: { route: string }) {
+/** Resolve the current hash route to a screen.
+ *
+ * `user` reaches only the screens that are *about* the signed-in admin rather
+ * than about a record — today the GraphQL explorer, which runs its queries under
+ * that admin's own authority and has to say whose. */
+function Screen({ route, user }: { route: string; user: CurrentUser }) {
   const tableMatch = route.match(/^\/tables\/([^/]+)$/);
   if (tableMatch) {
     return <TableDetail table={decodeURIComponent(tableMatch[1])} />;
   }
   if (route === "/applications/new") {
     return <ApplicationForm />;
+  }
+  const graphqlMatch = route.match(/^\/applications\/([^/]+)\/graphql$/);
+  if (graphqlMatch) {
+    return <GraphqlExplorer appId={decodeURIComponent(graphqlMatch[1])} user={user} />;
   }
   const editMatch = route.match(/^\/applications\/([^/]+)\/edit$/);
   if (editMatch) {
