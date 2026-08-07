@@ -1,0 +1,192 @@
+//! The configuration file, end to end against a **real Postgres database**: a
+//! `saltcorn.toml` with a `test` environment, `--environment test` on the command
+//! line, and the boot path connecting to the database that file names.
+//!
+//! The unit tests in `src/config_file.rs` and `src/db.rs` cover the parsing and
+//! the precedence rules. This one covers the thing neither can: that what comes
+//! out of the file is actually what gets connected — and, because the suite runs
+//! with `DATABASE_URL` set to a *different* database, that naming an environment
+//! really does outrank the ambient variables rather than merely claiming to.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use sc_cli::{DbConfig, connect_catalog};
+use sc_test_harness::TestDb;
+
+/// Matches the harness fallback so a bare `cargo test` works in CI.
+const DEFAULT_URL: &str = "postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test";
+
+/// Build a connection URL for the per-test database by replacing the database
+/// name in the base `DATABASE_URL` (which the harness also reads).
+fn url_for(db: &TestDb) -> String {
+    let base = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+    let (authority_and_path, query) = match base.split_once('?') {
+        Some((head, q)) => (head, Some(q)),
+        None => (base.as_str(), None),
+    };
+    let cut = authority_and_path.rfind('/').expect("URL has a path");
+    let mut url = format!("{}/{}", &authority_and_path[..cut], db.name());
+    if let Some(q) = query {
+        url.push('?');
+        url.push_str(q);
+    }
+    url
+}
+
+/// A `saltcorn.toml` on disk for the duration of one test.
+struct Fixture(std::path::PathBuf);
+
+impl Fixture {
+    fn new(name: &str, contents: &str) -> Fixture {
+        let path =
+            std::env::temp_dir().join(format!("sc-cli-it-{}-{name}.toml", std::process::id()));
+        std::fs::write(&path, contents).expect("write fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod fixture");
+        }
+        Fixture(path)
+    }
+
+    fn path(&self) -> &str {
+        self.0.to_str().expect("utf-8 fixture path")
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn serve_boots_against_the_environment_named_on_the_command_line() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+
+    // Three environments, as a deployment would have them. `production` and
+    // `staging` point nowhere reachable on purpose: if the selection were wrong
+    // in either direction this test would fail with a connection error rather
+    // than quietly pass against the right database for the wrong reason.
+    let file = Fixture::new(
+        "envs",
+        &format!(
+            r#"
+default_environment = "production"
+
+[environments.production]
+url = "postgres://saltcorn:secret@127.0.0.1:1/production"
+
+[environments.staging]
+url = "postgres://saltcorn:secret@127.0.0.1:1/staging"
+
+[environments.test]
+url = "{}"
+"#,
+            url_for(&db)
+        ),
+    );
+
+    // The command line a person would type — and the arguments that are not the
+    // database's business come back out for the server parser, unchanged.
+    let (cfg, rest) = DbConfig::extract([
+        "--environment",
+        "test",
+        "--config",
+        file.path(),
+        "--bind",
+        "127.0.0.1:3000",
+    ])?;
+    assert_eq!(rest, ["--bind", "127.0.0.1:3000"]);
+    assert_eq!(cfg.environment(), Some("test"));
+    assert!(
+        cfg.source().expect("a source").contains("test"),
+        "the startup line should name the environment"
+    );
+    assert!(
+        !cfg.target().contains("secret"),
+        "the target must not leak a password: {}",
+        cfg.target()
+    );
+
+    // The whole boot path, on the file's parameters.
+    let catalog = connect_catalog(&cfg).await?;
+    assert!(catalog.get(sc_auth::USERS_TABLE)?.is_some());
+
+    // ...in *this* database. The suite runs with `DATABASE_URL` pointing at the
+    // harness's maintenance database, so a `users` table here — created by the
+    // bootstrap above, against a database whose name only the file knew — is the
+    // proof that the named environment beat the ambient variable.
+    let client = db.client().await?;
+    let row = client
+        .query_one(
+            "select to_regclass('public.users') is not null as present",
+            &[],
+        )
+        .await
+        .expect("query");
+    assert!(
+        row.get::<_, bool>("present"),
+        "the users table should have been bootstrapped in the environment's own database"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_environment_given_as_parts_connects_just_like_a_url() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+
+    // The same database, described the way an operator who does not want a URL
+    // in the file would describe it: as parts. They are read back out of the
+    // base connection string so this works on any machine the suite runs on.
+    let base: tokio_postgres::Config = url_for(&db).parse().map_err(|e| {
+        sc_error::Error::config(format!(
+            "could not parse the harness connection string: {e}"
+        ))
+    })?;
+    // A Unix-socket host, when the connection string offers one, is preferred:
+    // the socket directory is a perfectly good `host` value — libpq's own
+    // convention, which `tokio_postgres::Config::host` follows — and a dev box
+    // whose Postgres listens only on its socket has no TCP host to fall back to.
+    let host = base
+        .get_hosts()
+        .iter()
+        .find_map(|h| match h {
+            tokio_postgres::config::Host::Unix(p) => Some(p.to_string_lossy().into_owned()),
+            tokio_postgres::config::Host::Tcp(_) => None,
+        })
+        .or_else(|| {
+            base.get_hosts().iter().find_map(|h| match h {
+                tokio_postgres::config::Host::Tcp(h) => Some(h.clone()),
+                tokio_postgres::config::Host::Unix(_) => None,
+            })
+        })
+        .unwrap_or_else(|| "localhost".to_owned());
+    let port = base.get_ports().first().copied().unwrap_or(5432);
+    let user = base.get_user().unwrap_or("postgres").to_owned();
+    let password = base
+        .get_password()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+
+    let mut section = format!(
+        "\n[environments.test]\nhost = \"{host}\"\nport = {port}\nuser = \"{user}\"\ndatabase = \"{}\"\n",
+        db.name()
+    );
+    if let Some(password) = password {
+        section.push_str(&format!("password = \"{password}\"\n"));
+    }
+    let file = Fixture::new("parts", &section);
+
+    let (cfg, _) = DbConfig::extract(["--environment", "test", "--config", file.path()])?;
+    // The parts path renders a credential-free target, and it is the file's.
+    assert!(
+        cfg.target().ends_with(&format!("/{}", db.name())),
+        "target should name the file's database: {}",
+        cfg.target()
+    );
+
+    let catalog = connect_catalog(&cfg).await?;
+    assert!(catalog.get(sc_auth::USERS_TABLE)?.is_some());
+    Ok(())
+}

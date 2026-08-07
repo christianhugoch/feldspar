@@ -4,10 +4,11 @@
 //! decision), since the server it launches is async top to bottom. It exposes
 //! the `serve` command, which connects the primary database, initialises the
 //! [`Catalog`](sc_catalog::Catalog), and starts the HTTP server with the admin
-//! API mounted. The database connection is configured by [`DbConfig`] (flags or
-//! the environment); the remaining flags configure the HTTP server itself
-//! ([`ServerConfig`]). The reusable boot logic lives in the crate library
-//! ([`sc_cli`]).
+//! API mounted. The database connection is configured by [`DbConfig`] — flags,
+//! the environment, or the environment selected with `--environment` out of the
+//! `saltcorn.toml` configuration file; the remaining flags configure the HTTP
+//! server itself ([`ServerConfig`]). The reusable boot logic lives in the crate
+//! library ([`sc_cli`]).
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -85,6 +86,14 @@ async fn serve_command(args: &[String]) -> Result<()> {
         }
     }
     config.ide_dir = ide_bundle_dir();
+
+    // Which database this process is about to write to is the one fact worth
+    // saying out loud before anything happens — an operator running three
+    // environments off one binary should be able to see, in the log, that this
+    // one is staging.
+    if let Some(source) = db.source() {
+        eprintln!("saltcorn: database configured from {source}");
+    }
 
     // Bring the data layer up before binding: connect the database, load the
     // catalog, and ensure the users table exists. A bad connection fails here
@@ -187,6 +196,9 @@ async fn build_app_command(args: &[String]) -> Result<()> {
         )));
     }
 
+    if let Some(source) = db.source() {
+        eprintln!("saltcorn: database configured from {source}");
+    }
     let catalog = connect_catalog(&db).await?;
     connect_stored_file_stores(&catalog).await?;
     connect_file_stores(&catalog, &file_store_specs)?;
@@ -236,6 +248,17 @@ fn print_usage() {
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
     eprintln!("    --database-url URL   full connection string (takes precedence)");
     eprintln!("    --db-host H  --db-port N  --db-user U  --db-password P  --db-name D");
+    eprintln!();
+    eprintln!("  configuration file (used for whatever the flags and environment leave unset):");
+    eprintln!(
+        "    --environment NAME   which [environments.NAME] section to connect with \
+         (or SALTCORN_ENV);"
+    );
+    eprintln!("                         naming one makes it outrank DATABASE_URL / PG*");
+    eprintln!("    --config PATH        read this file instead of searching (or SALTCORN_CONFIG)");
+    for path in sc_cli::config_file::search_paths() {
+        eprintln!("                         searched: {}", path.display());
+    }
     eprintln!();
     eprintln!(
         "  build-app: builds one application and prints the bundler's output.

@@ -30,6 +30,10 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
+# The `saltcorn.toml` configuration file: named environments, each with one set
+# of database connection parameters (`config_file.rs`).
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 sc-test-harness.workspace = true

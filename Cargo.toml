@@ -101,6 +101,20 @@ async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The `saltcorn.toml` configuration file (`sc-cli`): per-environment database
+# connection parameters, read when the environment does not supply them. TOML
+# rather than YAML or JSON because it is the format a Rust operator already has
+# a parser for in every other tool on the box, it has comments (a JSON config
+# file cannot carry the sentence explaining why staging points where it does),
+# and its failure mode is a parse error with a line number rather than YAML's
+# silent type coercion. `default-features = false` drops the serializer
+# (`display`): nothing writes this file — an operator does — so the crate is
+# built as a reader only.
+toml = { version = "1.1", default-features = false, features = [
+    "std",
+    "parse",
+    "serde",
+] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # argon2id password hashing. Pinned to the stable 0.5 line (0.6 is only an RC).
 # `std` pulls in `getrandom` (via rand_core) so a random salt can be drawn from

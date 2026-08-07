@@ -1,10 +1,12 @@
 //! Library half of the `saltcorn` binary (layer 10).
 //!
 //! The binary ([`main`](../main/index.html)) stays thin; the reusable pieces —
-//! parsing the database connection ([`DbConfig`]) and standing up a connected
-//! [`Catalog`] ([`connect_catalog`]) — live here so integration tests can drive
-//! the same boot path the CLI uses.
+//! parsing the database connection ([`DbConfig`]), reading the per-environment
+//! configuration file ([`config_file`]) and standing up a connected [`Catalog`]
+//! ([`connect_catalog`]) — live here so integration tests can drive the same boot
+//! path the CLI uses.
 
+pub mod config_file;
 pub mod db;
 
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use sc_db::DatabaseDriver;
 use sc_error::{Context, Error, Result};
 use sc_files::{FileStoreDef, connect_from_def};
 
+pub use config_file::{ConfigFile, Environment, SelectedEnvironment};
 pub use db::DbConfig;
 
 /// Connect to the primary database described by `db`, initialise the

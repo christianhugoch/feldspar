@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## Three databases, one binary: named environments in a configuration file
+
+The server knew one way to be told where its database is: flags, or the environment. That works
+for a container and works badly for a machine with a production database, a staging database and
+a test database on it, where an operator either re-exports `DATABASE_URL` between runs or writes
+three wrapper scripts. So the connection parameters can now live on disk, named, and the command
+line picks one: `saltcorn serve --environment staging`, `--env test`, or whatever else
+`[environments.*]` defines — the table is ordinary TOML, so a deployment may have as many
+environments as it has databases. `build-app` takes the same flags, since deploying to staging
+means building there too.
+
+[crates/sc-cli/src/config_file.rs](crates/sc-cli/src/config_file.rs) is the reader. Where the
+file lives is the operating system's business rather than ours, so it asks the platform — the
+user configuration directory (`$XDG_CONFIG_HOME`, `~/Library/Application Support`, `%APPDATA%`)
+and then the system one (`/etc`, `%PROGRAMDATA%`), the second mattering as much as the first
+because a server started by systemd runs as a service account that may have no home directory at
+all. `--config PATH` / `SALTCORN_CONFIG` names a file outright. TOML rather than YAML or JSON
+because an operator can put a comment next to the line saying why staging points where it does,
+and because its failure mode is a parse error with a line number rather than a silent coercion;
+the crate is built `default-features = false` as a reader only, which is all anything here does.
+
+**Nothing is stepped over.** A file that does not parse, a `--config` that does not exist, an
+`--environment` the file does not define (the error lists the ones it does), or a key spelled
+`databse` are all startup errors — a misconfiguration that got quietly ignored here would not
+mean a missing feature, it would mean connecting to the wrong database and writing to it. The one
+quiet path is *no file at all*, which is not a misconfiguration but the environment-variable
+deployment this sits alongside. A section that holds passwords and is readable by other users
+gets a warning on stderr, not a refusal: that is the operator's call, but it is worth a sentence.
+
+**Naming an environment inverts the precedence, deliberately.** The default order is flags, then
+`DATABASE_URL`/`PG*`, then the file — the file supplies what the environment does not, which is
+what was asked for. But `--environment staging` is an instruction, and an operator who gives it
+on a box where `DATABASE_URL` happens to point at production must not be quietly connected to
+production; so a *named* environment whose section says anything is authoritative for that run
+and the ambient variables are ignored entirely — entirely, not per field, since a section giving
+host and database while `DATABASE_URL` still supplied the URL would be the same accident wearing
+a smaller hat. Explicit `--db-*` flags still win over everything, and an empty placeholder section
+takes over nothing. `serve` prints which environment it connected with, and from which file,
+before it connects: which database this process is about to write to is the one fact worth saying
+out loud.
+
+The tests are in three layers, because the failure modes are: parsing and the refusals as unit
+tests in `config_file.rs`; the precedence rules in `db.rs`, driven through `DbConfig::extract`
+with a fixture file and written to hold whatever `DATABASE_URL` the suite happens to run with;
+and [crates/sc-cli/tests/config_file.rs](crates/sc-cli/tests/config_file.rs) end to end against a
+real Postgres, where a file naming three environments — two of them pointed at a dead port on
+purpose — boots the catalog on the third. That last one is the only place the claim can actually
+be checked: the suite runs with `DATABASE_URL` set to a *different* database, so a `users` table
+in the per-test database whose name only the file knew is the proof that naming an environment
+beat the ambient variable, rather than the code merely saying it does.
+
 ## The GraphQL provider, written down where the design lives
 
 §13.4 of the technical design described a provider that did not exist yet, in a paragraph. It now

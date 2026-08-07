@@ -1,0 +1,505 @@
+//! The `saltcorn.toml` configuration file: named environments, each holding one
+//! set of primary-database connection parameters.
+//!
+//! A deployment does not have *a* database; it has a production database, a
+//! staging database and a test database, and the difference between them is a
+//! handful of connection parameters. Carrying those in the environment works for
+//! one of them (a container, a systemd unit) and works badly for the rest: an
+//! operator on a machine with three of them either exports and re-exports
+//! `DATABASE_URL`, or writes three wrapper scripts. This file is the other half
+//! — the parameters live on disk, named, and the command line picks one:
+//!
+//! ```toml
+//! default_environment = "production"
+//!
+//! [environments.production]
+//! host = "db.internal"
+//! port = 5432
+//! user = "saltcorn"
+//! password = "…"
+//! database = "saltcorn"
+//!
+//! [environments.staging]
+//! url = "postgres://saltcorn:…@staging.internal:5432/saltcorn"
+//!
+//! [environments.test]
+//! database = "saltcorn_test"
+//! ```
+//!
+//! `environments` is an ordinary TOML table, so there is nothing special about
+//! the three names above — a deployment may define as many as it has databases,
+//! and `--environment NAME` names any of them.
+//!
+//! **Where the file lives** is the operating system's business, not ours, so
+//! [`search_paths`] asks the platform: the user configuration directory
+//! (`$XDG_CONFIG_HOME`, `~/Library/Application Support`, `%APPDATA%`) and then
+//! the system one (`/etc`, `%PROGRAMDATA%`). The system path matters as much as
+//! the user one here: a server started by systemd runs as a service account that
+//! may have no home directory at all.
+//!
+//! **No silent failures** (principle 5) is the whole design of the reader. A file
+//! that does not parse is an error, not a shrug; an unknown key is an error,
+//! because a misspelled `databse` that was quietly ignored would connect to the
+//! wrong database rather than fail; and naming an environment that the file does
+//! not define is an error listing the ones it does. The one deliberately quiet
+//! path is *no file at all*, which is not a misconfiguration — it is the
+//! environment-variable deployment this file exists alongside.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use sc_error::{Error, Result};
+use serde::Deserialize;
+
+/// The file's name, in whichever directory it is found.
+pub const FILE_NAME: &str = "saltcorn.toml";
+/// The per-application directory the file sits in, under the platform's
+/// configuration root.
+pub const APP_DIR: &str = "saltcorn";
+/// Environment variable naming the configuration file outright (overrides the
+/// search). The file it names must exist.
+pub const CONFIG_PATH_VAR: &str = "SALTCORN_CONFIG";
+/// Environment variable selecting the environment, when `--environment` is not
+/// passed. Selecting one this way is as explicit as the flag.
+pub const ENVIRONMENT_VAR: &str = "SALTCORN_ENV";
+/// The environment used when the file names no `default_environment` and the
+/// command line selects none.
+pub const DEFAULT_ENVIRONMENT: &str = "production";
+
+/// A parsed `saltcorn.toml`.
+///
+/// `deny_unknown_fields`: a key we do not recognise is a typo in a file whose
+/// whole job is to say which database to write to, and stepping over it would
+/// mean connecting somewhere the operator did not intend.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigFile {
+    /// Which environment to use when the command line selects none. Defaults to
+    /// [`DEFAULT_ENVIRONMENT`].
+    #[serde(default)]
+    pub default_environment: Option<String>,
+    /// The environments, by name. Any number, any names.
+    #[serde(default)]
+    pub environments: BTreeMap<String, Environment>,
+}
+
+/// One environment's connection parameters — the file's form of the same
+/// settings the `--db-*` flags and the `PG*` variables carry.
+///
+/// `url` and the individual parts are alternatives, and `url` wins, exactly as
+/// on the command line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Environment {
+    /// A full connection string. Takes precedence over the parts below.
+    pub url: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    /// The database name (`database`, not `dbname`: this is a file a person
+    /// writes, and `--db-name`'s spelling is the CLI's own abbreviation).
+    pub database: Option<String>,
+}
+
+impl Environment {
+    /// Whether this section says nothing at all. An empty section is treated as
+    /// no configuration rather than as "connect to the defaults", so a
+    /// placeholder `[environments.staging]` with the parameters still to be
+    /// filled in does not quietly become localhost.
+    pub fn is_empty(&self) -> bool {
+        *self == Environment::default()
+    }
+}
+
+impl ConfigFile {
+    /// Parse a configuration file's text. `path` is used only in error messages.
+    pub fn parse(text: &str, path: &Path) -> Result<ConfigFile> {
+        toml::from_str(text).map_err(|e| {
+            Error::config(format!(
+                "could not read the configuration file `{}`: {e}",
+                path.display()
+            ))
+        })
+    }
+
+    /// Read and parse the file at `path`, or `Ok(None)` if it does not exist.
+    ///
+    /// Only "not found" is `None`: a file that exists but cannot be read (a
+    /// permission problem, say) is an error, because that is a file the operator
+    /// meant us to use.
+    pub fn load(path: &Path) -> Result<Option<ConfigFile>> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(Error::config(format!(
+                    "could not open the configuration file `{}`: {e}",
+                    path.display()
+                )));
+            }
+        };
+        warn_if_world_readable(path);
+        ConfigFile::parse(&text, path).map(Some)
+    }
+
+    /// The environment section `name`, erroring with the available names when it
+    /// is not defined.
+    pub fn environment(&self, name: &str, path: &Path) -> Result<&Environment> {
+        self.environments.get(name).ok_or_else(|| {
+            let available = self
+                .environments
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            Error::config(format!(
+                "the configuration file `{}` defines no environment `{name}` \
+                 (it defines: {available}); select one with --environment NAME",
+                path.display(),
+            ))
+        })
+    }
+}
+
+/// The environment that was selected, the section it resolved to, and where it
+/// came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedEnvironment {
+    /// The file the section was read from.
+    pub path: PathBuf,
+    /// The environment's name.
+    pub name: String,
+    /// Whether the operator *named* this environment (`--environment` or
+    /// [`ENVIRONMENT_VAR`]) rather than falling into it by default. This is what
+    /// decides whether the file outranks the ambient `PG*`/`DATABASE_URL`
+    /// variables — see [`crate::db::DbConfig`].
+    pub explicit: bool,
+    /// The connection parameters.
+    pub section: Environment,
+}
+
+impl SelectedEnvironment {
+    /// A one-line description for the startup log: which environment, from where.
+    pub fn describe(&self) -> String {
+        format!("the `{}` environment of {}", self.name, self.path.display())
+    }
+}
+
+/// Find the configuration file, load it, and select an environment.
+///
+/// `path_flag` is `--config`'s value and `env_flag` is `--environment`'s; both
+/// fall back to their environment variables ([`CONFIG_PATH_VAR`],
+/// [`ENVIRONMENT_VAR`]).
+///
+/// Returns `Ok(None)` when there is simply no configuration to apply — no file
+/// on any searched path, or a file that defines no environments — provided the
+/// operator did not name an environment. If they did, every one of those cases
+/// is an error instead: they asked for staging, and being handed production's
+/// defaults because a file was missing is the failure this is here to prevent.
+pub fn select(
+    path_flag: Option<&str>,
+    env_flag: Option<&str>,
+) -> Result<Option<SelectedEnvironment>> {
+    let selected = env_flag
+        .map(str::to_owned)
+        .or_else(|| env_var(ENVIRONMENT_VAR));
+    let explicit = selected.is_some();
+
+    // An explicitly given path must exist; a searched one need not.
+    let (path, required) = match path_flag
+        .map(str::to_owned)
+        .or_else(|| env_var(CONFIG_PATH_VAR))
+    {
+        Some(p) => (Some(PathBuf::from(p)), true),
+        None => (locate(), false),
+    };
+    let Some(path) = path else {
+        return match selected {
+            Some(name) => Err(Error::config(format!(
+                "--environment {name} was given, but no configuration file was found (searched: {})",
+                describe_search_paths()
+            ))),
+            None => Ok(None),
+        };
+    };
+
+    let Some(file) = ConfigFile::load(&path)? else {
+        return match (required, selected) {
+            (true, _) => Err(Error::config(format!(
+                "the configuration file `{}` does not exist",
+                path.display()
+            ))),
+            (false, Some(name)) => Err(Error::config(format!(
+                "--environment {name} was given, but no configuration file was found (searched: {})",
+                describe_search_paths()
+            ))),
+            (false, None) => Ok(None),
+        };
+    };
+
+    if file.environments.is_empty() {
+        return match selected {
+            Some(name) => Err(Error::config(format!(
+                "--environment {name} was given, but the configuration file `{}` \
+                 defines no [environments.*] sections",
+                path.display()
+            ))),
+            None => Ok(None),
+        };
+    }
+
+    let name = selected
+        .or_else(|| file.default_environment.clone())
+        .unwrap_or_else(|| DEFAULT_ENVIRONMENT.to_owned());
+    let section = file.environment(&name, &path)?.clone();
+    Ok(Some(SelectedEnvironment {
+        path,
+        name,
+        explicit,
+        section,
+    }))
+}
+
+/// The first existing file among [`search_paths`].
+pub fn locate() -> Option<PathBuf> {
+    search_paths().into_iter().find(|p| p.is_file())
+}
+
+/// Where the configuration file is looked for, most specific first: the user's
+/// configuration directory, then the system-wide one.
+///
+/// The platform conventions, which is the whole point of asking rather than
+/// hard-coding `~/.saltcorn`:
+///
+/// | | user | system |
+/// |---|---|---|
+/// | Linux/BSD | `$XDG_CONFIG_HOME/saltcorn/` (else `~/.config/saltcorn/`) | `/etc/saltcorn/` |
+/// | macOS | `~/Library/Application Support/saltcorn/` | `/etc/saltcorn/` |
+/// | Windows | `%APPDATA%\saltcorn\` | `%PROGRAMDATA%\saltcorn\` |
+///
+/// Written against `std::env` rather than a directories crate: these are four
+/// variables and two fallbacks, and the platform seam is small enough that a
+/// dependency in the tree would cost more to justify than the rules cost to
+/// state. On macOS `$XDG_CONFIG_HOME` is still honoured when it is set, since a
+/// developer who exports it means it.
+pub fn search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = user_config_dir() {
+        paths.push(dir.join(APP_DIR).join(FILE_NAME));
+    }
+    if let Some(dir) = system_config_dir() {
+        paths.push(dir.join(APP_DIR).join(FILE_NAME));
+    }
+    paths
+}
+
+/// [`search_paths`], rendered for an error message.
+fn describe_search_paths() -> String {
+    let paths = search_paths();
+    if paths.is_empty() {
+        return "no candidate paths — neither a home nor a system configuration \
+                directory could be determined"
+            .to_owned();
+    }
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The platform's per-user configuration directory.
+fn user_config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return env_var("APPDATA").map(PathBuf::from);
+    }
+    if let Some(xdg) = env_var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg));
+    }
+    let home = PathBuf::from(env_var("HOME")?);
+    if cfg!(target_os = "macos") {
+        Some(home.join("Library").join("Application Support"))
+    } else {
+        Some(home.join(".config"))
+    }
+}
+
+/// The platform's system-wide configuration directory.
+fn system_config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env_var("PROGRAMDATA").map(PathBuf::from)
+    } else {
+        Some(PathBuf::from("/etc"))
+    }
+}
+
+/// Read an environment variable, treating empty as absent.
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// Warn — once, on stderr — when the file other people can read holds a password.
+///
+/// Not an error: refusing to start over a file mode would be a bad trade for a
+/// deployment that has decided its own access rules. But a database password in
+/// a world-readable file is worth a sentence, and the operator is the only one
+/// who can see it.
+#[cfg(unix)]
+fn warn_if_world_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = meta.permissions().mode() & 0o077;
+    if mode != 0 {
+        eprintln!(
+            "saltcorn: warning: the configuration file {} is readable by other users \
+             (mode {:o}); it may contain database passwords — consider `chmod 600`",
+            path.display(),
+            meta.permissions().mode() & 0o777,
+        );
+    }
+}
+
+/// No file modes to check off Unix.
+#[cfg(not(unix))]
+fn warn_if_world_readable(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"
+default_environment = "staging"
+
+[environments.production]
+host = "db.internal"
+port = 5432
+user = "saltcorn"
+password = "hunter2"
+database = "saltcorn"
+
+[environments.staging]
+url = "postgres://sc:pw@staging:5432/sc"
+
+[environments.test]
+database = "saltcorn_test"
+"#;
+
+    fn parse(text: &str) -> Result<ConfigFile> {
+        ConfigFile::parse(text, Path::new("saltcorn.toml"))
+    }
+
+    #[test]
+    fn parses_any_number_of_environments() {
+        let file = parse(SAMPLE).expect("parse");
+        assert_eq!(file.default_environment.as_deref(), Some("staging"));
+        let names: Vec<&str> = file.environments.keys().map(String::as_str).collect();
+        assert_eq!(names, ["production", "staging", "test"]);
+
+        let prod = &file.environments["production"];
+        assert_eq!(prod.host.as_deref(), Some("db.internal"));
+        assert_eq!(prod.port, Some(5432));
+        assert_eq!(prod.database.as_deref(), Some("saltcorn"));
+        assert!(prod.url.is_none());
+
+        assert_eq!(
+            file.environments["staging"].url.as_deref(),
+            Some("postgres://sc:pw@staging:5432/sc")
+        );
+        assert_eq!(
+            file.environments["test"].database.as_deref(),
+            Some("saltcorn_test")
+        );
+    }
+
+    #[test]
+    fn a_fourth_environment_needs_no_code_change() {
+        let file = parse(
+            r#"
+[environments.production]
+database = "a"
+
+[environments.qa-eu]
+database = "b"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(file.environments["qa-eu"].database.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_misspelled_key_is_an_error_not_a_shrug() {
+        let err = parse(
+            r#"
+[environments.production]
+databse = "typo"
+"#,
+        )
+        .expect_err("unknown key must be rejected");
+        assert!(
+            err.to_string().contains("databse"),
+            "the error should name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_toml_is_an_error() {
+        assert!(parse("[environments.production").is_err());
+    }
+
+    #[test]
+    fn a_non_numeric_port_is_an_error() {
+        assert!(
+            parse(
+                r#"
+[environments.production]
+port = "5432"
+"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selecting_an_undefined_environment_lists_the_defined_ones() {
+        let file = parse(SAMPLE).expect("parse");
+        let err = file
+            .environment("prod", Path::new("/etc/saltcorn/saltcorn.toml"))
+            .expect_err("unknown environment");
+        let msg = err.to_string();
+        assert!(msg.contains("prod"), "{msg}");
+        assert!(msg.contains("production, staging, test"), "{msg}");
+    }
+
+    #[test]
+    fn an_empty_section_is_empty() {
+        assert!(Environment::default().is_empty());
+        assert!(
+            !Environment {
+                database: Some("x".to_owned()),
+                ..Environment::default()
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn load_returns_none_for_a_missing_file() {
+        let missing = std::env::temp_dir().join("sc-no-such-config-9f3a2b.toml");
+        assert_eq!(ConfigFile::load(&missing).expect("load"), None);
+    }
+
+    #[test]
+    fn search_paths_are_platform_appropriate() {
+        // Whatever the platform, the file is looked for under an app directory
+        // named `saltcorn` and is called `saltcorn.toml`.
+        for path in search_paths() {
+            assert!(
+                path.ends_with(Path::new(APP_DIR).join(FILE_NAME)),
+                "{path:?}"
+            );
+        }
+    }
+}

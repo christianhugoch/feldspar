@@ -1,31 +1,54 @@
 //! Primary-database connection configuration for the `saltcorn` binary.
 //!
-//! [`DbConfig`] gathers where the primary Postgres database lives from CLI flags
-//! and, as a fallback, the environment — either a single connection URL
-//! (`--database-url` / `DATABASE_URL`) or the individual `host`/`port`/`user`/
-//! `password`/`db` parts (`--db-host` etc. / the conventional `PG*` variables).
-//! A URL, when present, wins wholesale; otherwise the parts build a
-//! [`tokio_postgres::Config`]. Either way [`DbConfig::connect`] yields a pooled
-//! [`PgDriver`] the CLI hands to the catalog.
+//! [`DbConfig`] gathers where the primary Postgres database lives from three
+//! places, in this order of authority:
+//!
+//! 1. **CLI flags** — either a single connection URL (`--database-url`) or the
+//!    individual `host`/`port`/`user`/`password`/`db` parts (`--db-host` etc.).
+//! 2. **The environment** — `DATABASE_URL`, or the conventional `PG*` variables.
+//! 3. **The configuration file** — the environment selected out of
+//!    `saltcorn.toml` ([`crate::config_file`]), which is where a deployment keeps
+//!    production's, staging's and test's parameters side by side.
+//!
+//! A URL, wherever it comes from, wins wholesale over the parts; otherwise the
+//! parts build a [`tokio_postgres::Config`]. Either way [`DbConfig::connect`]
+//! yields a pooled [`PgDriver`] the CLI hands to the catalog.
+//!
+//! **Naming an environment inverts 2 and 3.** With no `--environment`, the
+//! ambient variables outrank the file, which is the stated rule: the file
+//! supplies what the environment does not. But `--environment staging` is an
+//! instruction, and an operator who gives it on a box where `DATABASE_URL`
+//! happens to point at production must not be quietly connected to production.
+//! So a *named* environment whose section says anything is authoritative: the
+//! `PG*`/`DATABASE_URL` variables are ignored entirely for that run, and only
+//! explicit flags still override it. (Ignored *entirely*, not per field — a
+//! section giving host and database, with `DATABASE_URL` still filling in the
+//! URL, would be the same accident wearing a smaller hat.)
 //!
 //! Parsing is separated from resolution on purpose: [`DbConfig::extract`] records
-//! only what was passed on the command line (and returns the arguments it did not
-//! consume, so the server flags parse cleanly afterwards), while the environment
-//! fallbacks and defaults are applied later in [`connect`](DbConfig::connect) /
-//! [`target`](DbConfig::target). No silent failures: an unreadable value (e.g. a
-//! non-numeric port) is an error, and connection failures are surfaced by the
-//! caller with the redacted [`target`](DbConfig::target) for context.
+//! what was passed on the command line and loads the selected environment (and
+//! returns the arguments it did not consume, so the server flags parse cleanly
+//! afterwards), while the environment fallbacks and defaults are applied later in
+//! [`connect`](DbConfig::connect) / [`target`](DbConfig::target). No silent
+//! failures: an unreadable value (e.g. a non-numeric port) is an error, and
+//! connection failures are surfaced by the caller with the redacted
+//! [`target`](DbConfig::target) for context.
 
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
+
+use crate::config_file::{self, Environment, SelectedEnvironment};
 
 /// Default host when neither `--db-host` nor `PGHOST` is set.
 const DEFAULT_HOST: &str = "localhost";
 /// Default port when neither `--db-port` nor `PGPORT` is set.
 const DEFAULT_PORT: u16 = 5432;
 
-/// How to reach the primary database. Fields hold only what was passed on the
-/// command line; environment fallbacks are applied at [`connect`](Self::connect).
+/// How to reach the primary database. The flag fields hold only what was passed
+/// on the command line; the environment variables and the defaults are applied
+/// at [`connect`](Self::connect). `selected` is the configuration file's
+/// contribution, resolved at [`extract`](Self::extract) time because reading it
+/// is I/O and every later accessor is infallible.
 #[derive(Debug, Default, Clone)]
 pub struct DbConfig {
     url: Option<String>,
@@ -34,6 +57,8 @@ pub struct DbConfig {
     user: Option<String>,
     password: Option<String>,
     dbname: Option<String>,
+    /// The environment selected out of `saltcorn.toml`, if there is one.
+    selected: Option<SelectedEnvironment>,
 }
 
 impl DbConfig {
@@ -50,14 +75,23 @@ impl DbConfig {
     /// arguments that were **not** consumed (for the server config to parse).
     ///
     /// Recognised flags: `--database-url`, `--db-host`, `--db-port`, `--db-user`,
-    /// `--db-password`, `--db-name`. Anything else is passed through untouched, so
-    /// an unknown flag still fails loudly — in the server parser, not here.
+    /// `--db-password`, `--db-name`, plus `--environment` (which environment of
+    /// the configuration file to use) and `--config` (which configuration file).
+    /// Anything else is passed through untouched, so an unknown flag still fails
+    /// loudly — in the server parser, not here.
+    ///
+    /// This also **loads the configuration file**, so that every command that
+    /// takes database flags gets the file for free and none can forget to ask for
+    /// it. A file that does not parse, or a named environment that does not
+    /// exist, fails here — before anything connects.
     pub fn extract<I, S>(args: I) -> Result<(DbConfig, Vec<String>)>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         let mut cfg = DbConfig::default();
+        let mut environment: Option<String> = None;
+        let mut config_path: Option<String> = None;
         let mut rest = Vec::new();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -68,6 +102,8 @@ impl DbConfig {
                 "--db-user" => &mut cfg.user,
                 "--db-password" => &mut cfg.password,
                 "--db-name" => &mut cfg.dbname,
+                "--environment" | "--env" => &mut environment,
+                "--config" => &mut config_path,
                 other => {
                     rest.push(other.to_owned());
                     continue;
@@ -76,13 +112,26 @@ impl DbConfig {
             let flag = arg.as_ref().to_owned();
             *slot = Some(next_value(&mut it, &flag)?);
         }
+        cfg.selected = config_file::select(config_path.as_deref(), environment.as_deref())?;
         Ok((cfg, rest))
     }
 
-    /// Connect to the database, returning a pooled driver. A URL (from the flag
-    /// or `DATABASE_URL`) is used wholesale; otherwise the individual parts —
-    /// falling back to the `PG*` environment variables and then the host/port
-    /// defaults — build the connection.
+    /// Where the configuration file put us, for the startup log: `None` when no
+    /// configuration file took part in this connection.
+    pub fn source(&self) -> Option<String> {
+        self.selected.as_ref().map(SelectedEnvironment::describe)
+    }
+
+    /// The name of the selected environment, if a configuration file was used.
+    pub fn environment(&self) -> Option<&str> {
+        self.selected.as_ref().map(|s| s.name.as_str())
+    }
+
+    /// Connect to the database, returning a pooled driver. A URL (from the flag,
+    /// `DATABASE_URL` or the selected environment) is used wholesale; otherwise
+    /// the individual parts — falling back to the `PG*` environment variables,
+    /// the selected environment and then the host/port defaults — build the
+    /// connection.
     ///
     /// This only builds the pool; the first real connection (and thus the first
     /// chance to observe an unreachable/misconfigured database) happens when the
@@ -94,13 +143,14 @@ impl DbConfig {
         let mut config = tokio_postgres::Config::new();
         config.host(self.resolved_host());
         config.port(self.resolved_port()?);
-        if let Some(user) = self.resolved(&self.user, "PGUSER") {
+        if let Some(user) = self.resolved(&self.user, "PGUSER", |e| e.user.clone()) {
             config.user(user);
         }
-        if let Some(password) = self.resolved(&self.password, "PGPASSWORD") {
+        if let Some(password) = self.resolved(&self.password, "PGPASSWORD", |e| e.password.clone())
+        {
             config.password(password);
         }
-        if let Some(dbname) = self.resolved(&self.dbname, "PGDATABASE") {
+        if let Some(dbname) = self.resolved(&self.dbname, "PGDATABASE", |e| e.database.clone()) {
             config.dbname(dbname);
         }
         PgDriver::from_config(&config)
@@ -121,25 +171,34 @@ impl DbConfig {
             "{}:{}/{}",
             self.resolved_host(),
             self.port_string(),
-            self.resolved(&self.dbname, "PGDATABASE")
+            self.resolved(&self.dbname, "PGDATABASE", |e| e.database.clone())
                 .unwrap_or_else(|| "<default>".to_owned()),
         )
     }
 
-    /// The effective connection URL: the flag, else `DATABASE_URL`, else none.
+    /// The effective connection URL: the flag, then — in whichever order
+    /// [`file_wins`](Self::file_wins) dictates — `DATABASE_URL` and the selected
+    /// environment's `url`.
     fn resolved_url(&self) -> Option<String> {
-        self.url.clone().or_else(|| env_var("DATABASE_URL"))
+        if let Some(url) = &self.url {
+            return Some(url.clone());
+        }
+        let from_file = self.section().and_then(|e| e.url.clone());
+        if self.file_wins() {
+            return from_file;
+        }
+        env_var("DATABASE_URL").or(from_file)
     }
 
-    /// The effective host: flag, else `PGHOST`, else the default.
+    /// The effective host: flag, else `PGHOST`/the file, else the default.
     fn resolved_host(&self) -> String {
-        self.resolved(&self.host, "PGHOST")
+        self.resolved(&self.host, "PGHOST", |e| e.host.clone())
             .unwrap_or_else(|| DEFAULT_HOST.to_owned())
     }
 
     /// The effective port as a `u16`, erroring if it is not a valid number.
     fn resolved_port(&self) -> Result<u16> {
-        match self.resolved(&self.port, "PGPORT") {
+        match self.resolved(&self.port, "PGPORT", |e| e.port.map(|p| p.to_string())) {
             Some(raw) => raw
                 .parse()
                 .map_err(|e| Error::config(format!("invalid database port `{raw}`: {e}"))),
@@ -150,13 +209,41 @@ impl DbConfig {
     /// The effective port rendered for [`target`](Self::target) (defaulted, never
     /// erroring — display only).
     fn port_string(&self) -> String {
-        self.resolved(&self.port, "PGPORT")
+        self.resolved(&self.port, "PGPORT", |e| e.port.map(|p| p.to_string()))
             .unwrap_or_else(|| DEFAULT_PORT.to_string())
     }
 
-    /// A flag value, falling back to the named environment variable.
-    fn resolved(&self, flag: &Option<String>, env: &str) -> Option<String> {
-        flag.clone().or_else(|| env_var(env))
+    /// One setting, resolved: the flag first, then the environment variable and
+    /// the configuration file in whichever order [`file_wins`](Self::file_wins)
+    /// dictates. `pick` reads the setting out of the file's section.
+    fn resolved(
+        &self,
+        flag: &Option<String>,
+        env: &str,
+        pick: impl Fn(&Environment) -> Option<String>,
+    ) -> Option<String> {
+        if let Some(value) = flag {
+            return Some(value.clone());
+        }
+        let from_file = self.section().and_then(pick);
+        if self.file_wins() {
+            return from_file;
+        }
+        env_var(env).or(from_file)
+    }
+
+    /// The selected environment's connection parameters, if any.
+    fn section(&self) -> Option<&Environment> {
+        self.selected.as_ref().map(|s| &s.section)
+    }
+
+    /// Whether the configuration file outranks the ambient `PG*`/`DATABASE_URL`
+    /// variables: true exactly when the operator **named** an environment that
+    /// says something. See the module docs for why naming one inverts the order.
+    fn file_wins(&self) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(|s| s.explicit && !s.section.is_empty())
     }
 }
 
@@ -280,5 +367,171 @@ mod tests {
     #[test]
     fn redact_leaves_a_url_without_userinfo_unchanged() {
         assert_eq!(redact("postgres://host:5432/db"), "postgres://host:5432/db");
+    }
+
+    // --- The configuration file -------------------------------------------
+    //
+    // These drive `extract` with an explicit `--config`, never the search path,
+    // so they cannot pick up (or be broken by) a real `saltcorn.toml` on the
+    // machine running them. Nothing here sets an environment variable: doing so
+    // is racy across the test threads, so the assertions are written to hold
+    // whatever `DATABASE_URL`/`PG*` the suite happens to be run with — which is
+    // itself the property most of them are about.
+
+    const FIXTURE: &str = r#"
+default_environment = "production"
+
+[environments.production]
+host = "prod.internal"
+port = 5432
+user = "sc"
+password = "prod-pw"
+database = "saltcorn"
+
+[environments.staging]
+url = "postgres://sc:staging-pw@staging.internal:5432/saltcorn"
+
+[environments.test]
+host = "localhost"
+database = "saltcorn_test"
+
+[environments.blank]
+"#;
+
+    /// A configuration file on disk for the duration of one test, removed when
+    /// the handle drops.
+    struct Fixture(std::path::PathBuf);
+
+    impl Fixture {
+        fn new(name: &str, contents: &str) -> Fixture {
+            let path =
+                std::env::temp_dir().join(format!("sc-cli-{}-{name}.toml", std::process::id()));
+            std::fs::write(&path, contents).expect("write fixture");
+            // 0600 both because the file holds passwords and so the loader's
+            // world-readable warning does not fire on every test run.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .expect("chmod fixture");
+            }
+            Fixture(path)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().expect("utf-8 fixture path")
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_named_environment_supplies_the_connection_parts() {
+        let file = Fixture::new("parts", FIXTURE);
+        let (cfg, rest) = DbConfig::extract([
+            "--environment",
+            "test",
+            "--config",
+            file.path(),
+            "--bind",
+            "x",
+        ])
+        .expect("extract");
+
+        assert_eq!(rest, ["--bind", "x"]);
+        assert_eq!(cfg.environment(), Some("test"));
+        // Named → the file is authoritative, so this holds even when the suite
+        // is run with DATABASE_URL and PG* pointing elsewhere.
+        assert_eq!(cfg.resolved_url(), None);
+        assert_eq!(cfg.resolved_host(), "localhost");
+        assert_eq!(cfg.resolved_port().expect("port"), 5432);
+        assert_eq!(cfg.target(), "localhost:5432/saltcorn_test");
+    }
+
+    #[test]
+    fn a_named_environment_may_carry_a_url_and_outranks_the_environment() {
+        let file = Fixture::new("url", FIXTURE);
+        let (cfg, _) = DbConfig::extract(["--environment", "staging", "--config", file.path()])
+            .expect("extract");
+
+        assert_eq!(
+            cfg.resolved_url().as_deref(),
+            Some("postgres://sc:staging-pw@staging.internal:5432/saltcorn"),
+            "naming an environment must beat an ambient DATABASE_URL"
+        );
+        // ...and the startup line says which one, without the password.
+        let source = cfg.source().expect("a source");
+        assert!(source.contains("staging"), "{source}");
+        assert!(!cfg.target().contains("staging-pw"), "{}", cfg.target());
+    }
+
+    #[test]
+    fn a_flag_still_beats_a_named_environment() {
+        let file = Fixture::new("flag", FIXTURE);
+        let (cfg, _) = DbConfig::extract([
+            "--environment",
+            "staging",
+            "--config",
+            file.path(),
+            "--database-url",
+            "postgres://flag/db",
+        ])
+        .expect("extract");
+        assert_eq!(cfg.resolved_url().as_deref(), Some("postgres://flag/db"));
+    }
+
+    #[test]
+    fn without_a_flag_the_files_default_environment_is_used_and_yields_to_the_environment() {
+        let file = Fixture::new("default", FIXTURE);
+        let (cfg, _) = DbConfig::extract(["--config", file.path()]).expect("extract");
+
+        assert_eq!(cfg.environment(), Some("production"));
+        // Not *named*, so the ambient variables still come first: the file is
+        // the fallback, which is the whole point of it.
+        assert!(!cfg.file_wins());
+        if std::env::var_os("PGHOST").is_none() {
+            assert_eq!(cfg.resolved_host(), "prod.internal");
+        }
+        if std::env::var_os("DATABASE_URL").is_none() {
+            assert_eq!(cfg.resolved_url(), None);
+        }
+    }
+
+    #[test]
+    fn an_empty_named_section_does_not_take_over_from_the_environment() {
+        let file = Fixture::new("blank", FIXTURE);
+        let (cfg, _) = DbConfig::extract(["--environment", "blank", "--config", file.path()])
+            .expect("extract");
+        assert_eq!(cfg.environment(), Some("blank"));
+        assert!(
+            !cfg.file_wins(),
+            "a section that says nothing must not silence DATABASE_URL"
+        );
+    }
+
+    #[test]
+    fn an_undefined_environment_is_an_error() {
+        let file = Fixture::new("undefined", FIXTURE);
+        let err = DbConfig::extract(["--environment", "prod", "--config", file.path()])
+            .expect_err("unknown environment must fail");
+        assert!(err.to_string().contains("production, staging"), "{err}");
+    }
+
+    #[test]
+    fn a_config_path_that_does_not_exist_is_an_error() {
+        let missing = std::env::temp_dir().join("sc-cli-absent-config-4c1e.toml");
+        let err = DbConfig::extract(["--config", missing.to_str().expect("path")])
+            .expect_err("a named file that is absent must fail");
+        assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_config_file_fails_at_parse_time_not_at_connect_time() {
+        let file = Fixture::new("broken", "[environments.production\nhost = 'x'\n");
+        assert!(DbConfig::extract(["--config", file.path()]).is_err());
     }
 }

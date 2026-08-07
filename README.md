@@ -195,22 +195,85 @@ and everything else about the workbench goes on working.
 ## 6. Running the server
 
 The main command is `saltcorn serve`. It takes **database flags** and **server
-flags**; database settings may also come from environment variables. (The other
-command is `saltcorn build-app`, below.)
+flags**; database settings may also come from environment variables or from a
+configuration file. (The other command is `saltcorn build-app`, below.)
 
 ### Database connection
 
 Provide **either** a full connection URL **or** the individual parts. A URL, when
-present, wins.
+present, wins. Anything a flag does not set is taken from the environment, and
+anything the environment does not set is taken from the configuration file below.
 
-| Flag | Environment fallback | Default |
+| Flag | Environment fallback | Config file key | Default |
+|---|---|---|---|
+| `--database-url <url>` | `DATABASE_URL` | `url` | — |
+| `--db-host <host>` | `PGHOST` | `host` | `localhost` |
+| `--db-port <port>` | `PGPORT` | `port` | `5432` |
+| `--db-user <user>` | `PGUSER` | `user` | (libpq default) |
+| `--db-password <pw>` | `PGPASSWORD` | `password` | — |
+| `--db-name <name>` | `PGDATABASE` | `database` | (libpq default) |
+
+### Environments, and the configuration file
+
+A deployment usually has more than one database — production, staging, test — so
+their connection parameters can live together in a `saltcorn.toml`, one section
+each, and the command line picks one:
+
+```toml
+default_environment = "production"
+
+[environments.production]
+host = "db.internal"
+port = 5432
+user = "saltcorn"
+password = "change-me"
+database = "saltcorn"
+
+[environments.staging]
+url = "postgres://saltcorn:change-me@staging.internal:5432/saltcorn"
+
+[environments.test]
+database = "saltcorn_test"
+```
+
+```bash
+saltcorn serve                          # the file's default_environment
+saltcorn serve --environment staging    # or --env staging, or SALTCORN_ENV=staging
+saltcorn serve --environment test
+```
+
+`environments` is an ordinary table: define as many as you have databases, named
+whatever you like. With no `default_environment` and nothing named on the command
+line, the environment used is `production`.
+
+| Flag | Environment fallback | Meaning |
 |---|---|---|
-| `--database-url <url>` | `DATABASE_URL` | — |
-| `--db-host <host>` | `PGHOST` | `localhost` |
-| `--db-port <port>` | `PGPORT` | `5432` |
-| `--db-user <user>` | `PGUSER` | (libpq default) |
-| `--db-password <pw>` | `PGPASSWORD` | — |
-| `--db-name <name>` | `PGDATABASE` | (libpq default) |
+| `--environment <name>` | `SALTCORN_ENV` | which `[environments.<name>]` section to connect with |
+| `--config <path>` | `SALTCORN_CONFIG` | read this file instead of searching for one |
+
+Without `--config`, the file is looked for in the platform's configuration
+directories, user first:
+
+| | user | system |
+|---|---|---|
+| Linux/BSD | `$XDG_CONFIG_HOME/saltcorn/saltcorn.toml` (else `~/.config/saltcorn/saltcorn.toml`) | `/etc/saltcorn/saltcorn.toml` |
+| macOS | `~/Library/Application Support/saltcorn/saltcorn.toml` | `/etc/saltcorn/saltcorn.toml` |
+| Windows | `%APPDATA%\saltcorn\saltcorn.toml` | `%PROGRAMDATA%\saltcorn\saltcorn.toml` |
+
+No file at all is fine — that is the environment-variable deployment. But a file
+that does not parse, a key that is not recognised, a `--config` path that does not
+exist, or an `--environment` the file does not define are all startup errors, not
+things stepped over: the alternative is connecting to a database you did not mean.
+The file holds passwords, so keep it `chmod 600` — the server warns on stderr if
+other users can read it.
+
+> **Naming an environment outranks `DATABASE_URL` and `PG*`.** Normally the
+> environment wins and the file fills in what it leaves unset. But
+> `--environment staging` is an instruction: for that run the section is
+> authoritative and the ambient variables are ignored entirely, so an operator who
+> asks for staging on a box where `DATABASE_URL` points at production gets
+> staging. Explicit `--db-*` flags still win over everything. `saltcorn serve`
+> prints which environment it connected with, from which file.
 
 ### Server options
 
@@ -289,6 +352,15 @@ Using environment variables (handy for systemd/containers), behind a TLS proxy:
 ```bash
 export DATABASE_URL=postgres://saltcorn:change-me@localhost:5432/saltcorn
 target/release/saltcorn serve --bind 127.0.0.1:3000 --secure-cookies
+```
+
+One box, three databases: the parameters in `~/.config/saltcorn/saltcorn.toml`
+(or `/etc/saltcorn/saltcorn.toml` for a service account), the choice on the
+command line:
+
+```bash
+target/release/saltcorn serve --environment staging --bind 127.0.0.1:3001
+target/release/saltcorn build-app blog --environment staging
 ```
 
 On start the server prints the address it is listening on. If the database is
