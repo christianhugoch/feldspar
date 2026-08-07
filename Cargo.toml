@@ -271,3 +271,34 @@ rig-core = { version = "0.41", default-features = false, features = [
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+# --- Build profiles ----------------------------------------------------------
+#
+# Debug-info budget. The workspace has ~110 integration-test targets, and every
+# one of them statically links the same tree — V8 (`deno_core`), swc, hyper,
+# rustls. With rustc's default `debug = true` each test binary landed at ~440 MB,
+# almost all of it DWARF for dependency code, and each link peaked near 1.9 GB
+# of linker RSS. `cargo test -j8` therefore ran ~8 of those concurrently and
+# pushed the machine into memory pressure hard enough for `systemd-oomd` to kill
+# the whole terminal cgroup mid-run.
+#
+# The split below keeps the debug info that is actually read and drops the rest:
+# workspace crates keep line tables, so a panicking test still prints a
+# backtrace with file:line — the only thing a test run needs — while
+# dependencies get none, because nobody single-steps into V8's bindings. Full
+# DWARF for a dependency is available on demand with a one-off
+# `--config 'profile.dev.package."*".debug=true'`.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies carry no debug info: this is the bulk of both the binary size and
+# the linker's peak memory.
+#
+# This covers the test binaries too, and does not need restating under
+# `[profile.test]`: `test` inherits from `dev`, and that inheritance carries
+# `package."*"` overrides along with everything else. Verified rather than
+# assumed — a `cargo test` build of a crate carrying only this key emits a
+# dependency rlib with zero `.debug_info` sections, against 18 with the key
+# removed.
+[profile.dev.package."*"]
+debug = false

@@ -454,3 +454,41 @@ them at a database with `DATABASE_URL` (the same variable the server uses); CI u
 `postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test` against a
 `postgres:16` service. See [`docs/TECHNICAL_DESIGN.md`](docs/TECHNICAL_DESIGN.md)
 §16 for the testing approach.
+
+### Build resource use
+
+A static V8 (`deno_core`, behind `sc-expr`'s `eval` feature) is linked into
+**every one** of the workspace's ~110 integration-test binaries, so
+`cargo test --workspace` is a burst of very large, very parallel links. Two
+things keep that from taking the machine with it:
+
+- **A debug-info budget**, in the workspace `Cargo.toml`. Dependencies are built
+  with no debug info and workspace crates with line tables only, which is what a
+  test backtrace actually reads. This is the setting that matters: it takes a
+  test binary from ~440 MB to ~150 MB and the whole `--workspace` build from
+  ~20 GB of peak memory to ~3 GB. Full DWARF for a dependency, on the rare
+  occasion of stepping into one, is a one-off flag:
+
+  ```bash
+  cargo test --config 'profile.dev.package."*".debug=true' -p <crate>
+  ```
+
+- **`scripts/cargo-guarded.sh`**, an optional wrapper that runs cargo in its own
+  memory-capped systemd scope. Use it in place of `cargo` for long runs:
+
+  ```bash
+  ./scripts/cargo-guarded.sh test --workspace
+  ```
+
+  This matters on desktop Linux running `systemd-oomd`, which kills the heaviest
+  **cgroup** rather than the heaviest process when the session comes under memory
+  pressure. A shell, cargo and every rustc share the terminal's cgroup, so an
+  unguarded build that overruns is executed as "close the terminal window",
+  taking the scrollback that would have explained it. The wrapper gives the build
+  its own cgroup so only the build can be killed. It falls back to plain `cargo`
+  where systemd is not available.
+
+Note also that `target/` is not garbage-collected by cargo: every rebuild leaves
+the previous hashed test binaries behind, and at ~150 MB each across ~110 targets
+that reaches hundreds of GB over weeks. `cargo clean` periodically, or
+[`cargo-sweep`](https://github.com/holmgr/cargo-sweep) to drop only stale files.

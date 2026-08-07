@@ -22,6 +22,7 @@
 mod files;
 
 use bytes::Bytes;
+use sc_api::EndpointSet;
 use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
 use tokio::process::Command;
@@ -159,6 +160,65 @@ pub fn require_api_provider(app: &Application) -> Result<()> {
     )))
 }
 
+/// The generated file whose calls this check is about.
+const AUTH_SOURCE: &str = "src/auth.tsx";
+
+/// A build must not proceed when the project's auth layer calls endpoints the
+/// application no longer exposes.
+///
+/// The scaffold's auth layer signs in through `login` / `logout` / `whoami`, and
+/// only the REST provider projects them (§13.4). An app scaffolded with REST and
+/// later left without it therefore has an `src/auth.tsx` calling three methods
+/// that are no longer on the generated `ApiClient` — and since `tsc --noEmit`
+/// type-checks every file in the project, that fails the build with four errors in
+/// a file the admin never wrote and no mention of the actual cause.
+///
+/// So it is refused first, in the admin's own vocabulary — the same service
+/// [`require_api_provider`] performs one provider along. The question asked is
+/// about the **project's source**, not the app's providers, because an app that
+/// never had an auth layer is not broken by not having one: a public API with a
+/// public React client is a legitimate app, and it is what
+/// [`has_auth`](files::has_auth) scaffolds when the endpoints are absent.
+/// A project whose `auth.tsx` the admin has replaced with their own is likewise
+/// theirs to get right.
+async fn require_auth_endpoints_for_source(
+    app: &Application,
+    endpoints: &EndpointSet,
+    store: &dyn sc_files::FileStore,
+    project: &str,
+) -> Result<()> {
+    let missing: Vec<&str> = sc_api::AUTH_ENDPOINTS
+        .into_iter()
+        .filter(|name| endpoints.find(name).is_none())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    // Absent is the ordinary case for an app scaffolded without auth; unreadable
+    // is a store problem the write that follows will report far better than a
+    // check could.
+    let Ok(source) = store.read(&format!("{project}/{AUTH_SOURCE}")).await else {
+        return Ok(());
+    };
+    let calls_them = missing
+        .iter()
+        .any(|name| String::from_utf8_lossy(&source).contains(&format!("api.{name}(")));
+    if !calls_them {
+        return Ok(());
+    }
+    Err(Error::config(format!(
+        "application `{}` no longer exposes {}, which `{}/{AUTH_SOURCE}` signs in \
+         through — the build would fail type-checking a file it generated. Those \
+         endpoints come from the `{}` provider; add it back to the application \
+         (mounted at `/api` is the usual choice), or delete the app's auth layer if \
+         it is meant to be usable without signing in",
+        app.name,
+        missing.join(" / "),
+        project,
+        sc_api::REST_PROVIDER,
+    )))
+}
+
 /// Rewrite the generated runtime (`src/saltcorn/`) for `app` — the typed client,
 /// the hooks, and the GraphQL client and schema of an app that enables that
 /// provider — leaving every other file alone.
@@ -182,6 +242,7 @@ pub async fn emit_react_runtime(
     let store = cat.require_file_store(&source.store.0)?;
     let tables = app_tables(app, cat)?;
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
+    require_auth_endpoints_for_source(app, &endpoints, store.as_ref(), project).await?;
     // Regenerated on every build for the same reason the hooks are: an admin who
     // enables the GraphQL provider, or adds a table to the app, gets a schema
     // describing what is actually mounted at the next build — with nobody

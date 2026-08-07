@@ -72,6 +72,155 @@ fn gitignore_covers_rust_and_node() {
     );
 }
 
+/// Return the body of a TOML table header — everything from `[header]` up to the
+/// next line that starts a new table. Used to assert a profile key is set *in
+/// the right table*, which a whole-file `contains` cannot tell apart.
+fn toml_section<'a>(toml: &'a str, header: &str) -> Option<&'a str> {
+    let start = toml.find(header)? + header.len();
+    let rest = &toml[start..];
+    let end = rest
+        .match_indices('\n')
+        .find(|(i, _)| rest[i + 1..].starts_with('['))
+        .map_or(rest.len(), |(i, _)| i);
+    Some(&rest[..end])
+}
+
+/// The workspace links a static V8 into every one of its ~110 integration-test
+/// binaries, so the debug-info budget in the workspace manifest is what keeps
+/// `cargo test --workspace` from becoming a burst of ~440 MB links that drives
+/// the session into `systemd-oomd`'s kill threshold — which, because oomd kills
+/// a *cgroup*, takes the developer's whole terminal with it.
+///
+/// The budget is two keys, and dropping either puts the memory back without
+/// breaking anything a test would notice, so each is asserted by name.
+#[test]
+fn the_workspace_keeps_debug_info_off_dependencies() {
+    let root = workspace_root();
+    let manifest = read(&root, "Cargo.toml");
+
+    // Workspace crates keep line tables: a panicking test still prints a
+    // backtrace with `file:line`, which is what a test run reads debug info for.
+    let dev = toml_section(&manifest, "[profile.dev]")
+        .unwrap_or_else(|| panic!("Cargo.toml must declare [profile.dev]"));
+    assert!(
+        dev.contains(r#"debug = "line-tables-only""#),
+        "[profile.dev] should keep line tables only, so test backtraces still \
+         carry file:line without paying for full DWARF; found: {dev:?}"
+    );
+
+    // Dependencies get none. This is the key that matters: it is the bulk of
+    // both the binary size and the linker's peak memory. It needs no
+    // counterpart under `[profile.test]` — `test` inherits from `dev`, and that
+    // inheritance carries `package."*"` overrides too.
+    let header = r#"[profile.dev.package."*"]"#;
+    let deps = toml_section(&manifest, header)
+        .unwrap_or_else(|| panic!("Cargo.toml must declare {header}"));
+    assert!(
+        deps.contains("debug = false"),
+        "{header} must set `debug = false`: dependency DWARF is what took a test \
+         binary to ~440 MB and a --workspace build to ~20 GB of peak memory; \
+         found: {deps:?}"
+    );
+}
+
+/// The budget above is only worth having if it is actually reaching the linker,
+/// so this measures the output rather than the setting.
+///
+/// It deliberately does **not** measure *this* binary: `repo_hygiene` only reads
+/// files, so the linker garbage-collects almost everything and it lands around
+/// 7 MB whether the budget applies or not — it would pass either way and prove
+/// nothing. The binaries that matter are the ones that really do pull in V8
+/// (~173 MB with the budget, ~440 MB without), so this looks at the whole
+/// `deps/` directory the current build wrote and checks the largest.
+///
+/// The ceiling is loose on purpose: it only has to separate ~173 from ~440, not
+/// to police ordinary growth in the dependency tree.
+///
+/// A partial build (`-p sc-cli` alone) may have linked nothing large yet, in
+/// which case there is simply nothing to measure and the test passes — this is a
+/// second line of defence behind the manifest assertion above, which is the one
+/// that always holds.
+#[test]
+fn linked_test_binaries_stay_within_the_debug_info_budget() {
+    const CEILING_MB: u64 = 300;
+
+    // `<target>/debug/deps/` — derived from this binary rather than assumed, so
+    // it follows CARGO_TARGET_DIR and a `--target` build.
+    let exe = std::env::current_exe().expect("a test binary knows its own path");
+    let Some(deps) = exe.parent() else { return };
+
+    let mut largest: Option<(PathBuf, u64)> = None;
+    for entry in fs::read_dir(deps).into_iter().flatten().flatten() {
+        let path = entry.path();
+        // Test binaries have no extension; skip `.rlib`/`.rmeta`/`.d`/`.so`.
+        if path.extension().is_some() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if largest.as_ref().is_none_or(|(_, size)| meta.len() > *size) {
+            largest = Some((path, meta.len()));
+        }
+    }
+
+    let Some((path, size)) = largest else { return };
+    let size_mb = size / (1024 * 1024);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+
+    assert!(
+        size_mb < CEILING_MB,
+        "the largest linked test binary ({name}) is {size_mb} MB, over the \
+         {CEILING_MB} MB ceiling. Either the debug-info budget in the workspace \
+         Cargo.toml stopped applying, or this run deliberately overrode it \
+         (`--config 'profile.dev.package.\"*\".debug=true'`), which is expected \
+         to trip this test. Left unfixed, `cargo test --workspace` links ~110 \
+         binaries this size at once and systemd-oomd kills the terminal it runs \
+         in."
+    );
+}
+
+/// The second layer, for a run that overruns anyway: `cargo-guarded.sh` puts
+/// cargo in its own memory-capped cgroup, a *sibling* of the terminal's rather
+/// than a child, so the cap can only take the build. The two properties worth
+/// pinning are that it caps something and that it degrades to plain `cargo`
+/// where there is no systemd — a wrapper that silently did nothing on one
+/// machine and refused to run on another would be worse than no wrapper.
+#[test]
+fn the_guarded_cargo_wrapper_caps_memory_and_falls_back() {
+    let root = workspace_root();
+    let script = read(&root, "scripts/cargo-guarded.sh");
+
+    assert!(
+        script.contains("systemd-run") && script.contains("--scope"),
+        "the wrapper must run cargo in its own transient scope"
+    );
+    assert!(
+        script.contains("MemoryMax=") && script.contains("MemoryHigh="),
+        "the wrapper must set both a throttle (MemoryHigh) and a wall (MemoryMax)"
+    );
+    assert!(
+        script.contains(r#"exec cargo "$@""#),
+        "the wrapper must fall back to plain cargo where systemd is unavailable"
+    );
+
+    // Executable, or `./scripts/cargo-guarded.sh` in the README does not work.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = root.join("scripts/cargo-guarded.sh");
+        let mode = fs::metadata(&path)
+            .unwrap_or_else(|e| panic!("{path:?}: {e}"))
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "scripts/cargo-guarded.sh must be executable (mode is {mode:o})"
+        );
+    }
+}
+
 /// The markdown documents the documentation set consists of: the top-level
 /// entry points plus everything in `docs/`.
 fn documentation_files(root: &Path) -> Vec<PathBuf> {

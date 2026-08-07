@@ -188,6 +188,86 @@ async fn an_app_without_the_provider_gets_no_schema_at_all() -> sc_error::Result
 }
 
 #[tokio::test]
+async fn a_graphql_only_app_gets_a_client_with_no_auth_layer() -> sc_error::Result<()> {
+    // The scaffold signs in through `login` / `logout` / `whoami`, which only the
+    // REST provider projects (§13.4). A GraphQL-only app has none of them — so it
+    // used to scaffold a login screen calling three methods that were not on its
+    // `ApiClient`, and failed its build with four TypeScript errors in a file the
+    // admin never wrote. A public API is a legitimate app; what it gets is a
+    // client with no auth layer, not a broken one.
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    let tmp = TempDir::new("gqlonly")?;
+    cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+
+    let app = staff_app(vec![ApiConfig::new("graphql", "/graphql")]);
+    scaffold_app(&cat, &app, None).await?;
+    let project = tmp.path().join("staff");
+
+    assert!(!project.join("src/auth.tsx").exists());
+    assert!(!project.join("src/Login.tsx").exists());
+    assert!(!std::fs::read_to_string(project.join("src/main.tsx"))?.contains("AuthProvider"));
+
+    // What it does get is the shell and the GraphQL runtime. There are no
+    // generated *pages*: those are written from the table endpoints the REST
+    // provider projects (`exposed_tables`), and this app has none — its data
+    // layer is the typed `graphql()` call, which is the workflow this provider is
+    // for.
+    assert!(project.join("src/saltcorn/graphql.ts").is_file());
+    assert!(project.join("src/saltcorn/schema.graphql").is_file());
+    assert!(!project.join("src/pages").exists());
+
+    if !npm_available() {
+        eprintln!("skipping the type-check: `npm` is not on PATH");
+        return Ok(());
+    }
+    // The claim that actually matters, and the one the four errors disproved:
+    // `npm run build` is `tsc --noEmit && vite build`, so this compiles the whole
+    // project — including the shell that no longer imports an auth layer.
+    let source = app_source_from_config(&app.framework)?;
+    let report = build_application(&cat, &app, &source, None).await?;
+    assert!(report.installed, "the first build installs dependencies");
+    assert!(
+        project.join("dist/index.html").is_file(),
+        "the build produced no bundle"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn losing_the_auth_provider_is_refused_before_it_can_fail_in_tsc() -> sc_error::Result<()> {
+    // The other half: an app scaffolded *with* auth and later left without the
+    // REST provider still has an `src/auth.tsx` calling those three methods, and
+    // `tsc` type-checks every file in the project whether or not anything imports
+    // it. That build is refused with the reason, rather than run into the errors.
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    let tmp = TempDir::new("lostauth")?;
+    cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+
+    scaffold_app(&cat, &staff_app(both_providers()), None).await?;
+    assert!(tmp.path().join("staff/src/auth.tsx").is_file());
+
+    let graphql_only = staff_app(vec![ApiConfig::new("graphql", "/graphql")]);
+    let source = app_source_from_config(&graphql_only.framework)?;
+    let err = emit_react_runtime(&cat, &graphql_only, &source, None)
+        .await
+        .expect_err("the app can no longer serve the auth layer in its own source");
+    let msg = err.to_string();
+    assert!(msg.contains("login"), "{msg}");
+    assert!(msg.contains("whoami"), "{msg}");
+    // Names the fix — the provider to add back — not the symptom.
+    assert!(msg.contains("rest"), "{msg}");
+    assert!(msg.contains("src/auth.tsx"), "{msg}");
+
+    // A project with no auth layer is not caught by that check: it has nothing
+    // that calls the missing endpoints.
+    std::fs::remove_file(tmp.path().join("staff/src/auth.tsx"))?;
+    emit_react_runtime(&cat, &graphql_only, &source, None).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_schema_is_rewritten_on_every_build() -> sc_error::Result<()> {
     // The reason the SDL is generated rather than exported once: an admin adds a
     // column in the admin UI, and the app's queries are type-checked against it

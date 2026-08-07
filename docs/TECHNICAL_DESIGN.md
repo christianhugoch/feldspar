@@ -2395,7 +2395,12 @@ hard-coded:
   opts out with a `public` flag. The default is this way round because forgetting to mark a
   route should produce a locked door, not an open one — and because client-side auth state
   is a UI convenience that is never the enforcement point: every request is authorized again
-  by §7, which is what makes a wrong flag cosmetic rather than a hole.
+  by §7, which is what makes a wrong flag cosmetic rather than a hole. Those three endpoints
+  come from the **REST** provider (§13.4), so an application that enables no provider
+  projecting them — a GraphQL-only app, say — scaffolds the **anonymous** shell instead: no
+  auth provider, no login screen, no per-route flag. The rule is about a scaffold's routes,
+  and it cannot lock a door that has no key; a wholly public API with a public client is a
+  legitimate app, not a misconfigured one.
 - **Plain CSS, replaceable.** No CSS framework (a large dependency with its own version
   treadmill, when the value on offer is the data/auth/build path, not the look) and no
   CSS-in-JS (runtime `<style>` injection would force `style-src 'unsafe-inline'` into every

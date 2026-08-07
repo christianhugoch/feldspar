@@ -52,7 +52,7 @@ pub use ownership::{
     read_rows_as, update_row_as,
 };
 pub use provider::{ApiProvider, ApiRequest, ApiResponse, RawBody, SessionAction};
-pub use rest::{REST_PROVIDER, RestProvider, op_name};
+pub use rest::{AUTH_ENDPOINTS, REST_PROVIDER, RestProvider, op_name};
 pub use schema::{StructField, TypeSchema, ValueType};
 pub use typescript::generate_client;
 

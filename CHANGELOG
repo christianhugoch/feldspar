@@ -2,6 +2,105 @@
 
 Changes in reverse chronological order.
 
+## `cargo test --workspace` no longer closes the terminal it runs in
+
+Running the full suite on a desktop would, often enough to be a working hazard, make the whole
+terminal window disappear — no failure, no scrollback, nothing left to read. The journal names the
+culprit exactly: `systemd-oomd`, killing
+`app-org.gnome.Terminal.slice/vte-spawn-….scope` "due to memory pressure for
+`/user.slice/user-1000.slice/user@1000.service` being 54.80% > 50.00% for > 20s", with the scope's
+`Current Memory Usage: 20.2G`. Two things about that are worth spelling out, because together they
+turn a resource problem into a disappearing-evidence problem. oomd kills a **cgroup**, not a
+process — and a terminal's shell, the cargo it launched, every rustc under that and the tab's own
+process all share one `vte-spawn-*.scope`. So "the build used too much memory" is carried out as
+"close the window", destroying the output that would have explained it.
+
+The 20.2 GB is the workspace's own doing. A static V8 (`deno_core`, behind `sc-expr`'s `eval`
+feature) links into **every one** of the ~110 integration-test binaries, and at rustc's default
+`debug = true` each one came out at ~440 MB — overwhelmingly DWARF for dependency code — with a
+peak of ~1.9 GB of linker RSS apiece. `cargo test -j8` runs eight of those at once. CI had already
+met this and worked around it locally with `CARGO_PROFILE_DEV_DEBUG: 0`; a developer's machine
+never got the same treatment, and has less headroom than a runner precisely because a desktop
+session is running everything else too.
+
+So the fix is a **debug-info budget** in the workspace `Cargo.toml`, which applies to every cargo
+invocation without anyone having to remember a flag. Dependencies build with no debug info at all
+(`[profile.dev.package."*"] debug = false`) and workspace crates keep line tables only. One key
+covers `cargo test` as well as `cargo build`: `test` inherits from `dev`, and that inheritance
+carries `package."*"` overrides — checked rather than assumed, since the opposite would have been
+invisible. A `cargo test` build of a crate carrying only that key emits a dependency rlib with zero
+`.debug_info` sections, against 18 with the key removed.
+
+That draws the line where the value is: a panicking test still prints a backtrace with `file:line`,
+which is the whole of what a test run reads debug info for, while nobody loses anything they were
+using by not being able to single-step into V8's bindings. Full DWARF for a dependency is still one
+flag away — `--config 'profile.dev.package."*".debug=true'`. Measured on this workspace, a test
+binary goes 391 MB → 152 MB, the largest goes 440 MB → 173 MB, and a full
+`cargo test --workspace --no-fail-fast` — build and run, 145 suites and 1334 tests — peaks at 3.3 GB
+of toolchain RSS and never takes the machine below 23.8 GB of the 30 GB available. The run it
+replaces reached 20.2 GB in one cgroup.
+
+`scripts/cargo-guarded.sh` is the second layer, for whatever overruns anyway: it runs cargo under
+`systemd-run --user --scope` with `MemoryHigh`/`MemoryMax`, which lands the build in a *sibling*
+cgroup of the terminal's rather than a child of it. The cap is then the only thing that can be
+killed, and it exits 137 with an explanation of which knob to turn instead of taking the window.
+It falls back to plain `cargo` where there is no systemd, so it is safe to use unconditionally.
+
+Three tests in `crates/sc-cli/tests/repo_hygiene.rs` keep the budget from being quietly dropped and
+rediscovered the same way: one asserts both profile keys by name, one asserts the wrapper still caps
+and still falls back, and one measures the *output* rather than the setting. That last one does not
+weigh its own binary — `repo_hygiene` only reads files, so the linker collects almost everything and
+it comes out around 7 MB with or without the budget, passing either way and proving nothing. It
+scans the `deps/` directory the build just wrote and checks the largest binary there, which is one
+that genuinely links V8: ~173 MB now against ~440 MB before, either side of a 300 MB ceiling.
+
+Two things found on the way that are documented in the README rather than fixed in code: cargo
+never garbage-collects `target/`, so every rebuild's hashed test binaries accumulate (this checkout
+had 2287 stale executables, 423 GB, filling the disk to 94%); and `rust-lld` is already the default
+linker on this toolchain, so there is nothing to gain from installing `lld` or `mold`.
+
+## An app that cannot sign anyone in scaffolds an anonymous client, not a broken one
+
+A React application with **only** the GraphQL provider enabled scaffolded happily and then failed
+its build with four TypeScript errors in `src/auth.tsx` — `Property 'whoami' does not exist on
+type 'ApiClient'`, and the same for `login` and `logout` — in a file the admin never wrote. The
+cause is not a generation slip: the scaffold is authenticated by default (§13.3) and signs in
+through the app's own `login` / `logout` / `whoami`, and those are projected by the **REST**
+provider. The GraphQL provider projects its two endpoints and nothing else, by design (§13.4). So
+that app has no way for any caller to stop being anonymous, and a login screen was generated for
+it anyway.
+
+The scaffold now has **two shapes**, chosen by
+[`has_auth`](crates/sc-app/src/scaffold/files.rs) against the endpoint set: the authenticated one
+§13.3 describes, and — when nothing projects those three endpoints — an anonymous one with no
+`auth.tsx`, no `Login.tsx`, no `AuthProvider` around the router, no user cell in the header and
+no per-route `public` flag. Authenticated-by-default is a rule about a scaffold's *routes*, and
+it cannot lock a door that has no key: a wholly public API with a public client is a legitimate
+app rather than a misconfigured one, so it gets a client that compiles instead of a diagnostic
+telling it to become a different app. The names come from the new `sc_api::AUTH_ENDPOINTS`, so
+the branch cannot go stale against a provider that changes what it projects, and it is all three
+or none — half an auth layer is the failure this exists to prevent.
+
+The other half of that story is an app scaffolded **with** REST and later left without it. Its
+`src/auth.tsx` still calls the three methods, and `tsc --noEmit` type-checks every file in the
+project whether or not anything imports it, so that build really does fail — and it now fails
+first, with the reason, from `require_auth_endpoints_for_source` in
+[`scaffold/mod.rs`](crates/sc-app/src/scaffold/mod.rs). The question it asks is about the
+project's **source**, not the app's providers: an app that never had an auth layer is not broken
+by not having one, and an `auth.tsx` the admin has replaced with their own is theirs to get
+right. That is the same service [`require_api_provider`](crates/sc-app/src/scaffold/mod.rs)
+performs one provider along.
+
+The GraphQL scaffold tests enabled both providers throughout, which is why the combination was
+never exercised. [`graphql_scaffold.rs`](crates/sc-app/tests/graphql_scaffold.rs) now scaffolds a
+GraphQL-only app and puts it through a real `npm run build` — the claim the four errors disproved
+— and covers the lost-provider refusal beside it, including the case that must *not* be refused.
+
+Two things a GraphQL-only app still does not get, both by construction rather than oversight:
+generated **pages**, which are written from the table endpoints REST projects (its data layer is
+the typed `graphql()` call), and a login screen appearing later if REST is added, since the
+project's own files are written once at scaffold time and never regenerated.
+
 ## `cargo build` now builds the admin UI, and `SC_BUILD_ADMIN=0` turns it off
 
 The admin SPA and the file-store IDE were opt-in: `cargo build -p sc-cli` produced a binary that

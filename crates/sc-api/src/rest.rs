@@ -109,6 +109,15 @@ const LOGIN: &str = "login";
 const LOGOUT: &str = "logout";
 const WHOAMI: &str = "whoami";
 
+/// The app's own auth operations, as a client generator meets them.
+///
+/// Public because a *consumer* of the endpoint set has to be able to ask whether
+/// an application can sign anyone in — the React scaffold's login screen calls
+/// exactly these three, and only this provider projects them (the GraphQL
+/// provider projects its two, by design §13.4). Asking the endpoint set is how
+/// that question stays right when a provider changes what it projects.
+pub const AUTH_ENDPOINTS: [&str; 3] = [LOGIN, LOGOUT, WHOAMI];
+
 /// A REST projection of an application's endpoint set (design §13.4).
 pub struct RestProvider {
     mount: String,
@@ -1138,14 +1147,14 @@ mod tests {
 
     /// Every app's projection carries `login`, `logout`, and `whoami` on top of
     /// its per-table endpoints.
-    const AUTH_ENDPOINTS: usize = 3;
+    const AUTH_ENDPOINT_COUNT: usize = 3;
 
     #[test]
     fn projects_four_rest_endpoints_per_table() {
         let p = RestProvider::project("/api", &[table("posts", AccessRules::default())]);
         assert_eq!(p.name(), "rest");
         assert_eq!(p.mount(), "/api");
-        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4);
 
         // The table is a literal segment — the app's own tables are its contract.
         let list = p.endpoints().find("listPosts").unwrap();
@@ -1199,7 +1208,7 @@ mod tests {
     fn a_table_without_a_single_primary_key_gets_only_collection_endpoints() {
         // No key ⇒ no way to address a row, so no PUT/DELETE is promised.
         let p = RestProvider::project("/api", &[keyless("logs")]);
-        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 2);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 2);
         assert!(p.endpoints().find("listLogs").is_some());
         assert!(p.endpoints().find("createLogs").is_some());
         assert!(p.endpoints().find("updateLogs").is_none());
@@ -1213,7 +1222,7 @@ mod tests {
             min_role_write: 40,
         };
         let p = RestProvider::project("/api", &[table_with_file_field("posts", access)]);
-        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4 + 2);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4 + 2);
 
         // Addressed by table, row id and field name — never by raw store path.
         let download = p.endpoints().find("downloadPostsCover").unwrap();
@@ -1360,7 +1369,7 @@ mod tests {
             &[table("posts", AccessRules::default())],
             &[open, unset],
         );
-        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4 + 2);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4 + 2);
 
         let ep = p.endpoints().find("runSendDigest").unwrap();
         assert_eq!(ep.method, Method::Post);
@@ -1404,7 +1413,7 @@ mod tests {
                     .handler(HandlerRef::Sql("select 1".to_owned())),
             );
         // The custom route is part of the contract even though it is stubbed.
-        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4 + 1);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4 + 1);
         let ep = p.endpoints().find("search").unwrap();
         assert!(matches!(ep.handler, HandlerRef::Sql(_)));
 
@@ -1449,7 +1458,7 @@ mod tests {
         let p = RestProvider::project("/api", &[table("login", AccessRules::default())]);
         assert_eq!(p.endpoints().find("login").unwrap().method, Method::Post);
         assert!(p.endpoints().find("listLogin").is_some());
-        assert_eq!(p.endpoints().len(), AUTH_ENDPOINTS + 4);
+        assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4);
     }
 
     #[test]

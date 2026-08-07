@@ -18,6 +18,10 @@
 //!   tables: a scaffold that comes up showing a placeholder counter is a
 //!   template, while one that comes up showing their rows is a working app they
 //!   can edit.
+//!
+//! The shell comes in two shapes, decided by [`has_auth`]: the authenticated one
+//! §13.3 describes, and — for an application that exposes no auth endpoints — an
+//! anonymous one with no auth layer at all.
 
 use sc_api::{
     EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, generate_client,
@@ -113,6 +117,24 @@ fn exposed_tables<'a>(tables: &'a [Table], endpoints: &EndpointSet) -> Vec<&'a T
         .collect()
 }
 
+/// Whether this application can sign anyone in.
+///
+/// The scaffold's auth layer is generated code calling `login` / `logout` /
+/// `whoami` through the typed client, so it can only exist when the application
+/// exposes them — which today means the REST provider (§13.4). An app that does
+/// not gets the anonymous shell instead of a login screen whose three calls do
+/// not compile: **authenticated by default** (§13.3) is a statement about a
+/// scaffold's *routes*, and it cannot lock a door that has no key.
+///
+/// All three or none: a partial set is a provider having changed under us, and
+/// generating half an auth layer against it is how you get the error this branch
+/// exists to prevent.
+pub fn has_auth(endpoints: &EndpointSet) -> bool {
+    sc_api::AUTH_ENDPOINTS
+        .iter()
+        .all(|name| endpoints.find(name).is_some())
+}
+
 /// The whole project: the runtime plus everything written once.
 pub fn project_files(
     project: &str,
@@ -121,19 +143,22 @@ pub fn project_files(
     graphql: Option<&AppGraphql>,
 ) -> Vec<GeneratedFile> {
     let exposed = exposed_tables(tables, endpoints);
+    let auth = has_auth(endpoints);
     let mut files = vec![
         GeneratedFile::new("package.json", package_json(project)),
         GeneratedFile::new("vite.config.ts", VITE_CONFIG),
         GeneratedFile::new("tsconfig.json", tsconfig(graphql.is_some())),
         GeneratedFile::new("index.html", index_html(project)),
         GeneratedFile::new(".gitignore", GITIGNORE),
-        GeneratedFile::new("src/main.tsx", MAIN_TSX),
-        GeneratedFile::new("src/auth.tsx", AUTH_TSX),
-        GeneratedFile::new("src/Login.tsx", LOGIN_TSX),
-        GeneratedFile::new("src/App.tsx", app_tsx(project)),
-        GeneratedFile::new("src/routes.tsx", routes_tsx(&exposed, endpoints)),
+        GeneratedFile::new("src/main.tsx", main_tsx(auth)),
+        GeneratedFile::new("src/App.tsx", app_tsx(project, auth)),
+        GeneratedFile::new("src/routes.tsx", routes_tsx(&exposed, auth)),
         GeneratedFile::new("src/app.css", APP_CSS),
     ];
+    if auth {
+        files.push(GeneratedFile::new("src/auth.tsx", AUTH_TSX));
+        files.push(GeneratedFile::new("src/Login.tsx", LOGIN_TSX));
+    }
     for table in &exposed {
         files.push(GeneratedFile::new(
             format!("src/pages/{}.tsx", pascal(&table.name)),
@@ -259,11 +284,25 @@ fn index_html(project: &str) -> String {
 /// that omits it cannot be built anywhere but here.
 const GITIGNORE: &str = "node_modules\ndist\n*.local\n";
 
-const MAIN_TSX: &str = r#"import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
-import { AuthProvider } from "./auth";
-import App from "./App";
+/// The entry point. The auth provider wraps the router when there is one, so the
+/// current user is known before any route renders.
+fn main_tsx(auth: bool) -> String {
+    let (import, open, close) = if auth {
+        (
+            "import { AuthProvider } from \"./auth\";\n",
+            "    <AuthProvider>\n",
+            "    </AuthProvider>\n",
+        )
+    } else {
+        ("", "", "")
+    };
+    // The router's indentation follows the wrapper it is (or is not) inside.
+    let pad = if auth { "  " } else { "" };
+    format!(
+        r#"import {{ StrictMode }} from "react";
+import {{ createRoot }} from "react-dom/client";
+import {{ BrowserRouter }} from "react-router-dom";
+{import}import App from "./App";
 import "./app.css";
 
 const root = document.getElementById("root");
@@ -271,14 +310,14 @@ if (!root) throw new Error("no #root element in index.html");
 
 createRoot(root).render(
   <StrictMode>
-    <AuthProvider>
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
-    </AuthProvider>
-  </StrictMode>,
+{open}{pad}    <BrowserRouter>
+{pad}      <App />
+{pad}    </BrowserRouter>
+{close}  </StrictMode>,
 );
-"#;
+"#
+    )
+}
 
 /// The auth layer: a provider, a `useUser` hook and a gate.
 ///
@@ -402,16 +441,38 @@ export default function Login() {
 
 /// The shell: a header naming the app, a nav built from the route list, the
 /// signed-in user, and the routes themselves.
-fn app_tsx(project: &str) -> String {
+///
+/// Without auth there is no user to show and no gate to apply, so the header's
+/// last cell and the route element's condition are simply not written. The
+/// alternative — keeping them against a `user` that is always `null` — would
+/// generate an app permanently displaying "not signed in" beside a sign-in button
+/// that cannot exist.
+fn app_tsx(project: &str, auth: bool) -> String {
+    let (auth_imports, user_hook, user_cell, element) = if auth {
+        (
+            "import { useUser } from \"./auth\";\nimport Login from \"./Login\";\n",
+            "  const { user, signOut } = useUser();\n",
+            r#"        <span className="sc-user">
+          {user ? (
+            <>
+              {user.email} <button onClick={() => void signOut()}>Sign out</button>
+            </>
+          ) : (
+            "not signed in"
+          )}
+        </span>
+"#,
+            "r.public || user ? r.element : <Login />",
+        )
+    } else {
+        ("", "", "", "r.element")
+    };
     format!(
         r#"import {{ Link, Route, Routes, useLocation }} from "react-router-dom";
 import {{ routes }} from "./routes";
-import {{ useUser }} from "./auth";
-import Login from "./Login";
-
+{auth_imports}
 export default function App() {{
-  const {{ user, signOut }} = useUser();
-  const location = useLocation();
+{user_hook}  const location = useLocation();
 
   return (
     <div className="sc-app">
@@ -430,24 +491,11 @@ export default function App() {{
               </Link>
             ))}}
         </nav>
-        <span className="sc-user">
-          {{user ? (
-            <>
-              {{user.email}} <button onClick={{() => void signOut()}}>Sign out</button>
-            </>
-          ) : (
-            "not signed in"
-          )}}
-        </span>
-      </header>
+{user_cell}      </header>
       <main>
         <Routes>
           {{routes.map((r) => (
-            <Route
-              key={{r.path}}
-              path={{r.path}}
-              element={{r.public || user ? r.element : <Login />}}
-            />
+            <Route key={{r.path}} path={{r.path}} element={{{element}}} />
           ))}}
         </Routes>
       </main>
@@ -465,10 +513,15 @@ export default function App() {{
 /// without a build-time plugin scanning directories. `public` is the per-route
 /// opt-out from the authenticated-by-default rule — one word, and its absence
 /// means "signed in", which is the direction a forgotten flag should fail in.
-fn routes_tsx(tables: &[&Table], endpoints: &EndpointSet) -> String {
-    let _ = endpoints;
-    let mut imports =
-        String::from("import type { ReactNode } from \"react\";\nimport Login from \"./Login\";\n");
+///
+/// An app with no auth has no login route to reach and no flag to carry: every
+/// route is reachable, and a `public?: boolean` nothing reads would be a promise
+/// about a gate that is not there.
+fn routes_tsx(tables: &[&Table], auth: bool) -> String {
+    let mut imports = String::from("import type { ReactNode } from \"react\";\n");
+    if auth {
+        imports.push_str("import Login from \"./Login\";\n");
+    }
     let mut entries = String::new();
     for table in tables {
         let component = format!("{}Page", pascal(&table.name));
@@ -482,6 +535,14 @@ fn routes_tsx(tables: &[&Table], endpoints: &EndpointSet) -> String {
             title(&table.name)
         ));
     }
+    let (public_field, login_route) = if auth {
+        (
+            "  /** Reachable without signing in. Absent means: sign-in required. */\n  public?: boolean;\n",
+            "  { path: \"/login\", label: \"\", element: <Login />, public: true },\n",
+        )
+    } else {
+        ("", "")
+    };
     format!(
         r#"{imports}
 export type AppRoute = {{
@@ -490,13 +551,10 @@ export type AppRoute = {{
   /** Shown in the nav; an empty label hides the route from it. */
   label: string;
   element: ReactNode;
-  /** Reachable without signing in. Absent means: sign-in required. */
-  public?: boolean;
-}};
+{public_field}}};
 
 export const routes: AppRoute[] = [
-{entries}  {{ path: "/login", label: "", element: <Login />, public: true }},
-];
+{entries}{login_route}];
 "#
     )
 }
@@ -1403,13 +1461,76 @@ mod tests {
         }];
         let eps = endpoints(&tables);
         let exposed = exposed_tables(&tables, &eps);
-        let routes = routes_tsx(&exposed, &eps);
+        let routes = routes_tsx(&exposed, has_auth(&eps));
         // The first table owns `/`; later ones get their own path.
         assert!(routes.contains(r#"{ path: "/", label: "Tasks", element: <TasksPage /> }"#));
         assert!(routes.contains(r#"{ path: "/notes", label: "Notes", element: <NotesPage /> }"#));
         // Only the login route is public — the default is the locked door.
         assert_eq!(routes.matches("public: true").count(), 1);
         assert!(routes.contains(r#"path: "/login""#));
+    }
+
+    /// The endpoint set of an app whose provider projects no auth — the GraphQL
+    /// provider's two endpoints, and the table endpoints a GraphQL-only app does
+    /// not have either. What a page reads is beside the point here; what matters
+    /// is that nothing can sign in.
+    fn endpoints_without_auth() -> EndpointSet {
+        let mut set = EndpointSet::new();
+        for ep in endpoints(&[tasks()]).iter() {
+            if !sc_api::AUTH_ENDPOINTS.contains(&ep.name.as_str()) {
+                set.register(ep.clone());
+            }
+        }
+        set
+    }
+
+    /// An application with no auth endpoints — a wholly public API — scaffolds a
+    /// client with no auth layer, rather than one that cannot compile.
+    #[test]
+    fn an_app_that_cannot_sign_anyone_in_gets_a_public_client() {
+        let tables = [tasks()];
+        let eps = endpoints_without_auth();
+        assert!(!has_auth(&eps));
+        let files = project_files("todo", &tables, &eps, None);
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+
+        // No auth layer at all: not the files, not the imports of them.
+        assert!(!paths.contains(&"src/auth.tsx"), "{paths:?}");
+        assert!(!paths.contains(&"src/Login.tsx"), "{paths:?}");
+        for path in ["src/main.tsx", "src/App.tsx", "src/routes.tsx"] {
+            let src = file(&files, path);
+            assert!(!src.contains("./auth"), "{path}: {src}");
+            assert!(!src.contains("./Login"), "{path}: {src}");
+        }
+        // The pages are still there, and still typed against the app's tables:
+        // public is a statement about who may read, not about how much app there
+        // is.
+        assert!(paths.contains(&"src/pages/Tasks.tsx"), "{paths:?}");
+
+        // Every route renders, and none carries a flag about a gate that does not
+        // exist.
+        let routes = file(&files, "src/routes.tsx");
+        assert!(routes.contains(r#"{ path: "/", label: "Tasks", element: <TasksPage /> }"#));
+        assert!(!routes.contains("public"), "{routes}");
+        assert!(!routes.contains("/login"), "{routes}");
+        let app = file(&files, "src/App.tsx");
+        assert!(app.contains("element={r.element}"), "{app}");
+        assert!(!app.contains("useUser"), "{app}");
+        assert!(!app.contains("not signed in"), "{app}");
+    }
+
+    /// The same app *with* auth keeps every one of those, so the branch above is a
+    /// difference between two apps rather than a feature quietly lost.
+    #[test]
+    fn an_app_that_can_sign_in_still_gets_the_authenticated_shell() {
+        let tables = [tasks()];
+        let eps = endpoints(&tables);
+        assert!(has_auth(&eps));
+        let files = project_files("todo", &tables, &eps, None);
+        assert!(file(&files, "src/main.tsx").contains("<AuthProvider>"));
+        assert!(file(&files, "src/App.tsx").contains("useUser"));
+        assert!(file(&files, "src/App.tsx").contains("r.public || user ? r.element : <Login />"));
+        assert!(file(&files, "src/auth.tsx").contains("api.whoami("));
     }
 
     #[test]
