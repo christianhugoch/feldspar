@@ -69,7 +69,16 @@ API:
 - the API is enabled as part of an application (see below)
 - The API should offer access to tables and actions per permissions settings and also custom routes using user-written code (in a supported language) and SQL queries.
 - all APIs should generate information and typescript type declarations (or a typed API-consumer library). This is the case both for the admin UI and APIs enabled per application. 
-
+- in the graphQL api, aggregations are optional and enabled with a switch
+- The rest API should allow selecting join fields in the same way done by postgREST: optional field list in queery string can have key_name(joinfield1, joinfield2)
+- The REST api should include in its configuration custom SQL queries. these must have input parameters that are specified by types
+- select HTTP method manually per custom SQL query
+- There must be a button to update the client code in each code application following table changes. This should also check if rescaffolding is needed, e.g. if the application directory is empty. 
+- If the api defintion changes, the client code must be updated automatically.
+- the generated typescript client subdirectory must have a README.md file that explains that this directory is maintained externally and any changes will be overwritten
+- the saltcorn cli must include a command to add a custom SQL query to the API. This must update the  
+- the generated typescript client directory must include the SQL definition for the connected tables, to help any coding agents running in the directory formulate custom queries.
+- when scaffolding typescript apps, include an AGENTS.md file that points to the README.md file for the client and explains how to add a custom SQL query with the cli. 
 
 Admin UI:
 
