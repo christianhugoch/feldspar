@@ -76,6 +76,62 @@ export async function exercise(): Promise<void> {
 }
 "#;
 
+/// A usage module for an endpoint set that declares query parameters. It proves
+/// the three shapes are genuinely typed: the options object is omissible when
+/// every parameter is optional, required when one is not, a repeated parameter
+/// is an array, and each parameter carries the type it was declared with.
+const QUERY_USAGE_TS: &str = r#"
+import { createClient, ListBooksQuery } from "./client";
+
+export async function exercise(): Promise<void> {
+  const api = createClient({});
+
+  // All-optional parameters: the argument itself may be left out.
+  await api.listBooks();
+  const query: ListBooksQuery = {
+    select: "title,author(name)",
+    limit: 20,
+    published: ["gte.2020-01-01", "lt.2024-01-01"],
+  };
+  const books = await api.listBooks(query);
+
+  // A required parameter makes the object required, and it is typed.
+  const found = await api.searchBooks({ q: "dune" });
+
+  void books; void found;
+}
+"#;
+
+#[test]
+fn generated_query_parameter_client_type_checks() -> std::io::Result<()> {
+    use sc_api::{Endpoint, EndpointSet, Method, PathSpec, QueryParam, TypeSchema, ValueType};
+
+    let set = EndpointSet::new()
+        .with(
+            Endpoint::new("listBooks", Method::Get, PathSpec::root().lit("api/books"))
+                .query([
+                    QueryParam::new("select", ValueType::Text),
+                    QueryParam::new("limit", ValueType::Int),
+                    QueryParam::new("published", ValueType::Text).repeated(),
+                ])
+                .output(TypeSchema::array(TypeSchema::json())),
+        )
+        .with(
+            Endpoint::new(
+                "searchBooks",
+                Method::Get,
+                PathSpec::root().lit("api/search"),
+            )
+            .query([
+                QueryParam::new("q", ValueType::Text).required(),
+                QueryParam::new("limit", ValueType::Int),
+            ])
+            .output(TypeSchema::array(TypeSchema::json())),
+        );
+    let client_ts = sc_api::generate_client(&set);
+    type_check("query-params", &client_ts, QUERY_USAGE_TS)
+}
+
 #[test]
 fn generated_admin_client_type_checks() -> std::io::Result<()> {
     let client_ts = sc_api::generate_client(&sc_api::admin_endpoints());

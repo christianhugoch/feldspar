@@ -15,7 +15,7 @@
 //! (composite keys are post-MVP), and `createTable` gives a new table a default
 //! identity `id` key so the row editor has something to address.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -1766,7 +1766,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     // The provider routes on its own mount, so this is that
                     // mount and never a path a request chose.
                     path: provider.mount(),
-                    query: HashMap::new(),
+                    query: Vec::new(),
                     body: ctx.body.clone(),
                     raw: None,
                 };

@@ -20,7 +20,6 @@ use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::Result;
 use serde_json::Value as Json;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::endpoint::{EndpointSet, Method};
@@ -37,8 +36,16 @@ pub struct ApiRequest {
     pub method: Method,
     /// The request path within the application, with a leading slash.
     pub path: String,
-    /// Query-string parameters.
-    pub query: HashMap<String, String>,
+    /// Query-string parameters, **in the order they arrived and with duplicates
+    /// kept**.
+    ///
+    /// A map would be smaller and wrong: a filter vocabulary spells a range as
+    /// two values under one key (`?published=gte.2020&published=lt.2024`), and a
+    /// map keeps whichever arrived last — a dropped filter is rows the caller
+    /// did not ask for, which is the worst failure a data API can have. Read it
+    /// with [`query_get`](ApiRequest::query_get) and
+    /// [`query_all`](ApiRequest::query_all).
+    pub query: Vec<(String, String)>,
     /// The parsed JSON request body ([`Json::Null`] when there was none).
     pub body: Json,
     /// The raw, unparsed request body, set by the transport when the caller sent
@@ -53,10 +60,29 @@ impl ApiRequest {
         ApiRequest {
             method,
             path: path.into(),
-            query: HashMap::new(),
+            query: Vec::new(),
             body: Json::Null,
             raw: None,
         }
+    }
+
+    /// The first value given for `key`, or `None`.
+    ///
+    /// "First" rather than "last" because a repeated key is a list the caller
+    /// wrote in order, and a single-valued reader should see its head.
+    pub fn query_get(&self, key: &str) -> Option<&str> {
+        self.query
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Every value given for `key`, in arrival order.
+    pub fn query_all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.query
+            .iter()
+            .filter(move |(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// A `GET` for `path`.
@@ -70,9 +96,10 @@ impl ApiRequest {
         self
     }
 
-    /// Set a query parameter, returning `self` for chaining.
+    /// Append a query parameter, returning `self` for chaining. Calling it twice
+    /// with the same key keeps both values, as the wire does.
     pub fn query(mut self, key: impl Into<String>, value: impl Into<String>) -> ApiRequest {
-        self.query.insert(key.into(), value.into());
+        self.query.push((key.into(), value.into()));
         self
     }
 

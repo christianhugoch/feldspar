@@ -38,8 +38,11 @@ pub type HandlerFn = Arc<dyn Fn(HandlerCtx) -> BoxFuture<Result<HandlerResponse>
 pub struct HandlerCtx {
     /// Path parameters captured from the route pattern (e.g. `table`, `id`).
     pub path_params: HashMap<String, String>,
-    /// Query-string parameters.
-    pub query: HashMap<String, String>,
+    /// Query-string parameters, in arrival order and with duplicates kept — the
+    /// same shape (and for the same reason) as
+    /// [`ApiRequest::query`](sc_api::ApiRequest). Read it with
+    /// [`query_get`](HandlerCtx::query_get) and [`query_all`](HandlerCtx::query_all).
+    pub query: Vec<(String, String)>,
     /// The parsed JSON request body ([`Value::Null`] when there was no body).
     pub body: Value,
     /// The authenticated user, if any. Presence/role already satisfy the
@@ -74,6 +77,22 @@ impl HandlerCtx {
             .get(name)
             .map(String::as_str)
             .ok_or_else(|| sc_error::Error::invalid(format!("missing path parameter `{name}`")))
+    }
+
+    /// The first value given for a query parameter, or `None`.
+    pub fn query_get(&self, name: &str) -> Option<&str> {
+        self.query
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Every value given for a query parameter, in arrival order.
+    pub fn query_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.query
+            .iter()
+            .filter(move |(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 

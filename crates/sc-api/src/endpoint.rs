@@ -209,6 +209,60 @@ impl HandlerRef {
     }
 }
 
+/// One query-string parameter an endpoint accepts (design §13.1).
+///
+/// Query parameters belong in the endpoint *value* for the same reason path
+/// parameters do: a consumer generated from the endpoint set has to be able to
+/// express `?select=…` or a custom SQL query's arguments, and an untyped `fetch`
+/// written by hand beside a generated client is exactly where drift starts.
+///
+/// [`repeated`](QueryParam::repeated) is the one that carries a filter
+/// vocabulary: `?published=gte.2020-01-01&published=lt.2024-01-01` is two values
+/// under one key, both of which mean something. That is also why
+/// [`ApiRequest::query`](crate::ApiRequest) is an ordered list of pairs rather
+/// than a map — a map keeps whichever arrived last and drops the rest, which for
+/// a filter is rows the caller did not ask for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueryParam {
+    /// The parameter name — the query-string key, and the property name in the
+    /// generated client's options object.
+    pub name: String,
+    /// The parameter's scalar type. A repeated parameter is an array *of* this.
+    pub ty: ValueType,
+    /// The caller must supply it. An endpoint all of whose query parameters are
+    /// optional takes an optional options argument.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    /// The key may appear more than once, and every occurrence counts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repeated: bool,
+}
+
+impl QueryParam {
+    /// An optional, single-valued parameter. Refine it with
+    /// [`required`](QueryParam::required) and [`repeated`](QueryParam::repeated).
+    pub fn new(name: impl Into<String>, ty: ValueType) -> QueryParam {
+        QueryParam {
+            name: name.into(),
+            ty,
+            required: false,
+            repeated: false,
+        }
+    }
+
+    /// Mark the parameter as required.
+    pub fn required(mut self) -> QueryParam {
+        self.required = true;
+        self
+    }
+
+    /// Mark the parameter as repeatable (many values under one key).
+    pub fn repeated(mut self) -> QueryParam {
+        self.repeated = true;
+        self
+    }
+}
+
 /// A single HTTP endpoint, described as a value (design §13.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Endpoint {
@@ -218,6 +272,12 @@ pub struct Endpoint {
     pub method: Method,
     /// The request path (literal segments + typed parameters).
     pub path: PathSpec,
+    /// The query-string parameters the endpoint accepts, in declaration order —
+    /// which is the order they appear in the generated client's options object.
+    /// Empty for an endpoint that takes none, and then the generated method is
+    /// exactly as it was before query parameters existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub query: Vec<QueryParam>,
     /// The request body schema (an empty struct means "no body").
     pub input: TypeSchema,
     /// The response value schema.
@@ -249,6 +309,7 @@ impl Endpoint {
             name,
             method,
             path,
+            query: Vec::new(),
             input: TypeSchema::empty(),
             output: TypeSchema::empty(),
             binary_input: false,
@@ -256,6 +317,13 @@ impl Endpoint {
             auth: AuthRequirement::LoggedIn,
             handler,
         }
+    }
+
+    /// Declare the query-string parameters the endpoint accepts, appending to
+    /// any already declared.
+    pub fn query(mut self, params: impl IntoIterator<Item = QueryParam>) -> Endpoint {
+        self.query.extend(params);
+        self
     }
 
     /// Set the request body schema.

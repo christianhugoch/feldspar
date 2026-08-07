@@ -287,7 +287,7 @@ async fn upload(
     let ctx = HandlerCtx {
         raw_body: Some(bytes),
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
-        query: HashMap::new(),
+        query: Vec::new(),
         body: serde_json::Value::Null,
         user,
     };
@@ -936,18 +936,79 @@ fn error_status(err: &Error) -> StatusCode {
     }
 }
 
-/// Parse a query string into key/value pairs (no percent-decoding; MVP simple).
-fn parse_query(uri: &Uri) -> HashMap<String, String> {
-    let mut out = HashMap::new();
+/// Parse a query string into key/value pairs, **in order and with duplicates
+/// kept**.
+///
+/// Both properties are load-bearing rather than incidental: the REST read syntax
+/// spells a range as two values under one key
+/// (`?published=gte.2020&published=lt.2024`), so a map here would silently drop
+/// one of a caller's filters — and a dropped filter is rows they did not ask
+/// for. Values are percent-decoded (and `+` read as a space, as
+/// `application/x-www-form-urlencoded` and `URLSearchParams` write it), so what
+/// a handler reads is what the caller wrote.
+fn parse_query(uri: &Uri) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     if let Some(query) = uri.query() {
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let mut kv = pair.splitn(2, '=');
-            let key = kv.next().unwrap_or("").to_owned();
-            let value = kv.next().unwrap_or("").to_owned();
-            out.insert(key, value);
+            let key = form_decode(kv.next().unwrap_or(""));
+            let value = form_decode(kv.next().unwrap_or(""));
+            out.push((key, value));
         }
     }
     out
+}
+
+/// Decode one form-urlencoded component: `+` is a space, `%XX` is a byte.
+///
+/// A malformed escape (`%zz`, or a `%` at the end) is left as written rather
+/// than rejected: it is one character of one query parameter, and the endpoint
+/// that reads it is in a better position to say what is wrong with it than a
+/// parser that knows only that a `%` was not followed by two hex digits.
+fn form_decode(s: &str) -> String {
+    if !s.contains('%') && !s.contains('+') {
+        return s.to_owned();
+    }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        out.push(hi << 4 | lo);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    // A percent escape can carry any byte, including an invalid UTF-8 sequence;
+    // the lossy conversion keeps the rest of the value rather than losing it.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The value of one hex digit, or `None` if it is not one.
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// A JSON error body with the given status.
@@ -1131,6 +1192,59 @@ mod tests {
         assert_eq!(
             error_response(&Error::auth("nope"), Audience::Admin).status(),
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// A repeated key is how the REST read syntax spells a range, so both values
+    /// must arrive — and in the order the caller wrote them. A map here would
+    /// keep one and drop the other, which is a filter the caller asked for and
+    /// did not get.
+    #[test]
+    fn parse_query_keeps_order_and_duplicates() {
+        let uri: Uri = "/api/books?published=gte.2020&select=title&published=lt.2024"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            parse_query(&uri),
+            vec![
+                ("published".to_owned(), "gte.2020".to_owned()),
+                ("select".to_owned(), "title".to_owned()),
+                ("published".to_owned(), "lt.2024".to_owned()),
+            ]
+        );
+    }
+
+    /// What `URLSearchParams` (and so the generated client) writes must come
+    /// back as what the caller passed in: `&`, `=`, `+`, spaces and non-ASCII
+    /// text all survive the round trip.
+    #[test]
+    fn parse_query_decodes_what_the_generated_client_encodes() {
+        // `new URLSearchParams([["title","eq.rock & roll = 1+1 ☕"]]).toString()`
+        let uri: Uri = "/api/books?title=eq.rock+%26+roll+%3D+1%2B1+%E2%98%95"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            parse_query(&uri),
+            vec![("title".to_owned(), "eq.rock & roll = 1+1 ☕".to_owned())]
+        );
+    }
+
+    /// A `=` inside a value is part of the value (only the first splits), an
+    /// empty value is empty rather than absent, and a malformed escape is left
+    /// as written for the endpoint to complain about.
+    #[test]
+    fn parse_query_handles_the_awkward_edges() {
+        let uri: Uri = "/api/books?filter=a%3Db=c&empty=&odd=100%25&trailing=%"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            parse_query(&uri),
+            vec![
+                ("filter".to_owned(), "a=b=c".to_owned()),
+                ("empty".to_owned(), String::new()),
+                ("odd".to_owned(), "100%".to_owned()),
+                ("trailing".to_owned(), "%".to_owned()),
+            ]
         );
     }
 }

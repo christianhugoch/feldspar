@@ -127,18 +127,21 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 1 — Query parameters in the endpoint model (`sc-api`)
 
-- [ ] **`QueryParam`** in `endpoint.rs`: name, `ValueType`, `required`, and `repeated` (the one
+- [x] **`QueryParam`** in `endpoint.rs`: name, `ValueType`, `required`, and `repeated` (the one
       that carries `?published=gte.…&published=lt.…`), plus `Endpoint::query(…)`. Serde like
       the rest of the model, so a projected endpoint set still round-trips.
-- [ ] **`ApiRequest.query` becomes ordered pairs** (`Vec<(String, String)>`) with `get` and
-      `all` helpers, and `sc-server`'s `parse_query` preserves order and duplicates. Every
-      existing caller moves with it — there is no compatibility shim, and a `HashMap` left
-      anywhere is decision 3's silent failure waiting to be reintroduced.
-- [ ] **TypeScript generation**: an endpoint with query parameters takes a typed options object,
+- [x] **`ApiRequest.query` becomes ordered pairs** (`Vec<(String, String)>`) with `get` and
+      `all` helpers (`query_get`/`query_all`, so they read clearly on the request itself), and
+      `sc-server`'s `parse_query` preserves order and duplicates — and percent-decodes, so what a
+      handler reads is what the caller wrote. Every existing caller moved with it, `HandlerCtx`
+      included — there is no compatibility shim, and a `HashMap` left anywhere is decision 3's
+      silent failure waiting to be reintroduced.
+- [x] **TypeScript generation**: an endpoint with query parameters takes a typed options object,
       encoded into the URL by the generated client; an endpoint with none is unchanged (no empty
       options argument appearing on every method). Regenerate the admin's checked-in client and
-      keep its drift test green.
-- [ ] Tests: the generated signature and the encoding for a required, an optional and a repeated
+      keep its drift test green. (No admin endpoint declares one yet, so the checked-in clients
+      are byte-identical and the drift test needed no regeneration.)
+- [x] Tests: the generated signature and the encoding for a required, an optional and a repeated
       parameter; a value needing escaping survives a round trip; the emitted client type-checks
       (the existing generator type-check test); `parse_query` keeps both values of a repeated key.
 

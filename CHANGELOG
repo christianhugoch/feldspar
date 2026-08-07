@@ -2,6 +2,59 @@
 
 Changes in reverse chronological order.
 
+## A query parameter is part of the endpoint, and a query string is a list
+
+The API milestone's first phase, and the thing both of its features need before either can be
+built: an `Endpoint` can now declare the query-string parameters it accepts, and the generated
+TypeScript client takes them as a typed options object.
+
+Why it comes first. Two of this milestone's features — the REST read query string
+(`?select=…&published=gte.2020&order=…`) and custom SQL queries, whose `GET` arguments ride in the
+query string — are unexpressible in a generated client that can only type a path and a body. The
+alternative to typing them is a hand-written `fetch` sitting beside a generated client, calling the
+same server with none of the checking, and that is precisely the drift §13.1 exists to prevent. So
+`Endpoint` gains `query: Vec<QueryParam>`, each parameter carrying a name, a `ValueType`, whether
+it is `required`, and whether it is `repeated`. The field is skipped when empty, so every endpoint
+written before this serializes exactly as it did and a stored endpoint set still round-trips.
+
+`repeated` is the one worth explaining. A filter vocabulary spells a range as two values under one
+key — `?published=gte.2020-01-01&published=lt.2024-01-01` — and both of them mean something. That
+is also why `ApiRequest.query` is no longer a `HashMap<String, String>` but an ordered
+`Vec<(String, String)>`, read through `query_get` (the first value) and `query_all` (all of them,
+in order). A map keeps whichever pair arrived last and silently discards the rest; for a filter,
+what it discards is rows the caller asked not to see. That is the worst failure a data API can
+have, and it is not the kind of thing to leave sitting in a data structure waiting for Phase 2 to
+walk into. `HandlerCtx.query` moves with it for the same reason, and gains the same two readers.
+
+The server's `parse_query` therefore keeps order and duplicates, and now percent-decodes as well —
+`+` as a space, `%XX` as a byte, which is what `URLSearchParams` (and so the generated client)
+writes. Without decoding, a filter value containing a space or an `&` would reach a handler still
+escaped, and a caller's `title=eq.rock & roll` would quietly become something else. A malformed
+escape (`%zz`, a trailing `%`) is passed through as written rather than rejected: it is one
+character of one parameter, and the endpoint reading it can say what is wrong with it far better
+than a parser that knows only that a `%` was not followed by two hex digits.
+
+On the client side an endpoint with query parameters takes one options object, last, after the path
+parameters and any body. The object is *optional* when every parameter in it is, so declaring a
+`select` nobody has to pass does not put an empty `{}` at every call site — and an endpoint that
+declares no query parameters generates exactly the method it generated before, with no argument, no
+`URLSearchParams` and no `?` in its URL. Encoding goes through `URLSearchParams` rather than string
+concatenation, because a filter value legitimately contains `&`, `=`, `+` and spaces, and a client
+that pasted those into a URL would send a different query than its caller wrote. A repeated
+parameter types as an array and appends once per element; an optional one is skipped when
+`undefined` *or* `null`, so a nullable value threaded through from a form does not arrive as the
+string `"null"`.
+
+Tests: the three parameter shapes' signatures and their emitted encoding, an endpoint with no query
+parameters proving the no-argument case is untouched, serde round-tripping in both directions, the
+ordered-pairs readers keeping both values of a repeated key, and `parse_query` doing the same over a
+real URI — including the round trip of a value needing escaping (`eq.rock & roll = 1+1 ☕` survives
+`URLSearchParams`'s encoding of it) and the awkward edges: a `=` inside a value, an empty value, a
+malformed escape. The generated client type-checks under `tsc --noEmit --strict`, in a new case
+alongside the admin and app-REST ones, where a usage module calls an all-optional endpoint with no
+argument at all and a required one with its typed object. The checked-in admin clients are
+unchanged and their drift test stays green: no admin endpoint declares a query parameter yet.
+
 ## `cargo test --workspace` no longer closes the terminal it runs in
 
 Running the full suite on a desktop would, often enough to be a working hazard, make the whole

@@ -28,6 +28,9 @@ pub fn generate_client(set: &EndpointSet) -> String {
     // `Blob` (download) directly, which are the platform's own names for them.
     for ep in set {
         let pascal = to_pascal_case(&ep.name);
+        if !ep.query.is_empty() {
+            let _ = writeln!(out, "export type {pascal}Query = {};", query_type(ep));
+        }
         if !ep.input.is_empty() && !ep.binary_input {
             let _ = writeln!(out, "export type {pascal}Request = {};", ts_type(&ep.input));
         }
@@ -156,6 +159,13 @@ fn method_signature(ep: &Endpoint) -> String {
     } else if !ep.input.is_empty() {
         params.push(format!("body: {pascal}Request"));
     }
+    // The query parameters arrive as one options object, last — and the argument
+    // itself is optional when every parameter in it is, so declaring a `select`
+    // nobody has to pass does not put an empty `{}` at every call site.
+    if !ep.query.is_empty() {
+        let opt = if query_arg_optional(ep) { "?" } else { "" };
+        params.push(format!("{QUERY_ARG}{opt}: {pascal}Query"));
+    }
     let ret = if ep.binary_output {
         "Blob".to_owned()
     } else if ep.output.is_empty() {
@@ -174,11 +184,23 @@ fn emit_method_impl(out: &mut String, ep: &Endpoint) {
     if has_body {
         param_names.push("body".to_owned());
     }
+    if !ep.query.is_empty() {
+        param_names.push(QUERY_ARG.to_owned());
+    }
 
     let _ = writeln!(out, "    async {}({}) {{", ep.name, param_names.join(", "));
+    emit_query_encoding(out, ep);
+    let suffix = if ep.query.is_empty() {
+        ""
+    } else {
+        // Nested template literal: the `?` disappears with the last parameter,
+        // so an all-optional options object that was left empty produces exactly
+        // the URL the endpoint had before it declared any.
+        "${qs ? `?${qs}` : \"\"}"
+    };
     let _ = writeln!(
         out,
-        "      const res = await doFetch(`${{baseUrl}}{}`, {{",
+        "      const res = await doFetch(`${{baseUrl}}{}{suffix}`, {{",
         url_template(ep)
     );
     let _ = writeln!(out, "        method: \"{}\",", ep.method.as_str());
@@ -211,6 +233,79 @@ fn emit_method_impl(out: &mut String, ep: &Endpoint) {
     }
     out.push_str("    },\n");
 }
+
+/// Emit the `URLSearchParams` construction for an endpoint's query parameters.
+///
+/// Encoding is `URLSearchParams`'s, not a hand-rolled concatenation: a filter
+/// value legitimately contains `&`, `=`, `+` and spaces (`title=eq.rock & roll`),
+/// and a client that pasted those into the URL would send a *different* query
+/// than the caller wrote. A repeated parameter appends once per element, which
+/// is what makes `?published=gte.…&published=lt.…` expressible at all.
+fn emit_query_encoding(out: &mut String, ep: &Endpoint) {
+    if ep.query.is_empty() {
+        return;
+    }
+    // When the whole options object is optional the caller may have omitted it,
+    // so every read goes through `?.`.
+    let base = if query_arg_optional(ep) {
+        format!("{QUERY_ARG}?.")
+    } else {
+        format!("{QUERY_ARG}.")
+    };
+    out.push_str("      const search = new URLSearchParams();\n");
+    for p in &ep.query {
+        let name = &p.name;
+        if p.repeated {
+            let _ = writeln!(
+                out,
+                "      for (const value of {base}{name} ?? []) search.append(\"{name}\", String(value));"
+            );
+        } else if p.required {
+            // A required parameter implies the options object is required too,
+            // so `base` is a plain `.` here and the value is always there.
+            let _ = writeln!(
+                out,
+                "      search.append(\"{name}\", String({base}{name}));"
+            );
+        } else {
+            // `null` as well as `undefined`: a caller threading a nullable value
+            // through means "no value", and `String(null)` would send "null".
+            let _ = writeln!(
+                out,
+                "      if ({base}{name} !== undefined && {base}{name} !== null) \
+                 search.append(\"{name}\", String({base}{name}));"
+            );
+        }
+    }
+    out.push_str("      const qs = search.toString();\n");
+}
+
+/// The TypeScript type of an endpoint's query options object.
+fn query_type(ep: &Endpoint) -> String {
+    let members: Vec<String> = ep
+        .query
+        .iter()
+        .map(|p| {
+            let ty = if p.repeated {
+                format!("Array<{}>", p.ty.ts_type())
+            } else {
+                p.ty.ts_type().to_owned()
+            };
+            let opt = if p.required { "" } else { "?" };
+            format!("{}{opt}: {ty}", p.name)
+        })
+        .collect();
+    format!("{{ {} }}", members.join("; "))
+}
+
+/// Whether the options argument itself may be omitted — true when no query
+/// parameter is required.
+fn query_arg_optional(ep: &Endpoint) -> bool {
+    !ep.query.iter().any(|p| p.required)
+}
+
+/// The name of the generated methods' query-options argument.
+const QUERY_ARG: &str = "query";
 
 /// The request URL as a JS template-literal body (path params interpolated),
 /// e.g. `/api/tables/${table}/rows/${id}`.
