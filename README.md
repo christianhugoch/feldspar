@@ -111,50 +111,54 @@ That gives you `postgres://saltcorn:change-me@localhost:5432/saltcorn`.
 
 ---
 
-## 5. Building the admin web UI (optional but recommended)
+## 5. Building the admin web UI
 
 The admin SPA lives in [`ui/admin`](ui/admin) and is compiled to a static bundle
-that the server serves. Building it needs Node and is **opt-in** so the Rust-only
-build path never requires a JS toolchain. There are two ways to serve it.
-
-### Option A — build the bundle and point the server at it (recommended)
-
-Build the SPA, then pass its output directory to `saltcorn serve` with
-`--static-dir` at run time:
+that the server serves. **`cargo build` builds it for you**: `sc-cli`'s build
+script runs `npm ci && npm run build` in `ui/admin` (and in [`ui/ide`](ui/ide),
+below), embeds the resulting paths in the binary, and `saltcorn serve` then serves
+the UI with no `--static-dir` needed:
 
 ```bash
-cd ui/admin
-npm ci
-npm run build          # outputs ui/admin/dist (main.js + main.css)
+cargo build --release -p sc-cli     # builds the Rust binary *and* both front ends
+target/release/saltcorn serve ...   # serves the admin UI, no flags
+```
+
+The price is that a build needs a Node toolchain and takes as long as `npm ci` does.
+
+### Turning the UI build off
+
+Set **`SC_BUILD_ADMIN`** to `0`, `false`, `False` or `FALSE` on the **build** and
+the script is skipped, leaving a Rust-only build that needs no JS toolchain — what
+CI's clippy and test jobs do, and what you want on a machine without npm:
+
+```bash
+SC_BUILD_ADMIN=0 cargo build --release -p sc-cli   # Rust only, no bundles
+```
+
+Any other value (including `1` and `true`) builds the UI, as does leaving it unset.
+
+> **`SC_BUILD_ADMIN` is a _build-time_ variable, read by `cargo build` — not by
+> `saltcorn serve`.** Putting it on the run command has **no effect** either way:
+> a binary built without the bundle stays without it, and the browser gets a blank
+> page (see §9).
+
+Such a binary still serves the whole JSON API; only the browser UI is missing, and
+you can supply it at run time instead — build the SPA yourself and point the server
+at the output with `--static-dir`:
+
+```bash
+cd ui/admin && npm ci && npm run build   # outputs ui/admin/dist (main.js + main.css)
 cd ../..
 
 target/release/saltcorn serve --static-dir ui/admin/dist ...   # see §6
 ```
 
-This is the most predictable path: what you serve is exactly the `dist` you point
-at, and rebuilding the UI does not require rebuilding the Rust binary.
-
-### Option B — bake the bundle into the binary
-
-> **Important: `SC_BUILD_ADMIN` is a _build-time_ variable, read by `cargo build`
-> — not by `saltcorn serve`.** Putting it on the run command (e.g.
-> `SC_BUILD_ADMIN=1 saltcorn serve ...`) has **no effect**; the binary was already
-> built without the bundle, and the browser will get a blank page (see §9).
-
-Set `SC_BUILD_ADMIN=1` on the **build**. The build script runs `npm ci && npm run
-build` in `ui/admin`, embeds the resulting path in the binary, and then
-`saltcorn serve` serves the UI automatically with no `--static-dir` needed:
-
-```bash
-SC_BUILD_ADMIN=1 cargo build --release -p sc-cli   # runs the UI build, embeds it
-target/release/saltcorn serve ...                   # no --static-dir needed
-```
-
-### If you skip both
-
-The JSON API still works, but the browser shows only an empty bootstrap document
-(its `/main.js` and `/main.css` requests fall through to the fallback HTML). See
-§9 Troubleshooting.
+That is also the quickest loop when you are *working on* the UI: what you serve is
+exactly the `dist` you point at, and rebuilding it does not rebuild the Rust binary.
+With neither the embedded bundle nor `--static-dir`, the browser shows only an empty
+bootstrap document (its `/main.js` and `/main.css` requests fall through to the
+fallback HTML). See §9 Troubleshooting.
 
 ### The file-store IDE (`ui/ide`)
 
@@ -164,13 +168,13 @@ palette (design §12.1). It is served at `/ide/?store=<name>`, is **admin-only**
 reached from an "Edit code" button in the file store list, the file manager, and an
 application's row.
 
-**There is nothing to configure.** `SC_BUILD_ADMIN=1` builds it along with the SPA and
-the binary serves both; a binary built without it finds `ui/ide/dist` in the checkout it
-was compiled from, so a development server serves the IDE with no flag either. The one
-thing it needs is to have been built:
+**There is nothing to configure.** The default build builds it along with the SPA and the
+binary serves both; a binary built with `SC_BUILD_ADMIN=0` finds `ui/ide/dist` in the
+checkout it was compiled from, so a development server serves the IDE with no flag
+either. The one thing it needs is to have been built:
 
 ```bash
-cd ui/ide && npm ci && npm run build     # if you are not using SC_BUILD_ADMIN=1
+cd ui/ide && npm ci && npm run build     # only if you built with SC_BUILD_ADMIN=0
 ```
 
 It is a separate page rather than a screen in the admin SPA because VS Code initializes
@@ -280,7 +284,7 @@ other users can read it.
 | Flag | Meaning | Default |
 |---|---|---|
 | `--bind <addr>` | address:port to listen on | `127.0.0.1:3000` |
-| `--static-dir <dir>` | directory holding the built admin bundle | (embedded bundle if built with `SC_BUILD_ADMIN=1`, else none) |
+| `--static-dir <dir>` | directory holding the built admin bundle | (the embedded bundle, unless built with `SC_BUILD_ADMIN=0`) |
 | `--session-ttl-hours <n>` | session lifetime | `24` |
 | `--secure-cookies` | set the `Secure` attribute on session/CSRF cookies (use behind HTTPS) | off |
 | `--base-domain <domain>` | domain that applications are served under: an app with subdomain `blog` is served at `blog.<domain>` | none (app routing off) |
@@ -337,11 +341,11 @@ target/release/saltcorn serve \
   --bind 0.0.0.0:8080
 ```
 
-With the bundle baked into the binary (Option B from §5 — note `SC_BUILD_ADMIN`
-is on the **build**, and `--static-dir` is then unnecessary):
+With the bundle baked into the binary (the default build, §5 — `--static-dir` is
+then unnecessary):
 
 ```bash
-SC_BUILD_ADMIN=1 cargo build --release -p sc-cli
+cargo build --release -p sc-cli
 target/release/saltcorn serve \
   --database-url postgres://saltcorn:change-me@localhost:5432/saltcorn \
   --bind 127.0.0.1:3000
@@ -419,13 +423,14 @@ A `200` here means the process booted and is accepting requests.
   role cannot create tables. Make it the owner of the database (§4).
 - **Blank page; console shows `main.css`/`main.js` "MIME type ('text/html')"
   errors.** The server is serving the fallback HTML document for `/main.js` and
-  `/main.css` because it has no admin bundle to serve. This is almost always
-  because `SC_BUILD_ADMIN=1` was put on the **run** command instead of the build
-  (it is build-time only — see §5). Fix it either way:
+  `/main.css` because it has no admin bundle to serve. That means the binary was
+  built with `SC_BUILD_ADMIN` set to `0`/`false` — note it is a **build-time**
+  variable, so unsetting it on the run command changes nothing (see §5). Fix it
+  either way:
   - quickest: restart with `--static-dir ui/admin/dist` (after `npm run build` in
     `ui/admin`), or
-  - rebuild the binary with `SC_BUILD_ADMIN=1 cargo build --release -p sc-cli`,
-    then run without `--static-dir`.
+  - rebuild the binary with `cargo build --release -p sc-cli` and `SC_BUILD_ADMIN`
+    unset, then run without `--static-dir`.
   Confirm with `curl -i http://localhost:3000/main.js` — a working setup returns
   `content-type: text/javascript`, not `text/html`.
 - **Login/session doesn't stick behind HTTPS.** Add `--secure-cookies` so the

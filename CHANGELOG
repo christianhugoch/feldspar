@@ -2,6 +2,32 @@
 
 Changes in reverse chronological order.
 
+## `cargo build` now builds the admin UI, and `SC_BUILD_ADMIN=0` turns it off
+
+The admin SPA and the file-store IDE were opt-in: `cargo build -p sc-cli` produced a binary that
+served no admin UI unless you remembered `SC_BUILD_ADMIN=1`, and forgetting produced a *working*
+binary whose browser page was blank — a failure that looks like a bug in the server and is
+diagnosed by reading §9 of the README. The default is now the other way round. A plain
+`cargo build` runs `npm ci && npm run build` in `ui/admin` **and** `ui/ide` and embeds both
+paths, so the binary you get is the whole product.
+
+`SC_BUILD_ADMIN` survives as the opt-**out**, for the builds that genuinely have no Node
+toolchain: set it to `0`, `false`, `False` or `FALSE` and [the build
+script](crates/sc-cli/build.rs) is a no-op beyond its `rerun-if-changed` lines. Four spellings
+because a shell, a Makefile and a CI file each have their own habit, and a variable that
+recognised only `0` would silently build the UI for someone who wrote `false`. Everything else —
+`1`, `true`, unset, a typo — builds: an unrecognised value must fail towards the complete binary,
+since that is the outcome whose failure mode is visible. [`tests/build_script.rs`
+](crates/sc-cli/tests/build_script.rs) pulls the build script in as a module (cargo does not
+compile one as a test target) and asserts that table against the function the build actually
+calls.
+
+CI sets `SC_BUILD_ADMIN: 0` workspace-wide. Its jobs check Rust — fmt, clippy, tests — and none
+of them read a bundle, so two `npm ci` runs per job (the IDE alone is ~1 GB of monaco packages,
+on a runner whose disk is already the binding constraint) would buy nothing. That is the
+distinction the flip encodes: a person building the binary wants the product, and the pipelines
+that want only the Rust half know it and can say so.
+
 ## Three databases, one binary: named environments in a configuration file
 
 The server knew one way to be told where its database is: flags, or the environment. That works

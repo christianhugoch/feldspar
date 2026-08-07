@@ -1,13 +1,18 @@
 //! Wire the admin UI into the server binary's build: the `ui/admin` SPA **and**
 //! the `ui/ide` file-store IDE (design §12.1), which are one thing to an operator.
 //!
-//! Building them needs a Node toolchain, which the Rust-only build and CI paths
-//! must not require. So the build is **opt-in**: set `SC_BUILD_ADMIN=1` when
-//! building the `saltcorn` binary and this script runs both production builds
-//! (`npm ci && npm run build`) and records the output directories in the
-//! `SC_ADMIN_BUNDLE_DIR` and `SC_IDE_BUNDLE_DIR` compile-time envs. The binary
-//! then serves both with no flags at all (see `main.rs`). Without the variable the
-//! script is a no-op.
+//! The build is **on by default**: `cargo build -p sc-cli` runs both production
+//! builds (`npm ci && npm run build`) and records the output directories in the
+//! `SC_ADMIN_BUNDLE_DIR` and `SC_IDE_BUNDLE_DIR` compile-time envs, so the binary
+//! serves both with no flags at all (see `main.rs`). A binary that does not serve
+//! its own admin UI is the surprising outcome, not the expected one, which is why
+//! it is the default rather than something to remember.
+//!
+//! That default needs a Node toolchain, and the Rust-only paths that do not have
+//! one — CI's clippy/test jobs, a container without npm — turn it off with
+//! **`SC_BUILD_ADMIN`** set to `0`, `false`, `False` or `FALSE`. Any other value
+//! (`1`, `true`, unset) builds. Turned off, the script is a no-op beyond its
+//! `rerun-if-changed` lines.
 //!
 //! **One variable, not two.** The IDE is not a separate product an operator
 //! chooses: it is where they edit an application's source, reached from the admin
@@ -20,9 +25,23 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SC_BUILD_ADMIN");
-    let build = std::env::var_os("SC_BUILD_ADMIN").is_some();
+    let build = build_requested(std::env::var("SC_BUILD_ADMIN").ok().as_deref());
     build_bundle("ui/admin", "SC_ADMIN_BUNDLE_DIR", "admin UI", build);
     build_bundle("ui/ide", "SC_IDE_BUNDLE_DIR", "file-store IDE", build);
+}
+
+/// Decide whether to build the UI bundles from `SC_BUILD_ADMIN`'s value.
+///
+/// Opt **out**, not in: unset means build. Only the four spellings of "no" that
+/// a shell or a CI file would plausibly carry — `0`, `false`, `False`, `FALSE` —
+/// disable it. Everything else, including `1` and `true`, builds; a typo'd value
+/// therefore fails towards the complete binary rather than silently producing one
+/// with no admin UI, which is the failure that is hard to notice.
+///
+/// `pub` because `tests/build_script.rs` pulls this file in as a module to assert
+/// the table above — a build script has no other way to be tested.
+pub fn build_requested(value: Option<&str>) -> bool {
+    !matches!(value, Some("0" | "false" | "False" | "FALSE"))
 }
 
 /// Build one UI bundle and export its `dist` path, when asked to.
@@ -51,7 +70,7 @@ fn build_bundle(subdir: &str, env_var: &str, label: &str, build: bool) {
 
     if !ui.join("package.json").exists() {
         panic!(
-            "SC_BUILD_ADMIN set but {} has no package.json",
+            "the {label} build is on (SC_BUILD_ADMIN is not 0/false) but {} has no package.json",
             ui.display()
         );
     }
@@ -77,7 +96,13 @@ fn run<const N: usize>(dir: &std::path::Path, args: [&str; N]) {
         .args(args)
         .current_dir(dir)
         .status()
-        .unwrap_or_else(|e| panic!("failed to launch `npm {}`: {e}", args.join(" ")));
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to launch `npm {}`: {e}\n\
+                 (set SC_BUILD_ADMIN=0 to build the binary without the admin UI)",
+                args.join(" ")
+            )
+        });
     if !status.success() {
         panic!("`npm {}` failed with {status}", args.join(" "));
     }

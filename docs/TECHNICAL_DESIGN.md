@@ -1898,9 +1898,10 @@ a separate page.
 **The bundle is not a deployment choice.** `--ide-dir` and `SC_BUILD_IDE` were built first and
 then removed: the IDE is where an admin edits an application's source, reached from a button in
 the admin UI, so an operator has nothing to decide and a build that produced the admin UI without
-it would leave that button leading nowhere. `SC_BUILD_ADMIN=1` builds `ui/admin` **and** `ui/ide`
-and embeds both paths; a binary built without it finds `ui/ide/dist` in the checkout it was
-compiled from. There is also **no fallback document**: with no bundle, every path under `/ide/` —
+it would leave that button leading nowhere. A plain `cargo build` builds `ui/admin` **and**
+`ui/ide` and embeds both paths — one build script, one decision, taken by default, and turned off
+for both together with `SC_BUILD_ADMIN=0` (also `false`/`False`/`FALSE`) on builds that have no
+Node toolchain; a binary built that way finds `ui/ide/dist` in the checkout it was compiled from. There is also **no fallback document**: with no bundle, every path under `/ide/` —
 the document as much as an asset — is a 404. The SPA has a fallback so a client-routed deep link
 still loads the bundle; the IDE has no client-side routes to deep-link into (a store is a query
 parameter), so there is nothing to fall back *for*, and a fallback that answers a request for a

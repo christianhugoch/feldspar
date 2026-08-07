@@ -55,15 +55,14 @@ async fn run(args: &[String]) -> Result<()> {
 /// A hard-coded path, deliberately. The IDE is not a deployment choice — it is
 /// where an admin edits an application's source, reached from a button in the
 /// admin UI — so there is nothing for an operator to decide and no flag to forget:
-/// a binary built with `SC_BUILD_ADMIN=1` carries the bundle's path, and one built
-/// without it finds `ui/ide/dist` next to the source it was compiled from.
+/// the default build carries the bundle's path, and one built with
+/// `SC_BUILD_ADMIN=0` finds `ui/ide/dist` next to the source it was compiled from.
 const IDE_BUNDLE_IN_CHECKOUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/ide/dist");
 
 /// Where the IDE bundle is: the one built into this binary, else the checkout's.
 ///
-/// `None` only when neither exists — a binary built without `SC_BUILD_ADMIN=1` and
-/// run away from its source tree, which has no admin UI to reach the IDE from
-/// either.
+/// `None` only when neither exists — a binary built with `SC_BUILD_ADMIN=0` and run
+/// away from its source tree, which has no admin UI to reach the IDE from either.
 fn ide_bundle_dir() -> Option<std::path::PathBuf> {
     let candidate = option_env!("SC_IDE_BUNDLE_DIR").unwrap_or(IDE_BUNDLE_IN_CHECKOUT);
     let path = std::path::PathBuf::from(candidate);
@@ -78,7 +77,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
     let (file_store_specs, server_args) = extract_file_stores(rest)?;
     let mut config = ServerConfig::from_args(server_args)?;
-    // When the binary was built with the admin bundle (`SC_BUILD_ADMIN=1`, see
+    // When the binary was built with the admin bundle (the default — see
     // `build.rs`) and no explicit `--static-dir` was given, serve that bundle.
     if config.static_dir.is_none() {
         if let Some(dir) = option_env!("SC_ADMIN_BUNDLE_DIR") {

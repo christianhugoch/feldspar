@@ -262,7 +262,7 @@ fn the_design_records_what_the_ide_milestone_actually_built() {
     let design = read(&root, "docs/TECHNICAL_DESIGN.md");
     for fragment in [
         "IDE_CONTENT_SECURITY_POLICY",          // the relaxed policy, by name
-        "SC_BUILD_ADMIN=1",                     // …and no `--ide-dir` to decide
+        "SC_BUILD_ADMIN=0",                     // …and no `--ide-dir` to decide
         "before `initialize`",                  // the ordering the contributions depend on
         "monaco-languageclient` is not used",   // the language client deviation
         "does not match the server's root",     // …and the URI bridge it forced
