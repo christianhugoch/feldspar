@@ -550,45 +550,6 @@ async fn owned_row(
     Ok(existing)
 }
 
-/// The rows of `table` the formula grants `user` for reading — the sub-floor
-/// read path.
-pub(crate) async fn list_owned_rows(
-    cat: &Catalog,
-    table: &Table,
-    formula: &Formula,
-    user: Option<&User>,
-    evaluator: Option<&Arc<dyn JsEvaluator>>,
-) -> Result<Json> {
-    let shape = cat.schema_shape()?;
-    let env = UserEnv::Inline(user_values(user));
-    let calc = table.calc_formulas();
-    match translate(
-        formula,
-        Operation::Read,
-        &Env::new(&env).with_calc(&calc),
-        &shape,
-        &table.name,
-    ) {
-        // The database filters: one query, no V8 in the loop.
-        Ok(pred) => rows::list_rows_where(cat, table, Some(pred), None).await,
-        // The formula's shape needs JavaScript: fetch rows with their join
-        // values projected alongside and let the evaluator decide per row.
-        Err(TranslateError::Untranslatable(_)) => {
-            let evaluator = require_evaluator(evaluator)?;
-            let fetched =
-                fetch_rows_with_joins(cat, table, formula, &shape, FetchShape::default()).await?;
-            let mut granted = Vec::with_capacity(fetched.len());
-            for values in fetched {
-                if allowed(evaluator, formula, Operation::Read, user, &values).await {
-                    granted.push(table_row_json(table, &values));
-                }
-            }
-            Ok(Json::Array(granted))
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// Whether the formula grants `op` on the row `values` — the single-row check
 /// every sub-floor write (and file access) goes through. Join values missing
 /// from `values` (a proposed row that has not been stored) are resolved

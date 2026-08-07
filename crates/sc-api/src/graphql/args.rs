@@ -5,32 +5,23 @@
 //! say about *which* rows they want, and each becomes exactly what the row layer
 //! already understands: a `sc_query::Expr`, a `Vec<OrderBy>`, and two bounds.
 //! Nothing here reaches SQL as text — a column name comes from the catalog, an
-//! operator comes from a `match` in this file, and every literal the caller
-//! wrote becomes an [`Expr::Lit`] that the query layer parameterises on render.
+//! operator comes from [`crate::filter`], and every literal the caller wrote
+//! becomes an [`Expr::Lit`] that the query layer parameterises on render.
 //!
-//! **Literals are coerced against the column, not against JSON.** A filter value
-//! goes through the row layer's own [`rows::column_value`], the same function an
-//! insert's body goes through, so `{ due: { lt: "2026-01-01" } }` binds a *date*
-//! and not a string — the comparison the database performs is then the one the
-//! column's type means. The one deliberate exception is `like`/`ilike`, whose
-//! argument is a **pattern** rather than a value of the column: `"%urgent%"` is
-//! not a legal value for a `String` field with an `options` attribute, and
-//! holding a pattern to the column's value rules would refuse a query that is
-//! perfectly well formed.
-//!
-//! Null semantics are SQL's, not JavaScript's: `eq`/`ne` are `=` and `<>`, so
-//! neither matches a null, and `is_null` is how nullness is asked about. That is
-//! what a caller who knows Hasura expects, and inventing a null-safe `eq` here
-//! would make the same filter mean different things in a GraphQL `where` and in
-//! an ownership formula.
+//! What one **comparison** means is not decided here: `eq`/`lt`/`in`/`is_null`/…
+//! lower through [`crate::filter`], which the REST query string lowers through
+//! too, so the two syntaxes ask the database the same question. This module owns
+//! the part that is GraphQL's own — the shape of a `BoolExp`, its `_and`/`_or`/
+//! `_not` connectives, `order_by`'s input objects, and how a `limit` is bounded.
 
 use async_graphql::Value as GqlValue;
 use async_graphql::dynamic::ResolverContext;
 use sc_catalog::Table;
 use sc_error::{Error, Result};
-use sc_query::{BinOp, Expr, InSet, OrderBy, UnOp, Value};
+use sc_query::{BinOp, Expr, OrderBy, UnOp, Value};
 use serde_json::Value as Json;
 
+use crate::filter;
 use crate::rows::{self, Partition, RowQuery};
 
 /// The list-field argument names, shared with the schema builder so the two
@@ -248,7 +239,13 @@ fn column_predicate(
     Ok(combine(parts, BinOp::And))
 }
 
-/// One comparison operator applied to one column.
+/// One comparison operator applied to one column — the GraphQL value converted
+/// to JSON and handed to the shared lowering.
+///
+/// The conversion is the whole of GraphQL's part in a comparison: the custom
+/// scalars carry themselves (a `Date` arrives as the string a date is written
+/// as, a `Decimal` as a string), so what the vocabulary meets is the same JSON a
+/// query string's token parses to.
 fn comparison(
     table: &Table,
     column: &str,
@@ -256,65 +253,7 @@ fn comparison(
     op: &str,
     operand: &GqlValue,
 ) -> Result<Expr> {
-    let lit = |operand: &GqlValue| -> Result<Expr> {
-        Ok(Expr::lit(rows::column_value(
-            table,
-            column,
-            &to_json(operand)?,
-        )?))
-    };
-    let binary = |op: BinOp, operand: &GqlValue| -> Result<Expr> {
-        Ok(Expr::binary(op, col.clone(), lit(operand)?))
-    };
-    match op {
-        "eq" => binary(BinOp::Eq, operand),
-        "ne" => binary(BinOp::Ne, operand),
-        "gt" => binary(BinOp::Gt, operand),
-        "gte" => binary(BinOp::Ge, operand),
-        "lt" => binary(BinOp::Lt, operand),
-        "lte" => binary(BinOp::Le, operand),
-        // A pattern is not a value of the column (see the module docs), so it is
-        // bound as the text it is.
-        "like" => Ok(Expr::binary(BinOp::Like, col, pattern(op, operand)?)),
-        "ilike" => Ok(Expr::binary(BinOp::ILike, col, pattern(op, operand)?)),
-        "in" | "nin" => {
-            let GqlValue::List(items) = operand else {
-                return Err(Error::invalid(format!(
-                    "`{op}` on `{}`.`{column}` takes a list",
-                    table.name
-                )));
-            };
-            let set = InSet::List(items.iter().map(&lit).collect::<Result<Vec<_>>>()?);
-            let member = Expr::In {
-                e: Box::new(col),
-                set,
-            };
-            Ok(match op {
-                "in" => member,
-                _ => Expr::unary(UnOp::Not, member),
-            })
-        }
-        "is_null" => match operand {
-            GqlValue::Boolean(true) => Ok(Expr::unary(UnOp::IsNull, col)),
-            GqlValue::Boolean(false) => Ok(Expr::unary(UnOp::IsNotNull, col)),
-            _ => Err(Error::invalid(format!(
-                "`is_null` on `{}`.`{column}` takes a boolean",
-                table.name
-            ))),
-        },
-        other => Err(Error::invalid(format!(
-            "`{other}` is not a comparison on `{}`.`{column}`",
-            table.name
-        ))),
-    }
-}
-
-/// A `like`/`ilike` pattern, bound as text.
-fn pattern(op: &str, operand: &GqlValue) -> Result<Expr> {
-    match operand {
-        GqlValue::String(s) => Ok(Expr::lit(Value::Text(s.clone()))),
-        _ => Err(Error::invalid(format!("`{op}` takes a string pattern"))),
-    }
+    filter::comparison(table, column, col, op, &to_json(operand)?)
 }
 
 /// An `order_by` argument: a list of single-direction-per-column objects (or one

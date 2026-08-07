@@ -236,6 +236,16 @@ pub struct QueryParam {
     /// The key may appear more than once, and every occurrence counts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub repeated: bool,
+    /// The caller supplies **keys of their own**: this is not one query-string
+    /// key but a map of them, each entry becoming its own pair.
+    ///
+    /// What a REST filter vocabulary is (§13.4): `?published=gte.2020-01-01` is
+    /// keyed by *column*, so no fixed parameter name can describe it. The
+    /// parameter's [`name`](QueryParam::name) is then the property name in the
+    /// generated client's options object rather than a wire key, and its
+    /// [`ty`](QueryParam::ty) is the type of each value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub map: bool,
 }
 
 impl QueryParam {
@@ -247,6 +257,7 @@ impl QueryParam {
             ty,
             required: false,
             repeated: false,
+            map: false,
         }
     }
 
@@ -259,6 +270,13 @@ impl QueryParam {
     /// Mark the parameter as repeatable (many values under one key).
     pub fn repeated(mut self) -> QueryParam {
         self.repeated = true;
+        self
+    }
+
+    /// Mark the parameter as a map of caller-chosen keys (see
+    /// [`map`](QueryParam::map)).
+    pub fn map(mut self) -> QueryParam {
+        self.map = true;
         self
     }
 }

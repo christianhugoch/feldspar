@@ -29,6 +29,14 @@
 //! MVP stubs them (see `TODO.md` Phase 9), and the honest failure is better than
 //! pretending.
 //!
+//! **Reads take a query string** (§13.4): `GET {mount}/{table}` accepts
+//! PostgREST's `?select=…&column=op.value&order=…&limit=…&offset=…`, parsed by
+//! [`query`] into the row layer's own `RowQuery` and run through the *same*
+//! [`ownership::read_row_values_as`] the GraphQL provider's list fields use. The
+//! query string is a syntax over the read layer, not a second reader — which is
+//! also why an embedded `author(name)` is a correlated subquery of the same
+//! statement rather than a second fetch.
+//!
 //! **Triggers** are projected one endpoint each — `POST {mount}/actions/{name}`,
 //! request body → the event's payload, the action's result → the response — but
 //! only for the triggers the *application* names ([`project_with`](RestProvider::project_with)).
@@ -50,8 +58,12 @@ use sc_files::{ROLE_PUBLIC, check_access, mime_for_path, validate_file_path};
 use sc_query::Value;
 use serde_json::{Value as Json, json};
 
+mod query;
+
 use crate::auth::{credentials, credentials_schema, user_summary_json, user_summary_schema};
-use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSpec};
+use crate::endpoint::{
+    AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSpec, QueryParam,
+};
 use crate::ownership;
 use crate::provider::{ApiProvider, ApiRequest, ApiResponse};
 use crate::rows;
@@ -59,6 +71,17 @@ use crate::schema::{TypeSchema, ValueType};
 
 /// The provider's registered name.
 pub const REST_PROVIDER: &str = "rest";
+
+/// The most rows a list endpoint returns when the caller names no `limit`, and
+/// the ceiling one they *do* name is clamped to.
+///
+/// The GraphQL provider's [`row_cap`](crate::GraphqlLimits) argument, applied to
+/// the other syntax and for the same reason: an unbounded list is a request to
+/// stream a table into a response, and a caller's number is a request rather
+/// than a permission. Per-application configuration of it arrives with the rest
+/// of the provider configuration; until then every REST API is served under this
+/// one, through [`RestProvider::with_row_cap`].
+pub const DEFAULT_ROW_CAP: u64 = 500;
 
 /// Which table operation an endpoint runs. Recorded per endpoint at projection
 /// time so dispatch is a lookup rather than a re-parse of the path.
@@ -137,6 +160,8 @@ pub struct RestProvider {
     /// absent, a formula that needs it **fails closed** with a configuration
     /// error rather than granting anything.
     evaluator: Option<Arc<dyn JsEvaluator>>,
+    /// The ceiling a list read is bounded by ([`DEFAULT_ROW_CAP`]).
+    row_cap: u64,
 }
 
 impl RestProvider {
@@ -227,6 +252,12 @@ impl RestProvider {
             add(
                 RestOp::List,
                 Endpoint::new(op_name("list", name), Method::Get, collection())
+                    // What a read may say about itself, typed into the client so
+                    // nobody has to write a `fetch` beside it (§13.1). The
+                    // filters are the honest exception: `?published=gte.2020` is
+                    // a *string vocabulary* keyed by column, so it is typed as
+                    // one rather than as a shape it does not have.
+                    .query(list_query_params())
                     .output(TypeSchema::array(TypeSchema::json()))
                     .auth(read.clone())
                     .handler(HandlerRef::named(op_name("list", name))),
@@ -343,7 +374,15 @@ impl RestProvider {
             trigger_routes,
             dispatcher: None,
             evaluator: None,
+            row_cap: DEFAULT_ROW_CAP,
         }
+    }
+
+    /// Serve this API's list endpoints under a different row cap than
+    /// [`DEFAULT_ROW_CAP`].
+    pub fn with_row_cap(mut self, row_cap: u64) -> RestProvider {
+        self.row_cap = row_cap;
+        self
     }
 
     /// Inject the JavaScript evaluator ownership formulas' reified path runs
@@ -510,12 +549,14 @@ impl RestProvider {
         let caller = ownership::caller_context(user);
 
         Ok(match &route.op {
+            // The read's own rule is `read_row_values_as`'s — the floor, the
+            // formula, or the database's policies — so the gate here decides only
+            // whether the caller is refused *as the endpoint's auth would have
+            // refused them* (a 401/403 rather than an error), and the read
+            // applies §7.3 itself.
             RestOp::List => match formula(meets_read) {
                 Err(()) => forbidden(user),
-                Ok(None) => ApiResponse::ok(rows::list_rows(cat, &table).await?),
-                Ok(Some(f)) => ApiResponse::ok(
-                    ownership::list_owned_rows(cat, &table, f, user, evaluator).await?,
-                ),
+                Ok(_) => self.list(cat, &table, req, user).await?,
             },
             RestOp::Create => {
                 match formula(meets_write) {
@@ -677,6 +718,37 @@ impl RestProvider {
         })
     }
 
+    /// `GET {mount}/{table}` — the read, with everything the caller's query
+    /// string said about it.
+    ///
+    /// One function for every table, protected or not: the query string parses
+    /// into the row layer's [`RowQuery`](crate::rows::RowQuery) and the read goes
+    /// through [`ownership::read_row_values_as`], which is where "meets the floor
+    /// OR the formula grants the row OR the policies do" lives — the same entry
+    /// point the GraphQL root field and an agent's `query_table` use. A filter,
+    /// an ordering and a bound ride *inside* that read, so they narrow the rows
+    /// the caller may see rather than being applied to some wider set first.
+    async fn list(
+        &self,
+        cat: &Catalog,
+        table: &Table,
+        req: &ApiRequest,
+        user: Option<&User>,
+    ) -> Result<ApiResponse> {
+        let role = ownership::caller_role(user);
+        let plan = query::parse(cat, table, req, role, self.row_cap)?;
+        let rows = ownership::read_row_values_as(
+            cat,
+            table,
+            &plan.query,
+            role,
+            user,
+            self.evaluator.as_ref(),
+        )
+        .await?;
+        Ok(ApiResponse::ok(plan.render(table, &rows)))
+    }
+
     /// The existing row `id`, granted to the caller by the formula for `op` —
     /// or the **same not-found a missing row gets**, which is what makes
     /// denial indistinguishable from absence.
@@ -737,9 +809,10 @@ impl RestProvider {
                 .ok_or_else(|| Error::invalid("missing path parameter `id`"))
         };
         Ok(match &route.op {
-            RestOp::List => {
-                ApiResponse::ok(rows::list_rows_where(cat, table, None, Some(&ctx)).await?)
-            }
+            // The same read as the non-RLS path, and deliberately so: it routes
+            // itself through a caller-context transaction because the *table*
+            // says to, so the policies decide exactly as they do everywhere else.
+            RestOp::List => self.list(cat, table, req, user).await?,
             RestOp::Create => ApiResponse::with_status(
                 201,
                 rows::create_row_ctx(cat, table, body, Some(&ctx)).await?,
@@ -773,6 +846,25 @@ impl RestProvider {
             }
         })
     }
+}
+
+/// The query-string parameters every list endpoint accepts (§13.4), in the order
+/// they appear in the generated client's options object.
+///
+/// `filter` is the one that is not a scalar: a filter is a *column* name with a
+/// `op.value` string under it, so the client takes a map of them and appends each
+/// entry as its own query-string pair — `{ published: "gte.2020-01-01" }` becomes
+/// `?published=gte.2020-01-01`. Typing it as a map is honest about being a string
+/// vocabulary; typing it as anything narrower would be a promise the query string
+/// cannot keep.
+fn list_query_params() -> Vec<QueryParam> {
+    vec![
+        QueryParam::new("select", ValueType::Text),
+        QueryParam::new("order", ValueType::Text),
+        QueryParam::new("limit", ValueType::Int),
+        QueryParam::new("offset", ValueType::Int),
+        QueryParam::new("filter", ValueType::Text).map(),
+    ]
 }
 
 /// What a `DELETE` answers with.
@@ -1420,7 +1512,7 @@ mod tests {
         // A generated client types it like any other endpoint.
         let ts = crate::generate_client(p.endpoints());
         assert!(ts.contains("search("));
-        assert!(ts.contains("listPosts()"));
+        assert!(ts.contains("listPosts(query?: ListPostsQuery)"));
     }
 
     #[test]
@@ -1467,8 +1559,47 @@ mod tests {
         let ts = crate::generate_client(p.endpoints());
         // Same generator as the admin API: an app's client is not special-cased.
         assert!(ts.contains("export interface ApiClient {"));
-        assert!(ts.contains("listPosts(): Promise<ListPostsResponse>"));
+        assert!(ts.contains("listPosts(query?: ListPostsQuery): Promise<ListPostsResponse>"));
         assert!(ts.contains("updatePosts(id: number"));
         assert!(ts.contains("/api/posts/${id}"));
+    }
+
+    #[test]
+    fn a_list_endpoint_declares_the_read_query_string_and_types_it() {
+        // §13.1's rule applied to §13.4's query string: what a read may say is
+        // part of the endpoint, so the client can say it. A hand-written `fetch`
+        // beside a generated client is where drift starts.
+        let p = RestProvider::project("/api", &[table("posts", AccessRules::default())]);
+        let list = p.endpoints().find("listPosts").expect("the list endpoint");
+        let names: Vec<&str> = list.query.iter().map(|q| q.name.as_str()).collect();
+        assert_eq!(names, vec!["select", "order", "limit", "offset", "filter"]);
+        // None of them is required: `listPosts()` still takes no argument.
+        assert!(list.query.iter().all(|q| !q.required));
+        // Writing endpoints declare none — a query string is a read's vocabulary.
+        assert!(
+            p.endpoints()
+                .find("createPosts")
+                .expect("the create endpoint")
+                .query
+                .is_empty()
+        );
+
+        let ts = crate::generate_client(p.endpoints());
+        assert!(
+            ts.contains(
+                "export type ListPostsQuery = { select?: string; order?: string; \
+                 limit?: number; offset?: number; filter?: Record<string, string> };"
+            ),
+            "{ts}"
+        );
+        // A filter's *keys* are column names, so each entry is a pair of its own
+        // — `?published=gte.2020-01-01`, not `?filter=…`.
+        assert!(
+            ts.contains(
+                "for (const [key, value] of Object.entries(query?.filter ?? {})) \
+                 search.append(key, String(value));"
+            ),
+            "{ts}"
+        );
     }
 }

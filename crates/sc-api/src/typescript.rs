@@ -255,7 +255,15 @@ fn emit_query_encoding(out: &mut String, ep: &Endpoint) {
     out.push_str("      const search = new URLSearchParams();\n");
     for p in &ep.query {
         let name = &p.name;
-        if p.repeated {
+        if p.map {
+            // The caller's own keys, each becoming a pair of its own — a filter
+            // map is `?published=gte.2020-01-01`, not `?filter=…`.
+            let _ = writeln!(
+                out,
+                "      for (const [key, value] of Object.entries({base}{name} ?? {{}})) \
+                 search.append(key, String(value));"
+            );
+        } else if p.repeated {
             let _ = writeln!(
                 out,
                 "      for (const value of {base}{name} ?? []) search.append(\"{name}\", String(value));"
@@ -286,7 +294,9 @@ fn query_type(ep: &Endpoint) -> String {
         .query
         .iter()
         .map(|p| {
-            let ty = if p.repeated {
+            let ty = if p.map {
+                format!("Record<string, {}>", p.ty.ts_type())
+            } else if p.repeated {
                 format!("Array<{}>", p.ty.ts_type())
             } else {
                 p.ty.ts_type().to_owned()

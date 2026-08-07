@@ -2,6 +2,80 @@
 
 Changes in reverse chronological order.
 
+## A REST read is a query string, and it is the same read GraphQL does
+
+`GET /api/books?select=title,published,author(name,country)&published=gte.2020-01-01&order=published.desc&limit=20`
+now answers it — in one statement, with the author's columns projected as Ⱶ-join
+subqueries rather than fetched, and the caller seeing exactly the rows their role and
+the tables' ownership formulae permit.
+
+**Not a second data path**, which is the whole shape of this change. The query string
+parses into the row layer's own `RowQuery` — the same value a GraphQL list field's
+`where`/`order_by`/`limit`/`offset` lower to — and the read goes through the same
+`ownership::read_row_values_as` the GraphQL root field and an agent's `query_table`
+already use. So a filter, an ordering and a page apply *inside* the read that ownership
+bounds, rather than to some wider set first, and the milestone's query and its GraphQL
+equivalent are asserted to return the same rows against a real database. That is the
+regression test worth having: if the two ever disagree, one of them has grown a reader
+of its own. The REST list branch lost its own three-way (`list_rows` / `list_owned_rows`
+/ RLS) dispatch in the process, and `ownership::list_owned_rows` is gone — the general
+entry point subsumed it, and a second copy of "meets the floor OR the formula grants the
+row" is a second place for it to be quietly wrong.
+
+**One comparison vocabulary, two syntaxes.** `eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`in`/`nin`/
+`like`/`ilike`/`is_null` moved out of `graphql/args.rs` into `sc-api::filter`, and both
+surfaces lower through it. A filter value is coerced against the *column* there, so
+`?published=gte.2020-01-01` binds a **date** exactly as the GraphQL spelling does, and
+`is_null` means SQL's nullness in both. The GraphQL suites passing unchanged is the proof
+the move changed nothing; a new unit test asserts the two syntaxes build the identical
+`Expr` for the same comparison, which is the property that would rot first.
+
+**PostgREST's syntax, as a stated subset.** Taken: `select` with embeds through outgoing
+keys to any depth, `alias:column` renaming, `column=op.value` filters (repeated keys ANDed,
+so a range is two of them), `order=column.desc`, `limit`, `offset`. Deliberately not taken:
+one-to-many embeds, `!inner`, the `...` spread, `::` casts, `or=(…)`, and filters on an
+embedded resource. Everything not taken is refused **by name** — `!inner` says it is
+`!inner` and why, an unknown operator lists the ones that exist, `books(…)` on a table
+rather than a key says it is a one-to-many embed. Ignoring what we do not understand would
+answer with rows the caller did not ask for, and a silently dropped filter is the worst
+failure a data API can have. `limit` is clamped to the application's row cap and an absent
+one *becomes* it (500 by default, `RestProvider::with_row_cap`), for the same reason the
+GraphQL provider does it: an unbounded list is a request to stream a table into a response.
+
+**An embed is a projection, not a fetch.** `author(name,country)` becomes one
+`sc_expr::join_path_expr` correlated subquery per requested leaf, aliased by its join path,
+carried in the same `SELECT` as the row and nested back into `{"author": {"name": …}}` on
+the way out — to any depth, so `author(publisher(city))` is still one statement (asserted
+by recording the SQL, not by timing it). A null key answers `null` rather than an object of
+nulls, which is why the foreign key's own value is projected alongside the leaves.
+
+**An embed is a read, so the target's read rule holds.** Every embed goes through
+`ownership::join_guard` first: a caller who may not read the target table is refused
+naming it, and so is a caller whose access to it comes from an ownership formula — a join
+subquery has no `WHERE` this provider owns, so the formula cannot decide which rows are
+reached, and answering anyway would hand over a withheld row one column at a time. An
+RLS-protected target makes the whole statement a caller-context one instead, so its
+policies decide as they would in a read of their own. `select` is therefore not a way
+around anything the list endpoint enforces.
+
+**The read's vocabulary is part of the endpoint.** Every list endpoint now declares
+`select`, `order`, `limit`, `offset` and `filter` as query parameters, so `listBooks` takes
+a typed options object instead of leaving callers to hand-write a `fetch` beside a generated
+client. `filter` is a new *map* parameter shape (`QueryParam::map`): its keys are column
+names, so it types as `Record<string, string>` and each entry becomes its own query-string
+pair. Typing it as a map is honest about being a string vocabulary — pretending to a
+narrower type would be a promise the query string cannot keep. The generated client
+type-checks under `tsc --noEmit --strict` with a filtered, ordered, paged call in the usage
+module.
+
+Tests: unit tests for the query-string parser, the `select` grammar (aliases, nesting, each
+not-taken feature, an unclosed paren, a nesting bomb), the null-key rendering, and the
+cross-syntax `Expr` equality; and a new real-Postgres suite where the milestone's query
+matches its GraphQL equivalent, a two-hop embed is one statement, the row cap holds however
+large a `limit` asks for, a refused query issues no statement at all, and each authorization
+rule has a test that would fail open without it — an ownership formula and RLS each still
+bounding a filtered/ordered/paged read, and both embed refusals.
+
 ## A query parameter is part of the endpoint, and a query string is a list
 
 The API milestone's first phase, and the thing both of its features need before either can be

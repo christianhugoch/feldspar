@@ -38,7 +38,9 @@
 //! writes the query here, which is the one thing REST never let them do.
 
 mod agg;
-mod args;
+// The `where`/`order_by` lowering. Crate-visible so the REST query string's
+// tests can assert the two syntaxes lower a comparison identically.
+pub(crate) mod args;
 mod build;
 mod client;
 mod context;
@@ -48,8 +50,10 @@ mod loader;
 mod mutate;
 pub mod names;
 mod resolve;
+// Fixtures for this module's unit tests, and for `crate::filter`'s — the
+// comparison vocabulary is shared, so the table it is tested against is too.
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 mod types;
 
 use std::sync::Arc;

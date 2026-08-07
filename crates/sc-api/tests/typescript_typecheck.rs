@@ -59,7 +59,7 @@ export async function exercise(): Promise<void> {
 /// type `updatePosts`/`deletePosts` to take a `number` id — passing a string is a
 /// compile error, which is the whole point of generating the client.
 const APP_USAGE_TS: &str = r#"
-import { createClient } from "./client";
+import { createClient, ListPostsQuery } from "./client";
 
 export async function exercise(): Promise<void> {
   const api = createClient({ baseUrl: "https://blog.example.com" });
@@ -68,11 +68,22 @@ export async function exercise(): Promise<void> {
   const posts = await api.listPosts();
   const created = await api.createPosts({ title: "hello" });
 
+  // A read's query string is typed too (§13.4): `select`/`order`/`limit`/
+  // `offset` are scalars, and the filters are an explicit map of column to
+  // `op.value` — honest about being a string vocabulary.
+  const query: ListPostsQuery = {
+    select: "title,author(name,country)",
+    order: "published.desc",
+    limit: 20,
+    filter: { published: "gte.2020-01-01" },
+  };
+  const page = await api.listPosts(query);
+
   // The primary key is typed from the column: `id bigint` => number.
   await api.updatePosts(1, { title: "goodbye" });
   await api.deletePosts(1);
 
-  void posts; void created;
+  void posts; void created; void page;
 }
 "#;
 

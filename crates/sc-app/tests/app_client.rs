@@ -100,7 +100,9 @@ async fn app_client_is_generated_from_the_apps_own_endpoint_set() -> Result<()> 
     // factory, typed methods over the app's own tables.
     assert!(ts.contains("export interface ApiClient {"));
     assert!(ts.contains("export function createClient("));
-    assert!(ts.contains("listPosts()"));
+    // A list method takes the read query string's options object (§13.4),
+    // optional because every parameter in it is.
+    assert!(ts.contains("listPosts(query?: ListPostsQuery)"));
     assert!(ts.contains("createPosts("));
     assert!(ts.contains("/api/posts"));
 
@@ -282,7 +284,7 @@ async fn the_client_is_emitted_into_the_apps_source_tree_before_the_bundler_runs
 
     // ...it is really in the app's source tree...
     let emitted = std::fs::read_to_string(web.join("src").join("client.ts"))?;
-    assert!(emitted.contains("listPosts()"));
+    assert!(emitted.contains("listPosts(query?: ListPostsQuery)"));
     assert_eq!(emitted, app_client(&blog(), &cat)?);
 
     // ...and the bundler consumed it: the build only succeeds if the client

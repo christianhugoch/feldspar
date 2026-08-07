@@ -147,26 +147,29 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 2 — The REST read query string (`sc-api::rest`)
 
-- [ ] **`sc-api::filter`**: the comparison vocabulary lifted out of `graphql/args.rs` and made
+- [x] **`sc-api::filter`**: the comparison vocabulary lifted out of `graphql/args.rs` and made
       the shared lowering (decision 1). The GraphQL tests that cover it are the proof the move
       changed nothing; one new test asserts the two syntaxes produce the identical `Expr` for
       the same comparison.
-- [ ] **`rest/query.rs`**: parse `select`, `column=op.value`, `order`, `limit`, `offset` into a
+- [x] **`rest/query.rs`**: parse `select`, `column=op.value`, `order`, `limit`, `offset` into a
       `RowQuery`. An unknown column, an unknown operator, an unparseable bound or a
       not-taken PostgREST feature is a **400 naming it** (decision 2). `limit` is clamped to the
-      application's cap rather than trusted, as the GraphQL provider's is.
-- [ ] **`select` with embeds**: a leaf column projects itself; `author(name,country)` projects
+      application's cap rather than trusted, as the GraphQL provider's is. (An absent one
+      *becomes* the cap, as GraphQL's does; the cap is `RestProvider::with_row_cap`, defaulting
+      to 500, until Phase 3's provider configuration owns it.)
+- [x] **`select` with embeds**: a leaf column projects itself; `author(name,country)` projects
       `sc-expr`'s `join_path_expr` correlated subqueries — one column per requested leaf, nested
       back into `{"author": {"name": …}}` in the response — with `alias:` renaming and nesting
       to any depth. A null key yields a null object, not an error.
-- [ ] **`ownership::join_guard` on every embed**, the rule Phase 7 of the GraphQL milestone
+- [x] **`ownership::join_guard` on every embed**, the rule Phase 7 of the GraphQL milestone
       landed: a caller who may not read the target table is refused by name rather than handed
       a withheld row one column at a time.
-- [ ] The list endpoints **declare** these as query parameters (Phase 1), so `listBooks` takes a
+- [x] The list endpoints **declare** these as query parameters (Phase 1), so `listBooks` takes a
       typed options object: `select`, `order`, `limit`, `offset` typed, and filters as an
       explicit `filter?: Record<string, string>` — honest about being a string vocabulary rather
-      than pretending to a type it does not have.
-- [ ] Tests (real Postgres): the milestone's query and its GraphQL equivalent return the same
+      than pretending to a type it does not have. (`QueryParam` gained a `map` shape for it,
+      whose keys are the query-string keys.)
+- [x] Tests (real Postgres): the milestone's query and its GraphQL equivalent return the same
       rows; an embed is **one** statement (statement count, not timing); ownership formulae and
       RLS still filter what a filtered/ordered/paged read returns; a filter on an unknown column,
       an unsupported operator and `!inner` are each a 400 naming the thing; a caller who may not
