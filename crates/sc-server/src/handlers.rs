@@ -1821,6 +1821,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     "label": info.label,
                     "description": info.description,
                     "default_mount": info.default_mount,
+                    // The provider's own settings, in the same vocabulary a
+                    // framework's arrive in — so the application form renders
+                    // GraphQL's aggregation switch and its four bounds without
+                    // knowing that GraphQL is what it is rendering.
+                    "config_spec": info.config_spec.iter().map(form_field_json).collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -1991,7 +1996,7 @@ fn application_json(app: &Application) -> Json {
         "tables": app.tables.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
         "file_stores": app.file_stores.iter().map(|s| s.0.clone()).collect::<Vec<_>>(),
         "triggers": app.triggers.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
-        "apis": app.apis.iter().map(|a| json!({ "provider": a.provider, "mount": a.mount })).collect::<Vec<_>>(),
+        "apis": app.apis.iter().map(|a| json!({ "provider": a.provider, "mount": a.mount, "config": Json::Object(a.config.clone()) })).collect::<Vec<_>>(),
         "static_dirs": app.static_dirs.iter().map(|d| json!({ "mount": d.mount, "store": d.store.0, "path": d.path })).collect::<Vec<_>>(),
         "csp": csp_json(&app.csp),
         "attributes": Json::Object(app.attributes.clone()),
@@ -2216,10 +2221,15 @@ fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
             // The mount is required rather than defaulted: an empty one
             // normalises to `/`, which claims every path — a blank field is far
             // more likely a slip than a request for that.
+            //
+            // The settings are optional and validated on save against the spec
+            // the provider declares (`validate_api_config`), so a key nobody
+            // declared is refused here rather than stored and ignored.
             Ok(ApiConfig::new(
                 non_empty_str_field(o, "provider")?,
                 non_empty_str_field(o, "mount")?,
-            ))
+            )
+            .with_config(object_field(o, "config")?))
         })
         .collect::<Result<_>>()?;
     let static_dirs = parse_array(obj, "static_dirs")?

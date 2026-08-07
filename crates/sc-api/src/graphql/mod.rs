@@ -74,8 +74,8 @@ use crate::schema::{StructField, TypeSchema};
 pub use client::{GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, generate_graphql_client};
 pub use context::DEFAULT_FILE_MOUNT;
 pub use limits::{
-    DEFAULT_MAX_COMPLEXITY, DEFAULT_MAX_DEPTH, DEFAULT_ROW_CAP, DEFAULT_STATEMENT_BUDGET,
-    GraphqlLimits,
+    CFG_AGGREGATES, DEFAULT_MAX_COMPLEXITY, DEFAULT_MAX_DEPTH, DEFAULT_ROW_CAP,
+    DEFAULT_STATEMENT_BUDGET, GraphqlLimits, graphql_config_spec,
 };
 pub use names::SchemaNames;
 

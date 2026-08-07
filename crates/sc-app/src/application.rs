@@ -120,23 +120,48 @@ impl std::fmt::Display for TriggerRef {
 /// One API provider enabled for an application, mounted on a sub-path (design
 /// §13.4). The MVP ships a REST provider; the model carries the provider `name`
 /// so GraphQL/gRPC/tRPC/MCP slot in later without a shape change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ApiConfig {
     /// The provider name (`"rest"`, `"graphql"`, …).
     pub provider: String,
     /// The sub-path the provider is mounted at within the application, e.g.
     /// `/api`. Normalised to a leading slash and no trailing slash.
     pub mount: String,
+    /// Provider-specific configuration, validated on save against the spec the
+    /// provider declares
+    /// ([`api_provider_config_spec`](crate::api_provider_config_spec)).
+    ///
+    /// [`Attrs`] rather than a string map, and for the same reasons
+    /// [`FrameworkRef::config`] is: GraphQL's aggregation switch is a boolean
+    /// and its four bounds are numbers, and the admin form renders the
+    /// provider's declared spec and posts the result back as JSON — with no
+    /// provider-specific code in the form.
+    pub config: Attrs,
 }
 
 impl ApiConfig {
     /// A provider `provider` mounted at `mount` (the mount is normalised to a
-    /// single leading slash with no trailing slash).
+    /// single leading slash with no trailing slash), with no settings.
     pub fn new(provider: impl Into<String>, mount: impl Into<String>) -> ApiConfig {
         ApiConfig {
             provider: provider.into(),
             mount: normalize_mount(&mount.into()),
+            config: Attrs::new(),
         }
+    }
+
+    /// Set a config key, returning `self` for chaining.
+    pub fn with(mut self, key: impl Into<String>, value: impl Into<Json>) -> ApiConfig {
+        self.config.insert(key.into(), value.into());
+        self
+    }
+
+    /// Replace the whole config bag, returning `self` for chaining — how a
+    /// caller that already has one (a provider's limits rendered back to
+    /// settings) states it in one move.
+    pub fn with_config(mut self, config: Attrs) -> ApiConfig {
+        self.config = config;
+        self
     }
 }
 

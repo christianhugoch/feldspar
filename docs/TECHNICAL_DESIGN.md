@@ -2147,7 +2147,7 @@ pub struct Application {
     pub extra_frameworks: Vec<FrameworkRef>, // may bring in others (see Open Questions)
     pub tables: Vec<TableId>,            // the subset of the data layer it can access
     pub file_stores: Vec<FileStoreId>,
-    pub apis: Vec<ApiConfig>,            // any number, each on a sub-path
+    pub apis: Vec<ApiConfig>,            // any number, each on a sub-path, each with its own config
     pub static_dirs: Vec<StaticDir>,     // any number, each served at a sub-path
     pub csp: CspPolicy,                  // strict by default
     pub attributes: Attrs,               // sparse per-app values (§9 rule)
@@ -2599,9 +2599,26 @@ new here, because an aggregate and a projected join are new ways to *observe* ro
 Aliases, fragments and variables are the caller's input and never reach SQL as identifiers:
 response keys come from the operation, column names come from the catalog.
 
+**Provider configuration.** `ApiConfig` is `{ provider, mount, config: Attrs }`, and the third
+field is a settings bag validated on save against the spec the provider itself declares
+(`ApiProviderInfo::config_spec`, returned by `listApiProviders`) — the arrangement a framework's
+settings are already under (§13.3), so the application form renders a provider's controls without
+containing a line about any particular provider, and an undeclared key is refused where the admin
+is standing rather than stored and silently ignored. REST declares its `row_cap`; GraphQL declares
+its four bounds and the **aggregation switch**.
+
+**Aggregates are optional and off by default.** They are the most expensive thing the schema can
+express — a correlated subquery per parent row, over rows the caller may never see — so they are
+in the schema because somebody switched them on. With the switch off, `X_aggregate`, the
+`_aggregate` field on every relation and the four types behind them are **absent**, which makes
+asking for one the library's own "field not found" over the document, before any resolver and
+therefore before any statement. A field that existed and refused would be a schema advertising
+what it will not do.
+
 **Limits are configuration, not an option.** REST's cost is bounded by its shape — a route nobody
 wrote cannot be asked for — and a GraphQL endpoint is the opposite, so `GraphqlLimits` carries
-four numbers, per application, with defaults that are *set*: `max_depth` (15) and
+four numbers, per application (read from that same `ApiConfig::config`), with defaults that are
+*set*: `max_depth` (15) and
 `max_complexity` (2 000) are `async-graphql` validation rules and therefore refuse **before a
 statement is issued**; `row_cap` (500) is what a list field takes when the caller names no
 `limit` and the ceiling one they name is clamped to; and `statement_budget` (32) is counted as it

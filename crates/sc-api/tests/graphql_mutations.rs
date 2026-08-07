@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use sc_api::{ApiProvider, ApiRequest, GraphqlProvider, Method, RestProvider};
+use sc_api::{ApiProvider, ApiRequest, GraphqlLimits, GraphqlProvider, Method, RestProvider};
 use sc_auth::User;
 use sc_catalog::{
     Catalog, TableEvents, TableMeta, TableWrite, WriteOp, bootstrap_field_meta,
@@ -96,11 +96,14 @@ async fn setup(db: &TestDb) -> Result<(Arc<Catalog>, Events)> {
     Ok((catalog, events))
 }
 
-/// The GraphQL provider over both tables.
+/// The GraphQL provider over both tables, with the aggregate fields switched on
+/// — one test reads a mutation's returned row through the same selection a query
+/// would use, aggregate field included.
 fn provider(cat: &Catalog) -> Result<GraphqlProvider> {
-    GraphqlProvider::project(
+    GraphqlProvider::project_with(
         "/graphql",
         &[cat.require("tasks")?, cat.require("projects")?],
+        GraphqlLimits::new().aggregates(true),
     )
 }
 

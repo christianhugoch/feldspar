@@ -8,7 +8,7 @@
 // subdomain, its table and file-store subsets, its enabled APIs, its static
 // directories, and its CSP.
 
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Card from "react-bootstrap/Card";
@@ -30,14 +30,18 @@ import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
 import { setNotice } from "../notice";
 import { SettingsFields, asString, buildConfig, readConfig } from "../settings";
+import {
+  apiRowsFromApp,
+  apiRowsToRequest,
+  blankApiRow,
+  specFor,
+  type ApiRow,
+} from "../apiRows";
 
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
 type TriggerItem = ListTriggersResponse[number];
 type ApiProviderInfo = ListApiProvidersResponse[number];
-
-/** A `{ provider, mount }` API row, edited as a repeatable list. */
-type ApiRow = { provider: string; mount: string };
 /** A `{ mount, store, path }` static-directory row. */
 type StaticRow = { mount: string; store: string; path: string };
 
@@ -100,7 +104,9 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   // endpoints, which for a React app means a generated client with no methods and
   // a project that cannot compile — and for any app means a UI that cannot reach
   // its data. It is a row like any other, so removing it stays one click.
-  const [apis, setApis] = useState<ApiRow[]>([{ provider: "rest", mount: "/api" }]);
+  const [apis, setApis] = useState<ApiRow[]>([
+    { ...blankApiRow(), provider: "rest", mount: "/api" },
+  ]);
   const [staticDirs, setStaticDirs] = useState<StaticRow[]>([]);
   // Empty by default: a new app takes its framework's policy (§2.2) unless the
   // admin states one. Editing an app fills this in from what was stored.
@@ -140,7 +146,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
           setTables(existing.tables.join(", "));
           setFileStores(existing.file_stores.join(", "));
           setTriggers(existing.triggers);
-          setApis(existing.apis.map((a) => ({ provider: a.provider, mount: a.mount })));
+          setApis(apiRowsFromApp(existing.apis));
           setStaticDirs(
             existing.static_dirs.map((d) => ({
               mount: d.mount,
@@ -181,7 +187,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         tables: parseNames(tables),
         file_stores: parseNames(fileStores),
         triggers,
-        apis: apis.filter((a) => a.provider.trim() || a.mount.trim()),
+        apis: apiRowsToRequest(apis, allProviders),
         static_dirs: staticDirs.filter((d) => d.mount.trim() || d.path.trim()),
         // An empty box means "no opinion", and is sent as no field at all so the
         // *framework's* default policy applies (§2.2) — a React app gets the one
@@ -433,53 +439,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
             </Card.Body>
           </Card>
 
-          <RepeatableRows
-            title="APIs"
-            rows={apis}
-            columns={[
-              {
-                key: "provider",
-                label: "Provider",
-                placeholder: "rest",
-                // The registered names, from the server. An empty list — a server
-                // that could not list them — leaves this the text box it was: a
-                // picker that cannot be populated should not become a field that
-                // cannot be filled in.
-                options: allProviders.map((p) => ({ value: p.name, label: p.label })),
-              },
-              { key: "mount", label: "Mount", placeholder: "/api" },
-            ]}
-            onChange={setApis}
-            blank={{ provider: "", mount: "" }}
-            // Picking a provider fills an *empty* mount with that provider's usual
-            // sub-path, so the common case is one click. An admin who has typed a
-            // mount keeps it.
-            derive={(row, key) =>
-              key === "provider" && !row.mount.trim()
-                ? {
-                    ...row,
-                    mount:
-                      allProviders.find((p) => p.name === row.provider)?.default_mount ??
-                      "",
-                  }
-                : row
-            }
-            help={
-              allProviders.length > 0 ? (
-                <>
-                  {allProviders.map((p) => (
-                    <div key={p.name}>
-                      <code>{p.name}</code> — {p.description}
-                    </div>
-                  ))}
-                  <div className="mt-1">
-                    Each provider is mounted on its own sub-path; two on the same one
-                    is refused, because a request resolves to only one of them.
-                  </div>
-                </>
-              ) : undefined
-            }
-          />
+          <ApiRows rows={apis} providers={allProviders} onChange={setApis} />
 
           <RepeatableRows
             title="Static directories"
@@ -516,41 +476,158 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   );
 }
 
-/** A repeatable list of uniform string-field rows (APIs, static dirs), with
- * add/remove. Generic over the row shape so both lists share one control. */
+/** The APIs list: one card per enabled provider — its name, its mount, and the
+ * settings *that provider declares*, rendered by the same `SettingsFields` a
+ * framework's are (§13.3).
+ *
+ * Its own control rather than a `RepeatableRows` row, because an API row is no
+ * longer uniform strings: two providers on one application show different
+ * settings, and the difference comes from the server. There is still no
+ * provider-specific code here — enabling GraphQL shows its aggregation switch
+ * and its four bounds because that is what its `config_spec` says. */
+function ApiRows({
+  rows,
+  providers,
+  onChange,
+}: {
+  rows: ApiRow[];
+  providers: ApiProviderInfo[];
+  onChange: (rows: ApiRow[]) => void;
+}) {
+  const setRow = (index: number, next: ApiRow) =>
+    onChange(rows.map((r, i) => (i === index ? next : r)));
+  return (
+    <Card className="mb-3">
+      <Card.Header className="d-flex justify-content-between align-items-center">
+        <span>APIs</span>
+        <Button
+          size="sm"
+          variant="outline-primary"
+          onClick={() => onChange([...rows, blankApiRow()])}
+        >
+          Add
+        </Button>
+      </Card.Header>
+      <Card.Body>
+        {rows.length === 0 && <div className="text-muted">None.</div>}
+        {rows.map((row, index) => {
+          const spec = specFor(providers, row.provider);
+          return (
+            <div key={index} className={index > 0 ? "border-top pt-3 mt-3" : undefined}>
+              <Row className="mb-2 align-items-end">
+                <Col>
+                  <Form.Label className="small mb-1">Provider</Form.Label>
+                  {/* The registered names, from the server. An empty list — a
+                      server that could not list them — leaves this the text box
+                      it was: a picker that cannot be populated should not become
+                      a field that cannot be filled in. */}
+                  {providers.length > 0 ? (
+                    <Form.Select
+                      value={row.provider}
+                      onChange={(e) => {
+                        const provider = e.target.value;
+                        setRow(index, {
+                          ...row,
+                          provider,
+                          // Picking a provider fills an *empty* mount with that
+                          // provider's usual sub-path, so the common case is one
+                          // click. An admin who has typed a mount keeps it.
+                          mount: row.mount.trim()
+                            ? row.mount
+                            : (providers.find((p) => p.name === provider)?.default_mount ??
+                              ""),
+                        });
+                      }}
+                    >
+                      <option value="">Choose…</option>
+                      {providers.map((p) => (
+                        <option key={p.name} value={p.name}>
+                          {p.label}
+                        </option>
+                      ))}
+                      {/* A stored value this server does not register — a
+                          provider from a plugin that is gone, or an older name.
+                          Kept as an option so opening the form does not silently
+                          change it. */}
+                      {row.provider && !providers.some((p) => p.name === row.provider) && (
+                        <option value={row.provider}>{row.provider} (not registered)</option>
+                      )}
+                    </Form.Select>
+                  ) : (
+                    <Form.Control
+                      value={row.provider}
+                      placeholder="rest"
+                      onChange={(e) => setRow(index, { ...row, provider: e.target.value })}
+                    />
+                  )}
+                </Col>
+                <Col>
+                  <Form.Label className="small mb-1">Mount</Form.Label>
+                  <Form.Control
+                    value={row.mount}
+                    placeholder="/api"
+                    onChange={(e) => setRow(index, { ...row, mount: e.target.value })}
+                  />
+                </Col>
+                <Col xs="auto">
+                  <Button
+                    variant="outline-danger"
+                    onClick={() => onChange(rows.filter((_, i) => i !== index))}
+                  >
+                    Remove
+                  </Button>
+                </Col>
+              </Row>
+              {spec.length > 0 && (
+                <div className="ps-1">
+                  <SettingsFields
+                    spec={spec}
+                    values={row.config}
+                    idPrefix={`api-${index}`}
+                    onChange={(name, v) =>
+                      setRow(index, { ...row, config: { ...row.config, [name]: v } })
+                    }
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {providers.length > 0 && (
+          <Form.Text muted>
+            {providers.map((p) => (
+              <div key={p.name}>
+                <code>{p.name}</code> — {p.description}
+              </div>
+            ))}
+            <div className="mt-1">
+              Each provider is mounted on its own sub-path; two on the same one is
+              refused, because a request resolves to only one of them.
+            </div>
+          </Form.Text>
+        )}
+      </Card.Body>
+    </Card>
+  );
+}
+
+/** A repeatable list of uniform string-field rows (static dirs), with
+ * add/remove. Generic over the row shape. */
 function RepeatableRows<T extends Record<string, string>>({
   title,
   rows,
   columns,
   blank,
   onChange,
-  derive,
-  help,
 }: {
   title: string;
   rows: T[];
-  columns: {
-    key: keyof T & string;
-    label: string;
-    placeholder?: string;
-    /** Render a select over these instead of a text box. */
-    options?: { value: string; label: string }[];
-  }[];
+  columns: { key: keyof T & string; label: string; placeholder?: string }[];
   blank: T;
   onChange: (rows: T[]) => void;
-  /** Fill in the rest of a row after one of its cells is edited. */
-  derive?: (row: T, key: keyof T & string) => T;
-  /** Explanatory text under the rows. */
-  help?: ReactNode;
 }) {
   const setCell = (index: number, key: keyof T & string, value: string) => {
-    onChange(
-      rows.map((r, i) => {
-        if (i !== index) return r;
-        const next = { ...r, [key]: value } as T;
-        return derive ? derive(next, key) : next;
-      }),
-    );
+    onChange(rows.map((r, i) => (i === index ? ({ ...r, [key]: value } as T) : r)));
   };
   return (
     <Card className="mb-3">
@@ -571,31 +648,11 @@ function RepeatableRows<T extends Record<string, string>>({
             {columns.map((col) => (
               <Col key={col.key}>
                 <Form.Label className="small mb-1">{col.label}</Form.Label>
-                {col.options && col.options.length > 0 ? (
-                  <Form.Select
-                    value={row[col.key]}
-                    onChange={(e) => setCell(index, col.key, e.target.value)}
-                  >
-                    <option value="">Choose…</option>
-                    {col.options.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                    {/* A stored value this server does not register — a provider
-                        from a plugin that is gone, or an older name. Kept as an
-                        option so opening the form does not silently change it. */}
-                    {row[col.key] && !col.options.some((o) => o.value === row[col.key]) && (
-                      <option value={row[col.key]}>{row[col.key]} (not registered)</option>
-                    )}
-                  </Form.Select>
-                ) : (
-                  <Form.Control
-                    value={row[col.key]}
-                    placeholder={col.placeholder}
-                    onChange={(e) => setCell(index, col.key, e.target.value)}
-                  />
-                )}
+                <Form.Control
+                  value={row[col.key]}
+                  placeholder={col.placeholder}
+                  onChange={(e) => setCell(index, col.key, e.target.value)}
+                />
               </Col>
             ))}
             <Col xs="auto">
@@ -608,7 +665,6 @@ function RepeatableRows<T extends Record<string, string>>({
             </Col>
           </Row>
         ))}
-        {help && <Form.Text muted>{help}</Form.Text>}
       </Card.Body>
     </Card>
   );

@@ -23,7 +23,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use sc_api::{ApiProvider, ApiRequest, GraphqlProvider, Method};
+use sc_api::{ApiProvider, ApiRequest, GraphqlLimits, GraphqlProvider, Method};
 use sc_auth::User;
 use sc_catalog::{Catalog, TableMeta, bootstrap_table_meta, save_table_meta};
 use sc_db::{DatabaseDriver, DbCapabilities, PhysicalTable, RowStream, SchemaChange, Transaction};
@@ -134,15 +134,18 @@ fn clear(sql: &Sql) {
     sql.lock().expect("the sql log").clear();
 }
 
-/// The provider over the three tables, mounted where the default is.
+/// The provider over the three tables, mounted where the default is, with the
+/// aggregate fields **switched on** — they are off unless an application asks
+/// for them, and this is the file about what they do when it has.
 fn provider(cat: &Catalog) -> Result<GraphqlProvider> {
-    GraphqlProvider::project(
+    GraphqlProvider::project_with(
         "/graphql",
         &[
             cat.require("departments")?,
             cat.require("employees")?,
             cat.require("tasks")?,
         ],
+        GraphqlLimits::new().aggregates(true),
     )
 }
 
@@ -619,5 +622,51 @@ async fn an_aggregate_on_a_row_reached_through_a_join_says_it_was_not_computed()
     let errors = body["errors"].to_string();
     assert!(errors.contains("employees"), "{body}");
     assert!(errors.contains("not computed"), "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_switched_off_application_refuses_an_aggregate_before_issuing_a_statement() -> Result<()>
+{
+    // Aggregates are off unless an application switches them on, and off means
+    // *absent from the schema*: the refusal is `async-graphql`'s own validation
+    // over the document, so it costs nothing. Asserted as a statement count,
+    // because "before a statement is issued" is a claim about statements.
+    let db = TestDb::new().await?;
+    let (cat, sql) = setup(&db).await?;
+    let api = GraphqlProvider::project_with(
+        "/graphql",
+        &[
+            cat.require("departments")?,
+            cat.require("employees")?,
+            cat.require("tasks")?,
+        ],
+        GraphqlLimits::new(),
+    )?;
+
+    clear(&sql);
+    let body = run(&api, &cat, "{ departments_aggregate { count } }").await?;
+    let errors = body["errors"].to_string();
+    assert!(errors.contains("departments_aggregate"), "{body}");
+    assert!(recorded(&sql).is_empty(), "{:#?}", recorded(&sql));
+
+    // The child field is gone with it, and the list it hangs off is not.
+    let body = run(
+        &api,
+        &cat,
+        "{ departments { name employees_aggregate { count } } }",
+    )
+    .await?;
+    assert!(
+        body["errors"].to_string().contains("employees_aggregate"),
+        "{body}"
+    );
+    let body = run(
+        &api,
+        &cat,
+        "{ departments(order_by: [{ id: asc }]) { name } }",
+    )
+    .await?;
+    assert_eq!(data(&body)["departments"][0]["name"], json!("Engineering"));
     Ok(())
 }

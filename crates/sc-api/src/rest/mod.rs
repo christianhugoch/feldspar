@@ -56,6 +56,7 @@ use sc_error::{Error, Result};
 use sc_expr::{JsEvaluator, Operation};
 use sc_files::{ROLE_PUBLIC, check_access, mime_for_path, validate_file_path};
 use sc_query::Value;
+use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
 mod query;
@@ -78,10 +79,41 @@ pub const REST_PROVIDER: &str = "rest";
 /// The GraphQL provider's [`row_cap`](crate::GraphqlLimits) argument, applied to
 /// the other syntax and for the same reason: an unbounded list is a request to
 /// stream a table into a response, and a caller's number is a request rather
-/// than a permission. Per-application configuration of it arrives with the rest
-/// of the provider configuration; until then every REST API is served under this
-/// one, through [`RestProvider::with_row_cap`].
+/// than a permission. An application configures its own through
+/// [`rest_config_spec`]'s one setting; this is what it is served under until
+/// somebody states otherwise.
 pub const DEFAULT_ROW_CAP: u64 = 500;
+
+/// The setting behind [`RestProvider::with_row_cap`].
+pub const CFG_ROW_CAP: &str = "row_cap";
+
+/// What an admin enabling the REST provider may configure.
+///
+/// One setting today, and the same arrangement the GraphQL provider's five are
+/// under ([`graphql_config_spec`](crate::graphql_config_spec)): the application
+/// form renders whatever a provider declares, so this list is the only place
+/// that decides what a REST API can be configured with.
+pub fn rest_config_spec() -> Vec<FormField> {
+    vec![
+        FormField::new(CFG_ROW_CAP, BasicType::Int)
+            .label("Row cap per list read")
+            .default_value(DEFAULT_ROW_CAP as i64),
+    ]
+}
+
+/// The row cap an application's stored provider configuration names, or
+/// [`DEFAULT_ROW_CAP`].
+///
+/// A value that is absent or of the wrong shape is the default rather than an
+/// error, exactly as [`GraphqlLimits::from_config`](crate::GraphqlLimits::from_config)
+/// treats one: the configuration was validated against [`rest_config_spec`] on
+/// save, where the admin was still looking at it.
+pub fn rest_row_cap(config: &Attrs) -> u64 {
+    config
+        .get(CFG_ROW_CAP)
+        .and_then(Json::as_u64)
+        .unwrap_or(DEFAULT_ROW_CAP)
+}
 
 /// Which table operation an endpoint runs. Recorded per endpoint at projection
 /// time so dispatch is a lookup rather than a re-parse of the path.
@@ -1601,5 +1633,21 @@ mod tests {
             ),
             "{ts}"
         );
+    }
+
+    #[test]
+    fn the_row_cap_comes_from_the_applications_provider_configuration() {
+        let mut config = Attrs::new();
+        assert_eq!(rest_row_cap(&config), DEFAULT_ROW_CAP);
+        config.insert(CFG_ROW_CAP.to_owned(), Json::from(25));
+        assert_eq!(rest_row_cap(&config), 25);
+        // Unreadable is the default, not zero — which would be a REST API that
+        // answers every list with nothing. The value was validated on save.
+        config.insert(CFG_ROW_CAP.to_owned(), Json::String("lots".to_owned()));
+        assert_eq!(rest_row_cap(&config), DEFAULT_ROW_CAP);
+        // And the setting the spec declares is the setting this reads.
+        let spec = rest_config_spec();
+        assert_eq!(spec.len(), 1);
+        assert_eq!(spec[0].name(), CFG_ROW_CAP);
     }
 }

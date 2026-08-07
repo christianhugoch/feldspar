@@ -1561,6 +1561,11 @@ fn api_config_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("provider", TypeSchema::text()),
         StructField::new("mount", TypeSchema::text()),
+        // The provider's own settings, opaque JSON here for the reason a
+        // framework's `config` is: what the keys are is the *provider's*
+        // declaration (`listApiProviders`' `config_spec`), and the form renders
+        // that rather than a shape frozen into this schema.
+        StructField::new("config", TypeSchema::json()),
     ])
 }
 
@@ -1762,11 +1767,14 @@ fn framework_info_schema() -> TypeSchema {
 }
 
 /// A registered API provider as the application form needs it: the name it is
-/// stored under, how to present it, and the sub-path it is usually mounted at.
+/// stored under, how to present it, the sub-path it is usually mounted at, and
+/// the settings it takes.
 ///
-/// No `config_spec`: a provider is enabled with a name and a mount, and both are
-/// fields of the `ApiConfig` row the form already edits. If a provider ever
-/// takes settings of its own, this is where they would arrive.
+/// The `config_spec` is the same [`form_field_schema`] a framework's is, and it
+/// is here for the same reason (§13.3): the form renders whatever the provider
+/// declares, so GraphQL's aggregation switch is a control on a screen that knows
+/// nothing about GraphQL, and a provider that grows a setting grows a control
+/// without the admin UI being touched.
 fn api_provider_info_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("name", TypeSchema::text()),
@@ -1775,6 +1783,7 @@ fn api_provider_info_schema() -> TypeSchema {
         // What the form fills the mount box in with when this provider is
         // picked, so the common case is no typing at all.
         StructField::new("default_mount", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
     ])
 }
 

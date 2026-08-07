@@ -96,7 +96,10 @@ fn staff_app(apis: Vec<ApiConfig>) -> Application {
 fn both_providers() -> Vec<ApiConfig> {
     vec![
         ApiConfig::new("rest", "/api"),
-        ApiConfig::new("graphql", "/graphql"),
+        // With the aggregate fields switched on, which is what an application
+        // asking the milestone's motivating question does — off, they are not
+        // in the schema, and the SDL this scaffold writes would not carry them.
+        ApiConfig::new("graphql", "/graphql").with(sc_api::GRAPHQL_CFG_AGGREGATES, true),
     ]
 }
 

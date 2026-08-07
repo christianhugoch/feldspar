@@ -14,14 +14,21 @@
 //!
 //! No database: a schema is a pure function of the tables.
 
-use sc_api::GraphqlProvider;
+use sc_api::{GraphqlLimits, GraphqlProvider};
 use sc_catalog::{
     AccessRules, DataField, DataFieldKind, DbId, FieldId, FileStoreId, Table, TableId, TableSource,
 };
 use sc_types::{Attrs, BasicType, TypeRef};
 
-/// The expected SDL, checked in beside this test.
+/// The expected SDL of an application that switched its **aggregates on**,
+/// checked in beside this test.
 const SNAPSHOT: &str = include_str!("snapshots/graphql_schema.graphql");
+
+/// …and of the same application with the switch off, which is the default. Two
+/// files rather than one plus a rule about what to subtract: the switch changes
+/// which *types* the schema has, not only which fields, and "the aggregates are
+/// gone and nothing else moved" is a claim only a whole-schema diff can make.
+const SNAPSHOT_NO_AGGREGATES: &str = include_str!("snapshots/graphql_schema_no_aggregates.graphql");
 
 fn table(name: &str, fields: Vec<DataField>) -> Table {
     let primary_key = fields
@@ -109,20 +116,48 @@ fn fixture() -> Vec<Table> {
     ]
 }
 
-#[test]
-fn the_sdl_is_what_it_was() {
-    let provider = GraphqlProvider::project("/graphql", &fixture()).expect("the schema builds");
-    let sdl = provider.sdl();
-    if sdl.trim() != SNAPSHOT.trim() {
+/// The projection under `limits`, over the fixture.
+#[allow(clippy::expect_used)]
+fn sdl_of(limits: GraphqlLimits) -> String {
+    GraphqlProvider::project_with("/graphql", &fixture(), limits)
+        .expect("the schema builds")
+        .sdl()
+}
+
+/// Compare an SDL against its checked-in snapshot, naming the file to replace.
+fn assert_snapshot(sdl: &str, snapshot: &str, file: &str) {
+    if sdl.trim() != snapshot.trim() {
         // Print the whole thing: a diff of a schema is only readable whole.
         panic!(
             "the GraphQL SDL changed.\n\
              If the change is intended, replace \
-             crates/sc-api/tests/snapshots/graphql_schema.graphql with:\n\
+             crates/sc-api/tests/snapshots/{file} with:\n\
              ----------------------------------------\n{sdl}\
              ----------------------------------------\n"
         );
     }
+}
+
+#[test]
+fn the_sdl_is_what_it_was_with_aggregates_on() {
+    assert_snapshot(
+        &sdl_of(GraphqlLimits::new().aggregates(true)),
+        SNAPSHOT,
+        "graphql_schema.graphql",
+    );
+}
+
+#[test]
+fn the_sdl_is_what_it_was_with_aggregates_off() {
+    // The default, and therefore the schema most applications serve. Everything
+    // the other snapshot has apart from `X_aggregate`, the `_aggregate` field on
+    // the relations, the `XAggregate`/`XNumericFields`/`XComparableFields`
+    // objects and the `XSelectColumn` enum `count(distinct:)` names.
+    assert_snapshot(
+        &sdl_of(GraphqlLimits::new()),
+        SNAPSHOT_NO_AGGREGATES,
+        "graphql_schema_no_aggregates.graphql",
+    );
 }
 
 #[test]

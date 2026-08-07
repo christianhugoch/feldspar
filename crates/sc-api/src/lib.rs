@@ -44,17 +44,21 @@ pub use endpoint::{
     AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec, QueryParam,
 };
 pub use graphql::{
-    DEFAULT_FILE_MOUNT as GRAPHQL_DEFAULT_FILE_MOUNT, DEFAULT_MAX_COMPLEXITY, DEFAULT_MAX_DEPTH,
-    DEFAULT_MOUNT as GRAPHQL_DEFAULT_MOUNT, DEFAULT_ROW_CAP as GRAPHQL_DEFAULT_ROW_CAP,
-    DEFAULT_STATEMENT_BUDGET, GRAPHQL_CLIENT_FILE, GRAPHQL_PROVIDER, GRAPHQL_SCHEMA_FILE,
-    GraphqlLimits, GraphqlProvider, SchemaNames, generate_graphql_client,
+    CFG_AGGREGATES as GRAPHQL_CFG_AGGREGATES, DEFAULT_FILE_MOUNT as GRAPHQL_DEFAULT_FILE_MOUNT,
+    DEFAULT_MAX_COMPLEXITY, DEFAULT_MAX_DEPTH, DEFAULT_MOUNT as GRAPHQL_DEFAULT_MOUNT,
+    DEFAULT_ROW_CAP as GRAPHQL_DEFAULT_ROW_CAP, DEFAULT_STATEMENT_BUDGET, GRAPHQL_CLIENT_FILE,
+    GRAPHQL_PROVIDER, GRAPHQL_SCHEMA_FILE, GraphqlLimits, GraphqlProvider, SchemaNames,
+    generate_graphql_client, graphql_config_spec,
 };
 pub use ownership::{
     caller_context, caller_context_at, delete_row_as, insert_row_as, read_row_values_as,
     read_rows_as, update_row_as,
 };
 pub use provider::{ApiProvider, ApiRequest, ApiResponse, RawBody, SessionAction};
-pub use rest::{AUTH_ENDPOINTS, REST_PROVIDER, RestProvider, op_name};
+pub use rest::{
+    AUTH_ENDPOINTS, DEFAULT_ROW_CAP as REST_DEFAULT_ROW_CAP, REST_PROVIDER, RestProvider, op_name,
+    rest_config_spec, rest_row_cap,
+};
 pub use schema::{StructField, TypeSchema, ValueType};
 pub use typescript::generate_client;
 

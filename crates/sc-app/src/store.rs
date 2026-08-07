@@ -25,7 +25,7 @@ use sc_error::{Error, Result};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
 use serde_json::{Value as Json, json};
 
-use crate::api::validate_api_mounts;
+use crate::api::{validate_api_config, validate_api_mounts};
 use crate::application::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
 };
@@ -69,6 +69,14 @@ pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()
     // serve it. Same reasoning as the framework config above: caught on save,
     // where the admin can fix it, rather than at build or serve time.
     validate_api_mounts(app)?;
+    // …and each provider's own settings, against the spec that provider
+    // declares. An unknown key is refused rather than stored and ignored: the
+    // form renders exactly the spec, so a key outside it is a typo or a stale
+    // config, and a switch that silently does nothing is the failure this
+    // milestone's aggregation setting would otherwise be.
+    for api in &app.apis {
+        validate_api_config(api)?;
+    }
 
     if let Some(other) = load_application_by_subdomain(catalog, subdomain).await?
         && other.id != app.id
@@ -226,7 +234,13 @@ fn app_values(app: &Application) -> Result<Vec<Value>> {
         Value::Json(Json::Array(
             app.apis
                 .iter()
-                .map(|a| json!({ "provider": a.provider, "mount": a.mount }))
+                .map(|a| {
+                    json!({
+                        "provider": a.provider,
+                        "mount": a.mount,
+                        "config": Json::Object(a.config.clone()),
+                    })
+                })
                 .collect(),
         )),
         Value::Json(Json::Array(
@@ -305,10 +319,9 @@ pub(crate) fn application_from_row(row: &Row) -> Result<Application> {
         apis: json_array(row, COL_APIS)?
             .iter()
             .map(|v| {
-                Ok(ApiConfig::new(
-                    member_str(v, "provider", COL_APIS)?,
-                    member_str(v, "mount", COL_APIS)?,
-                ))
+                let provider = member_str(v, "provider", COL_APIS)?;
+                let config = member_config(v, &provider)?;
+                Ok(ApiConfig::new(provider, member_str(v, "mount", COL_APIS)?).with_config(config))
             })
             .collect::<Result<_>>()?,
         static_dirs: json_array(row, COL_STATIC_DIRS)?
@@ -324,6 +337,18 @@ pub(crate) fn application_from_row(row: &Row) -> Result<Application> {
         csp: csp_from_json(json_column(row, COL_CSP)?)?,
         attributes: object(json_column(row, COL_ATTRIBUTES)?, COL_ATTRIBUTES)?,
     })
+}
+
+/// An API row's `config` object — absent or `null` meaning "no settings", the
+/// same reading a framework's config gets below, and anything else refused.
+fn member_config(value: &Json, provider: &str) -> Result<Attrs> {
+    match value.get("config") {
+        Some(Json::Object(o)) => Ok(o.clone()),
+        None | Some(Json::Null) => Ok(Attrs::new()),
+        Some(_) => Err(Error::invalid(format!(
+            "{APPLICATIONS_TABLE}.{COL_APIS}: API provider `{provider}` has a non-object `config`"
+        ))),
+    }
 }
 
 fn framework_from_json(value: Json, column: &str) -> Result<FrameworkRef> {

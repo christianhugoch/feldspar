@@ -53,9 +53,9 @@ mod scaffold;
 mod store;
 
 pub use api::{
-    ApiProviderInfo, AppGraphql, app_client, app_client_with, app_endpoints, app_endpoints_with,
-    app_graphql, app_providers, app_providers_with, app_tables, app_triggers,
-    registered_api_provider_info, validate_api_mounts,
+    ApiProviderInfo, AppGraphql, api_provider_config_spec, app_client, app_client_with,
+    app_endpoints, app_endpoints_with, app_graphql, app_providers, app_providers_with, app_tables,
+    app_triggers, registered_api_provider_info, validate_api_config, validate_api_mounts,
 };
 pub use application::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,

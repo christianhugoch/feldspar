@@ -206,6 +206,7 @@ know, with the deviations noted.
 type Query {
   departments(where: DepartmentsBoolExp, order_by: [DepartmentsOrderBy!], limit: Int, offset: Int): [Departments!]!
   departments_by_pk(id: BigInt!): Departments
+  # only when the application switched its aggregates on — see below
   departments_aggregate(where: DepartmentsBoolExp): DepartmentsAggregate!
 }
 
@@ -299,6 +300,16 @@ observe rows:
    refused by name, translatable or not: the join subquery is built from the schema shape by
    `join_path_expr` and there is no `WHERE` the provider owns to fold the predicate into, so
    answering would hand over a withheld row one column at a time.
+> **As built (API improvements, Phase 3)**: the aggregate half of this schema is **optional and
+> off by default**, switched on per application by the `aggregates` setting on its GraphQL API row
+> (`ApiConfig::config`, validated on save against the provider's declared `config_spec` exactly as
+> a framework's settings are). Off, `X_aggregate`, the `_aggregate` field on every relation, the
+> `XAggregate`/`XNumericFields`/`XComparableFields` objects and the `XSelectColumn` enum are
+> **absent from the schema** — so a document naming one is `async-graphql`'s own "field not found"
+> before a resolver runs, rather than a silent null or a refusal that cost a round trip. An
+> aggregate is the most expensive thing this schema can express, and the expensive thing should be
+> present because somebody asked for it. The four limits below come from the same configuration.
+
 4. **Depth and complexity limits are mandatory**, and a nested-relation query is the reason.
    `limit_depth` / `limit_complexity` on the schema builder, plus a per-query row cap on
    every list field and a per-request budget of reads and writes, configured per application

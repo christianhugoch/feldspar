@@ -39,6 +39,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_graphql::ServerError;
 use sc_error::{Error, Result};
+use sc_types::{Attrs, BasicType, FormField};
+use serde_json::Value as Json;
 
 /// The most rows a list field yields when the caller names no `limit`, and the
 /// ceiling a `limit` they *do* name is clamped to.
@@ -72,7 +74,9 @@ pub const DEFAULT_MAX_COMPLEXITY: usize = 2_000;
 /// the honest response is to say so rather than to keep going.
 pub const DEFAULT_STATEMENT_BUDGET: usize = 32;
 
-/// The four bounds one application's GraphQL API is served under.
+/// The four bounds one application's GraphQL API is served under, plus the one
+/// switch that decides whether the most expensive thing the schema can express
+/// is in it at all.
 ///
 /// Per application because applications differ: a public read API and an
 /// internal reporting one want different numbers, and there is no number that
@@ -89,6 +93,16 @@ pub struct GraphqlLimits {
     pub row_cap: u64,
     /// The most reads and writes one operation may issue.
     pub statement_budget: usize,
+    /// Whether `X_aggregate` and the `_aggregate` fields on child relations are
+    /// part of the schema.
+    ///
+    /// **Off unless switched on.** An aggregate is the most expensive thing this
+    /// schema can express — a correlated subquery per parent row, over rows the
+    /// caller never sees — and the expensive thing should be present because
+    /// somebody asked for it. Off, the fields are *absent from the schema*, so a
+    /// document naming one is refused by the library's own validation before a
+    /// resolver runs, rather than by a resolve-time error or a silent null.
+    pub aggregates: bool,
 }
 
 impl Default for GraphqlLimits {
@@ -98,6 +112,7 @@ impl Default for GraphqlLimits {
             max_complexity: DEFAULT_MAX_COMPLEXITY,
             row_cap: DEFAULT_ROW_CAP,
             statement_budget: DEFAULT_STATEMENT_BUDGET,
+            aggregates: false,
         }
     }
 }
@@ -131,6 +146,109 @@ impl GraphqlLimits {
         self.statement_budget = statements;
         self
     }
+
+    /// Whether the aggregate fields are part of the schema.
+    pub fn aggregates(mut self, on: bool) -> GraphqlLimits {
+        self.aggregates = on;
+        self
+    }
+
+    /// The limits an application's stored provider configuration describes
+    /// (`ApiConfig::config`), each setting falling back to its default.
+    ///
+    /// A value that is absent or of the wrong shape *is* its default rather than
+    /// an error: the configuration was validated against
+    /// [`graphql_config_spec`] when it was saved, where the admin could still
+    /// fix it, and a mount is not the place to discover it a second time. The
+    /// switch is the exception in spirit only — absent means off, which is what
+    /// "off unless switched on" says.
+    pub fn from_config(config: &Attrs) -> GraphqlLimits {
+        let mut limits = GraphqlLimits::default();
+        if let Some(depth) = usize_setting(config, CFG_MAX_DEPTH) {
+            limits.max_depth = depth;
+        }
+        if let Some(complexity) = usize_setting(config, CFG_MAX_COMPLEXITY) {
+            limits.max_complexity = complexity;
+        }
+        if let Some(cap) = config.get(CFG_ROW_CAP).and_then(Json::as_u64) {
+            limits.row_cap = cap;
+        }
+        if let Some(budget) = usize_setting(config, CFG_STATEMENT_BUDGET) {
+            limits.statement_budget = budget;
+        }
+        limits.aggregates = config
+            .get(CFG_AGGREGATES)
+            .and_then(Json::as_bool)
+            .unwrap_or(false);
+        limits
+    }
+
+    /// This projection's limits as the configuration bag they came from — the
+    /// other direction of [`from_config`](GraphqlLimits::from_config), so a test
+    /// (and a CLI) can state limits as values and store them as settings.
+    pub fn to_config(self) -> Attrs {
+        let mut config = Attrs::new();
+        config.insert(CFG_AGGREGATES.to_owned(), Json::Bool(self.aggregates));
+        config.insert(CFG_MAX_DEPTH.to_owned(), Json::from(self.max_depth));
+        config.insert(
+            CFG_MAX_COMPLEXITY.to_owned(),
+            Json::from(self.max_complexity),
+        );
+        config.insert(CFG_ROW_CAP.to_owned(), Json::from(self.row_cap));
+        config.insert(
+            CFG_STATEMENT_BUDGET.to_owned(),
+            Json::from(self.statement_budget),
+        );
+        config
+    }
+}
+
+/// A `usize` setting, read from the JSON number it is stored as.
+fn usize_setting(config: &Attrs, key: &str) -> Option<usize> {
+    usize::try_from(config.get(key).and_then(Json::as_u64)?).ok()
+}
+
+/// The setting that switches the aggregate fields into the schema.
+pub const CFG_AGGREGATES: &str = "aggregates";
+/// The setting behind [`GraphqlLimits::max_depth`].
+pub const CFG_MAX_DEPTH: &str = "max_depth";
+/// The setting behind [`GraphqlLimits::max_complexity`].
+pub const CFG_MAX_COMPLEXITY: &str = "max_complexity";
+/// The setting behind [`GraphqlLimits::row_cap`].
+pub const CFG_ROW_CAP: &str = "row_cap";
+/// The setting behind [`GraphqlLimits::statement_budget`].
+pub const CFG_STATEMENT_BUDGET: &str = "statement_budget";
+
+/// What an admin enabling the GraphQL provider may configure (§13.3's settings
+/// vocabulary, applied to an API provider).
+///
+/// The five are the four bounds and the switch, and they are *here* rather than
+/// in the admin UI for the reason a framework's settings are: the application
+/// form renders whatever a provider declares, so a provider that grows a setting
+/// grows a control without a screen being edited.
+///
+/// None is required: every one has a default that is the answer for most
+/// applications, and a form of five compulsory numbers to enable GraphQL would
+/// be a form nobody fills in correctly.
+pub fn graphql_config_spec() -> Vec<FormField> {
+    let d = GraphqlLimits::default();
+    vec![
+        FormField::new(CFG_AGGREGATES, BasicType::Bool)
+            .label("Aggregate fields")
+            .default_value(false),
+        FormField::new(CFG_MAX_DEPTH, BasicType::Int)
+            .label("Maximum query depth")
+            .default_value(d.max_depth as i64),
+        FormField::new(CFG_MAX_COMPLEXITY, BasicType::Int)
+            .label("Maximum query complexity")
+            .default_value(d.max_complexity as i64),
+        FormField::new(CFG_ROW_CAP, BasicType::Int)
+            .label("Row cap per list field")
+            .default_value(d.row_cap as i64),
+        FormField::new(CFG_STATEMENT_BUDGET, BasicType::Int)
+            .label("Statements per operation")
+            .default_value(d.statement_budget as i64),
+    ]
 }
 
 /// What `async-graphql` says when its depth rule refuses a document.
@@ -269,5 +387,46 @@ mod tests {
         // which would be "no statements allowed".
         assert_eq!(limits.statement_budget, DEFAULT_STATEMENT_BUDGET);
         assert_eq!(limits.max_complexity, DEFAULT_MAX_COMPLEXITY);
+    }
+
+    #[test]
+    fn aggregates_are_off_until_an_application_switches_them_on() {
+        // The default is the claim: the most expensive thing the schema can
+        // express is present because somebody asked for it.
+        assert!(!GraphqlLimits::default().aggregates);
+        assert!(GraphqlLimits::new().aggregates(true).aggregates);
+        assert!(!GraphqlLimits::from_config(&Attrs::new()).aggregates);
+    }
+
+    #[test]
+    fn the_configuration_round_trips_through_the_settings_bag() {
+        let limits = GraphqlLimits::new()
+            .aggregates(true)
+            .max_depth(6)
+            .max_complexity(300)
+            .row_cap(50)
+            .statement_budget(9);
+        assert_eq!(GraphqlLimits::from_config(&limits.to_config()), limits);
+        // …and the bag holds exactly the keys the spec declares, so a save of
+        // what the form produced is a save `validate_attrs` accepts.
+        let spec = graphql_config_spec();
+        for key in limits.to_config().keys() {
+            assert!(spec.iter().any(|f| f.name() == key), "undeclared key {key}");
+        }
+        assert_eq!(spec.len(), limits.to_config().len());
+    }
+
+    #[test]
+    fn a_setting_that_is_absent_or_unreadable_is_its_default() {
+        // Validation happens on save, where the admin can fix it. A mount is
+        // not the place to fail a second time, and a `0` read out of a garbled
+        // value would be a far worse answer than the default.
+        let mut config = Attrs::new();
+        config.insert(CFG_MAX_DEPTH.to_owned(), Json::String("deep".to_owned()));
+        config.insert(CFG_ROW_CAP.to_owned(), Json::from(-1));
+        let limits = GraphqlLimits::from_config(&config);
+        assert_eq!(limits.max_depth, DEFAULT_MAX_DEPTH);
+        assert_eq!(limits.row_cap, DEFAULT_ROW_CAP);
+        assert_eq!(limits.statement_budget, DEFAULT_STATEMENT_BUDGET);
     }
 }

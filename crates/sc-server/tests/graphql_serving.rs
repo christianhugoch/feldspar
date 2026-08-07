@@ -203,7 +203,9 @@ fn staff_app() -> Application {
     .with_table(TableId("employees".to_owned()))
     .with_file_store(FileStoreId("apps".to_owned()))
     .with_api(ApiConfig::new("rest", "/api"))
-    .with_api(ApiConfig::new("graphql", "/graphql"))
+    // Aggregates switched on: they are absent from the schema unless an
+    // application asks for them, and the queries below ask for them.
+    .with_api(ApiConfig::new("graphql", "/graphql").with(sc_api::GRAPHQL_CFG_AGGREGATES, true))
 }
 
 /// A server with the app mounted, an admin logged in, and both tables readable

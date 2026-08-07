@@ -18,13 +18,14 @@ use std::sync::Arc;
 
 use sc_action::{Trigger, TriggerDispatcher};
 use sc_api::{
-    ApiProvider, EndpointSet, GRAPHQL_PROVIDER, GraphqlProvider, REST_PROVIDER, RestProvider,
-    generate_client, op_name,
+    ApiProvider, EndpointSet, GRAPHQL_PROVIDER, GraphqlLimits, GraphqlProvider, REST_PROVIDER,
+    RestProvider, generate_client, op_name, rest_row_cap,
 };
 use sc_catalog::{Catalog, Table};
-use sc_error::{Error, Result};
+use sc_error::{Error, Repr, Result};
+use sc_types::{FormField, validate_attrs};
 
-use crate::application::Application;
+use crate::application::{ApiConfig, Application};
 use crate::framework::framework_serves_ui;
 
 /// How an API provider presents itself to an admin enabling one: a human name
@@ -35,7 +36,7 @@ use crate::framework::framework_serves_ui;
 /// **list** rather than a free-text box, so `graphql` is discoverable and a typo
 /// is refused at the keyboard rather than surfacing later as a mount failure on
 /// a saved application.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ApiProviderInfo {
     /// The registry key, as stored in an [`ApiConfig`](crate::ApiConfig).
     pub name: String,
@@ -46,6 +47,14 @@ pub struct ApiProviderInfo {
     /// The sub-path this provider is usually mounted at — what the form fills in
     /// when the admin picks it.
     pub default_mount: String,
+    /// The settings this provider takes, in the same `FormField` vocabulary a
+    /// framework declares its own with (§13.3).
+    ///
+    /// The application form renders these and posts the result into
+    /// [`ApiConfig::config`](crate::ApiConfig::config), so enabling GraphQL and
+    /// switching its aggregates on is one screen with no GraphQL-specific code
+    /// on it — exactly the arrangement frameworks are already under.
+    pub config_spec: Vec<FormField>,
 }
 
 /// Every registered API provider with its presentation, in the order an admin
@@ -64,6 +73,7 @@ pub fn registered_api_provider_info() -> Vec<ApiProviderInfo> {
                           The one to take unless you know you want the other."
                 .to_owned(),
             default_mount: "/api".to_owned(),
+            config_spec: sc_api::rest_config_spec(),
         },
         ApiProviderInfo {
             name: GRAPHQL_PROVIDER.to_owned(),
@@ -74,8 +84,58 @@ pub fn registered_api_provider_info() -> Vec<ApiProviderInfo> {
                           rather than replacing it."
                 .to_owned(),
             default_mount: sc_api::GRAPHQL_DEFAULT_MOUNT.to_owned(),
+            config_spec: sc_api::graphql_config_spec(),
         },
     ]
+}
+
+/// The settings the API provider registered under `name` declares — the registry
+/// lookup, resolving a stored [`ApiConfig`](crate::ApiConfig)'s provider name to
+/// a spec without building the provider.
+///
+/// The sibling of [`framework_config_spec`](crate::framework_config_spec), and
+/// written from [`registered_api_provider_info`] for the reason that list is
+/// what [`app_providers_with`] switches on: a provider that is offered is a
+/// provider that mounts, and now also a provider whose settings are validated
+/// against what it actually declares.
+///
+/// An unknown name is a configuration error rather than a provider with no
+/// settings — the same answer mounting one gives.
+pub fn api_provider_config_spec(name: &str) -> Result<Vec<FormField>> {
+    registered_api_provider_info()
+        .into_iter()
+        .find(|p| p.name == name)
+        .map(|p| p.config_spec)
+        .ok_or_else(|| {
+            Error::config(format!(
+                "unknown API provider `{name}`; this server registers {}",
+                registered_provider_names()
+            ))
+        })
+}
+
+/// Check one [`ApiConfig`](crate::ApiConfig)'s settings against its provider's
+/// declared spec.
+///
+/// Called **on save** ([`save_application`](crate::save_application)), for the
+/// reason a framework's config is: a misspelled or ill-typed setting is the
+/// admin's to fix and the admin is standing in front of the form, whereas the
+/// same mistake read at mount time is a limit silently serving its default —
+/// which for the aggregation switch means a schema that quietly lacks the fields
+/// somebody thought they had turned on.
+pub fn validate_api_config(api: &ApiConfig) -> Result<()> {
+    let spec = api_provider_config_spec(&api.provider)?;
+    validate_attrs(&spec, &api.config).map_err(|e| {
+        // Name the provider as well as the setting, rebuilt rather than wrapped
+        // for the reason `check_attrs` gives in `framework.rs`: `Error`'s
+        // `Invalid` renders its own prefix, and a `Context` would hide the
+        // setting, which is the part the admin needs.
+        if let Repr::Invalid(msg) = e.repr() {
+            Error::invalid(format!("API provider `{}`: {msg}", api.provider))
+        } else {
+            e
+        }
+    })
 }
 
 /// The registered provider names, comma-separated — what an error naming what is
@@ -242,7 +302,10 @@ pub fn app_providers_with(
         .iter()
         .map(|api| match api.provider.as_str() {
             REST_PROVIDER => {
-                let mut provider = RestProvider::project_with(&api.mount, &tables, &triggers);
+                let mut provider = RestProvider::project_with(&api.mount, &tables, &triggers)
+                    // The application's own cap on a list read, from its stored
+                    // provider configuration.
+                    .with_row_cap(rest_row_cap(&api.config));
                 if let Some(evaluator) = &evaluator {
                     provider = provider.with_evaluator(evaluator.clone());
                 }
@@ -252,7 +315,7 @@ pub fn app_providers_with(
                 Ok(Box::new(provider) as Box<dyn ApiProvider>)
             }
             GRAPHQL_PROVIDER => {
-                let mut provider = graphql_provider(app, &api.mount, &tables)?;
+                let mut provider = graphql_provider(app, api, &tables)?;
                 if let Some(evaluator) = &evaluator {
                     provider = provider.with_evaluator(evaluator.clone());
                 }
@@ -268,28 +331,38 @@ pub fn app_providers_with(
         .collect()
 }
 
-/// Project `app`'s GraphQL API at `mount` over `tables` — the one place a
-/// [`GraphqlProvider`] is built for an application.
+/// Project `app`'s GraphQL API from `api` (its mount **and** its configuration)
+/// over `tables` — the one place a [`GraphqlProvider`] is built for an
+/// application.
 ///
 /// Shared by the mount path ([`app_providers_with`]) and the build path
-/// ([`app_graphql_sdl`]) so the SDL a build writes into the app's source tree is
+/// ([`app_graphql`]) so the SDL a build writes into the app's source tree is
 /// the SDL its running mount answers introspection with. Two constructions with
 /// the same arguments would be the same schema *by coincidence*; one is the same
-/// schema because it is the same call.
+/// schema because it is the same call. That now includes the limits: the
+/// aggregation switch changes which fields exist, so a build reading it from
+/// somewhere else than the mount does is how an app's checked SDL and its served
+/// schema come apart.
 ///
 /// The tables are the app's declared subset, already resolved — the same value
 /// the REST provider is projected from, so one application cannot expose two
 /// different table subsets through its two APIs.
-fn graphql_provider(app: &Application, mount: &str, tables: &[Table]) -> Result<GraphqlProvider> {
+fn graphql_provider(
+    app: &Application,
+    api: &ApiConfig,
+    tables: &[Table],
+) -> Result<GraphqlProvider> {
     // A schema that will not build is a mount failure naming the table that
     // caused it: an application whose API is half described is worse than one
     // that refuses to come up, because the half nobody notices is the wrong one.
-    let provider = GraphqlProvider::project(mount, tables).map_err(|e| {
-        Error::config(format!(
-            "application `{}` cannot project its GraphQL API: {e}",
-            app.name
-        ))
-    })?;
+    let provider =
+        GraphqlProvider::project_with(&api.mount, tables, GraphqlLimits::from_config(&api.config))
+            .map_err(|e| {
+                Error::config(format!(
+                    "application `{}` cannot project its GraphQL API: {e}",
+                    app.name
+                ))
+            })?;
     // A `File` field answers with its path and the URL the *REST* provider
     // serves the bytes at, so a GraphQL field never becomes a second download
     // path. An application with no REST provider has no such URL to give; the
@@ -329,7 +402,7 @@ pub fn app_graphql(app: &Application, cat: &Catalog) -> Result<Option<AppGraphql
         return Ok(None);
     };
     let tables = app_tables(app, cat)?;
-    let provider = graphql_provider(app, &api.mount, &tables)?;
+    let provider = graphql_provider(app, api, &tables)?;
     Ok(Some(AppGraphql {
         mount: provider.mount(),
         sdl: provider.sdl(),

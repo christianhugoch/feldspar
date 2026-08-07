@@ -66,6 +66,15 @@ sub-path. Two providers on **one** mount is refused when you save: a request res
 longest matching mount, so the loser of that tie would be a whole API that is mounted, generated
 a client for, and unreachable.
 
+**Tick `Aggregate fields` on the GraphQL row.** Each provider carries its own settings, rendered
+from what that provider declares, and GraphQL's are the aggregation switch and its four cost
+bounds (depth, complexity, row cap, statements per operation). Aggregates are **off unless you
+switch them on**: they are the most expensive thing the schema can express — a correlated
+subquery per parent row, over rows the caller may never see — so they are present because
+somebody asked for them. Off, `employees_aggregate` is not in the schema at all, and the query
+below comes back "field not found" rather than a silent null. This tutorial needs them, so turn
+them on now.
+
 The two providers share the application's declared table set. There is no separate "expose this
 table over GraphQL" switch, and there is deliberately no per-role schema: the schema describes
 what the *application* exposes, and who may see which rows is decided when the query resolves.
@@ -358,6 +367,11 @@ writes the query, so four bounds apply, with defaults that are *set* rather than
 | Fields named, aliases counted separately | 2 000 | Before a statement is issued |
 | Rows per list field | 500 | An absent `limit` becomes the cap; a larger one is clamped to it |
 | Reads and writes per operation | 32 | As it is spent — round trips are a property of execution |
+
+All four are **settings on the application's GraphQL API row**, beside the `Aggregate fields`
+switch of step 2 — a public read API and an internal reporting one want different numbers, and
+there is no number that is right for both. Edit them there; the schema is rebuilt when the
+application next mounts, because two of the four are compiled into it.
 
 Each refusal names the bound it hit and what to do about it. Introspection stays **on**: the SDL
 is served beside the endpoint anyway, the schema describes tables the application already exposes

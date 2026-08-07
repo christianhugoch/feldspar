@@ -149,12 +149,12 @@ fn clear(sql: &Sql) {
     sql.lock().expect("the sql log").clear();
 }
 
-/// The provider over both tables, under the application's default limits.
+/// The provider over both tables, under the default limits **plus** the
+/// aggregate fields: several rules below are about what an aggregate does with
+/// rows the caller may not see, and a schema without the fields could not state
+/// them at all.
 fn provider(cat: &Catalog) -> Result<GraphqlProvider> {
-    GraphqlProvider::project(
-        "/graphql",
-        &[cat.require("departments")?, cat.require("employees")?],
-    )
+    provider_with(cat, GraphqlLimits::new().aggregates(true))
 }
 
 /// The provider under limits of the test's choosing.

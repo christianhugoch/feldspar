@@ -89,21 +89,30 @@ pub fn build_schema(
         let Some(table) = tables.iter().find(|x| x.name == t.table) else {
             continue;
         };
-        builder = builder.register(row_object(table, t, names));
+        builder = builder.register(row_object(table, t, names, limits.aggregates));
         builder = builder.register(bool_exp_input(table, t));
         builder = builder.register(order_by_input(table, t));
-        builder = builder.register(select_column_enum(t));
-        builder = builder.register(aggregate_object(table, t));
-        if let Some(obj) = numeric_fields_object(table, t, &t.numeric_object, NumericAs::Column) {
-            builder = builder.register(obj);
+        // The aggregate half of the schema is registered only when the
+        // application asked for it (`GraphqlLimits::aggregates`). Absent means
+        // *absent*: `X_aggregate`, its result object and the two field objects
+        // under it are not types the schema has, so a document naming one is
+        // `async-graphql`'s own "field not found" before a resolver runs —
+        // rather than a silent null or a refusal that costs a round trip.
+        if limits.aggregates {
+            builder = builder.register(select_column_enum(t));
+            builder = builder.register(aggregate_object(table, t));
+            if let Some(obj) = numeric_fields_object(table, t, &t.numeric_object, NumericAs::Column)
+            {
+                builder = builder.register(obj);
+            }
+            if let Some(obj) = numeric_fields_object(table, t, &t.avg_object, NumericAs::Average) {
+                builder = builder.register(obj);
+            }
+            if let Some(obj) = comparable_fields_object(table, t) {
+                builder = builder.register(obj);
+            }
         }
-        if let Some(obj) = numeric_fields_object(table, t, &t.avg_object, NumericAs::Average) {
-            builder = builder.register(obj);
-        }
-        if let Some(obj) = comparable_fields_object(table, t) {
-            builder = builder.register(obj);
-        }
-        query = add_root_fields(query, table, t);
+        query = add_root_fields(query, table, t, limits.aggregates);
     }
 
     builder = builder.register(query);
@@ -178,7 +187,11 @@ fn comparison_input(scalar: &str) -> InputObject {
 }
 
 /// The row object: the table's columns, then its inverse relations.
-fn row_object(table: &Table, t: &TableNames, names: &SchemaNames) -> Object {
+///
+/// `aggregates` decides whether each relation also carries its `_aggregate`
+/// field — the same switch the root fields are under, because a child aggregate
+/// is the *more* expensive of the two (one correlated subquery per parent row).
+fn row_object(table: &Table, t: &TableNames, names: &SchemaNames, aggregates: bool) -> Object {
     let mut object = Object::new(&t.object);
     if !table.description.is_empty() {
         object = object.description(&table.description);
@@ -216,19 +229,21 @@ fn row_object(table: &Table, t: &TableNames, names: &SchemaNames) -> Object {
                 rel.child_table, rel.key_field
             )),
         );
-        object = object.field(
-            Field::new(
-                &rel.aggregate_field,
-                TypeRef::named_nn(&child.aggregate_object),
-                resolve::child_aggregate_field(&rel.child_table),
-            )
-            .argument(InputValue::new(ARG_WHERE, TypeRef::named(&child.bool_exp)))
-            .description(format!(
-                "Aggregates over the rows of `{}` that reference this row — computed by the \
-                 database as a correlated subquery, not by fetching them.",
-                rel.child_table
-            )),
-        );
+        if aggregates {
+            object = object.field(
+                Field::new(
+                    &rel.aggregate_field,
+                    TypeRef::named_nn(&child.aggregate_object),
+                    resolve::child_aggregate_field(&rel.child_table),
+                )
+                .argument(InputValue::new(ARG_WHERE, TypeRef::named(&child.bool_exp)))
+                .description(format!(
+                    "Aggregates over the rows of `{}` that reference this row — computed by the \
+                     database as a correlated subquery, not by fetching them.",
+                    rel.child_table
+                )),
+            );
+        }
     }
     object
 }
@@ -428,8 +443,9 @@ fn is_comparable(field: &DataField) -> bool {
     column_scalar(field) != names::JSON
 }
 
-/// The root fields for one table: the list, the single row, and the aggregate.
-fn add_root_fields(query: Object, table: &Table, t: &TableNames) -> Object {
+/// The root fields for one table: the list, the single row, and — when the
+/// application switched them on — the aggregate.
+fn add_root_fields(query: Object, table: &Table, t: &TableNames, aggregates: bool) -> Object {
     let query = query.field(
         list_arguments(
             Field::new(
@@ -460,6 +476,9 @@ fn add_root_fields(query: Object, table: &Table, t: &TableNames) -> Object {
         ),
         None => query,
     };
+    if !aggregates {
+        return query;
+    }
     query.field(
         Field::new(
             &t.aggregate_field,
@@ -631,9 +650,17 @@ mod tests {
     };
     use sc_types::BasicType;
 
+    /// The SDL of an application that switched its aggregates **on** — most of
+    /// these tests are about what the schema says, and the aggregate half of it
+    /// only exists when somebody asked for it. What the switch itself does is
+    /// asserted by `the_aggregate_fields_are_absent_when_the_switch_is_off`.
     fn sdl_of(tables: &[Table]) -> String {
+        sdl_with(tables, GraphqlLimits::default().aggregates(true))
+    }
+
+    fn sdl_with(tables: &[Table], limits: GraphqlLimits) -> String {
         let names = SchemaNames::derive(tables);
-        build_schema(tables, &names, GraphqlLimits::default())
+        build_schema(tables, &names, limits)
             .expect("schema builds")
             .sdl()
     }
@@ -783,7 +810,8 @@ mod tests {
         // plausible zero here would be the exact failure decision 5 forbids.
         let tables = [table_of("departments", vec![id_field()])];
         let names = SchemaNames::derive(&tables);
-        let schema = build_schema(&tables, &names, GraphqlLimits::default()).expect("builds");
+        let schema = build_schema(&tables, &names, GraphqlLimits::default().aggregates(true))
+            .expect("builds");
         let response = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
@@ -794,6 +822,60 @@ mod tests {
             "{:?}",
             response.errors
         );
+    }
+
+    #[test]
+    fn the_aggregate_fields_are_absent_when_the_switch_is_off() {
+        // Off is the default, and off means *absent from the schema*: no root
+        // `X_aggregate`, no `_aggregate` on the relation, and none of the types
+        // they are answered with. A schema that carried the fields and refused
+        // at resolve time would be a schema that advertises what it will not do.
+        let tables = [
+            table_of("departments", vec![id_field()]),
+            table_of(
+                "employees",
+                vec![
+                    id_field(),
+                    plain_field("name"),
+                    key_field("department", "departments", "id"),
+                ],
+            ),
+        ];
+        let sdl = sdl_with(&tables, GraphqlLimits::default());
+        for absent in [
+            "departments_aggregate",
+            "employees_aggregate",
+            "DepartmentsAggregate",
+            "EmployeesAggregate",
+            "SelectColumn",
+        ] {
+            assert!(!sdl.contains(absent), "`{absent}` should be absent:\n{sdl}");
+        }
+        // …and the rest of the schema is untouched: the switch removes the
+        // aggregates, not the reads they are taken over.
+        assert!(sdl.contains("departments("), "{sdl}");
+        assert!(sdl.contains("employees("), "{sdl}");
+    }
+
+    #[test]
+    fn an_aggregate_against_a_switched_off_schema_is_a_validation_error() {
+        // The point of *absence*: the refusal is the library's own "field not
+        // found", raised over the document before a resolver — and therefore
+        // before a statement — runs. A resolve-time refusal would have cost a
+        // round trip to say the same thing.
+        let tables = [table_of("departments", vec![id_field()])];
+        let names = SchemaNames::derive(&tables);
+        let schema = build_schema(&tables, &names, GraphqlLimits::default()).expect("builds");
+        let response = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(schema.execute("{ departments_aggregate { count } }"));
+        assert!(!response.errors.is_empty(), "{response:?}");
+        let message = &response.errors[0].message;
+        assert!(message.contains("departments_aggregate"), "{message}");
+        // Not the "no RequestContext" a resolver would have produced: nothing
+        // resolved, because there is no such field to resolve.
+        assert!(!message.contains("RequestContext"), "{message}");
     }
 
     #[test]

@@ -2,6 +2,54 @@
 
 Changes in reverse chronological order.
 
+## An API provider has settings, and GraphQL's aggregates are one of them
+
+An `ApiConfig` is now `{ provider, mount, config }`, and the third field is a settings bag
+validated on save against the spec the **provider itself declares**. GraphQL's five settings —
+the aggregation switch and the four bounds one operation is served under — live there, so an
+application's limits come from the application rather than from the defaults at the call site,
+and REST's `row_cap` does too.
+
+**No provider-specific code in the form.** `ApiProviderInfo` gained `config_spec: Vec<FormField>`,
+`listApiProviders` returns it, and the application form renders it with the same `SettingsFields`
+a framework's settings go through (§13.3). Enabling GraphQL shows its switch and its four numbers;
+enabling REST shows its one; a provider that grows a setting grows a control, and no screen is
+edited. The APIs list stopped being a row of uniform text boxes to make room for it, and the
+conversion — stored config to form strings and back to the types the spec declares — moved into
+`ui/admin/src/apiRows.ts`, where it is tested without a browser. A row whose provider this server
+does not register keeps its settings **exactly as they arrived**: they cannot be re-typed without
+a spec, and rewriting them would destroy the configuration of a provider that is merely absent.
+
+**Aggregates are off unless switched on**, which is the change with teeth. They are the most
+expensive thing the schema can express — a correlated subquery per parent row, over rows the
+caller may never see — so they are present because somebody asked for them. Off (the default),
+`X_aggregate`, the `_aggregate` field on every relation, the `XAggregate`/`XNumericFields`/
+`XComparableFields` objects and the `XSelectColumn` enum are **absent from the schema**. A
+document naming one is therefore `async-graphql`'s own "field not found" over the document —
+before a resolver runs and before a statement is issued — rather than a silent null or a refusal
+that cost a round trip. A field that existed and refused would be a schema advertising what it
+will not do.
+
+**An undeclared setting is refused on save.** `validate_api_config` runs in `save_application`
+beside the framework's own validation and the mount check, and names both the provider and the
+setting. The failure it exists to prevent is a misspelled `aggregate` stored happily and read as
+nothing: a switch that appears to work and does not. An unknown provider has no spec to be
+configured against and says so, which is the same answer mounting one gives.
+
+The SDL a build writes and the schema a mount answers still come from one projection
+(`graphql_provider` now takes the whole `ApiConfig`), so the switch cannot turn the aggregates on
+in one and not the other.
+
+Tests: the SDL snapshot in **both** states — the existing file is now the switched-on one, beside
+a new `graphql_schema_no_aggregates.graphql`, because "the aggregates are gone and nothing else
+moved" is a claim only a whole-schema diff can make; a real-Postgres test that an aggregate
+against a switched-off application is refused with **no statement recorded**; the limits
+round-tripping through save/load and reaching the projection; a misspelled and an ill-typed
+setting each refused on save naming the provider; unit tests for the config↔limits conversion in
+both directions and for an unreadable value falling back to its default rather than to zero; and
+a vitest suite asserting the form's round trip, including that editing only the mount does not
+save the switch off.
+
 ## A REST read is a query string, and it is the same read GraphQL does
 
 `GET /api/books?select=title,published,author(name,country)&published=gte.2020-01-01&order=published.desc&limit=20`

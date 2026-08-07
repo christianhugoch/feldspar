@@ -178,20 +178,26 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 3 — The GraphQL aggregation switch, and provider configuration
 
-- [ ] **`ApiConfig.config: Attrs`** — the field, its storage in `_sc_applications.apis`, and
+- [x] **`ApiConfig.config: Attrs`** — the field, its storage in `_sc_applications.apis`, and
       validation on save against the provider's declared spec (an unknown key is refused, as a
-      framework's is).
-- [ ] **`ApiProviderInfo::config_spec`** (`Vec<FormField>`), returned by `listApiProviders`, and
+      framework's is). (`validate_api_config`, called from `save_application` beside the
+      framework's own validation and the mount check; it names the provider *and* the setting.)
+- [x] **`ApiProviderInfo::config_spec`** (`Vec<FormField>`), returned by `listApiProviders`, and
       the application form rendering it with `SettingsFields` — no provider-specific code in the
-      form, exactly as with frameworks.
-- [ ] **`GraphqlLimits` comes from configuration** rather than from `project_with`'s defaults at
+      form, exactly as with frameworks. (REST declares `row_cap`, which now comes from the
+      application rather than from `RestProvider::with_row_cap`'s default at the call site.)
+- [x] **`GraphqlLimits` comes from configuration** rather than from `project_with`'s defaults at
       the call site, and gains the aggregation switch. Aggregates are **off** unless switched
       on (GOALS: "optional and enabled with a switch"): they are the most expensive thing the
       schema can express, and the expensive thing should be present because someone asked for it.
-- [ ] With the switch off, `X_aggregate` and the `_aggregate` fields on child relations are
+      (`GraphqlLimits::from_config`/`to_config`; `graphql_provider` takes the whole `ApiConfig`,
+      so the SDL a build writes and the schema a mount answers stay one projection.)
+- [x] With the switch off, `X_aggregate` and the `_aggregate` fields on child relations are
       **absent from the schema**, so asking for one is the library's own "field not found"
-      validation error rather than a silent null or a resolve-time refusal.
-- [ ] Tests: the SDL snapshot in both states (the existing snapshot moves to the switched-on
+      validation error rather than a silent null or a resolve-time refusal. (The
+      `XAggregate`/`XNumericFields`/`XComparableFields` objects and the `XSelectColumn` enum go
+      with them — they exist only to answer those fields.)
+- [x] Tests: the SDL snapshot in both states (the existing snapshot moves to the switched-on
       one); a document using an aggregate against a switched-off app is refused before a
       statement is issued; the limits round-trip through save/load; the admin form round-trips
       a provider's settings (vitest).

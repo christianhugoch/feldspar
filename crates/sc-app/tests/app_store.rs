@@ -72,7 +72,7 @@ fn blog() -> Application {
         .with_table(TableId("posts".to_owned()))
         .with_table(TableId("comments".to_owned()))
         .with_file_store(FileStoreId("uploads".to_owned()))
-        .with_api(ApiConfig::new("rest", "/api"))
+        .with_api(ApiConfig::new("rest", "/api").with("row_cap", 100))
         .with_static_dir(StaticDir::new(
             "/docs",
             FileStoreId("uploads".to_owned()),
@@ -95,6 +95,11 @@ async fn an_application_round_trips_through_the_table() -> Result<()> {
     // app's only definition, so anything lost here is lost for good.
     let loaded = load_application(&cat, app.id).await?.expect("saved app");
     assert_eq!(loaded, app);
+
+    // Including each API provider's own settings, which are as much part of the
+    // app's definition as the framework's: a row that lost them would be an app
+    // whose GraphQL aggregates quietly switched themselves off.
+    assert_eq!(loaded.apis[0].config["row_cap"], serde_json::json!(100));
 
     // Including the framework's own settings and the sparse attributes.
     assert_eq!(loaded.framework.config["store"], serde_json::json!("apps"));
