@@ -123,9 +123,27 @@ pub fn api_provider_config_spec(name: &str) -> Result<Vec<FormField>> {
 /// same mistake read at mount time is a limit silently serving its default —
 /// which for the aggregation switch means a schema that quietly lacks the fields
 /// somebody thought they had turned on.
-pub fn validate_api_config(api: &ApiConfig) -> Result<()> {
+///
+/// It takes the whole [`Application`] because a REST API's **custom SQL queries**
+/// are checked here too, and their rules are about the app: a query's sub-path
+/// may not be one the app's own tables already answer, and its name may not be
+/// one of their client methods. Whether the SQL *runs* is the database's
+/// question, asked separately by [`describe_api_queries`].
+pub fn validate_api_config(app: &Application, api: &ApiConfig) -> Result<()> {
     let spec = api_provider_config_spec(&api.provider)?;
-    validate_attrs(&spec, &api.config).map_err(|e| {
+    let mut settings = api.config.clone();
+    // A REST API's custom SQL queries live in the same object but are not a
+    // settings field (§13.4): they are a list of records each carrying a nested
+    // list of parameters, so they are validated as the typed value they are and
+    // then lifted out before the rest is checked against the form spec — which
+    // would otherwise refuse `queries` as an unknown setting.
+    if api.provider == REST_PROVIDER {
+        let queries = sc_api::custom_queries(&api.config)?;
+        let tables: Vec<String> = app.tables.iter().map(|t| t.0.clone()).collect();
+        sc_api::validate_custom_queries(&queries, &tables)?;
+        settings.remove(sc_api::REST_CFG_QUERIES);
+    }
+    validate_attrs(&spec, &settings).map_err(|e| {
         // Name the provider as well as the setting, rebuilt rather than wrapped
         // for the reason `check_attrs` gives in `framework.rs`: `Error`'s
         // `Invalid` renders its own prefix, and a `Context` would hide the
@@ -136,6 +154,38 @@ pub fn validate_api_config(api: &ApiConfig) -> Result<()> {
             e
         }
     })
+}
+
+/// Prepare every custom SQL query this API declares, and return the
+/// configuration with each query's **result columns** as the database described
+/// them (§13.4, decision 5).
+///
+/// Called on save, and the reason a broken query cannot be stored: preparing is
+/// both the validation and the typing, so a statement that will not prepare
+/// comes back as Postgres's own message while its author is still looking at it,
+/// and one that will is typed by the database rather than by a declaration that
+/// would go stale the first time anyone edited the SQL.
+///
+/// Re-describing on **every** save is what keeps the two from drifting: the
+/// stored columns are never older than the stored SQL, because they are written
+/// in the same statement.
+///
+/// An API with no custom queries — every GraphQL one, and most REST ones — is
+/// returned untouched without touching the database.
+pub async fn describe_api_queries(catalog: &Catalog, api: &ApiConfig) -> Result<ApiConfig> {
+    if api.provider != REST_PROVIDER {
+        return Ok(api.clone());
+    }
+    let mut queries = sc_api::custom_queries(&api.config)?;
+    if queries.is_empty() {
+        return Ok(api.clone());
+    }
+    for query in &mut queries {
+        query.columns = sc_api::describe_custom_query(catalog, query).await?;
+    }
+    let mut api = api.clone();
+    sc_api::set_custom_queries(&mut api.config, &queries)?;
+    Ok(api)
 }
 
 /// The registered provider names, comma-separated — what an error naming what is
@@ -305,7 +355,10 @@ pub fn app_providers_with(
                 let mut provider = RestProvider::project_with(&api.mount, &tables, &triggers)
                     // The application's own cap on a list read, from its stored
                     // provider configuration.
-                    .with_row_cap(rest_row_cap(&api.config));
+                    .with_row_cap(rest_row_cap(&api.config))
+                    // …and its custom SQL queries, one endpoint each (§13.4).
+                    .with_queries(sc_api::custom_queries(&api.config)?)
+                    .map_err(|e| Error::config(format!("application `{}`: {e}", app.name)))?;
                 if let Some(evaluator) = &evaluator {
                     provider = provider.with_evaluator(evaluator.clone());
                 }

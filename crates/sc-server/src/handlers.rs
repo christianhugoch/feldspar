@@ -1590,8 +1590,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 // A create mints a fresh id; the body carries everything else.
-                let app = application_from_body(AppId::new(), &ctx.body)?;
-                save_application(&catalog, &app).await?;
+                // What comes back from the save is what was *stored*: a custom
+                // SQL query is described on the way in, so the response carries
+                // the result columns the database reported rather than the empty
+                // list the caller sent.
+                let app =
+                    save_application(&catalog, &application_from_body(AppId::new(), &ctx.body)?)
+                        .await?;
                 // A `react` app's project is the server's to create (§2.3): this
                 // is the step that removes the SSH requirement, so it happens on
                 // the first save rather than waiting for an admin to ask. It is
@@ -1646,8 +1651,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 }
                 // The id is the path's, not the body's — the row's identity is not
                 // something a payload gets to reassign.
-                let app = application_from_body(id, &ctx.body)?;
-                save_application(&catalog, &app).await?;
+                let app =
+                    save_application(&catalog, &application_from_body(id, &ctx.body)?).await?;
                 Ok(HandlerResponse::ok(application_json(&app)))
             }
         }

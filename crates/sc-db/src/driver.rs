@@ -12,7 +12,7 @@ use sc_query::{SqlDialect, Statement};
 
 use crate::capabilities::DbCapabilities;
 use crate::row::RowStream;
-use crate::schema::{PhysicalTable, SchemaChange};
+use crate::schema::{DescribedColumn, PhysicalTable, SchemaChange};
 
 /// A single connected database: introspect its schema, run queries, change its
 /// schema, and open transactions (technical design §5).
@@ -33,6 +33,31 @@ pub trait DatabaseDriver: Send + Sync {
     /// Apply a single schema change (create/drop table, add/drop column).
     /// Creating a table adds no implicit primary-key column.
     async fn apply_schema(&self, change: &SchemaChange) -> Result<()>;
+
+    /// Prepare `sql` — with its bind parameters typed by `param_types`, named as
+    /// this backend names its types — and report the **result columns** the
+    /// backend says it will produce, without running it.
+    ///
+    /// This is how a custom SQL query (§13.4) gets its result type: the database
+    /// is the thing that knows what `SELECT sum(price), author FROM …` returns,
+    /// so it is asked, rather than an administrator being made to declare a
+    /// shape that goes stale the first time anyone edits the SQL. It doubles as
+    /// validation — a statement that will not prepare comes back as the
+    /// backend's own error, so a broken query is refused while its author is
+    /// still looking at it.
+    ///
+    /// Preparing must have **no effect**: it is a plan, not an execution.
+    ///
+    /// The default errors rather than returning no columns: a backend that
+    /// cannot describe a statement cannot type one either, and an empty answer
+    /// would read as "this query returns nothing".
+    async fn describe(&self, sql: &str, param_types: &[String]) -> Result<Vec<DescribedColumn>> {
+        let _ = (sql, param_types);
+        Err(Error::database(
+            "this database backend cannot describe a statement, so a custom SQL \
+             query cannot be typed against it",
+        ))
+    }
 
     /// Begin a transaction. Each metadata mutation (and, later, each workflow
     /// step) runs inside one; the returned handle is committed or rolled back

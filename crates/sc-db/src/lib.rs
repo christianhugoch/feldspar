@@ -27,7 +27,9 @@ mod schema;
 pub use capabilities::DbCapabilities;
 pub use driver::{DatabaseDriver, Transaction};
 pub use row::{Row, RowStream};
-pub use schema::{Column, ColumnDef, ColumnRef, ForeignKey, PhysicalTable, SchemaChange};
+pub use schema::{
+    Column, ColumnDef, ColumnRef, DescribedColumn, ForeignKey, PhysicalTable, SchemaChange,
+};
 
 #[cfg(test)]
 mod tests {

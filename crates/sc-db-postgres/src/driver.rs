@@ -11,7 +11,10 @@
 
 use async_trait::async_trait;
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
-use sc_db::{DatabaseDriver, DbCapabilities, PhysicalTable, RowStream, SchemaChange, Transaction};
+use sc_db::{
+    DatabaseDriver, DbCapabilities, DescribedColumn, PhysicalTable, RowStream, SchemaChange,
+    Transaction,
+};
 use sc_error::{Error, Result};
 use sc_query::{SqlDialect, Statement};
 use tokio_postgres::{Config, NoTls};
@@ -100,6 +103,19 @@ impl PgDriver {
         crate::exec::run_ddl(&client, &self.dialect, change).await
     }
 
+    /// Prepare `sql` (parameters typed by `param_types`) and report the result
+    /// columns Postgres says it will produce, without running it — how a custom
+    /// SQL query is typed, and how one that will not prepare is refused at the
+    /// keyboard (see [`crate::exec::describe`]).
+    pub async fn describe(
+        &self,
+        sql: &str,
+        param_types: &[String],
+    ) -> Result<Vec<DescribedColumn>> {
+        let client = self.client().await?;
+        crate::exec::describe(&client, sql, param_types).await
+    }
+
     /// Begin a transaction on a dedicated pooled connection. Metadata mutations
     /// run inside one; the returned handle is committed or rolled back exactly
     /// once (dropping it rolls back).
@@ -133,6 +149,10 @@ impl DatabaseDriver for PgDriver {
 
     async fn apply_schema(&self, change: &SchemaChange) -> Result<()> {
         PgDriver::apply_schema(self, change).await
+    }
+
+    async fn describe(&self, sql: &str, param_types: &[String]) -> Result<Vec<DescribedColumn>> {
+        PgDriver::describe(self, sql, param_types).await
     }
 
     async fn begin(&self) -> Result<Box<dyn Transaction>> {

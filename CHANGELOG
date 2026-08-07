@@ -2,6 +2,86 @@
 
 Changes in reverse chronological order.
 
+## An application's own SQL, as a typed endpoint
+
+An administrator writes a statement, names its parameters and their types, picks an HTTP
+method and a sub-path, and the application gains an endpoint — with a typed method on its
+generated client whose **return type came from Postgres**, not from anything anyone
+declared. It is the escape hatch for what the row layer's read cannot say: a window
+function, a recursive CTE, a report nobody wants to assemble in a browser.
+
+**The database types the result; the admin types the parameters.** Saving an application
+prepares every custom query it declares (`DatabaseDriver::describe`, over
+`prepare_typed`), and the columns the prepared statement reports become the endpoint's
+`TypeSchema`. So a query that will not prepare **cannot be saved** — the refusal carries
+Postgres's own message, and "column `titel` does not exist" arrives while its author is
+still looking at the SQL. Describing runs on *every* save, in the same call that writes
+the row, so the stored columns are never older than the stored SQL. The alternative —
+the admin declaring the result shape too — is a second source of truth that goes stale
+the first time anyone edits a `SELECT`.
+
+**`Statement::Raw` is the one hole in the AST, and the rule is written on the variant.**
+`sc-query`'s enum is the representation of a query; raw text is a hole in it, the goals
+ask for the hole, so there is exactly one, it is named, and it says what it is for: a
+`Raw` is constructed **only** from an admin-authored query definition, never from
+anything a caller sent. Arguments are coerced to their declared type and **bound**;
+`'; DROP TABLE books; --` supplied as an argument is a value that matches no rows, and
+there is a test that then counts the rows still in the table.
+
+**`:name` is rewritten once, by a scanner that knows what it is reading.** The admin
+writes `:since`, not `$1`, and `sc_query::rewrite_named_params` turns it into the
+dialect's placeholders — skipping single-quoted literals, dollar-quoted bodies, quoted
+identifiers, line and block comments (which Postgres nests) and `::` casts. Each of
+those is a way to corrupt somebody's query silently, and `x::text` read the other way
+round would both lose the cast and invent a parameter called `text`; each has a test of
+its own. The same scan counts statements, because "a custom query is one statement" has
+to be decided on the same reading of the text — a `;` inside a literal separates nothing.
+A repeated `:id` takes one placeholder and one bind, because two mentions of an argument
+are one value.
+
+**A custom query's authority is its own, and it is stated loudly** — in the module's own
+documentation, because raw SQL does not go through the row layer and so ownership
+formulae, rich-type coercion, `File`-field rules and table events do not reach it. What
+does: a role floor that is **admin unless the admin said otherwise** (§10.2's trigger
+rule — an access nobody has thought about must not be the one that turns out to be
+public); and the **caller-context transaction**, the same one a row operation on an
+RLS-protected table runs in, so the database's policies still decide what the query can
+see. That last one is asserted against a real RLS table with two callers who each see
+their own two rows and an admin who sees four — it would fail open if the context were
+dropped.
+
+**The method is the admin's choice; the read-only guarantee is not.** Nothing infers the
+method from the SQL (GOALS asks for the manual choice), so an `UPDATE` behind a `GET` is
+expressible — and the transaction refuses it, because a mutation a cache, a crawler or a
+link prefetch can cause is not one anybody chose. `sc-catalog` grew
+`run_in_context_read_only` for it, issuing `SET TRANSACTION READ ONLY` before the caller
+GUCs (a `SET TRANSACTION` after the first statement is not a read-only transaction).
+
+`Statement::Raw` carries its parameter types, which is the fix for a failure worth
+naming: `WHERE (:q IS NULL OR title = :q)` has no inferable parameter type, so a query
+that prepared happily against the admin's declared types would have failed the first
+time somebody called it. Describing and running now derive the types from one place, so
+a query is executed under exactly the types it was typed under.
+
+The rest of the model is refused at the keyboard rather than discovered later: a name
+that is not a usable client method name, or that a declared table's own endpoint already
+holds; a sub-path a table's routes already answer (`resolve` takes the first match and
+the tables are registered first, so the query would be an unreachable method in the
+client) or that starts with `actions`/`login`/`logout`/`whoami`; a `:name` the query does
+not declare, and a declared parameter the SQL never uses — which is an argument the
+client would demand and the query would ignore, reading as a filter that does nothing;
+more than one statement; and two result columns of one name, which would collapse into
+one JSON property and lose a column silently. The same collision rules run again when the
+provider is projected, so what would have been a duplicate-endpoint **panic** in a
+running server is a mount error naming both.
+
+Queries live in the API row's own configuration beside the provider's settings, but as a
+typed `queries` array rather than a settings field — a list of records each carrying a
+nested list of parameters is not a form, and `validate_api_config` lifts it out and
+validates it as the value it is. `save_application` now **returns the application as it
+was stored**, and the admin API answers with that: a create or update that reported the
+body it was sent would be telling an admin their query returns nothing.
+
 ## An API provider has settings, and GraphQL's aggregates are one of them
 
 An `ApiConfig` is now `{ provider, mount, config }`, and the third field is a settings bag

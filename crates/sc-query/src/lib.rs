@@ -10,15 +10,19 @@
 //! - [`Value`] — the universal row value type carried by literals and binds.
 //! - [`Expr`] and friends — scalar expression trees.
 //! - [`Statement`] ([`Select`]/[`Insert`]/[`Update`]/[`Delete`]) — the
-//!   top-level query AST.
+//!   top-level query AST, plus [`Statement::Raw`] for admin-authored SQL and
+//!   [`rewrite_named_params`], which turns its `:name` parameters into the
+//!   dialect's placeholders.
 
 mod dialect;
 mod expr;
+mod named;
 mod statement;
 mod value;
 
 pub use dialect::{SqlDialect, render_policy_expr};
 pub use expr::{BinOp, CaseArm, ColRef, Expr, InSet, JsonStep, UnOp};
+pub use named::{NamedSql, rewrite_named_params};
 pub use statement::{
     Assignment, Delete, Insert, Join, JoinKind, Nulls, OrderBy, OrderDir, Projection, Select,
     Source, Statement, Update,
@@ -147,6 +151,33 @@ mod tests {
         let json = serde_json::to_string(&stmt).expect("serialize");
         let back: Statement = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(stmt, back);
+    }
+
+    /// A `Raw` renders as it stands and its binds come back in order — the
+    /// whole contract of the one hole in the AST.
+    #[test]
+    fn a_raw_statement_renders_verbatim_with_its_binds() {
+        struct Pg;
+        impl SqlDialect for Pg {
+            fn quote_ident(&self, ident: &str) -> String {
+                format!("\"{ident}\"")
+            }
+            fn placeholder(&self, position: usize) -> String {
+                format!("${position}")
+            }
+        }
+
+        let named = rewrite_named_params(&Pg, "SELECT * FROM books WHERE author = :author")
+            .expect("rewrites");
+        assert_eq!(named.params, vec!["author"]);
+        let stmt = Statement::raw(named.sql, vec![Value::Text("Woolf".into())]);
+        let (sql, binds) = Pg.render(&stmt).expect("renders");
+        assert_eq!(sql, "SELECT * FROM books WHERE author = $1");
+        assert_eq!(binds, vec![Value::Text("Woolf".into())]);
+
+        // …and it is still plain, serializable data like every other statement.
+        let json = serde_json::to_string(&stmt).expect("serialize");
+        assert_eq!(stmt, serde_json::from_str::<Statement>(&json).expect("de"));
     }
 
     #[test]

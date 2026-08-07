@@ -147,6 +147,23 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
             Statement::Insert(i) => self.insert(i),
             Statement::Update(u) => self.update(u),
             Statement::Delete(d) => self.delete(d),
+            // Admin-authored SQL, already carrying this dialect's placeholders
+            // (see `Statement::Raw`): the text goes out as it stands and its
+            // values join the bind list in order. A `Raw` is top-level, so
+            // there are never earlier binds to renumber against — asserted
+            // here rather than assumed.
+            // `param_types` is not rendered: it tells the *driver* how to send
+            // the binds, which is a wire concern rather than a textual one.
+            Statement::Raw { sql, binds, .. } => {
+                if !self.binds.is_empty() || !self.sql.is_empty() {
+                    return Err(sc_error::Error::query(
+                        "a raw statement is rendered on its own, not nested inside another",
+                    ));
+                }
+                self.push(sql);
+                self.binds.extend(binds.iter().cloned());
+                Ok(())
+            }
         }
     }
 

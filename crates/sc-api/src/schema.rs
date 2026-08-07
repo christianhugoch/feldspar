@@ -70,6 +70,30 @@ impl ValueType {
         }
     }
 
+    /// The column type this wire type is carried for — the inverse of
+    /// [`from_basic`](ValueType::from_basic), and lossless in this direction
+    /// because every variant here names one [`BasicType`].
+    ///
+    /// What a value has to be coerced *to* before it can be bound: a custom SQL
+    /// query's parameter is declared as a [`ValueType`] by the admin and reaches
+    /// the database as a value of the corresponding basic type, through the same
+    /// `json_to_value` a row write goes through.
+    pub fn to_basic(self) -> BasicType {
+        match self {
+            ValueType::Bool => BasicType::Bool,
+            ValueType::Int => BasicType::Int,
+            ValueType::Float => BasicType::Float,
+            ValueType::Decimal => BasicType::Decimal,
+            ValueType::Text => BasicType::Text,
+            ValueType::Bytes => BasicType::Bytes,
+            ValueType::Json => BasicType::Json,
+            ValueType::Uuid => BasicType::Uuid,
+            ValueType::Date => BasicType::Date,
+            ValueType::Time => BasicType::Time,
+            ValueType::Timestamp => BasicType::Timestamp,
+        }
+    }
+
     /// The TypeScript type this scalar serializes as. See the per-variant docs
     /// for why non-string scalars (decimal, bytes) are carried as strings.
     pub fn ts_type(self) -> &'static str {

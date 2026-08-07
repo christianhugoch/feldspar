@@ -44,7 +44,46 @@ pub async fn run_in_context(
     context: &CallerContext,
     stmt: &Statement,
 ) -> Result<Vec<Row>> {
+    run_in_context_mode(catalog, context, stmt, Access::ReadWrite).await
+}
+
+/// Whether a caller-context transaction may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// The default: the transaction commits whatever the statement did.
+    ReadWrite,
+    /// `READ ONLY`: the database refuses any write the statement attempts.
+    ///
+    /// What a custom SQL query behind a `GET` runs under (§13.4). The method is
+    /// the admin's choice, but the read-only guarantee is not theirs to give
+    /// away: an `UPDATE` reached by a `GET` is a mutation a cache, a crawler or
+    /// a prefetch can cause, so it fails loudly here rather than quietly
+    /// happening.
+    ReadOnly,
+}
+
+/// [`run_in_context`] in a `READ ONLY` transaction — see [`Access::ReadOnly`].
+pub async fn run_in_context_read_only(
+    catalog: &Catalog,
+    context: &CallerContext,
+    stmt: &Statement,
+) -> Result<Vec<Row>> {
+    run_in_context_mode(catalog, context, stmt, Access::ReadOnly).await
+}
+
+async fn run_in_context_mode(
+    catalog: &Catalog,
+    context: &CallerContext,
+    stmt: &Statement,
+    access: Access,
+) -> Result<Vec<Row>> {
     let mut tx = catalog.primary().begin().await?;
+    // Before anything else, including the GUCs: `SET TRANSACTION` may only be
+    // issued before the transaction's first statement, so a read-only
+    // transaction that set its caller context first would not be one.
+    if access == Access::ReadOnly {
+        tx.batch("SET TRANSACTION READ ONLY").await?;
+    }
     tx.set_local(ROLE_GUC, &context.role.to_string()).await?;
     if let Some(user_json) = context.user_json() {
         tx.set_local(USER_GUC, &user_json).await?;

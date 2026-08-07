@@ -150,6 +150,45 @@ pub fn decode(row: &PgRow, idx: usize) -> Result<Value> {
     Ok(value)
 }
 
+/// The Postgres type a backend type *name* refers to — the inverse of the
+/// `Type::name()` this crate reports, and what
+/// [`describe`](sc_db::DatabaseDriver::describe) types a prepared statement's
+/// parameters with.
+///
+/// The names accepted are the ones `BasicType::sql_type()` produces plus the
+/// aliases `BasicType::from_sql_type` recognises, so a type that survives a
+/// round trip through the type layer survives this too. An unrecognised name is
+/// an error rather than a guess: preparing a statement with the wrong parameter
+/// type would either fail obscurely later or, worse, succeed and coerce.
+pub fn pg_type(sql_type: &str) -> Result<Type> {
+    Ok(match sql_type.trim().to_ascii_lowercase().as_str() {
+        "bool" | "boolean" => Type::BOOL,
+        "int2" | "smallint" => Type::INT2,
+        "int4" | "integer" => Type::INT4,
+        "int8" | "bigint" => Type::INT8,
+        "float4" | "real" => Type::FLOAT4,
+        "float8" | "double precision" => Type::FLOAT8,
+        "numeric" | "decimal" => Type::NUMERIC,
+        "text" => Type::TEXT,
+        "varchar" | "character varying" => Type::VARCHAR,
+        "bpchar" | "char" | "character" => Type::BPCHAR,
+        "name" => Type::NAME,
+        "bytea" => Type::BYTEA,
+        "json" => Type::JSON,
+        "jsonb" => Type::JSONB,
+        "uuid" => Type::UUID,
+        "date" => Type::DATE,
+        "time" | "time without time zone" => Type::TIME,
+        "timestamp" | "timestamp without time zone" => Type::TIMESTAMP,
+        "timestamptz" | "timestamp with time zone" => Type::TIMESTAMPTZ,
+        other => {
+            return Err(Error::database(format!(
+                "`{other}` is not a Postgres type this driver can bind a parameter as"
+            )));
+        }
+    })
+}
+
 /// Read a typed value from a column, converting the driver error into ours.
 fn get<'a, T: FromSql<'a>>(row: &'a PgRow, idx: usize) -> Result<T> {
     row.try_get::<usize, T>(idx)

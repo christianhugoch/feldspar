@@ -5,13 +5,15 @@
 //! Each [`SqlDialect`](crate::SqlDialect) renders it to concrete SQL; a
 //! `TableProvider` may interpret it directly.
 //!
-//! The four statement kinds ([`Select`], [`Insert`], [`Update`], [`Delete`])
-//! are boxed inside the [`Statement`] enum so the enum stays small regardless of
-//! how large `Select` grows.
+//! The four structured statement kinds ([`Select`], [`Insert`], [`Update`],
+//! [`Delete`]) are boxed inside the [`Statement`] enum so the enum stays small
+//! regardless of how large `Select` grows. A fifth, [`Raw`](Statement::Raw),
+//! is the one hole in the representation — see its own documentation for the
+//! rule written on it.
 
 use serde::{Deserialize, Serialize};
 
-use crate::Expr;
+use crate::{Expr, Value};
 
 /// The top-level query AST.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +27,70 @@ pub enum Statement {
     Update(Box<Update>),
     /// A `DELETE` statement.
     Delete(Box<Delete>),
+    /// SQL text, rendered by the dialect **as it stands**, with its ordered
+    /// bind values.
+    ///
+    /// This enum is the representation of a query, and raw text is a hole in it.
+    /// There is exactly one, it is named, and the rule is written here:
+    ///
+    /// **A `Raw` is constructed only from an admin-authored query definition,
+    /// never from anything a caller sent.** A custom SQL query (§13.4) is SQL an
+    /// administrator typed into the application's own configuration; the values
+    /// its caller supplies arrive as `binds` and reach the database as bind
+    /// parameters, so an argument spelling `'; DROP TABLE …` is a *value*. Code
+    /// that assembles `sql` by formatting caller input into it has defeated the
+    /// query layer's one safety guarantee.
+    ///
+    /// `sql` carries the dialect's own placeholders already — it is written by
+    /// [`rewrite_named_params`](crate::rewrite_named_params), which turns the
+    /// admin's `:name` into them — so rendering appends the binds without
+    /// renumbering. That is also why a `Raw` is a **top-level** statement and
+    /// never nested inside another: there is nothing to renumber against.
+    Raw {
+        /// The SQL text, with this dialect's placeholders already in it.
+        sql: String,
+        /// The bind values the placeholders refer to, in placeholder order.
+        binds: Vec<Value>,
+        /// The backend's own name for the type each placeholder is to be sent
+        /// as, in placeholder order — empty to let the backend infer them.
+        ///
+        /// Stating them is what makes a custom query behave the same when it is
+        /// *run* as when it was *described*: `WHERE (:q IS NULL OR name = :q)`
+        /// has no inferable parameter type, so a query that prepared happily
+        /// against the admin's declared types would otherwise fail the first
+        /// time somebody called it. Backend type names in the AST are the one
+        /// place that is not a leak, because a raw statement is written for one
+        /// backend by construction.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        param_types: Vec<String>,
+    },
+}
+
+impl Statement {
+    /// A [`Raw`](Statement::Raw) statement whose parameter types the backend
+    /// infers. Read that variant's documentation before calling this: `sql` must
+    /// be admin-authored, never assembled from caller input.
+    pub fn raw(sql: impl Into<String>, binds: Vec<Value>) -> Statement {
+        Statement::Raw {
+            sql: sql.into(),
+            binds,
+            param_types: Vec::new(),
+        }
+    }
+
+    /// [`raw`](Statement::raw) with each placeholder's type stated — see
+    /// [`param_types`](Statement::Raw::param_types).
+    pub fn raw_typed(
+        sql: impl Into<String>,
+        binds: Vec<Value>,
+        param_types: Vec<String>,
+    ) -> Statement {
+        Statement::Raw {
+            sql: sql.into(),
+            binds,
+            param_types,
+        }
+    }
 }
 
 impl From<Select> for Statement {

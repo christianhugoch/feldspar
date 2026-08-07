@@ -559,6 +559,89 @@ async fn an_api_that_would_swallow_the_apps_ui_is_refused_on_save() -> sc_error:
     Ok(())
 }
 
+/// A custom SQL query, added through the admin API exactly as the editor will
+/// (TODO "API improvements" Phase 4).
+///
+/// The claim: the query survives the round trip, it comes back **described** —
+/// with the columns Postgres reported, which is what the editor shows the admin
+/// and what the client is typed with — and a broken one is a `400` carrying
+/// Postgres's own message rather than a stored endpoint that fails on its first
+/// call.
+#[tokio::test]
+async fn a_custom_sql_query_is_saved_described_and_returned() -> sc_error::Result<()> {
+    let tmp = TempDir::new("customsql");
+    let (router, catalog, _db) = setup(&tmp).await?;
+    create_user(&catalog, "admin@example.com", "correct-horse", ROLE_ADMIN).await?;
+    let mut admin = Client::new(router, BASE_DOMAIN);
+    admin.login("admin@example.com", "correct-horse").await;
+
+    let query = json!({
+        "name": "titlesLike",
+        "description": "Posts whose title matches a pattern",
+        "method": "GET",
+        "path": "/reports/titles",
+        "sql": "SELECT id, title FROM posts WHERE title LIKE :pattern ORDER BY id",
+        "params": [{ "name": "pattern", "type": "text" }],
+        "min_role": 40
+    });
+    let mut body = blog_body();
+    body["apis"] = json!([{
+        "provider": "rest",
+        "mount": "/api",
+        "config": { "queries": [query.clone()] }
+    }]);
+
+    let (status, created) = admin
+        .send("POST", "/api/applications", Some(body.clone()))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    // The response carries what was *stored*, columns and all — an admin who
+    // just saved a query is shown what their client method will return.
+    let stored = &created["apis"][0]["config"]["queries"][0];
+    assert_eq!(stored["name"], json!("titlesLike"), "{created}");
+    assert_eq!(stored["min_role"], json!(40), "{created}");
+    assert_eq!(
+        stored["columns"],
+        json!([
+            { "name": "id", "type": "int" },
+            { "name": "title", "type": "text" },
+        ]),
+        "{created}"
+    );
+
+    // It survives a reload, and it is on the application's endpoint set.
+    let (_, list) = admin.send("GET", "/api/applications", None).await;
+    assert_eq!(
+        list[0]["apis"][0]["config"]["queries"][0]["columns"], stored["columns"],
+        "{list}"
+    );
+    let app = sc_app::list_applications(&catalog).await?.remove(0);
+    let endpoints = sc_app::app_endpoints(&app, &catalog)?;
+    assert!(endpoints.find("titlesLike").is_some());
+
+    // A query that will not prepare is refused with Postgres's own message, and
+    // the application it was posted with keeps the query it had.
+    let mut broken = query.clone();
+    broken["sql"] = json!("SELECT titel FROM posts WHERE title LIKE :pattern");
+    let mut bad = body;
+    bad["apis"][0]["config"]["queries"] = json!([broken]);
+    let id = created["id"].as_str().expect("a minted id").to_owned();
+    let (status, err) = admin
+        .send("PUT", &format!("/api/applications/{id}"), Some(bad))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(
+        err["error"].as_str().unwrap_or_default().contains("titel"),
+        "{err}"
+    );
+    let (_, list) = admin.send("GET", "/api/applications", None).await;
+    assert_eq!(
+        list[0]["apis"][0]["config"]["queries"][0]["sql"], query["sql"],
+        "the stored query is untouched: {list}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn non_admins_are_rejected_from_every_application_endpoint() -> sc_error::Result<()> {
     let tmp = TempDir::new("authz");

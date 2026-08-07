@@ -52,7 +52,10 @@ pub use observer::{SchemaChanged, SchemaObserver};
 pub use prefetch::prefetch_bindings;
 pub use projection::SchemaProjection;
 pub use provider::{DriverTableProvider, TableProvider};
-pub use rls::{ROLE_GUC, disable_rls, disable_rls_sql, enable_rls, enable_rls_sql, run_in_context};
+pub use rls::{
+    Access, ROLE_GUC, disable_rls, disable_rls_sql, enable_rls, enable_rls_sql, run_in_context,
+    run_in_context_read_only,
+};
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
     ATTR_OWNERSHIP_FORMULA, ATTR_RLS_ENABLED, TABLE_META_TABLE, TableMeta, TableMetaId,

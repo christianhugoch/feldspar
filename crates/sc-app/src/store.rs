@@ -25,7 +25,7 @@ use sc_error::{Error, Result};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
 use serde_json::{Value as Json, json};
 
-use crate::api::{validate_api_config, validate_api_mounts};
+use crate::api::{describe_api_queries, validate_api_config, validate_api_mounts};
 use crate::application::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
 };
@@ -47,7 +47,13 @@ use crate::framework::{CFG_STORE, validate_framework_config};
 ///
 /// Saving does **not** build or mount anything. An app can be saved and unbuilt;
 /// that is what a newly created app is until its first build.
-pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()> {
+///
+/// **Returns the application as it was stored**, which is not always the one that
+/// arrived: a custom SQL query is described on the way in, so what comes back
+/// carries the result columns the database reported. A caller that answers with
+/// the value it sent instead would be telling the admin their query returns
+/// nothing — which is the drift §13.1 exists to prevent, in miniature.
+pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<Application> {
     let subdomain = app.subdomain.trim();
     if subdomain.is_empty() {
         return Err(Error::invalid("an application needs a subdomain"));
@@ -75,8 +81,26 @@ pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()
     // config, and a switch that silently does nothing is the failure this
     // milestone's aggregation setting would otherwise be.
     for api in &app.apis {
-        validate_api_config(api)?;
+        validate_api_config(app, api)?;
     }
+    // …and each custom SQL query is **prepared** against the database, which is
+    // both the last validation and the typing: a statement that will not prepare
+    // cannot be saved (it comes back carrying Postgres's own message), and one
+    // that will is stored with the result columns the database reported, so the
+    // shape the generated client promises is the shape the query returns. The
+    // application written below is therefore the one that came back from this,
+    // not the one that arrived.
+    let described = Application {
+        apis: {
+            let mut apis = Vec::with_capacity(app.apis.len());
+            for api in &app.apis {
+                apis.push(describe_api_queries(catalog, api).await?);
+            }
+            apis
+        },
+        ..app.clone()
+    };
+    let app = &described;
 
     if let Some(other) = load_application_by_subdomain(catalog, subdomain).await?
         && other.id != app.id
@@ -110,7 +134,7 @@ pub async fn save_application(catalog: &Catalog, app: &Application) -> Result<()
         );
         run(catalog, Statement::from(insert)).await?;
     }
-    Ok(())
+    Ok(described)
 }
 
 /// Load the application with this id, if it exists.

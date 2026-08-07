@@ -163,7 +163,7 @@ async fn a_setting_outside_the_providers_spec_is_refused_on_save() -> Result<()>
 
     // …and the same application with the setting spelled right saves.
     let ok = staff_app(ApiConfig::new("graphql", "/graphql").with(GRAPHQL_CFG_AGGREGATES, true));
-    validate_api_config(&ok.apis[0])?;
+    validate_api_config(&ok, &ok.apis[0])?;
     save_application(&cat, &ok).await?;
     assert_eq!(sc_app::list_applications(&cat).await?.len(), 1);
     Ok(())

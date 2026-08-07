@@ -24,10 +24,14 @@
 //! than admins only. The provider never touches cookies: it returns a
 //! [`SessionAction`] and the transport mints and carries the token.
 //!
-//! **Custom routes** (developer-authored guest code or SQL, §13.4) are carried by
-//! the endpoint model and rejected with `501 Not Implemented` at runtime: the
-//! MVP stubs them (see `TODO.md` Phase 9), and the honest failure is better than
-//! pretending.
+//! **Custom SQL queries** (§13.4) are the one thing here that is not a
+//! projection of the row layer: an administrator's own statement, at their own
+//! sub-path and method, with typed parameters bound into it and its result typed
+//! by the database that described it. [`custom`] holds the model, the rules and
+//! the authority note — read that module before changing anything about them.
+//! Custom routes authored as **guest code** remain carried by the endpoint model
+//! and rejected with `501 Not Implemented`: that half is still stubbed, and the
+//! honest failure is better than pretending.
 //!
 //! **Reads take a query string** (§13.4): `GET {mount}/{table}` accepts
 //! PostgREST's `?select=…&column=op.value&order=…&limit=…&offset=…`, parsed by
@@ -59,7 +63,10 @@ use sc_query::Value;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
+pub mod custom;
 mod query;
+
+use custom::CustomQuery;
 
 use crate::auth::{credentials, credentials_schema, user_summary_json, user_summary_schema};
 use crate::endpoint::{
@@ -164,6 +171,14 @@ const LOGIN: &str = "login";
 const LOGOUT: &str = "logout";
 const WHOAMI: &str = "whoami";
 
+/// The first path segments this provider's own routes claim, which a custom SQL
+/// query's sub-path may therefore not start with (see
+/// [`custom::validate_custom_queries`]).
+///
+/// A table's name is the other half of that rule, and it is not a constant — it
+/// is whatever the application declares.
+pub(crate) const RESERVED_SEGMENTS: [&str; 4] = [ACTIONS_SEGMENT, LOGIN, LOGOUT, WHOAMI];
+
 /// The app's own auth operations, as a client generator meets them.
 ///
 /// Public because a *consumer* of the endpoint set has to be able to ask whether
@@ -182,6 +197,10 @@ pub struct RestProvider {
     routes: HashMap<String, TableRoute>,
     /// Endpoint name → the trigger it runs, for the app's exposed subset.
     trigger_routes: HashMap<String, String>,
+    /// Endpoint name → the admin-authored SQL query it runs
+    /// ([`with_queries`](RestProvider::with_queries)). Keyed the same way the
+    /// [`HandlerRef::Sql`] on the endpoint names it, so dispatch is a lookup.
+    custom_routes: HashMap<String, CustomQuery>,
     /// The dispatcher an exposed trigger is run through. Injected by the server
     /// via [`with_dispatcher`](RestProvider::with_dispatcher); absent in the
     /// contexts that only need the endpoint *shapes* (client generation), where
@@ -404,6 +423,7 @@ impl RestProvider {
             endpoints,
             routes,
             trigger_routes,
+            custom_routes: HashMap::new(),
             dispatcher: None,
             evaluator: None,
             row_cap: DEFAULT_ROW_CAP,
@@ -415,6 +435,58 @@ impl RestProvider {
     pub fn with_row_cap(mut self, row_cap: u64) -> RestProvider {
         self.row_cap = row_cap;
         self
+    }
+
+    /// Project the application's **custom SQL queries** (§13.4), one endpoint
+    /// each, on top of the table and trigger routes.
+    ///
+    /// A `Result` rather than a builder that cannot fail, because a name a table
+    /// endpoint already holds would otherwise be a panic in a running server:
+    /// [`EndpointSet::register`] refuses duplicates, and the collision is
+    /// reachable — a table gains a column and is reprojected beside a query an
+    /// admin named after it. Saving the application refuses that combination
+    /// first ([`custom::validate_custom_queries`]); this is the same rule at the
+    /// other end, turning what would be a crash into a mount error naming both.
+    pub fn with_queries(mut self, queries: Vec<CustomQuery>) -> Result<RestProvider> {
+        for query in queries {
+            if self.endpoints.find(&query.name).is_some() {
+                return Err(Error::config(format!(
+                    "custom SQL query `{}` has the same name as an endpoint this \
+                     API already projects; rename the query",
+                    query.name
+                )));
+            }
+            self.endpoints
+                .register(custom::custom_endpoint(&self.mount, &query));
+            self.custom_routes.insert(query.name.clone(), query);
+        }
+        Ok(self)
+    }
+
+    /// Run an admin-authored SQL query (§13.4).
+    ///
+    /// The endpoint's `MinRole` — the query's own floor, admin unless the admin
+    /// said otherwise — was enforced before this ran. What happens here is the
+    /// rest of [`custom`]'s authority note: the caller's arguments are coerced
+    /// to their declared types and **bound**, the statement runs inside the
+    /// caller-context transaction so an RLS-protected table's policies still
+    /// decide what it can see, and a `GET` runs `READ ONLY` so a write behind
+    /// one fails rather than happening.
+    async fn run_custom(
+        &self,
+        query: &CustomQuery,
+        req: &ApiRequest,
+        cat: &Catalog,
+        user: Option<&User>,
+    ) -> Result<ApiResponse> {
+        let statement = custom::custom_statement(cat, query, req)?;
+        let caller = ownership::caller_context(user);
+        let rows = if query.read_only() {
+            sc_catalog::run_in_context_read_only(cat, &caller, &statement).await
+        } else {
+            sc_catalog::run_in_context(cat, &caller, &statement).await
+        }?;
+        Ok(ApiResponse::ok(custom::rows_to_json(&rows)))
     }
 
     /// Inject the JavaScript evaluator ownership formulas' reified path runs
@@ -466,11 +538,14 @@ impl RestProvider {
         Ok(ApiResponse::ok(result))
     }
 
-    /// Add a developer-authored custom route (guest code or SQL, §13.4).
+    /// Add a developer-authored custom route as a bare endpoint (§13.4).
     ///
-    /// The endpoint is projected and typed like any other, but running it is
-    /// stubbed for the MVP: [`handle`](RestProvider::handle) answers `501 Not
-    /// Implemented` for a [`HandlerRef::GuestCode`]/[`HandlerRef::Sql`] handler.
+    /// The endpoint is projected and typed like any other, but nothing here
+    /// knows how to *run* it: a [`HandlerRef::GuestCode`] is `501 Not
+    /// Implemented`, and a [`HandlerRef::Sql`] resolves against the queries
+    /// [`with_queries`](RestProvider::with_queries) registered — which is the
+    /// way to add a custom SQL query, since it carries the definition the
+    /// handler needs.
     pub fn with_custom_route(mut self, endpoint: Endpoint) -> RestProvider {
         self.endpoints.register(endpoint);
         self
@@ -1144,16 +1219,22 @@ impl ApiProvider for RestProvider {
                     )),
                 },
             },
-            // Custom routes are carried by the model but not executable in the
-            // MVP (design §13.4; TODO Phase 9).
+            // Custom routes authored as guest code are carried by the model but
+            // not executable yet (design §13.4).
             HandlerRef::GuestCode { language, .. } => Ok(ApiResponse::error(
                 501,
                 format!("custom {language} routes are not implemented yet"),
             )),
-            HandlerRef::Sql(_) => Ok(ApiResponse::error(
-                501,
-                "custom SQL routes are not implemented yet",
-            )),
+            HandlerRef::Sql(name) => match self.custom_routes.get(name) {
+                Some(query) => self.run_custom(query, &req, cat, user).await,
+                // A `Sql` endpoint registered by something other than
+                // `with_queries` — the set was extended with a route this
+                // provider has no query for.
+                None => Ok(ApiResponse::error(
+                    501,
+                    format!("custom SQL query `{name}` has no definition here"),
+                )),
+            },
         }
     }
 }
@@ -1545,6 +1626,43 @@ mod tests {
         let ts = crate::generate_client(p.endpoints());
         assert!(ts.contains("search("));
         assert!(ts.contains("listPosts(query?: ListPostsQuery)"));
+    }
+
+    /// A custom SQL query is an endpoint like any other — typed client method,
+    /// role floor, query-string parameters — and its name is checked against
+    /// what the API already projects rather than panicking the registry.
+    #[test]
+    fn custom_sql_queries_are_projected_with_their_own_authority() {
+        let query = custom::CustomQuery::new(
+            "topAuthors",
+            Method::Get,
+            "/reports/top-authors",
+            "SELECT author FROM posts WHERE id > :since",
+        )
+        .params([custom::CustomParam::new("since", ValueType::Int)])
+        .min_role(40);
+        let p = RestProvider::project("/api", &[table("posts", AccessRules::default())])
+            .with_queries(vec![query.clone()])
+            .expect("projects");
+
+        let ep = p.endpoints().find("topAuthors").unwrap();
+        assert_eq!(ep.path.pattern(), "/api/reports/top-authors");
+        // The query's own floor, not the tables' — a custom query's authority is
+        // its own (§13.4).
+        assert_eq!(ep.auth, AuthRequirement::MinRole(40));
+        assert_eq!(ep.query.len(), 1);
+        let ts = crate::generate_client(p.endpoints());
+        assert!(ts.contains("topAuthors("), "{ts}");
+
+        // A name the API already projects is a mount error, not a panic.
+        let clash = custom::CustomQuery::new("listPosts", Method::Get, "/x", "SELECT 1 AS n");
+        let err = match RestProvider::project("/api", &[table("posts", AccessRules::default())])
+            .with_queries(vec![clash])
+        {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a name the API already projects must be refused"),
+        };
+        assert!(err.contains("listPosts"), "{err}");
     }
 
     #[test]

@@ -55,6 +55,10 @@ pub use ownership::{
     read_rows_as, update_row_as,
 };
 pub use provider::{ApiProvider, ApiRequest, ApiResponse, RawBody, SessionAction};
+pub use rest::custom::{
+    CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, QueryColumn, custom_queries,
+    describe_custom_query, set_custom_queries, validate_custom_queries,
+};
 pub use rest::{
     AUTH_ENDPOINTS, DEFAULT_ROW_CAP as REST_DEFAULT_ROW_CAP, REST_PROVIDER, RestProvider, op_name,
     rest_config_spec, rest_row_cap,

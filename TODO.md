@@ -204,30 +204,46 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 4 — Custom SQL queries: the model and the execution
 
-- [ ] **`CustomQuery`** (in `sc-api`): name, description, HTTP method, sub-path, SQL, ordered
+- [x] **`CustomQuery`** (in `sc-api`): name, description, HTTP method, sub-path, SQL, ordered
       typed parameters, `min_role`. Validated on save — a name that is a valid client method
       name and unique within the API, a path that cannot collide with a table's routes, at
       least one statement, and every `:name` in the SQL declared as a parameter (and every
-      declared parameter used).
-- [ ] **`Statement::Raw { sql, binds }`** in `sc-query`, rendered by the dialect as-is with its
+      declared parameter used). (Also: a name no *table endpoint* already holds, a path outside
+      `actions`/`login`/`logout`/`whoami`, and no two result columns of one name — which would
+      collapse into one JSON property. Stored in the API row's config as a typed `queries`
+      array, lifted out of the settings-spec check by `validate_api_config`, which now takes
+      the whole `Application` because the path and name rules are about the app's tables.)
+- [x] **`Statement::Raw { sql, binds }`** in `sc-query`, rendered by the dialect as-is with its
       binds, with the construction rule of decision 4 written where the variant is declared.
-      Unit tests for rendering and serde round-tripping.
-- [ ] **The `:name` rewriter**: named parameters to the dialect's positional placeholders,
+      Unit tests for rendering and serde round-tripping. (Plus `param_types`: `WHERE :q IS NULL`
+      has no inferable parameter type, so a query that *described* under the admin's declared
+      types would have failed the first time it *ran*. Describing and running derive them from
+      one place.)
+- [x] **The `:name` rewriter**: named parameters to the dialect's positional placeholders,
       skipping single-quoted literals, dollar-quoted bodies, `--` and `/* */` comments and `::`
       casts. Unit-tested against each of those specifically, because each is a way to corrupt
-      an admin's query silently.
-- [ ] **`DatabaseDriver::describe(sql, param_types) -> Vec<(String, TypeRef)>`**, implemented by
+      an admin's query silently. (`sc_query::rewrite_named_params`; also skips quoted
+      identifiers, nests block comments as Postgres does, gives a repeated `:name` one
+      placeholder and one bind, and counts statements on the same scan.)
+- [x] **`DatabaseDriver::describe(sql, param_types) -> Vec<(String, TypeRef)>`**, implemented by
       `PgDriver` over `prepare_typed`, mapping Postgres's reported column types through
       `BasicType::from_sql_type`. A statement that will not prepare returns Postgres's own error.
-- [ ] **Projection into the endpoint set**: one endpoint per query at `{mount}{path}` with the
+      (Returns `Vec<DescribedColumn>` — name plus the backend's own type name — because `sc-db`
+      does not know about `TypeRef`; the mapping is `sc-api`'s, exactly as `PhysicalTable`'s
+      `sql_type` is mapped by the type layer.)
+- [x] **Projection into the endpoint set**: one endpoint per query at `{mount}{path}` with the
       admin's method; parameters as **query parameters** for `GET`/`DELETE` and as a typed body
       for the others; the output `TypeSchema` from `describe`; `AuthRequirement::MinRole` from
       the query's `min_role`. So a custom query gets a typed client method like everything else.
-- [ ] **Execution** in the REST provider: coerce each argument to its declared type (the row
+      (`RestProvider::with_queries`, a `Result` because a name the API already projects would
+      otherwise panic the registry in a running server.)
+- [x] **Execution** in the REST provider: coerce each argument to its declared type (the row
       layer's own `rows::column_value`), bind, run inside the caller-context transaction —
       `READ ONLY` for `GET` (decision 7) — and return the rows as JSON. A database error is an
-      Application error carrying Postgres's message (§16).
-- [ ] Tests (real Postgres): a two-parameter query returns the same rows as the SQL run by hand;
+      Application error carrying Postgres's message (§16). (The coercion is `json_to_value`
+      against the declared `ValueType` — there is no table to hold the value against — and
+      `sc-catalog` grew `run_in_context_read_only` for the transaction.)
+- [x] Tests (real Postgres): a two-parameter query returns the same rows as the SQL run by hand;
       an argument containing `'; drop table …` is a *value*, and the table is still there; a
       missing required argument is a 400 naming it; a wrongly-typed one is refused before the
       statement runs; a `GET` query that writes is refused by the read-only transaction; a

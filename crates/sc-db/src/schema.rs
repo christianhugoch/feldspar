@@ -56,6 +56,23 @@ pub struct Column {
     pub default: Option<String>,
 }
 
+/// One column of a prepared statement's result, as reported by
+/// [`describe`](crate::DatabaseDriver::describe).
+///
+/// Deliberately not a [`Column`]: a result column has no nullability the backend
+/// will commit to and no default — an expression is not a column of a table.
+/// What it has is a name and a type, which is exactly what typing a custom
+/// query's response needs. As with [`Column::sql_type`], the type is the
+/// backend's own name for it; mapping it to a Saltcorn type is the type layer's
+/// job (§6), not the driver's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribedColumn {
+    /// The column's output name (an alias, or whatever the backend derived).
+    pub name: String,
+    /// The backend's own type name (e.g. `text`, `int8`, `numeric`).
+    pub sql_type: String,
+}
+
 /// A foreign-key constraint. Local `columns` reference `referenced_columns` of
 /// `referenced_table`, positionally. The referenced columns need not be a
 /// primary key (the goals require FKs to non-PK columns).
