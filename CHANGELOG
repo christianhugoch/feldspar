@@ -2,6 +2,39 @@
 
 Changes in reverse chronological order.
 
+## The GraphQL provider, written down where the design lives
+
+§13.4 of the technical design described a provider that did not exist yet, in a paragraph. It now
+describes the one that does: the schema shape a caller actually sees, the naming rule (and why an
+underivable name is an omission with a diagnostic rather than something mangled to fit), the
+aggregate lowering with the SQL it produces, the level-batched execution, the four authorization
+rules that are genuinely new because an aggregate and a projected join are new ways to *observe*
+rows, and the four limits with their defaults and the reason each is counted where it is. Design
+documents are read by people deciding whether to change something, so it says why each of those
+went the way it did rather than what the modules are called.
+
+[docs/GRAPHQL_API.md](docs/GRAPHQL_API.md) keeps its own job — the libraries surveyed, the
+deviations from Hasura, the alternatives rejected — and is marked **implemented**, with a note at
+each of the three places the implementation went somewhere the record did not: the explorer
+became an admin endpoint because `connect-src 'self'` forbids the admin page from reaching an
+app's subdomain at all; a database integer is `BigInt` rather than GraphQL's 32-bit `Int`, and a
+decimal is a string, because a scalar must not lose information silently; and a GraphQL
+aggregate's subquery aliases are `_sc_g…` so that one statement can carry both a calculated field
+and an aggregate without a collision. A design record that quietly disagrees with the code is
+worse than no record, and rewriting it to match would erase the decisions it exists to hold.
+
+[docs/tutorial-graphql.md](docs/tutorial-graphql.md) is the other half, in the shape the other
+tutorials take: two tables and a relation, an application with **both** providers on one
+subdomain, the milestone's own query run in the explorer, and then the same query typed in the
+React app so a column removed in the admin UI is a `tsc` error naming the call site. It says what
+the server did with each query — two statements, and one if you drop the child list, because the
+constrained count was never a round trip of its own — and it carries a `curl` recipe, since a
+GraphQL endpoint answers `200` with its errors in the body and that is the first sentence
+somebody debugging one needs. Two of its steps exist because everything before them runs as an
+admin, the one caller no rule applies to: what a caller who is *not* one sees (the nullable child
+list, the refusal that is never a quiet zero, a key that is a read of the table it reaches), and
+what one query is allowed to cost.
+
 ## An explorer for it, with no more authority than the admin holding it
 
 An application that enables GraphQL now has a screen: a query editor, a variables pane, a

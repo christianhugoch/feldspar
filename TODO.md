@@ -336,15 +336,23 @@ the explorer and through the app's own mount in the same admin's session is the 
 introspection through it describes the application's schema and not a table outside its declared
 subset; a write through it is the row layer's write, read back over REST.
 
-## Phase 10 — Documentation
+## Phase 10 — Documentation ✅
 
-- [ ] **§13.4 of the technical design** gains the GraphQL provider: the schema shape, the
+- [x] **§13.4 of the technical design** gains the GraphQL provider: the schema shape, the
       aggregate lowering, the authorization rules and the limits, with
       [docs/GRAPHQL_API.md](./docs/GRAPHQL_API.md) named as the record behind them.
-- [ ] A tutorial beside the others (`docs/tutorial-graphql.md`): enable the provider, run the
+- [x] A tutorial beside the others (`docs/tutorial-graphql.md`): enable the provider, run the
       motivating query, add a constrained aggregate, and type it in a React app.
-- [ ] CHANGELOG entries as the phases land, in this repository's voice: what changed and why it
+- [x] CHANGELOG entries as the phases land, in this repository's voice: what changed and why it
       is that way, not a list of files.
+
+`GRAPHQL_API.md` is a *record*, not a manual, so it was not rewritten to match the code: it still
+says "researched and decided" about decisions taken before any of this existed, marked
+**implemented** at the top, with a note at each of the three places the implementation went
+somewhere it did not — the explorer became an admin endpoint (`connect-src 'self'` forbids the
+admin page from reaching an app's subdomain), an integer is `BigInt` rather than GraphQL's 32-bit
+`Int`, and a GraphQL aggregate's subquery aliases are `_sc_g…`. Editing the record to agree with
+the code would erase the alternatives it exists to hold.
 
 ---
 

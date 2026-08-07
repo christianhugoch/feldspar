@@ -2465,18 +2465,167 @@ All API access flows through the same authorization layer (§7), so an API calle
 the rows a user of that role/ownership would, and every provider participates in the shared
 TypeScript consumer generation (§13.1).
 
-**The GraphQL provider** is the second one, and it exists for what REST cannot express: a shape
-the *caller* chooses — rows, values reached through outgoing keys, and aggregations over child
-tables qualified by a predicate on the child ("for each department, the employees earning below
-50 000"). It is built on `async-graphql`'s **dynamic** schema, because an application's schema is
-runtime data rather than Rust types, and it aggregates by lowering a selection into the *same*
-correlated subquery `sc-expr`'s Ↄ chains translate to (§6.2, §7.3), projected as another column
-of the parent `SELECT`. Reads go through `sc-api`'s ownership entry points and writes through its
-row layer, so an aggregate is subject to the child table's own access rules — an untranslatable
-child ownership formula refuses the aggregate rather than counting rows the caller may not read —
-and depth/complexity limits are configured rather than optional. The library survey, the schema
-shape, the authorization rules and the rejected alternatives are recorded in
-[GRAPHQL_API.md](./GRAPHQL_API.md).
+#### The GraphQL provider
+
+`sc-api::graphql` is the second provider, and it exists for what REST cannot express: a shape the
+*caller* chooses — rows, values reached through outgoing keys, child rows, and **aggregations
+over child tables qualified by a predicate on the child** ("for each department, the employees
+earning below 50 000"). Over REST that is either a route per question or fetching every employee
+and counting them in the browser. The library survey, the rejected alternatives and the normative
+schema shape are recorded in [GRAPHQL_API.md](./GRAPHQL_API.md); this section is what the
+provider *is*.
+
+It is built on `async-graphql` 7.2's **dynamic** schema, because an application's schema is
+runtime data rather than Rust types: an admin adds a column and the API has it at the next mount,
+which a macro-driven library could only do by regenerating and recompiling Rust. The schema is
+rebuilt where the REST `EndpointSet` is — `AppMounts` observes the catalog — and a schema that
+will not build is a **mount failure naming the table that caused it**, never a half-served API.
+
+It projects **two endpoints**, which is genuinely all a GraphQL API is: `POST {mount}` carrying
+`{query, variables, operationName}`, and `GET {mount}/schema.graphql` serving the SDL. So it
+participates in the shared endpoint model and the TypeScript generation of §13.1 exactly as REST
+does. Both endpoints are `Public`, because the gate is the **table's**, at resolve time, not the
+endpoint's (decision: one schema per application, not one per role — Hasura compiles a schema per
+role; we authorize when we resolve and refuse with an error naming the table). `ApiRequest`
+carries no headers, so there is no `Accept` to negotiate on and the legacy GraphQL-over-HTTP rule
+applies: `application/json`, **200 with an `errors` array**, validation failures included.
+
+**The schema shape** is Hasura-flavoured, because that is the quality bar and the shape callers
+already know:
+
+```graphql
+type Query {
+  departments(where: DepartmentsBoolExp, order_by: [DepartmentsOrderBy!], limit: Int, offset: Int): [Departments!]!
+  departments_by_pk(id: BigInt!): Departments
+  departments_aggregate(where: DepartmentsBoolExp): DepartmentsAggregate!
+}
+
+type Departments {
+  id: BigInt!
+  name: String!
+  manager: Users                       # outgoing key — a Ⱶ-join, a correlated scalar subquery
+  employees(where: EmployeesBoolExp, order_by: [EmployeesOrderBy!], limit: Int, offset: Int): [Employees!]
+  employees_aggregate(where: EmployeesBoolExp): EmployeesAggregate!
+}
+
+type EmployeesAggregate {
+  count(distinct: EmployeesSelectColumn): Int!
+  sum: EmployeesNumericFields!   avg: EmployeesAvgFields!
+  min: EmployeesComparableFields!   max: EmployeesComparableFields!
+}
+```
+
+with `insert_X(object:)`, `update_X_by_pk(pk_columns:, set:)` and `delete_X_by_pk(…)` on
+`Mutation`. Column types map onto GraphQL's three usable scalars plus custom ones where GraphQL
+has nothing that would not lose information — `BigInt` (our integers are `bigint`; GraphQL's
+`Int` is fixed at 32 bits), `Decimal` and `Bytes` as text, `Date`, `Time`, `Timestamp`, `UUID`,
+`JSON`. A `File` field projects as `FileValue { path, url }`, where the URL is the one the
+**REST** provider already serves the bytes at: a GraphQL field must not become a second
+file-download path. The deviations from Hasura are deliberate and few: no `aggregate`/`nodes`
+wrapper (the sibling list field is how you page rows), `count(distinct: Column)` because that is
+what `Expr::Agg` spells, a child list's `limit`/`offset` are **per parent**, and a child list
+field is **nullable** — the child read applies the *child* table's rules, and a non-null field
+would propagate its refusal up and null the parent instead of leaving the refusal on the field
+that was refused.
+
+**Names are derived in one place and never mangled.** GraphQL names are `/[_A-Za-z][_0-9A-Za-z]*/`,
+which Ⱶ and Ↄ are not. Type names are PascalCased (`blog_posts` → `BlogPosts`); a table or field
+that cannot become a legal name, or whose derived name collides with another's, is **omitted with
+a diagnostic** rather than mangled to fit — mangling invents collisions, and a schema that
+quietly answers for the wrong table is worse than one that admits it is missing one. An inverse
+relation is `<child>` when exactly one of the child's key fields points here and `<child>_by_<key>`
+when more than one does, which is the disambiguation `childↃkey` spells, arrived at from the
+other direction.
+
+**The provider does not aggregate; `sc-expr` does.** An aggregate selection lowers to the *same*
+correlated subquery a Ↄ chain translates to (§6.2, §7.3, [AGG_EXPRS.md](./AGG_EXPRS.md)),
+projected as another column of the parent `SELECT`:
+
+```sql
+SELECT "departments".*,
+       (SELECT count(*) FROM "employees" AS "_sc_g1"
+         WHERE "_sc_g1"."department" = "departments"."id" AND "_sc_g1"."salary" < $1) AS …
+FROM "departments"
+```
+
+One implementation of "sum coalesces to 0, avg/min/max over no rows are null, null keys are
+ignored", shared by calculated fields, ownership formulae and the wire — which is the whole
+reason this provider was affordable. The child predicate is folded into the subquery's `WHERE`,
+so the constrained count is computed by the database rather than by fetching the children and
+counting them, and the rule is "whichever read reaches the row projects them": a batched child
+list carries its own aggregates the same way.
+
+**Execution is level-batched**: one `SELECT` for the root (columns, calculated fields, one
+correlated subquery per requested Ⱶ-joinfield, one per requested aggregate — only what the
+selection set actually asks for), and one `SELECT` per child relation *per level* through an
+`async_graphql::dataloader::DataLoader`, so siblings collapse into `WHERE key IN (…)` rather than
+one query per parent. A per-parent `limit` is `row_number() OVER (PARTITION BY …)` inside that
+one read, which is why `sc-query` grew the window form. Compiling a whole operation into a single
+`json_agg` statement — PostGraphile's design — is faster, is a milestone of its own, and would
+bypass the row layer, which is where the rules live.
+
+**Authorization is §7's, reached through `sc-api`'s own entry points** rather than restated:
+reads through `ownership::read_row_values_as`, aggregates through `ownership::aggregate_values_as`,
+writes through `ownership::insert_row_as` / `update_row_as` / `delete_row_as` (which are
+`rows::create_row_ctx` / `update_row_guarded` / `delete_row_guarded` plus §7.3). Four things are
+new here, because an aggregate and a projected join are new ways to *observe* rows:
+
+- **An aggregate never counts a row the caller may not read.** Under RLS the whole read — parent,
+  joinfields and aggregate subqueries — runs inside the caller-context transaction, so the child
+  tables' policies apply to the correlated subqueries. Without RLS, the child's translated
+  ownership predicate is ANDed into the subquery's `WHERE`.
+- **An untranslatable child ownership formula refuses the aggregate**, with an error naming the
+  table. A refusal is an error, never a quiet zero: a count over rows the caller cannot read is a
+  leak, and a silent `0` is worse because nobody investigates it.
+- **A Ⱶ-join is a read of the table it reaches** (`ownership::join_guard`): the caller meets the
+  target's floor, or the target is RLS-enabled and its policies decide inside the caller's
+  transaction, or the join is refused by name. A target whose access comes from an ownership
+  *formula* is refused either way — the join subquery is built from the schema shape and has no
+  `WHERE` this provider owns to fold a predicate into, so answering would hand over a withheld
+  row one column at a time.
+- **A mutation's refusal is the row layer's**, with its own message and a machine-readable
+  `extensions.code` (`BAD_USER_INPUT`, `FORBIDDEN`, `NOT_FOUND`, `CONFIGURATION_ERROR`,
+  `INTERNAL_SERVER_ERROR`), `extensions.table`, and `extensions.field` when the failure was about
+  a column — enough for a form to put the message next to the input. A table only gets the
+  mutations the row layer could carry out: no `update`/`delete` without a single primary key, no
+  insert with no writable column.
+
+Aliases, fragments and variables are the caller's input and never reach SQL as identifiers:
+response keys come from the operation, column names come from the catalog.
+
+**Limits are configuration, not an option.** REST's cost is bounded by its shape — a route nobody
+wrote cannot be asked for — and a GraphQL endpoint is the opposite, so `GraphqlLimits` carries
+four numbers, per application, with defaults that are *set*: `max_depth` (15) and
+`max_complexity` (2 000) are `async-graphql` validation rules and therefore refuse **before a
+statement is issued**; `row_cap` (500) is what a list field takes when the caller names no
+`limit` and the ceiling one they name is clamped to; and `statement_budget` (32) is counted as it
+is spent, because the number of round trips is a property of execution rather than of the
+document. The library's two terse refusals are rewritten to name the bound they hit. Introspection
+stays **on**: the SDL is served beside the endpoint anyway, and every tool on the browser side
+needs it — the defaults are chosen to admit the standard introspection query, which is deeper
+than anything written by hand.
+
+**Enabling it, and generating for it.** `app_providers_with` builds the provider from the *same*
+resolved table set and the *same* JavaScript evaluator the REST projection gets, so one
+application's two APIs cannot disagree about which tables exist or about a row an ownership
+formula decides; the mount check refuses two providers on one mount, since a request resolves to
+the longest matching mount and the loser of that tie is a whole API that is mounted, generated a
+client for and unreachable. For an application that enables the provider — and only for one — the
+build writes `src/saltcorn/schema.graphql` from `Schema::sdl()` and a dependency-free
+`src/saltcorn/graphql.ts` beside the REST `client.ts`, and points a `gql.tada` language-service
+plugin at the SDL, so a query's result and variable types are TypeScript's own work with no
+codegen step and the scaffold's `tsc --noEmit` makes a stale query a build failure. Nothing is
+added to `package.json`: an application's CSP is `default-src 'self'` and its dependencies are
+the developer's business.
+
+**The explorer is an admin screen** (§12), for the same CSP reason: the CDN GraphiQL every server
+ships cannot load, and vendoring GraphiQL into every application is a dependency the app never
+asked for. It posts to `runApplicationGraphql`, an admin endpoint that finds the application's
+*mounted* provider and calls the very `ApiProvider::handle` a request to the app's subdomain
+reaches, with the signed-in admin as the caller — so it holds exactly the authority of the person
+driving it, which the screen says in as many words.
+
+The tutorial is [tutorial-graphql.md](./tutorial-graphql.md).
 
 ### 13.5 Serving: TLS certificates and readiness notification
 

@@ -172,6 +172,19 @@ fn tutorials_are_cross_linked() {
         agents.contains("tutorial-triggers.md"),
         "the agents tutorial builds on the triggers tutorial and should link it"
     );
+    assert!(
+        agents.contains("tutorial-graphql.md"),
+        "the agents tutorial should point at the GraphQL tutorial as a next step"
+    );
+    let graphql = read(&root, "docs/tutorial-graphql.md");
+    assert!(
+        graphql.contains("tutorial-react-todo.md"),
+        "the GraphQL tutorial builds on the React tutorial and should link it"
+    );
+    assert!(
+        graphql.contains("tutorial-ownership.md"),
+        "the GraphQL tutorial leans on the ownership rules and should link them"
+    );
 }
 
 /// The agents tutorial has to teach **the whole loop**, because every step of it
@@ -331,6 +344,80 @@ fn the_triggers_tutorial_covers_all_three_kinds_of_trigger() {
         assert!(
             triggers.contains(fragment),
             "the triggers tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// §13.4 is the GraphQL milestone's design section, and the parts worth having
+/// written down are the ones somebody would otherwise have to read the provider
+/// to learn: what the wire contract looks like, that the aggregate is *not*
+/// implemented here but lowered onto `sc-expr`, the four authorization rules an
+/// aggregate and a projected key made necessary, and the four bounds one
+/// operation is served under. A section that lost any of them would still read
+/// like a description of a GraphQL API, which is exactly why it is worth a test.
+#[test]
+fn the_design_records_what_the_graphql_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        // The wire contract: two endpoints, one schema, the legacy HTTP rule.
+        "POST {mount}",
+        "schema.graphql",
+        "200 with an `errors` array",
+        "BigInt",                  // …and a scalar that does not silently lose information
+        "FileValue { path, url }", // …nor become a second download path
+        // Names are derived, and an underivable one is an omission.
+        "<child>_by_<key>",
+        "omitted with",
+        // The load-bearing decision: the provider does not aggregate.
+        "_sc_g1",
+        "count(distinct: Column)",
+        "row_number() OVER (PARTITION BY …)",
+        // The four authorization rules.
+        "ownership::aggregate_values_as",
+        "ownership::join_guard",
+        "never a quiet zero",
+        "nullable", // …which is why a child list field is
+        // What one operation may cost, and where each bound is counted.
+        "max_complexity",
+        "statement_budget",
+        "statement is issued", // …two of which refuse before one ever is
+        // …and the screen that drives it with the admin's own authority.
+        "runApplicationGraphql",
+    ] {
+        assert!(
+            design.contains(fragment),
+            "§13.4 should record `{fragment}`"
+        );
+    }
+}
+
+/// The GraphQL tutorial has to reach the milestone's own query and then keep
+/// going past the happy path: an admin is the one caller no rule applies to, so
+/// a tutorial that stopped at "it works" would teach a GraphQL API with no
+/// authorization and no cost. Each fragment below is one thing a reader would
+/// otherwise have to discover in production.
+#[test]
+fn the_graphql_tutorial_reaches_the_motivating_query_and_its_rules() {
+    let root = workspace_root();
+    let tutorial = read(&root, "docs/tutorial-graphql.md");
+    for fragment in [
+        "employees_aggregate(where:", // the query the milestone exists for
+        "_sc_g1",                     // …and the correlated subquery it becomes
+        "row_number()",               // a nested `limit` is per parent
+        "DataLoader",                 // …and a child list is one statement per level
+        "insert_employees",           // the write path
+        "BAD_USER_INPUT",             // …and what a refusal carries
+        "x-csrf-token",               // calling it without a browser
+        "errors in the body",         // …where a GraphQL endpoint puts its refusals
+        "gql.tada",                   // typing it in the app, with no codegen step
+        "partial results",            // what a caller who is not an admin sees
+        "quiet zero",                 // …and the refusal that is never a count
+        "32",                         // the statement budget, in the limits table
+    ] {
+        assert!(
+            tutorial.contains(fragment),
+            "the GraphQL tutorial should cover `{fragment}`"
         );
     }
 }

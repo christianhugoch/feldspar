@@ -379,3 +379,9 @@ on its own. The formula language the prompt is written in is
 [tutorial-triggers.md](tutorial-triggers.md)'s; and the project the coding agent edits is the one
 [tutorial-react-todo.md](tutorial-react-todo.md) generated — the agent is using the same IDE
 capabilities you have, through the same file store.
+
+The next tutorial gives an application a **second API** beside its REST one:
+[tutorial-graphql.md](tutorial-graphql.md) enables the GraphQL provider, answers "for each
+department, how many employees earn under 50 000" in one round trip with the count computed by
+the database, and types that query in the React app so a schema change breaks the build rather
+than the page.

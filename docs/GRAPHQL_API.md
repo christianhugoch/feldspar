@@ -1,8 +1,12 @@
 # The GraphQL API provider
 
 The design record for the second `ApiProvider` (§13.4): a GraphQL projection of an
-application's tables, beside the REST one. Status: **researched and decided, not
-implemented** — the plan is `TODO.md`.
+application's tables, beside the REST one. Status: **implemented** — `crates/sc-api/src/graphql`,
+built to this record; the plan it was built from is `TODO.md`, what it became is
+[TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md) §13.4, and the walkthrough is
+[tutorial-graphql.md](./tutorial-graphql.md). This file stays as it was written — the decisions
+and the alternatives they were taken over — with a note where the implementation went somewhere
+else.
 
 ## Why GraphQL, stated as a requirement
 
@@ -135,6 +139,13 @@ a query editor, a variables box, a result pane and the schema browsed from intro
 bundled with the admin SPA (which already vendors its own assets under
 `ui/admin/src/vendor`). It talks to the application's mount as the logged-in admin.
 
+> **As built**: the same `default-src 'self'` also forbids the admin page from `fetch`ing its
+> own subdomains (`connect-src 'self'`), so the screen posts to an **admin endpoint**,
+> `runApplicationGraphql`, which finds the app's mounted provider and calls the very
+> `ApiProvider::handle` a request to `staff.example.com/graphql` reaches, with the signed-in
+> admin as the caller. Same schema, same limits, same authorization — the endpoint's only
+> decision is who is asking.
+
 ---
 
 ## 3. Where the aggregations come from
@@ -155,14 +166,15 @@ becomes one column on the departments query:
 
 ```sql
 SELECT "departments".*,
-       (SELECT count(*) FROM "employees" "_sc_a1"
-         WHERE "_sc_a1"."department" = "departments"."id"
-           AND "_sc_a1"."salary" < $1) AS "employees_aggregate.count"
+       (SELECT count(*) FROM "employees" AS "_sc_g1"
+         WHERE "_sc_g1"."department" = "departments"."id"
+           AND "_sc_g1"."salary" < $1) AS "employees_aggregate.count"
 FROM "departments"
 ```
 
 which is byte-for-byte the shape `employeesↃdepartment.filter(r => r.salary < 50000).length`
-already translates to. One query, one implementation of the semantics (`sum` coalesces to 0,
+already translates to (the aliases are `_sc_g…` rather than the translator's own `_sc_a…`, so a
+GraphQL aggregate and a calculated field in the same statement cannot collide). One query, one implementation of the semantics (`sum` coalesces to 0,
 `avg`/`min`/`max` on no rows are null, null keys are ignored, `count(DISTINCT …)`), and
 aggregates that behave identically wherever they are asked for — in a calculated field, in
 an ownership formula, or over the wire.
@@ -193,12 +205,12 @@ know, with the deviations noted.
 ```graphql
 type Query {
   departments(where: DepartmentsBoolExp, order_by: [DepartmentsOrderBy!], limit: Int, offset: Int): [Departments!]!
-  departments_by_pk(id: Int!): Departments
+  departments_by_pk(id: BigInt!): Departments
   departments_aggregate(where: DepartmentsBoolExp): DepartmentsAggregate!
 }
 
 type Departments {
-  id: Int!
+  id: BigInt!
   name: String!
   # outgoing key — a Ⱶ-join, resolved as a correlated scalar subquery
   manager: Users
@@ -218,10 +230,16 @@ type EmployeesAggregate {
 
 input EmployeesBoolExp {
   _and: [EmployeesBoolExp!]  _or: [EmployeesBoolExp!]  _not: EmployeesBoolExp
-  salary: IntComparison        # { eq gt gte lt lte in nin is_null }
+  salary: BigIntComparison     # { eq ne gt gte lt lte in nin is_null }
   name: StringComparison       # + { like ilike }
 }
 ```
+
+> **As built**: a database integer is `BigInt`, not GraphQL's 32-bit `Int` (which `count` still
+> is), a decimal is a `Decimal` carried as a string, and `avg` has its own
+> `<Table>AvgFields` — the average of an integer column is a decimal, not an integer. A `File`
+> field is `FileValue { path, url }`, where the URL is the one the REST provider already serves
+> the bytes at.
 
 **Deviations from Hasura, deliberately:**
 
