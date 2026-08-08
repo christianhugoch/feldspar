@@ -2086,10 +2086,19 @@ admin UI API and every application API:
 pub struct Endpoint {
     pub method:  Method,
     pub path:    PathSpec,          // literal segments + typed params, e.g. /tables/{id}/rows
-    pub input:   TypeSchema,        // query + body args
+    pub query:   Vec<QueryParam>,   // the query-string parameters it accepts, in order
+    pub input:   TypeSchema,        // body args
     pub output:  TypeSchema,        // result value
     pub auth:    AuthRequirement,   // role / ownership, enforced via §7
     pub handler: HandlerRef,        // Rust fn, or guest code / SQL for custom routes
+}
+
+pub struct QueryParam {
+    pub name:     String,           // the query-string key, and the options-object property
+    pub ty:       ValueType,
+    pub required: bool,
+    pub repeated: bool,             // the key may appear many times, and each occurrence counts
+    pub map:      bool,             // the caller supplies the *keys*: a filter vocabulary
 }
 
 pub enum TypeSchema {               // enough to describe args & results and emit TS types
@@ -2113,6 +2122,34 @@ pub enum TypeSchema {               // enough to describe args & results and emi
   TypeScript **type declarations and a typed API-consumer library**. GOALS requires this for
   both the admin UI and per-application APIs, so `ui/admin` and every code-framework app get a
   type-checked client that cannot drift from the server contract.
+
+**A query parameter is part of the endpoint.** Path parameters were always in the value; query
+parameters had to join them the moment an endpoint's *interesting* input arrived that way —
+REST's `?select=…&published=gte.…` (§13.4) and a `GET` custom query's arguments. The reason is
+§13.1's whole reason: a generated client that cannot express a request leaves the developer
+writing an untyped `fetch` beside it, and that hand-written call is where drift starts. So the
+endpoint declares them and the generator emits them:
+
+- **One options object, last, and optional when every parameter in it is.** `listBooks(query?: {
+  select?: string; order?: string; limit?: number; offset?: number; filter?: Record<string,
+  string> })` — so declaring a `select` nobody has to pass does not put an empty `{}` at every
+  existing call site, and an endpoint declaring none generates exactly the method it did before
+  query parameters existed.
+- **`URLSearchParams` does the encoding**, never string concatenation: a filter value
+  legitimately contains `&`, `=`, `+` and spaces (`title=eq.rock & roll`), and a client that
+  pasted those into the URL would send a different query than the caller wrote.
+- **`repeated` appends once per element**, which is what makes `?published=gte.2020&published=lt.2024`
+  expressible at all. **`map` is the caller's own keys** — a filter is keyed by *column*, so no
+  fixed parameter name can describe it; the parameter's name becomes the options property and each
+  entry becomes its own pair. Typing a filter as `Record<string, string>` is honest about being a
+  string vocabulary; typing it as anything narrower would be a promise the query string cannot keep.
+
+**`ApiRequest.query` is therefore an ordered `Vec<(String, String)>`**, with `query_get` /
+`query_all` for the two questions a handler asks, and the transport's parser preserves order and
+duplicates (and percent-decodes, so a handler reads what the caller wrote). A `HashMap` keeps
+whichever value arrived last and drops the rest — for a filter vocabulary that is a *silently
+dropped predicate*, which is rows the caller did not ask for: the worst failure an API of this
+shape can have, hiding in a data structure. There is no compatibility shim; every caller moved.
 
 **`updateTable` takes the whole settings object, and `alter_table` does not.** The endpoint's
 body carries *every* setting — label, description, both role floors, the ownership formula and
@@ -2432,8 +2469,9 @@ What is generated:
 - `package.json`, `vite.config.ts`, `tsconfig.json`, `index.html`, `.gitignore`, the entry
   point, the app shell, the login screen, the route list, a stylesheet, and **one page per
   table the app declares**, using that table's real columns.
+- `AGENTS.md` at the project **root** — see the contract below.
 - The runtime under `src/saltcorn/`: the typed client and the typed hooks, from the app's own
-  `EndpointSet`.
+  `EndpointSet`, plus the directory's own `README.md` and `schema.sql`.
 
 Three rules it obeys. **It never overwrites**: scaffolding into a directory with anything in
 it is refused, naming the directory, before a byte is written — a generator that clobbers is
@@ -2451,6 +2489,54 @@ admin's business — are unaffected), and the project's build script is `tsc --n
 build`, so a client that no longer matches the app's calls fails the build with a type error
 rather than producing a bundle that 404s at runtime.
 
+#### The generated directory's contract, and `AGENTS.md`
+
+The split above is the whole arrangement, so it is stated **in the tree** and not only here —
+a boundary a developer (or their coding agent) has to read the design document to discover is
+one they will cross. Every regenerated file carries a `DO NOT EDIT` header in its own comment
+syntax (`//` for TypeScript, `#` for SDL, `--` for SQL: a header that made the file unparseable
+would break the one tool it exists for), and `src/saltcorn/` holds two documents beside the
+code:
+
+- **`README.md`** — that everything in the directory is overwritten without warning, what each
+  file in it is, which tables this application may read and write, and **how to add an endpoint
+  the client does not have**: `saltcorn api add-query` (§13.4) spelled with *this* app's
+  subdomain and *this* app's REST mount, so it is pasteable rather than a template. It carries
+  the custom-query authority note with it, beside the command that opens the hole.
+- **`schema.sql`** — the `CREATE TABLE` definitions of the tables the application declares, so
+  somebody writing that SQL has real column names and real types. Rendered by the **driver**
+  (`DatabaseDriver::render_ddl` over the existing `SchemaChange` renderer, joined up by
+  `sc_app::app_schema_sql`), because a second DDL writer in `sc-app` would drift from the one
+  the database actually gets, and a file that exists to be trusted cannot be the one that is
+  wrong. Its header says it *describes* rather than migrates — the mistake a file full of
+  `CREATE TABLE` invites.
+
+**`AGENTS.md` goes at the project root, and is written once.** It says what the project is,
+that `src/saltcorn/` is generated and points at that README, that data reaches the browser
+through the generated client and nothing else, and how to add a custom query. The scaffold
+writes it and **nothing ever rewrites it**: it is at the root, which is the developer's, and
+coding agents append what they learn to it — clobbering that on the next build would destroy
+their work. The two files are the same boundary seen from both sides: inside the generated
+directory is ours and is rewritten, the root is theirs and is not.
+
+**Regeneration is not a build** (and this is what discharges GOALS' "if the API definition
+changes, the client code must be updated automatically"). Re-emitting `src/saltcorn/**` is
+fast, runs no external process and cannot fail on a bundler, so it happens on every event that
+invalidates the endpoint set: `AppMounts::refresh_table` (a column added, a table's access
+changed), saving an application, and `saltcorn api add-query` / `remove-query`. All three go
+through one `sc_app::emit_app_client`, so they cannot disagree. `npm run build` stays the build
+button's and the dev server's. A re-emit that fails — an unreachable store, a `code` app with
+no client path — is **logged and never fatal**: the catalog observer runs inside somebody's
+schema change, and an unreachable file store must not fail their edit or take a mounted
+application down.
+
+`updateApplicationClient` is the same thing on demand, for when the store *was* unreachable
+when a table changed. It reports which of two things it did, because they are not the same
+news: when the project directory is **empty** it scaffolds instead of re-emitting — filling an
+empty tree with a `src/saltcorn/` and no project around it would produce something that cannot
+build — using the scaffold's own emptiness check, since a second opinion about what "empty"
+means is how the two would eventually disagree.
+
 ### 13.4 API providers
 
 ```rust
@@ -2459,6 +2545,17 @@ pub trait ApiProvider: Send + Sync {
     fn name(&self) -> &str;               // rest | graphql | grpc | trpc | mcp
     fn mount(&self) -> String;            // sub-path within the application
     async fn handle(&self, req: ApiRequest, cat: &Catalog, user: &AuthUser) -> Result<ApiResponse>;
+}
+
+/// How a provider presents itself to the admin UI — the same arrangement
+/// `FrameworkInfo` is under (§13.3), so no screen names a provider.
+pub struct ApiProviderInfo {
+    pub name: String,                     // the registry key, as stored in an ApiConfig
+    pub label: String,
+    pub description: String,
+    pub default_mount: String,            // what the form fills in when the admin picks it
+    pub config_spec: Vec<FormField>,      // its settings, rendered by the admin form
+    pub supports_custom_queries: bool,    // whether the custom-query editor is offered
 }
 ```
 
@@ -2470,6 +2567,158 @@ code (in a supported language) or as SQL queries. Quality bar: Hasura / PostgRES
 All API access flows through the same authorization layer (§7), so an API caller sees exactly
 the rows a user of that role/ownership would, and every provider participates in the shared
 TypeScript consumer generation (§13.1).
+
+#### Per-provider configuration
+
+`ApiConfig` is `{ provider, mount, config: Attrs }`, and the third field is a settings bag
+validated on save (`validate_api_config`) against the spec the provider itself declares
+(`ApiProviderInfo::config_spec`, returned by `listApiProviders`) — the arrangement a framework's
+settings are already under (§13.3). So the application form renders a provider's controls with
+`SettingsFields` and contains no line about any particular provider, and an **undeclared key is
+refused where the admin is standing** rather than stored and silently ignored. The refusal names
+the provider *and* the setting, because an application may mount several. REST declares its
+`row_cap`; GraphQL declares its four bounds and its aggregation switch. Validation takes the
+whole `Application`, not just the row, because some of what it checks — a custom query's name
+and sub-path — is about the app's tables.
+
+**Custom queries live in the same object but are not a settings field.** They are a typed
+`queries` array under a known key, lifted out of the spec check and validated as a value of its
+own type: a list of records each carrying a nested list of parameters is not a form, and
+pretending otherwise would distort both the form vocabulary and the model. That is what
+`supports_custom_queries` is for — the editor appears because a provider said it serves them, so
+the day a second provider does, the screen does not have to hear about it.
+
+#### The REST provider: the read query string
+
+A table `posts` projects to `GET /api/posts`, `POST /api/posts`, `PUT /api/posts/{id}` and
+`DELETE /api/posts/{id}` — the table a **literal** path segment rather than a `{table}`
+parameter, because an app's API exposes the app's own tables, so they are part of the contract
+and get typed methods (`listPosts`, `createPosts`, …) instead of a stringly-typed argument. The
+projection includes the app's own `login` / `logout` / `whoami` (§7.2), which is why it is the
+provider a scaffolded client can authenticate against (§13.3).
+
+A **list read takes a query string** in PostgREST's syntax:
+
+```
+GET /api/books?select=title,published,author(name,country)&published=gte.2020-01-01&order=published.desc&limit=20
+```
+
+**It is a syntax over the read layer, not a second reader.** `rest::query` parses that into the
+row layer's own `rows::RowQuery` — the *same* value the GraphQL provider's list arguments lower
+to — and runs it through the *same* `ownership::read_row_values_as`. The comparison vocabulary
+(`eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`in`/`is_null`/`like`/`ilike`) is one lowering in `sc-api::filter`,
+shared with GraphQL, so a Date filter binds a date in both surfaces and there is exactly one
+place that decides what a filter may say. One request is **one statement**: an embed is not a
+second query but one `sc-expr` Ⱶ-join correlated subquery per requested leaf, projected as extra
+columns of the same `SELECT` and nested back into `{"author": {"name": …}}` on the way out — with
+`alias:column` renaming, nesting to any depth, and a null key answering `null` rather than an
+object of nulls. Every embed passes `ownership::join_guard` first, for the reason the GraphQL
+Ⱶ-join does: a correlated subquery has no `WHERE` this provider owns, so a caller whose access to
+the target table comes from an ownership *formula* is refused **by name** rather than handed a
+withheld row one column at a time.
+
+**The subset is stated, and everything outside it is refused by name.** Taken: `select` with
+embeds through outgoing keys, `alias:column`, `column=op.value`, `order=column.desc`/`.asc`,
+`limit`, `offset`. Not taken: one-to-many embeds (a second, batched read — GraphQL's dataloader;
+the goal names *join fields*), `!inner` (it changes which parents come back, which is a join, and
+this read is one table plus correlated subqueries), the `...` spread operator, `::` casts,
+`or=(…)`, and filters on an embedded resource. An unknown column, an unknown operator, an
+unparseable bound or a not-taken feature is a **400 naming it**, never an ignored parameter: a
+silently dropped filter answers with rows the caller did not ask for, which is the worst failure
+this API can have. `select`, `order`, `limit` and `offset` are therefore reserved words a column
+of the same name cannot be filtered on — the same trade PostgREST makes. `limit` is clamped to
+the application's `row_cap` (default 500) rather than trusted, and an absent one *becomes* the
+cap, exactly as a GraphQL list field's does.
+
+The list endpoints **declare** all of this as query parameters (§13.1), so `listBooks` takes a
+typed options object rather than leaving a hand-written `fetch` as the only way to ask.
+
+#### Custom SQL queries
+
+The one thing in this section that is not a projection of the row layer. An administrator writes
+a statement, names its parameters and their types, picks an HTTP **method** and a sub-path, and
+the application gains an endpoint with a typed client method — the escape hatch for what the
+row layer's read cannot express: a window function, a recursive CTE, a report nobody wants to
+assemble in a browser.
+
+```rust
+pub struct CustomQuery {
+    pub name:        String,          // the client method name; unique within the API
+    pub description: String,
+    pub method:      Method,          // the admin's choice, never inferred from the SQL
+    pub path:        String,          // sub-path within the mount, e.g. /reports/top-authors
+    pub sql:         String,          // one statement, with `:name` parameters
+    pub params:      Vec<CustomParam>,// name, declared ValueType, required
+    pub min_role:    u8,              // **admin unless stated**
+    pub columns:     Vec<QueryColumn>,// server-written: what the database said it returns
+}
+```
+
+**`Statement::Raw { sql, binds }`** is the hole this opens in `sc-query`'s enum, and it is the
+only one: the enum is the representation of a query (GOALS: "enum-based representation of an SQL
+query"), raw text is a hole in it, and the goal asks for the hole — so it gets exactly one,
+named, with the rule written where the variant is declared. `Raw` is constructed **only** from an
+admin-authored query definition, never from anything a caller sent. Parameters are always bound:
+the SQL is rewritten once (`sc_query::rewrite_named_params`) so each `:name` becomes the dialect's
+positional placeholder, skipping single-quoted literals, quoted identifiers, dollar-quoted bodies,
+`--` and `/* */` comments (nested, as Postgres nests them) and Postgres's `::` cast — so `x::text`
+is a cast and not a parameter called `text`. A repeated `:name` gets one placeholder and one bind,
+and the same scan counts the statements, because "one statement" is a rule and not a hope.
+
+**The database types the result; the admin types the parameters.** The admin declares each input
+parameter's type (GOALS requires it) and the caller's JSON is coerced to it before binding, so
+`"7"` from a query string binds an integer and a wrongly-typed argument is refused before the
+statement runs. The *result* columns come from **preparing** the statement — a new
+`DatabaseDriver::describe(sql, param_types)` over `tokio_postgres`'s `prepare_typed`, whose
+`Statement::columns()` carries each column's name and type — and those become the endpoint's
+`TypeSchema` and the generated client's return type, each column nullable because an outer join,
+a `CASE` with no `ELSE` or an aggregate over no rows can produce a null in any of them. Every
+save describes every query the application declares, which is what makes a query that will not
+prepare **impossible to save**: the refusal carries Postgres's own message, and `column "titel"
+does not exist` arrives while its author is looking at the SQL. The alternative — the admin
+declaring the result shape too — is a second source of truth that goes stale the first time
+anyone edits the statement.
+
+**A custom query's authority is its own, and it is stated loudly.** Raw SQL does not go through
+the row layer, so ownership formulae do not filter it, rich types do not coerce what it returns,
+`File`-field rules do not govern it, and a write inside one raises no table event. Nor is it
+confined to the tables the application declares — that subset is a property of the *projected*
+table endpoints, and a raw statement is not one of them. What remains, deliberately:
+
+- **A role floor, defaulting to admin.** §10.2's rule for a trigger's exposure, for the same
+  reason: an access nobody has thought about must not be the one that turns out to be public.
+  The CLI defaults the same way, since a command line defaulting to "public" would be the one
+  place the rule did not hold.
+- **The caller context.** The query runs inside the same caller-context transaction a row
+  operation on an RLS table does, so an RLS-protected table's policies still decide what it can
+  see — the one authorization rule enforced *below* the API, and therefore the one that still
+  applies here.
+- **`READ ONLY` for `GET`.** The method is the admin's (GOALS: "select HTTP method manually per
+  custom SQL query"); the transaction is inferred, so an `UPDATE` behind a `GET` fails loudly
+  rather than mutating something a cache or a crawler asked for. Other methods commit.
+
+Both the admin editor and the generated `README.md` say the first two of those in as many words:
+an admin opening a hole should be told what it is a hole in, where they are opening it.
+
+**Validated as a model, before anything is prepared**: a name that is a valid client method name,
+unique within the API and not one a table endpoint already holds; a sub-path that cannot collide
+with a table's routes or with `actions`/`login`/`logout`/`whoami`; one statement; every `:name`
+in the SQL declared and every declared parameter used; and no two result columns of one name,
+which would collapse into a single JSON property. Parameters project as **query parameters** for
+`GET`/`DELETE` and as a typed body otherwise, and `AuthRequirement::MinRole` comes from
+`min_role` — so a custom query is an endpoint like any other from the moment it is saved.
+
+**Two ways in, one stored value.** The admin UI's editor validates through `describeCustomQuery`,
+an admin endpoint that runs the model's rules *and* `describe` and stores nothing, so the whole
+refusal a save would give arrives in one round trip — and on success the columns it reports are
+also the documentation, being exactly what the client method will hand back. `saltcorn api
+add-query` / `list-queries` / `remove-query` do the same from a terminal (validating by saving,
+which is what prepares) and re-emit the app's generated client, because a command that changed
+the API and left the client describing the old one would be the drift §13.1 exists to prevent,
+introduced by the tool meant to avoid it.
+
+The tutorial for both halves of this provider is
+[tutorial-rest-queries.md](./tutorial-rest-queries.md).
 
 #### The GraphQL provider
 
@@ -2599,13 +2848,11 @@ new here, because an aggregate and a projected join are new ways to *observe* ro
 Aliases, fragments and variables are the caller's input and never reach SQL as identifiers:
 response keys come from the operation, column names come from the catalog.
 
-**Provider configuration.** `ApiConfig` is `{ provider, mount, config: Attrs }`, and the third
-field is a settings bag validated on save against the spec the provider itself declares
-(`ApiProviderInfo::config_spec`, returned by `listApiProviders`) — the arrangement a framework's
-settings are already under (§13.3), so the application form renders a provider's controls without
-containing a line about any particular provider, and an undeclared key is refused where the admin
-is standing rather than stored and silently ignored. REST declares its `row_cap`; GraphQL declares
-its four bounds and the **aggregation switch**.
+**Provider configuration.** GraphQL's settings live in `ApiConfig::config` like every provider's
+(above): its four bounds and the **aggregation switch**, declared as a spec and rendered by a form
+that knows nothing about GraphQL. `GraphqlLimits::from_config`/`to_config` is the pair that reads
+and writes them, and `graphql_provider` takes the whole `ApiConfig`, so the SDL a build writes and
+the schema a mount answers stay one projection of one configuration.
 
 **Aggregates are optional and off by default.** They are the most expensive thing the schema can
 express — a correlated subquery per parent row, over rows the caller may never see — so they are

@@ -2,6 +2,52 @@
 
 Changes in reverse chronological order.
 
+## Written down where the design lives, and a tutorial that opens the hole on purpose
+
+The milestone's last phase, and the one that decides whether any of the rest of it is
+findable a year from now. Three sections of the design document gained what this milestone
+actually built, and there is a tutorial for the two features an application's developer
+meets first.
+
+**§13.1** gains the query parameter as part of the endpoint: the `QueryParam` shape, the one
+options object the generator emits (optional when every parameter in it is, so an existing
+call site does not grow an empty `{}`), `URLSearchParams` doing the encoding rather than
+concatenation, and the `map` shape a filter vocabulary needs because a filter is keyed by
+*column*. With it, the reason `ApiRequest.query` is an ordered list of pairs — a `HashMap`
+turns a repeated key into a **silently dropped predicate**, which is rows the caller did not
+ask for.
+
+**§13.3** gains the generated directory's contract, because a boundary a developer has to
+read the design document to discover is one they will cross: the `DO NOT EDIT` header in
+each file's own comment syntax, what `README.md` and `schema.sql` are for, `schema.sql`
+being the *driver's* DDL rather than a second writer's, and `AGENTS.md` living at the root
+and never being rewritten. Plus what regeneration is and is not — not a build, so it can run
+on every event that invalidates the endpoint set, logged and never fatal, with
+`updateApplicationClient` as the same thing on demand.
+
+**§13.4** gains the two halves it was missing. The REST query string as a *syntax over the
+read layer*: the taken subset, the not-taken one refused by name, one statement per request,
+`join_guard` on every embed, and the four reserved words. And custom SQL queries: the
+`Statement::Raw` hole and the rule written on it, the `:name` rewriter, `describe` as the
+source of the result type, and the authority paragraph — what a raw statement escapes
+(ownership formulae, rich types, `File` rules, table events) and what still holds it (the
+role floor, the caller's database context, `READ ONLY` for `GET`). Per-provider
+configuration moved up to its own subsection, since it is now three providers' worth of
+arrangement rather than a note under GraphQL's.
+
+**[tutorial-rest-queries.md](docs/tutorial-rest-queries.md)** builds two tables and reads
+them: `select` with an embed, the whole filter vocabulary, ordering and paging, then the
+refusals — because the tutorial has to teach that *nothing is ever ignored* before a reader
+meets it in production. Then the typed client, then a custom query written twice, in the
+admin editor and from the command line, and called both ways. It does not stop at "it
+works": an admin is the one caller no rule applies to, so it says which rules apply to
+everybody else, and it says what a custom query is a hole in before showing how to open one.
+
+Two hygiene tests keep this honest the way the GraphQL milestone's do: one asserting the
+design still records each load-bearing decision across the three sections, one asserting the
+tutorial still reaches the motivating query and every rule past the happy path — and the
+tutorial cross-link chain now ends at this one.
+
 ## The generated directory explains itself, and keeps itself current
 
 `src/saltcorn/` has been a generated directory since the React framework landed, but it

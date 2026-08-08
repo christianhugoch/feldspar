@@ -334,6 +334,23 @@ fn tutorials_are_cross_linked() {
         graphql.contains("tutorial-ownership.md"),
         "the GraphQL tutorial leans on the ownership rules and should link them"
     );
+    assert!(
+        graphql.contains("tutorial-rest-queries.md"),
+        "the GraphQL tutorial should point at the REST-queries tutorial as a next step"
+    );
+    let rest = read(&root, "docs/tutorial-rest-queries.md");
+    assert!(
+        rest.contains("tutorial-react-todo.md"),
+        "the REST-queries tutorial builds on the React tutorial and should link it"
+    );
+    assert!(
+        rest.contains("tutorial-ownership.md"),
+        "the REST-queries tutorial leans on the ownership rules and should link them"
+    );
+    assert!(
+        rest.contains("tutorial-graphql.md"),
+        "the REST-queries tutorial should point at the questions GraphQL answers instead"
+    );
 }
 
 /// The agents tutorial has to teach **the whole loop**, because every step of it
@@ -567,6 +584,98 @@ fn the_graphql_tutorial_reaches_the_motivating_query_and_its_rules() {
         assert!(
             tutorial.contains(fragment),
             "the GraphQL tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// The API milestone spans three sections — query parameters in the endpoint
+/// model (§13.1), the generated directory's contract (§13.3), and the REST query
+/// string, custom SQL queries and per-provider configuration (§13.4) — and each
+/// records something a reader would otherwise have to find in the source: the
+/// data structure a filter vocabulary forced, the boundary between the generated
+/// directory and the developer's project, the stated subset of PostgREST's
+/// grammar, and the authority a raw statement does *and* does not carry.
+#[test]
+fn the_design_records_what_the_api_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        // §13.1: a query parameter is part of the endpoint, and what that emits.
+        "pub query:   Vec<QueryParam>",
+        "A query parameter is part of the endpoint",
+        "URLSearchParams",   // …which does the encoding, not concatenation
+        "query_all",         // …and the two questions a handler asks
+        "dropped predicate", // the failure a `HashMap` would hide
+        // §13.3: the generated directory's contract, stated in the tree.
+        "DatabaseDriver::render_ddl", // schema.sql is the driver's, not a second writer's
+        "`AGENTS.md` goes at the project root",
+        "emit_app_client",         // one re-emit, three callers
+        "logged and never fatal",  // …inside somebody else's schema change
+        "updateApplicationClient", // …and the same thing on demand
+        // §13.4: configuration, the query string, and its stated subset.
+        "ApiProviderInfo::config_spec",
+        "supports_custom_queries",
+        "syntax over the read layer",
+        "one-to-many embeds",
+        "ownership::join_guard",
+        "reserved words a column",
+        // §13.4: custom SQL, the one escape hatch, and its authority.
+        "Statement::Raw { sql, binds }",
+        "rewrite_named_params",
+        "DatabaseDriver::describe",
+        "READ ONLY",
+        "impossible to save",
+        "describeCustomQuery",
+    ] {
+        assert!(
+            design.contains(fragment),
+            "the design should record `{fragment}`"
+        );
+    }
+}
+
+/// The REST tutorial has to reach the milestone's own query and then keep going
+/// past the happy path, for the same reason the GraphQL one does: an admin is the
+/// caller no rule applies to, and a custom query is a hole somebody opens on
+/// purpose. Each fragment below is one thing a reader would otherwise discover in
+/// production.
+#[test]
+fn the_rest_tutorial_reaches_the_motivating_query_and_its_rules() {
+    let root = workspace_root();
+    let tutorial = read(&root, "docs/tutorial-rest-queries.md");
+    for fragment in [
+        // The query the milestone exists for, and every piece of its vocabulary.
+        "select=title,published,author(name,country)",
+        "is_null.true",
+        "in.(200,300,400)",
+        "order=published.desc,title",
+        "Row cap per list read", // …and the ceiling an absent `limit` becomes
+        // Nothing is ignored: the refusals, by the name of the thing refused.
+        "one-to-many embeds",
+        "!inner",
+        "rows the caller did not ask for",
+        // Reads that reach a second table are still reads.
+        "read of the table it reaches",
+        // The typed client, which is why a query parameter is in the endpoint.
+        "ListBooksQuery",
+        "Record<string, string>",
+        "useQuery",
+        // A custom query: written, checked, and what it is a hole in.
+        "describeCustomQuery",
+        "no table event",
+        "READ ONLY",
+        "saltcorn api add-query",
+        "list-queries",
+        "drop table books", // …an argument is a value, and the table survives
+        "TopAuthorsResponse",
+        // And the generated directory that keeps up with all of it.
+        "schema.sql",
+        "AGENTS.md",
+        "Update code",
+    ] {
+        assert!(
+            tutorial.contains(fragment),
+            "the REST tutorial should cover `{fragment}`"
         );
     }
 }

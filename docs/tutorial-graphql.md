@@ -387,3 +387,6 @@ built on it.
 - [AGG_EXPRS.md](./AGG_EXPRS.md) — the aggregation semantics these fields share with calculated
   fields and ownership formulae.
 - [tutorial-ownership.md](tutorial-ownership.md) — the rules step 9 leans on.
+- [tutorial-rest-queries.md](tutorial-rest-queries.md) — the other provider on the same tables:
+  what REST's query string *can* ask for in one statement, and the custom SQL query for the
+  question neither syntax can.

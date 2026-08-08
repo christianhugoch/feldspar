@@ -323,14 +323,17 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 7 — Documentation
 
-- [ ] **§13.1** gains query parameters in the endpoint model and their generation; **§13.4**
+- [x] **§13.1** gains query parameters in the endpoint model and their generation; **§13.4**
       gains the REST query string (with the taken/not-taken subset of decision 2), custom SQL
       queries and their authority rule, and per-provider configuration; **§13.3** gains the
       generated-directory contract and `AGENTS.md`.
-- [ ] A tutorial beside the others (`docs/tutorial-rest-queries.md`): select with embeds, filter
+- [x] A tutorial beside the others (`docs/tutorial-rest-queries.md`): select with embeds, filter
       and page a table, then add a custom SQL query from the admin UI and again from the CLI,
-      and call both from the typed client.
-- [ ] CHANGELOG entries as the phases land, in this repository's voice: what changed and why it
+      and call both from the typed client. (Plus what it refuses and why by name, the rules a
+      caller who is not an admin meets, and the generated directory that keeps up — the
+      tutorial cross-link chain now ends here, and two hygiene tests hold the design document
+      and the tutorial to what was built.)
+- [x] CHANGELOG entries as the phases land, in this repository's voice: what changed and why it
       is that way, not a list of files.
 
 ---
