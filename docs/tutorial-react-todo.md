@@ -283,6 +283,14 @@ repository on disk; nothing here depends on having gone through the IDE.
   runs, so it is what to reach for in a deploy script — or when a failing build has left the
   app unreachable in a browser. It does not mount anything, so it is safe to run against a
   live deployment's database.
+- **Building in the project directory, and `SIGHUP`**: `npm run build` in `/srv/apps/todo`
+  writes `dist/`, but the running server serves the bundle it read into memory when *it* last
+  built, so the page does not change. `pkill -HUP saltcorn` makes it re-read: `SIGHUP` drops
+  every application's cached bundle, re-reads it from disk, and reloads the catalog and the
+  stored application definitions with it — running **no bundler and no `npm install`**, so it
+  takes milliseconds. `npm run build && pkill -HUP saltcorn`, then reload the page, is the
+  whole loop, and it is the one to give a coding agent working in the project. The server logs
+  what it reloaded and how long it took.
 
 ## When React's conventions do not fit
 

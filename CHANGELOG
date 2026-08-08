@@ -2,6 +2,60 @@
 
 Changes in reverse chronological order.
 
+## `SIGHUP` reloads a running server, so a build on disk is a build in the browser
+
+`npm run build` in an application's project directory changed nothing anybody could see, and
+the reason was not obvious from anywhere: what a mounted app serves is the `AssetBundle` the
+server read out of the output directory **when the server itself last built**, and every
+request after that is answered from that map in memory. Only the admin UI's Build button and
+a restart ever replaced it. So the loop a developer — and every coding agent working inside a
+project — actually runs, build then reload the page, silently showed the previous build. The
+same staleness had a second face: an application row edited by another process (`saltcorn api
+add-query` from the project directory) is never re-read by the running server either, because
+the re-projection that keeps mounts current is a schema observer inside *this* process.
+
+Both are now one signal. `SIGHUP` reloads the catalog — re-introspection, both overlays — and
+then every stored application: its row, the API providers projected from that row, and its
+bundle re-read from the output directory the last build left. It **runs no bundler and no
+installer**, which is the whole point: the caller has just built, and `npm install && npm run
+build` again would be a slow duplicate of the work that prompted the signal. That makes it
+milliseconds, and the reload logs its timings — the question it has to answer is how long to
+wait before looking at the page, and the only honest answer is what it just took.
+
+```sh
+npm run build && pkill -HUP saltcorn
+```
+
+A signal rather than an endpoint because of who sends it: a shell in the project directory,
+with no session, no CSRF token and no reason to acquire either, but with the run of the
+machine. The Build button is untouched and still builds; this is its fast half.
+
+The failure rule is the one boot already follows. An application whose output directory is
+missing is *reported* and keeps serving what it was serving — the remount happens only after
+the new bundle has loaded — so one unbuilt app cannot take the others down, and a reload
+returns a report rather than a `Result` because a server that is already serving has no
+business stopping over either half of it. A row deleted elsewhere is unmounted; a table
+created elsewhere is in the catalog when the signal returns, which is what lets an app that
+now declares it project endpoints for it.
+
+The handler is registered **before** the task that services it is spawned, and that is not
+tidiness: `SIGHUP`'s default disposition is to terminate, so a signal arriving in the gap
+would have killed the process instead of reloading it. The test that sends a real
+`kill -HUP` caught exactly that, which is why it exists in a test binary of its own — a
+signal is process-wide, and raising one where other tests live would fire their reloads too.
+
+Both generated documents now carry the loop, because it is the thing nobody guesses: the
+project's `AGENTS.md` (written once, at scaffold) and `src/saltcorn/README.md` (rewritten on
+every build) each say why a build alone is invisible, give the one pasteable line, say what
+the reload deliberately does not do, and name the URL to look at — this app's own subdomain.
+`docs/tutorial-react-todo.md` gains it beside `saltcorn build-app`, and the GraphQL
+tutorial's "or `npm run build` in the project" — which was quietly wrong — now includes the
+signal.
+
+Not reloaded, each having its own live-updating admin API and each shared into the scheduler
+or the catalog's write path at boot: the trigger set, the agents, the LLM providers, and the
+file-store connections.
+
 ## Written down where the design lives, and a tutorial that opens the hole on purpose
 
 The milestone's last phase, and the one that decides whether any of the rest of it is

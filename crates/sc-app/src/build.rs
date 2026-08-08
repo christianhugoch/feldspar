@@ -246,16 +246,65 @@ pub struct BuildReport {
 /// fails.
 pub async fn build_app(cat: &Catalog, source: &AppSource) -> Result<BuildReport> {
     let store = cat.require_file_store(&source.store.0)?;
-    let root = store.local_path("")?.ok_or_else(|| {
+    let root = store_root(&store, source)?;
+    let mut report = run_build(&source.build, &root).await?;
+    report.git_repo = store.is_git_repo();
+    Ok(report)
+}
+
+/// The on-disk root of an app source's file store.
+///
+/// A build spawns an external process with a working directory and a reload
+/// reads files off a disk, so both need a store that *is* a directory; an
+/// object-store-backed app is refused here with one message rather than two
+/// (§13.3).
+fn store_root(
+    store: &std::sync::Arc<dyn sc_files::FileStore>,
+    source: &AppSource,
+) -> Result<PathBuf> {
+    store.local_path("")?.ok_or_else(|| {
         Error::config(format!(
             "file store {:?} has no local path, so it cannot host a code framework's \
              build step; use a local store",
             source.store.0
         ))
-    })?;
-    let mut report = run_build(&source.build, &root).await?;
-    report.git_repo = store.is_git_repo();
-    Ok(report)
+    })
+}
+
+/// Load an application's **already-built** bundle from its output directory,
+/// running no bundler and no installer.
+///
+/// This is the other half of [`build_app`]: that one runs the build step and
+/// loads what it produced, this one only loads. It exists because the bytes a
+/// [`CodeFramework`] serves are a snapshot taken when the *server* last built —
+/// so a developer (or a coding agent) who runs `npm run build` in the project
+/// directory changes the disk and nothing a browser can see. Re-reading the
+/// output directory is what makes that build visible, and it is cheap enough
+/// (a directory walk) to sit on a signal handler, where re-running a bundler
+/// would not be.
+///
+/// Deliberately **not** a build: the output directory is taken as it is found.
+/// An application that has never been built has no output directory, and saying
+/// so is the right answer — a reload that quietly started running `npm install`
+/// would be a very slow surprise.
+pub fn load_app_bundle(cat: &Catalog, source: &AppSource) -> Result<AssetBundle> {
+    let store = cat.require_file_store(&source.store.0)?;
+    let root = store_root(&store, source)?;
+    let output_dir = resolve_under(&root, &source.build.output_dir)?;
+    if !output_dir.is_dir() {
+        return Err(Error::config(format!(
+            "there is no build output at {} to reload; build the application first",
+            output_dir.display()
+        )));
+    }
+    let bundle = AssetBundle::from_dir(&output_dir)?;
+    if bundle.is_empty() {
+        return Err(Error::config(format!(
+            "the build output directory {} is empty",
+            output_dir.display()
+        )));
+    }
+    Ok(bundle)
 }
 
 /// Emit an application's typed TypeScript client into its source tree, then

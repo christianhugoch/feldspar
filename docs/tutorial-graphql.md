@@ -315,7 +315,8 @@ rather than a status code. When a **partial** result is the answer you want, `gr
 returns the whole response instead: a child list the caller may not read is an error on that
 field with the parents still present.
 
-Press **Build** again (or `npm run build` in the project, which is `tsc --noEmit && vite build`).
+Press **Build** again (or, in the project, `npm run build && pkill -HUP saltcorn` — the build is
+`tsc --noEmit && vite build`, and the signal is what makes the server re-read what it wrote).
 The build regenerates `schema.graphql` from the app's tables *before* it type-checks, so the SDL
 in the tree always describes the API this build will serve — nobody exports it by hand, and it
 cannot be stale.

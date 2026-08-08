@@ -274,6 +274,44 @@ fn add_query_command(ctx: &ProjectContext<'_>) -> String {
     )
 }
 
+/// How to make a build on disk be the build in the browser: `SIGHUP`.
+///
+/// Both documents carry this for the same reason they both carry
+/// [`add_query_command`] — it answers a question asked in the moment, and a
+/// reader who has to go and find the answer has already gone. It is *the* thing
+/// that surprises everyone who builds this project by hand, including every
+/// coding agent that tries to look at what it just changed: the served bundle is
+/// a snapshot the server took when it last built, so `npm run build` alone
+/// changes nothing a browser can see.
+fn reloading_section(ctx: &ProjectContext<'_>) -> String {
+    format!(
+        "## Seeing a build in the browser\n\
+         \n\
+         `npm run build` writes `dist/`, but the running server is serving the \
+         bundle it read into memory the last time **it** built this application. \
+         A build on disk changes nothing a browser can see until the server \
+         re-reads it, and `SIGHUP` is what makes it:\n\
+         \n\
+         ```sh\n\
+         npm run build && pkill -HUP saltcorn\n\
+         ```\n\
+         \n\
+         That drops every application's cached bundle and re-reads it from disk, \
+         and reloads the catalog and the stored application definitions with it — \
+         a table added, a column added, a custom query saved. It runs **no \
+         bundler and no `npm install`**: it is the fast half of the admin UI's \
+         *Build* button, and it is what to use after building by hand. The server \
+         logs what it reloaded and how long it took, which is usually a few \
+         milliseconds.\n\
+         \n\
+         Then load `http://{subdomain}.<the server's base domain>` — the \
+         application is served on its own subdomain — and the new bundle is what \
+         answers. If `pkill` finds nothing, the server is running under another \
+         name or another user; `kill -HUP <pid>` does the same thing.\n",
+        subdomain = ctx.app.subdomain,
+    )
+}
+
 /// `src/saltcorn/README.md`: what this directory is, and the one command that
 /// adds an endpoint to it.
 ///
@@ -351,10 +389,13 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
          (`--min-role`, admin — role 1 — unless you say otherwise), and the \
          caller's own database context, so row-level-security policies still \
          decide what the statement can see. A `get` query runs in a read-only \
-         transaction. Open the hole deliberately.\n",
+         transaction. Open the hole deliberately.\n\
+         \n\
+         {reload}",
         name = ctx.app.name,
         subdomain = ctx.app.subdomain,
         command = add_query_command(ctx),
+        reload = reloading_section(ctx),
     )
 }
 
@@ -384,6 +425,8 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          The source of the Saltcorn application `{name}`, served at `{subdomain}`. \
          It is a React + TypeScript project built by Vite: `npm run build` \
          type-checks it and bundles it, and the Saltcorn server serves the bundle.\n\
+         \n\
+         {reload}\
          \n\
          ## `{REACT_RUNTIME_SUBDIR}/` is generated — never edit it\n\
          \n\
@@ -428,6 +471,7 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
         name = ctx.app.name,
         subdomain = ctx.app.subdomain,
         command = add_query_command(ctx),
+        reload = reloading_section(ctx),
     )
 }
 
@@ -1663,6 +1707,37 @@ mod tests {
         // It says it is the developer's, because that is the only thing stopping
         // an agent from treating it as generated and leaving it alone.
         assert!(agents.contains("never overwrites it"), "{agents}");
+    }
+
+    /// Both documents say how to make a build on disk be the build in the
+    /// browser, because a reader who builds by hand and reloads the page sees no
+    /// change and has no way to guess why.
+    #[test]
+    fn both_documents_carry_the_reload_command() {
+        let tables = [tasks()];
+        let app = todo();
+        let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
+
+        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+            let doc = file(&files, path);
+            assert!(
+                doc.contains("npm run build && pkill -HUP saltcorn"),
+                "{path} should carry the whole loop in one pasteable line: {doc}"
+            );
+            // Why it is needed at all — the served bundle is a snapshot.
+            assert!(doc.contains("read into memory"), "{path}: {doc}");
+            // And what it deliberately does not do, so nobody reaches for the
+            // Build button expecting this to be slower than it is.
+            assert!(
+                doc.contains("no bundler and no `npm install`"),
+                "{path}: {doc}"
+            );
+            // The URL to look at is this app's own.
+            assert!(
+                doc.contains("http://todo.<the server's base domain>"),
+                "{path}: {doc}"
+            );
+        }
     }
 
     /// An app with the GraphQL provider gets two more generated files, and the

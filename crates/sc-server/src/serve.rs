@@ -1,5 +1,9 @@
 //! Binding the listener and running the server with graceful shutdown
 //! (technical design §16).
+//!
+//! Two signals matter to a running server: `SIGTERM` (or Ctrl-C) stops it, and
+//! `SIGHUP` reloads the catalog and the applications in place without building
+//! anything — see [`crate::reload`].
 
 use std::sync::Arc;
 
@@ -27,6 +31,12 @@ pub async fn serve(
     sessions: Arc<SessionStore>,
     apps: Arc<AppMounts>,
 ) -> Result<()> {
+    // `SIGHUP` reloads the catalog and the applications in place, building
+    // nothing (see `crate::reload`). Installed here beside the shutdown signals
+    // because this is the function that owns the process's signal behaviour, and
+    // it holds the registry a reload mutates.
+    crate::reload::spawn_sighup_reload(apps.clone());
+
     let app = build_router_with_apps(&endpoints, handlers, sessions, &config, apps)?;
 
     let listener = tokio::net::TcpListener::bind(config.addr)

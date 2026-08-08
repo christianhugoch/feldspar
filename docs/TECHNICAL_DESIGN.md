@@ -2252,6 +2252,27 @@ unbuilt, and the admin UI shows that state rather than pretending a save deploye
 A saved-but-unbuilt app is a normal state, not an error — it is what a newly created app is
 until its first build.
 
+**Reload on `SIGHUP`: the third path, which builds nothing.** What a mounted app serves is
+the `AssetBundle` the server read out of the build's output directory *when it last built*,
+so a developer who runs `npm run build` in the project directory changes the disk and changes
+nothing a browser can see — and the same holds for an application row edited by another
+process (`saltcorn api add-query`), which the running server's mounts have never read. Both
+are the same gap: state that was loaded once and is now stale, with no way to say so from
+outside the process. `SIGHUP` is that way (`sc_server::reload_all`). It reloads the catalog
+(re-introspection and both overlays) and every stored application — the row, and with it the
+API providers projected from it, and the bundle re-read from its existing output directory —
+and it **runs no bundler and no installer**, which is what makes it milliseconds rather than
+a minute and what makes it correct to send *after* building by hand. The per-app failure rule
+is the boot rule: an app whose output directory is missing is reported and keeps serving what
+it was serving, and the timings are logged, because the question a reload has to answer is
+how long the caller waits before looking.
+
+A signal rather than an endpoint because of who sends it: a shell in the application's
+project directory, belonging to a developer or to a coding agent, with no session and no
+reason to acquire one. It is not a replacement for the Build button — that still builds — but
+its fast half. What it deliberately does not reload, each having its own live-updating admin
+API, is the trigger set, the agents, the LLM providers and the file-store connections.
+
 ### 13.3 Frameworks
 
 ```rust
