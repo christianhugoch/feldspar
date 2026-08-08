@@ -123,3 +123,43 @@ async fn create_alter_and_drop_round_trip_through_introspect() -> sc_error::Resu
 
     Ok(())
 }
+
+/// `render_ddl` is the DDL `apply_schema` would run — **and does not run it**.
+///
+/// It is what writes an application's generated `schema.sql` (§13.3): a
+/// description of the tables a coding agent may write SQL against. A renderer
+/// that quietly applied what it rendered would turn opening a project into a
+/// migration, and a renderer that disagreed with `apply_schema` would describe a
+/// schema the database does not have — which is the whole reason this is the
+/// driver's job rather than a second DDL writer's.
+#[tokio::test]
+async fn render_ddl_is_what_apply_schema_would_run_and_applies_nothing() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let driver = PgDriver::from_pool(db.pool().clone());
+    let change = SchemaChange::CreateTable {
+        name: "sc_rd_thing".into(),
+        columns: vec![
+            ColumnDef::new("code", "text").not_null(),
+            ColumnDef::new("label", "text"),
+        ],
+        primary_key: vec!["code".into()],
+    };
+
+    let sql = driver.render_ddl(&change)?;
+    assert_eq!(
+        sql,
+        "CREATE TABLE \"sc_rd_thing\" (\"code\" text NOT NULL, \"label\" text, \
+         PRIMARY KEY (\"code\"))"
+    );
+    assert!(
+        table(&driver, "sc_rd_thing").await?.is_none(),
+        "rendering must not apply"
+    );
+
+    // The rendered text is exactly what the database accepts: applying the same
+    // change produces the table the statement describes.
+    driver.apply_schema(&change).await?;
+    let created = table(&driver, "sc_rd_thing").await?.expect("created");
+    assert_eq!(created.primary_key, ["code"]);
+    Ok(())
+}

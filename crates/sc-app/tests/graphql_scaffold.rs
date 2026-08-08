@@ -300,6 +300,8 @@ async fn the_schema_is_rewritten_on_every_build() -> sc_error::Result<()> {
         [
             "staff/src/saltcorn/client.ts",
             "staff/src/saltcorn/hooks.ts",
+            "staff/src/saltcorn/schema.sql",
+            "staff/src/saltcorn/README.md",
             "staff/src/saltcorn/graphql.ts",
             "staff/src/saltcorn/schema.graphql",
         ]

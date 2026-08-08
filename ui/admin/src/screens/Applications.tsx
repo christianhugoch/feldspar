@@ -42,6 +42,10 @@ function filesUrl(store: string, path: string): string {
 export function Applications() {
   const [apps, setApps] = useState<AppItem[] | null>(null);
   const [status, setStatus] = useState<Record<string, BuildStatus>>({});
+  // The app whose generated code is being rewritten, if any. Separate from the
+  // build status: regenerating does not build, so it must not claim an app is
+  // built — nor forget that it was.
+  const [updating, setUpdating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The most recent outcome, surfaced so a tool's log or diagnostics are visible
   // rather than buried in a per-row badge. A build fills this in directly; a
@@ -81,6 +85,35 @@ export function Applications() {
         title: `Build failed — ${app.name}`,
         text: errorMessage(err, "The build failed."),
       });
+    }
+  };
+
+  // Rewrite the app's generated code (`src/saltcorn/**`) without building it.
+  // The server does this by itself whenever the API definition changes, so this
+  // is the "now, please" case: a store that was unreachable when a table
+  // changed, or a project directory that was emptied — which the server
+  // rescaffolds rather than filling with generated files that cannot build. It
+  // says which of the two it did, because they are not the same news.
+  const updateClient = async (app: AppItem) => {
+    setUpdating(app.id);
+    setOutcome(null);
+    try {
+      const report = await api.updateApplicationClient(app.id);
+      setOutcome({
+        ok: true,
+        title: report.scaffolded
+          ? `Project scaffolded — ${app.name}`
+          : `Generated code updated — ${app.name}`,
+        text: report.log,
+      });
+    } catch (err) {
+      setOutcome({
+        ok: false,
+        title: `Could not update the generated code — ${app.name}`,
+        text: errorMessage(err, "The generated code could not be rewritten."),
+      });
+    } finally {
+      setUpdating(null);
     }
   };
 
@@ -213,6 +246,15 @@ export function Applications() {
                           href={`#/applications/${encodeURIComponent(app.id)}/edit`}
                         >
                           Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline-secondary"
+                          disabled={updating === app.id}
+                          onClick={() => void updateClient(app)}
+                          title="Rewrite this application's generated client, hooks and schema from its current definition — no build"
+                        >
+                          {updating === app.id ? "Updating…" : "Update code"}
                         </Button>
                         <Button
                           size="sm"

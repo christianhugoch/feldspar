@@ -34,6 +34,29 @@ pub trait DatabaseDriver: Send + Sync {
     /// Creating a table adds no implicit primary-key column.
     async fn apply_schema(&self, change: &SchemaChange) -> Result<()>;
 
+    /// Render `change` as this backend's DDL **without applying it** — the same
+    /// text [`apply_schema`](DatabaseDriver::apply_schema) would run.
+    ///
+    /// It exists so that the `schema.sql` in an application's generated
+    /// directory (§13.3) — what a coding agent reads before writing a custom SQL
+    /// query against these tables — is produced by the thing that renders the
+    /// real DDL, rather than by a second DDL writer that would drift from it the
+    /// first time a type or a constraint changed. Nothing about it is
+    /// backend-agnostic: DDL is dialect-specific, which is exactly why it is the
+    /// driver's to render.
+    ///
+    /// The default errors rather than returning something plausible: a backend
+    /// that cannot render its own DDL cannot describe its schema either, and a
+    /// file full of Postgres text for a database that is not Postgres would be a
+    /// lie in a file that exists to be trusted.
+    fn render_ddl(&self, change: &SchemaChange) -> Result<String> {
+        let _ = change;
+        Err(Error::database(
+            "this database backend cannot render DDL, so an application's \
+             generated `schema.sql` cannot be written for it",
+        ))
+    }
+
     /// Prepare `sql` — with its bind parameters typed by `param_types`, named as
     /// this backend names its types — and report the **result columns** the
     /// backend says it will produce, without running it.

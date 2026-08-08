@@ -34,7 +34,7 @@ use sc_app::{
     app_source_from_config, applications_using_file_store, builder_agent_name, delete_application,
     framework_builder_agent, framework_config_spec, framework_default_csp, list_applications,
     load_application, registered_api_provider_info, registered_framework_info,
-    require_scaffoldable, save_application, scaffold_app,
+    require_scaffoldable, save_application, scaffold_app, update_app_client,
 };
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, any_user_exists,
@@ -1642,8 +1642,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("updateApplication", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 let id = parse_app_id(ctx.path_param("id")?)?;
                 if load_application(&catalog, id).await?.is_none() {
@@ -1653,6 +1655,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // something a payload gets to reassign.
                 let app =
                     save_application(&catalog, &application_from_body(id, &ctx.body)?).await?;
+                // A save is an API-definition change: a table added to the
+                // subset, an endpoint's role, a custom query. The generated
+                // client has to describe what the app now serves (decision 10),
+                // so it is rewritten here — logged and never fatal, because the
+                // application is already saved and an unreachable store is not a
+                // reason to report that it was not.
+                reemit_app_client(&catalog, &app, apps.triggers()).await;
                 Ok(HandlerResponse::ok(application_json(&app)))
             }
         }
@@ -1712,6 +1721,34 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     "built": true,
                     "git_repo": report.git_repo,
                     "log": build_log(&report),
+                })))
+            }
+        }
+    });
+
+    // Rewrite an application's generated code on demand, without building.
+    //
+    // The button beside "Build", and deliberately a different button: a build
+    // runs a bundler and can take a minute, while this writes four files and
+    // cannot fail on anything but the store. It is the same call the automatic
+    // path makes when a table changes (decision 10), so an admin who wants it
+    // now and an admin who changed a column get the same files.
+    reg.register("updateApplicationClient", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let app = load_application(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
+                let update = update_app_client(&catalog, &app, apps.triggers()).await?;
+                Ok(HandlerResponse::ok(json!({
+                    "scaffolded": matches!(update, sc_app::ClientUpdate::Scaffolded(_)),
+                    "files": update.files(),
+                    "log": update.summary(),
                 })))
             }
         }
@@ -2100,6 +2137,29 @@ async fn scaffold_new_app(
         return Ok(None);
     }
     scaffold_app(catalog, app, dispatcher).await.map(Some)
+}
+
+/// Rewrite a saved application's generated files, reporting a failure to the
+/// operator's console and to nobody else.
+///
+/// Saving an application changes its API definition — the tables it declares,
+/// the providers it enables, the custom queries on them — so its `src/saltcorn/`
+/// must follow (decision 10). It deliberately does **not** affect the response:
+/// the application is stored and valid, and an unreachable store is something
+/// the admin fixes and re-triggers with the update button, not a reason to tell
+/// them their save failed.
+async fn reemit_app_client(
+    catalog: &Catalog,
+    app: &Application,
+    dispatcher: Option<&Arc<sc_action::TriggerDispatcher>>,
+) {
+    if let Err(e) = sc_app::emit_app_client(catalog, app, dispatcher).await {
+        eprintln!(
+            "saltcorn: application `{}` was saved, but its generated client could \
+             not be rewritten: {e}",
+            app.subdomain
+        );
+    }
 }
 
 /// Create the agent that builds a newly created application, returning its name.

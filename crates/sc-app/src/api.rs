@@ -473,6 +473,40 @@ pub fn app_graphql(app: &Application, cat: &Catalog) -> Result<Option<AppGraphql
     }))
 }
 
+/// The `CREATE TABLE` statements for the tables an application declares — the
+/// `schema.sql` of its generated directory (§13.3).
+///
+/// It is there for the coding agent working in the project: "write me a custom
+/// SQL query that totals invoices by month" is answerable only against real
+/// column names and real types, and the alternative to shipping them is an agent
+/// guessing at a schema it cannot see.
+///
+/// **Rendered by the driver** ([`DatabaseDriver::render_ddl`](sc_db::DatabaseDriver::render_ddl)),
+/// not by a DDL writer of its own: the statement here is the one the database
+/// would actually be given, so it cannot drift from what the tables are. Only the
+/// app's *declared* tables appear — the same subset every provider is confined to
+/// (§13.2) — so the file describes exactly what a query in this project may name,
+/// and calculated fields are omitted because they are not columns.
+pub fn app_schema_sql(app: &Application, cat: &Catalog) -> Result<String> {
+    let driver = cat.primary();
+    let mut sql = String::new();
+    for table in app_tables(app, cat)? {
+        let change = sc_db::SchemaChange::CreateTable {
+            name: table.name.clone(),
+            columns: table
+                .fields
+                .iter()
+                .filter(|f| !f.is_calc())
+                .map(sc_catalog::DataField::to_column_def)
+                .collect(),
+            primary_key: table.primary_key.clone(),
+        };
+        sql.push_str(&driver.render_ddl(&change)?);
+        sql.push_str(";\n\n");
+    }
+    Ok(sql)
+}
+
 /// The application's whole API surface: every enabled provider's projection,
 /// collected into one [`EndpointSet`].
 ///

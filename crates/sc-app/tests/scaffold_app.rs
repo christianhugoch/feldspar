@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sc_app::{
-    ApiConfig, AppRequest, Application, CodeFramework, FrameworkRef, app_source_from_config,
-    build_application, emit_react_runtime, scaffold_app,
+    ApiConfig, AppRequest, Application, ClientUpdate, CodeFramework, FrameworkRef,
+    app_source_from_config, build_application, emit_react_runtime, save_application, scaffold_app,
+    update_app_client,
 };
 use sc_catalog::{Catalog, FileStoreId, TableId};
 use sc_db::DatabaseDriver;
@@ -111,13 +112,32 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
         "src/auth.tsx",
         "src/Login.tsx",
         "src/app.css",
+        "AGENTS.md",
         "src/saltcorn/client.ts",
         "src/saltcorn/hooks.ts",
+        "src/saltcorn/schema.sql",
+        "src/saltcorn/README.md",
     ] {
         assert!(project.join(expected).is_file(), "missing {expected}");
     }
-    // 11 project files + one page for the app's one table + the two-file runtime.
-    assert_eq!(report.files.len(), 14);
+    // 12 project files + one page for the app's one table + the four-file runtime.
+    assert_eq!(report.files.len(), 17);
+
+    // What a coding agent opening this project finds: a root file pointing at the
+    // generated directory, and in it a README and a `schema.sql` describing the
+    // app's real tables. The DDL is the *driver's* — the same text the database
+    // was given — so it cannot drift from the columns that are actually there.
+    let agents = std::fs::read_to_string(project.join("AGENTS.md"))?;
+    assert!(agents.contains("src/saltcorn/README.md"), "{agents}");
+    assert!(agents.contains("`tasks`"), "{agents}");
+    let schema = std::fs::read_to_string(project.join("src/saltcorn/schema.sql"))?;
+    assert!(schema.contains(r#"CREATE TABLE "tasks""#), "{schema}");
+    assert!(schema.contains(r#""title" text NOT NULL"#), "{schema}");
+    assert!(schema.contains(r#"PRIMARY KEY ("id")"#), "{schema}");
+    let readme = std::fs::read_to_string(project.join("src/saltcorn/README.md"))?;
+    assert!(readme.contains("saltcorn api add-query"), "{readme}");
+    assert!(readme.contains("--app todo"), "{readme}");
+    assert!(readme.contains("--api /api"), "{readme}");
 
     // Generated against the app's real table, not a placeholder: there is a page
     // for `tasks`, and the hooks carry its columns and their nullability.
@@ -203,6 +223,11 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
     // The admin edits their own code — the half of the project that is theirs.
     let mine = "// my app\nexport default function App() { return null; }\n";
     std::fs::write(project.join("src/App.tsx"), mine)?;
+    // Including the root `AGENTS.md`, which a coding agent appends to. It is
+    // written once, at scaffold time, and a re-emit that clobbered it would
+    // destroy exactly the notes it exists to accumulate (decision 9).
+    let notes = "# Todo\n\nThe invoice totals are cents, not euros.\n";
+    std::fs::write(project.join("AGENTS.md"), notes)?;
 
     // A table is added to the app later. The runtime is regenerated from the
     // app's endpoints, so the new table's hooks simply exist — this is what makes
@@ -219,16 +244,75 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
     let written = emit_react_runtime(&cat, &app, &source, None).await?;
     assert_eq!(
         written,
-        ["todo/src/saltcorn/client.ts", "todo/src/saltcorn/hooks.ts"]
+        [
+            "todo/src/saltcorn/client.ts",
+            "todo/src/saltcorn/hooks.ts",
+            "todo/src/saltcorn/schema.sql",
+            "todo/src/saltcorn/README.md",
+        ]
     );
 
     let hooks = std::fs::read_to_string(project.join("src/saltcorn/hooks.ts"))?;
     assert!(hooks.contains("export function useNotes()"), "{hooks}");
     assert!(hooks.contains("export type NotesRow"), "{hooks}");
+    // The schema description follows the tables, for the same reason and on the
+    // same schedule: an agent writing SQL against this project must not be
+    // reading last week's columns.
+    let schema = std::fs::read_to_string(project.join("src/saltcorn/schema.sql"))?;
+    assert!(schema.contains(r#"CREATE TABLE "notes""#), "{schema}");
+    assert!(schema.contains(r#""body" text"#), "{schema}");
     // Everything outside `src/saltcorn/` is untouched — including the page for
-    // the new table, which is the admin's to add or not.
+    // the new table, which is the admin's to add or not, and the notes in
+    // `AGENTS.md`.
     assert_eq!(std::fs::read_to_string(project.join("src/App.tsx"))?, mine);
+    assert_eq!(std::fs::read_to_string(project.join("AGENTS.md"))?, notes);
     assert!(!project.join("src/pages/Notes.tsx").exists());
+    Ok(())
+}
+
+/// The admin screen's "update code" button (`updateApplicationClient`), at the
+/// layer that decides what it does: rewrite the generated directory, or — when
+/// the project directory is empty — scaffold a whole project into it.
+#[tokio::test]
+async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populated_one()
+-> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog_with_tasks(&db).await?;
+    let tmp = TempDir::new("update")?;
+    cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+    let app = todo_app();
+    let project = tmp.path().join("todo");
+
+    // Nothing there yet: re-emitting would leave a `src/saltcorn/` with no
+    // project around it, which cannot build. So it scaffolds, and says so.
+    let update = update_app_client(&cat, &app, None).await?;
+    assert!(matches!(update, ClientUpdate::Scaffolded(_)), "{update:?}");
+    assert!(
+        update.summary().contains("scaffolded"),
+        "{}",
+        update.summary()
+    );
+    assert!(project.join("package.json").is_file());
+    assert!(project.join("src/saltcorn/README.md").is_file());
+
+    // Now it is populated, so the same button regenerates and leaves the
+    // developer's own files alone.
+    let mine = "// mine\nexport default function App() { return null; }\n";
+    std::fs::write(project.join("src/App.tsx"), mine)?;
+    let update = update_app_client(&cat, &app, None).await?;
+    let ClientUpdate::Regenerated(files) = &update else {
+        panic!("a populated project is regenerated, not scaffolded: {update:?}");
+    };
+    assert_eq!(
+        files,
+        &[
+            "todo/src/saltcorn/client.ts",
+            "todo/src/saltcorn/hooks.ts",
+            "todo/src/saltcorn/schema.sql",
+            "todo/src/saltcorn/README.md",
+        ]
+    );
+    assert_eq!(std::fs::read_to_string(project.join("src/App.tsx"))?, mine);
     Ok(())
 }
 
@@ -238,7 +322,9 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
 /// would make the whole suite depend on both. What it buys, and nothing else
 /// does: the generated hooks are **type-checked against the generated client**
 /// (the project's build script is `tsc --noEmit && vite build`), so a drift
-/// between what `sc-api` emits and what the scaffold calls fails here.
+/// between what `sc-api` emits and what the scaffold calls fails here — including
+/// the client method a **custom SQL query** produces, whose result type came from
+/// Postgres describing the statement rather than from anything in this repository.
 #[tokio::test]
 async fn a_scaffolded_app_installs_builds_and_serves_end_to_end() -> sc_error::Result<()> {
     if std::env::var("SC_TEST_NPM").as_deref() != Ok("1") {
@@ -251,9 +337,40 @@ async fn a_scaffolded_app_installs_builds_and_serves_end_to_end() -> sc_error::R
     let tmp = TempDir::new("e2e")?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    let app = todo_app();
+    // Saved rather than used as built: saving is what **describes** the custom
+    // query, so the stored app carries the columns Postgres reported and the
+    // generated method is typed from them.
+    sc_app::bootstrap(&cat).await?;
+    let mut app = todo_app();
+    app.apis = vec![ApiConfig::new("rest", "/api").with(
+        "queries",
+        serde_json::json!([{
+            "name": "countTasks",
+            "method": "GET",
+            "path": "/reports/count",
+            "min_role": 1,
+            "sql": "SELECT count(*) AS n FROM tasks WHERE title = :title",
+            "params": [{ "name": "title", "type": "text", "required": true }],
+        }]),
+    )];
+    let app = save_application(&cat, &app).await?;
+
     let report = scaffold_app(&cat, &app, None).await?;
     assert!(!report.files.is_empty());
+
+    // A caller of that method, in the developer's own half of the project. It is
+    // never rendered; `tsc --noEmit` type-checks every file in the project, which
+    // is the point — a custom query whose generated method did not match this
+    // call fails the build.
+    std::fs::write(
+        tmp.path().join("todo/src/reports.ts"),
+        "import { api } from \"./saltcorn/hooks\";\n\
+         \n\
+         export async function countTasks(title: string): Promise<number> {\n\
+         \x20 const rows = await api.countTasks({ title });\n\
+         \x20 return rows[0]?.n ?? 0;\n\
+         }\n",
+    )?;
 
     // No shell step between scaffolding and a served bundle: the build installs
     // the dependencies the scaffold declared, then runs the bundler.

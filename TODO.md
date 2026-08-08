@@ -284,30 +284,42 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 6 — The generated client directory, and keeping it current
 
-- [ ] **`src/saltcorn/README.md`**, generated: this directory is maintained by the Saltcorn
+- [x] **`src/saltcorn/README.md`**, generated: this directory is maintained by the Saltcorn
       server, every file in it is overwritten on each build, edits belong outside it — and how
-      to add a custom SQL query with the CLI, with the command spelled out.
-- [ ] **`src/saltcorn/schema.sql`**, generated: the `CREATE TABLE` definitions of the tables the
+      to add a custom SQL query with the CLI, with the command spelled out. (Spelled for *this*
+      application — its subdomain and its REST mount — so it is pasteable rather than a
+      template, and carrying decision 6's authority note beside the command that opens the
+      hole.)
+- [x] **`src/saltcorn/schema.sql`**, generated: the `CREATE TABLE` definitions of the tables the
       application declares, so a coding agent working in the project can write a custom query
       against something real. Rendered by the **driver** (a new `DatabaseDriver::render_ddl`
       over the existing `SchemaChange` renderer) rather than by a second DDL writer in `sc-app`
-      that would drift from the one the database actually gets.
-- [ ] **`AGENTS.md` at the project root**, written by the scaffold only (decision 9): what this
+      that would drift from the one the database actually gets. (`sc_app::app_schema_sql` is the
+      join; the header says it describes rather than migrates, which is the mistake a file of
+      `CREATE TABLE` invites.)
+- [x] **`AGENTS.md` at the project root**, written by the scaffold only (decision 9): what this
       project is, that `src/saltcorn/` is generated and why, a pointer to its README, and how to
       add a custom SQL query.
-- [ ] **The button**: `updateApplicationClient` (admin API) and a control on the application
+- [x] **The button**: `updateApplicationClient` (admin API) and a control on the application
       screen. It re-emits the generated runtime, and when the project directory is **empty** it
       scaffolds instead — reusing the scaffold's own emptiness check — reporting which of the
-      two it did rather than saying "done" for both.
-- [ ] **Automatically**, on an API-definition change: `AppMounts::refresh_table` (a column added,
+      two it did rather than saying "done" for both. (`sc_app::update_app_client` returns a
+      `ClientUpdate` that names which happened; the two generators now take one
+      `ProjectContext` rather than six parameters that grew by one per generated file.)
+- [x] **Automatically**, on an API-definition change: `AppMounts::refresh_table` (a column added,
       a table changed) and saving an application already reproject the endpoint set in memory;
       they now also re-emit `src/saltcorn/**` for each affected mounted app whose source is
-      reachable. Non-fatal and logged (decision 10).
-- [ ] Tests: the scaffold writes the three new files and the "only `src/saltcorn/` is
+      reachable. Non-fatal and logged (decision 10). (The observer is synchronous and runs
+      inside somebody's schema change, so the re-emit is spawned; `updateApplication` awaits its
+      own and logs.)
+- [x] Tests: the scaffold writes the three new files and the "only `src/saltcorn/` is
       regenerated" boundary test covers them; an edited root `AGENTS.md` survives a re-emit; the
       button rescaffolds an emptied directory and re-emits a populated one; adding a column
       through the admin API rewrites `client.ts` **and** `schema.sql` with no build and no
       restart; the scaffolded project still type-checks, including a call to a custom query.
+      (The column's *typed* surface is `hooks.ts` and `schema.sql` — REST's row payloads are
+      opaque JSON, so `client.ts` moves when the endpoint set does, which the custom query saved
+      through `updateApplication` asserts in the same file.)
 
 ## Phase 7 — Documentation
 

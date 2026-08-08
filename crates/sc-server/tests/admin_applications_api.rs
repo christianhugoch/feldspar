@@ -740,6 +740,12 @@ async fn non_admins_are_rejected_from_every_application_endpoint() -> sc_error::
             "POST",
             "/api/applications/00000000-0000-0000-0000-000000000000/build",
         ),
+        // Rewriting an application's source tree is administration too, even
+        // though it builds nothing.
+        (
+            "POST",
+            "/api/applications/00000000-0000-0000-0000-000000000000/client",
+        ),
         ("GET", "/api/frameworks"),
         // Preparing arbitrary SQL is as much an admin's business as saving it.
         ("POST", "/api/custom-queries/describe"),

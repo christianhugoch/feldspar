@@ -27,7 +27,7 @@ use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
 use tokio::process::Command;
 
-use crate::api::{app_endpoints_with, app_graphql, app_tables};
+use crate::api::{app_endpoints_with, app_graphql, app_schema_sql, app_tables};
 use crate::application::Application;
 use crate::build::{AppSource, app_source_from_config};
 use crate::react::REACT_FRAMEWORK;
@@ -91,7 +91,15 @@ pub async fn scaffold_app(
     let tables = app_tables(app, cat)?;
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
     let graphql = app_graphql(app, cat)?;
-    let generated = files::project_files(&project, &tables, &endpoints, graphql.as_ref());
+    let schema_sql = app_schema_sql(app, cat)?;
+    let generated = files::project_files(&files::ProjectContext {
+        project: &project,
+        app,
+        tables: &tables,
+        endpoints: &endpoints,
+        graphql: graphql.as_ref(),
+        schema_sql: &schema_sql,
+    });
 
     let mut written = Vec::with_capacity(generated.len());
     for file in &generated {
@@ -248,9 +256,20 @@ pub async fn emit_react_runtime(
     // describing what is actually mounted at the next build — with nobody
     // exporting an SDL by hand.
     let graphql = app_graphql(app, cat)?;
+    // Rewritten on the same schedule and for the same reason as the client: the
+    // tables it describes are the ones this app declares, and a column added in
+    // the admin UI has to reach the file a coding agent writes SQL against.
+    let schema_sql = app_schema_sql(app, cat)?;
 
     let mut written = Vec::new();
-    for file in files::runtime_files(&tables, &endpoints, graphql.as_ref()) {
+    for file in files::runtime_files(&files::ProjectContext {
+        project,
+        app,
+        tables: &tables,
+        endpoints: &endpoints,
+        graphql: graphql.as_ref(),
+        schema_sql: &schema_sql,
+    }) {
         let path = format!("{project}/{}", file.path);
         store
             .write(&path, Bytes::from(file.contents.into_bytes()))
@@ -259,6 +278,80 @@ pub async fn emit_react_runtime(
         written.push(path);
     }
     Ok(written)
+}
+
+/// What [`update_app_client`] did — and it matters which, because the two
+/// outcomes are very different news about the same button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientUpdate {
+    /// The project directory was empty, so a whole project was written into it.
+    /// An admin who pressed "update the generated client" and got a project back
+    /// has to be told, not congratulated on a regeneration that did not happen.
+    Scaffolded(ScaffoldReport),
+    /// The generated files were rewritten, leaving everything else alone. The
+    /// paths written, store-relative.
+    Regenerated(Vec<String>),
+}
+
+impl ClientUpdate {
+    /// A one-line summary for the admin's log, saying **which** of the two
+    /// happened.
+    pub fn summary(&self) -> String {
+        match self {
+            ClientUpdate::Scaffolded(report) => format!(
+                "the project directory was empty, so it was scaffolded: {}",
+                report.summary()
+            ),
+            ClientUpdate::Regenerated(files) if files.is_empty() => {
+                "this application generates no client, so nothing was rewritten".to_owned()
+            }
+            ClientUpdate::Regenerated(files) => {
+                format!("regenerated {}", files.join(", "))
+            }
+        }
+    }
+
+    /// The files written, whichever path was taken.
+    pub fn files(&self) -> &[String] {
+        match self {
+            ClientUpdate::Scaffolded(report) => &report.files,
+            ClientUpdate::Regenerated(files) => files,
+        }
+    }
+}
+
+/// Bring an application's generated code up to date on demand — the admin
+/// screen's button, and the CLI's re-emit with one extra case handled.
+///
+/// Ordinarily this rewrites `src/saltcorn/**` and nothing else
+/// ([`emit_app_client`](crate::emit_app_client)). But a project directory that
+/// is **empty** has nothing to rewrite: the app was created before its store was
+/// reachable, or somebody deleted the tree. Re-emitting into it would leave a
+/// `src/saltcorn/` with no project around it — a directory of generated files
+/// that cannot build — so an empty directory is scaffolded instead, through the
+/// scaffold's own emptiness check rather than a second opinion about what
+/// "empty" means.
+///
+/// Which of the two happened is in the return value rather than folded into a
+/// single "done": scaffolding writes an entire project, and an admin must not
+/// have to discover that by looking.
+pub async fn update_app_client(
+    cat: &Catalog,
+    app: &Application,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+) -> Result<ClientUpdate> {
+    if require_scaffoldable(app).is_ok() {
+        let source = app_source_from_config(&app.framework)?;
+        let store = cat.require_file_store(&source.store.0)?;
+        if is_empty_dir(store.as_ref(), &source.build.source_dir).await? {
+            return scaffold_app(cat, app, dispatcher)
+                .await
+                .map(ClientUpdate::Scaffolded);
+        }
+    }
+    crate::build::emit_app_client(cat, app, dispatcher)
+        .await
+        .map(ClientUpdate::Regenerated)
 }
 
 /// Whether `dir` in `store` is absent or empty.

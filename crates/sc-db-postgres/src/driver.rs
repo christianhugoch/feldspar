@@ -103,6 +103,13 @@ impl PgDriver {
         crate::exec::run_ddl(&client, &self.dialect, change).await
     }
 
+    /// Render `change` as the Postgres DDL `apply_schema` would run, without
+    /// running it — the one renderer, borrowed by the generated `schema.sql` an
+    /// application's project carries (§13.3).
+    pub fn render_ddl(&self, change: &SchemaChange) -> Result<String> {
+        crate::ddl::render(&self.dialect, change)
+    }
+
     /// Prepare `sql` (parameters typed by `param_types`) and report the result
     /// columns Postgres says it will produce, without running it — how a custom
     /// SQL query is typed, and how one that will not prepare is refused at the
@@ -149,6 +156,10 @@ impl DatabaseDriver for PgDriver {
 
     async fn apply_schema(&self, change: &SchemaChange) -> Result<()> {
         PgDriver::apply_schema(self, change).await
+    }
+
+    fn render_ddl(&self, change: &SchemaChange) -> Result<String> {
+        PgDriver::render_ddl(self, change)
     }
 
     async fn describe(&self, sql: &str, param_types: &[String]) -> Result<Vec<DescribedColumn>> {

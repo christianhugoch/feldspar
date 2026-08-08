@@ -54,8 +54,9 @@ mod store;
 
 pub use api::{
     ApiProviderInfo, AppGraphql, api_provider_config_spec, app_client, app_client_with,
-    app_endpoints, app_endpoints_with, app_graphql, app_providers, app_providers_with, app_tables,
-    app_triggers, registered_api_provider_info, validate_api_config, validate_api_mounts,
+    app_endpoints, app_endpoints_with, app_graphql, app_providers, app_providers_with,
+    app_schema_sql, app_tables, app_triggers, registered_api_provider_info, validate_api_config,
+    validate_api_mounts,
 };
 pub use application::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
@@ -87,8 +88,8 @@ pub use react::{
     react_client_path, react_config_spec, react_csp, react_runtime_dir, valid_project_name,
 };
 pub use scaffold::{
-    GeneratedFile, ScaffoldReport, emit_react_runtime, require_api_provider, require_scaffoldable,
-    scaffold_app,
+    ClientUpdate, GeneratedFile, ScaffoldReport, emit_react_runtime, require_api_provider,
+    require_scaffoldable, scaffold_app, update_app_client,
 };
 pub use store::{
     applications_using_file_store, delete_application, list_applications, load_application,

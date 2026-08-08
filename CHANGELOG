@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## The generated directory explains itself, and keeps itself current
+
+`src/saltcorn/` has been a generated directory since the React framework landed, but it
+never said so anywhere a person — or a coding agent — would look, and it went stale
+between builds. Both are fixed, and the two halves are the same idea: what the server
+generates is the server's, and it follows the application's definition without anybody
+asking.
+
+**Two new generated files.** `src/saltcorn/README.md` says the directory is overwritten
+without warning, lists what is in it, and spells out `saltcorn api add-query` for *this*
+application — its subdomain, its mount — so the answer to "the client has no method for
+what I need" is a command to paste rather than a search. It carries decision 6's
+authority note too: raw SQL does not go through the row layer, what still applies is the
+role floor and the caller's database context. `src/saltcorn/schema.sql` is the
+`CREATE TABLE` of the tables the application declares, so an agent writing that query has
+real column names and real types instead of guesses.
+
+**The DDL is the driver's.** `schema.sql` is rendered through a new
+`DatabaseDriver::render_ddl` over the existing `SchemaChange` renderer — the same text
+`apply_schema` would run, and nothing applied. A second DDL writer in `sc-app` would have
+drifted from the real one the first time a type or a constraint changed, and a file that
+exists to be trusted cannot be the one that is wrong.
+
+**`AGENTS.md` at the project root, written once.** It says what the project is, that
+`src/saltcorn/` is generated and points at its README, that data reaches the browser
+through the generated client and nothing else, and how to add a custom query. It is the
+developer's file: the scaffold writes it and **never** rewrites it, because agents append
+what they learn to it and clobbering that would destroy their work. That is the same
+boundary §13.3 already draws — inside the generated directory is ours, the project root
+is theirs — applied to one more file.
+
+**Nobody regenerates anything by hand.** A re-projection of an app's providers — a column
+added, a table's access changed, a trigger's role — now also re-emits that app's
+`src/saltcorn/**`, and saving an application does the same. It is a background task and
+its failures are logged, never fatal: the observer that triggers it is running inside
+somebody's schema change, and an unreachable store must not fail their edit or take a
+mounted app down (decision 10). No bundler runs; `npm run build` stays the build button's.
+
+**And a button for the times you want it now**: `updateApplicationClient`, beside Build on
+the applications screen. When the project directory is **empty** it scaffolds instead of
+re-emitting — an app whose store was unreachable at creation, or whose tree somebody
+deleted, would otherwise get a `src/saltcorn/` with no project around it — and the
+response says which of the two it did, because writing a whole project is not the same
+news as rewriting four files. The emptiness check is the scaffold's own; a second opinion
+about what "empty" means is how the two would eventually disagree.
+
+The opt-in `npm` end-to-end test now writes a caller of a **custom query** into the
+scaffolded project, so `tsc --noEmit` type-checks a method whose result type came from
+Postgres describing the statement — the whole chain, from `SELECT` to `rows[0].n`, fails
+the build if any link of it moves.
+
 ## Writing a custom query: a screen, and a command line
 
 The model landed last; this is how somebody actually adds one. Two ways, both of which

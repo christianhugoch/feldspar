@@ -269,7 +269,9 @@ impl AppMounts {
     }
 
     /// Re-project the providers of every mounted app matching `select`, keeping
-    /// each app's built framework as it is.
+    /// each app's built framework as it is — and rewrite those apps' generated
+    /// files, so the projection in memory and the client on disk describe the
+    /// same API.
     fn reproject(&self, select: impl Fn(&Application) -> bool) -> Result<()> {
         let Some(catalog) = self.catalog() else {
             return Ok(());
@@ -283,6 +285,7 @@ impl AppMounts {
             .filter(|m| select(&m.app))
             .cloned()
             .collect();
+        let apps: Vec<Application> = affected.iter().map(|m| m.app.clone()).collect();
         for mounted in affected {
             let refreshed = MountedApp::new_with(
                 mounted.app.clone(),
@@ -293,7 +296,55 @@ impl AppMounts {
             )?;
             self.remount(refreshed);
         }
+        self.reemit_clients(apps);
         Ok(())
+    }
+
+    /// Rewrite the generated files (`src/saltcorn/**`) of each of `apps`, in the
+    /// background — the automatic half of "if the API definition changes, the
+    /// client code must be updated automatically" (GOALS, decision 10).
+    ///
+    /// A re-projection means the app's endpoint set just changed: a column
+    /// added, a table's access tightened, a trigger's role. The projection in
+    /// memory changes at once; without this, the `client.ts` and `schema.sql` in
+    /// the app's source tree would go on describing the API as it was until
+    /// somebody built, which is precisely the drift §13.1 exists to prevent.
+    ///
+    /// **Background and non-fatal.** The caller is a synchronous schema
+    /// observer running inside somebody's admin request, and writing files
+    /// through a store is neither its job nor fast; more importantly, a re-emit
+    /// that fails (an unreachable store, a `code` app with no client path)
+    /// must never take a mounted application down or fail the schema change
+    /// that triggered it. So it is spawned, and its failures are logged in the
+    /// operator's console beside every other thing that went wrong at boot.
+    ///
+    /// With no Tokio runtime — a unit test constructing an `AppMounts` by hand —
+    /// there is nothing to spawn onto and nothing to do.
+    fn reemit_clients(&self, apps: Vec<Application>) {
+        if apps.is_empty() {
+            return;
+        }
+        let (Some(catalog), Ok(handle)) = (
+            self.catalog().cloned(),
+            tokio::runtime::Handle::try_current(),
+        ) else {
+            return;
+        };
+        let triggers = self.triggers().cloned();
+        handle.spawn(async move {
+            for app in apps {
+                match sc_app::emit_app_client(&catalog, &app, triggers.as_ref()).await {
+                    // An app with no generated client is a configuration, not a
+                    // failure, and it says nothing.
+                    Ok(_) => {}
+                    Err(e) => eprintln!(
+                        "saltcorn: application `{}` changed, but its generated client \
+                         could not be rewritten: {e}",
+                        app.subdomain
+                    ),
+                }
+            }
+        });
     }
 
     /// The app served on `subdomain`, as an [`Arc`] the caller holds after the
