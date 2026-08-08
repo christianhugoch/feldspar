@@ -642,6 +642,80 @@ async fn a_custom_sql_query_is_saved_described_and_returned() -> sc_error::Resul
     Ok(())
 }
 
+/// The editor's **Check** button (TODO "API improvements" Phase 5):
+/// `describeCustomQuery` prepares a query and reports its columns without
+/// storing anything.
+///
+/// Why it exists, and therefore what this asserts: the columns are what the
+/// admin's generated client method will return, and finding them out by saving
+/// the whole application means finding out about a typo in one `SELECT` by
+/// having every other edit on the screen refused with it. So the same two
+/// judgements a save makes — the model's rules, then Postgres's — have to arrive
+/// from this one call, and nothing may be written by it.
+#[tokio::test]
+async fn a_custom_sql_query_is_described_without_being_saved() -> sc_error::Result<()> {
+    let tmp = TempDir::new("describe");
+    let (router, catalog, _db) = setup(&tmp).await?;
+    create_user(&catalog, "admin@example.com", "correct-horse", ROLE_ADMIN).await?;
+    let mut admin = Client::new(router, BASE_DOMAIN);
+    admin.login("admin@example.com", "correct-horse").await;
+
+    let query = json!({
+        "name": "titlesLike",
+        "method": "GET",
+        "path": "/reports/titles",
+        "sql": "SELECT id, title FROM posts WHERE title LIKE :pattern ORDER BY id",
+        "params": [{ "name": "pattern", "type": "text" }],
+        "min_role": 40,
+        "tables": ["posts"]
+    });
+    let (status, described) = admin
+        .send("POST", "/api/custom-queries/describe", Some(query.clone()))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{described}");
+    assert_eq!(
+        described["columns"],
+        json!([
+            { "name": "id", "type": "int" },
+            { "name": "title", "type": "text" },
+        ]),
+        "{described}"
+    );
+    // Nothing was stored: this is a question, not a save.
+    assert!(sc_app::list_applications(&catalog).await?.is_empty());
+
+    // A statement that will not prepare comes back as Postgres's own message.
+    let mut broken = query.clone();
+    broken["sql"] = json!("SELECT titel FROM posts");
+    broken["params"] = json!([]);
+    let (status, err) = admin
+        .send("POST", "/api/custom-queries/describe", Some(broken))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(
+        err["error"].as_str().unwrap_or_default().contains("titel"),
+        "{err}"
+    );
+
+    // …and so does a name the app's own table endpoints already hold, which is
+    // decided without a database — the whole refusal a save would give, from
+    // the check button, so it takes one round trip rather than two.
+    let mut colliding = query;
+    colliding["name"] = json!("listPosts");
+    let (status, err) = admin
+        .send("POST", "/api/custom-queries/describe", Some(colliding))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("listPosts"),
+        "{err}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn non_admins_are_rejected_from_every_application_endpoint() -> sc_error::Result<()> {
     let tmp = TempDir::new("authz");
@@ -667,6 +741,8 @@ async fn non_admins_are_rejected_from_every_application_endpoint() -> sc_error::
             "/api/applications/00000000-0000-0000-0000-000000000000/build",
         ),
         ("GET", "/api/frameworks"),
+        // Preparing arbitrary SQL is as much an admin's business as saving it.
+        ("POST", "/api/custom-queries/describe"),
     ] {
         // Prime CSRF for mutations.
         anon.raw("GET", "/api/auth/status", None).await;

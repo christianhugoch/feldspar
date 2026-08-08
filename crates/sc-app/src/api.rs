@@ -55,6 +55,15 @@ pub struct ApiProviderInfo {
     /// switching its aggregates on is one screen with no GraphQL-specific code
     /// on it — exactly the arrangement frameworks are already under.
     pub config_spec: Vec<FormField>,
+    /// Whether this provider serves **custom SQL queries** — whether the
+    /// application form should offer the query editor beside its settings.
+    ///
+    /// A flag rather than the form checking for `rest`, for the reason the
+    /// settings are a declared spec: the screen renders what a provider says
+    /// about itself, and the day a second provider grows custom queries the form
+    /// does not have to hear about it. Custom queries are not a settings field
+    /// (§13.4, decision 8), so this is how the provider declares them.
+    pub supports_custom_queries: bool,
 }
 
 /// Every registered API provider with its presentation, in the order an admin
@@ -74,6 +83,7 @@ pub fn registered_api_provider_info() -> Vec<ApiProviderInfo> {
                 .to_owned(),
             default_mount: "/api".to_owned(),
             config_spec: sc_api::rest_config_spec(),
+            supports_custom_queries: true,
         },
         ApiProviderInfo {
             name: GRAPHQL_PROVIDER.to_owned(),
@@ -85,6 +95,7 @@ pub fn registered_api_provider_info() -> Vec<ApiProviderInfo> {
                 .to_owned(),
             default_mount: sc_api::GRAPHQL_DEFAULT_MOUNT.to_owned(),
             config_spec: sc_api::graphql_config_spec(),
+            supports_custom_queries: false,
         },
     ]
 }

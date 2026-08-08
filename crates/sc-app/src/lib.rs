@@ -67,7 +67,7 @@ pub use applications::{
 };
 pub use build::{
     AppSource, BuildReport, app_source_from_config, build_app, build_application,
-    build_code_framework, emit_client, run_build,
+    build_code_framework, emit_app_client, emit_client, run_build,
 };
 pub use builder_agent::{
     BuilderAgentSpec, BuilderTrait, TRAIT_BUILD_APPLICATION, TRAIT_CFG_APPLICATION,

@@ -35,8 +35,10 @@ import {
   apiRowsToRequest,
   blankApiRow,
   specFor,
+  supportsCustomQueries,
   type ApiRow,
 } from "../apiRows";
+import { CustomQueries } from "./CustomQueries";
 
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
@@ -439,7 +441,12 @@ export function ApplicationForm({ appId }: { appId?: string }) {
             </Card.Body>
           </Card>
 
-          <ApiRows rows={apis} providers={allProviders} onChange={setApis} />
+          <ApiRows
+            rows={apis}
+            providers={allProviders}
+            tables={parseNames(tables)}
+            onChange={setApis}
+          />
 
           <RepeatableRows
             title="Static directories"
@@ -488,10 +495,14 @@ export function ApplicationForm({ appId }: { appId?: string }) {
 function ApiRows({
   rows,
   providers,
+  tables,
   onChange,
 }: {
   rows: ApiRow[];
   providers: ApiProviderInfo[];
+  /** The application's declared tables, sent with a custom query's check so the
+   * server can refuse a name or path this app's own table routes already hold. */
+  tables: string[];
   onChange: (rows: ApiRow[]) => void;
 }) {
   const setRow = (index: number, next: ApiRow) =>
@@ -589,6 +600,17 @@ function ApiRows({
                     }
                   />
                 </div>
+              )}
+              {/* …and its custom SQL queries, when the provider serves them.
+                  Offered on the provider's own say-so (`supports_custom_queries`),
+                  so this screen still knows nothing about which provider REST is. */}
+              {supportsCustomQueries(providers, row.provider) && (
+                <CustomQueries
+                  queries={row.queries}
+                  tables={tables}
+                  idPrefix={`api-${index}`}
+                  onChange={(queries) => setRow(index, { ...row, queries })}
+                />
               )}
             </div>
           );

@@ -1831,10 +1831,43 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     // GraphQL's aggregation switch and its four bounds without
                     // knowing that GraphQL is what it is rendering.
                     "config_spec": info.config_spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                    // …and whether it takes custom SQL queries, which are not a
+                    // settings field and so have an editor of their own.
+                    "supports_custom_queries": info.supports_custom_queries,
                 })
             })
             .collect();
         Ok(HandlerResponse::ok(Json::Array(out)))
+    });
+
+    // Prepare one custom SQL query and answer with the columns the database says
+    // it returns — the editor's "Check" button (§13.4).
+    //
+    // The same two calls a save makes, in the same order: everything decidable
+    // without a database first (the name, the path, one statement, the declared
+    // parameters and the used ones being the same set), then `describe`, which
+    // is where Postgres's own message comes from. Deciding it twice would be two
+    // answers to "is this query valid", and the one that is wrong is the one
+    // nobody is reading until a caller hits it.
+    reg.register("describeCustomQuery", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let tables = parse_str_array(obj, "tables")?;
+                let query: sc_api::CustomQuery = serde_json::from_value(ctx.body.clone())
+                    .map_err(|e| Error::invalid(format!("not a custom SQL query: {e}")))?;
+                sc_api::validate_custom_queries(std::slice::from_ref(&query), &tables)?;
+                let columns = sc_api::describe_custom_query(&catalog, &query).await?;
+                Ok(HandlerResponse::ok(json!({
+                    "columns": columns
+                        .iter()
+                        .map(|c| json!({ "name": c.name, "type": c.ty }))
+                        .collect::<Vec<_>>(),
+                })))
+            }
+        }
     });
 
     // --- users --------------------------------------------------------------

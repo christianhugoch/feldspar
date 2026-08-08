@@ -983,6 +983,30 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // Prepare one custom SQL query and report the columns the **database** says
+    // it returns (§13.4, decision 5), without storing anything.
+    //
+    // Saving already does this — a query that will not prepare cannot be saved —
+    // so why a second route? Because the editor needs the answer *before* the
+    // save: the columns are what the admin's generated client method will
+    // return, and finding out by saving the whole application means finding out
+    // about a typo in one `SELECT` by having every other edit on the screen
+    // refused with it. It is the same call on the same catalog; only the moment
+    // differs.
+    set.register(
+        Endpoint::new(
+            "describeCustomQuery",
+            Method::Post,
+            api().lit("custom-queries").lit("describe"),
+        )
+        .input(custom_query_input_schema())
+        .output(TypeSchema::struct_of([StructField::new(
+            "columns",
+            TypeSchema::array(query_column_schema()),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- users --------------------------------------------------------------
 
     set.register(
@@ -1784,6 +1808,54 @@ fn api_provider_info_schema() -> TypeSchema {
         // picked, so the common case is no typing at all.
         StructField::new("default_mount", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+        // Whether this provider serves custom SQL queries, i.e. whether the
+        // application form offers the query editor for it. Declared by the
+        // provider for the same reason its settings are: the form renders what
+        // it is told rather than checking for a provider by name.
+        StructField::new("supports_custom_queries", TypeSchema::bool()),
+    ])
+}
+
+/// The body `describeCustomQuery` takes: one custom SQL query as the editor
+/// holds it, plus the tables the application it belongs to declares.
+///
+/// It is the stored [`CustomQuery`](crate::CustomQuery) shape rather than "just
+/// the SQL and the parameters" so that the *whole* refusal an eventual save
+/// would give arrives from the check button: a name a table endpoint already
+/// holds and a path a table's own routes already answer are both about this
+/// query, and learning about them at save time — after the SQL has been declared
+/// fine — is two round trips to fix one query. `tables` is the application's
+/// declared subset; an application not yet created sends the ones typed into the
+/// form, and an empty list simply skips those two rules.
+fn custom_query_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("method", TypeSchema::text()),
+        StructField::new("path", TypeSchema::text()),
+        StructField::new("sql", TypeSchema::text()),
+        StructField::new(
+            "params",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("type", TypeSchema::text()),
+                StructField::new("required", TypeSchema::optional(TypeSchema::bool())),
+            ])),
+        ),
+        StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+        StructField::new(
+            "tables",
+            TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+        ),
+    ])
+}
+
+/// One column of a custom query's result, as the database described it: the name
+/// it arrives under in the JSON, and the wire type it was mapped to.
+fn query_column_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("type", TypeSchema::text()),
     ])
 }
 

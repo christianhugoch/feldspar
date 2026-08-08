@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## Writing a custom query: a screen, and a command line
+
+The model landed last; this is how somebody actually adds one. Two ways, both of which
+end in the same stored `queries` array, and neither of which asks anyone to regenerate
+anything by hand.
+
+**In the admin UI**, an API row that serves custom queries grows an editor: name, method,
+sub-path, minimum role, the SQL, and the parameter list. The button that matters is
+**Check**. It posts to a new admin endpoint, `describeCustomQuery`, which runs the same
+two judgements a save runs — the model's rules, then `describe` — and answers with the
+columns Postgres says the statement returns, storing nothing. So `column "titel" does not
+exist` arrives in one round trip, in Postgres's words, while its author is looking at the
+SQL; and the columns are also the **documentation**, because they are exactly what the
+generated client method will hand back. Doing this at save time instead would mean
+learning about a typo in one `SELECT` by having every other edit on the screen refused
+with it.
+
+**The authority note is on the screen**, not only in the module docs (decision 6): the
+editor says, above the list, that raw SQL does not go through the row layer — so ownership
+formulae, rich-type coercion and File-field rules do not reach it — and that what still
+applies is the role floor (admin unless you say otherwise) and the caller's database
+context, so RLS policies still decide what it can see. An admin opening a hole should be
+told what it is a hole in, where they are opening it.
+
+**The form still knows nothing about REST.** `ApiProviderInfo` gained
+`supports_custom_queries`, so the editor appears because a provider declared it does this,
+in the same spirit as the `config_spec` beside it. And `apiRowsToRequest` now carries the
+queries back explicitly — `buildConfig` writes the provider's declared settings and
+nothing else, which is right for settings and meant that opening an application to change
+its mount silently saved its custom queries away. That failure has a test of its own.
+
+**From a terminal**: `saltcorn api add-query --app blog --name topAuthors --path
+/reports/top-authors --param since:int --sql @report.sql`, with `list-queries` and
+`remove-query` beside it. Three commands rather than one because an add-only command is a
+trap: the first typo would need a browser to fix, which is the situation the command
+exists to avoid. A parameter is written `name:type`, or `name:type?` when the caller may
+leave it out; `--sql @file` reads the statement from a file, because SQL is many lines and
+a shell is a poor place to keep them. The role floor defaults to **admin** here too — a
+command-line default of "public" would be the one place the rule did not hold.
+
+Adding or removing a query **re-emits the application's generated client** (a new
+`sc_app::emit_app_client`, which for a `react` app rewrites the whole `src/saltcorn/`
+runtime, since its hooks are typed from the same endpoint set). A command that changed the
+API and left the client describing the old one would be the drift §13.1 exists to prevent,
+introduced by the tool meant to avoid it. The re-emit is reported but never fatal: the
+query is already saved by then, and exiting non-zero would say the opposite. Validation is
+the save itself, so a query that will not prepare exits non-zero carrying Postgres's
+message with the stored application untouched — asserted end-to-end, through the real
+binary against a real database, along with the endpoint set and the emitted `client.ts`
+both gaining the method.
+
 ## An application's own SQL, as a typed endpoint
 
 An administrator writes a statement, names its parameters and their types, picks an HTTP

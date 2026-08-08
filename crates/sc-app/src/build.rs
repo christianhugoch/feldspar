@@ -313,6 +313,41 @@ pub async fn emit_client(
     Ok(Some(path.clone()))
 }
 
+/// Rewrite an application's **generated** files from its current definition —
+/// the typed client, and a `react` app's whole `src/saltcorn/` runtime — without
+/// building anything.
+///
+/// This is "if the API definition changes, the client code must be updated
+/// automatically" (GOALS) reduced to what it actually requires: re-emitting the
+/// generated files is fast, needs no external process, and cannot fail on a
+/// bundler, so it can run wherever a definition changes — a query added from the
+/// command line, a column added in the admin UI — leaving `npm run build` to the
+/// build button and the dev server.
+///
+/// Returns the paths written, which is what a caller reports. An application
+/// whose framework declares no client path writes nothing and says so with an
+/// empty list rather than an error: an app with no generated client is a
+/// configuration, not a failure.
+pub async fn emit_app_client(
+    cat: &Catalog,
+    app: &Application,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+) -> Result<Vec<String>> {
+    let source = app_source_from_config(&app.framework)?;
+    // A `react` app's client is one file of a generated *directory* whose hooks
+    // are typed from the same endpoint set, so rewriting only the client would
+    // leave the two disagreeing. `emit_react_runtime` writes the client too,
+    // which is why this is an either/or rather than both.
+    if app.framework.name == REACT_FRAMEWORK {
+        return emit_react_runtime(cat, app, &source, dispatcher).await;
+    }
+    let endpoints = app_endpoints_with(app, cat, dispatcher)?;
+    Ok(emit_client(cat, &source, &endpoints)
+        .await?
+        .into_iter()
+        .collect())
+}
+
 /// Build an application and return a [`CodeFramework`] serving the result, with
 /// the [`BuildSpec`] attached.
 ///

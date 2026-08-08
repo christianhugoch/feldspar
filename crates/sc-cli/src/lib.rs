@@ -2,10 +2,11 @@
 //!
 //! The binary ([`main`](../main/index.html)) stays thin; the reusable pieces —
 //! parsing the database connection ([`DbConfig`]), reading the per-environment
-//! configuration file ([`config_file`]) and standing up a connected [`Catalog`]
-//! ([`connect_catalog`]) — live here so integration tests can drive the same boot
-//! path the CLI uses.
+//! configuration file ([`config_file`]), parsing the `api` commands' flags
+//! ([`api`]) and standing up a connected [`Catalog`] ([`connect_catalog`]) —
+//! live here so integration tests can drive the same boot path the CLI uses.
 
+pub mod api;
 pub mod config_file;
 pub mod db;
 

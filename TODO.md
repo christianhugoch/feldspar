@@ -252,24 +252,35 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 5 — The admin editor and the CLI
 
-- [ ] **The application form's custom-query editor**, one list per REST API row: name, method,
+- [x] **The application form's custom-query editor**, one list per REST API row: name, method,
       sub-path, `min_role`, SQL, and the parameter list. It validates through the server
       (`describe`) before saving, and shows the resulting column names and types — which is also
       how the admin learns what their client method will return. The authority note of
-      decision 6 is on the screen, not only in the docs.
-- [ ] **`saltcorn api add-query`**: `--app <subdomain> --api <mount> --name … --method … --path …
+      decision 6 is on the screen, not only in the docs. (The check is the new admin endpoint
+      `describeCustomQuery`, which runs the model's rules *and* `describe` — the whole refusal a
+      save would give, in one round trip, without storing anything. The editor is offered on the
+      provider's own say-so: `ApiProviderInfo::supports_custom_queries`, so the form still knows
+      nothing about which provider REST is. `apiRowsToRequest` now carries the queries back
+      explicitly, because `buildConfig` writes the declared spec and nothing else — editing an
+      app's mount was quietly deleting its custom queries.)
+- [x] **`saltcorn api add-query`**: `--app <subdomain> --api <mount> --name … --method … --path …
       --min-role … --param name:type[,…] --sql <text|@file>`. It connects the database like
       `build-app` does, validates by preparing, saves the application, and **re-emits the app's
       generated client** — the sentence GOALS.md leaves unfinished ("This must update the …"),
       read as the generated client, since that is what a new endpoint invalidates.
-- [ ] `saltcorn api list-queries` and `saltcorn api remove-query` beside it. An add-only command
+      (`sc_app::emit_app_client` is that re-emit, shared so Phase 6's button and the automatic
+      path reuse it; `name:type?` declares an optional parameter, and `--param` may carry
+      several.)
+- [x] `saltcorn api list-queries` and `saltcorn api remove-query` beside it. An add-only command
       is a trap: the first typo would need a browser to fix, which is the situation the command
       exists to avoid.
-- [ ] Tests: vitest over the editor's model (form state → request, a validation failure → the
+- [x] Tests: vitest over the editor's model (form state → request, a validation failure → the
       message, the described columns → the preview); an integration test (real Postgres) that
       adds a query through the CLI and asserts the endpoint set and the emitted `client.ts` both
       gained it; a CLI add with invalid SQL exits non-zero, prints Postgres's message, and
-      leaves the stored application untouched.
+      leaves the stored application untouched. (Plus the flag parsing as Rust unit tests, and
+      `describeCustomQuery` over HTTP: described without saving, Postgres's message on a broken
+      statement, and admin-only.)
 
 ## Phase 6 — The generated client directory, and keeping it current
 

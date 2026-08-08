@@ -14,7 +14,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use sc_api::admin_endpoints;
-use sc_app::{app_source_from_config, build_application, load_application_by_subdomain};
+use sc_app::{
+    app_source_from_config, build_application, load_application_by_subdomain, save_application,
+};
 use sc_auth::SessionStore;
 use sc_cli::DbConfig;
 use sc_cli::{
@@ -40,6 +42,7 @@ async fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("serve") => serve_command(&args[1..]).await,
         Some("build-app") => build_app_command(&args[1..]).await,
+        Some("api") => api_command(&args[1..]).await,
         Some(other) => Err(sc_error::Error::config(format!(
             "unknown command `{other}`"
         ))),
@@ -238,11 +241,268 @@ async fn build_app_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `saltcorn api SUBCOMMAND …` — an application's custom SQL queries from the
+/// command line (§13.4).
+///
+/// Three subcommands rather than one, because an add-only command is a trap: the
+/// first typo would need a browser to fix, which is precisely the situation this
+/// command exists to avoid.
+async fn api_command(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("add-query") => add_query_command(&args[1..]).await,
+        Some("list-queries") => list_queries_command(&args[1..]).await,
+        Some("remove-query") => remove_query_command(&args[1..]).await,
+        Some(other) => Err(sc_error::Error::config(format!(
+            "unknown api subcommand `{other}`; there are add-query, list-queries \
+             and remove-query"
+        ))),
+        None => Err(sc_error::Error::config(
+            "api needs a subcommand: add-query, list-queries or remove-query",
+        )),
+    }
+}
+
+/// Connect the database and the file stores the way `build-app` does, and load
+/// the application named by `--app`.
+///
+/// The file stores are connected because the command **re-emits the generated
+/// client**, which is written through the app's source store — a command that
+/// changed the API and left the client describing the old one would be the drift
+/// §13.1 exists to prevent, introduced by the tool meant to avoid it.
+async fn open_app(
+    subdomain: &str,
+    db: &DbConfig,
+    file_stores: &[String],
+) -> Result<(std::sync::Arc<sc_catalog::Catalog>, sc_app::Application)> {
+    if let Some(source) = db.source() {
+        eprintln!("saltcorn: database configured from {source}");
+    }
+    let catalog = connect_catalog(db).await?;
+    connect_stored_file_stores(&catalog).await?;
+    connect_file_stores(&catalog, file_stores)?;
+    let app = load_application_by_subdomain(&catalog, subdomain)
+        .await?
+        .ok_or_else(|| {
+            sc_error::Error::not_found(format!("no application with subdomain `{subdomain}`"))
+        })?;
+    Ok((catalog, app))
+}
+
+/// Re-emit `app`'s generated client, reporting what was written.
+///
+/// A failure here is **reported, not fatal**: the query is already saved, and
+/// exiting non-zero would say the opposite. What the message has to carry is
+/// which half happened, so nobody goes looking for a client method that was
+/// never written — an unreachable store or an app with no client path is a
+/// configuration to fix, not a query to add again.
+async fn reemit_client(catalog: &sc_catalog::Catalog, app: &sc_app::Application) {
+    match sc_app::emit_app_client(catalog, app, None).await {
+        Ok(written) if written.is_empty() => {
+            eprintln!(
+                "saltcorn: application `{}` generates no client, so nothing was \
+                 rewritten",
+                app.subdomain
+            );
+        }
+        Ok(written) => {
+            eprintln!("saltcorn: rewrote {}", written.join(", "));
+        }
+        Err(e) => {
+            eprintln!(
+                "saltcorn: the query was saved, but the generated client could not \
+                 be rewritten: {e}"
+            );
+        }
+    }
+}
+
+/// `saltcorn api add-query --app SUBDOMAIN [--api MOUNT] --name … --path … --sql …`.
+///
+/// Validates by **preparing** — the same call the admin UI's check button and
+/// every save make — so a query that will not prepare exits non-zero carrying
+/// Postgres's own message, and the stored application is untouched.
+async fn add_query_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let (file_stores, rest) = extract_file_stores(rest)?;
+    let parsed = sc_cli::api::parse_add_query(&rest)?;
+
+    let (catalog, mut app) = open_app(&parsed.app, &db, &file_stores).await?;
+    let api = sc_cli::api::select_api(&mut app, parsed.api.as_deref())?;
+    let mut queries = sc_api::custom_queries(&api.config)?;
+    if queries.iter().any(|q| q.name == parsed.query.name) {
+        return Err(sc_error::Error::invalid(format!(
+            "application `{}` already has a custom query named `{}`; remove it \
+             first (saltcorn api remove-query) or use another name",
+            parsed.app, parsed.query.name
+        )));
+    }
+    let name = parsed.query.name.clone();
+    let mount = api.mount.clone();
+    queries.push(parsed.query);
+    sc_api::set_custom_queries(&mut api.config, &queries)?;
+
+    // The save is the validation: it prepares every query the app declares and
+    // stores the columns the database reported. A refusal leaves the stored row
+    // exactly as it was, because nothing is written until every query prepares.
+    let saved = save_application(&catalog, &app).await?;
+    eprintln!(
+        "saltcorn: added `{name}` to the API at {mount} of `{}`",
+        parsed.app
+    );
+    print_query_columns(&saved, &mount, &name)?;
+    reemit_client(&catalog, &saved).await;
+    Ok(())
+}
+
+/// Print what the database said the newly-saved query returns — the same answer
+/// the admin UI shows, because it is the same stored value, and the shape the
+/// generated client method now has.
+fn print_query_columns(app: &sc_app::Application, mount: &str, name: &str) -> Result<()> {
+    let Some(api) = app.apis.iter().find(|a| a.mount == mount) else {
+        return Ok(());
+    };
+    let Some(query) = sc_api::custom_queries(&api.config)?
+        .into_iter()
+        .find(|q| q.name == name)
+    else {
+        return Ok(());
+    };
+    if query.columns.is_empty() {
+        println!("{name}: returns no columns");
+    } else {
+        println!(
+            "{name}: returns {}",
+            query
+                .columns
+                .iter()
+                .map(|c| format!("{} ({})", c.name, c.ty.name()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// `saltcorn api list-queries --app SUBDOMAIN [--api MOUNT]`.
+async fn list_queries_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let (file_stores, rest) = extract_file_stores(rest)?;
+    let parsed = sc_cli::api::parse_query_ref("list-queries", &rest)?;
+
+    let (_catalog, app) = open_app(&parsed.app, &db, &file_stores).await?;
+    let mut found = 0;
+    for api in &app.apis {
+        if let Some(mount) = &parsed.api
+            && api.mount != *mount
+        {
+            continue;
+        }
+        for query in sc_api::custom_queries(&api.config)? {
+            found += 1;
+            println!(
+                "{} {}{}  {} (min role {})",
+                query.method.as_str(),
+                api.mount,
+                query.path,
+                query.name,
+                query.min_role
+            );
+            if !query.description.is_empty() {
+                println!("    {}", query.description);
+            }
+            if !query.params.is_empty() {
+                println!(
+                    "    parameters: {}",
+                    query
+                        .params
+                        .iter()
+                        .map(|p| format!(
+                            "{}: {}{}",
+                            p.name,
+                            p.ty.name(),
+                            if p.required { "" } else { " (optional)" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if !query.columns.is_empty() {
+                println!(
+                    "    returns: {}",
+                    query
+                        .columns
+                        .iter()
+                        .map(|c| format!("{}: {}", c.name, c.ty.name()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+    }
+    if found == 0 {
+        eprintln!(
+            "saltcorn: application `{}` has no custom SQL queries",
+            parsed.app
+        );
+    }
+    Ok(())
+}
+
+/// `saltcorn api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME`.
+async fn remove_query_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let (file_stores, rest) = extract_file_stores(rest)?;
+    let parsed = sc_cli::api::parse_query_ref("remove-query", &rest)?;
+    let name = parsed.name.clone().ok_or_else(|| {
+        sc_error::Error::config("remove-query needs --name: which query to remove")
+    })?;
+
+    let (catalog, mut app) = open_app(&parsed.app, &db, &file_stores).await?;
+    let api = sc_cli::api::select_api(&mut app, parsed.api.as_deref())?;
+    let mount = api.mount.clone();
+    let mut queries = sc_api::custom_queries(&api.config)?;
+    let before = queries.len();
+    queries.retain(|q| q.name != name);
+    if queries.len() == before {
+        // Naming what is there, because "no such query" with a list is a typo
+        // fixed in one step and without it is a second command to find out.
+        return Err(sc_error::Error::not_found(format!(
+            "the API at {mount} of `{}` has no custom query named `{name}`; it has {}",
+            parsed.app,
+            if before == 0 {
+                "none".to_owned()
+            } else {
+                sc_api::custom_queries(&api.config)?
+                    .iter()
+                    .map(|q| format!("`{}`", q.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        )));
+    }
+    sc_api::set_custom_queries(&mut api.config, &queries)?;
+    let saved = save_application(&catalog, &app).await?;
+    eprintln!(
+        "saltcorn: removed `{name}` from the API at {mount} of `{}`",
+        parsed.app
+    );
+    reemit_client(&catalog, &saved).await;
+    Ok(())
+}
+
 /// Print the short usage summary.
 fn print_usage() {
     eprintln!("saltcorn — usage:");
     eprintln!("  saltcorn serve [database flags] [server flags]");
     eprintln!("  saltcorn build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]");
+    eprintln!("  saltcorn api add-query --app SUBDOMAIN [--api MOUNT] --name NAME");
+    eprintln!(
+        "                        [--method GET] --path /sub/path [--min-role N] \
+         [--description TEXT]"
+    );
+    eprintln!("                        [--param name:type[,name:type…]]… --sql TEXT|@FILE");
+    eprintln!("  saltcorn api list-queries --app SUBDOMAIN [--api MOUNT]");
+    eprintln!("  saltcorn api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME");
     eprintln!();
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
     eprintln!("    --database-url URL   full connection string (takes precedence)");
@@ -261,6 +521,15 @@ fn print_usage() {
     eprintln!();
     eprintln!(
         "  build-app: builds one application and prints the bundler's output.
+
+  api: adds, lists and removes an application's custom SQL queries. A query is
+       validated by preparing it, so one that will not prepare is refused with
+       the database's own message and nothing is stored; adding or removing one
+       rewrites the application's generated client. A parameter is written
+       `name:type`, or `name:type?` when the caller may leave it out. Every
+       query has a minimum role, and it is **admin** unless --min-role says
+       otherwise: raw SQL does not go through the row layer, so ownership
+       formulae do not filter what it returns.
 
   server:"
     );

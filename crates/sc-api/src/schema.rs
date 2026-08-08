@@ -94,6 +94,47 @@ impl ValueType {
         }
     }
 
+    /// The wire name of this type — what it serialises as, and what an admin
+    /// writes when they declare a custom query's parameter.
+    pub fn name(self) -> &'static str {
+        match self {
+            ValueType::Bool => "bool",
+            ValueType::Int => "int",
+            ValueType::Float => "float",
+            ValueType::Decimal => "decimal",
+            ValueType::Text => "text",
+            ValueType::Bytes => "bytes",
+            ValueType::Json => "json",
+            ValueType::Uuid => "uuid",
+            ValueType::Date => "date",
+            ValueType::Time => "time",
+            ValueType::Timestamp => "timestamp",
+        }
+    }
+
+    /// Every type, in the order a chooser should offer them — so a command line
+    /// and a form can both name the whole set without either holding a list of
+    /// its own that a new variant would not reach.
+    pub const ALL: [ValueType; 11] = [
+        ValueType::Text,
+        ValueType::Int,
+        ValueType::Float,
+        ValueType::Decimal,
+        ValueType::Bool,
+        ValueType::Date,
+        ValueType::Timestamp,
+        ValueType::Time,
+        ValueType::Uuid,
+        ValueType::Json,
+        ValueType::Bytes,
+    ];
+
+    /// The type written under this name, if it is one — the inverse of
+    /// [`name`](ValueType::name).
+    pub fn from_name(name: &str) -> Option<ValueType> {
+        ValueType::ALL.into_iter().find(|t| t.name() == name)
+    }
+
     /// The TypeScript type this scalar serializes as. See the per-variant docs
     /// for why non-string scalars (decimal, bytes) are carried as strings.
     pub fn ts_type(self) -> &'static str {

@@ -88,7 +88,9 @@ export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log:
 export type RunApplicationGraphqlRequest = { query: string; variables?: unknown | null; operationName?: string | null };
 export type RunApplicationGraphqlResponse = unknown;
 export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
-export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
+export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }>; supports_custom_queries: boolean }>;
+export type DescribeCustomQueryRequest = { name: string; description?: string | null; method: string; path: string; sql: string; params: Array<{ name: string; type: string; required?: boolean | null }>; min_role?: number | null; tables?: Array<string> | null };
+export type DescribeCustomQueryResponse = { columns: Array<{ name: string; type: string }> };
 export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
 export type CreateUserRequest = { email: string; password: string; role: number };
 export type CreateUserResponse = { id: string; email: string; role: number };
@@ -163,6 +165,7 @@ export interface ApiClient {
   runApplicationGraphql(id: string, body: RunApplicationGraphqlRequest): Promise<RunApplicationGraphqlResponse>;
   listFrameworks(): Promise<ListFrameworksResponse>;
   listApiProviders(): Promise<ListApiProvidersResponse>;
+  describeCustomQuery(body: DescribeCustomQueryRequest): Promise<DescribeCustomQueryResponse>;
   listUsers(): Promise<ListUsersResponse>;
   createUser(body: CreateUserRequest): Promise<CreateUserResponse>;
   listTriggers(): Promise<ListTriggersResponse>;
@@ -725,6 +728,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listApiProviders", res);
       return (await res.json()) as ListApiProvidersResponse;
+    },
+    async describeCustomQuery(body) {
+      const res = await doFetch(`${baseUrl}/api/custom-queries/describe`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("describeCustomQuery", res);
+      return (await res.json()) as DescribeCustomQueryResponse;
     },
     async listUsers() {
       const res = await doFetch(`${baseUrl}/api/users`, {

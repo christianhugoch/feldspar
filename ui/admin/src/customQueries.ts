@@ -1,0 +1,215 @@
+// The application form's **custom SQL query** model (§13.4): the records an
+// admin edits, the request they are checked with, and what the check reports
+// back.
+//
+// A module rather than state inside the screen, for the reason `apiRows.ts` is
+// one: what has to be right is a conversion. A stored `queries` array becomes
+// rows an admin can edit and comes back as the same array, and a row becomes the
+// body `describeCustomQuery` prepares. Both are testable without a browser
+// (`customQueries.test.ts`); what is left in the screen is controls.
+//
+// **Nothing here decides whether a query is valid.** The name, the path, the
+// parameters and the SQL are all judged by the server — the same call a save
+// makes, so there is one authority for what a valid query is and the admin never
+// sees the form and the server disagree. This module carries the answer to the
+// screen; it does not invent one.
+
+/** One declared input parameter, as the form edits it. */
+export type QueryParamRow = {
+  name: string;
+  /** A `ValueType` name (`text`, `int`, `date`, …), as the wire spells it. */
+  type: string;
+  required: boolean;
+};
+
+/** One result column, as the **database** described it. Never edited: the admin
+ * declares the parameters and Postgres types the result (decision 5). */
+export type QueryColumn = { name: string; type: string };
+
+/** One custom SQL query, as the form edits it. */
+export type QueryRow = {
+  name: string;
+  description: string;
+  method: string;
+  path: string;
+  sql: string;
+  minRole: number;
+  params: QueryParamRow[];
+  /** The columns last described — from the stored query when the form opened,
+   * or from the check button. Shown as the preview of what the generated client
+   * method will return. */
+  columns: QueryColumn[];
+};
+
+/** What the check button is doing, and what it found. */
+export type CheckStatus =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "ok"; columns: QueryColumn[] }
+  | { kind: "error"; message: string };
+
+/** The parameter types an admin may declare — the wire's `ValueType` names, in
+ * `ValueType::ALL`'s order.
+ *
+ * A list rather than a free-text box: the type is what the caller's argument is
+ * coerced to before it is bound, so a misspelt one is a query that refuses every
+ * call it gets. The copy is the same arrangement every field name in this file
+ * lives under — these are protocol names, and the server refuses one it does not
+ * know. */
+export const PARAM_TYPES = [
+  "text",
+  "int",
+  "float",
+  "decimal",
+  "bool",
+  "date",
+  "timestamp",
+  "time",
+  "uuid",
+  "json",
+  "bytes",
+] as const;
+
+/** The methods a query may answer on. The admin's choice, with no inference from
+ * the SQL (GOALS) — what is inferred is the transaction, and `GET` gets a
+ * read-only one. */
+export const QUERY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+
+/** The role floor a query starts at: **admin**, and stated rather than defaulted
+ * quietly (§10.2). */
+export const ADMIN_ROLE = 1;
+
+/** An empty query — what "Add" produces. */
+export function blankQueryRow(): QueryRow {
+  return {
+    name: "",
+    description: "",
+    method: "GET",
+    path: "",
+    sql: "",
+    minRole: ADMIN_ROLE,
+    params: [],
+    columns: [],
+  };
+}
+
+/** An empty parameter row. */
+export function blankParamRow(): QueryParamRow {
+  return { name: "", type: "text", required: true };
+}
+
+/** The key custom queries are stored under inside an API's config object
+ * (`sc_api::REST_CFG_QUERIES`). A protocol constant, so the client's copy having
+ * to match is the arrangement every other field name here lives under. */
+export const QUERIES_KEY = "queries";
+
+/** Read the `queries` of a stored API config into editable rows.
+ *
+ * Tolerant of anything: a config bag arrives as `unknown`, and a value that is
+ * not a list of query records reads as no queries rather than throwing on a
+ * screen the admin came to fix something else on. What it will not do is
+ * *invent* — a record missing its SQL keeps an empty one, and the server refuses
+ * it on save. */
+export function queryRowsFromConfig(config: unknown): QueryRow[] {
+  const raw = (config as Record<string, unknown> | null | undefined)?.[QUERIES_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((q) => q && typeof q === "object").map(queryRowFrom);
+}
+
+function queryRowFrom(stored: unknown): QueryRow {
+  const q = stored as Record<string, unknown>;
+  const params = Array.isArray(q.params) ? q.params : [];
+  const columns = Array.isArray(q.columns) ? q.columns : [];
+  return {
+    name: text(q.name),
+    description: text(q.description),
+    method: text(q.method) || "GET",
+    path: text(q.path),
+    sql: text(q.sql),
+    minRole: typeof q.min_role === "number" ? q.min_role : ADMIN_ROLE,
+    params: params.map((p) => {
+      const o = (p ?? {}) as Record<string, unknown>;
+      return {
+        name: text(o.name),
+        type: text(o.type) || "text",
+        // Absent means required, as the stored form's serde default does.
+        required: o.required !== false,
+      };
+    }),
+    columns: columns.map((c) => {
+      const o = (c ?? {}) as Record<string, unknown>;
+      return { name: text(o.name), type: text(o.type) };
+    }),
+  };
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** One query as it is stored and sent — the wire shape, whose field names are
+ * the server's (`min_role`, `type`) rather than the form's. */
+export type StoredQuery = {
+  name: string;
+  description: string;
+  method: string;
+  path: string;
+  sql: string;
+  min_role: number;
+  params: { name: string; type: string; required: boolean }[];
+};
+
+/** The rows as the `queries` value of an API's config object.
+ *
+ * The described **columns are not sent back**: they are the database's answer,
+ * rewritten on every save from the SQL that arrives with them, and echoing a
+ * stale copy would be a second source of truth travelling in the same request as
+ * the first. */
+export function queryRowsToConfig(rows: QueryRow[]): StoredQuery[] {
+  return rows.map((row) => ({
+    name: row.name.trim(),
+    description: row.description.trim(),
+    method: row.method,
+    path: row.path.trim(),
+    sql: row.sql,
+    min_role: row.minRole,
+    params: row.params.map((p) => ({
+      name: p.name.trim(),
+      type: p.type,
+      required: p.required,
+    })),
+  }));
+}
+
+/** The body `describeCustomQuery` takes: the row, plus the tables the
+ * application declares — so the check answers the *whole* question a save would,
+ * including the name and path rules that are about this app's tables. */
+export function describeBody(row: QueryRow, tables: string[]): StoredQuery & {
+  tables: string[];
+} {
+  const [query] = queryRowsToConfig([row]);
+  return { ...query, tables };
+}
+
+/** The preview line: what the generated client method returns, as the database
+ * described it. Empty when nothing has been described yet, so the screen shows
+ * the invitation to check rather than an empty shape it might be believed. */
+export function columnsSummary(columns: QueryColumn[]): string {
+  return columns.map((c) => `${c.name}: ${c.type}`).join(", ");
+}
+
+/** The one-line status a check leaves behind. */
+export function statusSummary(status: CheckStatus): string {
+  switch (status.kind) {
+    case "idle":
+      return "";
+    case "checking":
+      return "Preparing the statement…";
+    case "ok":
+      return status.columns.length
+        ? `Returns ${columnsSummary(status.columns)}`
+        : "Prepared. It returns no columns.";
+    case "error":
+      return status.message;
+  }
+}
