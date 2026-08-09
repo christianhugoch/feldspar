@@ -1,27 +1,31 @@
 //! `saltcorn auth token` against a **real running server** on a real socket.
 //!
 //! The point of this command is that the session it writes is one the server
-//! will actually accept, and nothing short of an end-to-end sign-in tests that:
-//! the CSRF handshake, the `Host` header the app is routed by, the cookies the
-//! response carries and the file a browser would load. So this binds a port,
-//! serves an application on it, and signs in over HTTP exactly as the command
-//! does — because it *is* what the command does.
+//! will actually accept, and nothing short of an end-to-end exchange tests that:
+//! the grant written to the database, the CSRF handshake, the `Host` header the
+//! app is routed by, the cookies the response carries and the file a browser
+//! would load. So this binds a port, serves an application on it, and mints a
+//! session over HTTP exactly as the command does — because it *is* what the
+//! command does.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
 
 use sc_app::{ApiConfig, Application, AssetBundle, CodeFramework, FrameworkRef};
-use sc_auth::SessionStore;
+use sc_auth::{Role, SessionStore, save_role};
 use sc_catalog::{Catalog, PublicOrigin, TableId};
-use sc_cli::auth::{self, SessionFormat, Target};
+use sc_cli::auth::{self, SessionFormat, Target, UserSelector};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_server::{AppMounts, MountedApp, ServerConfig, admin_handlers, build_router_with_apps};
 use sc_test_harness::TestDb;
 
 const BASE_DOMAIN: &str = "example.com";
-const EMAIL: &str = "agent@example.com";
+const ADMIN: &str = "admin@example.com";
+const EDITOR: &str = "editor@example.com";
 const PASSWORD: &str = "correct horse battery staple";
+/// A role this installation invented, to be found by name.
+const EDITOR_ROLE: u8 = 40;
 
 /// A server on a real port, serving one application on its subdomain.
 struct Running {
@@ -29,13 +33,15 @@ struct Running {
     url: String,
     /// The application's own host, which is what routes the request.
     host: String,
+    /// The database the grants are written to — the command's other half.
+    catalog: Arc<Catalog>,
     _db: TestDb,
 }
 
-/// Bring up a database, a user, an application mounted with an empty bundle, and
-/// the server, bound to a port the OS picks.
+/// Bring up a database, two users, an application mounted with an empty bundle,
+/// and the server, bound to a port the OS picks.
 ///
-/// The bundle is empty on purpose: this test is about `/api/login`, and a
+/// The bundle is empty on purpose: this test is about the session, and a
 /// framework with no assets serves 404s for everything else without needing a
 /// bundler to have run.
 async fn start() -> sc_error::Result<Running> {
@@ -54,7 +60,9 @@ async fn start() -> sc_error::Result<Running> {
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
     sc_app::bootstrap(&catalog).await?;
-    sc_auth::create_user(&catalog, EMAIL, PASSWORD, sc_auth::ROLE_ADMIN).await?;
+    sc_auth::create_user(&catalog, ADMIN, PASSWORD, sc_auth::ROLE_ADMIN).await?;
+    save_role(&catalog, &Role::new(EDITOR_ROLE, "Editor")).await?;
+    sc_auth::create_user(&catalog, EDITOR, PASSWORD, EDITOR_ROLE).await?;
 
     // A valid `code` configuration: it is never built here (the mount below
     // carries an empty bundle), but saving validates it like any other row.
@@ -101,6 +109,7 @@ async fn start() -> sc_error::Result<Running> {
     Ok(Running {
         url: format!("http://127.0.0.1:{port}"),
         host: PublicOrigin::new(BASE_DOMAIN, port).host_for("blog"),
+        catalog,
         _db: db,
     })
 }
@@ -109,17 +118,26 @@ fn target(server: &Running) -> Target {
     Target {
         url: server.url.clone(),
         host: server.host.clone(),
-        login_path: "/api/login".to_owned(),
         secure: false,
     }
 }
 
+/// What the command does end to end, for one selector: resolve the user, mint a
+/// grant, redeem it.
+async fn session_as(
+    server: &Running,
+    selector: &UserSelector,
+) -> sc_error::Result<(Vec<auth::Cookie>, serde_json::Value)> {
+    let user = auth::resolve_user(&server.catalog, selector).await?;
+    auth::session_for(&server.catalog, &target(server), &user).await
+}
+
 #[tokio::test]
-async fn signing_in_writes_a_session_a_browser_could_use() -> sc_error::Result<()> {
+async fn a_grant_writes_a_session_a_browser_could_use() -> sc_error::Result<()> {
     let server = start().await?;
     let target = target(&server);
 
-    let (cookies, user) = auth::mint_session(&target, EMAIL, PASSWORD).await?;
+    let (cookies, user) = session_as(&server, &UserSelector::Email(ADMIN.to_owned())).await?;
 
     // The session cookie is there, and it is the server's — opaque, and long
     // enough to be the 256-bit token §7.2 mints.
@@ -136,8 +154,8 @@ async fn signing_in_writes_a_session_a_browser_could_use() -> sc_error::Result<(
     // The CSRF cookie rides along, so a mutation from the restored browser works
     // too rather than 403ing on the first save.
     assert!(cookies.iter().any(|c| c.name == "sc_csrf"), "{cookies:?}");
-    // The server said who we are.
-    assert_eq!(user["email"], EMAIL);
+    // The server said who we are — and no password was asked for anywhere above.
+    assert_eq!(user["email"], ADMIN);
 
     // The Playwright file is scoped to the application's own host — not the
     // loopback address the command happened to connect to.
@@ -168,8 +186,7 @@ async fn signing_in_writes_a_session_a_browser_could_use() -> sc_error::Result<(
 #[tokio::test]
 async fn the_session_it_writes_is_accepted_by_the_server() -> sc_error::Result<()> {
     let server = start().await?;
-    let target = target(&server);
-    let (cookies, _) = auth::mint_session(&target, EMAIL, PASSWORD).await?;
+    let (cookies, _) = session_as(&server, &UserSelector::Admin).await?;
 
     // The whole promise of the command in one request: replay the cookie at an
     // endpoint that requires a session, as a browser loading the file would.
@@ -193,7 +210,8 @@ async fn the_session_it_writes_is_accepted_by_the_server() -> sc_error::Result<(
         .json()
         .await
         .map_err(|e| sc_error::Error::msg(e.to_string()))?;
-    assert_eq!(body["email"], EMAIL);
+    // `--admin` found the admin without being told which user that is.
+    assert_eq!(body["email"], ADMIN);
 
     // Without it, the same request is anonymous — which is the state a
     // screenshot script is in until it loads the file.
@@ -208,16 +226,77 @@ async fn the_session_it_writes_is_accepted_by_the_server() -> sc_error::Result<(
 }
 
 #[tokio::test]
-async fn a_wrong_password_is_refused_with_the_servers_own_words() -> sc_error::Result<()> {
+async fn a_role_selects_that_roles_user_and_only_its_privileges() -> sc_error::Result<()> {
     let server = start().await?;
-    let err = auth::mint_session(&target(&server), EMAIL, "not the password")
+    let (_, user) = session_as(&server, &UserSelector::Role("Editor".to_owned())).await?;
+    assert_eq!(user["email"], EDITOR);
+    // The session is the *user's*, so it carries their role and not an admin's:
+    // "give the agent its own low-privilege account" is a limit, not a slogan.
+    assert_eq!(user["role"], i64::from(EDITOR_ROLE));
+
+    // Case is not the point of a name a human typed at a shell.
+    let (_, same) = session_as(&server, &UserSelector::Role("editor".to_owned())).await?;
+    assert_eq!(same["email"], EDITOR);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_role_nobody_holds_and_a_role_that_is_not_a_role_say_so() -> sc_error::Result<()> {
+    let server = start().await?;
+
+    // A role that exists but has no users: the error names it and its number,
+    // because the fix is to give somebody the role rather than to guess.
+    save_role(&server.catalog, &Role::new(60, "Nobody")).await?;
+    let err = auth::resolve_user(&server.catalog, &UserSelector::Role("Nobody".to_owned()))
         .await
-        .expect_err("a wrong password must not mint a session");
+        .expect_err("no user holds it");
     let message = err.to_string();
-    // The status and the server's message, so the caller can tell a bad password
-    // from an unreachable server without reading the code.
-    assert!(message.contains("401"), "{message}");
-    assert!(message.to_lowercase().contains("invalid"), "{message}");
+    assert!(message.contains("Nobody"), "{message}");
+    assert!(message.contains("60"), "{message}");
+
+    // A name that is not a role at all: the answer lists the roles there are.
+    let err = auth::resolve_user(&server.catalog, &UserSelector::Role("Wizard".to_owned()))
+        .await
+        .expect_err("no such role");
+    let message = err.to_string();
+    assert!(message.contains("Wizard"), "{message}");
+    for known in ["Admin (1)", "Editor (40)", "Public (100)"] {
+        assert!(message.contains(known), "{message}");
+    }
+
+    // And an email nobody has.
+    let err = auth::resolve_user(
+        &server.catalog,
+        &UserSelector::Email("ghost@example.com".to_owned()),
+    )
+    .await
+    .expect_err("no such user");
+    assert!(err.to_string().contains("ghost@example.com"), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_grant_is_good_once_and_a_forged_one_is_no_good_at_all() -> sc_error::Result<()> {
+    let server = start().await?;
+    let target = target(&server);
+
+    let user = auth::resolve_user(&server.catalog, &UserSelector::Admin).await?;
+    let grant = sc_auth::create_session_grant(&server.catalog, user.id).await?;
+    auth::mint_session(&target, &grant).await?;
+
+    // Replayed: the row was deleted when it was redeemed, so the second attempt
+    // is refused exactly as an invented one is.
+    let err = auth::mint_session(&target, &grant)
+        .await
+        .expect_err("a grant is single-use");
+    assert!(err.to_string().contains("401"), "{err}");
+
+    // Invented: a well-formed grant string for a row that never existed.
+    let forged = "00000000-0000-4000-8000-000000000000.not a secret";
+    let err = auth::mint_session(&target, forged)
+        .await
+        .expect_err("a forged grant mints nothing");
+    assert!(err.to_string().contains("401"), "{err}");
     Ok(())
 }
 
@@ -227,10 +306,9 @@ async fn an_unreachable_server_says_where_it_tried() -> sc_error::Result<()> {
     let target = Target {
         url: "http://127.0.0.1:1".to_owned(),
         host: "blog.example.com".to_owned(),
-        login_path: "/api/login".to_owned(),
         secure: false,
     };
-    let err = auth::mint_session(&target, EMAIL, PASSWORD)
+    let err = auth::mint_session(&target, "irrelevant.grant")
         .await
         .expect_err("nothing is listening");
     let message = err.to_string();
@@ -239,11 +317,14 @@ async fn an_unreachable_server_says_where_it_tried() -> sc_error::Result<()> {
     Ok(())
 }
 
-/// The cookie and header names this crate spells for itself must be the ones the
-/// server actually sets — the comment in `auth.rs` promises this test exists.
+/// The cookie, header and route names this crate spells for itself must be the
+/// ones the server actually uses — the comment in `auth.rs` promises this test
+/// exists.
 #[test]
 fn the_wire_names_match_the_servers() {
     assert_eq!(sc_server::SESSION_COOKIE, "sc_session");
     assert_eq!(sc_server::CSRF_COOKIE, "sc_csrf");
     assert_eq!(sc_server::CSRF_HEADER, "x-csrf-token");
+    assert_eq!(sc_server::SESSION_TOKEN_ROUTE, "/auth/token");
+    assert_eq!(sc_server::GRANT_FIELD, "grant");
 }

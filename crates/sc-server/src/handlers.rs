@@ -38,7 +38,8 @@ use sc_app::{
 };
 use sc_auth::{
     COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, any_user_exists,
-    authenticate_admin, create_first_user, create_user, delete_role, list_roles, save_role,
+    authenticate_admin, create_first_user, create_user, delete_role, list_roles,
+    redeem_session_grant, save_role,
 };
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, DataField, DataFieldKind, FIELD_META_TABLE, FieldId,
@@ -64,6 +65,7 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::apps::{AppMounts, build_and_mount};
 use crate::handler::{HandlerRegistry, HandlerResponse};
+use crate::router::GRANT_FIELD;
 
 /// Build the registry of admin handlers over a shared [`Catalog`] and the live
 /// [`AppMounts`] registry.
@@ -143,6 +145,44 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("logout", |_ctx| async {
         Ok(HandlerResponse::end_session(json!({ "ok": true })))
+    });
+
+    // Turn a one-time session grant into a session (§7.2). Registered here, with
+    // every other handler, but reached from a route outside the `EndpointSet`
+    // (see [`SESSION_TOKEN_ROUTE`](crate::SESSION_TOKEN_ROUTE)) — it is not part
+    // of any API's contract and has no business in a generated client. What it
+    // shares with `login` is the part that matters: the session it starts is
+    // started the same way, by the same dispatcher, for a `User` read from the
+    // same table.
+    //
+    // The authority is the grant, and the grant's authority is the database it
+    // was written to. Whoever can write that row can already read every password
+    // hash; what they cannot do — and what this exists for — is mint a session
+    // in a store that lives in this process's memory.
+    reg.register("redeemSessionGrant", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let grant = require_object(&ctx.body)?
+                    .get(GRANT_FIELD)
+                    .and_then(Json::as_str)
+                    .ok_or_else(|| {
+                        Error::invalid(format!("missing or non-string field `{GRANT_FIELD}`"))
+                    })?
+                    .to_owned();
+                match redeem_session_grant(&catalog, &grant).await? {
+                    Some(user) => {
+                        let body = user_summary_json(&user);
+                        Ok(HandlerResponse::start_session(user, body))
+                    }
+                    // Expired, already used, never existed, or the user is gone:
+                    // one answer for all four, because the caller is entitled to
+                    // none of the difference.
+                    None => Err(Error::auth("invalid or expired session grant")),
+                }
+            }
+        }
     });
 
     // --- catalog: tables & fields ------------------------------------------

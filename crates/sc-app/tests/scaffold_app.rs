@@ -90,6 +90,11 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
 {
     let db = TestDb::new().await?;
     let cat = catalog_with_tasks(&db).await?;
+    // The roles a server has from its first boot, plus one this installation
+    // invented: the generated documentation names them, because `saltcorn auth
+    // token --role NAME` takes a name and the project has no other way to know.
+    sc_auth::bootstrap(&cat).await?;
+    sc_auth::save_role(&cat, &sc_auth::Role::new(40, "Editor")).await?;
     let tmp = TempDir::new("write")?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
     // What the boot path does with `--base-domain`: the generated documentation
@@ -149,10 +154,20 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     assert!(agents.contains("http://todo.example.com:3000"), "{agents}");
     assert!(readme.contains("http://todo.example.com:3000"), "{readme}");
     assert!(
-        agents.contains("saltcorn auth token --app todo"),
+        agents.contains("saltcorn auth token --app todo --admin"),
         "{agents}"
     );
     assert!(readme.contains("pkill -HUP saltcorn"), "{readme}");
+    // Both documents name this installation's roles — read out of the database
+    // this scaffold ran against, not described in the abstract — and neither
+    // asks for a password, because the command no longer takes one.
+    for doc in [&agents, &readme] {
+        assert!(
+            doc.contains("Admin (1), Editor (40), Public (100)"),
+            "{doc}"
+        );
+        assert!(!doc.contains("--password"), "{doc}");
+    }
     // ...and the session file it writes is not committable.
     let ignore = std::fs::read_to_string(project.join(".gitignore"))?;
     assert!(ignore.contains(".saltcorn-session.json"), "{ignore}");

@@ -6,14 +6,23 @@
 //! is the cookie a browser would have got by signing in, and what it has is a
 //! shell on the machine.
 //!
-//! **This signs in; it does not forge.** The session cookie the server accepts
-//! is the one *it* minted, in a store that lives in its own memory (§7.2), so
-//! nothing outside that process can mint one — and nothing here tries. This
-//! command makes the same `POST .../login` call the sign-in screen makes,
-//! against the running server, with an account and its password, and writes down
-//! what came back. The session it hands over can do exactly what that account
-//! can do and no more; giving it a low-privilege account of its own is therefore
-//! a real limit and not a gesture.
+//! **It asks no password, because it is not a caller who should have one.** This
+//! command runs where the server runs, from a shell holding the primary
+//! database's credentials — the authority that can already read every password
+//! hash, rewrite any of them, and grant itself any role. Demanding a user's
+//! password on top of that protected nothing and cost the operator a secret to
+//! keep, so what it does instead is name a *user* — `--email`, `--admin`, or
+//! `--role NAME` — and mint a [one-time grant](sc_auth::create_session_grant) in
+//! the database for them.
+//!
+//! **It still does not forge.** The session cookie the server accepts is the one
+//! *it* minted, in a store that lives in its own memory (§7.2), so nothing
+//! outside that process can make one and nothing here tries: the grant is
+//! presented to the running server, which checks it against its own database and
+//! starts an ordinary session — the same session, by the same code, that a
+//! sign-in would have started. The session can do exactly what that account can
+//! do and no more, so giving an agent a low-privilege account of its own is a
+//! real limit and not a gesture.
 //!
 //! Two files come out, and which one depends on what will read it:
 //!
@@ -27,33 +36,34 @@
 //! The CSRF dance is why this is not one request: mutating requests are refused
 //! unless the `x-csrf-token` header echoes the `sc_csrf` cookie (§7.2's
 //! double-submit check), and a first-contact client has neither. So it does what
-//! a browser does — one GET to be given the cookie, then the login carrying it
-//! both ways.
+//! a browser does — one GET to be given the cookie, then the redemption carrying
+//! it both ways.
 
 use std::path::{Path, PathBuf};
 
+use sc_auth::{ROLE_ADMIN, Role, User, create_session_grant, list_roles};
+use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::{Value as Json, json};
-
-/// The environment variable a password may come from, for a caller that would
-/// rather not put one in a command line every process on the box can read.
-pub const PASSWORD_VAR: &str = "SALTCORN_PASSWORD";
 
 /// The default file name for [`SessionFormat::Playwright`].
 pub const DEFAULT_PLAYWRIGHT_FILE: &str = ".saltcorn-session.json";
 /// The default file name for [`SessionFormat::Netscape`].
 pub const DEFAULT_NETSCAPE_FILE: &str = ".saltcorn-cookies.txt";
 
-/// The name of the session cookie, and of the CSRF cookie and header.
+/// The name of the session cookie, of the CSRF cookie and header, and the route
+/// a grant is redeemed at with the field it travels in.
 ///
 /// Spelled here rather than imported from `sc-server` because this crate is a
 /// *client* of the running server, which may be a different build: what matters
-/// is the wire contract, and the wire contract is these three names. The
-/// server's own constants are asserted equal to these in a test, so a rename
-/// that broke this cannot land quietly.
+/// is the wire contract, and the wire contract is these five names. The server's
+/// own constants are asserted equal to these in a test, so a rename that broke
+/// this cannot land quietly.
 const SESSION_COOKIE: &str = "sc_session";
 const CSRF_COOKIE: &str = "sc_csrf";
 const CSRF_HEADER: &str = "x-csrf-token";
+const TOKEN_ROUTE: &str = "/auth/token";
+const GRANT_FIELD: &str = "grant";
 
 /// Which file to write.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -89,22 +99,26 @@ impl SessionFormat {
     }
 }
 
-/// Where to sign in: the origin to connect to, the host the application answers
-/// on, and the path of its own `login` endpoint.
+/// Where to ask for the session: the origin to connect to and the host the
+/// application answers on.
 ///
 /// The connection target and the host are separate because they routinely
 /// differ. A server routes an application by the request's `Host` header
 /// (§13.2), and a development machine that has no DNS for `blog.example.com`
 /// can still reach it by connecting to the loopback and *saying* that name —
 /// which is exactly what `--url` is for.
+///
+/// The request goes to the application's own host even though the route that
+/// answers it is the server's rather than the app's ([`TOKEN_ROUTE`] is a fixed
+/// route, ahead of the host-routed fallback). That is not incidental: the
+/// cookies come back scoped to the host that will use them, and the one thing
+/// this command must not do is write a session file for the wrong origin.
 #[derive(Debug, Clone)]
 pub struct Target {
     /// The origin to connect to, e.g. `http://127.0.0.1:3000`.
     pub url: String,
     /// The `Host` header to send, e.g. `blog.example.com`.
     pub host: String,
-    /// The application's login path, e.g. `/api/login`.
-    pub login_path: String,
     /// Whether the cookies should be marked `secure` — i.e. whether the browser
     /// that will use them is talking to an `https` origin.
     pub secure: bool,
@@ -179,17 +193,13 @@ fn parse_set_cookie(header: &str) -> Option<Cookie> {
     Some(cookie)
 }
 
-/// Sign in at `target` as `email`, returning the cookies the server set and the
+/// Present `grant` at `target`, returning the cookies the server set and the
 /// user it says you are.
 ///
-/// A failed login is the **server's** error, verbatim: a wrong password, a role
-/// that may not sign in, an application that exposes no login endpoint. Guessing
-/// at which would be worse than quoting it (§16).
-pub async fn mint_session(
-    target: &Target,
-    email: &str,
-    password: &str,
-) -> Result<(Vec<Cookie>, Json)> {
+/// A refusal is the **server's** error, verbatim: a grant that expired while the
+/// command was running, one already redeemed, a user deleted in between.
+/// Guessing at which would be worse than quoting it (§16).
+pub async fn mint_session(target: &Target, grant: &str) -> Result<(Vec<Cookie>, Json)> {
     let client = reqwest::Client::builder()
         .build()
         .map_err(|e| Error::config(format!("could not build the HTTP client: {e}")))?;
@@ -214,16 +224,16 @@ pub async fn mint_session(
             ))
         })?;
 
-    let login = format!("{}{}", target.url.trim_end_matches('/'), target.login_path);
+    let redeem = format!("{}{TOKEN_ROUTE}", target.url.trim_end_matches('/'));
     let response = client
-        .post(&login)
+        .post(&redeem)
         .header(reqwest::header::HOST, &target.host)
         .header(
             reqwest::header::COOKIE,
             format!("{CSRF_COOKIE}={}", csrf.value),
         )
         .header(CSRF_HEADER, &csrf.value)
-        .json(&json!({ "email": email, "password": password }))
+        .json(&json!({ GRANT_FIELD: grant }))
         .send()
         .await
         .map_err(|e| unreachable_server(target, e))?;
@@ -233,11 +243,11 @@ pub async fn mint_session(
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(Error::invalid(format!(
-            "signing in as {email} at {login} failed with {status}: {}",
+            "{redeem} refused the session grant with {status}: {}",
             server_message(&body)
         )));
     }
-    // The login response carries the session; it does **not** re-set the CSRF
+    // The redemption response carries the session; it does **not** re-set the CSRF
     // cookie, because the request already had one — the server only mints that
     // on first contact. Carrying the primer's forward is what makes the written
     // jar complete: a restored browser would be handed a fresh one on its first
@@ -247,7 +257,7 @@ pub async fn mint_session(
     }
     if !cookies.iter().any(|c| c.name == SESSION_COOKIE) {
         return Err(Error::msg(format!(
-            "{login} accepted the sign-in but set no `{SESSION_COOKIE}` cookie, \
+            "{redeem} accepted the grant but set no `{SESSION_COOKIE}` cookie, \
              so there is no session to write"
         )));
     }
@@ -380,71 +390,115 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// A password from the flag, from a file the flag names, or from the
-/// environment.
-///
-/// `@FILE` is the same spelling `api add-query --sql @FILE` uses, and for the
-/// same reason: a secret on a command line is readable by every process on the
-/// machine, and one in shell history outlives its usefulness.
-pub fn resolve_password(flag: Option<&str>) -> Result<String> {
-    let raw = match flag {
-        Some(value) => value.to_owned(),
-        None => std::env::var(PASSWORD_VAR).map_err(|_| {
-            Error::config(format!(
-                "no password: pass --password TEXT, --password @FILE, or set \
-                 {PASSWORD_VAR}"
-            ))
-        })?,
-    };
-    let Some(file) = raw.strip_prefix('@') else {
-        return Ok(raw);
-    };
-    let text = std::fs::read_to_string(file)
-        .map_err(|e| Error::file(format!("could not read the password from {file}: {e}")))?;
-    let password = text.trim_end_matches(['\n', '\r']).to_owned();
-    if password.is_empty() {
-        return Err(Error::config(format!("{file} is empty")));
-    }
-    Ok(password)
-}
-
 /// Where to write, given `--out` and the format's default.
 pub fn out_path(out: Option<&str>, format: SessionFormat) -> PathBuf {
     PathBuf::from(out.unwrap_or_else(|| format.default_file()))
 }
 
-/// The path of an application's own `login` endpoint: its REST mount plus
-/// `/login`.
+/// Which user the session is for — the three ways of saying it.
 ///
-/// Read off the application rather than assumed, because the mount is a setting
-/// (`/api` by default, but an app may put it anywhere) — and refused when the
-/// app has no REST provider at all, since then there is nothing to sign in to
-/// and no session to be had.
-pub fn login_path(app: &sc_app::Application) -> Result<String> {
-    let mount = app
-        .apis
+/// Three rather than one because the caller is usually a script that does not
+/// know the installation's users, and the two questions it can actually answer
+/// are "the admin" and "somebody who can see this screen". `--email` remains for
+/// the case where the answer is a particular person, which is the one a shared
+/// deployment wants: give the agent its own account and name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserSelector {
+    /// `--email EMAIL`: exactly this user.
+    Email(String),
+    /// `--admin`: the first user holding the admin role.
+    Admin,
+    /// `--role NAME`: the first user holding the role with this name.
+    Role(String),
+}
+
+impl UserSelector {
+    /// How the selection reads in a message about it.
+    fn describe(&self) -> String {
+        match self {
+            UserSelector::Email(email) => format!("--email {email}"),
+            UserSelector::Admin => "--admin".to_owned(),
+            UserSelector::Role(name) => format!("--role {name}"),
+        }
+    }
+}
+
+/// Resolve a selector against the database, or say why it names nobody.
+///
+/// Every refusal names what was asked for and what exists instead — an unknown
+/// role lists the roles, a role nobody holds says so and gives its number — because
+/// the caller is at a shell with no other way to find out, and "not found" on its
+/// own would send them to the admin UI to answer a question this command could
+/// have answered.
+pub async fn resolve_user(catalog: &Catalog, selector: &UserSelector) -> Result<User> {
+    match selector {
+        UserSelector::Email(email) => sc_auth::load_user_by_email(catalog, email)
+            .await?
+            .ok_or_else(|| Error::not_found(format!("no user with the email `{email}`"))),
+        UserSelector::Admin => {
+            let role = role_by_number(catalog, ROLE_ADMIN).await?;
+            first_holder(catalog, &role).await
+        }
+        UserSelector::Role(name) => {
+            let role = role_by_name(catalog, name).await?;
+            first_holder(catalog, &role).await
+        }
+    }
+}
+
+/// The role with this name, or an error listing the roles there are.
+async fn role_by_name(catalog: &Catalog, name: &str) -> Result<Role> {
+    let roles = list_roles(catalog).await?;
+    roles
         .iter()
-        .find(|a| a.provider == sc_api::REST_PROVIDER)
-        .map(|a| a.mount.as_str())
+        .find(|r| r.name.eq_ignore_ascii_case(name.trim()))
+        .cloned()
         .ok_or_else(|| {
-            Error::invalid(format!(
-                "application `{}` exposes no REST API, so it has no login endpoint \
-                 to sign in to",
-                app.subdomain
+            Error::not_found(format!(
+                "no role named `{name}`. The roles on this server are: {}",
+                role_list(&roles)
             ))
-        })?;
-    Ok(format!("{}/login", mount.trim_end_matches('/')))
+        })
+}
+
+/// The role with this number — used for `--admin`, so its name is the
+/// installation's own even when an admin has renamed it.
+async fn role_by_number(catalog: &Catalog, number: u8) -> Result<Role> {
+    list_roles(catalog)
+        .await?
+        .into_iter()
+        .find(|r| r.role == number)
+        .ok_or_else(|| Error::not_found(format!("this database has no role {number}")))
+}
+
+/// The first user holding `role`, or an error saying that nobody does.
+async fn first_holder(catalog: &Catalog, role: &Role) -> Result<User> {
+    sc_auth::first_user_with_role(catalog, role.role)
+        .await?
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "no user has the role `{}` ({}), so there is no session to mint for it",
+                role.name, role.role
+            ))
+        })
+}
+
+/// The roles, as an error message lists them: `Admin (1), Public (100)`.
+pub fn role_list(roles: &[Role]) -> String {
+    roles
+        .iter()
+        .map(|r| format!("{} ({})", r.name, r.role))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What `auth token` was asked for.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct TokenArgs {
     /// `--app`: which application's session this is.
     pub app: String,
-    /// `--email`: who to sign in as.
-    pub email: String,
-    /// `--password`: the secret, or `@FILE`. Absent means the environment.
-    pub password: Option<String>,
+    /// `--email` / `--admin` / `--role`: who the session is for.
+    pub user: UserSelector,
     /// `--url`: the origin to connect to, when it is not the application's own
     /// (a loopback address on a machine with no DNS for the base domain).
     pub url: Option<String>,
@@ -458,23 +512,35 @@ pub struct TokenArgs {
 
 /// Parse `auth token`'s flags. Unknown ones are refused by name, like every
 /// other command's.
+///
+/// The three ways of naming a user are mutually exclusive and one is required:
+/// two of them together is a caller who has not decided, and defaulting to
+/// either would sign them in as somebody they did not ask for.
 pub fn parse_token_args(args: &[String]) -> Result<TokenArgs> {
-    let mut parsed = TokenArgs {
-        format: SessionFormat::Playwright,
-        ..TokenArgs::default()
-    };
     let mut app = None;
     let mut email = None;
+    let mut role = None;
+    let mut admin = false;
+    let mut url = None;
+    let mut base_domain = None;
+    let mut out = None;
     let mut format = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
+        // `--admin` is the one flag that takes no value; everything else reads
+        // the next argument, and a flag left dangling at the end is an error
+        // rather than an empty string.
+        if arg == "--admin" {
+            admin = true;
+            continue;
+        }
         let slot = match arg.as_str() {
             "--app" => &mut app,
             "--email" => &mut email,
-            "--password" => &mut parsed.password,
-            "--url" => &mut parsed.url,
-            "--base-domain" => &mut parsed.base_domain,
-            "--out" => &mut parsed.out,
+            "--role" => &mut role,
+            "--url" => &mut url,
+            "--base-domain" => &mut base_domain,
+            "--out" => &mut out,
             "--format" => &mut format,
             other => {
                 return Err(Error::config(format!(
@@ -488,15 +554,65 @@ pub fn parse_token_args(args: &[String]) -> Result<TokenArgs> {
                 .clone(),
         );
     }
-    parsed.app = app.ok_or_else(|| {
+
+    let app = app.ok_or_else(|| {
         Error::config("auth token needs --app: which application's session to mint")
     })?;
-    parsed.email =
-        email.ok_or_else(|| Error::config("auth token needs --email: which user to sign in as"))?;
-    if let Some(name) = format {
-        parsed.format = SessionFormat::parse(&name)?;
+    let user = select_user(email, admin, role)?;
+    Ok(TokenArgs {
+        app,
+        user,
+        url,
+        base_domain,
+        out,
+        format: match format {
+            Some(name) => SessionFormat::parse(&name)?,
+            None => SessionFormat::Playwright,
+        },
+    })
+}
+
+/// Exactly one of the three ways of naming a user.
+fn select_user(email: Option<String>, admin: bool, role: Option<String>) -> Result<UserSelector> {
+    let mut chosen: Vec<UserSelector> = [
+        email.map(UserSelector::Email),
+        admin.then_some(UserSelector::Admin),
+        role.map(UserSelector::Role),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if chosen.len() > 1 {
+        return Err(Error::config(format!(
+            "auth token takes one of --email, --admin and --role, not {}",
+            chosen
+                .iter()
+                .map(UserSelector::describe)
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )));
     }
-    Ok(parsed)
+    chosen.pop().ok_or_else(|| {
+        Error::config(
+            "auth token needs to know who the session is for: --email EMAIL, \
+             --admin (the first admin user), or --role NAME (the first user \
+             holding that role)",
+        )
+    })
+}
+
+/// Mint a grant for `user` and exchange it at `target` for a session.
+///
+/// The two halves of the command that need something other than a file: the
+/// database, which is what authorises this at all, and the running server, which
+/// is the only thing that can turn the grant into a session.
+pub async fn session_for(
+    catalog: &Catalog,
+    target: &Target,
+    user: &User,
+) -> Result<(Vec<Cookie>, Json)> {
+    let grant = create_session_grant(catalog, user.id).await?;
+    mint_session(target, &grant).await
 }
 
 #[cfg(test)]
@@ -564,24 +680,50 @@ mod tests {
         assert_eq!(fields[6], "abc123");
     }
 
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
     #[test]
-    fn a_password_comes_from_the_flag_a_file_or_the_environment() {
-        assert_eq!(resolve_password(Some("hunter2")).expect("flag"), "hunter2");
+    fn a_user_is_named_one_of_three_ways() {
+        let by_email = parse_token_args(&args(&["--app", "blog", "--email", "a@b.c"]))
+            .expect("an email names a user");
+        assert_eq!(by_email.user, UserSelector::Email("a@b.c".to_owned()));
 
-        let path = std::env::temp_dir().join(format!("sc-cli-pw-{}", std::process::id()));
-        std::fs::write(&path, "from-a-file\n").expect("write");
-        let flag = format!("@{}", path.display());
-        assert_eq!(
-            resolve_password(Some(&flag)).expect("file"),
-            "from-a-file",
-            "the trailing newline every editor adds is not part of the password"
-        );
-        std::fs::remove_file(&path).ok();
+        // `--admin` takes no value, and what follows it is still parsed.
+        let by_admin =
+            parse_token_args(&args(&["--app", "blog", "--admin", "--format", "netscape"]))
+                .expect("--admin names a user");
+        assert_eq!(by_admin.user, UserSelector::Admin);
+        assert_eq!(by_admin.format, SessionFormat::Netscape);
 
-        // A file that is not there says which file, not "no such file or
-        // directory" on its own.
-        let err = resolve_password(Some("@/nonexistent/password")).expect_err("missing");
-        assert!(err.to_string().contains("/nonexistent/password"), "{err}");
+        let by_role =
+            parse_token_args(&args(&["--app", "blog", "--role", "Editor"])).expect("a role");
+        assert_eq!(by_role.user, UserSelector::Role("Editor".to_owned()));
+    }
+
+    #[test]
+    fn naming_no_user_or_two_is_refused_by_name() {
+        // None of the three: the error lists all three rather than naming the
+        // one that used to be mandatory.
+        let err = parse_token_args(&args(&["--app", "blog"])).expect_err("no user");
+        let message = err.to_string();
+        for flag in ["--email", "--admin", "--role"] {
+            assert!(message.contains(flag), "{message}");
+        }
+
+        // Two of them: a caller who has not decided, and there is no sensible
+        // precedence to invent.
+        let err = parse_token_args(&args(&["--app", "blog", "--admin", "--email", "a@b.c"]))
+            .expect_err("two selectors");
+        assert!(err.to_string().contains("--email a@b.c"), "{err}");
+        assert!(err.to_string().contains("--admin"), "{err}");
+    }
+
+    #[test]
+    fn the_roles_are_listed_the_way_an_error_shows_them() {
+        let roles = [Role::new(ROLE_ADMIN, "Admin"), Role::new(100, "Public")];
+        assert_eq!(role_list(&roles), "Admin (1), Public (100)");
     }
 
     #[test]
@@ -614,7 +756,6 @@ mod tests {
         let target = Target {
             url: "http://127.0.0.1:3000".to_owned(),
             host: "blog.example.com".to_owned(),
-            login_path: "/api/login".to_owned(),
             secure: false,
         };
         assert_eq!(target.browser_url(), "http://blog.example.com:3000");

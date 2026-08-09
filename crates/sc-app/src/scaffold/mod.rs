@@ -92,6 +92,10 @@ pub async fn scaffold_app(
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
     let graphql = app_graphql(app, cat)?;
     let schema_sql = app_schema_sql(app, cat)?;
+    // This installation's roles, for the documentation that says how to get a
+    // session: `saltcorn auth token --role NAME` takes a name, and nothing inside
+    // a project directory knows what this server calls its roles.
+    let roles = documented_roles(cat).await?;
     let generated = files::project_files(&files::ProjectContext {
         project: &project,
         app,
@@ -102,6 +106,7 @@ pub async fn scaffold_app(
         // Where this deployment serves its apps, so the generated documentation
         // names the URL to open. `None` when nobody told this process.
         origin: cat.public_origin(),
+        roles: &roles,
     });
 
     let mut written = Vec::with_capacity(generated.len());
@@ -127,6 +132,23 @@ pub async fn scaffold_app(
         files: written,
         git_initialized,
     })
+}
+
+/// The roles the generated documentation names, or none when this database has
+/// no roles table.
+///
+/// A running server always has one — [`sc_auth::bootstrap`] creates it before the
+/// first user can exist — so the empty answer is for a catalog that was brought
+/// up without it, which is a test's database rather than an installation's. It
+/// degrades instead of failing because of what the list is *for*: one sentence of
+/// documentation, and failing a build over a sentence would be the wrong trade.
+/// The generator says "the roles are listed in the admin UI" and the project is
+/// still written.
+async fn documented_roles(cat: &Catalog) -> Result<Vec<sc_auth::Role>> {
+    if cat.get(sc_auth::ROLES_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    sc_auth::list_roles(cat).await
 }
 
 /// Whether `app` is one this module may generate a project for.
@@ -264,6 +286,11 @@ pub async fn emit_react_runtime(
     // the admin UI has to reach the file a coding agent writes SQL against.
     let schema_sql = app_schema_sql(app, cat)?;
 
+    // Re-read on every build rather than cached, for the same reason the tables
+    // are: an admin who adds a role gets a README that names it at the next
+    // build, with nobody re-scaffolding anything.
+    let roles = documented_roles(cat).await?;
+
     let mut written = Vec::new();
     for file in files::runtime_files(&files::ProjectContext {
         project,
@@ -273,6 +300,7 @@ pub async fn emit_react_runtime(
         graphql: graphql.as_ref(),
         schema_sql: &schema_sql,
         origin: cat.public_origin(),
+        roles: &roles,
     }) {
         let path = format!("{project}/{}", file.path);
         store

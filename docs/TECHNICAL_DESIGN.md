@@ -2559,15 +2559,39 @@ missing rather than inventing `localhost`.
 
 **`saltcorn auth token`** is the session half. An application's screens require a signed-in
 user, and a session cookie is one the server minted into its own in-memory store (§7.2) — so
-nothing outside that process can forge one, and this does not try. It performs the same
-`POST {mount}/login` the sign-in screen performs, against the running server, with an account
-and its password, and writes the cookies down: Playwright's `storageState` by default,
-a Netscape `cookies.txt` for `curl` on request, `0600` either way, and both default names in
-the scaffold's `.gitignore` because a session file is a password. The session can do exactly
-what that account can do, which makes "give the agent its own low-privilege account" a real
-limit rather than advice. Two requests, not one: the CSRF check (§7.2) refuses a mutation
-whose `x-csrf-token` header does not echo its `sc_csrf` cookie, and a first-contact client has
-neither, so it primes with a GET exactly as a browser does.
+nothing outside that process can forge one, and this does not try.
+
+It asks for **no password**, because the caller is not somebody who should be made to have
+one: it runs where the server runs, from a shell holding the primary database's connection
+string, which is strictly more authority than any password buys — enough to read every hash
+and rewrite any of them. What it asks instead is *who*: `--email EMAIL`, `--admin` (the first
+user holding the admin role), or `--role NAME` (the first user holding that role). "First"
+means lowest email, since §7.1's users table records no creation time and an answer that
+changed between Tuesdays would be a bug that looked like a flake. A role that does not exist
+is refused with the list of the ones that do, and a role nobody holds is refused saying so —
+the caller is at a shell, and "not found" alone would send them to the admin UI to answer a
+question this command could answer.
+
+The bridge from a process holding the database to a session store it cannot reach is a
+**one-time grant**: a row in `_sc_session_grants` naming the user, its secret half stored
+argon2id-hashed exactly as a password is, expiring two minutes later. The command presents it
+at `POST /auth/token` — a fixed route outside every `EndpointSet`, for the same reason
+`/upload` is one: it is nobody's API contract and no generated client should carry a method
+for it. The server redeems it, **deleting the row before it checks the secret**, so a grant is
+good once whether or not that once succeeded, and then starts an ordinary session by the same
+code `login` does. The authority is the database, not the row: whoever can write it could
+already do everything it grants, and what they could *not* do — mint a session in another
+process's memory — is exactly what this gives them, narrowly and briefly.
+
+Out come the cookies: Playwright's `storageState` by default, a Netscape `cookies.txt` for
+`curl` on request, `0600` either way, and both default names in the scaffold's `.gitignore`
+because a session file is a password. The session can do exactly what that account can do,
+which makes "give the agent its own low-privilege account" a real limit rather than advice —
+and the generated documentation lists the installation's actual roles, because `--role` takes
+a name and nothing inside a project directory knows what this server calls them. Two requests,
+not one: the CSRF check (§7.2) refuses a mutation whose `x-csrf-token` header does not echo its
+`sc_csrf` cookie, and a first-contact client has neither, so it primes with a GET exactly as a
+browser does.
 
 **Regeneration is not a build** (and this is what discharges GOALS' "if the API definition
 changes, the client code must be updated automatically"). Re-emitting `src/saltcorn/**` is

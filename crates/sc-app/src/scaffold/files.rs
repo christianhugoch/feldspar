@@ -27,6 +27,7 @@ use sc_api::{
     EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, generate_client,
     generate_graphql_client, op_name,
 };
+use sc_auth::{ROLE_ADMIN, Role};
 use sc_catalog::{PublicOrigin, Table};
 use sc_types::BasicType;
 
@@ -123,6 +124,15 @@ pub struct ProjectContext<'a> {
     /// without one serves no applications at all — and the documentation then
     /// says what to substitute.
     pub origin: Option<PublicOrigin>,
+    /// This installation's roles, most privileged first
+    /// ([`list_roles`](sc_auth::list_roles)).
+    ///
+    /// The documentation names them because `saltcorn auth token --role NAME`
+    /// takes one, and a reader inside a project directory has no other way to
+    /// find out what this server calls its roles. Not a contract — an admin may
+    /// add or rename one tomorrow — which is why the generated README says when
+    /// the list was taken.
+    pub roles: &'a [Role],
 }
 
 impl ProjectContext<'_> {
@@ -152,6 +162,40 @@ impl ProjectContext<'_> {
             Some(origin) => origin.url_for(&self.app.subdomain),
             None => format!("http://{}.<the server's base domain>", self.app.subdomain),
         }
+    }
+
+    /// The roles as one line: `Admin (1), Editor (40), Public (100)`.
+    fn role_line(&self) -> String {
+        self.roles
+            .iter()
+            .map(|r| format!("{} ({})", r.name, r.role))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The roles as a bullet list, each with the number every `min_role` is
+    /// written in and whatever the admin wrote about it.
+    fn role_bullets(&self) -> String {
+        self.roles
+            .iter()
+            .map(|r| {
+                let description = if r.description.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", r.description.trim())
+                };
+                format!("- **`{}`** (role {}){description}\n", r.name, r.role)
+            })
+            .collect()
+    }
+
+    /// The name this installation gives the admin role — `Admin` unless somebody
+    /// renamed it, which they are allowed to do.
+    fn admin_role_name(&self) -> &str {
+        self.roles
+            .iter()
+            .find(|r| r.role == ROLE_ADMIN)
+            .map_or("Admin", |r| r.name.as_str())
     }
 
     /// The sentence after the URL: nothing when it is the real one, and where to
@@ -358,22 +402,33 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
          one against the **running server** and writes it to disk:\n\
          \n\
          ```sh\n\
-         saltcorn auth token --app {subdomain} --email you@example.com \\\n  \
-           --password @dev-password\n\
+         saltcorn auth token --app {subdomain} --admin\n\
          ```\n\
          \n\
-         It signs in through this application's own `login` endpoint — the same \
-         call the sign-in screen makes — so what it writes is exactly the session \
-         a browser would have got: the same user, the same role, the same limits. \
-         It is **not** a back door: without a real account and its password it \
-         mints nothing, and the session it returns can do neither more nor less \
-         than that account can.\n\
+         **It asks for no password.** The command runs on the server, from a \
+         shell that already holds the database's connection string — an \
+         authority that can read every password hash and change any of them — so \
+         what it needs from you is not a secret but a *user*. Name one in \
+         whichever of these three ways you can answer:\n\
          \n\
-         The password comes from `--password TEXT`, from `--password @FILE` \
-         (which is how it stays out of your shell history and this repository), \
-         or from the `SALTCORN_PASSWORD` environment variable. Give the agent \
-         **its own account**, at the lowest role that can see the screens being \
-         photographed, rather than an admin's.\n\
+         - `--admin` — the first user holding the `{admin_role}` role. The \
+         quickest way to see every screen, and the one to think about twice: a \
+         script holding an admin session can do everything an admin can.\n\
+         - `--role NAME` — the first user holding that role. {roles_sentence}\n\
+         - `--email you@example.com` — that user exactly. Give an agent **its own \
+         account**, at the lowest role that can see the screens being \
+         photographed, and name it here.\n\
+         \n\
+         {roles_list}\
+         It is **not** a back door. The session is minted by the server, from a \
+         single-use grant written to the database and good for two minutes, and \
+         it is the same session — made by the same code — that signing in would \
+         have produced. What it can do is exactly what that account can do: no \
+         more, and no less.\n\
+         \n\
+         A role that is not a role, and a role no user holds, are each refused by \
+         name rather than guessed at, so `--role Reviewer` on a server with no \
+         reviewers tells you which of the two is the case.\n\
          \n\
          The default output is `.saltcorn-session.json` in the working \
          directory, in Playwright's `storageState` shape; `--format netscape` \
@@ -413,14 +468,43 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
          with `curl`:\n\
          \n\
          ```sh\n\
-         saltcorn auth token --app {subdomain} --email you@example.com \\\n  \
-           --password @dev-password --format netscape\n\
+         saltcorn auth token --app {subdomain} --admin --format netscape\n\
          curl --cookie .saltcorn-cookies.txt {url}{mount}/whoami\n\
          ```\n",
         subdomain = ctx.app.subdomain,
         url = ctx.app_url_or_placeholder(),
         where_from = ctx.origin_note(),
         mount = ctx.query_mount().unwrap_or("/api"),
+        admin_role = ctx.admin_role_name(),
+        roles_sentence = roles_sentence(ctx),
+        roles_list = roles_list(ctx),
+    )
+}
+
+/// The half-sentence after `--role NAME`, naming this installation's roles.
+///
+/// Degrades rather than lies. A generator given no roles — which a running
+/// server cannot be, since the two built-ins are bootstrapped before the first
+/// user exists — says where to look instead of printing an empty list.
+fn roles_sentence(ctx: &ProjectContext<'_>) -> String {
+    if ctx.roles.is_empty() {
+        return "The roles are listed in the admin UI, under Users.".to_owned();
+    }
+    format!("The roles on this server are {}.", ctx.role_line())
+}
+
+/// The roles as a block of bullets, for the reader deciding which account an
+/// agent should be given. Nothing at all when there are none to list.
+fn roles_list(ctx: &ProjectContext<'_>) -> String {
+    if ctx.roles.is_empty() {
+        return String::new();
+    }
+    format!(
+        "The roles this server has, lowest number most privileged — as they were \
+         when this file was written, which is not a promise about tomorrow:\n\
+         \n\
+         {}\n",
+        ctx.role_bullets()
     )
 }
 
@@ -440,23 +524,30 @@ fn testing_summary(ctx: &ProjectContext<'_>) -> String {
          \n\
          ```sh\n\
          npm run build && pkill -HUP saltcorn    # the server serves a cached bundle until this\n\
-         saltcorn auth token --app {subdomain} --email you@example.com --password @dev-password\n\
+         saltcorn auth token --app {subdomain} --admin\n\
          ```\n\
          \n\
          The first makes the running server re-read what the build just wrote \
          (it runs no bundler; it is the fast half of the admin UI's *Build* \
-         button). The second signs in through this application's own login \
-         endpoint and writes `.saltcorn-session.json`, which Playwright loads as \
+         button). The second mints a session and writes \
+         `.saltcorn-session.json`, which Playwright loads as \
          `browser.newContext({{ storageState: '.saltcorn-session.json' }})` — \
          without it, every screen behind the sign-in page photographs as the \
          sign-in page.\n\
          \n\
+         **It asks for no password**; it asks *who*. `--admin` takes the first \
+         `{admin_role}` user, `--role NAME` the first user holding that role, and \
+         `--email you@example.com` that person exactly. {roles_sentence} Prefer \
+         the least privileged role that can see the screen being photographed.\n\
+         \n\
          **[`{REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}`]({REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}) \
-         has the whole procedure**: the `curl` form, where the password comes \
-         from, what the session can and cannot do, and how long it lasts.\n",
+         has the whole procedure**: the `curl` form, what each role is for, what \
+         the session can and cannot do, and how long it lasts.\n",
         subdomain = ctx.app.subdomain,
         url = ctx.app_url_or_placeholder(),
         where_from = ctx.origin_note(),
+        admin_role = ctx.admin_role_name(),
+        roles_sentence = roles_sentence(ctx),
     )
 }
 
@@ -1755,7 +1846,23 @@ mod tests {
             // domain, which is the case the documentation has to degrade
             // gracefully in; `ctx_at` is the one that knows.
             origin: None,
+            roles: roles(),
         }
+    }
+
+    /// The roles of an installation that has added one of its own: the two
+    /// built-ins every database has, plus the `Editor` that makes a generated
+    /// list worth generating.
+    fn roles() -> &'static [Role] {
+        static ROLES: std::sync::OnceLock<Vec<Role>> = std::sync::OnceLock::new();
+        ROLES.get_or_init(|| {
+            vec![
+                Role::new(ROLE_ADMIN, "Admin").description("Full access to everything."),
+                Role::new(40, "Editor").description("May write posts."),
+                Role::new(100, "Public")
+                    .description("Anyone at all, including callers who are not logged in."),
+            ]
+        })
     }
 
     /// The same context, for a deployment that knows where it serves.
@@ -1909,7 +2016,6 @@ mod tests {
         let readme = file(&files, "src/saltcorn/README.md");
         assert!(readme.contains("read into memory"), "{readme}");
         assert!(readme.contains("--format netscape"), "{readme}");
-        assert!(readme.contains("SALTCORN_PASSWORD"), "{readme}");
         assert!(readme.contains("live credential"), "{readme}");
         let agents = file(&files, "AGENTS.md");
         assert!(!agents.contains("--format netscape"), "{agents}");
@@ -1923,6 +2029,77 @@ mod tests {
         let ignore = file(&files, ".gitignore");
         assert!(ignore.contains(".saltcorn-session.json"), "{ignore}");
         assert!(ignore.contains(".saltcorn-cookies.txt"), "{ignore}");
+    }
+
+    /// The session command asks for no password, and both documents say what to
+    /// give it instead — in this installation's own vocabulary, because
+    /// `--role NAME` takes a name and nothing inside a project directory knows
+    /// what this server's roles are called.
+    #[test]
+    fn both_documents_name_the_three_ways_to_choose_a_user_and_this_servers_roles() {
+        let tables = [tasks()];
+        let app = todo();
+        let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
+
+        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+            let doc = file(&files, path);
+            // The pasteable command carries no password flag, and neither
+            // document mentions one: a reader who pastes the old line would get
+            // "unknown argument" from a command that no longer takes it.
+            assert!(
+                doc.contains("saltcorn auth token --app todo --admin"),
+                "{path}: {doc}"
+            );
+            assert!(!doc.contains("--password"), "{path}: {doc}");
+            assert!(!doc.contains("SALTCORN_PASSWORD"), "{path}: {doc}");
+            for flag in ["--admin", "--role NAME", "--email you@example.com"] {
+                assert!(doc.contains(flag), "{path} should offer {flag}: {doc}");
+            }
+            // The roles, named and numbered, as this database has them.
+            assert!(
+                doc.contains("Admin (1), Editor (40), Public (100)"),
+                "{path}: {doc}"
+            );
+        }
+
+        // The README also says what each role is for, which is what a reader
+        // choosing an account for an agent actually needs.
+        let readme = file(&files, "src/saltcorn/README.md");
+        assert!(
+            readme.contains("**`Editor`** (role 40) — May write posts."),
+            "{readme}"
+        );
+        assert!(readme.contains("single-use grant"), "{readme}");
+    }
+
+    /// A generator given no roles points at the admin UI instead of printing an
+    /// empty list. Unreachable from a running server — the built-in roles exist
+    /// before the first user does — but the sentence still has to read like one
+    /// if it ever happens.
+    #[test]
+    fn documentation_with_no_roles_to_name_degrades_to_a_pointer() {
+        let tables = [tasks()];
+        let app = todo();
+        let endpoints = endpoints(&tables);
+        let files = project_files(&ProjectContext {
+            roles: &[],
+            ..ctx(&app, &tables, &endpoints, None)
+        });
+
+        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+            let doc = file(&files, path);
+            assert!(doc.contains("listed in the admin UI"), "{path}: {doc}");
+            assert!(
+                !doc.contains("The roles on this server are"),
+                "{path}: {doc}"
+            );
+        }
+        // `--admin` still names a role, falling back to the built-in spelling
+        // rather than leaving a gap in the sentence.
+        assert!(
+            file(&files, "AGENTS.md").contains("`Admin` user"),
+            "the admin role should still have a name"
+        );
     }
 
     /// The URL is the deployment's real one when this process knows it, and

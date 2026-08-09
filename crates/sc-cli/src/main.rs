@@ -592,22 +592,21 @@ async fn auth_command(args: &[String]) -> Result<()> {
     }
 }
 
-/// `saltcorn auth token --app SUBDOMAIN --email EMAIL [--password …] [--url …]
-/// [--out PATH] [--format playwright|netscape]`.
+/// `saltcorn auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)
+/// [--url …] [--out PATH] [--format playwright|netscape]`.
 ///
-/// Signs in to the **running server** as `--email` and writes the cookies a
+/// Mints a session for a user of the **running server** and writes the cookies a
 /// browser would have got, so a script can screenshot the screens behind the
-/// sign-in page (§13.3). The database is consulted for one thing only — the
-/// application's own login path, which is its REST mount plus `/login`, and
-/// which is a setting rather than a constant.
+/// sign-in page (§13.3).
 ///
-/// It deliberately does not create a user, reset a password or mint a token of
-/// its own: the only session the server will accept is one the server made
-/// (§7.2), and the only way to be given one is to sign in.
+/// No password, because the caller already holds something stronger: the primary
+/// database's credentials. What it does with them is write a one-time grant
+/// (§7.2) that the server exchanges for an ordinary session — it still creates
+/// no user, resets no password and forges no cookie, because the only session
+/// the server accepts is one the server itself made.
 async fn auth_token_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
     let parsed = sc_cli::auth::parse_token_args(&rest)?;
-    let password = sc_cli::auth::resolve_password(parsed.password.as_deref())?;
 
     if let Some(source) = db.source() {
         eprintln!("saltcorn: database configured from {source}");
@@ -618,6 +617,10 @@ async fn auth_token_command(args: &[String]) -> Result<()> {
         .ok_or_else(|| {
             sc_error::Error::not_found(format!("no application with subdomain `{}`", parsed.app))
         })?;
+    // Resolved before anything is written or any request is made, so "there is
+    // no such user" arrives before "the server is unreachable" — the two are
+    // fixed in different places.
+    let user = sc_cli::auth::resolve_user(&catalog, &parsed.user).await?;
 
     // Where the application answers, and where to connect to reach it. The two
     // differ whenever a development machine has no DNS for the base domain,
@@ -639,11 +642,10 @@ async fn auth_token_command(args: &[String]) -> Result<()> {
             .clone()
             .unwrap_or_else(|| origin.url_for(&app.subdomain)),
         host: origin.host_for(&app.subdomain),
-        login_path: sc_cli::auth::login_path(&app)?,
         secure: origin.secure,
     };
 
-    let (cookies, user) = sc_cli::auth::mint_session(&target, &parsed.email, &password).await?;
+    let (cookies, signed_in) = sc_cli::auth::session_for(&catalog, &target, &user).await?;
     let path = sc_cli::auth::out_path(parsed.out.as_deref(), parsed.format);
     sc_cli::auth::write_private(
         &path,
@@ -651,11 +653,16 @@ async fn auth_token_command(args: &[String]) -> Result<()> {
     )?;
 
     // What was written, for whom, and the URL to point a browser at — the three
-    // things the caller's next command needs.
+    // things the caller's next command needs. The identity is the *server's*
+    // answer, not the flag's: `--admin` and `--role` name a user this command
+    // chose, and the caller should be told which one it got.
     eprintln!(
-        "saltcorn: signed in as {}{} — session written to {}",
-        parsed.email,
-        match user.get("role").and_then(|r| r.as_i64()) {
+        "saltcorn: session for {}{} — written to {}",
+        signed_in
+            .get("email")
+            .and_then(|e| e.as_str())
+            .unwrap_or("the selected user"),
+        match signed_in.get("role").and_then(|r| r.as_i64()) {
             Some(role) => format!(" (role {role})"),
             None => String::new(),
         },
@@ -678,7 +685,7 @@ fn print_usage() {
     eprintln!("                        [--param name:type[,name:type…]]… --sql TEXT|@FILE");
     eprintln!("  saltcorn api list-queries --app SUBDOMAIN [--api MOUNT]");
     eprintln!("  saltcorn api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME");
-    eprintln!("  saltcorn auth token --app SUBDOMAIN --email EMAIL [--password TEXT|@FILE]");
+    eprintln!("  saltcorn auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
     eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
     eprintln!();
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
@@ -708,14 +715,17 @@ fn print_usage() {
        otherwise: raw SQL does not go through the row layer, so ownership
        formulae do not filter what it returns.
 
-  auth token: signs in to the *running* server as --email and writes the cookies
-       a browser would have got, so a script can screenshot the screens behind
-       the sign-in page. It forges nothing: without a real account and its
-       password it mints nothing, and the session can do exactly what that
-       account can. The password comes from --password, --password @FILE or
-       SALTCORN_PASSWORD. The default file is .saltcorn-session.json,
-       Playwright's storageState; --format netscape writes a cookies.txt for
-       curl instead. Both are written 0600 — a session file is a password.
+  auth token: mints a session on the *running* server and writes the cookies a
+       browser would have got, so a script can screenshot the screens behind the
+       sign-in page. It asks no password: this command already holds the
+       database, which is more authority than any password buys. Say who the
+       session is for with --email EMAIL, with --admin (the first admin user) or
+       with --role NAME (the first user holding that role — the error lists the
+       roles when the name is not one). It forges nothing: the session is minted
+       by the server, from a one-time grant, and can do exactly what that account
+       can. The default file is .saltcorn-session.json, Playwright's
+       storageState; --format netscape writes a cookies.txt for curl instead.
+       Both are written 0600 — a session file is a password.
 
   server:"
     );

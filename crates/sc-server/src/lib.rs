@@ -52,7 +52,8 @@ pub use handlers::admin_handlers;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
 pub use router::{
-    BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
+    BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, GRANT_FIELD, IDE_PREFIX, SESSION_TOKEN_ROUTE,
+    build_router, build_router_with_apps,
 };
 pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};

@@ -115,16 +115,21 @@ there.
 ### Without a browser to sign in with
 
 A script — a screenshot run, a smoke test, a coding agent checking its own work — cannot type
-into that sign-in screen, so it photographs the sign-in screen. `saltcorn auth token` signs in
-on its behalf and writes the cookies down:
+into that sign-in screen, so it photographs the sign-in screen. `saltcorn auth token` gets it a
+session and writes the cookies down:
 
 ```
-saltcorn auth token --app todo --email you@example.com --password @dev-password
+saltcorn auth token --app todo --admin
 ```
 
-That is the same `POST /api/login` the screen makes, against the *running* server, so what
-comes back is exactly the session a browser would have got — the same user, the same role, the
-same limits. It writes `.saltcorn-session.json`, which is Playwright's `storageState`:
+It asks for no password. You are at a shell that already holds the database this server runs
+on, which can read every password hash and change any of them, so what the command needs from
+you is not a secret but a *user*: `--admin` takes the first admin, `--role NAME` the first user
+holding a role (the error lists the roles when the name is not one), and `--email
+you@example.com` that person exactly. The session itself is minted by the running server, from
+a single-use grant good for two minutes, so what comes back is exactly the session a browser
+would have got — the same user, the same role, the same limits. It writes
+`.saltcorn-session.json`, which is Playwright's `storageState`:
 
 ```js
 const context = await browser.newContext({ storageState: '.saltcorn-session.json' });

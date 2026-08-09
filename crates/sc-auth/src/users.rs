@@ -65,8 +65,8 @@ fn users_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the roles and users tables exist, creating them if absent, and return
-/// the users table.
+/// Ensure the roles, users and session-grant tables exist, creating them if
+/// absent, and return the users table.
 ///
 /// **Roles first, and that order is load-bearing**: `users.role` references
 /// `_sc_roles`, and a foreign key onto a table that does not exist is not a
@@ -82,10 +82,13 @@ fn users_fields() -> Vec<DataField> {
 /// this one. Call this once at startup after the [`Catalog`] is initialised.
 pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
     crate::roles::bootstrap_roles(catalog).await?;
-    if let Some(existing) = catalog.get(USERS_TABLE)? {
-        return Ok(existing);
-    }
-    catalog.create_table(USERS_TABLE, &users_fields()).await
+    let users = match catalog.get(USERS_TABLE)? {
+        Some(existing) => existing,
+        None => catalog.create_table(USERS_TABLE, &users_fields()).await?,
+    };
+    // Last, and that order is load-bearing too: a grant references a user.
+    crate::grant::bootstrap_session_grants(catalog).await?;
+    Ok(users)
 }
 
 #[cfg(test)]

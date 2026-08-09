@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## The password `saltcorn auth token` should never have asked for
+
+`auth token` (below) asked for a user's password. That was the wrong question, and asking it
+made the command worse than useless in the case it exists for: an agent that has just built an
+application and wants to look at it does not have anybody's password, and the operator who
+does now has a secret to leave in a file or a shell history.
+
+**It was never buying anything.** The command runs where the server runs, from a shell holding
+the primary database's connection string — an authority that can already read every password
+hash, rewrite any of them, and grant itself any role it likes. A password checked *on top of*
+that protected nothing. So the flag is gone, along with `--password @FILE` and
+`SALTCORN_PASSWORD`, and what the command asks for now is not a secret but a **user**:
+`--email EMAIL` as before, `--admin` for the first user holding the admin role, or `--role
+NAME` for the first user holding that one. "First" is lowest email — the users table records no
+creation time (§7.1) and an answer that changed between Tuesdays would be a bug that looked
+like a flake. A name that is not a role is refused *with the list of the ones that are*, and a
+role nobody holds is refused saying exactly that: the caller is at a shell, and "not found"
+alone would send them to the admin UI to answer a question this command can answer.
+
+**It still forges nothing**, and that was the interesting part to keep. A session cookie is one
+the server minted into its own in-memory store (§7.2), so no other process can make one — and
+this one does not try. It writes a **one-time grant** instead: a row in `_sc_session_grants`
+naming the user, its secret half stored argon2id-hashed exactly as a password is, expiring two
+minutes later, swept when the next one is minted. That is presented at `POST /auth/token`, a
+fixed route outside every `EndpointSet` for the same reason `/upload` is one — it is nobody's
+API contract, and no generated client should carry a method for it — where the server redeems
+it and starts an ordinary session by the same code `login` does. The row is **deleted before
+the secret is checked**, so a grant is good once whether or not that once succeeded, and a
+guessed id buys one attempt rather than an unlimited supply. The authority is the database, not
+the row: whoever can write it could already do everything it grants; what they could not do —
+mint a session in another process's memory — is what this gives them, narrowly and briefly.
+
+**And the documentation now names this server's roles.** `--role` takes a name, and nothing
+inside a project directory knows what an installation calls its roles, so a generated
+`AGENTS.md` and `src/saltcorn/README.md` that merely *described* roles would send the reader
+back to the admin UI. Both now list them — `Admin (1), Editor (40), Public (100)` — read out of
+`_sc_roles` at scaffold time and re-read on every build, so a role added next month appears in
+the README without anybody re-scaffolding anything. The README also gives each one its
+description, because the reader is usually deciding which account an agent should get. A
+database with no roles table (a test's, never a server's) documents no roles rather than
+failing a build over a sentence.
+
 ## A session in a file, a URL in the documentation: the rest of the screenshot loop
 
 `SIGHUP` (below) fixed the first half of "an agent changed something and wants to look at it".

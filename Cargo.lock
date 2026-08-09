@@ -3155,6 +3155,7 @@ dependencies = [
  "bytes",
  "sc-action",
  "sc-api",
+ "sc-auth",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",
