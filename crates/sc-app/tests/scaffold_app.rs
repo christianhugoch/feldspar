@@ -167,6 +167,11 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
             "{doc}"
         );
         assert!(!doc.contains("--password"), "{doc}");
+        // The other thing that command needs and this project cannot supply: the
+        // base domain, which it re-reads from `saltcorn.toml` and which this
+        // document knows because the process that wrote it was told.
+        assert!(doc.contains(r#"base_domain = "example.com""#), "{doc}");
+        assert!(doc.contains("--base-domain example.com"), "{doc}");
     }
     // ...and the session file it writes is not committable.
     let ignore = std::fs::read_to_string(project.join(".gitignore"))?;

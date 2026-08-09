@@ -23,7 +23,10 @@ A deployment with more than one database can put this in `saltcorn.toml` beside 
 parameters instead — `base_domain`, `bind` and `secure_cookies` in the `[environments.NAME]`
 section — so `saltcorn serve --environment production` needs no flags. It is worth doing even
 for one: the same settings are what a **command-line build** reads to write your application's
-real URL into the documentation it generates for that project.
+real URL into the documentation it generates for that project, and what `saltcorn auth token`
+(below) reads to know which host to mint a session for. An environment carrying connection
+parameters and no `base_domain` stops that command with `no base domain` — add it there once,
+or pass `--base-domain` on every invocation.
 
 ## Step 1 — Add a file store
 
