@@ -2,6 +2,65 @@
 
 Changes in reverse chronological order.
 
+## A session in a file, a URL in the documentation: the rest of the screenshot loop
+
+`SIGHUP` (below) fixed the first half of "an agent changed something and wants to look at it".
+Two things were still in the way, and neither is discoverable from inside a project.
+
+**The screens are behind a sign-in.** A scaffolded app's routes require a user unless they say
+otherwise (§13.3), so a script driving a browser photographs the sign-in page. What it needs
+is the cookie a browser would have got; what it has is a shell. **`saltcorn auth token`** is
+that shell's way to sign in: `--app`, `--email`, a password from `--password`, `--password
+@FILE` or `SALTCORN_PASSWORD`, and out comes `.saltcorn-session.json` — Playwright's
+`storageState`, which `browser.newContext({ storageState })` restores a logged-in browser
+from. `--format netscape` writes a `cookies.txt` for `curl --cookie` instead.
+
+It **signs in; it does not forge**. The only session the server accepts is one it minted into
+its own in-memory store (§7.2), so nothing outside that process can mint one and this does not
+try: it makes the same `POST {mount}/login` the sign-in screen makes, against the running
+server, with a real account and its real password, and writes down what came back. The session
+can do exactly what that account can do — which is what makes "give the agent its own
+low-privilege account" a limit rather than a suggestion. Two requests rather than one, because
+the CSRF check refuses a mutation whose `x-csrf-token` does not echo its `sc_csrf` cookie and a
+first-contact client has neither: it primes with a GET, exactly as a browser does. The primer's
+CSRF cookie is carried into the file, too — the login response does not re-set one, and a
+`curl` restored without it would 403 on its first POST.
+
+A session file is a password, and is treated as one: written `0600`, with the mode set before
+the bytes so it is never briefly world-readable, and both default names are in the
+`.gitignore` the scaffold writes.
+
+**And the URL was nowhere.** An application is served at `<subdomain>.<base-domain>`, and the
+base domain is the *server's* command line — it appears nowhere in the project, so the
+generated documentation could only ever describe the URL rather than give it. Now
+`Catalog::public_origin` carries it: base domain, bound port, TLS or not, recorded at boot by
+`saltcorn serve` from its own flags. It rides on the catalog for the reason the schema
+observer does — every generator already holds one, and the alternative was a parameter about
+*documentation* in the signature of everything that builds.
+
+The awkward half of that is that a build does not only happen in the server. So a
+`saltcorn.toml` environment now carries `base_domain`, `bind` and `secure_cookies` beside its
+connection parameters: an environment is a deployment, not a connection string. `saltcorn
+serve --environment production` consequently needs no other flag — the file's settings are
+parsed *before* the command line's, so a flag still wins by being read later — and, the reason
+it was done, `saltcorn build-app` and `saltcorn api add-query` write the **same** URL the
+server would. A build that rewrote `README.md` with the URL taken out would be worse than one
+that never wrote it. Both also take `--base-domain` directly. A process that was told nothing
+still says which setting is missing rather than inventing `localhost`: the generated
+documentation is the file a reader trusts most, and a plausible wrong hostname in it is worse
+than an obvious gap.
+
+Both documents gained the whole loop, at the length each is for. `src/saltcorn/README.md` has
+the procedure — the reload, the session command, where the password comes from, what the
+session can and cannot do, how long it lasts (the server's TTL, or a restart, since sessions
+are in memory — a `SIGHUP` reload deliberately does not end one), the Playwright snippet and
+the `curl` form. `AGENTS.md` has the two commands, the URL, and a pointer here, because it is
+read at the start of every session and what belongs in it is the loop and where the rest is.
+
+The test that matters binds a real port, mounts an application on it, signs in over HTTP and
+replays the cookie at `whoami` — because "the session it writes is one the server accepts" is
+the entire claim, and nothing short of that tests it.
+
 ## `SIGHUP` reloads a running server, so a build on disk is a build in the browser
 
 `npm run build` in an application's project directory changed nothing anybody could see, and

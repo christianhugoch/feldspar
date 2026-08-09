@@ -2540,6 +2540,35 @@ coding agents append what they learn to it — clobbering that on the next build
 their work. The two files are the same boundary seen from both sides: inside the generated
 directory is ours and is rewritten, the root is theirs and is not.
 
+**Both documents also carry the loop between an edit and a *seeing* of it**, because every
+step of it surprises somebody and none of it is discoverable from the project. The served
+bundle is a snapshot the server took when it last built, so `npm run build` alone changes
+nothing a browser can see (`SIGHUP`, §13.2). The screens are behind a sign-in, so a script's
+screenshot is a screenshot of the sign-in page (`saltcorn auth token`, below). And the URL is
+a subdomain of a base domain that is the *server's* configuration and appears nowhere in the
+project — so it is written in, resolved, from `Catalog::public_origin`: the base domain, the
+bound port and whether it is behind TLS, recorded at boot by `saltcorn serve` from its own
+flags and by a command-line build from its `saltcorn.toml` environment. It rides on the
+catalog for the reason the schema observer does — every generator already holds one, and the
+alternative is a documentation parameter in the signature of everything that builds. Both
+processes must resolve it or the two disagree: a `saltcorn build-app` that rewrote `README.md`
+with the URL taken *out* would be worse than one that never wrote it, which is why an
+environment in `saltcorn.toml` carries `base_domain`/`bind`/`secure_cookies` beside its
+connection parameters. Never guessed: a process that was not told says which setting is
+missing rather than inventing `localhost`.
+
+**`saltcorn auth token`** is the session half. An application's screens require a signed-in
+user, and a session cookie is one the server minted into its own in-memory store (§7.2) — so
+nothing outside that process can forge one, and this does not try. It performs the same
+`POST {mount}/login` the sign-in screen performs, against the running server, with an account
+and its password, and writes the cookies down: Playwright's `storageState` by default,
+a Netscape `cookies.txt` for `curl` on request, `0600` either way, and both default names in
+the scaffold's `.gitignore` because a session file is a password. The session can do exactly
+what that account can do, which makes "give the agent its own low-privilege account" a real
+limit rather than advice. Two requests, not one: the CSRF check (§7.2) refuses a mutation
+whose `x-csrf-token` header does not echo its `sc_csrf` cookie, and a first-contact client has
+neither, so it primes with a GET exactly as a browser does.
+
 **Regeneration is not a build** (and this is what discharges GOALS' "if the API definition
 changes, the client code must be updated automatically"). Re-emitting `src/saltcorn/**` is
 fast, runs no external process and cannot fail on a bundler, so it happens on every event that

@@ -30,6 +30,11 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
+# `auth token` is an HTTP *client* of the running server: it signs in the way the
+# sign-in screen does and writes down the cookies. The workspace's one client, so
+# no second TLS stack (see the pin's note).
+reqwest.workspace = true
+serde_json.workspace = true
 # The `saltcorn.toml` configuration file: named environments, each with one set
 # of database connection parameters (`config_file.rs`).
 serde.workspace = true

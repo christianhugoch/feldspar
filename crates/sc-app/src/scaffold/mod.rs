@@ -99,6 +99,9 @@ pub async fn scaffold_app(
         endpoints: &endpoints,
         graphql: graphql.as_ref(),
         schema_sql: &schema_sql,
+        // Where this deployment serves its apps, so the generated documentation
+        // names the URL to open. `None` when nobody told this process.
+        origin: cat.public_origin(),
     });
 
     let mut written = Vec::with_capacity(generated.len());
@@ -269,6 +272,7 @@ pub async fn emit_react_runtime(
         endpoints: &endpoints,
         graphql: graphql.as_ref(),
         schema_sql: &schema_sql,
+        origin: cat.public_origin(),
     }) {
         let path = format!("{project}/{}", file.path);
         store

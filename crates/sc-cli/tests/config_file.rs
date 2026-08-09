@@ -190,3 +190,78 @@ async fn an_environment_given_as_parts_connects_just_like_a_url() -> sc_error::R
     assert!(catalog.get(sc_auth::USERS_TABLE)?.is_some());
     Ok(())
 }
+
+/// An environment is a **deployment**, so it may also say where it is served —
+/// and that is what lets a command-line build write the same application URL
+/// into the generated documentation that the server would.
+#[test]
+fn an_environment_carries_where_its_applications_are_served() {
+    let file = Fixture::new(
+        "serving",
+        "[environments.production]\n\
+         database = \"saltcorn\"\n\
+         base_domain = \"example.com\"\n\
+         bind = \"0.0.0.0:443\"\n\
+         secure_cookies = true\n\
+         \n\
+         [environments.dev]\n\
+         database = \"saltcorn_dev\"\n\
+         base_domain = \"localhost\"\n",
+    );
+
+    let (prod, _) = DbConfig::extract(["--environment", "production", "--config", file.path()])
+        .expect("extract");
+    let serving = prod.serving();
+    assert_eq!(serving.base_domain(), Some("example.com"));
+    assert_eq!(serving.port(), Some(443));
+    assert_eq!(serving.secure_cookies(), Some(true));
+    let origin = serving.public_origin(None).expect("an origin");
+    // 443 is https's default, so it is left out of a URL meant to be pasted.
+    assert_eq!(origin.url_for("blog"), "https://blog.example.com");
+    assert_eq!(origin.host_for("blog"), "blog.example.com");
+
+    // A section that gives only the domain still resolves: the port falls back
+    // to the one `serve` binds by default, which is what a development machine
+    // is running anyway.
+    let (dev, _) =
+        DbConfig::extract(["--environment", "dev", "--config", file.path()]).expect("extract");
+    assert_eq!(
+        dev.serving()
+            .public_origin(None)
+            .expect("an origin")
+            .url_for("todo"),
+        "http://todo.localhost:3000"
+    );
+
+    // A flag outranks the file, the same way every other setting does.
+    assert_eq!(
+        dev.serving()
+            .public_origin(Some("other.test"))
+            .expect("an origin")
+            .url_for("todo"),
+        "http://todo.other.test:3000"
+    );
+}
+
+/// With no configuration file and no flag there is no origin — and that has to
+/// stay a quiet `None`, because it is every deployment that never had one.
+#[test]
+fn without_a_base_domain_there_is_no_origin() {
+    let (cfg, _) = DbConfig::extract(["--database-url", "postgres:///x"]).expect("extract");
+    assert!(cfg.serving().public_origin(None).is_none());
+    // ...but a flag alone is enough.
+    assert!(cfg.serving().public_origin(Some("example.com")).is_some());
+}
+
+/// A key the file does not define is a typo, and typos in this file are errors
+/// (the reader's whole design) — including in the serving half.
+#[test]
+fn a_misspelled_serving_key_is_refused() {
+    let file = Fixture::new(
+        "typo",
+        "[environments.production]\nbase_domian = \"example.com\"\n",
+    );
+    let err = DbConfig::extract(["--environment", "production", "--config", file.path()])
+        .expect_err("a misspelled key must fail");
+    assert!(err.to_string().contains("base_domian"), "{err}");
+}

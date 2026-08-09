@@ -39,6 +39,70 @@ use sc_error::{Error, Result};
 
 use crate::config_file::{self, Environment, SelectedEnvironment};
 
+/// The serving settings of a selected environment: where this deployment's
+/// applications are reachable in a browser.
+///
+/// A **view** over the configuration file's section rather than a resolved
+/// value, because who resolves it differs: `serve` merges it with its own flags
+/// and its own defaults (it has a bind address whether or not anyone configured
+/// one), while a command-line build has only this and gives up gracefully when
+/// it says nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct Serving<'a> {
+    section: Option<&'a Environment>,
+}
+
+impl Serving<'_> {
+    /// The configured base domain, if the file gave one.
+    pub fn base_domain(&self) -> Option<&str> {
+        self.section.and_then(|s| s.base_domain.as_deref())
+    }
+
+    /// The configured bind address, if the file gave one.
+    pub fn bind(&self) -> Option<&str> {
+        self.section.and_then(|s| s.bind.as_deref())
+    }
+
+    /// Whether the file says the deployment is behind TLS.
+    pub fn secure_cookies(&self) -> Option<bool> {
+        self.section.and_then(|s| s.secure_cookies)
+    }
+
+    /// The port applications are reached on: the bind address's, if one was
+    /// configured and parses as a socket address.
+    ///
+    /// A bind address that does not parse is **not** an error here. The one
+    /// place that must refuse it is `serve`, which is about to bind it and does
+    /// so through the same parser as `--bind`; a build that only wanted to write
+    /// a URL into a comment has no business failing over a setting it is merely
+    /// quoting.
+    pub fn port(&self) -> Option<u16> {
+        self.bind()?
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|addr| addr.port())
+    }
+
+    /// Where applications are served, when the file said enough to know: a base
+    /// domain, and a port to reach it on.
+    ///
+    /// `base_domain` overrides the file's, for a command with a flag of its own.
+    pub fn public_origin(&self, base_domain: Option<&str>) -> Option<sc_catalog::PublicOrigin> {
+        let domain = base_domain.or_else(|| self.base_domain())?;
+        Some(
+            sc_catalog::PublicOrigin::new(domain, self.port().unwrap_or(DEFAULT_HTTP_PORT))
+                .secure(self.secure_cookies().unwrap_or(false)),
+        )
+    }
+}
+
+/// The port an application's URL carries when nothing said which — the port
+/// [`sc_server::DEFAULT_BIND`](sc_server) binds, and the one every local
+/// deployment in the documentation uses. Named here rather than borrowed from
+/// the server so this crate's *build* commands, which never construct a
+/// `ServerConfig`, do not depend on one.
+const DEFAULT_HTTP_PORT: u16 = 3000;
+
 /// Default host when neither `--db-host` nor `PGHOST` is set.
 const DEFAULT_HOST: &str = "localhost";
 /// Default port when neither `--db-port` nor `PGPORT` is set.
@@ -125,6 +189,21 @@ impl DbConfig {
     /// The name of the selected environment, if a configuration file was used.
     pub fn environment(&self) -> Option<&str> {
         self.selected.as_ref().map(|s| s.name.as_str())
+    }
+
+    /// The **serving** half of the selected environment: where this deployment's
+    /// applications are reachable.
+    ///
+    /// It rides on the database configuration because it arrives with it — one
+    /// `[environments.NAME]` section says both, and every command already
+    /// resolves that section to find its database. A command that wants the
+    /// serving settings therefore needs no second flag, no second file and no
+    /// second lookup; see [`Environment`]'s documentation for why an environment
+    /// carries them at all.
+    pub fn serving(&self) -> Serving<'_> {
+        Serving {
+            section: self.section(),
+        }
     }
 
     /// Connect to the database, returning a pooled driver. A URL (from the flag,

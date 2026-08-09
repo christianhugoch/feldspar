@@ -27,7 +27,7 @@ use sc_api::{
     EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, generate_client,
     generate_graphql_client, op_name,
 };
-use sc_catalog::Table;
+use sc_catalog::{PublicOrigin, Table};
 use sc_types::BasicType;
 
 use crate::api::AppGraphql;
@@ -115,6 +115,14 @@ pub struct ProjectContext<'a> {
     /// the **driver** renders them
     /// ([`app_schema_sql`](crate::app_schema_sql)).
     pub schema_sql: &'a str,
+    /// Where this deployment serves its applications
+    /// ([`Catalog::public_origin`](sc_catalog::Catalog::public_origin)), so the
+    /// documentation can name the URL to open rather than describing one.
+    ///
+    /// `None` when this process was not told the base domain — a server started
+    /// without one serves no applications at all — and the documentation then
+    /// says what to substitute.
+    pub origin: Option<PublicOrigin>,
 }
 
 impl ProjectContext<'_> {
@@ -130,6 +138,33 @@ impl ProjectContext<'_> {
             .iter()
             .find(|a| a.provider == sc_api::REST_PROVIDER)
             .map(|a| a.mount.as_str())
+    }
+
+    /// The URL this application is served at, written out — or, when this
+    /// process was never told the base domain, a placeholder naming the one
+    /// thing the reader has to substitute.
+    ///
+    /// Never a guess. A generated document that said `http://localhost:3000`
+    /// because that is the usual answer would be wrong on every deployment that
+    /// is not this one, and wrong in the file a reader trusts most.
+    fn app_url_or_placeholder(&self) -> String {
+        match &self.origin {
+            Some(origin) => origin.url_for(&self.app.subdomain),
+            None => format!("http://{}.<the server's base domain>", self.app.subdomain),
+        }
+    }
+
+    /// The sentence after the URL: nothing when it is the real one, and where to
+    /// find the missing piece when it is not.
+    fn origin_note(&self) -> &'static str {
+        match self.origin {
+            Some(_) => "",
+            None => {
+                " — the server that generated this was started without a \
+                     `--base-domain`, so substitute the base domain of the one \
+                     serving it"
+            }
+        }
     }
 }
 
@@ -274,18 +309,28 @@ fn add_query_command(ctx: &ProjectContext<'_>) -> String {
     )
 }
 
-/// How to make a build on disk be the build in the browser: `SIGHUP`.
+/// The whole loop for looking at what you just changed: build, make the server
+/// serve it, sign in without a browser to sign in with, screenshot.
 ///
-/// Both documents carry this for the same reason they both carry
-/// [`add_query_command`] — it answers a question asked in the moment, and a
-/// reader who has to go and find the answer has already gone. It is *the* thing
-/// that surprises everyone who builds this project by hand, including every
-/// coding agent that tries to look at what it just changed: the served bundle is
-/// a snapshot the server took when it last built, so `npm run build` alone
-/// changes nothing a browser can see.
-fn reloading_section(ctx: &ProjectContext<'_>) -> String {
+/// This is the README's version — the full procedure. [`testing_summary`] is
+/// `AGENTS.md`'s: the two commands and a pointer here.
+///
+/// It exists because every step of it surprises somebody. The served bundle is a
+/// snapshot the server took when *it* last built, so `npm run build` alone
+/// changes nothing a browser can see. The screens are behind a login, so a
+/// screenshot taken by an agent is a screenshot of the sign-in page. And the URL
+/// is a subdomain of a base domain that is the *server's* configuration, not
+/// anything in this project — which is why it is written in here, resolved,
+/// rather than described.
+fn testing_section(ctx: &ProjectContext<'_>) -> String {
     format!(
-        "## Seeing a build in the browser\n\
+        "## Testing the application and taking screenshots\n\
+         \n\
+         This application is served at **{url}**{where_from} — an application \
+         gets its own subdomain of the server's base domain (there is no path \
+         prefix, and no port of its own).\n\
+         \n\
+         ### 1. Make the server serve the build\n\
          \n\
          `npm run build` writes `dist/`, but the running server is serving the \
          bundle it read into memory the last time **it** built this application. \
@@ -302,13 +347,116 @@ fn reloading_section(ctx: &ProjectContext<'_>) -> String {
          bundler and no `npm install`**: it is the fast half of the admin UI's \
          *Build* button, and it is what to use after building by hand. The server \
          logs what it reloaded and how long it took, which is usually a few \
-         milliseconds.\n\
+         milliseconds. If `pkill` finds nothing, the server is running under \
+         another name or another user; `kill -HUP <pid>` does the same thing.\n\
          \n\
-         Then load `http://{subdomain}.<the server's base domain>` — the \
-         application is served on its own subdomain — and the new bundle is what \
-         answers. If `pkill` finds nothing, the server is running under another \
-         name or another user; `kill -HUP <pid>` does the same thing.\n",
+         ### 2. A session, without a browser to sign in with\n\
+         \n\
+         Most of this application's screens require a signed-in user, so a \
+         browser driven by a script needs a session cookie before it can \
+         photograph anything but the sign-in page. `saltcorn auth token` mints \
+         one against the **running server** and writes it to disk:\n\
+         \n\
+         ```sh\n\
+         saltcorn auth token --app {subdomain} --email you@example.com \\\n  \
+           --password @dev-password\n\
+         ```\n\
+         \n\
+         It signs in through this application's own `login` endpoint — the same \
+         call the sign-in screen makes — so what it writes is exactly the session \
+         a browser would have got: the same user, the same role, the same limits. \
+         It is **not** a back door: without a real account and its password it \
+         mints nothing, and the session it returns can do neither more nor less \
+         than that account can.\n\
+         \n\
+         The password comes from `--password TEXT`, from `--password @FILE` \
+         (which is how it stays out of your shell history and this repository), \
+         or from the `SALTCORN_PASSWORD` environment variable. Give the agent \
+         **its own account**, at the lowest role that can see the screens being \
+         photographed, rather than an admin's.\n\
+         \n\
+         The default output is `.saltcorn-session.json` in the working \
+         directory, in Playwright's `storageState` shape; `--format netscape` \
+         writes `.saltcorn-cookies.txt` for `curl --cookie` instead, and `--out` \
+         puts either anywhere you like. **The file is a live credential**: it is \
+         written `0600`, both default names are in this project's `.gitignore`, \
+         and one that leaks is a logged-in browser for whoever has it.\n\
+         \n\
+         A session lasts until the server's session lifetime runs out (24 hours \
+         unless the server was started with another) or until the server \
+         **restarts** — sessions are held in the server's memory, so a restart \
+         invalidates every token file. A `SIGHUP` reload does not: it reloads \
+         applications and the catalog, and leaves sessions alone, which is what \
+         makes the build-reload-screenshot loop worth having.\n\
+         \n\
+         ### 3. The screenshot\n\
+         \n\
+         ```js\n\
+         const browser = await chromium.launch();\n\
+         const context = await browser.newContext({{\n  \
+           storageState: '.saltcorn-session.json',\n  \
+           viewport: {{ width: 1280, height: 800 }},\n\
+         }});\n\
+         const page = await context.newPage();\n\
+         await page.goto('{url}/');\n\
+         await page.screenshot({{ path: 'home.png', fullPage: true }});\n\
+         ```\n\
+         \n\
+         The routes worth photographing are the ones in `src/routes.tsx`, and \
+         they are client-side: the server answers every path with `index.html` \
+         (the SPA fallback), so `{url}/anything` loads the app and the router \
+         decides what renders. Wait for something real before shooting — \
+         `await page.waitForSelector('table')` beats a fixed sleep, because the \
+         page renders before its data arrives.\n\
+         \n\
+         To check an API response rather than a screen, the same session works \
+         with `curl`:\n\
+         \n\
+         ```sh\n\
+         saltcorn auth token --app {subdomain} --email you@example.com \\\n  \
+           --password @dev-password --format netscape\n\
+         curl --cookie .saltcorn-cookies.txt {url}{mount}/whoami\n\
+         ```\n",
         subdomain = ctx.app.subdomain,
+        url = ctx.app_url_or_placeholder(),
+        where_from = ctx.origin_note(),
+        mount = ctx.query_mount().unwrap_or("/api"),
+    )
+}
+
+/// `AGENTS.md`'s version: where the application is, the two commands, and where
+/// the rest of it is written down.
+///
+/// Short on purpose. `AGENTS.md` is the file an agent reads *first* and at every
+/// session, so what belongs in it is the loop and the pointer; the reasoning,
+/// the formats and the caveats belong in one place, and that place is the
+/// generated directory's README.
+fn testing_summary(ctx: &ProjectContext<'_>) -> String {
+    format!(
+        "## Testing it and taking screenshots\n\
+         \n\
+         This application is served at **{url}**{where_from}. Two things stand \
+         between an edit and a screenshot of it, and neither is obvious:\n\
+         \n\
+         ```sh\n\
+         npm run build && pkill -HUP saltcorn    # the server serves a cached bundle until this\n\
+         saltcorn auth token --app {subdomain} --email you@example.com --password @dev-password\n\
+         ```\n\
+         \n\
+         The first makes the running server re-read what the build just wrote \
+         (it runs no bundler; it is the fast half of the admin UI's *Build* \
+         button). The second signs in through this application's own login \
+         endpoint and writes `.saltcorn-session.json`, which Playwright loads as \
+         `browser.newContext({{ storageState: '.saltcorn-session.json' }})` — \
+         without it, every screen behind the sign-in page photographs as the \
+         sign-in page.\n\
+         \n\
+         **[`{REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}`]({REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}) \
+         has the whole procedure**: the `curl` form, where the password comes \
+         from, what the session can and cannot do, and how long it lasts.\n",
+        subdomain = ctx.app.subdomain,
+        url = ctx.app_url_or_placeholder(),
+        where_from = ctx.origin_note(),
     )
 }
 
@@ -391,11 +539,11 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
          decide what the statement can see. A `get` query runs in a read-only \
          transaction. Open the hole deliberately.\n\
          \n\
-         {reload}",
+         {testing}",
         name = ctx.app.name,
         subdomain = ctx.app.subdomain,
         command = add_query_command(ctx),
-        reload = reloading_section(ctx),
+        testing = testing_section(ctx),
     )
 }
 
@@ -426,7 +574,7 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          It is a React + TypeScript project built by Vite: `npm run build` \
          type-checks it and bundles it, and the Saltcorn server serves the bundle.\n\
          \n\
-         {reload}\
+         {testing}\
          \n\
          ## `{REACT_RUNTIME_SUBDIR}/` is generated — never edit it\n\
          \n\
@@ -471,7 +619,7 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
         name = ctx.app.name,
         subdomain = ctx.app.subdomain,
         command = add_query_command(ctx),
-        reload = reloading_section(ctx),
+        testing = testing_summary(ctx),
     )
 }
 
@@ -598,7 +746,11 @@ fn index_html(project: &str) -> String {
 /// `node_modules` and `dist` only. The generated runtime is **not** ignored: it
 /// is part of the source an admin reads and type-checks against, and a git repo
 /// that omits it cannot be built anywhere but here.
-const GITIGNORE: &str = "node_modules\ndist\n*.local\n";
+/// The last two lines are the session files `saltcorn auth token` writes: they
+/// are live credentials for this application, and a project that committed one
+/// would be handing out a logged-in browser.
+const GITIGNORE: &str = "node_modules\ndist\n*.local\n\
+                         .saltcorn-session.json\n.saltcorn-cookies.txt\n";
 
 /// The entry point. The auth provider wraps the router when there is one, so the
 /// current user is known before any route renders.
@@ -1599,6 +1751,23 @@ mod tests {
             // The driver renders this in the real path; its exact text is that
             // renderer's business, and this is enough to assert it is carried.
             schema_sql: "CREATE TABLE \"tasks\" (\"id\" int8 NOT NULL);\n",
+            // The default context is a process that was never told a base
+            // domain, which is the case the documentation has to degrade
+            // gracefully in; `ctx_at` is the one that knows.
+            origin: None,
+        }
+    }
+
+    /// The same context, for a deployment that knows where it serves.
+    fn ctx_at<'a>(
+        app: &'a Application,
+        tables: &'a [Table],
+        endpoints: &'a EndpointSet,
+        origin: PublicOrigin,
+    ) -> ProjectContext<'a> {
+        ProjectContext {
+            origin: Some(origin),
+            ..ctx(app, tables, endpoints, None)
         }
     }
 
@@ -1709,11 +1878,11 @@ mod tests {
         assert!(agents.contains("never overwrites it"), "{agents}");
     }
 
-    /// Both documents say how to make a build on disk be the build in the
-    /// browser, because a reader who builds by hand and reloads the page sees no
-    /// change and has no way to guess why.
+    /// Both documents carry the loop between an edit and a screenshot of it:
+    /// the reload (because the served bundle is a snapshot) and the session
+    /// (because the screens are behind a sign-in), and the URL to open.
     #[test]
-    fn both_documents_carry_the_reload_command() {
+    fn both_documents_carry_the_build_reload_screenshot_loop() {
         let tables = [tasks()];
         let app = todo();
         let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
@@ -1722,21 +1891,78 @@ mod tests {
             let doc = file(&files, path);
             assert!(
                 doc.contains("npm run build && pkill -HUP saltcorn"),
-                "{path} should carry the whole loop in one pasteable line: {doc}"
+                "{path} should carry the reload in one pasteable line: {doc}"
             );
-            // Why it is needed at all — the served bundle is a snapshot.
-            assert!(doc.contains("read into memory"), "{path}: {doc}");
-            // And what it deliberately does not do, so nobody reaches for the
-            // Build button expecting this to be slower than it is.
+            // Why the reload is needed at all — the served bundle is a snapshot.
+            assert!(doc.contains("cached bundle"), "{path}: {doc}");
+            // The session command, spelled for this app.
             assert!(
-                doc.contains("no bundler and no `npm install`"),
+                doc.contains("saltcorn auth token --app todo"),
                 "{path}: {doc}"
             );
-            // The URL to look at is this app's own.
+            // And what loads the result, which is the point of the file.
+            assert!(doc.contains("storageState"), "{path}: {doc}");
+        }
+
+        // The README is the one that explains; `AGENTS.md` points at it rather
+        // than restating any of it (decision 9's division of labour).
+        let readme = file(&files, "src/saltcorn/README.md");
+        assert!(readme.contains("read into memory"), "{readme}");
+        assert!(readme.contains("--format netscape"), "{readme}");
+        assert!(readme.contains("SALTCORN_PASSWORD"), "{readme}");
+        assert!(readme.contains("live credential"), "{readme}");
+        let agents = file(&files, "AGENTS.md");
+        assert!(!agents.contains("--format netscape"), "{agents}");
+        assert!(agents.contains("has the whole procedure"), "{agents}");
+        assert!(
+            agents.contains("](src/saltcorn/README.md)"),
+            "the pointer should be a link: {agents}"
+        );
+
+        // A session file is a credential, so the project refuses to commit one.
+        let ignore = file(&files, ".gitignore");
+        assert!(ignore.contains(".saltcorn-session.json"), "{ignore}");
+        assert!(ignore.contains(".saltcorn-cookies.txt"), "{ignore}");
+    }
+
+    /// The URL is the deployment's real one when this process knows it, and
+    /// names what to substitute when it does not — never a guess.
+    #[test]
+    fn the_documents_name_the_url_the_app_is_served_at() {
+        let tables = [tasks()];
+        let app = todo();
+        let endpoints = endpoints(&tables);
+
+        // Told where it serves: the app's own subdomain of the base domain,
+        // carrying the port because 3000 is not a default.
+        let known = project_files(&ctx_at(
+            &app,
+            &tables,
+            &endpoints,
+            PublicOrigin::new("example.com", 3000),
+        ));
+        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+            let doc = file(&known, path);
+            assert!(
+                doc.contains("http://todo.example.com:3000"),
+                "{path}: {doc}"
+            );
+            assert!(
+                !doc.contains("base domain>"),
+                "{path} should not still be describing a URL it knows: {doc}"
+            );
+        }
+
+        // Not told: the placeholder, and a note saying which piece is missing —
+        // rather than `localhost`, which would be wrong everywhere else.
+        let unknown = project_files(&ctx(&app, &tables, &endpoints, None));
+        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+            let doc = file(&unknown, path);
             assert!(
                 doc.contains("http://todo.<the server's base domain>"),
                 "{path}: {doc}"
             );
+            assert!(doc.contains("--base-domain"), "{path}: {doc}");
         }
     }
 

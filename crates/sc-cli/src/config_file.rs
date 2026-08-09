@@ -26,6 +26,23 @@
 //! database = "saltcorn_test"
 //! ```
 //!
+//! An environment is a **deployment**, not only a connection string, so a
+//! section may also say where that deployment is served:
+//!
+//! ```toml
+//! [environments.production]
+//! url = "postgres://saltcorn:…@db.internal/saltcorn"
+//! base_domain = "example.com"      # apps are at <subdomain>.example.com
+//! bind = "0.0.0.0:443"
+//! secure_cookies = true
+//! ```
+//!
+//! Those three mirror `serve`'s flags of the same names, so `saltcorn serve
+//! --environment production` needs none of them on the command line — and, less
+//! obviously but more usefully, a `saltcorn build-app` run against the same
+//! environment writes the application's real URL into the documentation it
+//! generates instead of a placeholder.
+//!
 //! `environments` is an ordinary TOML table, so there is nothing special about
 //! the three names above — a deployment may define as many as it has databases,
 //! and `--environment NAME` names any of them.
@@ -83,11 +100,21 @@ pub struct ConfigFile {
     pub environments: BTreeMap<String, Environment>,
 }
 
-/// One environment's connection parameters — the file's form of the same
-/// settings the `--db-*` flags and the `PG*` variables carry.
+/// One environment: the database it connects to, and where it is served.
 ///
 /// `url` and the individual parts are alternatives, and `url` wins, exactly as
 /// on the command line.
+///
+/// The last three are the **serving** half, and they are here because an
+/// environment is a deployment rather than a connection string. Two things
+/// follow from having them: `saltcorn serve --environment production` needs no
+/// other flag, and — the reason they were added — a build run from the command
+/// line writes the *same* application URL into the generated documentation that
+/// a build run by the server would. Without them, `saltcorn build-app` would
+/// quietly rewrite `AGENTS.md` with the URL taken out, which is worse than
+/// never having written it. They mirror three `serve` flags exactly; the rest of
+/// `serve`'s flags are not here because none of them decides where an
+/// application is reachable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Environment {
@@ -100,6 +127,17 @@ pub struct Environment {
     /// The database name (`database`, not `dbname`: this is a file a person
     /// writes, and `--db-name`'s spelling is the CLI's own abbreviation).
     pub database: Option<String>,
+    /// The domain applications are served under — `--base-domain`. An app is at
+    /// `<subdomain>.<base_domain>` (design §13.2).
+    pub base_domain: Option<String>,
+    /// The address the server binds — `--bind`. Only its port takes part in an
+    /// application's URL, but it is spelled as the flag is so there is one thing
+    /// to write and one thing to read.
+    pub bind: Option<String>,
+    /// Whether the deployment is behind TLS — `--secure-cookies`, whose flag
+    /// name says what it does to cookies and which equally decides whether an
+    /// application's URL is `https`.
+    pub secure_cookies: Option<bool>,
 }
 
 impl Environment {

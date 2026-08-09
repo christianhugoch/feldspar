@@ -92,6 +92,9 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     let cat = catalog_with_tasks(&db).await?;
     let tmp = TempDir::new("write")?;
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+    // What the boot path does with `--base-domain`: the generated documentation
+    // needs it to say where the application can be opened.
+    cat.set_public_origin(sc_catalog::PublicOrigin::new("example.com", 3000));
 
     let report = scaffold_app(&cat, &todo_app(), None).await?;
     assert_eq!(report.project, "todo");
@@ -138,6 +141,21 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     assert!(readme.contains("saltcorn api add-query"), "{readme}");
     assert!(readme.contains("--app todo"), "{readme}");
     assert!(readme.contains("--api /api"), "{readme}");
+
+    // The catalog was told where this deployment serves (as `saltcorn serve` and
+    // the command-line build both do at boot), so both documents name the URL to
+    // open rather than describing one — and the session command that gets a
+    // browser past the sign-in page.
+    assert!(agents.contains("http://todo.example.com:3000"), "{agents}");
+    assert!(readme.contains("http://todo.example.com:3000"), "{readme}");
+    assert!(
+        agents.contains("saltcorn auth token --app todo"),
+        "{agents}"
+    );
+    assert!(readme.contains("pkill -HUP saltcorn"), "{readme}");
+    // ...and the session file it writes is not committable.
+    let ignore = std::fs::read_to_string(project.join(".gitignore"))?;
+    assert!(ignore.contains(".saltcorn-session.json"), "{ignore}");
 
     // Generated against the app's real table, not a placeholder: there is a page
     // for `tasks`, and the hooks carry its columns and their nullability.

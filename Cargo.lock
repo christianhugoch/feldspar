@@ -3211,6 +3211,7 @@ name = "sc-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "reqwest",
  "sc-agent",
  "sc-api",
  "sc-app",

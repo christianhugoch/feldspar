@@ -25,6 +25,7 @@ mod field;
 mod field_meta;
 mod file_stores;
 mod observer;
+mod origin;
 mod prefetch;
 mod projection;
 mod provider;
@@ -49,6 +50,7 @@ pub use file_stores::{
     load_file_store, load_file_store_by_name, resolve_options, save_file_store,
 };
 pub use observer::{SchemaChanged, SchemaObserver};
+pub use origin::PublicOrigin;
 pub use prefetch::prefetch_bindings;
 pub use projection::SchemaProjection;
 pub use provider::{DriverTableProvider, TableProvider};

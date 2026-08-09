@@ -43,6 +43,7 @@ async fn run(args: &[String]) -> Result<()> {
         Some("serve") => serve_command(&args[1..]).await,
         Some("build-app") => build_app_command(&args[1..]).await,
         Some("api") => api_command(&args[1..]).await,
+        Some("auth") => auth_command(&args[1..]).await,
         Some(other) => Err(sc_error::Error::config(format!(
             "unknown command `{other}`"
         ))),
@@ -79,7 +80,11 @@ fn ide_bundle_dir() -> Option<std::path::PathBuf> {
 async fn serve_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
     let (file_store_specs, server_args) = extract_file_stores(rest)?;
-    let mut config = ServerConfig::from_args(server_args)?;
+    // The selected environment's serving settings come first and the command
+    // line after, so a flag beats the file by simply being parsed later — the
+    // same order of authority the database settings follow, expressed as
+    // argument order rather than as a second merge to keep in step.
+    let mut config = ServerConfig::from_args(serving_defaults(&db).iter().chain(&server_args))?;
     // When the binary was built with the admin bundle (the default — see
     // `build.rs`) and no explicit `--static-dir` was given, serve that bundle.
     if config.static_dir.is_none() {
@@ -101,6 +106,14 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // catalog, and ensure the users table exists. A bad connection fails here
     // with a clear message rather than a server that boots then 500s.
     let catalog = connect_catalog(&db).await?;
+    // Where this process serves its applications, recorded for the project
+    // generator: an app's `AGENTS.md` and `src/saltcorn/README.md` name the URL
+    // to open, and this is the only place that knows it (§13.2).
+    if let Some(domain) = &config.base_domain {
+        catalog.set_public_origin(
+            sc_catalog::PublicOrigin::new(domain, config.addr.port()).secure(config.secure_cookies),
+        );
+    }
     // Connect the file stores configured in the admin UI. One that fails — a
     // disk unmounted since it was defined — is logged and skipped, not fatal;
     // it stays listed and editable so the admin can repoint it.
@@ -165,6 +178,66 @@ async fn serve_command(args: &[String]) -> Result<()> {
     serve(config, admin_endpoints(), handlers, sessions, apps).await
 }
 
+/// Take `flag`'s value out of `args`, returning it and what remains.
+///
+/// Every command that *writes* generated documentation accepts
+/// `--base-domain`, and each of them parses the rest of its arguments its own
+/// way, so this is pulled out ahead of that rather than added to three
+/// unrelated parsers.
+fn take_option(args: Vec<String>, flag: &str) -> Result<(Option<String>, Vec<String>)> {
+    let mut value = None;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        if arg == flag {
+            value = Some(
+                it.next()
+                    .ok_or_else(|| sc_error::Error::config(format!("{flag} needs a value")))?,
+            );
+        } else {
+            rest.push(arg);
+        }
+    }
+    Ok((value, rest))
+}
+
+/// The selected environment's serving settings, spelled as the `serve` flags
+/// they mirror, to be parsed *before* the operator's own.
+///
+/// A `bind` that does not parse is left for [`ServerConfig::from_args`] to
+/// refuse: it is about to be bound, and one parser saying so beats two
+/// disagreeing about what a socket address is.
+fn serving_defaults(db: &DbConfig) -> Vec<String> {
+    let serving = db.serving();
+    let mut flags = Vec::new();
+    if let Some(domain) = serving.base_domain() {
+        flags.push("--base-domain".to_owned());
+        flags.push(domain.to_owned());
+    }
+    if let Some(bind) = serving.bind() {
+        flags.push("--bind".to_owned());
+        flags.push(bind.to_owned());
+    }
+    if serving.secure_cookies() == Some(true) {
+        flags.push("--secure-cookies".to_owned());
+    }
+    flags
+}
+
+/// Record where this deployment serves its applications, for the generated
+/// documentation a build or a definition change rewrites.
+///
+/// The command line's `--base-domain` outranks the configuration file's, and
+/// with neither there is nothing to record: the documentation then names the
+/// setting to supply instead of inventing a hostname. This is what keeps a
+/// command-line build's output identical to the server's — see
+/// [`Environment`](sc_cli::Environment).
+fn set_public_origin(catalog: &sc_catalog::Catalog, db: &DbConfig, base_domain: Option<&str>) {
+    if let Some(origin) = db.serving().public_origin(base_domain) {
+        catalog.set_public_origin(origin);
+    }
+}
+
 /// `saltcorn build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]`.
 ///
 /// Builds one application from the command line, printing the tool output as it
@@ -191,6 +264,7 @@ async fn build_app_command(args: &[String]) -> Result<()> {
         }
     };
     let (db, rest) = DbConfig::extract(rest)?;
+    let (base_domain, rest) = take_option(rest, "--base-domain")?;
     let (file_store_specs, leftover) = extract_file_stores(rest)?;
     if let Some(unknown) = leftover.first() {
         return Err(sc_error::Error::config(format!(
@@ -202,6 +276,10 @@ async fn build_app_command(args: &[String]) -> Result<()> {
         eprintln!("saltcorn: database configured from {source}");
     }
     let catalog = connect_catalog(&db).await?;
+    // A build rewrites `src/saltcorn/README.md`, which names the URL the
+    // application is served at — so this build has to know it, or it would
+    // replace the server's answer with a placeholder.
+    set_public_origin(&catalog, &db, base_domain.as_deref());
     connect_stored_file_stores(&catalog).await?;
     connect_file_stores(&catalog, &file_store_specs)?;
 
@@ -273,11 +351,15 @@ async fn open_app(
     subdomain: &str,
     db: &DbConfig,
     file_stores: &[String],
+    base_domain: Option<&str>,
 ) -> Result<(std::sync::Arc<sc_catalog::Catalog>, sc_app::Application)> {
     if let Some(source) = db.source() {
         eprintln!("saltcorn: database configured from {source}");
     }
     let catalog = connect_catalog(db).await?;
+    // These commands re-emit the generated directory, README included, so they
+    // need the URL for the same reason a build does.
+    set_public_origin(&catalog, db, base_domain);
     connect_stored_file_stores(&catalog).await?;
     connect_file_stores(&catalog, file_stores)?;
     let app = load_application_by_subdomain(&catalog, subdomain)
@@ -323,10 +405,12 @@ async fn reemit_client(catalog: &sc_catalog::Catalog, app: &sc_app::Application)
 /// Postgres's own message, and the stored application is untouched.
 async fn add_query_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
+    let (base_domain, rest) = take_option(rest, "--base-domain")?;
     let (file_stores, rest) = extract_file_stores(rest)?;
     let parsed = sc_cli::api::parse_add_query(&rest)?;
 
-    let (catalog, mut app) = open_app(&parsed.app, &db, &file_stores).await?;
+    let (catalog, mut app) =
+        open_app(&parsed.app, &db, &file_stores, base_domain.as_deref()).await?;
     let api = sc_cli::api::select_api(&mut app, parsed.api.as_deref())?;
     let mut queries = sc_api::custom_queries(&api.config)?;
     if queries.iter().any(|q| q.name == parsed.query.name) {
@@ -389,7 +473,9 @@ async fn list_queries_command(args: &[String]) -> Result<()> {
     let (file_stores, rest) = extract_file_stores(rest)?;
     let parsed = sc_cli::api::parse_query_ref("list-queries", &rest)?;
 
-    let (_catalog, app) = open_app(&parsed.app, &db, &file_stores).await?;
+    // No `--base-domain`: listing rewrites nothing, so there is no generated
+    // document whose URL could go missing.
+    let (_catalog, app) = open_app(&parsed.app, &db, &file_stores, None).await?;
     let mut found = 0;
     for api in &app.apis {
         if let Some(mount) = &parsed.api
@@ -451,13 +537,15 @@ async fn list_queries_command(args: &[String]) -> Result<()> {
 /// `saltcorn api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME`.
 async fn remove_query_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
+    let (base_domain, rest) = take_option(rest, "--base-domain")?;
     let (file_stores, rest) = extract_file_stores(rest)?;
     let parsed = sc_cli::api::parse_query_ref("remove-query", &rest)?;
     let name = parsed.name.clone().ok_or_else(|| {
         sc_error::Error::config("remove-query needs --name: which query to remove")
     })?;
 
-    let (catalog, mut app) = open_app(&parsed.app, &db, &file_stores).await?;
+    let (catalog, mut app) =
+        open_app(&parsed.app, &db, &file_stores, base_domain.as_deref()).await?;
     let api = sc_cli::api::select_api(&mut app, parsed.api.as_deref())?;
     let mount = api.mount.clone();
     let mut queries = sc_api::custom_queries(&api.config)?;
@@ -490,6 +578,93 @@ async fn remove_query_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `saltcorn auth SUBCOMMAND …` — sessions for driving an application without a
+/// browser to sign in with.
+async fn auth_command(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("token") => auth_token_command(&args[1..]).await,
+        Some(other) => Err(sc_error::Error::config(format!(
+            "unknown auth subcommand `{other}`; there is `token`"
+        ))),
+        None => Err(sc_error::Error::config(
+            "auth needs a subcommand: token (a signed-in session, written to a file)",
+        )),
+    }
+}
+
+/// `saltcorn auth token --app SUBDOMAIN --email EMAIL [--password …] [--url …]
+/// [--out PATH] [--format playwright|netscape]`.
+///
+/// Signs in to the **running server** as `--email` and writes the cookies a
+/// browser would have got, so a script can screenshot the screens behind the
+/// sign-in page (§13.3). The database is consulted for one thing only — the
+/// application's own login path, which is its REST mount plus `/login`, and
+/// which is a setting rather than a constant.
+///
+/// It deliberately does not create a user, reset a password or mint a token of
+/// its own: the only session the server will accept is one the server made
+/// (§7.2), and the only way to be given one is to sign in.
+async fn auth_token_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::auth::parse_token_args(&rest)?;
+    let password = sc_cli::auth::resolve_password(parsed.password.as_deref())?;
+
+    if let Some(source) = db.source() {
+        eprintln!("saltcorn: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    let app = load_application_by_subdomain(&catalog, &parsed.app)
+        .await?
+        .ok_or_else(|| {
+            sc_error::Error::not_found(format!("no application with subdomain `{}`", parsed.app))
+        })?;
+
+    // Where the application answers, and where to connect to reach it. The two
+    // differ whenever a development machine has no DNS for the base domain,
+    // which is most of them.
+    let origin = db
+        .serving()
+        .public_origin(parsed.base_domain.as_deref())
+        .ok_or_else(|| {
+            sc_error::Error::config(
+                "no base domain: an application is served at \
+                 `<subdomain>.<base-domain>`, so pass --base-domain, or set \
+                 `base_domain` in the saltcorn.toml environment this is \
+                 connecting with",
+            )
+        })?;
+    let target = sc_cli::auth::Target {
+        url: parsed
+            .url
+            .clone()
+            .unwrap_or_else(|| origin.url_for(&app.subdomain)),
+        host: origin.host_for(&app.subdomain),
+        login_path: sc_cli::auth::login_path(&app)?,
+        secure: origin.secure,
+    };
+
+    let (cookies, user) = sc_cli::auth::mint_session(&target, &parsed.email, &password).await?;
+    let path = sc_cli::auth::out_path(parsed.out.as_deref(), parsed.format);
+    sc_cli::auth::write_private(
+        &path,
+        &sc_cli::auth::render(&cookies, &target.host, parsed.format),
+    )?;
+
+    // What was written, for whom, and the URL to point a browser at — the three
+    // things the caller's next command needs.
+    eprintln!(
+        "saltcorn: signed in as {}{} — session written to {}",
+        parsed.email,
+        match user.get("role").and_then(|r| r.as_i64()) {
+            Some(role) => format!(" (role {role})"),
+            None => String::new(),
+        },
+        path.display()
+    );
+    eprintln!("saltcorn: the application is at {}", target.browser_url());
+    Ok(())
+}
+
 /// Print the short usage summary.
 fn print_usage() {
     eprintln!("saltcorn — usage:");
@@ -503,6 +678,8 @@ fn print_usage() {
     eprintln!("                        [--param name:type[,name:type…]]… --sql TEXT|@FILE");
     eprintln!("  saltcorn api list-queries --app SUBDOMAIN [--api MOUNT]");
     eprintln!("  saltcorn api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME");
+    eprintln!("  saltcorn auth token --app SUBDOMAIN --email EMAIL [--password TEXT|@FILE]");
+    eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
     eprintln!();
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
     eprintln!("    --database-url URL   full connection string (takes precedence)");
@@ -531,10 +708,27 @@ fn print_usage() {
        otherwise: raw SQL does not go through the row layer, so ownership
        formulae do not filter what it returns.
 
+  auth token: signs in to the *running* server as --email and writes the cookies
+       a browser would have got, so a script can screenshot the screens behind
+       the sign-in page. It forges nothing: without a real account and its
+       password it mints nothing, and the session can do exactly what that
+       account can. The password comes from --password, --password @FILE or
+       SALTCORN_PASSWORD. The default file is .saltcorn-session.json,
+       Playwright's storageState; --format netscape writes a cookies.txt for
+       curl instead. Both are written 0600 — a session file is a password.
+
   server:"
     );
     eprintln!("    --bind ADDR  --static-dir DIR  --session-ttl-hours N  --secure-cookies");
+    eprintln!("    --base-domain DOMAIN     apps are served at <subdomain>.<domain>");
     eprintln!(
         "    --file-store NAME=PATH   connect a local directory as a named file store (repeatable)"
+    );
+    eprintln!();
+    eprintln!(
+        "  a saltcorn.toml environment may also carry `base_domain`, `bind` and
+  `secure_cookies`, so `serve --environment NAME` needs none of those flags —
+  and so a build from the command line writes the same application URL into the
+  generated documentation that the server would."
     );
 }

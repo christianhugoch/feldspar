@@ -7,6 +7,7 @@
 //! live here so integration tests can drive the same boot path the CLI uses.
 
 pub mod api;
+pub mod auth;
 pub mod config_file;
 pub mod db;
 
@@ -18,7 +19,7 @@ use sc_error::{Context, Error, Result};
 use sc_files::{FileStoreDef, connect_from_def};
 
 pub use config_file::{ConfigFile, Environment, SelectedEnvironment};
-pub use db::DbConfig;
+pub use db::{DbConfig, Serving};
 
 /// Connect to the primary database described by `db`, initialise the
 /// [`Catalog`] from its live schema, and ensure the platform tables (`users`,

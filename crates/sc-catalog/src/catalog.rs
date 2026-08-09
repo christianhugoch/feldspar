@@ -69,6 +69,12 @@ pub struct Catalog {
     /// the schema editor (layer 8) and the mount registry (layer 10) cannot name
     /// each other, and the catalog is what they both already hold.
     schema_observer: RwLock<Option<Arc<dyn crate::observer::SchemaObserver>>>,
+    /// Where this deployment's applications are reachable in a browser
+    /// (`crate::origin`), set once at boot by the process that knows — the
+    /// server from its command line, a command-line build from its
+    /// `saltcorn.toml` environment. `None` where nobody said, which is a normal
+    /// state: a server with no base domain serves no applications.
+    public_origin: RwLock<Option<crate::PublicOrigin>>,
 }
 
 /// One step of a transactional schema batch ([`Catalog::apply_schema_batch`]).
@@ -98,6 +104,7 @@ impl Catalog {
             file_store_errors: RwLock::new(HashMap::new()),
             field_overlay_issues: RwLock::new(Vec::new()),
             schema_observer: RwLock::new(None),
+            public_origin: RwLock::new(None),
             table_events: RwLock::new(None),
         };
         catalog.reload().await?;
@@ -463,6 +470,33 @@ impl Catalog {
             Some(observer) => observer.schema_changed(self, change),
             None => Ok(()),
         }
+    }
+
+    /// Record where this deployment's applications are reachable in a browser
+    /// (see [`crate::origin`]), replacing anything set before.
+    ///
+    /// Called once at boot by the process that knows: `saltcorn serve` from its
+    /// `--base-domain`/`--bind`, a command-line build from the `saltcorn.toml`
+    /// environment it connected with. It is not database state and is not
+    /// persisted — it is a fact about *this process's* view of the deployment,
+    /// held here because the project generator that needs it already has a
+    /// catalog and nothing else it could ask.
+    pub fn set_public_origin(&self, origin: crate::PublicOrigin) {
+        if let Ok(mut guard) = self.public_origin.write() {
+            *guard = Some(origin);
+        }
+    }
+
+    /// Where applications are reachable, if this process was told.
+    ///
+    /// `None` is a normal answer — no base domain means no application is
+    /// addressable — and every caller is expected to have something sensible to
+    /// say instead of a hostname it made up.
+    pub fn public_origin(&self) -> Option<crate::PublicOrigin> {
+        self.public_origin
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Ensure a system metadata table exists with (at least) `fields`, creating

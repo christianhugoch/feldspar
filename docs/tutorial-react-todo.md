@@ -19,6 +19,12 @@ a base domain the server has no way to address an app, so it serves the admin UI
 
 That is the whole command line. Sign in to the admin UI at `http://localhost:3000`.
 
+A deployment with more than one database can put this in `saltcorn.toml` beside the connection
+parameters instead — `base_domain`, `bind` and `secure_cookies` in the `[environments.NAME]`
+section — so `saltcorn serve --environment production` needs no flags. It is worth doing even
+for one: the same settings are what a **command-line build** reads to write your application's
+real URL into the documentation it generates for that project.
+
 ## Step 1 — Add a file store
 
 Your app's source lives in a **file store**. Create one in the admin UI, under **File stores →
@@ -105,6 +111,33 @@ one, and a delete button per row.
 
 Add a task. It is in your `tasks` table; open the table in the admin UI and you will see it
 there.
+
+### Without a browser to sign in with
+
+A script — a screenshot run, a smoke test, a coding agent checking its own work — cannot type
+into that sign-in screen, so it photographs the sign-in screen. `saltcorn auth token` signs in
+on its behalf and writes the cookies down:
+
+```
+saltcorn auth token --app todo --email you@example.com --password @dev-password
+```
+
+That is the same `POST /api/login` the screen makes, against the *running* server, so what
+comes back is exactly the session a browser would have got — the same user, the same role, the
+same limits. It writes `.saltcorn-session.json`, which is Playwright's `storageState`:
+
+```js
+const context = await browser.newContext({ storageState: '.saltcorn-session.json' });
+await (await context.newPage()).goto('http://todo.localhost:3000/');
+```
+
+`--format netscape` writes a `cookies.txt` for `curl --cookie` instead. Both files are written
+`0600` and both names are in the project's `.gitignore`, because a session file is a password:
+give the script **its own account** at the lowest role that can see what it is looking at,
+rather than yours. The session lasts until the server's session lifetime runs out (24 hours by
+default) or the server restarts — sessions live in the server's memory. The generated
+`todo/src/saltcorn/README.md` says all of this again, in the project, where the script's author
+will be.
 
 ## Step 6 — What was generated
 
