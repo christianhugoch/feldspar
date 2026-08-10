@@ -243,14 +243,31 @@ fn an_environment_carries_where_its_applications_are_served() {
     );
 }
 
-/// With no configuration file and no flag there is no origin — and that has to
-/// stay a quiet `None`, because it is every deployment that never had one.
+/// With nothing configuring an origin there is no origin — and that has to stay
+/// a quiet `None`, because it is every deployment that never had one.
+///
+/// **Nothing here may search for a configuration file.** The two ways to reach
+/// this state are "no file was found" and "the file that was found applies
+/// nothing", and a bare [`DbConfig::extract`] would take the first of those from
+/// the *machine the test runs on*: a developer whose own
+/// `~/.config/saltcorn/saltcorn.toml` sets `base_domain` (which is the ordinary
+/// way to run this server locally) would watch this fail for a reason that is
+/// nothing to do with the code. So the state is built directly, and the
+/// searching path is covered by the fixture-driven tests above.
 #[test]
 fn without_a_base_domain_there_is_no_origin() {
-    let (cfg, _) = DbConfig::extract(["--database-url", "postgres:///x"]).expect("extract");
+    // No file, no flag, no environment — the deployment that never had one.
+    let cfg = DbConfig::from_url("postgres:///x");
     assert!(cfg.serving().public_origin(None).is_none());
     // ...but a flag alone is enough.
     assert!(cfg.serving().public_origin(Some("example.com")).is_some());
+
+    // The other road to the same place: a file was found and selected nothing,
+    // which is `Ok(None)` rather than an error (see `config_file::select`).
+    let empty = Fixture::new("no-environments", "# nothing here\n");
+    let (found, _) = DbConfig::extract(["--config", empty.path()]).expect("extract");
+    assert!(found.serving().public_origin(None).is_none());
+    assert!(found.serving().public_origin(Some("example.com")).is_some());
 }
 
 /// A key the file does not define is a typo, and typos in this file are errors
