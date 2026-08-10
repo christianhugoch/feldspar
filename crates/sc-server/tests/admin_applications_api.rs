@@ -409,12 +409,16 @@ async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> s
             .contains("bring your own")
     );
 
-    // Two settings, both required — the short form §2.4 renders.
+    // Two settings — the short form §2.4 renders. Only the store must be
+    // answered: the project directory defaults to the store root, so an admin
+    // whose store holds one application can leave the box empty and save (§2.2).
     let react = &frameworks[0];
     let spec = react["config_spec"].as_array().unwrap();
     let setting_names: Vec<&Value> = spec.iter().map(|f| &f["name"]).collect();
     assert_eq!(setting_names, [&json!("store"), &json!("project")]);
-    assert!(spec.iter().all(|f| f["required"] == json!(true)));
+    assert_eq!(spec[0]["required"], json!(true));
+    assert_eq!(spec[1]["required"], json!(false));
+    assert_eq!(spec[1]["default"], json!(""));
     // The store arrives already resolved to the stores that exist, so the UI
     // renders a select with no query evaluator of its own (§1.6).
     assert_eq!(spec[0]["options"], json!(["apps"]));

@@ -737,6 +737,12 @@ mod tests {
         // A plain name passes, and `code` is unaffected by react's rule.
         let ok = fw.with(CFG_PROJECT, "todo");
         assert!(validate_framework_config_structure(&ok).is_ok());
+        // So does no project at all — the app is the whole store (§2.2). Both
+        // spellings the form can produce: the key omitted, and the key present
+        // and empty.
+        let root = FrameworkRef::new(REACT_FRAMEWORK).with(CFG_STORE, "apps");
+        assert!(validate_framework_config_structure(&root).is_ok());
+        assert!(validate_framework_config_structure(&root.clone().with(CFG_PROJECT, "")).is_ok());
         let code = FrameworkRef::new(CODE_FRAMEWORK)
             .with(CFG_STORE, "apps")
             .with(CFG_OUTPUT, "../shared/dist")

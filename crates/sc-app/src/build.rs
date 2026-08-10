@@ -157,11 +157,16 @@ fn react_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
 
     let spec = react_config_spec();
     let store = required_setting(&spec, &fw.config, CFG_STORE)?;
-    let project = required_setting(&spec, &fw.config, CFG_PROJECT)?;
+    // Optional, and defaulted to the store root by the spec: an app whose store
+    // holds nothing else needs no sub-directory (see `CFG_PROJECT`). Trimmed
+    // because a box containing only spaces is an empty box, and every path below
+    // is derived from this string.
+    let project = setting(&spec, &fw.config, CFG_PROJECT)?.unwrap_or_default();
+    let project = project.trim();
 
     Ok(
-        AppSource::new(FileStoreId(store), react_build_spec(&project))
-            .with_client(react_client_path(&project)),
+        AppSource::new(FileStoreId(store), react_build_spec(project))
+            .with_client(react_client_path(project)),
     )
 }
 
@@ -829,15 +834,40 @@ mod tests {
 
     #[test]
     fn a_react_config_missing_a_setting_names_it_and_the_framework() {
-        for missing in [CFG_STORE, CFG_PROJECT] {
-            let mut config = react_config();
-            config.config.remove(missing);
-            let err = app_source_from_config(&config)
-                .expect_err("should reject a config missing a required setting")
-                .to_string();
-            assert!(err.contains(missing), "should name `{missing}`: {err}");
-            assert!(err.contains(REACT_FRAMEWORK), "{err}");
+        let mut config = react_config();
+        config.config.remove(CFG_STORE);
+        let err = app_source_from_config(&config)
+            .expect_err("should reject a config missing a required setting")
+            .to_string();
+        assert!(err.contains(CFG_STORE), "should name `{CFG_STORE}`: {err}");
+        assert!(err.contains(REACT_FRAMEWORK), "{err}");
+    }
+
+    #[test]
+    fn a_react_app_with_no_project_directory_is_the_whole_store() {
+        // The store *is* the project: a git store cloned from the app's own
+        // repository has no sub-directory to name, and requiring one would make
+        // the admin invent a nesting level their repository does not have.
+        for blank in ["", "   "] {
+            let source = app_source_from_config(&react_config().with(CFG_PROJECT, blank))
+                .expect("a blank project directory means the store root");
+            assert_eq!(source.build.source_dir, "");
+            assert_eq!(source.build.output_dir, "dist");
+            assert_eq!(
+                source.client_path.as_deref(),
+                Some("src/saltcorn/client.ts"),
+                "no path acquires a leading slash"
+            );
+            // Still an npm project, so it still installs itself.
+            assert!(source.build.install.is_some());
         }
+        // Unset is the same as blank — the form omits an empty box, and the
+        // spec's default answers for it.
+        let mut omitted = react_config();
+        omitted.config.remove(CFG_PROJECT);
+        let source = app_source_from_config(&omitted).expect("the default is the store root");
+        assert_eq!(source.build.source_dir, "");
+        assert_eq!(source.build.output_dir, "dist");
     }
 
     #[test]
@@ -845,7 +875,7 @@ mod tests {
         // The check is here, at the setting, rather than several layers down in
         // `resolve_under`: a traversal attempt should be reported as the setting
         // it came from, not as a build path that escaped the store.
-        for bad in ["../../etc", "a/b", "my app", ".hidden", ""] {
+        for bad in ["../../etc", "a/b", "my app", ".hidden"] {
             let err = app_source_from_config(&react_config().with(CFG_PROJECT, bad))
                 .expect_err("should reject an unusable project name")
                 .to_string();

@@ -84,8 +84,9 @@ pub use framework::{
 };
 pub use react::{
     CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,
-    REACT_OUTPUT_SUBDIR, REACT_RUNTIME_SUBDIR, check_project_name, react_build_spec,
-    react_client_path, react_config_spec, react_csp, react_runtime_dir, valid_project_name,
+    REACT_OUTPUT_SUBDIR, REACT_RUNTIME_SUBDIR, check_project_name, project_description,
+    project_path, react_build_spec, react_client_path, react_config_spec, react_csp,
+    react_runtime_dir, valid_project_name,
 };
 pub use scaffold::{
     ClientUpdate, GeneratedFile, ScaffoldReport, emit_react_runtime, require_api_provider,

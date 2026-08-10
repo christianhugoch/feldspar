@@ -41,6 +41,13 @@ pub const REACT_FRAMEWORK: &str = "react";
 /// this names a directory on disk that a build and a scaffold both point at. It
 /// also has to live in the framework config because that is all
 /// `app_source_from_config` is given.
+///
+/// **Blank means the store root.** A store dedicated to one application — the
+/// common case for a git store cloned from the app's own repository — has no
+/// sub-directory to name, and asking for one would force an admin to invent a
+/// nesting level their repository does not have. So the setting is optional, and
+/// every derived path ([`project_path`]) collapses to the store root when it is
+/// empty.
 pub const CFG_PROJECT: &str = "project";
 
 /// The directory the bundler emits into, under the project directory.
@@ -84,10 +91,39 @@ pub fn react_config_spec() -> Vec<FormField> {
             .label("File store")
             .required()
             .server_query(sc_catalog::QUERY_FILE_STORES),
+        // Optional, and defaulted to the store root, exactly like the `code`
+        // framework's source directory: a store holding one application needs no
+        // sub-directory, and a required field would make the admin invent one.
         FormField::new(CFG_PROJECT, BasicType::Text)
-            .label("Project directory")
-            .required(),
+            .label("Project directory (blank for the store root)")
+            .default_value(""),
     ]
+}
+
+/// A path under the project directory, relative to the file store.
+///
+/// The one place the "blank means the store root" rule is applied, so every
+/// derived path — build output, generated runtime, the client — agrees on it and
+/// none of them can produce a leading `/` that a store would have to forgive.
+pub fn project_path(project: &str, rest: &str) -> String {
+    if project.is_empty() {
+        rest.to_owned()
+    } else {
+        format!("{project}/{rest}")
+    }
+}
+
+/// How to name the project directory in a message to an admin: the directory
+/// itself, or "the store root" when it is blank.
+///
+/// An error reading `cannot scaffold into `` of file store `apps`` names nothing;
+/// the admin did not type an empty string, they left a box empty.
+pub fn project_description(project: &str) -> String {
+    if project.is_empty() {
+        "the store root".to_owned()
+    } else {
+        format!("`{project}`")
+    }
 }
 
 /// The build step for a project named `project`: `npm run build`, from
@@ -101,7 +137,7 @@ pub fn react_build_spec(project: &str) -> BuildSpec {
         command: REACT_BUILD_COMMAND.to_owned(),
         args: REACT_BUILD_ARGS.iter().map(|a| (*a).to_owned()).collect(),
         source_dir: project.to_owned(),
-        output_dir: format!("{project}/{REACT_OUTPUT_SUBDIR}"),
+        output_dir: project_path(project, REACT_OUTPUT_SUBDIR),
         // The tutorial used to tell the admin to run this over SSH, which an
         // admin with no shell cannot. The framework knows its projects are npm
         // projects, so the build installs them when they are not installed.
@@ -116,7 +152,7 @@ pub fn react_build_spec(project: &str) -> BuildSpec {
 /// Where the app's generated runtime (client and typed hooks) is written,
 /// relative to the file store: `<project>/src/saltcorn`.
 pub fn react_runtime_dir(project: &str) -> String {
-    format!("{project}/{REACT_RUNTIME_SUBDIR}")
+    project_path(project, REACT_RUNTIME_SUBDIR)
 }
 
 /// Where the generated TypeScript client is written, relative to the file store:
@@ -171,22 +207,32 @@ pub fn react_csp() -> CspPolicy {
 /// a name that cannot escape the store and one that is checked not to.
 /// [`valid_project_name`] as a check, with the error an admin should read.
 ///
+/// **Blank is accepted**: it is not a bad directory name but the absence of one,
+/// meaning the app lives at the store root (see [`CFG_PROJECT`]). The rule below
+/// is about names that would be interpolated into a path, and there is nothing to
+/// interpolate.
+///
 /// Used from `validate_framework_config`, so an unusable name is refused **on
 /// save**, where the admin is still looking at the form — the same principle
 /// §1.6 applied to an unknown store. A spec cannot express "a directory name"
 /// (§6.2 has no pattern constraint), so this is the framework's own check rather
 /// than something `validate_attrs` could have done.
 pub fn check_project_name(project: &str) -> Result<()> {
-    if valid_project_name(project) {
+    if project.trim().is_empty() || valid_project_name(project.trim()) {
         return Ok(());
     }
     Err(Error::invalid(format!(
         "setting `{CFG_PROJECT}` is {project:?}, which is not a usable directory name; \
-         use letters, digits, `-` and `_`, starting with a letter or digit"
+         use letters, digits, `-` and `_`, starting with a letter or digit, \
+         or leave it blank to put the project at the root of the file store"
     )))
 }
 
 /// Whether `project` is usable as the project directory name.
+///
+/// A *name*, so the empty string is not one — [`check_project_name`] is where
+/// "no directory at all" is allowed, because that is a statement about the
+/// setting rather than about the name.
 pub fn valid_project_name(project: &str) -> bool {
     let mut chars = project.chars();
     match chars.next() {
@@ -202,22 +248,27 @@ mod tests {
     use crate::framework::CFG_STORE;
 
     #[test]
-    fn the_spec_is_two_labelled_required_settings() {
+    fn the_spec_is_two_labelled_settings() {
         let spec = react_config_spec();
         let names: Vec<&str> = spec.iter().map(|f| f.name()).collect();
         // The whole claim of the framework: five settings become two.
         assert_eq!(names, [CFG_STORE, CFG_PROJECT]);
-        assert!(spec.iter().all(|f| f.required));
         assert!(spec.iter().all(|f| !f.base.label.is_empty()));
 
         // The store is the same server-resolved pick-list `code` uses, so the
         // admin UI renders a select with no framework-specific code (§1.6).
         let store = spec.iter().find(|f| f.name() == CFG_STORE).unwrap();
+        assert!(store.required);
         assert_eq!(store.query(), Some(sc_catalog::QUERY_FILE_STORES));
         // The project is free text — it is a name the admin invents.
         let project = spec.iter().find(|f| f.name() == CFG_PROJECT).unwrap();
         assert_eq!(project.query(), None);
         assert!(project.static_options().is_empty());
+        // ...and it is optional, defaulted to the store root: a store holding one
+        // app has no sub-directory to name, and a required field would leave the
+        // admin unable to save the form at all.
+        assert!(!project.required);
+        assert_eq!(project.default.as_ref().and_then(|d| d.as_str()), Some(""));
     }
 
     #[test]
@@ -244,6 +295,36 @@ mod tests {
         ] {
             assert!(path == "todo" || path.starts_with("todo/"), "{path}");
         }
+    }
+
+    #[test]
+    fn a_blank_project_puts_everything_at_the_store_root() {
+        let build = react_build_spec("");
+        // The source directory *is* the store, and nothing acquires a leading
+        // slash the store would have to forgive.
+        assert_eq!(build.source_dir, "");
+        assert_eq!(build.output_dir, "dist");
+        assert_eq!(react_runtime_dir(""), "src/saltcorn");
+        assert_eq!(react_client_path(""), "src/saltcorn/client.ts");
+        assert_eq!(project_path("", "package.json"), "package.json");
+        assert_eq!(project_path("todo", "package.json"), "todo/package.json");
+        for path in [
+            build.output_dir,
+            react_runtime_dir(""),
+            react_client_path(""),
+            project_path("", "src/App.tsx"),
+        ] {
+            assert!(!path.starts_with('/'), "{path}");
+        }
+
+        // Blank is the absence of a directory, not a bad one, so it saves...
+        assert!(check_project_name("").is_ok());
+        assert!(check_project_name("   ").is_ok());
+        // ...while a name that would still be interpolated into a path does not.
+        assert!(check_project_name("../..").is_err());
+        // And an admin reading a message about it is told where it is.
+        assert_eq!(project_description(""), "the store root");
+        assert_eq!(project_description("todo"), "`todo`");
     }
 
     #[test]

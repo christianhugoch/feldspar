@@ -30,14 +30,15 @@ use tokio::process::Command;
 use crate::api::{app_endpoints_with, app_graphql, app_schema_sql, app_tables};
 use crate::application::Application;
 use crate::build::{AppSource, app_source_from_config};
-use crate::react::REACT_FRAMEWORK;
+use crate::react::{REACT_FRAMEWORK, project_description, project_path};
 
 pub use files::GeneratedFile;
 
 /// What a scaffold did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScaffoldReport {
-    /// The project directory within the store, e.g. `todo`.
+    /// The project directory within the store, e.g. `todo`; empty for the store
+    /// root.
     pub project: String,
     /// The files written, store-relative, in the order they were written.
     pub files: Vec<String>,
@@ -54,7 +55,7 @@ impl ScaffoldReport {
             "scaffolded {} file{} into {}{}",
             self.files.len(),
             if self.files.len() == 1 { "" } else { "s" },
-            self.project,
+            project_description(&self.project),
             if self.git_initialized {
                 " (git repository initialised)"
             } else {
@@ -81,10 +82,11 @@ pub async fn scaffold_app(
     let store = cat.require_file_store(&source.store.0)?;
     if !is_empty_dir(store.as_ref(), &project).await? {
         return Err(Error::invalid(format!(
-            "cannot scaffold into `{}` of file store `{}`: it is not empty. \
+            "cannot scaffold into {} of file store `{}`: it is not empty. \
              Scaffolding never overwrites existing files; choose another project \
              name, or point the application at the project already there",
-            project, source.store.0
+            project_description(&project),
+            source.store.0
         )));
     }
 
@@ -111,7 +113,7 @@ pub async fn scaffold_app(
 
     let mut written = Vec::with_capacity(generated.len());
     for file in &generated {
-        let path = format!("{project}/{}", file.path);
+        let path = project_path(&project, &file.path);
         store
             .write(&path, Bytes::from(file.contents.clone().into_bytes()))
             .await
@@ -230,7 +232,8 @@ async fn require_auth_endpoints_for_source(
     // Absent is the ordinary case for an app scaffolded without auth; unreadable
     // is a store problem the write that follows will report far better than a
     // check could.
-    let Ok(source) = store.read(&format!("{project}/{AUTH_SOURCE}")).await else {
+    let auth_path = project_path(project, AUTH_SOURCE);
+    let Ok(source) = store.read(&auth_path).await else {
         return Ok(());
     };
     let calls_them = missing
@@ -240,14 +243,13 @@ async fn require_auth_endpoints_for_source(
         return Ok(());
     }
     Err(Error::config(format!(
-        "application `{}` no longer exposes {}, which `{}/{AUTH_SOURCE}` signs in \
+        "application `{}` no longer exposes {}, which `{auth_path}` signs in \
          through — the build would fail type-checking a file it generated. Those \
          endpoints come from the `{}` provider; add it back to the application \
          (mounted at `/api` is the usual choice), or delete the app's auth layer if \
          it is meant to be usable without signing in",
         app.name,
         missing.join(" / "),
-        project,
         sc_api::REST_PROVIDER,
     )))
 }
@@ -302,7 +304,7 @@ pub async fn emit_react_runtime(
         origin: cat.public_origin(),
         roles: &roles,
     }) {
-        let path = format!("{project}/{}", file.path);
+        let path = project_path(project, &file.path);
         store
             .write(&path, Bytes::from(file.contents.into_bytes()))
             .await
@@ -386,15 +388,25 @@ pub async fn update_app_client(
         .map(ClientUpdate::Regenerated)
 }
 
+/// The repository's own directory, which is not project content — see
+/// [`is_empty_dir`].
+const GIT_DIR: &str = ".git";
+
 /// Whether `dir` in `store` is absent or empty.
 ///
 /// A missing directory and an empty one are the same answer to the only question
 /// being asked — "is there anything here to lose?" — so a listing error for a
 /// path that does not exist is not propagated. Any other listing failure is,
 /// because it means the store could not answer.
+///
+/// `.git` does not count as content. The project directory *is* the store root
+/// for an app whose store is its own repository (see `CFG_PROJECT`), and a clone
+/// with no files in it still has a `.git` — treating that as "something to lose"
+/// would refuse to scaffold into exactly the empty repository the feature is for,
+/// while losing nothing the admin wrote.
 async fn is_empty_dir(store: &dyn sc_files::FileStore, dir: &str) -> Result<bool> {
     match store.list(dir).await {
-        Ok(entries) => Ok(entries.is_empty()),
+        Ok(entries) => Ok(entries.iter().all(|e| e.name == GIT_DIR)),
         // The store cannot distinguish "no such directory" in its error type; a
         // path that cannot be listed holds nothing this can destroy.
         Err(_) => Ok(true),
@@ -471,14 +483,22 @@ mod tests {
         };
         assert_eq!(
             report.summary(),
-            "scaffolded 1 file into todo (git repository initialised)"
+            "scaffolded 1 file into `todo` (git repository initialised)"
         );
         let report = ScaffoldReport {
             files: vec!["a".to_owned(), "b".to_owned()],
             git_initialized: false,
             ..report
         };
-        assert_eq!(report.summary(), "scaffolded 2 files into todo");
+        assert_eq!(report.summary(), "scaffolded 2 files into `todo`");
+
+        // A project at the store root has no directory to name, so the summary
+        // says where it went rather than printing an empty pair of backticks.
+        let root = ScaffoldReport {
+            project: String::new(),
+            ..report
+        };
+        assert_eq!(root.summary(), "scaffolded 2 files into the store root");
     }
 
     #[test]

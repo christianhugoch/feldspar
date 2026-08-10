@@ -231,6 +231,87 @@ async fn scaffolding_never_overwrites_an_occupied_directory() -> sc_error::Resul
     Ok(())
 }
 
+/// A store dedicated to one application: the project directory is left blank and
+/// the app *is* the store. This is the shape a git store cloned from the app's
+/// own repository has — there is no sub-directory to name, and before §2.2 made
+/// the setting optional there was no way to say so.
+#[tokio::test]
+async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let cat = catalog_with_tasks(&db).await?;
+    let tmp = TempDir::new("root")?;
+    // An empty clone: the repository directory is there and nothing else. It must
+    // not count as "occupied" — that would refuse exactly the case this is for.
+    std::fs::create_dir_all(tmp.path().join(".git"))?;
+    cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
+
+    let mut app = todo_app();
+    app.framework = FrameworkRef::new("react").with("store", "apps");
+
+    let report = scaffold_app(&cat, &app, None).await?;
+    assert_eq!(report.project, "");
+    assert!(
+        report.summary().contains("the store root"),
+        "{}",
+        report.summary()
+    );
+
+    // Every file landed at the root, with no leading slash and no directory named
+    // after nothing.
+    for expected in [
+        "package.json",
+        "index.html",
+        "src/App.tsx",
+        "src/pages/Tasks.tsx",
+        "src/saltcorn/client.ts",
+        "src/saltcorn/hooks.ts",
+    ] {
+        assert!(tmp.path().join(expected).is_file(), "missing {expected}");
+    }
+    assert!(report.files.contains(&"package.json".to_owned()));
+    assert!(!report.files.iter().any(|f| f.starts_with('/')));
+
+    // `npm` refuses a package with an empty name, so the blank directory borrows
+    // the app's other machine-readable identity: its subdomain.
+    let package = std::fs::read_to_string(tmp.path().join("package.json"))?;
+    assert!(package.contains(r#""name": "todo""#), "{package}");
+
+    // The store was already a repository, so no nested one was created inside it.
+    assert!(!report.git_initialized);
+
+    // And the build reads the same conventions back: source at the root, output
+    // in `dist` beside it, the client where the scaffold imports it from.
+    let source = app_source_from_config(&app.framework)?;
+    assert_eq!(source.build.source_dir, "");
+    assert_eq!(source.build.output_dir, "dist");
+    assert_eq!(
+        source.client_path.as_deref(),
+        Some("src/saltcorn/client.ts")
+    );
+
+    // A re-emit rewrites the generated directory in place, at the root.
+    let written = emit_react_runtime(&cat, &app, &source, None).await?;
+    assert_eq!(
+        written,
+        [
+            "src/saltcorn/client.ts",
+            "src/saltcorn/hooks.ts",
+            "src/saltcorn/schema.sql",
+            "src/saltcorn/README.md",
+        ]
+    );
+
+    // Scaffolding again is refused, because now there *is* something to lose —
+    // and the message says where rather than printing an empty directory name.
+    let err = scaffold_app(&cat, &app, None)
+        .await
+        .expect_err("the root is no longer empty")
+        .to_string();
+    assert!(err.contains("the store root"), "{err}");
+    assert!(err.contains("not empty"), "{err}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_store_that_is_already_a_repo_does_not_get_a_nested_one() -> sc_error::Result<()> {
     let db = TestDb::new().await?;

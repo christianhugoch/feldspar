@@ -2401,7 +2401,12 @@ can tell which framework it is building.
 
 `project` is the framework's setting rather than the application's `name` because it is a
 directory on disk, while `name` is a renameable display string; it is also the only thing
-`app_source_from_config` is given. It is constrained to a plain identifier (ASCII letters,
+`app_source_from_config` is given. It is **optional, and blank means the store root**: a store
+holding one application — a git store cloned from that application's own repository — has no
+sub-directory to name, and requiring one would make the admin invent a nesting level their
+repository does not have. Every derived path collapses accordingly (`react::project_path` is the
+one place that rule lives), so a root project has source `""`, output `dist/` and its runtime
+under `src/saltcorn/`. When it is given it is constrained to a plain identifier (ASCII letters,
 digits, `-`, `_`, leading alphanumeric), checked **on save** by the framework itself — §6.2's
 vocabulary states presence, type and membership, not patterns, and growing it for one setting
 would oblige every guest-language framework to be understood by it. Checking at save rather

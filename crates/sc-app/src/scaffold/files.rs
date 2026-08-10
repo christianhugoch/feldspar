@@ -136,6 +136,26 @@ pub struct ProjectContext<'a> {
 }
 
 impl ProjectContext<'_> {
+    /// What the project calls itself: the npm package name, the `<title>` and the
+    /// header the app comes up with.
+    ///
+    /// The project directory when there is one, and the app's **subdomain** when
+    /// the project is the store root (see
+    /// [`CFG_PROJECT`](crate::react::CFG_PROJECT)). A `package.json` with an empty
+    /// `name` is one npm refuses to install, so the blank directory needs a name
+    /// from somewhere — and the subdomain is the app's other machine-readable
+    /// identity, already a DNS label and so already a legal package name, unlike
+    /// [`Application::name`](crate::Application::name) (`"My Blog"`).
+    fn project_name(&self) -> &str {
+        if !self.project.is_empty() {
+            return self.project;
+        }
+        if !self.app.subdomain.is_empty() {
+            return &self.app.subdomain;
+        }
+        "app"
+    }
+
     /// The mount custom SQL queries are added to — the app's REST API, the one
     /// provider that serves them (§13.4).
     ///
@@ -298,7 +318,7 @@ pub fn has_auth(endpoints: &EndpointSet) -> bool {
 
 /// The whole project: the runtime plus everything written once.
 pub fn project_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
-    let project = ctx.project;
+    let project = ctx.project_name();
     let exposed = exposed_tables(ctx.tables, ctx.endpoints);
     let auth = has_auth(ctx.endpoints);
     let mut files = vec![

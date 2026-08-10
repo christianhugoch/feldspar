@@ -2,6 +2,39 @@
 
 Changes in reverse chronological order.
 
+## A React app can be the whole file store
+
+The `react` framework's **project directory** was required, and there was no way to say "the app
+is the store". `/` was refused as a directory name (correctly — it is not one), and leaving the
+box empty could not be saved, because the setting was declared `required` and the admin UI marks
+the input so. That left an admin whose git store *is* the application's repository having to
+invent a nesting level their repository does not have.
+
+The setting is now **optional, defaulting to the store root**. `project` blank means every
+derived path collapses one level: source `""`, output `dist`, runtime `src/saltcorn`, client
+`src/saltcorn/client.ts`. One function, `react::project_path`, applies that rule, so the build,
+the scaffold, the re-emit and the client path cannot disagree about it — and none of them can
+produce the leading `/` that a store would otherwise have to forgive. `check_project_name`
+accepts blank (the absence of a name is not a bad name) while still refusing `../..`, `a/b` and
+the rest, and its message now says that leaving it empty is an option.
+
+Two consequences worth naming:
+
+- **`.git` no longer counts as content** when deciding whether a directory is empty enough to
+  scaffold into. The project directory *is* the store root for a store cloned from the app's own
+  repository, and an empty clone still has a `.git` — refusing that would refuse exactly the case
+  this change is for, while losing nothing the admin wrote.
+- **The npm package name falls back to the app's subdomain.** `package.json`, the `<title>` and
+  the app's header took the project directory as their name; a blank one would have produced a
+  package npm refuses to install. The subdomain is the app's other machine-readable identity and
+  is already a legal package name, unlike its display name (`"My Blog"`).
+
+Messages that used to interpolate the directory now say "the store root" where there is no
+directory to name, rather than printing empty backticks.
+
+The `code` framework already allowed this — its `source` setting has always been optional and
+defaulted to the store root — so it needed no change; `react` was the odd one out.
+
 ## Sessions live in the database, so there can be more than one server
 
 The session store was a `HashMap` behind an `RwLock`, and it was the single thing standing
