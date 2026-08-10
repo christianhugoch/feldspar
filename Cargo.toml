@@ -120,6 +120,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # `std` pulls in `getrandom` (via rand_core) so a random salt can be drawn from
 # the OS CSPRNG (`OsRng`) when hashing.
 argon2 = { version = "0.5", features = ["std"] }
+# SHA-256 for session tokens at rest (§7.2). A *fast* hash on purpose: a session
+# token is 256 bits of uniform randomness, so there is no dictionary for a slow
+# hash to defeat — argon2 above is for passwords, which are guessable.
+sha2 = "0.10"
+# Bounded LRU for the session cache (§7.2): capacity bounds memory, and the
+# store's own freshness TTL bounds staleness.
+lru = "0.12"
 # Postgres driver + pool. `with-*` features light up ToSql/FromSql for the
 # `Value` variants the driver maps in later phases.
 tokio-postgres = { version = "0.7", features = [

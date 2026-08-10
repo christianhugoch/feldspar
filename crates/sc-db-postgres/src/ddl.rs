@@ -24,6 +24,7 @@ pub fn render(dialect: &PgDialect, change: &SchemaChange) -> Result<String> {
             name,
             columns,
             primary_key,
+            unlogged,
         } => {
             // Every primary-key column must be one of the declared columns —
             // catch a malformed change before Postgres does, with a clearer
@@ -44,8 +45,12 @@ pub fn render(dialect: &PgDialect, change: &SchemaChange) -> Result<String> {
                     .join(", ");
                 items.push(format!("PRIMARY KEY ({cols})"));
             }
+            // `UNLOGGED` is honoured rather than checked: the driver advertises
+            // the capability, so a change that asks for it here has already been
+            // routed to a backend that has it.
             format!(
-                "CREATE TABLE {} ({})",
+                "CREATE {}TABLE {} ({})",
+                if *unlogged { "UNLOGGED " } else { "" },
                 dialect.quote_ident(name),
                 items.join(", ")
             )
@@ -133,6 +138,7 @@ mod tests {
                 ColumnDef::new("email", "text").unique(),
             ],
             primary_key: vec!["org".into(), "user_id".into()],
+            unlogged: false,
         };
         let sql = render_ok(&change);
         assert_eq!(
@@ -158,6 +164,7 @@ mod tests {
                     .references("_sc_roles", "role"),
             ],
             primary_key: vec!["id".into()],
+            unlogged: false,
         };
         assert_eq!(
             render_ok(&change),
@@ -184,6 +191,7 @@ mod tests {
             name: "t".into(),
             columns: vec![ColumnDef::new("active", "bool").not_null().default("true")],
             primary_key: vec![],
+            unlogged: false,
         };
         assert_eq!(
             render_ok(&change),
@@ -197,6 +205,7 @@ mod tests {
             name: "t".into(),
             columns: vec![ColumnDef::new("a", "int8")],
             primary_key: vec!["b".into()],
+            unlogged: false,
         };
         assert!(render(&PgDialect::new(), &change).is_err());
     }

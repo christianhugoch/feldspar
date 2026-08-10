@@ -86,8 +86,8 @@ pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
         Some(existing) => existing,
         None => catalog.create_table(USERS_TABLE, &users_fields()).await?,
     };
-    // Last, and that order is load-bearing too: a grant references a user.
-    crate::grant::bootstrap_session_grants(catalog).await?;
+    // Last, and that order is load-bearing too: a session references a user.
+    crate::session::bootstrap_sessions(catalog).await?;
     Ok(users)
 }
 

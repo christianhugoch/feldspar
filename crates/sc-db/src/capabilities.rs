@@ -29,6 +29,13 @@ pub struct DbCapabilities {
     /// Data-modifying statements can return affected rows (`RETURNING`), so an
     /// insert/update/delete yields the resulting row without a follow-up query.
     pub returning: bool,
+    /// A table can be created without write-ahead logging — Postgres's
+    /// `UNLOGGED`. Drives
+    /// [`SchemaChange::CreateTable::unlogged`](crate::SchemaChange::CreateTable),
+    /// which the session store (§7.2) asks for: session rows are worth sharing
+    /// between nodes and not worth a WAL record, and losing them all to an
+    /// unclean shutdown costs a re-login.
+    pub unlogged_tables: bool,
 }
 
 impl DbCapabilities {
@@ -40,6 +47,7 @@ impl DbCapabilities {
             composite_pk: false,
             listen_notify: false,
             returning: false,
+            unlogged_tables: false,
         }
     }
 }

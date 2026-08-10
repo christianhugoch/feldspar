@@ -14,6 +14,7 @@ fn create_table(name: &str) -> SchemaChange {
         name: name.into(),
         columns: vec![ColumnDef::new("id", "int8").not_null()],
         primary_key: vec!["id".into()],
+        unlogged: false,
     }
 }
 

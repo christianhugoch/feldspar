@@ -65,9 +65,9 @@ fn router_with_ide(dir: Option<std::path::PathBuf>) -> (Router, Arc<SessionStore
 }
 
 /// A logged-in session for a user of `role`.
-fn session_for(sessions: &SessionStore, role: u8) -> String {
+async fn session_for(sessions: &SessionStore, role: u8) -> String {
     let user = User::new(Uuid::new_v4(), role).unwrap();
-    sessions.login(user).unwrap()
+    sessions.login(user).await.unwrap()
 }
 
 fn get(path: &str, session: Option<&str>, html: bool) -> Request<Body> {
@@ -85,7 +85,7 @@ fn get(path: &str, session: Option<&str>, html: bool) -> Request<Body> {
 async fn an_admin_gets_the_ide_bundle_under_the_relaxed_policy() {
     let dir = ide_bundle("admin");
     let (router, sessions) = router_with_ide(Some(dir.clone()));
-    let token = session_for(&sessions, ROLE_ADMIN);
+    let token = session_for(&sessions, ROLE_ADMIN).await;
 
     // The document: `/ide/` is the bundle's own index.html.
     let response = router
@@ -150,7 +150,7 @@ async fn the_ide_is_not_served_to_anyone_but_an_admin() {
     assert!(!String::from_utf8_lossy(&body).contains("export const workbench"));
 
     // A logged-in non-admin is refused too: this milestone's IDE is admin-only.
-    let public = session_for(&sessions, ROLE_PUBLIC);
+    let public = session_for(&sessions, ROLE_PUBLIC).await;
     let response = router
         .clone()
         .oneshot(get("/ide/main.js", Some(&public), false))
@@ -165,7 +165,7 @@ async fn the_ide_is_not_served_to_anyone_but_an_admin() {
 async fn the_relaxed_policy_stays_on_the_ide_route() {
     let dir = ide_bundle("policy");
     let (router, sessions) = router_with_ide(Some(dir.clone()));
-    let token = session_for(&sessions, ROLE_ADMIN);
+    let token = session_for(&sessions, ROLE_ADMIN).await;
 
     // The admin SPA, fetched by the same admin in the same session, is still
     // strict — no inline styles, no blob workers, no eval.
@@ -222,7 +222,7 @@ async fn the_relaxed_policy_stays_on_the_ide_route() {
 #[tokio::test]
 async fn without_a_bundle_nothing_under_the_prefix_is_html() {
     let (router, sessions) = router_with_ide(None);
-    let token = session_for(&sessions, ROLE_ADMIN);
+    let token = session_for(&sessions, ROLE_ADMIN).await;
 
     for path in [
         "/ide/",
@@ -256,7 +256,7 @@ async fn without_a_bundle_nothing_under_the_prefix_is_html() {
 async fn an_asset_outside_the_bundle_is_a_404() {
     let dir = ide_bundle("missing-asset");
     let (router, sessions) = router_with_ide(Some(dir.clone()));
-    let token = session_for(&sessions, ROLE_ADMIN);
+    let token = session_for(&sessions, ROLE_ADMIN).await;
 
     let response = router
         .clone()

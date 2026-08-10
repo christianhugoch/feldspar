@@ -102,6 +102,9 @@ mod tests {
                     name,
                     columns,
                     primary_key,
+                    // The mock advertises no capabilities, so it is never asked
+                    // for an unlogged table — and would give an ordinary one.
+                    ..
                 } => {
                     tables.push(PhysicalTable {
                         name: name.clone(),
@@ -188,6 +191,7 @@ mod tests {
                 ColumnDef::new("email", "text").unique(),
             ],
             primary_key: vec!["org".into(), "user_id".into()],
+            unlogged: false,
         };
         driver.apply_schema(&change).await.unwrap();
 

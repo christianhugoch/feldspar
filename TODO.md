@@ -338,6 +338,36 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ---
 
+## Out of band — the session store (not part of the API milestone)
+
+Taken because the in-memory store was the single thing preventing a second application server,
+and because moving it made a whole command's worth of machinery unnecessary.
+
+- [x] **Sessions in `_sc_sessions`**, `UNLOGGED` where the backend advertises it
+      (`SchemaChange::CreateTable { unlogged }` + `DbCapabilities::unlogged_tables`, so a
+      backend without it gets an ordinary table rather than an error). The row holds the
+      SHA-256 of the token, the `user_id` it names and the expiry; the user is *read back* on a
+      cache miss rather than copied into the row.
+- [x] **A per-node read-through cache** bounded by an LRU capacity (memory) and a per-entry
+      freshness TTL (staleness). Misses are never cached — that is what makes multi-node work.
+      `SessionStore::memory()` stays as a test seam for the tests that have no database.
+- [x] **`saltcorn auth token` writes the session itself**, so it needs no running server.
+      `_sc_session_grants`, `POST /auth/token`, the `redeemSessionGrant` handler and the CSRF
+      priming request are deleted.
+- [x] Tests (real Postgres): two stores over one database honour each other's sessions and
+      logouts; the cache's staleness window is watched opening and closing; the table is
+      asserted `UNLOGGED` against `pg_class` and `users` asserted permanent; the stored value is
+      not the cookie; a deleted user's session stops resolving *and* never blocked the delete;
+      expiry lapses lazily and in bulk; a role change reaches a live session; and the CLI mints
+      a usable session with nothing listening on the port.
+
+**Left for the message bus (§16).** A logout is exact on the node that handles it and converges
+elsewhere within the cache's freshness TTL. `SessionStore::invalidate` is the seam a
+bus-delivered eviction hooks to; until then the window is documented, configurable to zero, and
+covered by a test rather than a promise.
+
+---
+
 ## Carried past this milestone
 
 - **One-to-many embeds in `select`** (`select=departments(name,employees(name))`). The read is

@@ -78,6 +78,7 @@ impl PgDriver {
             composite_pk: true,
             listen_notify: true,
             returning: true,
+            unlogged_tables: true,
         }
     }
 

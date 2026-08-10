@@ -69,24 +69,6 @@ pub const BOOTSTRAP_HTML: &str = "<!doctype html>\n\
 /// The path prefix the file-store IDE is served under (design §12.1).
 pub const IDE_PREFIX: &str = "/ide";
 
-/// Where a one-time session grant is exchanged for a session (§7.2) — the route
-/// behind `saltcorn auth token`.
-///
-/// A fixed route rather than an endpoint, for the same reason `/upload` is one:
-/// it is not part of any API's contract. No generated client should have a
-/// method for it, no application projects it, and no browser has any use for it
-/// — the one caller is a command line that already holds the primary database's
-/// credentials and wrote the grant with them.
-///
-/// It answers on **every host**, application subdomains included, because a real
-/// route takes precedence over the host-routed fallback. That is what a session
-/// file needs: the cookie is written for the application's own host, and the
-/// request that mints it goes to the same place a browser would.
-pub const SESSION_TOKEN_ROUTE: &str = "/auth/token";
-
-/// The field [`SESSION_TOKEN_ROUTE`] reads the grant out of.
-pub const GRANT_FIELD: &str = "grant";
-
 /// Shared server state threaded through dispatch.
 #[derive(Clone)]
 struct AppState {
@@ -205,13 +187,6 @@ pub fn build_router_with_apps(
         // body, and a chat turn is bidirectional in a way the typed endpoint
         // model has no shape for.
         .route(AGENT_CHAT_ROUTE, axum::routing::get(agent_chat))
-        // A session from a one-time grant, for a caller with a database and no
-        // browser (see the constant). Public, like `login`: what authenticates
-        // it is the grant, and a grant nobody holds is not a way in.
-        .route(
-            SESSION_TOKEN_ROUTE,
-            axum::routing::post(redeem_session_grant),
-        )
         .fallback(dispatch)
         .with_state(state)
         // CSRF runs outside dispatch so it guards every route and can mint the
@@ -276,7 +251,7 @@ async fn upload(
     body: axum::body::Body,
 ) -> Response {
     let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    let user = match session_user(&state, &jar) {
+    let user = match session_user(&state, &jar).await {
         Ok(user) => user,
         Err(response) => return *response,
     };
@@ -332,63 +307,6 @@ async fn upload(
     }
 }
 
-/// Exchange a one-time session grant for a session (see [`SESSION_TOKEN_ROUTE`]).
-///
-/// The work is the `redeemSessionGrant` handler's, not this function's — the
-/// same arrangement `upload` has, and for the same reason: the handler is where
-/// the catalog is, and routing around the `EndpointSet` must not also mean
-/// routing around the registry. What is left here is the plumbing dispatch would
-/// have done for a typed endpoint: read the body, run the handler, and let
-/// [`apply_response`] set the cookie exactly as it sets `login`'s.
-///
-/// No session lookup and no auth check, deliberately. The caller is by
-/// definition someone with no session yet, and there is no user to be: the grant
-/// is the credential, and the handler is what checks it.
-async fn redeem_session_grant(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    body: Bytes,
-) -> Response {
-    let parsed: Value = if body.is_empty() {
-        Value::Null
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(value) => value,
-            Err(e) => {
-                return json_error(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}"));
-            }
-        }
-    };
-
-    let Some(handler) = state.handlers.get("redeemSessionGrant").cloned() else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "this server has no session-grant handler registered",
-        );
-    };
-    let ctx = HandlerCtx {
-        raw_body: None,
-        path_params: HashMap::new(),
-        query: Vec::new(),
-        body: parsed,
-        user: None,
-    };
-    match handler(ctx).await {
-        Ok(resp) => apply_response(&state, jar, None, resp).await,
-        Err(e) => {
-            error_out(
-                &state,
-                &e,
-                Audience::Admin,
-                "POST",
-                SESSION_TOKEN_ROUTE,
-                None,
-            )
-            .await
-        }
-    }
-}
-
 /// The IDE's language-server socket (design §12.1): admin-only, one process per
 /// connection.
 ///
@@ -407,7 +325,7 @@ async fn language_server(
     AxumPath(store): AxumPath<String>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
-    let user = match session_user(&state, &jar) {
+    let user = match session_user(&state, &jar).await {
         Ok(user) => user,
         Err(response) => return *response,
     };
@@ -430,7 +348,7 @@ async fn agent_chat(
     jar: CookieJar,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
-    let user = match session_user(&state, &jar) {
+    let user = match session_user(&state, &jar).await {
         Ok(user) => user,
         Err(response) => return *response,
     };
@@ -581,7 +499,7 @@ async fn dispatch_app(
 
         let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
         let user = match &session_token {
-            Some(token) => match state.sessions.user_for(token) {
+            Some(token) => match state.sessions.user_for(token).await {
                 Ok(u) => u,
                 Err(e) => {
                     log_failure("session lookup failed", &e);
@@ -731,7 +649,7 @@ async fn handle_api(
     // Recover the authenticated user (if any) from the session cookie.
     let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let user = match &session_token {
-        Some(token) => match state.sessions.user_for(token) {
+        Some(token) => match state.sessions.user_for(token).await {
             Ok(u) => u,
             Err(e) => {
                 log_failure("session lookup failed", &e);
@@ -830,7 +748,7 @@ async fn apply_response(
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
     let jar = match resp.session {
         SessionAction::Keep => jar,
-        SessionAction::Start(user) => match state.sessions.login(user.clone()) {
+        SessionAction::Start(user) => match state.sessions.login(user.clone()).await {
             Ok(token) => {
                 // After the session exists, not before: an event that says
                 // someone logged in must not fire for a login that then failed.
@@ -849,7 +767,7 @@ async fn apply_response(
         },
         SessionAction::End => {
             if let Some(token) = &session_token {
-                let _ = state.sessions.logout(token);
+                let _ = state.sessions.logout(token).await;
             }
             jar.remove(Cookie::build((SESSION_COOKIE, "")).path("/").build())
         }
@@ -888,7 +806,7 @@ async fn serve_ide(
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
 ) -> Response {
-    let user = match session_user(state, jar) {
+    let user = match session_user(state, jar).await {
         Ok(user) => user,
         Err(response) => return *response,
     };
@@ -953,14 +871,14 @@ fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
 /// what anonymity costs depends on what is being asked for; `Err` is a session
 /// store that failed, which no caller can do anything about. The error is boxed
 /// because a `Response` is large and this is the rare path.
-fn session_user(
+async fn session_user(
     state: &AppState,
     jar: &CookieJar,
 ) -> std::result::Result<Option<User>, Box<Response>> {
     let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned()) else {
         return Ok(None);
     };
-    state.sessions.user_for(&token).map_err(|e| {
+    state.sessions.user_for(&token).await.map_err(|e| {
         log_failure("session lookup failed", &e);
         Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,

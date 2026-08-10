@@ -301,7 +301,35 @@ impl Catalog {
         name: impl Into<String>,
         fields: &[DataField],
     ) -> Result<Table> {
-        let name = name.into();
+        self.create_table_inner(name.into(), fields, false).await
+    }
+
+    /// Create a table whose rows are **not worth a WAL record**: Postgres's
+    /// `UNLOGGED`, where the primary database supports it (design §7.2).
+    ///
+    /// Identical to [`create_table`](Self::create_table) in every other respect,
+    /// and identical in *every* respect on a backend that does not advertise
+    /// [`unlogged_tables`](sc_db::DbCapabilities::unlogged_tables) — the flag
+    /// buys write throughput, never semantics, so falling back to an ordinary
+    /// table is correct rather than a failure. The trade it makes is real and
+    /// belongs to the caller: an unclean shutdown truncates the table, and its
+    /// contents never reach a physical standby.
+    pub async fn create_unlogged_table(
+        &self,
+        name: impl Into<String>,
+        fields: &[DataField],
+    ) -> Result<Table> {
+        let unlogged = self.primary.capabilities().unlogged_tables;
+        self.create_table_inner(name.into(), fields, unlogged).await
+    }
+
+    /// The shared body of the two create-table entry points.
+    async fn create_table_inner(
+        &self,
+        name: String,
+        fields: &[DataField],
+        unlogged: bool,
+    ) -> Result<Table> {
         if fields.is_empty() {
             return Err(Error::invalid(format!(
                 "cannot create table `{name}` with no fields"
@@ -318,6 +346,7 @@ impl Catalog {
                 name: name.clone(),
                 columns,
                 primary_key,
+                unlogged,
             })
             .await?;
         self.reload().await?;

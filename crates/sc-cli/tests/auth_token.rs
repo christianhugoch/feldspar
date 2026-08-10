@@ -1,12 +1,12 @@
 //! `saltcorn auth token` against a **real running server** on a real socket.
 //!
 //! The point of this command is that the session it writes is one the server
-//! will actually accept, and nothing short of an end-to-end exchange tests that:
-//! the grant written to the database, the CSRF handshake, the `Host` header the
-//! app is routed by, the cookies the response carries and the file a browser
-//! would load. So this binds a port, serves an application on it, and mints a
-//! session over HTTP exactly as the command does — because it *is* what the
-//! command does.
+//! will actually accept, and since the command no longer *asks* the server for
+//! it, nothing short of an end-to-end replay tests that: the row written to the
+//! database, the `Host` header the app is routed by, the cookie attributes a
+//! browser needs, and the file it would load. So this binds a port, serves an
+//! application on it, mints a session the way the command does — against the
+//! database alone — and then presents it over HTTP.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
@@ -98,7 +98,10 @@ async fn start() -> sc_error::Result<Running> {
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
         admin_handlers(catalog.clone(), apps.clone()),
-        Arc::new(SessionStore::default()),
+        // The database-backed store, as `saltcorn serve` builds it — which is the
+        // whole point here: the command writes a session row this server has
+        // never heard of, and it must honour it anyway.
+        Arc::new(SessionStore::database(catalog.clone())),
         &config,
         apps.clone(),
     )?;
@@ -122,8 +125,8 @@ fn target(server: &Running) -> Target {
     }
 }
 
-/// What the command does end to end, for one selector: resolve the user, mint a
-/// grant, redeem it.
+/// What the command does end to end, for one selector: resolve the user and
+/// start a session for them.
 async fn session_as(
     server: &Running,
     selector: &UserSelector,
@@ -133,13 +136,13 @@ async fn session_as(
 }
 
 #[tokio::test]
-async fn a_grant_writes_a_session_a_browser_could_use() -> sc_error::Result<()> {
+async fn the_command_writes_a_session_a_browser_could_use() -> sc_error::Result<()> {
     let server = start().await?;
     let target = target(&server);
 
     let (cookies, user) = session_as(&server, &UserSelector::Email(ADMIN.to_owned())).await?;
 
-    // The session cookie is there, and it is the server's — opaque, and long
+    // The session cookie is there, and it is a real one — opaque, and long
     // enough to be the 256-bit token §7.2 mints.
     let session = cookies
         .iter()
@@ -154,8 +157,25 @@ async fn a_grant_writes_a_session_a_browser_could_use() -> sc_error::Result<()> 
     // The CSRF cookie rides along, so a mutation from the restored browser works
     // too rather than 403ing on the first save.
     assert!(cookies.iter().any(|c| c.name == "sc_csrf"), "{cookies:?}");
-    // The server said who we are — and no password was asked for anywhere above.
+    // Who we signed in as — and no password was asked for anywhere above.
     assert_eq!(user["email"], ADMIN);
+
+    // What is *stored* is not what was written to the file: a database dump is
+    // not a pile of live sessions.
+    let stored: i64 = server
+        .catalog
+        .primary()
+        .query(&sc_query::Statement::from(
+            sc_query::Select::from(sc_query::Source::table(sc_auth::SESSIONS_TABLE)).filter(
+                sc_query::Expr::col(sc_auth::COL_SESSION_TOKEN_HASH)
+                    .eq(sc_query::Expr::lit(session.value.as_str())),
+            ),
+        ))
+        .await?
+        .try_collect()
+        .await?
+        .len() as i64;
+    assert_eq!(stored, 0, "the raw token must not be a key in the table");
 
     // The Playwright file is scoped to the application's own host — not the
     // loopback address the command happened to connect to.
@@ -275,56 +295,76 @@ async fn a_role_nobody_holds_and_a_role_that_is_not_a_role_say_so() -> sc_error:
     Ok(())
 }
 
+/// A cookie nobody minted is nobody's session — the property that makes the
+/// written file worth anything.
+///
+/// Writing a session row is an authority the database's credentials confer; a
+/// *guess* at a token is not, and the two must not be confused just because the
+/// store moved out of the server's memory.
 #[tokio::test]
-async fn a_grant_is_good_once_and_a_forged_one_is_no_good_at_all() -> sc_error::Result<()> {
+async fn an_invented_session_cookie_is_not_a_session() -> sc_error::Result<()> {
     let server = start().await?;
-    let target = target(&server);
 
-    let user = auth::resolve_user(&server.catalog, &UserSelector::Admin).await?;
-    let grant = sc_auth::create_session_grant(&server.catalog, user.id).await?;
-    auth::mint_session(&target, &grant).await?;
-
-    // Replayed: the row was deleted when it was redeemed, so the second attempt
-    // is refused exactly as an invented one is.
-    let err = auth::mint_session(&target, &grant)
+    // The right shape — 64 hex characters, exactly as a real one — and not a
+    // token that was ever minted.
+    let forged = "f".repeat(64);
+    let response = reqwest::Client::new()
+        .get(format!("{}/api/whoami", server.url))
+        .header(reqwest::header::HOST, &server.host)
+        .header(reqwest::header::COOKIE, format!("sc_session={forged}"))
+        .send()
         .await
-        .expect_err("a grant is single-use");
-    assert!(err.to_string().contains("401"), "{err}");
-
-    // Invented: a well-formed grant string for a row that never existed.
-    let forged = "00000000-0000-4000-8000-000000000000.not a secret";
-    let err = auth::mint_session(&target, forged)
-        .await
-        .expect_err("a forged grant mints nothing");
-    assert!(err.to_string().contains("401"), "{err}");
+        .map_err(|e| sc_error::Error::msg(e.to_string()))?;
+    assert_eq!(response.status(), 401, "a forged cookie is anonymous");
     Ok(())
 }
 
+/// The command needs the **database**, and nothing else: no server to ask, no
+/// port to reach, no grant to bridge the two.
+///
+/// This is the reason the session store became a table rather than a nicety on
+/// top of one — so it is asserted rather than described. The target below names
+/// a port nothing is listening on, and a session is written all the same.
 #[tokio::test]
-async fn an_unreachable_server_says_where_it_tried() -> sc_error::Result<()> {
-    // Port 1 on the loopback: nothing is listening, and nothing can be.
+async fn a_session_is_minted_with_no_server_running() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
+    let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
+    sc_auth::bootstrap(&catalog).await?;
+    sc_auth::create_user(&catalog, ADMIN, PASSWORD, sc_auth::ROLE_ADMIN).await?;
+
     let target = Target {
+        // Port 1 on the loopback: nothing is listening, and nothing can be.
         url: "http://127.0.0.1:1".to_owned(),
         host: "blog.example.com".to_owned(),
         secure: false,
     };
-    let err = auth::mint_session(&target, "irrelevant.grant")
-        .await
-        .expect_err("nothing is listening");
-    let message = err.to_string();
-    assert!(message.contains("127.0.0.1:1"), "{message}");
-    assert!(message.contains("saltcorn serve"), "{message}");
+    let user = auth::resolve_user(&catalog, &UserSelector::Admin).await?;
+    let (cookies, signed_in) = auth::session_for(&catalog, &target, &user).await?;
+
+    assert_eq!(signed_in["email"], ADMIN);
+    assert!(cookies.iter().any(|c| c.name == "sc_session"));
+
+    // And it is a session a server *would* accept: the row is there, naming this
+    // user, which is the only thing a server consults.
+    let store = SessionStore::database(catalog.clone());
+    let token = &cookies
+        .iter()
+        .find(|c| c.name == "sc_session")
+        .expect("session")
+        .value;
+    assert_eq!(
+        store.user_for(token).await?.expect("a live session").id,
+        user.id
+    );
     Ok(())
 }
 
-/// The cookie, header and route names this crate spells for itself must be the
-/// ones the server actually uses — the comment in `auth.rs` promises this test
-/// exists.
+/// The cookie and header names this crate spells for itself must be the ones the
+/// server actually uses — the comment in `auth.rs` promises this test exists.
 #[test]
 fn the_wire_names_match_the_servers() {
     assert_eq!(sc_server::SESSION_COOKIE, "sc_session");
     assert_eq!(sc_server::CSRF_COOKIE, "sc_csrf");
     assert_eq!(sc_server::CSRF_HEADER, "x-csrf-token");
-    assert_eq!(sc_server::SESSION_TOKEN_ROUTE, "/auth/token");
-    assert_eq!(sc_server::GRANT_FIELD, "grant");
 }

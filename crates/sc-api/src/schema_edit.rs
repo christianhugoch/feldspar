@@ -693,6 +693,7 @@ impl Plan {
             name: name.to_owned(),
             columns: columns.iter().map(DataField::to_column_def).collect(),
             primary_key: vec![DEFAULT_PK_NAME.to_owned()],
+            unlogged: false,
         });
         for meta in pending_meta {
             self.metas.push(MetaWrite {

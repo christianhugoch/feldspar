@@ -30,17 +30,22 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
-# `auth token` is an HTTP *client* of the running server: it signs in the way the
-# sign-in screen does and writes down the cookies. The workspace's one client, so
-# no second TLS stack (see the pin's note).
-reqwest.workspace = true
 serde_json.workspace = true
+# `auth token` writes a session row and mints the cookies that carry it: a UUID
+# for the CSRF token, a `chrono` duration for the session's lifetime, and
+# `sc-query`'s `Value` to read the user's email out of the row.
+uuid.workspace = true
+chrono.workspace = true
+sc-query.workspace = true
 # The `saltcorn.toml` configuration file: named environments, each with one set
 # of database connection parameters (`config_file.rs`).
 serde.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# The end-to-end test presents the session this command writes to a real running
+# server, which needs an HTTP client; nothing in the command itself does any more.
+reqwest.workspace = true
 sc-test-harness.workspace = true
 sc-types.workspace = true
 axum.workspace = true

@@ -2,6 +2,74 @@
 
 Changes in reverse chronological order.
 
+## Sessions live in the database, so there can be more than one server
+
+The session store was a `HashMap` behind an `RwLock`, and it was the single thing standing
+between this and a second application server: a session minted on node A is not one node B has
+heard of, so a load balancer in front of two processes would log people out at random. It is now
+a row in **`_sc_sessions`** in the primary database — the one thing every node already shares —
+with a per-node cache in front of it, so the common case is still a map lookup rather than a
+round trip.
+
+**The table is `UNLOGGED`** where the backend says it can be. A session is worth sharing between
+nodes and not worth a write-ahead-log record; the price is that an unclean shutdown truncates it
+and its rows never reach a physical standby, and both of those cost a re-login — which is what a
+restart already cost. `SchemaChange::CreateTable` gained an `unlogged` flag and `DbCapabilities`
+an `unlogged_tables` to gate it, so a backend without it gets an ordinary table rather than an
+error: the flag buys throughput, never semantics.
+
+**The cache is bounded twice**, because either bound alone is not enough: an LRU capacity
+(10,000) bounds memory, and a per-entry freshness TTL (60s) bounds staleness. Three things fall
+out of that and each is deliberate.
+
+- **A miss is never cached.** Node A mints a session, the browser's next request lands on node B,
+  and a node that had cached "no such token" would keep the user logged out until the entry aged
+  out. An unknown token always asks the database — a primary-key lookup on an unlogged table.
+- **The row names the user; it does not copy them.** It carries `user_id`, and a cache miss reads
+  the user back. Serialising a `User`'s admin-defined columns into the session row would have
+  frozen them for the session's whole 24 hours; instead a role change lands within the freshness
+  TTL.
+- **The token is stored SHA-256-hashed.** A fast hash, unlike a password's argon2id: the token is
+  already 256 bits of uniform randomness, so there is no dictionary for a slow hash to defeat.
+  What it buys is that a database dump is not a pile of live cookies.
+
+**Logout is the one place this is weaker than a map, and the window is bounded rather than
+hidden.** The node that handles a logout deletes the row and evicts its own cache entry, so it is
+consistent immediately; another node holding a cached entry keeps honouring that cookie until the
+entry goes stale. That window is the freshness TTL, it closes entirely once the message bus can
+carry an eviction to every node (`SessionStore::invalidate` is the seam it will hook to), and a
+deployment that will not accept it sets the cache TTL to zero, which turns every lookup into a
+read. There is a test that watches the window open and close rather than a comment claiming it
+is short.
+
+`SessionStore::memory()` keeps the old in-process map as a test seam — the router's own tests
+have no database at all — but `saltcorn serve` always builds the database-backed store.
+
+### `saltcorn auth token` needs no server, and the grant is gone
+
+The one-time session grant existed for one reason: a command line holding the database could not
+reach a store that lived in the server's memory, so it wrote a row saying "the next caller who
+presents this secret is this user" and asked a *running* server to turn it into a session. With
+sessions in the database that bridge has nothing to span. `auth token` writes the session row
+itself and mints both cookies, so it works against a stopped server and a screenshot script no
+longer has to sequence itself behind one coming up.
+
+This is not new authority. It is what `grant.rs` already said in its own header — whoever can
+write a grant can already read every password hash and rewrite any of them — spelled once
+instead of twice. Deleted with it: `_sc_session_grants`, the `POST /auth/token` route, the
+`redeemSessionGrant` handler, and the CSRF priming request the exchange needed. The CSRF cookie
+is minted locally because the double-submit check compares a cookie with a header and nothing
+else — it is not bound to the session — and a `curl` restored from the file needs one or its
+first POST 403s.
+
+**`_sc_sessions.user_id` is deliberately not a foreign key**, which is the opposite of the rule
+everywhere else in `sc-auth`, so: the schema layer renders a plain `REFERENCES` with no
+`ON DELETE` action, and a constraint here would mean an administrator cannot delete a user who
+happens to be signed in. Nothing is given up, because the guarantee is already unconditional —
+`user_for` resolves a session by *reading the user*, so a session naming somebody who is gone
+resolves to nobody, and the row it leaves behind is inert until the sweep collects it. A test
+asserts both halves, including that the delete is not blocked.
+
 ## An application's tables and file stores are ticked, not typed
 
 The application form asked for the two subsets an app is built out of — the tables it may

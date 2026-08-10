@@ -123,9 +123,10 @@ async fn react_app_logs_in_against_sc_auth_and_the_session_identifies_it() -> Re
     // That is exactly what a session store does with it — mint a token, and hand
     // the user back when the app presents it on the next request.
     let sessions = SessionStore::default();
-    let token = sessions.login(user)?;
+    let token = sessions.login(user).await?;
     let recovered = sessions
-        .user_for(&token)?
+        .user_for(&token)
+        .await?
         .ok_or_else(|| sc_error::Error::auth("the token just minted must identify its user"))?;
 
     // Authenticated, the same request now succeeds.
@@ -150,8 +151,8 @@ async fn react_app_logs_in_against_sc_auth_and_the_session_identifies_it() -> Re
     assert_eq!(out.session, SessionAction::End);
 
     // ...and once it does, the token no longer identifies anyone.
-    assert!(sessions.logout(&token)?);
-    assert!(sessions.user_for(&token)?.is_none());
+    assert!(sessions.logout(&token).await?);
+    assert!(sessions.user_for(&token).await?.is_none());
     Ok(())
 }
 

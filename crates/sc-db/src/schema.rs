@@ -105,6 +105,17 @@ pub enum SchemaChange {
         /// one for a composite key). Each must appear in `columns`.
         #[serde(default)]
         primary_key: Vec<String>,
+        /// Create the table **without write-ahead logging** — Postgres's
+        /// `UNLOGGED` (see
+        /// [`unlogged_tables`](crate::DbCapabilities::unlogged_tables)).
+        ///
+        /// Only ever a request: a backend that does not advertise the capability
+        /// creates an ordinary table, because the flag is a performance
+        /// property and never a correctness one. Ask for it only where losing
+        /// every row on an unclean shutdown is acceptable — the session table
+        /// (§7.2) is the case it exists for.
+        #[serde(default)]
+        unlogged: bool,
     },
     /// Drop an existing table.
     DropTable {

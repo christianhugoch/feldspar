@@ -172,7 +172,12 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // process.
     let (_scheduler, _scheduler_task) = sc_server::start_scheduler(&catalog, &triggers);
 
-    let sessions = Arc::new(SessionStore::default());
+    // Sessions are rows, not process memory (§7.2), which is what lets a second
+    // application server exist: put two of these behind a load balancer and a
+    // session minted by either is a session both honour. Each keeps its own
+    // bounded cache in front of the table, so the common case is still a map
+    // lookup.
+    let sessions = Arc::new(SessionStore::database(catalog.clone()));
     eprintln!("saltcorn: listening on http://{}", config.addr);
     let handlers = admin_handlers(catalog, apps.clone());
     serve(config, admin_endpoints(), handlers, sessions, apps).await

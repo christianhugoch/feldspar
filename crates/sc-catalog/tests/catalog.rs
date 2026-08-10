@@ -46,6 +46,7 @@ async fn catalog_init_create_and_reflect() -> sc_error::Result<()> {
                 sc_db::ColumnDef::new("name", "text").not_null(),
             ],
             primary_key: vec!["id".into()],
+            unlogged: false,
         })
         .await?;
 

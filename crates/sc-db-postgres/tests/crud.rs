@@ -53,6 +53,7 @@ async fn full_table_and_crud_lifecycle() -> sc_error::Result<()> {
                 ColumnDef::new("title", "text").not_null(),
             ],
             primary_key: vec!["id".into()],
+            unlogged: false,
         })
         .await?;
 

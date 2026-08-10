@@ -12,17 +12,22 @@
 //! hash, rewrite any of them, and grant itself any role. Demanding a user's
 //! password on top of that protected nothing and cost the operator a secret to
 //! keep, so what it does instead is name a *user* — `--email`, `--admin`, or
-//! `--role NAME` — and mint a [one-time grant](sc_auth::create_session_grant) in
-//! the database for them.
+//! `--role NAME` — and start a session for them.
 //!
-//! **It still does not forge.** The session cookie the server accepts is the one
-//! *it* minted, in a store that lives in its own memory (§7.2), so nothing
-//! outside that process can make one and nothing here tries: the grant is
-//! presented to the running server, which checks it against its own database and
-//! starts an ordinary session — the same session, by the same code, that a
-//! sign-in would have started. The session can do exactly what that account can
-//! do and no more, so giving an agent a low-privilege account of its own is a
-//! real limit and not a gesture.
+//! **It writes the session itself, and needs no server at all.** A session is a
+//! row in [`_sc_sessions`](sc_auth::SESSIONS_TABLE) (§7.2) — that is what lets
+//! two application servers share one — so the authority that can write that
+//! table can start a session, and this command is holding exactly that
+//! authority. It used to have to ask a *running* server, through a one-time
+//! grant, because the store it had to reach lived in that process's memory; with
+//! the store in the database there is nothing left to ask for. So `auth token`
+//! works against a stopped server, and a screenshot script no longer has to
+//! sequence itself behind one coming up.
+//!
+//! It still forges nothing. The session it makes is
+//! [`create_session`](sc_auth::create_session)'s, the same one a sign-in makes,
+//! doing exactly what that account can do and no more — so giving an agent a
+//! low-privilege account of its own is a real limit and not a gesture.
 //!
 //! Two files come out, and which one depends on what will read it:
 //!
@@ -33,37 +38,37 @@
 //! Both are **credentials**, so both are written `0600` and both default names
 //! are in the `.gitignore` a scaffolded project ships with.
 //!
-//! The CSRF dance is why this is not one request: mutating requests are refused
-//! unless the `x-csrf-token` header echoes the `sc_csrf` cookie (§7.2's
-//! double-submit check), and a first-contact client has neither. So it does what
-//! a browser does — one GET to be given the cookie, then the redemption carrying
-//! it both ways.
+//! **Two cookies are written, not one.** Mutating requests are refused unless
+//! the `x-csrf-token` header echoes the `sc_csrf` cookie (§7.2's double-submit
+//! check). That check compares a cookie with a header and nothing else — it is
+//! not bound to the session — so the value can be minted here alongside the
+//! session, and a `curl` restored from the file can POST. A browser restored
+//! from it would be handed one anyway on its first page load; `curl` would not,
+//! and its first POST would 403.
 
 use std::path::{Path, PathBuf};
 
-use sc_auth::{ROLE_ADMIN, Role, User, create_session_grant, list_roles};
+use chrono::Duration;
+use sc_auth::{DEFAULT_TTL_HOURS, ROLE_ADMIN, Role, User, create_session, list_roles};
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::{Value as Json, json};
+use uuid::Uuid;
 
 /// The default file name for [`SessionFormat::Playwright`].
 pub const DEFAULT_PLAYWRIGHT_FILE: &str = ".saltcorn-session.json";
 /// The default file name for [`SessionFormat::Netscape`].
 pub const DEFAULT_NETSCAPE_FILE: &str = ".saltcorn-cookies.txt";
 
-/// The name of the session cookie, of the CSRF cookie and header, and the route
-/// a grant is redeemed at with the field it travels in.
+/// The names of the two cookies a signed-in browser carries.
 ///
-/// Spelled here rather than imported from `sc-server` because this crate is a
-/// *client* of the running server, which may be a different build: what matters
-/// is the wire contract, and the wire contract is these five names. The server's
-/// own constants are asserted equal to these in a test, so a rename that broke
-/// this cannot land quietly.
+/// Spelled here rather than imported from `sc-server` because the server that
+/// reads this file may be a different build: what matters is the wire contract,
+/// and the wire contract is these two names. The server's own constants are
+/// asserted equal to these in a test, so a rename that broke this cannot land
+/// quietly.
 const SESSION_COOKIE: &str = "sc_session";
 const CSRF_COOKIE: &str = "sc_csrf";
-const CSRF_HEADER: &str = "x-csrf-token";
-const TOKEN_ROUTE: &str = "/auth/token";
-const GRANT_FIELD: &str = "grant";
 
 /// Which file to write.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -99,23 +104,22 @@ impl SessionFormat {
     }
 }
 
-/// Where to ask for the session: the origin to connect to and the host the
-/// application answers on.
+/// Who the session file is *for*: the host the application answers on, and the
+/// origin a browser reaches it at.
 ///
-/// The connection target and the host are separate because they routinely
-/// differ. A server routes an application by the request's `Host` header
-/// (§13.2), and a development machine that has no DNS for `blog.example.com`
-/// can still reach it by connecting to the loopback and *saying* that name —
-/// which is exactly what `--url` is for.
+/// The two routinely differ. A server routes an application by the request's
+/// `Host` header (§13.2), and a development machine with no DNS for
+/// `blog.example.com` reaches it by connecting to the loopback and *saying* that
+/// name — which is what `--url` is for.
 ///
-/// The request goes to the application's own host even though the route that
-/// answers it is the server's rather than the app's ([`TOKEN_ROUTE`] is a fixed
-/// route, ahead of the host-routed fallback). That is not incidental: the
-/// cookies come back scoped to the host that will use them, and the one thing
-/// this command must not do is write a session file for the wrong origin.
+/// [`host`](Self::host) is the load-bearing one: it is the domain the cookies
+/// are written for, and the one thing this command must not do is write a
+/// session file for the wrong origin. [`url`](Self::url) is now only the origin
+/// reported back to the caller (and the port in it), because nothing is
+/// connected to any more.
 #[derive(Debug, Clone)]
 pub struct Target {
-    /// The origin to connect to, e.g. `http://127.0.0.1:3000`.
+    /// The origin the application is reached at, e.g. `http://127.0.0.1:3000`.
     pub url: String,
     /// The `Host` header to send, e.g. `blog.example.com`.
     pub host: String,
@@ -141,7 +145,7 @@ fn port_of(url: &str) -> Option<u16> {
     url.rsplit(':').next()?.trim_end_matches('/').parse().ok()
 }
 
-/// One cookie the server set.
+/// One cookie of the pair a signed-in browser carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cookie {
     /// The cookie's name.
@@ -158,143 +162,51 @@ pub struct Cookie {
     pub same_site: String,
 }
 
-/// Parse one `Set-Cookie` header value.
+/// The cookies a browser signed in as `token`'s owner would carry, scoped for
+/// `target`.
 ///
-/// Attributes not listed here (`Max-Age`, `Expires`, `Domain`) are ignored
-/// deliberately: the server sets none of them — its cookies are host-only
-/// session cookies whose lifetime is the *server-side* session's — so parsing
-/// them would be modelling a case that cannot arise, and writing them out would
-/// claim a lifetime this file does not have.
-fn parse_set_cookie(header: &str) -> Option<Cookie> {
-    let mut parts = header.split(';');
-    let (name, value) = parts.next()?.trim().split_once('=')?;
-    let mut cookie = Cookie {
+/// They are built to match what the server sets, attribute for attribute
+/// (`security.rs`'s `build_cookie`): path `/`, `SameSite=Strict`, `HttpOnly` on
+/// the session and not on the CSRF cookie — which the SPA has to read — and
+/// `Secure` iff the browser will be talking `https`. A cookie written with the
+/// wrong attributes is one the browser silently declines to send, which looks
+/// exactly like a session that did not work.
+fn cookies_for(target: &Target, token: String) -> Vec<Cookie> {
+    let cookie = |name: &str, value: String, http_only: bool| Cookie {
         name: name.to_owned(),
-        value: value.to_owned(),
+        value,
         path: "/".to_owned(),
-        http_only: false,
-        secure: false,
-        same_site: "Lax".to_owned(),
+        http_only,
+        secure: target.secure,
+        same_site: "Strict".to_owned(),
     };
-    for attr in parts {
-        let attr = attr.trim();
-        let (key, val) = match attr.split_once('=') {
-            Some((k, v)) => (k.trim().to_ascii_lowercase(), v.trim().to_owned()),
-            None => (attr.to_ascii_lowercase(), String::new()),
-        };
-        match key.as_str() {
-            "path" => cookie.path = val,
-            "httponly" => cookie.http_only = true,
-            "secure" => cookie.secure = true,
-            "samesite" => cookie.same_site = val,
-            _ => {}
-        }
-    }
-    Some(cookie)
+    vec![
+        cookie(SESSION_COOKIE, token, true),
+        // Not read back by anything server-side — the double-submit check only
+        // compares this cookie with the header echoing it — so any unguessable
+        // value is a valid one, and this is the same 256 bits the server mints.
+        cookie(CSRF_COOKIE, new_csrf_token(), false),
+    ]
 }
 
-/// Present `grant` at `target`, returning the cookies the server set and the
-/// user it says you are.
-///
-/// A refusal is the **server's** error, verbatim: a grant that expired while the
-/// command was running, one already redeemed, a user deleted in between.
-/// Guessing at which would be worse than quoting it (§16).
-pub async fn mint_session(target: &Target, grant: &str) -> Result<(Vec<Cookie>, Json)> {
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|e| Error::config(format!("could not build the HTTP client: {e}")))?;
-
-    // One GET to be handed a CSRF cookie, exactly as a browser opening the app
-    // would be. Any answer will do — even a 404 carries the cookie — so the
-    // status is not checked; only the absence of a cookie is a problem.
-    let primer = client
-        .get(&target.url)
-        .header(reqwest::header::HOST, &target.host)
-        .send()
-        .await
-        .map_err(|e| unreachable_server(target, e))?;
-    let csrf = cookies_of(primer.headers())
-        .into_iter()
-        .find(|c| c.name == CSRF_COOKIE)
-        .ok_or_else(|| {
-            Error::msg(format!(
-                "{} answered without a `{CSRF_COOKIE}` cookie, so it is not a \
-                 Saltcorn server (or something in front of it is stripping cookies)",
-                target.url
-            ))
-        })?;
-
-    let redeem = format!("{}{TOKEN_ROUTE}", target.url.trim_end_matches('/'));
-    let response = client
-        .post(&redeem)
-        .header(reqwest::header::HOST, &target.host)
-        .header(
-            reqwest::header::COOKIE,
-            format!("{CSRF_COOKIE}={}", csrf.value),
-        )
-        .header(CSRF_HEADER, &csrf.value)
-        .json(&json!({ GRANT_FIELD: grant }))
-        .send()
-        .await
-        .map_err(|e| unreachable_server(target, e))?;
-
-    let status = response.status();
-    let mut cookies = cookies_of(response.headers());
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(Error::invalid(format!(
-            "{redeem} refused the session grant with {status}: {}",
-            server_message(&body)
-        )));
-    }
-    // The redemption response carries the session; it does **not** re-set the CSRF
-    // cookie, because the request already had one — the server only mints that
-    // on first contact. Carrying the primer's forward is what makes the written
-    // jar complete: a restored browser would be handed a fresh one on its first
-    // page load, but `curl` would not, and its first POST would 403.
-    if !cookies.iter().any(|c| c.name == CSRF_COOKIE) {
-        cookies.push(csrf);
-    }
-    if !cookies.iter().any(|c| c.name == SESSION_COOKIE) {
-        return Err(Error::msg(format!(
-            "{redeem} accepted the grant but set no `{SESSION_COOKIE}` cookie, \
-             so there is no session to write"
-        )));
-    }
-    let user = serde_json::from_str(&body).unwrap_or(Json::Null);
-    Ok((cookies, user))
+/// A fresh CSRF token: 256 bits from two v4 UUIDs, hex-encoded, exactly as the
+/// server's own `new_csrf_token` makes one.
+fn new_csrf_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-/// Every cookie in a response's `Set-Cookie` headers.
-fn cookies_of(headers: &reqwest::header::HeaderMap) -> Vec<Cookie> {
-    headers
-        .get_all(reqwest::header::SET_COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .filter_map(parse_set_cookie)
-        .collect()
-}
-
-/// The error for a server that could not be reached, saying both where we tried
-/// and what to do about it — the two things missing from a bare connect error.
-fn unreachable_server(target: &Target, e: reqwest::Error) -> Error {
-    Error::config(format!(
-        "could not reach the server at {} (as host `{}`): {e}. Is `saltcorn serve` \
-         running, and is --url pointing at it?",
-        target.url, target.host
-    ))
-}
-
-/// The server's own message out of an error body, falling back to the body.
-fn server_message(body: &str) -> String {
-    serde_json::from_str::<Json>(body)
-        .ok()
-        .and_then(|j| {
-            j.get("error")
-                .or_else(|| j.get("message"))
-                .and_then(|m| m.as_str().map(str::to_owned))
-        })
-        .unwrap_or_else(|| body.trim().to_owned())
+/// What the command reports back about who it signed in as — the same three
+/// fields the server's `login` answers with, so the message reads identically
+/// whichever made the session.
+fn user_summary(user: &User) -> Json {
+    json!({
+        "id": user.id.to_string(),
+        "role": user.role,
+        "email": user.get(sc_auth::COL_EMAIL).and_then(|v| match v {
+            sc_query::Value::Text(t) => Some(t.clone()),
+            _ => None,
+        }),
+    })
 }
 
 /// Render the cookies in `format`, for `host`.
@@ -601,45 +513,74 @@ fn select_user(email: Option<String>, admin: bool, role: Option<String>) -> Resu
     })
 }
 
-/// Mint a grant for `user` and exchange it at `target` for a session.
+/// Start a session for `user` and return the cookies that carry it, scoped for
+/// `target`, with a summary of who was signed in.
 ///
-/// The two halves of the command that need something other than a file: the
-/// database, which is what authorises this at all, and the running server, which
-/// is the only thing that can turn the grant into a session.
+/// The one half of the command that needs something other than a file: the
+/// database, which is both what authorises this and — since §7.2 put sessions
+/// in a table — where the session goes. No server is contacted, so a server that
+/// is not running is not an error.
 pub async fn session_for(
     catalog: &Catalog,
     target: &Target,
     user: &User,
 ) -> Result<(Vec<Cookie>, Json)> {
-    let grant = create_session_grant(catalog, user.id).await?;
-    mint_session(target, &grant).await
+    let token = create_session(catalog, user.id, Duration::hours(DEFAULT_TTL_HOURS)).await?;
+    Ok((cookies_for(target, token), user_summary(user)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn insecure_target() -> Target {
+        Target {
+            url: "http://blog.example.com:3000".to_owned(),
+            host: "blog.example.com".to_owned(),
+            secure: false,
+        }
+    }
+
     fn session() -> Cookie {
-        parse_set_cookie("sc_session=abc123; Path=/; HttpOnly; SameSite=Strict").expect("parse")
+        cookies_for(&insecure_target(), "abc123".to_owned())
+            .into_iter()
+            .find(|c| c.name == "sc_session")
+            .expect("the session cookie")
     }
 
     #[test]
-    fn a_set_cookie_header_is_parsed_with_its_attributes() {
-        let c = session();
-        assert_eq!(c.name, "sc_session");
-        assert_eq!(c.value, "abc123");
-        assert_eq!(c.path, "/");
-        assert!(c.http_only);
-        assert!(!c.secure);
-        assert_eq!(c.same_site, "Strict");
+    fn the_cookies_carry_the_attributes_the_server_sets() {
+        let jar = cookies_for(&insecure_target(), "abc123".to_owned());
 
-        // A cookie with no attributes still parses, with the defaults.
-        let plain = parse_set_cookie("sc_csrf=xyz").expect("parse");
-        assert_eq!(plain.path, "/");
-        assert!(!plain.http_only);
+        let session = jar
+            .iter()
+            .find(|c| c.name == "sc_session")
+            .expect("session");
+        assert_eq!(session.value, "abc123");
+        assert_eq!(session.path, "/");
+        assert_eq!(session.same_site, "Strict");
+        // `HttpOnly`, exactly as the server sets it: nothing in a page has any
+        // business reading a session token.
+        assert!(session.http_only);
+        assert!(!session.secure, "http, so not Secure");
 
-        // Not a cookie at all.
-        assert!(parse_set_cookie("garbage").is_none());
+        // The CSRF cookie is the one the SPA has to read, so it must *not* be
+        // HttpOnly — a jar that got this backwards would 403 every mutation.
+        let csrf = jar.iter().find(|c| c.name == "sc_csrf").expect("csrf");
+        assert!(!csrf.http_only);
+        assert_eq!(csrf.value.len(), 64);
+        assert_ne!(csrf.value, session.value);
+
+        // `Secure` follows the scheme the browser will use, not this process's.
+        let secure = Target {
+            secure: true,
+            ..insecure_target()
+        };
+        assert!(
+            cookies_for(&secure, "abc123".to_owned())
+                .iter()
+                .all(|c| c.secure)
+        );
     }
 
     #[test]

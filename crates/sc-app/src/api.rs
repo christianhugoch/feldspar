@@ -500,6 +500,7 @@ pub fn app_schema_sql(app: &Application, cat: &Catalog) -> Result<String> {
                 .map(sc_catalog::DataField::to_column_def)
                 .collect(),
             primary_key: table.primary_key.clone(),
+            unlogged: false,
         };
         sql.push_str(&driver.render_ddl(&change)?);
         sql.push_str(";\n\n");

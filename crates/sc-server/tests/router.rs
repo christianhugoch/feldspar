@@ -256,7 +256,7 @@ async fn insufficient_role_is_forbidden() {
     let (router, sessions) = test_router();
     // Seed a session for a non-admin user (role 40) directly in the store.
     let editor = User::new(Uuid::new_v4(), 40).unwrap();
-    let token = sessions.login(editor).unwrap();
+    let token = sessions.login(editor).await.unwrap();
 
     let request = Request::get("/api/secret")
         .header(header::COOKIE, format!("{SESSION_COOKIE}={token}"))

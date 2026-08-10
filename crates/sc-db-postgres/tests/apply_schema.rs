@@ -30,6 +30,7 @@ async fn create_alter_and_drop_round_trip_through_introspect() -> sc_error::Resu
                 ColumnDef::new("label", "text"),
             ],
             primary_key: vec!["code".into(), "kind".into()],
+            unlogged: false,
         })
         .await?;
 
@@ -143,6 +144,7 @@ async fn render_ddl_is_what_apply_schema_would_run_and_applies_nothing() -> sc_e
             ColumnDef::new("label", "text"),
         ],
         primary_key: vec!["code".into()],
+        unlogged: false,
     };
 
     let sql = driver.render_ddl(&change)?;

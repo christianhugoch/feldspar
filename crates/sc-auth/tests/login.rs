@@ -34,7 +34,7 @@ async fn login_session_logout_round_trip() -> sc_error::Result<()> {
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
 
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
-    let catalog = Catalog::init(driver.clone() as Arc<dyn DatabaseDriver>).await?;
+    let catalog = Arc::new(Catalog::init(driver.clone() as Arc<dyn DatabaseDriver>).await?);
     bootstrap(&catalog).await?;
     let created = create_first_user(&catalog, "admin@example.com", "s3cret-pw").await?;
 
@@ -62,12 +62,12 @@ async fn login_session_logout_round_trip() -> sc_error::Result<()> {
     );
 
     // A login mints a session token that resolves back to the user; logout ends it.
-    let sessions = SessionStore::default();
-    let token = sessions.login(user.clone())?;
-    assert_eq!(sessions.user_for(&token)?, Some(user));
+    let sessions = SessionStore::database(catalog.clone());
+    let token = sessions.login(user.clone()).await?;
+    assert_eq!(sessions.user_for(&token).await?, Some(user));
 
-    assert!(sessions.logout(&token)?);
-    assert_eq!(sessions.user_for(&token)?, None);
+    assert!(sessions.logout(&token).await?);
+    assert_eq!(sessions.user_for(&token).await?, None);
 
     Ok(())
 }

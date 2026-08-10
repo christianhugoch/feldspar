@@ -179,9 +179,11 @@ async fn serve_with(agent: Agent, providers: Arc<dyn ProviderConnector>) -> Resu
         addr,
         admin: sessions
             .login(User::new(Uuid::new_v4(), ROLE_ADMIN).unwrap())
+            .await
             .unwrap(),
         public: sessions
             .login(User::new(Uuid::new_v4(), ROLE_PUBLIC).unwrap())
+            .await
             .unwrap(),
         catalog,
         _db: db,
@@ -621,6 +623,7 @@ async fn a_server_without_agents_closes_the_socket_with_the_reason() -> Result<(
     });
     let admin = sessions
         .login(User::new(Uuid::new_v4(), ROLE_ADMIN).unwrap())
+        .await
         .unwrap();
 
     let mut request = format!("ws://{addr}{AGENT_CHAT_ROUTE}")

@@ -495,6 +495,36 @@ pub struct User {
 ### 7.2 Authentication
 
 - Password + session cookie baseline.
+- **Sessions are rows, cached per node.** A login mints a 256-bit opaque token, sends it in an
+  `HttpOnly` cookie and writes a row to `_sc_sessions` in the primary database. An in-memory
+  map would be the fastest possible store and the reason there could only ever be *one*
+  application server — a session minted on node A is not one node B has heard of, so a load
+  balancer in front of two processes logs people out at random. The table is the one thing
+  every node already shares.
+
+  What keeps it off the critical path is that it is cheap in three specific ways. The table is
+  **`UNLOGGED`** where the backend advertises it (`DbCapabilities::unlogged_tables`): a session
+  is worth sharing between nodes and not worth a WAL record, and the price — an unclean
+  shutdown truncates it, and it never reaches a physical standby — is a re-login, which is what
+  a restart already cost. **Nothing is written per request**, because the expiry is fixed at
+  login rather than sliding. And each node keeps a **read-through cache** in front of it,
+  bounded two ways: an LRU capacity bounds memory, and a per-entry freshness TTL (60s) bounds
+  staleness.
+
+  Three consequences are deliberate. **Misses are never cached** — node A mints a session, the
+  browser's next request lands on node B, and a node that cached "no such token" would keep the
+  user logged out. **The row names the user rather than copying them**, so a cache miss re-reads
+  the user and a role change lands within the freshness TTL instead of surviving the session's
+  whole 24 hours. And **the token is stored SHA-256-hashed** — a fast hash, unlike a password's
+  argon2id, because 256 bits of uniform randomness has no dictionary to defeat — so a database
+  dump is not a pile of live cookies.
+
+  **Logout is the one place this is weaker than a map**, and the weakness is bounded rather than
+  hidden. The node that handles it deletes the row and evicts its own entry, so it is consistent
+  at once; another node holding a cached entry honours the cookie until that entry goes stale.
+  The window is the freshness TTL, it closes entirely once the message bus (§16) can carry an
+  eviction to every node — `SessionStore::invalidate` is the seam it will hook to — and a
+  deployment that will not accept it sets the cache TTL to zero, making every lookup a read.
 - **Device recognition** ("Google-level"): remember known devices, email the user on a
   new-device login.
 - **OAuth2 server option**: Saltcorn can act as an identity provider (`sc-auth` exposes the
@@ -753,6 +783,7 @@ a sparse value goes into `attributes`.**
 | `_sc_models` | model definitions | provider + config fields |
 | `_sc_model_instances` | fitted model instances | parameters, hyperparameters, fit metadata |
 | `_sc_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
+| `_sc_sessions` | live sessions | **`UNLOGGED`** where the backend allows it (§7.2): the SHA-256 of the token, the user it names, and when it lapses. Shared by every node, cached per node behind an LRU + freshness TTL. `user_id` is deliberately **not** a foreign key — the schema layer renders no `ON DELETE` action, so one would block deleting a signed-in user; a session resolves by reading the user, so a deleted one's session resolves to nobody |
 | `users` | users | UUID PK (not `_sc_`-prefixed; it is user-facing and extensible) |
 
 **Files have no per-file database row.** Per-file metadata is stored in **xattrs** on disk;
@@ -2558,8 +2589,8 @@ connection parameters. Never guessed: a process that was not told says which set
 missing rather than inventing `localhost`.
 
 **`saltcorn auth token`** is the session half. An application's screens require a signed-in
-user, and a session cookie is one the server minted into its own in-memory store (§7.2) — so
-nothing outside that process can forge one, and this does not try.
+user, so a screenshot taken by a script is a screenshot of the sign-in page unless something
+hands it the cookie a browser would have got.
 
 It asks for **no password**, because the caller is not somebody who should be made to have
 one: it runs where the server runs, from a shell holding the primary database's connection
@@ -2572,26 +2603,26 @@ is refused with the list of the ones that do, and a role nobody holds is refused
 the caller is at a shell, and "not found" alone would send them to the admin UI to answer a
 question this command could answer.
 
-The bridge from a process holding the database to a session store it cannot reach is a
-**one-time grant**: a row in `_sc_session_grants` naming the user, its secret half stored
-argon2id-hashed exactly as a password is, expiring two minutes later. The command presents it
-at `POST /auth/token` — a fixed route outside every `EndpointSet`, for the same reason
-`/upload` is one: it is nobody's API contract and no generated client should carry a method
-for it. The server redeems it, **deleting the row before it checks the secret**, so a grant is
-good once whether or not that once succeeded, and then starts an ordinary session by the same
-code `login` does. The authority is the database, not the row: whoever can write it could
-already do everything it grants, and what they could *not* do — mint a session in another
-process's memory — is exactly what this gives them, narrowly and briefly.
+**It writes the session itself, and contacts no server.** A session *is* a row in
+`_sc_sessions` (§7.2) — that is what lets two application servers share one — so the authority
+that can write that table can start a session, and this command holds exactly that authority.
+It used to need a running server and a one-time grant in `_sc_session_grants` to bridge the
+gap, because the store it had to reach lived in the server's own memory; with the store in the
+database there is nothing left to ask for, and the grant, the `POST /auth/token` route that
+redeemed it and the CSRF priming request it needed are all gone. `auth token` now works
+against a stopped server.
 
 Out come the cookies: Playwright's `storageState` by default, a Netscape `cookies.txt` for
 `curl` on request, `0600` either way, and both default names in the scaffold's `.gitignore`
 because a session file is a password. The session can do exactly what that account can do,
 which makes "give the agent its own low-privilege account" a real limit rather than advice —
 and the generated documentation lists the installation's actual roles, because `--role` takes
-a name and nothing inside a project directory knows what this server calls them. Two requests,
-not one: the CSRF check (§7.2) refuses a mutation whose `x-csrf-token` header does not echo its
-`sc_csrf` cookie, and a first-contact client has neither, so it primes with a GET exactly as a
-browser does.
+a name and nothing inside a project directory knows what this server calls them. **Two
+cookies, not one**: the CSRF check (§7.2) refuses a mutation whose `x-csrf-token` header does
+not echo its `sc_csrf` cookie, and that check compares a cookie with a header and nothing
+else — it is not bound to the session — so the value is minted here alongside it. A restored
+browser would be handed one on its first page load; `curl` would not, and its first POST
+would 403.
 
 **Regeneration is not a build** (and this is what discharges GOALS' "if the API definition
 changes, the client code must be updated automatically"). Re-emitting `src/saltcorn/**` is

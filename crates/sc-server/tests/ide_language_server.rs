@@ -241,9 +241,11 @@ async fn serve(router: Router, sessions: &SessionStore, db: Option<TestDb>) -> S
         addr,
         admin: sessions
             .login(User::new(Uuid::new_v4(), ROLE_ADMIN).unwrap())
+            .await
             .unwrap(),
         public: sessions
             .login(User::new(Uuid::new_v4(), ROLE_PUBLIC).unwrap())
+            .await
             .unwrap(),
         _db: db,
     }

@@ -11,7 +11,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::Duration;
 use sc_auth::{
-    COL_EMAIL, ROLE_ADMIN, SessionStore, any_user_exists, authenticate, bootstrap,
+    CACHE_CAPACITY, COL_EMAIL, ROLE_ADMIN, SessionStore, any_user_exists, authenticate, bootstrap,
     create_first_user,
 };
 use sc_catalog::Catalog;
@@ -40,7 +40,7 @@ async fn phase5_auth_acceptance_walk() -> sc_error::Result<()> {
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
 
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
-    let catalog = Catalog::init(driver.clone() as Arc<dyn DatabaseDriver>).await?;
+    let catalog = Arc::new(Catalog::init(driver.clone() as Arc<dyn DatabaseDriver>).await?);
     bootstrap(&catalog).await?;
 
     // --- create-first-user ----------------------------------------------------
@@ -88,32 +88,41 @@ async fn phase5_auth_acceptance_walk() -> sc_error::Result<()> {
     );
 
     // --- logout ---------------------------------------------------------------
-    let sessions = SessionStore::default();
-    let token = sessions.login(user.clone())?;
+    // The real store, not the in-process test seam: this walk is the phase's
+    // definition of done, so the sessions in it are rows like a server's are.
+    let sessions = SessionStore::database(catalog.clone());
+    let token = sessions.login(user.clone()).await?;
     assert_eq!(
-        sessions.user_for(&token)?,
+        sessions.user_for(&token).await?,
         Some(user.clone()),
         "session resolves before logout"
     );
-    assert!(sessions.logout(&token)?, "logout removes the session");
+    assert!(sessions.logout(&token).await?, "logout removes the session");
     assert_eq!(
-        sessions.user_for(&token)?,
+        sessions.user_for(&token).await?,
         None,
         "session gone after logout"
     );
 
     // --- session expiry -------------------------------------------------------
     // A short-lived session resolves while fresh, then lapses after its TTL.
-    let short = SessionStore::with_ttl(Duration::milliseconds(150));
-    let expiring = short.login(user.clone())?;
+    // The cache is switched off (a zero freshness TTL) so what lapses here is
+    // the row, not a cached copy of it.
+    let short = SessionStore::database_with(
+        catalog.clone(),
+        Duration::milliseconds(150),
+        Duration::zero(),
+        CACHE_CAPACITY,
+    );
+    let expiring = short.login(user.clone()).await?;
     assert_eq!(
-        short.user_for(&expiring)?,
+        short.user_for(&expiring).await?,
         Some(user),
         "session valid within its TTL"
     );
     tokio::time::sleep(StdDuration::from_millis(300)).await;
     assert_eq!(
-        short.user_for(&expiring)?,
+        short.user_for(&expiring).await?,
         None,
         "session expired after its TTL"
     );
