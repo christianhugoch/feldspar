@@ -39,10 +39,16 @@ fn endpoints() -> EndpointSet {
 fn ide_bundle(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("sc-ide-bundle-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("main.js"), "export const workbench = 1;\n").unwrap();
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(
+        dir.join("assets/main-a1b2c3.js"),
+        "export const workbench = 1;\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("index.html"),
-        "<!doctype html><div id=\"workbench\"></div>\n",
+        "<!doctype html><div id=\"workbench\"></div>\n\
+         <script type=\"module\" src=\"/ide/assets/main-a1b2c3.js\"></script>\n",
     )
     .unwrap();
     dir
@@ -102,6 +108,12 @@ async fn an_admin_gets_the_ide_bundle_under_the_relaxed_policy() {
         IDE_CONTENT_SECURITY_POLICY,
         "the IDE is served under its own policy, not the strict one"
     );
+    // The document keeps its URL across every rebuild, so it must be revalidated:
+    // it is what names the hashed assets, and a cached copy pins the old ones.
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
     let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
         .await
         .unwrap();
@@ -110,10 +122,15 @@ async fn an_admin_gets_the_ide_bundle_under_the_relaxed_policy() {
     // And its assets, addressed under the prefix.
     let response = router
         .clone()
-        .oneshot(get("/ide/main.js", Some(&token), false))
+        .oneshot(get("/ide/assets/main-a1b2c3.js", Some(&token), false))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable",
+        "a hashed name can be cached forever — a rebuild changes the URL"
+    );
     let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
         .await
         .unwrap();
@@ -140,7 +157,7 @@ async fn the_ide_is_not_served_to_anyone_but_an_admin() {
     // An asset fetch with no session gets the ordinary rejection, and no bundle.
     let response = router
         .clone()
-        .oneshot(get("/ide/main.js", None, false))
+        .oneshot(get("/ide/assets/main-a1b2c3.js", None, false))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -153,7 +170,7 @@ async fn the_ide_is_not_served_to_anyone_but_an_admin() {
     let public = session_for(&sessions, ROLE_PUBLIC).await;
     let response = router
         .clone()
-        .oneshot(get("/ide/main.js", Some(&public), false))
+        .oneshot(get("/ide/assets/main-a1b2c3.js", Some(&public), false))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -215,7 +232,7 @@ async fn the_relaxed_policy_stays_on_the_ide_route() {
 /// document**, and never HTML.
 ///
 /// This is the shape of a bug that already happened once. Answering a request for
-/// `/ide/main.js` with a document gives the browser HTML where it expected a
+/// one of the bundle's modules with a document gives the browser HTML where it expected a
 /// module: it refuses it on its MIME type and renders a blank page, so the
 /// fallback hides the very thing it was meant to explain. There is nothing to fall
 /// back *for* — the IDE has no client-side routes — so there is no fallback.
@@ -227,7 +244,7 @@ async fn without_a_bundle_nothing_under_the_prefix_is_html() {
     for path in [
         "/ide/",
         "/ide/?store=app-source",
-        "/ide/main.js",
+        "/ide/assets/main-a1b2c3.js",
         "/ide/main.css",
         "/ide/assets/onig.wasm",
     ] {

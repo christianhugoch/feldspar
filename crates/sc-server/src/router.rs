@@ -46,25 +46,50 @@ use crate::security::{
     build_cookie, csrf_middleware,
 };
 
-/// The minimal bootstrap document served for non-API navigations. It has **no
-/// server-rendered admin markup** and no inline script/style (so it satisfies
-/// the strict CSP): just the SPA mount point and the bundle's stable entry
-/// points. The `ui/admin` build pins these to `/main.js` + `/main.css` (see its
-/// `vite.config.ts`), so a request that falls back to this document loads the
-/// same assets the built `index.html` links — both same-origin, `'self'`-clean.
+/// The document served for a navigation when there is **no admin bundle to
+/// serve** — no `--static-dir`, or a directory with no `index.html` in it.
+///
+/// It links no assets, and that is the whole point of it. The bundle's entry
+/// points carry a content hash in their names (see `ui/admin/vite.config.ts`),
+/// so this constant *cannot* name them; a document that guessed would be served
+/// for the guessed path too, and the browser would report a module with a
+/// `text/html` MIME type — the blank page with a puzzling console error that
+/// this says out loud instead. No inline script or style, so the strict CSP
+/// holds here as it does everywhere else.
 pub const BOOTSTRAP_HTML: &str = "<!doctype html>\n\
 <html lang=\"en\">\n\
 <head>\n\
 <meta charset=\"utf-8\">\n\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
 <title>Saltcorn</title>\n\
-<link rel=\"stylesheet\" href=\"/main.css\">\n\
 </head>\n\
 <body>\n\
 <div id=\"root\"></div>\n\
-<script type=\"module\" src=\"/main.js\"></script>\n\
+<p>The Saltcorn admin UI is not built. Run <code>npm ci &amp;&amp; npm run build</code>\n\
+in <code>ui/admin</code>, and start the server with <code>--static-dir</code> pointing\n\
+at <code>ui/admin/dist</code> (or rebuild <code>sc-cli</code>, which does both).</p>\n\
 </body>\n\
 </html>\n";
+
+/// `Cache-Control` for a file whose name carries a content hash: a year, and
+/// never revalidated. Changing the file changes its name, so a stale copy of
+/// this exact URL cannot exist.
+const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
+/// `Cache-Control` for everything else a bundle holds — above all the document,
+/// which keeps its URL across every rebuild and is what names the hashed assets.
+/// `no-cache` is "revalidate", not "do not store": the browser still gets its
+/// 304s, but it can never show yesterday's document (and so yesterday's app)
+/// without asking.
+const REVALIDATE_CACHE_CONTROL: &str = "no-cache";
+
+/// Whether a bundle-relative path is one of Vite's content-hashed outputs.
+///
+/// Everything the build emits apart from `index.html` lands in `assets/` with a
+/// hash in its name, so the prefix is the test.
+fn is_hashed_asset(path: &str) -> bool {
+    path.starts_with("/assets/")
+}
 
 /// The path prefix the file-store IDE is served under (design §12.1).
 pub const IDE_PREFIX: &str = "/ide";
@@ -777,8 +802,8 @@ async fn apply_response(
 
 /// Whether a path belongs to the file-store IDE (design §12.1).
 ///
-/// `/ide` and `/ide/` are both the IDE itself; `/ide/main.js` and everything else
-/// under the prefix are its assets. A path that merely *starts* with the letters —
+/// `/ide` and `/ide/` are both the IDE itself; everything else under the prefix
+/// is one of its assets. A path that merely *starts* with the letters —
 /// `/ideas` — is not the IDE's, hence the boundary check.
 fn is_ide_path(path: &str) -> bool {
     path.strip_prefix(IDE_PREFIX)
@@ -819,8 +844,8 @@ async fn serve_ide(
         return rejection;
     }
 
-    // `/ide/main.js` is `main.js` within the bundle, and `/ide` or `/ide/` is its
-    // document.
+    // `/ide/assets/main-a1b2c3.js` is `assets/main-a1b2c3.js` within the bundle,
+    // and `/ide` or `/ide/` is its document.
     let rest = uri
         .path()
         .strip_prefix(IDE_PREFIX)
@@ -828,28 +853,22 @@ async fn serve_ide(
         .unwrap_or("/");
     let mut response = None;
     if let Some(dir) = &state.ide_dir {
-        if let Ok(request) = Request::builder().uri(rest).body(Body::empty()) {
-            match ServeDir::new(dir.as_ref().as_path()).oneshot(request).await {
-                Ok(served) if served.status() != StatusCode::NOT_FOUND => {
-                    response = Some(served.map(Body::new));
-                }
-                _ => {}
-            }
-        }
+        response = serve_file(dir.as_ref().as_path(), rest).await;
     }
     // Nothing there: a 404, for the document as much as for an asset. There is no
     // fallback document, and that is the point — the SPA has one so a client-routed
     // deep link still loads the bundle, while the IDE has no client-side routes to
     // deep-link into (a store is a query parameter, §12.1). A document served in
-    // answer to a request for `/ide/main.js` is HTML where the browser expected a
-    // module: it refuses it on its MIME type and renders a blank page, so the
-    // fallback would hide the very thing it was meant to explain.
+    // answer to a request for one of the bundle's modules is HTML where the browser
+    // expected a module: it refuses it on its MIME type and renders a blank page, so
+    // the fallback would hide the very thing it was meant to explain.
     let mut response = response.unwrap_or_else(|| {
         json_error(
             StatusCode::NOT_FOUND,
             "the file-store IDE bundle is not built (run `npm ci && npm run build` in ui/ide)",
         )
     });
+    set_cache_control(&mut response, rest);
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(IDE_CONTENT_SECURITY_POLICY),
@@ -887,22 +906,55 @@ async fn session_user(
     })
 }
 
-/// Serve a file from the static bundle, falling back to the SPA bootstrap
-/// document (history fallback) when there is no matching file.
+/// Serve a file from the static bundle, falling back to the bundle's own
+/// `index.html` (history fallback) when there is no matching file.
+///
+/// The document is the bundle's, not a constant here, because it is the only
+/// thing that knows the hashed names of the assets it links. A client-routed
+/// deep link therefore boots the *same* build a hit on `/` does, and the two
+/// cannot drift apart across a rebuild.
 async fn serve_static(state: &AppState, uri: &Uri) -> Response {
     if let Some(dir) = &state.static_dir {
-        if let Ok(request) = Request::builder().uri(uri.clone()).body(Body::empty()) {
-            // `ServeDir`'s error type is `Infallible`, so a match (not `if let`)
-            // keeps the compiler from flagging an irrefutable pattern.
-            match ServeDir::new(dir.as_ref().as_path()).oneshot(request).await {
-                Ok(response) if response.status() != StatusCode::NOT_FOUND => {
-                    return response.map(Body::new);
-                }
-                _ => {}
-            }
+        let dir = dir.as_ref().as_path();
+        if let Some(mut response) = serve_file(dir, uri.path()).await {
+            set_cache_control(&mut response, uri.path());
+            return response;
+        }
+        if let Some(mut response) = serve_file(dir, "/index.html").await {
+            set_cache_control(&mut response, "/index.html");
+            return response;
         }
     }
-    (StatusCode::OK, Html(BOOTSTRAP_HTML)).into_response()
+    let mut response = (StatusCode::OK, Html(BOOTSTRAP_HTML)).into_response();
+    set_cache_control(&mut response, "/index.html");
+    response
+}
+
+/// One file out of a built bundle, or `None` if the bundle has no such file.
+async fn serve_file(dir: &std::path::Path, path: &str) -> Option<Response> {
+    let request = Request::builder().uri(path).body(Body::empty()).ok()?;
+    // `ServeDir`'s error type is `Infallible`, so a match (not `if let`) keeps
+    // the compiler from flagging an irrefutable pattern.
+    match ServeDir::new(dir).oneshot(request).await {
+        Ok(response) if response.status() != StatusCode::NOT_FOUND => Some(response.map(Body::new)),
+        _ => None,
+    }
+}
+
+/// Tell the browser how long it may keep what it was just given.
+///
+/// This is the half of content-hashed filenames that does the work: without it
+/// a rebuilt bundle is a rebuilt bundle the browser never asks for, and an
+/// admin reloads a page that is still running last week's build.
+fn set_cache_control(response: &mut Response, path: &str) {
+    let value = if is_hashed_asset(path) {
+        IMMUTABLE_CACHE_CONTROL
+    } else {
+        REVALIDATE_CACHE_CONTROL
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
 }
 
 /// Map an HTTP method token to the endpoint model's [`ApiMethod`].

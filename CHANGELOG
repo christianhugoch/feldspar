@@ -2,6 +2,29 @@
 
 Changes in reverse chronological order.
 
+## A rebuilt UI is a UI the browser fetches
+
+Both bundles pinned their entry points to `main.js` + `main.css`, because the server's
+`BOOTSTRAP_HTML` constant named them. A stable name is a name the browser has already
+cached: rebuild the admin UI, restart the server, reload — and the page is still running the
+old bundle until someone opens devtools and disables the cache.
+
+Both `vite.config.ts` files now keep Vite's default **content-hashed** output
+(`assets/index-<hash>.js`), and the server serves the bundle's own `index.html`, including
+as the history fallback for a client-routed deep link — the document is the only thing that
+knows the hashed names, so it is the only thing that can name them. `serve_static` and
+`serve_ide` share one `serve_file` helper, and both now set `Cache-Control`: a year and
+`immutable` for anything under `assets/` (a change to that file is a change to its URL), and
+`no-cache` — revalidate, not "don't store" — for the document, whose URL never changes.
+`sc-cli`'s build script checks for `dist/index.html` rather than `dist/main.js`, that being
+the one output whose name it can still know.
+
+`BOOTSTRAP_HTML` is now only what is served when there is **no** bundle, and it links no
+assets: it says the admin UI is not built. Naming a guessed entry point produced a blank page
+and a MIME-type error in the console — the symptom README §9 used to have to explain — where
+a sentence does. Tests cover the fallback document coming from the bundle, the two
+`Cache-Control` values on both bundles, and the no-bundle document.
+
 ## Roles belong to Users, not to the sidebar
 
 Roles had a top-level entry in the admin sidebar, which put a list nobody visits on its own next

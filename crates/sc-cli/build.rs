@@ -78,11 +78,15 @@ fn build_bundle(subdir: &str, env_var: &str, label: &str, build: bool) {
     run(&ui, ["ci"]);
     run(&ui, ["run", "build"]);
 
+    // `index.html` is what is checked for, rather than an entry script: entry
+    // filenames carry a content hash, so `index.html` is the one output whose
+    // name this script can know — and it is also the file the server serves, so
+    // its absence is exactly the failure worth catching here.
     let dist = ui.join("dist");
-    if !dist.join("main.js").exists() {
+    if !dist.join("index.html").exists() {
         panic!(
             "the {label} build did not produce {}",
-            dist.join("main.js").display()
+            dist.join("index.html").display()
         );
     }
     // Canonicalize so the embedded path is absolute regardless of run-time CWD.

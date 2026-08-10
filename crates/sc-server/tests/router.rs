@@ -115,30 +115,50 @@ fn cookie_value(cookies: &[String], name: &str) -> Option<String> {
     })
 }
 
-#[tokio::test]
-async fn serves_a_static_bundle_and_falls_back_to_bootstrap() {
-    // A temp "built bundle" with an entry file, served via `--static-dir`.
-    let dir = std::env::temp_dir().join(format!("sc-admin-bundle-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("main.js"), "export const x = 1;\n").unwrap();
+/// A temp "built bundle" — an `index.html` linking a content-hashed entry, the
+/// shape `vite build` produces — served via `--static-dir`. Cleaned up by the
+/// caller.
+fn admin_bundle(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sc-admin-bundle-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("assets/index-a1b2c3.js"), "export const x = 1;\n").unwrap();
+    std::fs::write(
+        dir.join("index.html"),
+        "<!doctype html><div id=\"root\"></div>\n\
+         <script type=\"module\" src=\"/assets/index-a1b2c3.js\"></script>\n",
+    )
+    .unwrap();
+    dir
+}
 
+fn static_router(dir: &std::path::Path) -> Router {
     let sessions = Arc::new(SessionStore::default());
     let config = ServerConfig {
-        static_dir: Some(dir.clone()),
+        static_dir: Some(dir.to_path_buf()),
         ..ServerConfig::default()
     };
-    let router = build_router(&test_endpoints(), test_registry(), sessions, &config).unwrap();
+    build_router(&test_endpoints(), test_registry(), sessions, &config).unwrap()
+}
+
+#[tokio::test]
+async fn serves_a_static_bundle_and_falls_back_to_its_document() {
+    let dir = admin_bundle("fallback");
+    let router = static_router(&dir);
 
     // The bundle asset is served from the static dir.
     let (status, _, body) = call(
         &router,
-        Request::get("/main.js").body(Body::empty()).unwrap(),
+        Request::get("/assets/index-a1b2c3.js")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("export const x"));
 
-    // An unknown (client-routed) path falls back to the bootstrap document.
+    // An unknown (client-routed) path falls back to the bundle's *own* document,
+    // which is the only thing that knows the hashed name of the entry to load.
+    // A constant here could only guess it, and would boot nothing.
     let (status, _, body) = call(
         &router,
         Request::get("/some/spa/route").body(Body::empty()).unwrap(),
@@ -146,6 +166,44 @@ async fn serves_a_static_bundle_and_falls_back_to_bootstrap() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<div id=\"root\"></div>"));
+    assert!(body.contains("/assets/index-a1b2c3.js"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A rebuilt bundle must be a bundle the browser actually fetches again.
+///
+/// The hashed name is half of that; these headers are the other half. The entry
+/// may be cached forever because changing it changes its URL, while the document
+/// — whose URL never changes, and which names the entry — must be revalidated on
+/// every load. Get the second wrong and a reload keeps booting the old build
+/// until someone empties the cache by hand.
+#[tokio::test]
+async fn hashed_assets_are_immutable_and_the_document_is_not() {
+    let dir = admin_bundle("cache");
+    let router = static_router(&dir);
+
+    for (path, expected) in [
+        (
+            "/assets/index-a1b2c3.js",
+            "public, max-age=31536000, immutable",
+        ),
+        ("/index.html", "no-cache"),
+        ("/", "no-cache"),
+        ("/some/spa/route", "no-cache"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            expected,
+            "{path}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -181,11 +239,13 @@ async fn serves_bootstrap_document_with_security_headers() {
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("<div id=\"root\"></div>"));
-    // No server-rendered admin markup and no inline script/style: the SPA loads
-    // via stable same-origin entry points that the strict CSP permits.
-    assert!(html.contains("<script type=\"module\" src=\"/main.js\">"));
-    assert!(html.contains("<link rel=\"stylesheet\" href=\"/main.css\">"));
+    // This router has no bundle, so what comes back says so rather than linking
+    // assets that are not there. Guessing a name would produce the blank page
+    // with a MIME-type error in the console instead of the sentence.
+    assert!(html.contains("not built"));
+    // No server-rendered admin markup and no inline script or style, so the
+    // strict CSP holds here too.
+    assert!(!html.contains("<script"));
     assert!(!html.contains("onclick"));
 }
 

@@ -148,7 +148,7 @@ you can supply it at run time instead — build the SPA yourself and point the s
 at the output with `--static-dir`:
 
 ```bash
-cd ui/admin && npm ci && npm run build   # outputs ui/admin/dist (main.js + main.css)
+cd ui/admin && npm ci && npm run build   # outputs ui/admin/dist (index.html + hashed assets/)
 cd ../..
 
 target/release/saltcorn serve --static-dir ui/admin/dist ...   # see §6
@@ -156,9 +156,11 @@ target/release/saltcorn serve --static-dir ui/admin/dist ...   # see §6
 
 That is also the quickest loop when you are *working on* the UI: what you serve is
 exactly the `dist` you point at, and rebuilding it does not rebuild the Rust binary.
-With neither the embedded bundle nor `--static-dir`, the browser shows only an empty
-bootstrap document (its `/main.js` and `/main.css` requests fall through to the
-fallback HTML). See §9 Troubleshooting.
+The bundle's entry points carry a content hash in their names, and the server serves
+the bundle's own `index.html` (including for client-routed deep links), so a rebuild
+is picked up by a plain reload — no cache to disable. With neither the embedded
+bundle nor `--static-dir`, the browser shows a document saying the admin UI is not
+built. See §9 Troubleshooting.
 
 ### The file-store IDE (`ui/ide`)
 
@@ -421,18 +423,17 @@ A `200` here means the process booted and is accepting requests.
   database exists (§4) — the server does not create it.
 - **Startup error mentioning the `users` table or permissions.** The connecting
   role cannot create tables. Make it the owner of the database (§4).
-- **Blank page; console shows `main.css`/`main.js` "MIME type ('text/html')"
-  errors.** The server is serving the fallback HTML document for `/main.js` and
-  `/main.css` because it has no admin bundle to serve. That means the binary was
-  built with `SC_BUILD_ADMIN` set to `0`/`false` — note it is a **build-time**
-  variable, so unsetting it on the run command changes nothing (see §5). Fix it
-  either way:
+- **The page says "The Saltcorn admin UI is not built".** The server has no admin
+  bundle to serve. That means the binary was built with `SC_BUILD_ADMIN` set to
+  `0`/`false` — note it is a **build-time** variable, so unsetting it on the run
+  command changes nothing (see §5). Fix it either way:
   - quickest: restart with `--static-dir ui/admin/dist` (after `npm run build` in
     `ui/admin`), or
   - rebuild the binary with `cargo build --release -p sc-cli` and `SC_BUILD_ADMIN`
     unset, then run without `--static-dir`.
-  Confirm with `curl -i http://localhost:3000/main.js` — a working setup returns
-  `content-type: text/javascript`, not `text/html`.
+  Confirm with `curl -i http://localhost:3000/` — a working setup returns a document
+  linking `/assets/index-<hash>.js`, and that URL returns
+  `content-type: text/javascript`.
 - **Login/session doesn't stick behind HTTPS.** Add `--secure-cookies` so the
   cookies are sent over TLS. Conversely, do **not** use `--secure-cookies` for
   plain-HTTP local development, or the browser will drop the cookies.
