@@ -425,9 +425,16 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // sequence and the live re-projection — is the schema editor's
                 // (§3.3), so an agent's `add_field` and this endpoint cannot
                 // drift.
+                //
+                // `type` is read as optional rather than required because a
+                // `Key`'s storage type is its target's, and the schema editor is
+                // the one that knows that — it fills the type in for a reference
+                // and names the omission for anything else. Requiring it here
+                // would make the admin UI ask for an answer it cannot know and
+                // the database would refuse.
                 let field = schema_edit::FieldSpec {
                     name: non_empty_str_field(obj, "name")?.to_owned(),
-                    type_name: non_empty_str_field(obj, "type")?.to_owned(),
+                    type_name: optional_str(obj, "type"),
                     label: optional_str(obj, "label"),
                     description: description.clone(),
                     required: optional_bool(obj, "required")?,
@@ -2010,6 +2017,9 @@ fn field_json(field: &DataField, description: &str) -> Json {
         "nullable": !field.required,
         "required": field.required,
         "unique": field.unique,
+        // Introspected, like `unique`: what a field editor needs to say which
+        // column a reference onto this table should point at by default.
+        "primary_key": field.primary_key,
         "kind": field_kind_json(&field.kind),
         "attributes": Json::Object(field.base.attributes.clone()),
     })

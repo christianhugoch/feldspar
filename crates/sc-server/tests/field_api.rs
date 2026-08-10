@@ -433,3 +433,105 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
 
     Ok(())
 }
+
+/// A **`Key` field created without a `type`**: the storage type is the target
+/// field's, worked out by the server rather than sent.
+///
+/// This is what lets the admin UI stop asking "stored as" — a question whose
+/// only correct answer is the one the target column already gives, and whose
+/// wrong answers are columns Postgres refuses to reference. The same request
+/// carries the target field and the summary field, so what a reference points at
+/// and what it is shown as are chosen together.
+#[tokio::test]
+async fn a_key_field_takes_its_storage_type_from_its_target() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+
+    // The table to point at, with a column to summarise rows by.
+    client
+        .send("POST", "/api/tables", Some(json!({ "name": "author" })))
+        .await;
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/author/fields",
+            Some(json!({ "name": "full_name", "type": "text" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // No `type` in the request at all.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({
+                "name": "written_by",
+                "kind": { "type": "key", "target_table": "author",
+                          "target_field": "id", "summary_field": "full_name" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["sql_type"],
+        json!("int8"),
+        "the type comes from `author.id`, not from the request: {body}"
+    );
+    assert_eq!(body["kind"]["target_table"], json!("author"));
+    assert_eq!(body["kind"]["target_field"], json!("id"));
+    assert_eq!(body["kind"]["summary_field"], json!("full_name"));
+
+    // It is a real foreign key in the database, not just an overlay.
+    let refs = _db
+        .client()
+        .await?
+        .query(
+            "SELECT c.conname FROM pg_constraint c \
+             WHERE c.conrelid = 'book'::regclass AND c.contype = 'f'",
+            &[],
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    assert_eq!(refs.len(), 1, "one foreign key on book");
+
+    // A field that is *not* a reference still needs a type, and the refusal says
+    // so rather than inventing one.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({ "name": "untyped" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("needs a type"),
+        "the error says a type is needed: {body}"
+    );
+
+    // A summary field the target does not have is refused by name.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({
+                "name": "bad_ref",
+                "kind": { "type": "key", "target_table": "author",
+                          "target_field": "id", "summary_field": "nickname" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nickname"),
+        "the error names the missing summary field: {body}"
+    );
+
+    Ok(())
+}

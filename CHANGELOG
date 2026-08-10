@@ -2,6 +2,44 @@
 
 Changes in reverse chronological order.
 
+## A key field is chosen, not typed
+
+Adding a `Key` field in the admin UI meant typing the target table's name, typing a field name
+in it, typing a summary field name, and then answering "stored as" — four questions, three of
+which the admin could only get right by remembering another table's columns, and one whose
+only correct answer was already written down in the column being pointed at. Every wrong answer
+came back as a refusal *after* the request: a table that does not exist, a column that does not
+exist, or a foreign key Postgres will not create because the two types differ.
+
+**Now all three are selects, and the fourth question is gone.** The target table is picked from
+the catalog (this table included — a parent link is a key onto its own table), and choosing one
+loads its fields so the target and summary fields are picked from what that table actually has.
+A reference is therefore valid by construction rather than by validation, and changing the
+target table re-checks both other selections against the new table instead of leaving a column
+name that belongs to the old one.
+
+**"Stored as" is not a question with an admin-supplied answer.** A key is stored as whatever it
+points at, so the request no longer carries a type at all: `createField` takes `type` as
+optional, and the schema editor — which already derived a key's storage from its target for
+callers that omitted it, agents included — is now the only thing that answers it. The form
+*reports* the type it will get (`Stored as int8, to match it`) beside the target field. Asking a
+question whose wrong answers are the only ones the caller could give was the bug; the fix is to
+stop asking rather than to validate harder.
+
+The one thing the form still guesses is which column a new key should point at by default, and
+`listFields` now reports `primary_key` alongside `unique` so it can guess from what the database
+says rather than from the name `id`. A table introspected from elsewhere may have no primary key
+at all, so the default falls back to the first unique column and then to the first column —
+every field stays listed, and an impossible target is still the database's to refuse.
+
+The Key form's model (`ui/admin/src/keyField.ts`) is separate from the screen and unit-tested:
+which field is the default target, what a selection becomes when the target table changes under
+it, that an unset summary field is omitted rather than sent as `""`, and that the request never
+carries a storage type. The server side is covered end to end in `field_api.rs` — a key created
+with no `type` gets its target's, is a real foreign key in the database, and a summary field the
+target does not have is refused by name — along with the refusal that keeps the relaxation
+honest: a field that is *not* a reference and names no type is still told it needs one.
+
 ## The password `saltcorn auth token` should never have asked for
 
 `auth token` (below) asked for a user's password. That was the wrong question, and asking it

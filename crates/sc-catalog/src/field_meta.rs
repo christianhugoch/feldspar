@@ -115,6 +115,13 @@ pub fn file_kind_config_spec() -> Vec<FormField> {
 /// The settings a `Key` field kind takes (§6.2), as [`FormField`]s. Mirrors
 /// [`file_kind_config_spec`]; the field names match the keys [`FieldMeta`] folds a
 /// `Key` kind's parameters into.
+///
+/// Unlike a `File`'s, this spec is what a `Key`'s parameters *are*, not the form
+/// the admin UI renders for them: the three depend on each other — the target and
+/// summary fields must be fields of the chosen table — and the `FormField`
+/// vocabulary has no way to say that one setting's options come from another's
+/// value. So the admin UI renders a Key by hand (`ui/admin/src/keyField.ts`) and
+/// this stays the machine-readable description of what the kind accepts.
 pub fn key_kind_config_spec() -> Vec<FormField> {
     vec![
         FormField::new(KEY_TARGET_TABLE, BasicType::Text)

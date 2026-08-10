@@ -1238,6 +1238,7 @@ fn field_schema() -> TypeSchema {
         StructField::new("nullable", TypeSchema::bool()),
         StructField::new("required", TypeSchema::bool()),
         StructField::new("unique", TypeSchema::bool()),
+        StructField::new("primary_key", TypeSchema::bool()),
         // `kind` and `attributes` are opaque JSON: their shape depends on the
         // field's kind and type, which the API cannot know statically any more
         // than it can a framework's settings.
@@ -1248,11 +1249,13 @@ fn field_schema() -> TypeSchema {
 
 /// The body accepted when **creating** a field. `type` is a basic-type or
 /// registered-rich-type name — `sql_type` is derived from it, not asked for, so
-/// the two can never disagree (§3.3). Everything past `name`/`type` is optional.
+/// the two can never disagree (§3.3). Everything past `name` is optional:
+/// `type` may be omitted for a `Key`, whose storage type is its target's and so
+/// is not the caller's to choose (`schema_edit::FieldSpec`).
 fn create_field_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("name", TypeSchema::text()),
-        StructField::new("type", TypeSchema::text()),
+        StructField::new("type", TypeSchema::optional(TypeSchema::text())),
         StructField::new("kind", TypeSchema::optional(TypeSchema::json())),
         StructField::new("attributes", TypeSchema::optional(TypeSchema::json())),
         StructField::new("label", TypeSchema::optional(TypeSchema::text())),

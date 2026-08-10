@@ -26,6 +26,14 @@ import type {
   ListFieldTypesResponse,
   ListTablesResponse,
 } from "../client";
+import {
+  EMPTY_KEY,
+  keyIsComplete,
+  keyKindRequest,
+  keyStorage,
+  reconcileKey,
+  type KeyKind,
+} from "../keyField";
 import { roleOptions, useRoles, type Roles } from "../roles";
 import { SettingsFields, buildConfig } from "../settings";
 
@@ -102,6 +110,9 @@ export function TableDetail({ table }: { table: string }) {
   const [fieldTypes, setFieldTypes] = useState<ListFieldTypesResponse | null>(null);
   const [rows, setRows] = useState<RowRecord[] | null>(null);
   const [settings, setSettings] = useState<TableSummary | null>(null);
+  // Every table in the catalog: what a Key field's target is chosen from. This
+  // table is included — a key onto its own table (a parent link) is legitimate.
+  const [tables, setTables] = useState<ListTablesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = async () => {
@@ -119,6 +130,7 @@ export function TableDetail({ table }: { table: string }) {
       setFields(f);
       setFieldTypes(ft);
       setRows(r as RowRecord[]);
+      setTables(t);
       setSettings(t.find((candidate) => candidate.name === table) ?? null);
     } catch {
       setError("Could not load the table.");
@@ -173,7 +185,13 @@ export function TableDetail({ table }: { table: string }) {
 
         <Row>
           <Col lg={5} className="mb-4">
-            <Fields table={table} fields={fields} fieldTypes={fieldTypes} onChange={load} />
+            <Fields
+              table={table}
+              fields={fields}
+              fieldTypes={fieldTypes}
+              tables={tables}
+              onChange={load}
+            />
           </Col>
           <Col lg={7} className="mb-4">
             <Rows table={table} fields={fields} rows={rows} onChange={load} />
@@ -415,11 +433,13 @@ function Fields({
   table,
   fields,
   fieldTypes,
+  tables,
   onChange,
 }: {
   table: string;
   fields: ListFieldsResponse | null;
   fieldTypes: ListFieldTypesResponse | null;
+  tables: ListTablesResponse | null;
   onChange: () => void;
 }) {
   const [name, setName] = useState("");
@@ -433,9 +453,10 @@ function Fields({
   // Attribute-form values (rich type attributes, or a kind's parameters),
   // keyed by spec-field name. Reset whenever the chosen type changes.
   const [attrs, setAttrs] = useState<Record<string, string>>({});
-  // A Key's stored SQL type must match the column it references; a File's is
-  // always text, so the picker only asks for this when a Key is chosen.
-  const [keyStorage, setKeyStorage] = useState("int8");
+  // A Key's parameters, which the generic attribute form cannot render: they
+  // depend on each other (see `keyField.ts`). Unused for any other kind.
+  const [keyKind, setKeyKind] = useState<KeyKind>(EMPTY_KEY);
+  const [targetFields, setTargetFields] = useState<ListFieldsResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -468,11 +489,44 @@ function Fields({
     }
   }, [calculated, selected, basicTypes]);
 
+  // The chosen target table's own fields, so the target and summary selects
+  // offer what that table actually has. Loaded here rather than from the tables
+  // listing because `listTables` reports settings, not columns — and a table's
+  // fields change under this screen as often as they are edited on it.
+  useEffect(() => {
+    const target = keyKind.target_table;
+    if (!target) {
+      setTargetFields(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listFields(target)
+      .then((list) => {
+        if (cancelled) return;
+        setTargetFields(list);
+        // Re-check the selects against what the table has: a target field left
+        // over from the previously chosen table would name a column of the
+        // wrong one.
+        setKeyKind((k) => (k.target_table === target ? reconcileKey(k, list) : k));
+      })
+      .catch(() => {
+        if (!cancelled) setError(`Could not read the fields of “${target}”.`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [keyKind.target_table]);
+
   const add = async (e: FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !selected) return;
     if (calculated && !expression.trim()) {
       setError("A calculated field needs a formula.");
+      return;
+    }
+    if (!calculated && selected.name === "key" && !keyIsComplete(keyKind)) {
+      setError("A key needs a table and a field to point at.");
       return;
     }
     setBusy(true);
@@ -484,10 +538,16 @@ function Fields({
         // type stays as the value's display type; the expression is the field.
         body.required = false;
         body.kind = { type: "calc", expression: expression.trim() };
+      } else if (selected.name === "key") {
+        // No `type`: a key is stored as whatever its target is stored as, and
+        // the server derives that from the field it points at rather than
+        // trusting an answer this form would have to guess.
+        delete body.type;
+        body.kind = keyKindRequest(keyKind);
       } else if (selected.category === "kind") {
-        // A kind carries its parameters in `kind`, and needs a storage type:
-        // text for a File, the chosen SQL type for a Key.
-        body.type = selected.name === "file" ? "text" : keyStorage;
+        // A File is a path, so it is stored as text; its parameters come from
+        // the kind's declared spec like any other settings form.
+        body.type = "text";
         body.kind = { type: selected.name, ...buildConfig(selected.config_spec, attrs) };
       } else if (selected.category === "rich") {
         body.attributes = buildConfig(selected.config_spec, attrs);
@@ -621,29 +681,25 @@ function Fields({
             </Form.Group>
           ) : (
             <>
-              {/* A Key needs a storage type matching the column it references. */}
-              {selected?.name === "key" && (
-                <Form.Group className="mb-2" controlId="fieldKeyStorage">
-                  <Form.Label>Stored as</Form.Label>
-                  <Form.Select value={keyStorage} onChange={(e) => setKeyStorage(e.target.value)}>
-                    {basicTypes.map((t) => (
-                      <option key={t.name} value={t.name}>
-                        {t.label}
-                      </option>
-                    ))}
-                  </Form.Select>
-                  <Form.Text muted>Match the type of the field this key references.</Form.Text>
-                </Form.Group>
+              {selected?.name === "key" ? (
+                // A Key's parameters are the one set the spec-driven form cannot
+                // render: each depends on the one above it.
+                <KeyFields
+                  tables={tables}
+                  targetFields={targetFields}
+                  value={keyKind}
+                  onChange={setKeyKind}
+                />
+              ) : (
+                /* The chosen type's own attributes / a kind's parameters, rendered
+                   from its spec — no per-type code lives here. */
+                <SettingsFields
+                  spec={selected?.config_spec ?? []}
+                  values={attrs}
+                  onChange={(key, v) => setAttrs((a) => ({ ...a, [key]: v }))}
+                  idPrefix="field-attr"
+                />
               )}
-
-              {/* The chosen type's own attributes / a kind's parameters, rendered
-                  from its spec — no per-type code lives here. */}
-              <SettingsFields
-                spec={selected?.config_spec ?? []}
-                values={attrs}
-                onChange={(key, v) => setAttrs((a) => ({ ...a, [key]: v }))}
-                idPrefix="field-attr"
-              />
 
               <Form.Check
                 className="mb-3"
@@ -661,6 +717,100 @@ function Fields({
         </Form>
       </Card.Body>
     </Card>
+  );
+}
+
+/**
+ * The parameter form for a `Key` field (design §3.4): what it points at, and
+ * what a row of the other table is shown as.
+ *
+ * Three selects rather than the spec-driven form, because the three settings are
+ * not independent — the target and summary fields are fields *of the chosen
+ * table*, and the storage type is the target field's, so it is reported rather
+ * than asked. Choosing from what exists is also what makes the reference valid
+ * by construction: a typed table or column name is a reference the server has to
+ * refuse after the fact.
+ */
+function KeyFields({
+  tables,
+  targetFields,
+  value,
+  onChange,
+}: {
+  tables: ListTablesResponse | null;
+  targetFields: ListFieldsResponse | null;
+  value: KeyKind;
+  onChange: (value: KeyKind) => void;
+}) {
+  const storage = keyStorage(value, targetFields ?? []);
+  return (
+    <>
+      <Form.Group className="mb-2" controlId="fieldKeyTable">
+        <Form.Label>
+          Target table<span className="text-danger"> *</span>
+        </Form.Label>
+        <Form.Select
+          value={value.target_table}
+          // The other two selects are about to describe a different table, so
+          // they are cleared here and re-defaulted once its fields arrive.
+          onChange={(e) =>
+            onChange({ target_table: e.target.value, target_field: "", summary_field: "" })
+          }
+        >
+          <option value="">Choose a table…</option>
+          {(tables ?? []).map((t) => (
+            <option key={t.name} value={t.name}>
+              {t.label || t.name}
+            </option>
+          ))}
+        </Form.Select>
+      </Form.Group>
+
+      <Form.Group className="mb-2" controlId="fieldKeyField">
+        <Form.Label>
+          Target field<span className="text-danger"> *</span>
+        </Form.Label>
+        <Form.Select
+          value={value.target_field}
+          disabled={!value.target_table || !targetFields}
+          onChange={(e) => onChange({ ...value, target_field: e.target.value })}
+        >
+          {!value.target_table && <option value="">Choose a table first</option>}
+          {(targetFields ?? []).map((f) => (
+            <option key={f.name} value={f.name}>
+              {f.name}
+              {f.primary_key ? " (primary key)" : f.unique ? " (unique)" : ""}
+            </option>
+          ))}
+        </Form.Select>
+        <Form.Text muted>
+          The column this key points at — it must be unique.
+          {storage && (
+            <>
+              {" "}
+              Stored as <code>{storage}</code>, to match it.
+            </>
+          )}
+        </Form.Text>
+      </Form.Group>
+
+      <Form.Group className="mb-3" controlId="fieldKeySummary">
+        <Form.Label>Summary field</Form.Label>
+        <Form.Select
+          value={value.summary_field}
+          disabled={!value.target_table || !targetFields}
+          onChange={(e) => onChange({ ...value, summary_field: e.target.value })}
+        >
+          <option value="">—</option>
+          {(targetFields ?? []).map((f) => (
+            <option key={f.name} value={f.name}>
+              {f.name}
+            </option>
+          ))}
+        </Form.Select>
+        <Form.Text muted>How a referenced row is shown. Optional.</Form.Text>
+      </Form.Group>
+    </>
   );
 }
 
