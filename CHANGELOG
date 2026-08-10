@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## An application's tables and file stores are ticked, not typed
+
+The application form asked for the two subsets an app is built out of — the tables it may
+access and the file stores it may read — as **comma-separated text**. Both are lists the server
+already has, and neither box checked anything as it was typed: a misspelt table came back as a
+refusal after the save, and a table that had since been dropped was not checked at all until the
+app failed to mount. It was the same shape of question the Key field used to ask, and it has the
+same answer.
+
+**Both are now multi-selects.** The box shows what is chosen as removable chips; the menu holds
+a filter, an **All** and a **None** button, a count (`2 of 4`), and one tick box per table or
+store with its label or description under it. A table's options come from `listTables` and a
+store's from `listFileStores`, so what can be chosen is what exists, and a listing that fails
+leaves an empty picker holding whatever the application already names rather than a screen that
+will not open.
+
+**A stored name the server does not offer stays visible and stays selected**, flagged in red with
+the reason — the same treatment a trigger that no longer exists already got on this screen. It is
+why the application will not mount, so the picker cannot be allowed to drop it silently on the
+next save; unticking it is one click. "All" selects the list in front of the admin, that row
+included, for the same reason.
+
+**It is hand-built rather than `react-select`** (`ui/admin/src/multiSelect.tsx`, ~40 lines of CSS
+in `admin.css`). The admin SPA is served under a strict Content-Security-Policy with `style-src
+'self'` and no `unsafe-inline`, asserted by `admin_theme.rs`; `react-select` styles itself with
+Emotion, which injects a stylesheet at runtime and would be blocked — the same reason the React
+scaffolder avoids CSS-in-JS. For that reason there is no Popper-positioned menu and no `style`
+attribute anywhere in the control either. It is a general control rather than two copies inside
+the form, so the trigger list and the static directories' `store` column can take it next.
+
+The model behind it is separate from the rendering and unit-tested (`multiSelect.test.ts`): which
+rows a list of options and a stored selection produce, that a name the server did not offer is
+kept and flagged at the end, what the filter matches, and that ticking is a pure function of what
+was selected — so All, then None, then one tick cannot leave a duplicate in the saved request.
+
 ## A key field is chosen, not typed
 
 Adding a `Key` field in the admin UI meant typing the target table's name, typing a field name

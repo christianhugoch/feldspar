@@ -22,7 +22,9 @@ import type {
   CreateApplicationRequest,
   ListApiProvidersResponse,
   ListApplicationsResponse,
+  ListFileStoresResponse,
   ListFrameworksResponse,
+  ListTablesResponse,
   ListTriggersResponse,
 } from "../client";
 import { navigate } from "../App";
@@ -38,22 +40,17 @@ import {
   supportsCustomQueries,
   type ApiRow,
 } from "../apiRows";
+import { MultiSelect } from "../multiSelect";
 import { CustomQueries } from "./CustomQueries";
 
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
 type TriggerItem = ListTriggersResponse[number];
 type ApiProviderInfo = ListApiProvidersResponse[number];
+type TableItem = ListTablesResponse[number];
+type FileStoreItem = ListFileStoresResponse[number];
 /** A `{ mount, store, path }` static-directory row. */
 type StaticRow = { mount: string; store: string; path: string };
-
-/** Split a comma/whitespace-separated list into trimmed, non-empty names. */
-function parseNames(raw: string): string[] {
-  return raw
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
 
 /** Render a CSP object as `directive: src1 src2` lines for the textarea. */
 function cspToText(csp: unknown): string {
@@ -84,8 +81,12 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   const [frameworks, setFrameworks] = useState<FrameworkInfo[] | null>(null);
   // The server's triggers, so the exposed subset is *picked* rather than typed:
   // a name that does not resolve is an application that will not mount, and the
-  // list is right here to choose from (unlike tables, which are not).
+  // list is right here to choose from. The tables and the file stores are here
+  // for the same reason, and were the last two subsets an admin had to type from
+  // memory as a comma-separated list.
   const [allTriggers, setAllTriggers] = useState<TriggerItem[]>([]);
+  const [allTables, setAllTables] = useState<TableItem[]>([]);
+  const [allFileStores, setAllFileStores] = useState<FileStoreItem[]>([]);
   // The API providers this server registers, for the same reason: a provider name
   // is the one field of an application whose typo survives the save and turns up
   // later as "unknown API provider" from a mount that failed.
@@ -99,8 +100,8 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   const [subdomain, setSubdomain] = useState("");
   const [frameworkName, setFrameworkName] = useState("");
   const [config, setConfig] = useState<Record<string, string>>({});
-  const [tables, setTables] = useState("");
-  const [fileStores, setFileStores] = useState("");
+  const [tables, setTables] = useState<string[]>([]);
+  const [fileStores, setFileStores] = useState<string[]>([]);
   const [triggers, setTriggers] = useState<string[]>([]);
   // A new application starts with REST at `/api`. An app with no API has no
   // endpoints, which for a React app means a generated client with no methods and
@@ -127,6 +128,11 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         // Likewise: a server that cannot list its providers still edits
         // applications, with the provider box falling back to free text.
         const provs = await api.listApiProviders().catch(() => [] as ApiProviderInfo[]);
+        // And likewise for the two subsets: a listing that fails leaves an empty
+        // picker holding whatever the application already names, rather than a
+        // screen that will not open.
+        const tbls = await api.listTables().catch(() => [] as TableItem[]);
+        const stores = await api.listFileStores().catch(() => [] as FileStoreItem[]);
         let existing: AppItem | undefined;
         if (appId) {
           existing = (await api.listApplications()).find((a) => a.id === appId);
@@ -139,14 +145,16 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         setFrameworks(fws);
         setAllTriggers(trigs);
         setAllProviders(provs);
+        setAllTables(tbls);
+        setAllFileStores(stores);
         if (existing) {
           setName(existing.name);
           setDescription(existing.description);
           setSubdomain(existing.subdomain);
           setFrameworkName(existing.framework.name);
           setConfig(readConfig(existing.framework.config));
-          setTables(existing.tables.join(", "));
-          setFileStores(existing.file_stores.join(", "));
+          setTables(existing.tables);
+          setFileStores(existing.file_stores);
           setTriggers(existing.triggers);
           setApis(apiRowsFromApp(existing.apis));
           setStaticDirs(
@@ -186,8 +194,8 @@ export function ApplicationForm({ appId }: { appId?: string }) {
           config: buildConfig(selected?.config_spec ?? [], config),
         },
         extra_frameworks: [],
-        tables: parseNames(tables),
-        file_stores: parseNames(fileStores),
+        tables,
+        file_stores: fileStores,
         triggers,
         apis: apiRowsToRequest(apis, allProviders),
         static_dirs: staticDirs.filter((d) => d.mount.trim() || d.path.trim()),
@@ -351,23 +359,43 @@ export function ApplicationForm({ appId }: { appId?: string }) {
 
           <Row>
             <Col md={6}>
-              <Form.Group className="mb-3" controlId="appTables">
-                <Form.Label>Tables</Form.Label>
-                <Form.Control
-                  value={tables}
-                  placeholder="posts, comments"
-                  onChange={(e) => setTables(e.target.value)}
+              <Form.Group className="mb-3">
+                <Form.Label htmlFor="appTables">Tables</Form.Label>
+                {/* The catalog, ticked — not a comma-separated list typed from
+                    memory. A table's label is worth showing beside its name for
+                    the same reason the tables screen shows it: the name is what
+                    the app addresses and the label is what it is. */}
+                <MultiSelect
+                  id="appTables"
+                  options={allTables.map((t) => ({
+                    value: t.name,
+                    description: t.label && t.label !== t.name ? t.label : t.description,
+                  }))}
+                  selected={tables}
+                  onChange={setTables}
+                  emptyText="This server has no tables yet."
                 />
                 <Form.Text muted>The tables this app may access.</Form.Text>
               </Form.Group>
             </Col>
             <Col md={6}>
-              <Form.Group className="mb-3" controlId="appFileStores">
-                <Form.Label>File stores</Form.Label>
-                <Form.Control
-                  value={fileStores}
-                  placeholder="apps, uploads"
-                  onChange={(e) => setFileStores(e.target.value)}
+              <Form.Group className="mb-3">
+                <Form.Label htmlFor="appFileStores">File stores</Form.Label>
+                <MultiSelect
+                  id="appFileStores"
+                  options={allFileStores.map((s) => ({
+                    value: s.name,
+                    // A store that is configured but unreachable is still a
+                    // legitimate choice — the app names it, and the connection is
+                    // the store's own problem to fix — so it is offered with the
+                    // fact attached rather than withheld.
+                    description: s.connected
+                      ? s.description
+                      : [s.description, "not connected"].filter(Boolean).join(" — "),
+                  }))}
+                  selected={fileStores}
+                  onChange={setFileStores}
+                  emptyText="This server has no file stores yet."
                 />
                 <Form.Text muted>The file stores this app may access.</Form.Text>
               </Form.Group>
@@ -444,7 +472,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
           <ApiRows
             rows={apis}
             providers={allProviders}
-            tables={parseNames(tables)}
+            tables={tables}
             onChange={setApis}
           />
 

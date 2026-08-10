@@ -821,3 +821,58 @@ div.navbar-brand > a:hover {
     padding-right: 0;
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * The multi-select (`multiSelect.tsx`)
+ *
+ * Bootstrap has no such control and Tabler adds none, so the box and its menu
+ * are assembled from `.form-select` and `.dropdown-menu` plus the four rules
+ * they cannot supply: a box that grows with its chips, a menu that is placed
+ * without Popper (hence `position: absolute` under a relative wrapper) and
+ * matches the box's width, and a list that scrolls rather than running off the
+ * bottom of the page when a server has fifty tables.
+ * ------------------------------------------------------------------ */
+
+.multiselect {
+  position: relative;
+}
+
+/* `.form-select` is a one-line block; this one holds a wrapping row of chips and
+   is as tall as it needs to be, with the height floor keeping an empty box the
+   same size as the inputs beside it. */
+.multiselect-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  height: auto;
+  min-height: calc(1.4285714286em + 0.5625rem + 2px);
+  cursor: pointer;
+}
+
+.multiselect-chip {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Tabler's close glyph is sized for a modal's corner; in a chip it has to fit
+   the line it sits on. */
+.multiselect-chip .btn-close {
+  width: 0.5rem;
+  height: 0.5rem;
+  background-size: 0.5rem;
+  padding: 0;
+}
+
+.multiselect-menu {
+  position: absolute;
+  inset-inline: 0;
+  top: 100%;
+  width: auto;
+  padding-top: 0.75rem;
+}
+
+.multiselect-options {
+  max-height: 15rem;
+  overflow-y: auto;
+}
