@@ -34,17 +34,17 @@ guessed id buys one attempt rather than an unlimited supply. The authority is th
 the row: whoever can write it could already do everything it grants; what they could not do —
 mint a session in another process's memory — is what this gives them, narrowly and briefly.
 
-**The base domain is in the documentation too**, because it is what the command actually stops
-on first. An application is served at `<subdomain>.<base-domain>` (§13.2), and `auth token`
-re-reads that from the `saltcorn.toml` environment it connects with rather than from the
-running server — so an environment carrying connection parameters and no `base_domain` gets
-`no base domain: … pass --base-domain, or set base_domain …`, which names a setting and cannot
-name a value. The generated documentation was written *by the process that knows the value*, so
-it gives it: `AGENTS.md` and the README now say what this server's base domain is, show the
-`base_domain = "…"` line to add and the `--base-domain …` flag to pass, and the README shows
-the error itself so the reader who arrived with it recognises where they are. A document
-written by a process that was never told a base domain still says where the value goes and
-still refuses to guess one.
+**The base domain is in the documentation only when the reader has to supply it.** An
+application is served at `<subdomain>.<base-domain>` (§13.2), so `auth token` needs one, and it
+is what the command stops on first when it has none. But a server that was told its base domain
+has already answered that question for the environment its generated documentation is about:
+the command as written in `AGENTS.md` and the README runs, and a paragraph explaining a setting
+the reader does not have to touch is noise in the files they read first. So the generated
+documents say nothing about it when this process knows the value. A document written by a
+process that was **not** told one cannot name it, and says what to add to the command line —
+`--base-domain <the server's base domain>` — which is the one place a reader inside a project
+directory can supply it. Neither document sends anybody to edit the server's `saltcorn.toml`:
+that file is the deployment's business, not the application project's.
 
 **And the documentation now names this server's roles.** `--role` takes a name, and nothing
 inside a project directory knows what an installation calls its roles, so a generated

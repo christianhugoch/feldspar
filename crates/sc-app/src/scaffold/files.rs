@@ -490,60 +490,34 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
 }
 
 /// The paragraph about the one thing `auth token` needs that this project cannot
-/// supply — and, when this process knows it, the value to supply.
+/// supply — written **only** when this process cannot supply it either.
 ///
-/// It is the first thing the command stops on, before any of the interesting
-/// parts: an application is served at `<subdomain>.<base-domain>` (§13.2) and the
-/// base domain is the *server's* configuration, which the command re-reads from
-/// `saltcorn.toml` rather than from the server's memory. A `saltcorn.toml`
-/// environment carrying database parameters and no `base_domain` is the normal
-/// way to have this happen, and the error it produces names a setting rather than
-/// a value — which is right for the command, and exactly what a document written
-/// *by the server that knows the value* can improve on.
+/// An application is served at `<subdomain>.<base-domain>` (§13.2), so the
+/// command needs a base domain, and a server that was told one has already
+/// answered the question for the environment this document is about: the command
+/// above runs as it is written, and a paragraph explaining a setting the reader
+/// does not have to touch is noise in the file they read first. A document
+/// written by a process that was *not* told one cannot name the value, so it says
+/// what to add to the command line — the one place a reader of this project can
+/// supply it — and nothing about the server's own configuration files, which are
+/// not this project's business.
 fn base_domain_section(ctx: &ProjectContext<'_>) -> String {
-    let Some(domain) = ctx.base_domain() else {
-        return "**It needs the server's base domain**, which is not in this \
-                project: an application is served at `<subdomain>.<base-domain>`, \
-                and the base domain is the server's own configuration. The \
-                process that wrote this file was not told one, so substitute the \
-                base domain of the server serving this application: put \
-                `base_domain = \"…\"` in the `saltcorn.toml` environment the \
-                command connects with (the one it names in its first line of \
-                output), or pass `--base-domain …` on the command line.\n\
-                \n"
-        .to_owned();
-    };
+    if ctx.base_domain().is_some() {
+        return String::new();
+    }
     format!(
-        "**It needs the server's base domain, which is `{domain}`.** An \
-         application is served at `<subdomain>.<base-domain>`, so this one is at \
-         `{url}` — and that base domain is the *server's* configuration, not \
-         anything in this project. `saltcorn auth token` re-reads it from the \
-         `saltcorn.toml` environment it connects with, rather than from the \
-         running server, so an environment that carries database parameters and \
-         no `base_domain` stops the command before it does anything:\n\
-         \n\
-         ```\n\
-         error: configuration error: no base domain: an application is served at \
-         `<subdomain>.<base-domain>`, so pass --base-domain, or set `base_domain` \
-         in the saltcorn.toml environment this is connecting with\n\
-         ```\n\
-         \n\
-         Fix it once, in the environment named in the command's own first line of \
-         output (`database configured from …`):\n\
-         \n\
-         ```toml\n\
-         [environments.production]\n\
-         # …the database parameters already there…\n\
-         base_domain = \"{domain}\"\n\
-         ```\n\
-         \n\
-         or pass it per invocation, which needs no file:\n\
+        "**It needs the server's base domain**, which is not in this project: an \
+         application is served at `<subdomain>.<base-domain>`, and the base \
+         domain is the server's own configuration. The process that wrote this \
+         file was not told one, so if the command stops with `no base domain`, \
+         name the base domain of the server serving this application on the \
+         command line:\n\
          \n\
          ```sh\n\
-         saltcorn auth token --app {subdomain} --admin --base-domain {domain}\n\
+         saltcorn auth token --app {subdomain} --admin --base-domain \
+         <the server's base domain>\n\
          ```\n\
          \n",
-        url = ctx.app_url_or_placeholder(),
         subdomain = ctx.app.subdomain,
     )
 }
@@ -608,7 +582,6 @@ fn testing_summary(ctx: &ProjectContext<'_>) -> String {
          the least privileged role that can see the screen being photographed.\n\
          \n\
          {base_domain_line}\
-         \n\
          **[`{REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}`]({REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}) \
          has the whole procedure**: the `curl` form, what each role is for, what \
          the session can and cannot do, and how long it lasts.\n",
@@ -621,32 +594,24 @@ fn testing_summary(ctx: &ProjectContext<'_>) -> String {
     )
 }
 
-/// `AGENTS.md`'s version of [`base_domain_section`]: the value and the two ways
-/// to give it, in one paragraph.
+/// `AGENTS.md`'s version of [`base_domain_section`]: one line, and only when
+/// there is something for the reader to do.
 ///
 /// Here rather than only in the README because it is not an explanation, it is
 /// the thing that stops the pasted command above from working — and a reader who
 /// has to open another file to get past their first error has already lost the
-/// loop this section is about.
+/// loop this section is about. Nothing at all when this process knows the base
+/// domain: the command above then works as it stands.
 fn base_domain_line(ctx: &ProjectContext<'_>) -> String {
-    match ctx.base_domain() {
-        Some(domain) => format!(
-            "**It also needs the server's base domain**, which is `{domain}` — an \
-             application is served at `<subdomain>.<base-domain>`, and that is the \
-             server's configuration rather than this project's. The command reads \
-             it from the `saltcorn.toml` environment it connects with, so if it \
-             stops with `no base domain`, add `base_domain = \"{domain}\"` to that \
-             environment (the one it names in its first line of output) or pass \
-             `--base-domain {domain}`.\n"
-        ),
-        None => "**It also needs the server's base domain** — an application is \
-                 served at `<subdomain>.<base-domain>`, and that is the server's \
-                 configuration rather than this project's. The command reads it \
-                 from the `saltcorn.toml` environment it connects with, so if it \
-                 stops with `no base domain`, add `base_domain = \"…\"` to that \
-                 environment or pass `--base-domain …`.\n"
-            .to_owned(),
+    if ctx.base_domain().is_some() {
+        return String::new();
     }
+    "**It also needs the server's base domain** — an application is served at \
+     `<subdomain>.<base-domain>`, and the process that wrote this file was not \
+     told this server's. If the command stops with `no base domain`, add \
+     `--base-domain <the server's base domain>` to it.\n\
+     \n"
+    .to_owned()
 }
 
 /// `src/saltcorn/README.md`: what this directory is, and the one command that
@@ -2226,27 +2191,21 @@ mod tests {
                 !doc.contains("base domain>"),
                 "{path} should not still be describing a URL it knows: {doc}"
             );
-            // `auth token` re-reads the base domain from `saltcorn.toml` rather
-            // than from the running server, so an environment without one stops
-            // it before anything else it says can matter. This document knows the
-            // value — it was written by the process that was told it — so it
-            // gives it rather than describing the setting.
+            // A server that was told its base domain has answered the question
+            // for the environment this document is about: the `auth token`
+            // command runs as written, so the document says nothing about a
+            // setting the reader does not have to touch — and nothing at all
+            // about the server's configuration file, which is not this project's
+            // business.
             assert!(
-                doc.contains("base_domain = \"example.com\""),
-                "{path} should say what to put in saltcorn.toml: {doc}"
+                !doc.contains("--base-domain"),
+                "{path} should not ask for a base domain it knows: {doc}"
             );
             assert!(
-                doc.contains("--base-domain example.com"),
-                "{path} should also give the per-invocation form: {doc}"
+                !doc.contains("saltcorn.toml"),
+                "{path} should not send the reader to a config file: {doc}"
             );
         }
-        // The README, which is the one that explains, shows the error the reader
-        // arrived with.
-        let readme = file(&known, "src/saltcorn/README.md");
-        assert!(
-            readme.contains("error: configuration error: no base domain"),
-            "{readme}"
-        );
 
         // Not told: the placeholder, and a note saying which piece is missing —
         // rather than `localhost`, which would be wrong everywhere else.
@@ -2257,11 +2216,10 @@ mod tests {
                 doc.contains("http://todo.<the server's base domain>"),
                 "{path}: {doc}"
             );
+            // The one place a reader of *this* project can supply it: the
+            // command line. Never the server's `saltcorn.toml`.
             assert!(doc.contains("--base-domain"), "{path}: {doc}");
-            // It still says where the value goes, without inventing one — a
-            // generated document that guessed a domain would be wrong in the
-            // file a reader trusts most.
-            assert!(doc.contains("saltcorn.toml"), "{path}: {doc}");
+            assert!(!doc.contains("saltcorn.toml"), "{path}: {doc}");
             assert!(!doc.contains("localhost"), "{path}: {doc}");
         }
     }
