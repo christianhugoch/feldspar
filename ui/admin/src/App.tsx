@@ -26,7 +26,6 @@ import {
   IconLogout,
   IconMoon,
   IconRobot,
-  IconShieldLock,
   IconSun,
   IconTable,
   IconUsers,
@@ -142,7 +141,7 @@ type NavItem = {
   matches: string[];
 };
 
-const NAV: NavItem[] = [
+export const NAV: NavItem[] = [
   { href: "#/tables", label: "Tables", icon: <IconTable />, matches: ["/tables"] },
   {
     href: "#/applications",
@@ -166,8 +165,15 @@ const NAV: NavItem[] = [
     // admin UI has any use for one.
     matches: ["/agents", "/llm-providers"],
   },
-  { href: "#/users", label: "Users", icon: <IconUsers />, matches: ["/users"] },
-  { href: "#/roles", label: "Roles", icon: <IconShieldLock />, matches: ["/roles"] },
+  {
+    href: "#/users",
+    label: "Users",
+    icon: <IconUsers />,
+    // Roles hang off this section rather than standing beside it, the way LLM
+    // providers hang off Agents: a role exists to be held by a user, and the
+    // way to the list is a button on the Users screen.
+    matches: ["/users", "/roles"],
+  },
 ];
 
 /** The authenticated admin shell: Tabler's vertical layout around the screen. */

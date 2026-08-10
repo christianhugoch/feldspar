@@ -2,6 +2,16 @@
 
 Changes in reverse chronological order.
 
+## Roles belong to Users, not to the sidebar
+
+Roles had a top-level entry in the admin sidebar, which put a list nobody visits on its own next
+to the sections that are actually worked in. It is now reached the way LLM providers are reached
+from Agents: a **Roles** button in the Users page header. The Users entry claims `/roles` as well
+as `/users`, so the sidebar still marks the section an admin is standing in, and the Roles screen
+carries `Users` as its pretitle. A new `nav.test.ts` asserts the arrangement for both pairs — no
+sidebar entry of its own, and the owning section still lit up — so a screen cannot end up
+reachable with the sidebar pointing nowhere.
+
 ## A React app can be the whole file store
 
 The `react` framework's **project directory** was required, and there was no way to say "the app

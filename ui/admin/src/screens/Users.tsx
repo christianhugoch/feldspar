@@ -16,6 +16,7 @@ import Table from "react-bootstrap/Table";
 
 import { api } from "../api";
 import type { ListUsersResponse } from "../client";
+import { navigate } from "../App";
 import { PageBody, PageHeader } from "../layout";
 import { roleLabel, useRoles } from "../roles";
 
@@ -58,7 +59,15 @@ export function Users() {
 
   return (
     <>
-      <PageHeader pretitle="Access" title="Users" />
+      <PageHeader
+        pretitle="Access"
+        title="Users"
+        actions={
+          <Button variant="outline-secondary" onClick={() => navigate("/roles")}>
+            Roles
+          </Button>
+        }
+      />
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
 

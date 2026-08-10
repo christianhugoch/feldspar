@@ -4,7 +4,9 @@
 // scale, a name, and — in its attributes — whatever role-specific settings
 // arrive later. `users.role` is a foreign key onto it, so this screen is a
 // prerequisite for the Users screen rather than a decoration: a user cannot hold
-// a role that does not exist here.
+// a role that does not exist here. That is also why it is reached from a button
+// on Users rather than from the sidebar: nothing but a user has a use for a
+// role, so it belongs to that section rather than beside it.
 //
 // Admin (1) and Public (100) are marked built in and cannot be deleted. Without
 // the first nobody can administer anything; without the second an anonymous
@@ -80,7 +82,7 @@ export function Roles() {
 
   return (
     <>
-      <PageHeader pretitle="Access" title="Roles" />
+      <PageHeader pretitle="Users" title="Roles" />
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
 
