@@ -1577,6 +1577,67 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- settings -----------------------------------------------------------
+    //
+    // `_sc_config` (§9), rendered from its declarations: the response carries
+    // the sections and their fields alongside the values, so the screen is
+    // generic over what a setting is — the same arrangement the file-store and
+    // provider forms have. Two things happen *here* rather than in the store:
+    // secrets are redacted on the way out and the sentinel merged back on the
+    // way in (§11.1), and a certificate is parsed before it is saved, because a
+    // key that does not match its chain must fail in front of the admin rather
+    // than at the next restart (§13.5).
+    reg.register("getSettings", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move { Ok(HandlerResponse::ok(settings_json(&catalog).await?)) }
+        }
+    });
+
+    reg.register("updateSettings", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let submitted = match ctx.body.get("values") {
+                    Some(Json::Object(values)) => values.clone(),
+                    Some(Json::Null) | None => Attrs::new(),
+                    Some(other) => {
+                        return Err(Error::invalid(format!(
+                            "`values` should be an object of settings, got {other}"
+                        )));
+                    }
+                };
+                let stored = sc_config::all_config(&catalog).await?;
+                let spec = sc_config::config_spec();
+                // The secret the form sent back untouched is the sentinel it was
+                // shown, not the key: restore what is stored.
+                let values = sc_types::merge_secrets(&spec, &stored, &submitted);
+
+                // What the settings *mean together* is checked before anything
+                // is written: `custom` with no certificate, or a certificate its
+                // key does not match, is refused as one act rather than saved as
+                // half a configuration.
+                let merged = {
+                    let mut merged = stored.clone();
+                    for (key, value) in &values {
+                        merged.insert(key.clone(), value.clone());
+                    }
+                    merged
+                };
+                let ssl = sc_config::ssl_settings_from(&merged)?;
+                ssl.check()?;
+                if ssl.mode == sc_config::SslMode::Custom {
+                    crate::tls::check_certificate(&ssl.certificate, &ssl.private_key)?;
+                }
+
+                sc_config::set_config_many(&catalog, &values).await?;
+                Ok(HandlerResponse::ok(settings_json(&catalog).await?))
+            }
+        }
+    });
+
     reg.register("listApplications", {
         let catalog = catalog.clone();
         move |_ctx| {
@@ -3190,6 +3251,42 @@ fn build_log(report: &sc_app::BuildReport) -> String {
         log.push_str(&report.stderr);
     }
     log
+}
+
+/// The settings screen's whole payload: what may be set, and what is set
+/// (matching `settings_schema`).
+///
+/// The values are [`redacted`](sc_types::redact_attrs) here, at the one place
+/// they are serialised, so a secret setting cannot leak through a second reader
+/// added later — the rule §11.1 states for an API key, applied to the private
+/// key an admin pastes into the TLS section.
+async fn settings_json(catalog: &Catalog) -> Result<Json> {
+    let sections: Vec<Json> = sc_config::config_sections()
+        .iter()
+        .map(|section| {
+            json!({
+                "name": section.name,
+                "label": section.label,
+                "description": section.description,
+                "fields": section
+                    .fields
+                    .iter()
+                    .map(|def| {
+                        let mut field = form_field_json(&def.field);
+                        if let Json::Object(map) = &mut field {
+                            map.insert("help".to_owned(), Json::from(def.help));
+                        }
+                        field
+                    })
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let values = sc_types::redact_attrs(
+        &sc_config::config_spec(),
+        &sc_config::all_config(catalog).await?,
+    );
+    Ok(json!({ "sections": sections, "values": Json::Object(values) }))
 }
 
 /// A [`FormField`] as the API returns it (matching `form_field_schema`): enough

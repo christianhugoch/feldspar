@@ -2,6 +2,77 @@
 
 Changes in reverse chronological order.
 
+## The server can be reached over HTTPS, and settings have somewhere to live
+
+Two things arrive together because neither is much use alone: a **settings table**, and the
+first settings worth putting in it — **TLS certificates**, from Let's Encrypt or from the
+admin's own paste (§13.5).
+
+**`_sc_config`** is a new crate, `sc-config` (layer 5), and it is a key and a JSON value per
+row. What makes it a settings table rather than a bag is that **every key is declared** — as
+a `FormField`, the same vocabulary a file store's backend and an LLM provider declare their
+settings in (§6.2), carrying a type, a label, a default, an optional set of allowed values,
+`multiline` and `secret`. A write is validated against that declaration, so `https_port =
+"yes"` is a message in front of the admin rather than a row, and a key nobody declared is
+refused rather than stored where nothing would ever read it. Reading is strict for the same
+reason; a row whose key no declaration describes is *reportable* (`stray_config_keys`) and
+deletable rather than silently obeyed or silently ignored.
+
+**TLS** is the first section. `ssl_mode` is `off`, `letsencrypt` or `custom`; `custom` takes a
+PEM chain and key, `letsencrypt` takes a contact address and a **directory URL** — so "Let's
+Encrypt" is a default rather than a hard-coding, and a staging directory or a private CA is a
+value in a text box. `sc-server::tls` turns the stored settings into a serving plan and an
+`axum-server` accept seam that both sources reach the listener through: a fixed
+`rustls::ServerConfig` for a pasted certificate, `rustls-acme`'s acceptor for an ACME one. The
+admin UI and every application are served by it, because they are one listener with a `Host`
+router behind them.
+
+Five decisions worth stating, each because the alternative looks reasonable until it bites:
+
+- **TLS-ALPN-01, not HTTP-01.** Validation happens *inside* the handshake the server already
+  terminates, so there is no `/.well-known/acme-challenge` route to keep in step, and nothing
+  an application's own routes can shadow. The price is that the CA must reach the TLS port,
+  which for Let's Encrypt means 443.
+- **ALPN advertises `http/1.1` only.** A WebSocket over HTTP/2 needs RFC 8441's extended
+  CONNECT, which axum's `ws` does not implement, so advertising `h2` would trade the agent
+  chat and the IDE's language server for multiplexing on an admin console.
+- **The ACME cache is a table** (`_sc_acme_cache`), keyed by the digest of the domain list and
+  the directory URL. On disk it would mean each node ordering its own certificate — a
+  rate-limit incident waiting for the deployment that scales out — and a key that does not
+  distinguish orders would mean serving a staging certificate in production.
+- **The certificate is checked where it is pasted.** A key that does not match its chain fails
+  on Save, carrying rustls's own message, rather than at the next restart when nobody is
+  watching and the symptom is a server that will not bind.
+- **A stored setting that cannot serve stops the boot.** Falling back to plain HTTP would leave
+  an admin who configured TLS serving an unencrypted admin UI and no way to find out.
+
+With TLS on there are two listeners — the `--bind` address and the TLS port beside it — bound
+before either serves and stopped by one signal. The plain one answers with a **308** (not a
+301: a 301 lets a client turn a `POST` into a `GET`, which for an API request is a write
+quietly becoming a read), unless the admin turns the redirect off to serve both ways. Session
+cookies become `Secure` on their own, and the public origin carries the HTTPS port.
+
+The admin UI gains a **Settings** entry in the sidebar — the installation's own section, one
+entry however many sections of settings the server grows. The screen knows **nothing about any
+particular setting**: it renders the declarations the API hands it and posts back what was
+edited, so adding a setting is a Rust declaration and a redeployed server. The private key is a
+`secret`, so it reaches the browser as the sentinel and a save that hands the sentinel back
+leaves the stored key alone — the §11.1 rule an API key lives under, applied to a certificate's
+key, and the thing that stops editing an unrelated setting from destroying a working
+certificate.
+
+Tests cover the type check on write against real Postgres (including a batch save that lands
+*nothing* when one value in it is bad), the ACME cache as two nodes over one database, the
+settings API's declarations and its secret round trip, the four ways a configuration is
+refused — and, because a handshake is the one thing a `tower::oneshot` cannot exercise, a
+**real HTTPS request** against a self-signed certificate generated in-process, with an
+untrusted client refused beside it so the first test cannot pass against a server presenting
+anything at all.
+
+Not built, and named rather than implied: per-application config scope (§9 allows it; every key
+today is installation-wide), certificate changes without a restart, and §13.5's other half, the
+systemd readiness notification.
+
 ## A rebuilt UI is a UI the browser fetches
 
 Both bundles pinned their entry points to `main.js` + `main.css`, because the server's

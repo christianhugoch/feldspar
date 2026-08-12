@@ -30,6 +30,7 @@ mod reload;
 mod router;
 mod security;
 mod serve;
+mod tls;
 mod triggers;
 
 pub use agents::{AgentServices, install_agents};
@@ -57,4 +58,8 @@ pub use router::{
 pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::serve;
+pub use tls::{
+    TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,
+    redirect_router, serve_https, tls_domains,
+};
 pub use triggers::{fire_startup, install_triggers, start_scheduler};

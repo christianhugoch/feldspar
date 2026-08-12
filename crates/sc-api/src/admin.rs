@@ -1128,6 +1128,34 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // --- settings -----------------------------------------------------------
+    // The `_sc_config` values an admin edits (§9, §13.5). Two endpoints, and
+    // both carry the **declarations** alongside the values, for the same reason
+    // the file-store and LLM-provider screens are handed a `config_spec`: the
+    // settings screen renders whatever the server declares and knows nothing
+    // about any particular setting. Adding one is a Rust declaration and a
+    // redeployed server, with no matching change in the SPA.
+    //
+    // The save returns the settings as they now stand rather than an
+    // acknowledgement, so the screen shows what was stored — including the
+    // defaults a cleared box fell back to, and the sentinel standing in for a
+    // secret it must not be handed back.
+    set.register(
+        Endpoint::new("getSettings", Method::Get, api().lit("settings"))
+            .output(settings_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("updateSettings", Method::Post, api().lit("settings"))
+            .input(TypeSchema::struct_of([StructField::new(
+                "values",
+                TypeSchema::json(),
+            )]))
+            .output(settings_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
     set
 }
 
@@ -1889,6 +1917,44 @@ fn query_column_schema() -> TypeSchema {
         StructField::new("name", TypeSchema::text()),
         StructField::new("type", TypeSchema::text()),
     ])
+}
+
+/// The whole settings screen in one response: what may be set, and what is set.
+///
+/// `values` is opaque JSON — a bag keyed by the declared settings' names — for
+/// the same reason a file store's `config` is: its shape is the declarations',
+/// which are data, and a static type could only describe it by freezing it.
+/// Secrets in it are the redaction sentinel, never the stored value.
+fn settings_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("sections", TypeSchema::array(settings_section_schema())),
+        StructField::new("values", TypeSchema::json()),
+    ])
+}
+
+/// One group of settings: its heading, what it is for, and its keys.
+fn settings_section_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("fields", TypeSchema::array(settings_field_schema())),
+    ])
+}
+
+/// A settings key: the same declaration every other configurable thing carries,
+/// plus the sentence a settings screen has room to put under the control.
+fn settings_field_schema() -> TypeSchema {
+    let TypeSchema::Struct(fields) = form_field_schema() else {
+        // `form_field_schema` is a struct literal one function away; this arm
+        // exists because the type says it might not be, not because it can.
+        return form_field_schema();
+    };
+    TypeSchema::struct_of(
+        fields
+            .into_iter()
+            .chain([StructField::new("help", TypeSchema::text())]),
+    )
 }
 
 /// One settings field of a framework's `config_spec`: enough for the admin UI to

@@ -36,6 +36,13 @@ describe("the admin sidebar", () => {
     expect(activeLabels("/llm-providers")).toEqual(["Agents"]);
   });
 
+  /** Settings is the installation's own section, so it *does* have an entry —
+   * and one entry however many sections of settings the server declares. */
+  it("has a single entry for settings", () => {
+    expect(NAV.filter((item) => item.label === "Settings")).toHaveLength(1);
+    expect(activeLabels("/settings")).toEqual(["Settings"]);
+  });
+
   it("gives every entry a route that lights it up", () => {
     for (const item of NAV) {
       expect(activeLabels(item.href.replace(/^#/, ""))).toContain(item.label);

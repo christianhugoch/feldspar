@@ -104,6 +104,9 @@ export type DeleteTriggerResponse = { deleted: boolean };
 export type RunTriggerRequest = unknown;
 export type RunTriggerResponse = { result: unknown };
 export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
+export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; help: string }> }>; values: unknown };
+export type UpdateSettingsRequest = { values: unknown };
+export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; help: string }> }>; values: unknown };
 
 export interface ApiClient {
   authStatus(): Promise<AuthStatusResponse>;
@@ -176,6 +179,8 @@ export interface ApiClient {
   deleteTrigger(id: string): Promise<DeleteTriggerResponse>;
   runTrigger(id: string, body: RunTriggerRequest): Promise<RunTriggerResponse>;
   listActions(): Promise<ListActionsResponse>;
+  getSettings(): Promise<GetSettingsResponse>;
+  updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
 }
 
 export interface ClientOptions {
@@ -815,6 +820,23 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listActions", res);
       return (await res.json()) as ListActionsResponse;
+    },
+    async getSettings() {
+      const res = await doFetch(`${baseUrl}/api/settings`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getSettings", res);
+      return (await res.json()) as GetSettingsResponse;
+    },
+    async updateSettings(body) {
+      const res = await doFetch(`${baseUrl}/api/settings`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateSettings", res);
+      return (await res.json()) as UpdateSettingsResponse;
     },
   };
 }

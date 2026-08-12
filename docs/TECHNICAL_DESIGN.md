@@ -778,7 +778,8 @@ a sparse value goes into `attributes`.**
 | `_sc_runs` | workflow & agent runs | current context + state, updated after each step; `kind` discriminates `agent` from `workflow`, so a chat session and a durable run are one mechanism (§11.4) |
 | `_sc_run_traces` | per-step context + timing | only when tracing is enabled for that workflow |
 | `_sc_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
-| `_sc_config` | configuration | scoped to whole setup or one application; per-key value-type restriction; values stored as JSON |
+| `_sc_config` | configuration | key + JSON value, one row per setting. Every key is **declared** as a `FormField` in `sc-config` (§6.2's vocabulary), which is what types it: a write is validated against the declaration and an undeclared key is refused, so the admin UI renders the settings screen from the declarations and knows nothing about any particular setting. Per-application scope is not built yet — today's keys are all installation-wide (§13.5) |
+| `_sc_acme_cache` | ACME account + issued certificates | not configuration and not admin-visible: opaque bytes keyed by the digest of the domain list and the CA directory URL (§13.5), in the database so a renewal survives a restart and a second node does not order its own |
 | `_sc_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
 | `_sc_models` | model definitions | provider + config fields |
 | `_sc_model_instances` | fitted model instances | parameters, hyperparameters, fit metadata |
@@ -3028,6 +3029,36 @@ posture of §16.
 Both modes feed the same rustls `ServerConfig`; switching modes does not change how the
 listener is set up. Plain-HTTP serving (behind a trusted proxy, or for local development)
 remains available.
+
+**As built.** `sc-config` declares the TLS section of `_sc_config` (`ssl_mode` ∈
+`off`/`letsencrypt`/`custom`, the pasted chain and key, the ACME contact and directory URL,
+extra domains, `https_port`, `redirect_http_to_https`); `sc-server::tls` turns those into a
+serving plan and an `axum-server` acceptor — a fixed `rustls::ServerConfig` for a pasted
+certificate, `rustls-acme`'s acceptor for an ACME one — and `sc-cli` reads the settings at
+boot, after the mounts, so the certificate covers the base domain plus every mounted app's
+subdomain. Five decisions worth stating:
+
+- **TLS-ALPN-01, not HTTP-01.** Validation happens inside the handshake the server already
+  terminates, so no `/.well-known/acme-challenge` route exists to be shadowed by an
+  application's own routes or forgotten behind a redirect. The cost is that the CA must reach
+  the TLS port itself.
+- **ALPN advertises `http/1.1` only.** WebSockets over HTTP/2 need RFC 8441 extended CONNECT,
+  which axum's `ws` does not implement; advertising `h2` would trade the agent chat (§11.4)
+  and the IDE's language server (§12.1) for multiplexing on an admin console.
+- **The ACME cache is a table** (`_sc_acme_cache`), keyed by the digest of the domain list and
+  the directory URL, so a renewal survives a restart, a second node serves what the first
+  ordered, and pointing a deployment at the staging directory misses rather than serving the
+  wrong certificate.
+- **The private key is a `secret` `FormField`** — redacted by the settings endpoints, restored
+  from the sentinel on save — and it is *not* encrypted at rest, the same statement §11.1
+  makes about an LLM provider's API key.
+- **A certificate is checked where it is pasted**, and a stored setting that cannot serve stops
+  the boot rather than falling back to plain HTTP: an admin who configured TLS and got HTTP
+  would not find out from the server.
+
+With TLS on there are two listeners — the bind address (plain HTTP, redirecting with a **308**
+so a redirected `POST` stays a `POST`, unless the admin turns the redirect off) and the TLS
+port beside it — and one shutdown signal stops both.
 
 **Readiness notification.** On systemd-managed Linux, `sc-server` sends `READY=1` via the
 `sd_notify` protocol once it has bound its listener(s) and the catalog is initialised, so the

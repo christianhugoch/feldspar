@@ -368,6 +368,56 @@ covered by a test rather than a promise.
 
 ---
 
+## Out of band — settings and TLS certificates (§13.5)
+
+Taken because a deployment that cannot serve HTTPS needs a reverse proxy in front of it, and
+because the settings table the design has always called for (§9's `_sc_config`) had no
+implementation — so the first setting anybody wanted had nowhere to live.
+
+- [x] **`_sc_config`**, in a new `sc-config` crate (layer 5): key + JSON value, one row per
+      setting. Every key is **declared** as a `FormField` (§6.2's vocabulary — type, label,
+      default, options, `secret`, `multiline`), so a write is checked against its declaration
+      and an undeclared key is refused rather than stored where nothing reads it. Reading is
+      strict for the same reason; a stray row is reportable (`stray_config_keys`) and
+      deletable.
+- [x] **The TLS section**: `ssl_mode` (`off`/`letsencrypt`/`custom`), the pasted chain and key,
+      the ACME contact and directory URL, extra domains, `https_port`,
+      `redirect_http_to_https`. `SslSettings::check` is what the mode *means* — `custom` with
+      no certificate, `letsencrypt` with no contact — checked on save, not at the next boot.
+- [x] **`sc-server::tls`**: a serving plan (`TlsSettings`) and one `axum-server` accept seam
+      both certificate sources reach the listener through — a fixed `rustls::ServerConfig` for
+      a pasted certificate, `rustls-acme`'s acceptor for an ACME one. TLS-ALPN-01, so no
+      challenge route exists to shadow; ALPN advertises `http/1.1` only, because a WebSocket
+      over HTTP/2 needs RFC 8441 and axum's `ws` does not implement it.
+- [x] **Two listeners under one shutdown signal**: the bind address (a 308 to HTTPS by
+      default, so a redirected `POST` stays a `POST`) and the TLS port beside it. Both bound
+      before either serves, so a port that cannot be had names itself at startup.
+- [x] **`_sc_acme_cache`**, keyed by the digest of the domain list + directory URL, so a
+      renewal survives a restart and a second node serves what the first ordered. The
+      `rustls-acme` cache traits are implemented in `sc-server` over `sc-config`'s two methods,
+      because naming somebody's trait is the upper layer's business.
+- [x] **The boot path** reads the settings after the mounts (so the certificate covers the base
+      domain and every mounted app's subdomain), turns on `Secure` cookies, and puts the HTTPS
+      port in the public origin. A stored setting that cannot serve **stops the boot**.
+- [x] **`getSettings`/`updateSettings`** and a **Settings** entry in the admin sidebar. The
+      response carries the declarations with the values, so the screen renders settings it
+      knows nothing about; the private key is redacted on the way out and the sentinel merged
+      back on the way in; a save is validated whole and refused whole.
+- [x] Tests: the table's type check on write, over real Postgres, including a batch save that
+      lands nothing when one value is bad and a stray key that is reported rather than read;
+      the ACME cache as two nodes over one database; the settings API's declarations, its
+      secret round trip, and the four ways a configuration is refused; a **real handshake**
+      against a self-signed certificate generated in-process, and an untrusted client being
+      refused; the redirect's status, target and preserved path; and the screen's model —
+      typed values out, sentinel preserved, defaults restored.
+
+**Not built.** Per-application config scope (§9 describes `_sc_config` as scoped to the whole
+setup *or* one application; every key today is installation-wide). Reloading certificates
+without a restart — the plan is read at boot, so a renewal is `rustls-acme`'s business and a
+*mode* change is a restart. The systemd readiness notification (§13.5's other half).
+
+---
+
 ## Carried past this milestone
 
 - **One-to-many embeds in `select`** (`select=departments(name,employees(name))`). The read is

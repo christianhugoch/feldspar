@@ -13,9 +13,10 @@ members = [
     "crates/sc-types",
     # Layer 4 — catalog
     "crates/sc-catalog",
-    # Layer 5 — users/auth, files
+    # Layer 5 — users/auth, files, configuration values
     "crates/sc-auth",
     "crates/sc-files",
+    "crates/sc-config",
     # Layer 6 — actions & triggers, and the LLM provider seam
     "crates/sc-action",
     "crates/sc-llm",
@@ -60,6 +61,7 @@ sc-types = { path = "crates/sc-types" }
 sc-catalog = { path = "crates/sc-catalog" }
 sc-auth = { path = "crates/sc-auth" }
 sc-files = { path = "crates/sc-files" }
+sc-config = { path = "crates/sc-config" }
 sc-action = { path = "crates/sc-action" }
 sc-llm = { path = "crates/sc-llm" }
 sc-agent = { path = "crates/sc-agent" }
@@ -185,6 +187,51 @@ mime_guess = "2"
 # workbench, bridged to a `typescript-language-server` process on the server.
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
+
+# --- TLS termination (design §13.5) ------------------------------------------
+#
+# The server terminates TLS itself so a deployment needs no reverse proxy, and
+# it does it with **rustls** — the same stack `reqwest` already brings, and no
+# OpenSSL anywhere in the tree (§16).
+#
+# `axum-server` is the piece axum does not have: `axum::serve` takes a
+# `TcpListener` and knows nothing about a TLS handshake, whereas `axum-server`
+# accepts through an `Accept` implementation — which is exactly the seam both
+# certificate sources plug into (a fixed rustls config for a pasted
+# certificate, `rustls-acme`'s acceptor for an ACME one). `tls-rustls` rather
+# than `tls-rustls-no-provider` so rustls's `aws-lc-rs` provider is compiled in
+# and can be installed by name at boot: two crypto providers reach the tree
+# (this and `ring`, via other dependencies), and rustls refuses to guess between
+# them.
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+# Building a `ServerConfig` from a pasted certificate, and installing the
+# process-wide crypto provider. Version-pinned with `axum-server` and
+# `rustls-acme`, which both hand us `rustls` types — two rustls versions in one
+# binary would be two unrelated `ServerConfig`s that do not typecheck against
+# each other.
+rustls = { version = "0.23", default-features = false, features = [
+    "aws-lc-rs",
+    "logging",
+    "std",
+    "tls12",
+] }
+# Parsing the admin's pasted PEM. Deliberately a parser rather than a
+# hand-rolled base64 splitter: "which of PKCS#8, PKCS#1 and SEC1 is this key?"
+# is not a question to answer with `starts_with`.
+rustls-pemfile = "2"
+# The ACME client (§13.5): pure Rust, no `certbot` process, and it answers the
+# **TLS-ALPN-01** challenge inside the TLS handshake it is already terminating —
+# so there is no HTTP-01 route to open on port 80 and nothing to keep in step
+# with the router. `tokio` is the runtime feature; `axum` supplies the
+# `axum-server` acceptor so both certificate sources reach the listener the same
+# way.
+rustls-acme = { version = "0.15", features = ["tokio", "axum"] }
+# Certificate generation **for tests only** (a dev-dependency wherever it is
+# used): a TLS test needs a certificate, and the two alternatives — checking one
+# into the repository or asking a CA for one — are a key in git and a network
+# dependency respectively. Already in the tree as `rustls-acme`'s own
+# dependency, pinned here so there is one version of it.
+rcgen = "0.13"
 # Base64 for carrying file bytes across the JSON file-manager API (§14.1). The
 # file endpoints reuse the same typed-JSON dispatch as the rest of the admin API
 # rather than special-casing binary routes, so file contents ride in JSON as

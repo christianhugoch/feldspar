@@ -1,0 +1,40 @@
+[package]
+name = "sc-config"
+description = "The `_sc_config` table: typed, admin-editable configuration values (layer 5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# `FormField` is the one vocabulary a configurable thing declares itself in
+# (§6.2): a configuration key is a `FormField` with a section around it, so the
+# admin UI renders settings with the same code it renders a file store's config
+# with, and `validate_attrs` is the type check on write.
+sc-types.workspace = true
+# `_sc_config` is a table like every other piece of stored metadata (§9), so
+# this crate speaks the query language and reads rows back out of the driver.
+sc-catalog.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+serde_json.workspace = true
+# The ACME cache stores opaque bytes (an account key, a certificate chain) in a
+# text column, and base64 is what makes "opaque bytes" and "text column" the
+# same thing.
+base64.workspace = true
+# The cache key is the digest of the domain list + directory URL: a cache entry
+# has to be found again by what it is *for*, and that is a list of arbitrary
+# length rather than a column value.
+sha2.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+sc-db.workspace = true
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+
+[lints]
+workspace = true

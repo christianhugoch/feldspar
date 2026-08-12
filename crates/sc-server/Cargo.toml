@@ -41,9 +41,21 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-query.workspace = true
 sc-types.workspace = true
+# The settings an admin edits (§13.5): the TLS section is read at boot to decide
+# how the listener is set up, and written by the settings endpoints this crate
+# serves. The ACME cache is a table there too, because it is *what this
+# deployment serves TLS with* rather than anything this crate should own.
+sc-config.workspace = true
 
 tokio.workspace = true
 axum.workspace = true
+# TLS termination (§13.5). `axum-server` is the acceptor seam both certificate
+# sources reach the listener through; `rustls` + `rustls-pemfile` build a config
+# from a pasted certificate; `rustls-acme` obtains and renews one from a CA.
+axum-server.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rustls-acme.workspace = true
 # The chat socket's client protocol, parsed rather than hand-matched (§11.4).
 serde = { workspace = true }
 # The async trait the provider connector is expressed as (§11.4) — and, in the
@@ -66,6 +78,15 @@ rust_decimal.workspace = true
 [dev-dependencies]
 sc-test-harness.workspace = true
 tokio-tungstenite.workspace = true
+# Certificates for the TLS tests, generated in-process: a test must not carry a
+# checked-in key (it would expire, and a repository is not where keys live) and
+# must not reach a CA. `rcgen` is already in the tree — `rustls-acme` builds its
+# challenge certificates with it.
+rcgen.workspace = true
+# An HTTPS *client* for the end-to-end TLS test: the one thing a
+# `tower::oneshot` cannot exercise is the handshake, because the handshake
+# happens below the service.
+reqwest.workspace = true
 # The scripted provider (`sc-agent`'s `testing` feature, decision 7): the chat
 # socket is driven through a whole turn without a vendor and without a token.
 sc-agent = { workspace = true, features = ["testing"] }

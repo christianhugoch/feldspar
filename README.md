@@ -299,6 +299,41 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 > fatal, and can be fixed and rebuilt without a restart. Without a base domain the
 > server has no way to address an app, so it serves the admin only.
 
+### HTTPS
+
+TLS is **not** a flag: it is configured in the admin UI under **Settings → SSL / TLS
+certificates**, stored in `_sc_config`, and read at boot. Two sources, and both serve
+the admin UI and every application:
+
+| `ssl_mode` | What happens |
+|---|---|
+| `off` (default) | plain HTTP — right for local development and for a deployment behind a TLS-terminating proxy |
+| `letsencrypt` | certificates obtained and renewed from an ACME CA. Give it a contact email; the CA directory URL is a setting, so a staging directory or a private CA is a value in a text box |
+| `custom` | paste a PEM certificate chain and private key. Refused on save if they are not valid PEM or do not match each other |
+
+With TLS on, the server binds **two** listeners: the `--bind` address, which answers
+plain HTTP, and the `https_port` setting (default 443) beside it. The plain one
+redirects to HTTPS by default (`redirect_http_to_https`); switch it off to serve the
+application on both. Session cookies become `Secure` automatically.
+
+ACME notes:
+
+- Validation uses the **TLS-ALPN-01** challenge, inside the TLS handshake — so the CA
+  must reach `https_port` on a public address (443 for Let's Encrypt), and there is no
+  HTTP challenge route to keep clear.
+- The certificate covers the base domain, every mounted application's subdomain, and
+  anything listed in `ssl_extra_domains`. **Adding an application adds a name at the
+  next restart**, which is when the order is built.
+- The account key and the issued certificates are cached in the database
+  (`_sc_acme_cache`), so a renewal survives a restart and a second node serves what the
+  first one ordered instead of ordering its own.
+- Try `https://acme-staging-v02.api.letsencrypt.org/directory` first. Its certificates
+  are untrusted; its rate limits are not.
+
+Settings that do not serve are refused where they are typed, and a stored setting that
+cannot serve **stops the boot** rather than silently falling back to plain HTTP — an
+admin who configured TLS and got HTTP would not find out from the server.
+
 ### Building one application from the command line
 
 ```bash

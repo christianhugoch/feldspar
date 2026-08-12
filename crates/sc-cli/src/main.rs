@@ -106,12 +106,33 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // catalog, and ensure the users table exists. A bad connection fails here
     // with a clear message rather than a server that boots then 500s.
     let catalog = connect_catalog(&db).await?;
+
+    // How this process serves TLS is a **stored setting**, not a flag (§13.5):
+    // the certificate an admin pastes and the ACME account it renews through
+    // live in `_sc_config`, so every node against one database serves the same
+    // thing and a renewal is not a deploy. Read here, before anything is
+    // announced, because it decides the port the outside world reaches this
+    // server on — which is what the public origin and the cookie's `Secure`
+    // attribute are about to be built from.
+    let ssl = sc_config::ssl_settings(&catalog).await?;
+    if ssl.enabled() {
+        // A session cookie sent over the HTTPS this process is about to serve is
+        // a cookie that should not travel over anything else. The flag stays as
+        // a way to turn it on *without* TLS here (a TLS-terminating proxy in
+        // front), so this only ever adds.
+        config.secure_cookies = true;
+    }
     // Where this process serves its applications, recorded for the project
     // generator: an app's `AGENTS.md` and `src/saltcorn/README.md` name the URL
     // to open, and this is the only place that knows it (§13.2).
     if let Some(domain) = &config.base_domain {
+        let port = if ssl.enabled() {
+            ssl.https_port
+        } else {
+            config.addr.port()
+        };
         catalog.set_public_origin(
-            sc_catalog::PublicOrigin::new(domain, config.addr.port()).secure(config.secure_cookies),
+            sc_catalog::PublicOrigin::new(domain, port).secure(config.secure_cookies),
         );
     }
     // Connect the file stores configured in the admin UI. One that fails — a
@@ -161,6 +182,22 @@ async fn serve_command(args: &[String]) -> Result<()> {
         mount_all(&apps).await;
     }
 
+    // The certificate's names, now that the mounts are known: the base domain,
+    // every mounted application's subdomain, and whatever else the admin listed
+    // (§13.5). Adding an application therefore adds a name to the next order —
+    // at the next restart, which is when the ACME client is built. A settings
+    // mistake stops the boot rather than quietly serving plain HTTP: an admin
+    // who configured TLS and got HTTP would not find out from the server.
+    config.tls = sc_server::TlsSettings::from_ssl(
+        &ssl,
+        sc_server::tls_domains(
+            config.base_domain.as_deref(),
+            &apps.subdomains(),
+            &ssl.extra_domains,
+        ),
+        Some(sc_config::AcmeCache::new(catalog.clone())),
+    )?;
+
     // Everything is up — catalog, file stores, applications, triggers — and the
     // listener has not been announced yet, which is exactly what the `startup`
     // event means.
@@ -178,7 +215,14 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // bounded cache in front of the table, so the common case is still a map
     // lookup.
     let sessions = Arc::new(SessionStore::database(catalog.clone()));
-    eprintln!("saltcorn: listening on http://{}", config.addr);
+    if config.tls.enabled() && config.tls.redirect_http() {
+        eprintln!(
+            "saltcorn: listening on http://{} (redirecting to HTTPS)",
+            config.addr
+        );
+    } else {
+        eprintln!("saltcorn: listening on http://{}", config.addr);
+    }
     let handlers = admin_handlers(catalog, apps.clone());
     serve(config, admin_endpoints(), handlers, sessions, apps).await
 }

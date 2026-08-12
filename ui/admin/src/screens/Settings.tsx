@@ -1,0 +1,179 @@
+// Settings screen: the values in `_sc_config`, rendered from their declarations.
+//
+// This screen knows **nothing about any particular setting**. The server sends
+// sections, each with a list of fields carrying the same declaration a file
+// store's backend or an LLM provider sends (`settings.tsx`'s `FieldSpec`), plus
+// a sentence of help; this renders whatever arrives and posts back what was
+// edited. Adding a setting is a Rust declaration and a redeployed server — there
+// is no matching change here, which is the point of declaring settings as data
+// (§6.2, §13.5).
+//
+// Two behaviours are worth naming because they are not obvious from the code:
+//
+// - **A secret arrives as the sentinel** and is posted back unchanged unless the
+//   admin types over it, which is how the private key stays editable without
+//   ever being sent to the browser (`SettingField` handles the input itself).
+// - **Saving is one act.** The server validates the whole payload — including
+//   what the settings mean together, like `custom` mode with no certificate —
+//   and refuses it whole, so this form never leaves half a configuration
+//   applied. The message it refuses with is the server's own, because "the
+//   certificate and private key do not match" is worth more than anything this
+//   screen could invent.
+
+import { useEffect, useState, type FormEvent } from "react";
+import Alert from "react-bootstrap/Alert";
+import Button from "react-bootstrap/Button";
+import Spinner from "react-bootstrap/Spinner";
+
+import { api } from "../api";
+import type { GetSettingsResponse } from "../client";
+import { AlertBody, PageBody, PageHeader } from "../layout";
+import {
+  SettingField,
+  buildConfig,
+  initialValues,
+  readConfig,
+  type FieldSpec,
+} from "../settings";
+
+/** One section as the API describes it. */
+type Section = GetSettingsResponse["sections"][number];
+
+/** Every field of every section, flattened — the spec the payload is built
+ * against, since the save is one bag of values rather than one per section. */
+export function allFields(sections: Section[]): FieldSpec[] {
+  return sections.flatMap((section) => section.fields);
+}
+
+/** What Save sends: every declared setting, with an emptied box as `null`.
+ *
+ * `buildConfig` drops an empty optional value, which is right where a config is
+ * stored as one bag (the whole bag is replaced, so a dropped key is a cleared
+ * one) and wrong here, where each setting is its own row: an omitted key would
+ * mean "leave it as it was", and clearing a box would do nothing at all. `null`
+ * is what the server reads as "clear this setting", returning it to its
+ * declared default. */
+export function settingsPayload(
+  spec: FieldSpec[],
+  values: Record<string, string>,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = { ...buildConfig(spec, values) };
+  for (const field of spec) {
+    if (!(field.name in payload)) payload[field.name] = null;
+  }
+  return payload;
+}
+
+export function Settings() {
+  const [sections, setSections] = useState<Section[] | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  /** Take a settings response as the form's state. */
+  const adopt = (response: GetSettingsResponse) => {
+    setSections(response.sections);
+    setValues(initialValues(allFields(response.sections), readConfig(response.values)));
+  };
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        adopt(await api.getSettings());
+      } catch {
+        setError("Could not load the settings.");
+      }
+    })();
+  }, []);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!sections) return;
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      // The response is what was *stored*, not what was sent: a cleared box
+      // comes back as the declared default, and a secret as the sentinel.
+      adopt(await api.updateSettings({ values: settingsPayload(allFields(sections), values) }));
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save the settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!sections) {
+    return (
+      <>
+        <PageHeader title="Settings" />
+        <PageBody>
+          {error ? (
+            <Alert variant="danger">{error}</Alert>
+          ) : (
+            <Spinner animation="border" role="status" />
+          )}
+        </PageBody>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <PageHeader title="Settings" />
+      <PageBody>
+        {error && (
+          <Alert variant="danger">
+            <AlertBody>{error}</AlertBody>
+          </Alert>
+        )}
+        {saved && (
+          <Alert variant="success" dismissible onClose={() => setSaved(false)}>
+            <AlertBody>
+              Settings saved. Certificate and port changes take effect when the server
+              restarts.
+            </AlertBody>
+          </Alert>
+        )}
+
+        <form onSubmit={(e) => void save(e)}>
+          {sections.map((section) => (
+            <div className="card mb-4" key={section.name}>
+              <div className="card-header">
+                <div>
+                  <h3 className="card-title">{section.label}</h3>
+                  <p className="card-subtitle text-secondary mb-0">{section.description}</p>
+                </div>
+              </div>
+              <div className="card-body">
+                {section.fields.map((field) => (
+                  <div key={field.name}>
+                    <SettingField
+                      field={field}
+                      value={values[field.name] ?? ""}
+                      onChange={(v) => setValues((current) => ({ ...current, [field.name]: v }))}
+                      idPrefix={`setting-${section.name}`}
+                    />
+                    {/* The help sits under the control rather than in the label:
+                        these are sentences, and a label is a name. */}
+                    {field.help && (
+                      <div className="form-hint mt-n2 mb-3 text-secondary">{field.help}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          <div className="btn-list">
+            <Button type="submit" disabled={busy}>
+              {busy ? "Saving…" : "Save settings"}
+            </Button>
+          </div>
+        </form>
+      </PageBody>
+    </>
+  );
+}

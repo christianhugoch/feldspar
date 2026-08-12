@@ -26,6 +26,10 @@ sc-files.workspace = true
 sc-llm.workspace = true
 # `_sc_agents` and `_sc_runs`, bootstrapped beside the other metadata tables.
 sc-agent.workspace = true
+# `_sc_config` and the ACME cache, bootstrapped the same way — and read at boot,
+# because how this process serves TLS is a stored setting rather than a flag
+# (§13.5).
+sc-config.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 tokio.workspace = true

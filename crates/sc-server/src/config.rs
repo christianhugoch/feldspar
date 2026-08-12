@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use sc_error::{Error, Result};
 
+use crate::tls::TlsSettings;
+
 /// Default address the server binds when `--bind` is not given.
 pub const DEFAULT_BIND: &str = "127.0.0.1:3000";
 
@@ -44,6 +46,15 @@ pub struct ServerConfig {
     /// request reaches the admin. App routing is opt-in because without a base
     /// domain to anchor it, a request's own `Host` header would choose its app.
     pub base_domain: Option<String>,
+    /// How this server obtains the certificate it serves HTTPS with (§13.5).
+    ///
+    /// **Not a command-line setting**, deliberately: certificates are edited in
+    /// the admin UI and stored in `_sc_config`, so every node against one
+    /// database serves the same thing and a renewal is not a deploy. The boot
+    /// path reads the settings and fills this in
+    /// ([`TlsSettings::from_ssl`](crate::tls::TlsSettings::from_ssl)); the
+    /// default is [`Off`](TlsSettings::Off), which is plain HTTP.
+    pub tls: TlsSettings,
 }
 
 impl Default for ServerConfig {
@@ -58,6 +69,7 @@ impl Default for ServerConfig {
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,
             base_domain: None,
+            tls: TlsSettings::Off,
         }
     }
 }

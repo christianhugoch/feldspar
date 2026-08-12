@@ -26,6 +26,7 @@ import {
   IconLogout,
   IconMoon,
   IconRobot,
+  IconSettings,
   IconSun,
   IconTable,
   IconUsers,
@@ -46,6 +47,7 @@ import { LlmProviders } from "./screens/LlmProviders";
 import { LlmProviderForm } from "./screens/LlmProviderForm";
 import { Login } from "./screens/Login";
 import { Roles } from "./screens/Roles";
+import { Settings } from "./screens/Settings";
 import { Tables } from "./screens/Tables";
 import { TableDetail } from "./screens/TableDetail";
 import { Triggers } from "./screens/Triggers";
@@ -173,6 +175,15 @@ export const NAV: NavItem[] = [
     // providers hang off Agents: a role exists to be held by a user, and the
     // way to the list is a button on the Users screen.
     matches: ["/users", "/roles"],
+  },
+  {
+    href: "#/settings",
+    label: "Settings",
+    icon: <IconSettings />,
+    // Last, and one entry however many sections it grows: settings are about
+    // the *installation* rather than about anything in it, and an admin looks
+    // for them in one place rather than under whichever thing they configure.
+    matches: ["/settings"],
   },
 ];
 
@@ -443,6 +454,9 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   if (route.startsWith("/roles")) {
     return <Roles />;
+  }
+  if (route.startsWith("/settings")) {
+    return <Settings />;
   }
   return <Tables />;
 }

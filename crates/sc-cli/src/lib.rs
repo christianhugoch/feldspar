@@ -72,6 +72,9 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_agent::bootstrap_runs(&catalog)
         .await
         .context("ensuring the runs table exists")?;
+    sc_config::bootstrap(&catalog)
+        .await
+        .context("ensuring the configuration tables exist")?;
     Ok(catalog)
 }
 
