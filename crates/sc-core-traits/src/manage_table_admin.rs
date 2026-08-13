@@ -46,8 +46,9 @@
 //! because a guess costs a turn or a wrong column: the **type names are an enum
 //! built from the live registry**, so `varchar(255)` cannot be invented; a
 //! **foreign key is `references: <table>`**, with the storage type taken from the
-//! target's primary key rather than asked for; and a **created table gets an
-//! identity primary key unasked**.
+//! target's primary key rather than asked for; and a **table is created with the
+//! key its fields declare** — no `id` is invented (GOALS), so a model that wants
+//! one says `primary_key: true` on a field, exactly as an admin ticks the box.
 
 use sc_agent::{AgentTrait, TraitCheck, TraitContext};
 use sc_api::schema_edit::{
@@ -436,9 +437,13 @@ fn edit_description(grants: &Grants, rls_available: bool) -> String {
          in one call rather than one table per call — a foreign key may point at a \
          table created earlier in the same list, and a formula may name a field \
          added earlier in it.\n\n\
-         Every created table is given an identity primary key called `id`; do not \
-         declare one. A foreign key is `references: <table name>` — its storage \
-         type comes from that table's primary key and must not be given.\n\n\
+         No primary key is invented: a table has the key its fields declare, so \
+         give one field `primary_key: true` — an `int` key numbers itself and a \
+         `uuid` key generates itself, and more than one field with it makes a \
+         composite key. A table with no key at all is allowed, but cannot be \
+         edited row by row or referenced by another table. A foreign key is \
+         `references: <table name>` — its storage type comes from that table's \
+         primary key and must not be given.\n\n\
          {permitted} {access}{rls}\n\n\
          Call `{TOOL_DESCRIBE}` first if you are changing something that already \
          exists; `{ARG_DRY_RUN}` validates a batch and applies none of it."
@@ -523,6 +528,16 @@ fn edit_parameters() -> Json {
                             "type": "boolean",
                             "description": "The column carries a unique constraint.",
                         },
+                        "primary_key": {
+                            "type": "boolean",
+                            "description":
+                                "This field is (part of) the table's primary key. \
+                                 Nothing invents one, so a table that should be \
+                                 editable row by row or referenced by another \
+                                 table needs a field that says this. On \
+                                 `alter_field` it adds an existing column to the \
+                                 key, or takes it out.",
+                        },
                         "label": {
                             "type": "string",
                             "description":
@@ -536,8 +551,10 @@ fn edit_parameters() -> Json {
                         "fields": {
                             "type": "array",
                             "description":
-                                "The table's fields, for `create_table`. Do not \
-                                 include `id` — every created table is given one.",
+                                "The table's fields, for `create_table`. Include \
+                                 the key: one field with `primary_key: true` \
+                                 (conventionally `id`, of type `int` or `uuid`), \
+                                 because nothing adds one for you.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -548,6 +565,7 @@ fn edit_parameters() -> Json {
                                     "expression": { "type": "string" },
                                     "required": { "type": "boolean" },
                                     "unique": { "type": "boolean" },
+                                    "primary_key": { "type": "boolean" },
                                     "label": { "type": "string" },
                                     "description": { "type": "string" },
                                 },
@@ -755,6 +773,7 @@ fn parse_field_settings(obj: &Map<String, Json>) -> Result<FieldSettings> {
         type_name: optional_string(obj, "type")?,
         kind,
         attributes: None,
+        primary_key: optional_bool(obj, "primary_key")?,
     })
 }
 
@@ -776,6 +795,7 @@ fn parse_field_spec(item: &Json) -> Result<FieldSpec> {
         description: optional_string(obj, "description")?.unwrap_or_default(),
         required: optional_bool(obj, "required")?.unwrap_or(false),
         unique: optional_bool(obj, "unique")?.unwrap_or(false),
+        primary_key: optional_bool(obj, "primary_key")?.unwrap_or(false),
         kind: field_kind(obj)?.unwrap_or(DataFieldKind::Plain),
         attributes: Attrs::new(),
     })

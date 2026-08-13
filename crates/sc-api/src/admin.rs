@@ -1387,16 +1387,20 @@ pub fn admin_endpoints() -> EndpointSet {
     // here, a trigger on a table the admin left out. Reporting that as success
     // would hide it and as failure would be wrong.
     set.register(
-        Endpoint::new("restoreBackup", Method::Post, api().lit("backup").lit("restore"))
-            .input(TypeSchema::struct_of([
-                StructField::new("id", TypeSchema::text()),
-                StructField::new("include", backup_selection_schema()),
-            ]))
-            .output(TypeSchema::struct_of([
-                StructField::new("restored", TypeSchema::array(TypeSchema::text())),
-                StructField::new("warnings", TypeSchema::array(TypeSchema::text())),
-            ]))
-            .auth(AuthRequirement::admin()),
+        Endpoint::new(
+            "restoreBackup",
+            Method::Post,
+            api().lit("backup").lit("restore"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("id", TypeSchema::text()),
+            StructField::new("include", backup_selection_schema()),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("restored", TypeSchema::array(TypeSchema::text())),
+            StructField::new("warnings", TypeSchema::array(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
     );
 
     set
@@ -1579,6 +1583,10 @@ fn field_schema() -> TypeSchema {
         StructField::new("required", TypeSchema::bool()),
         StructField::new("unique", TypeSchema::bool()),
         StructField::new("primary_key", TypeSchema::bool()),
+        // Whether the column fills itself in when a write omits it. A fact about
+        // the column read back by introspection, not a wish recorded when it was
+        // created, so it stays true however the field came to be a key.
+        StructField::new("generated", TypeSchema::bool()),
         // `kind` and `attributes` are opaque JSON: their shape depends on the
         // field's kind and type, which the API cannot know statically any more
         // than it can a framework's settings.
@@ -1602,12 +1610,22 @@ fn create_field_schema() -> TypeSchema {
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         StructField::new("required", TypeSchema::optional(TypeSchema::bool())),
         StructField::new("unique", TypeSchema::optional(TypeSchema::bool())),
+        // The key is a field like any other (GOALS): a table is created with no
+        // primary key at all, and gets one when a field says it is one. More
+        // than one field may, and then the key is composite in field order.
+        StructField::new("primary_key", TypeSchema::optional(TypeSchema::bool())),
     ])
 }
 
-/// The body accepted when **editing** a field — the overlay-only subset. No
-/// `name`, `required`, `unique` or storage type: those are the database's, and
-/// changing them is a schema change out of scope for this milestone.
+/// The body accepted when **editing** a field — the overlay-only subset, plus
+/// the one column property that must be reachable after the fact. No `name`,
+/// `required`, `unique` or storage type: those are the database's, and changing
+/// them is a schema change out of scope for this milestone.
+///
+/// `primary_key` is the exception, and a considered one: since no table is
+/// created with a key it did not declare, a table that has none — imported from
+/// a CSV with no key column, or built a field at a time — could otherwise only
+/// get one by being dropped and recreated with its rows thrown away.
 fn field_settings_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("type", TypeSchema::optional(TypeSchema::text())),
@@ -1615,6 +1633,7 @@ fn field_settings_schema() -> TypeSchema {
         StructField::new("attributes", TypeSchema::optional(TypeSchema::json())),
         StructField::new("label", TypeSchema::optional(TypeSchema::text())),
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("primary_key", TypeSchema::optional(TypeSchema::bool())),
     ])
 }
 

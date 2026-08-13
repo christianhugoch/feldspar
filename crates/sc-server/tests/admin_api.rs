@@ -176,6 +176,20 @@ async fn full_admin_api_story() -> sc_error::Result<()> {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["name"], json!("book"));
 
+    // The key is a field like any other and nothing invents one (GOALS), so it
+    // is added the same way the title is — and an `int` key numbers itself,
+    // which is what the row CRUD below relies on.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["primary_key"], json!(true));
+    assert_eq!(body["nullable"], json!(false), "a key column is NOT NULL");
+
     let (status, body) = client
         .send(
             "POST",

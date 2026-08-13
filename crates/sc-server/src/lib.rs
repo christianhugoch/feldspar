@@ -35,11 +35,11 @@ mod tls;
 mod triggers;
 
 pub use agents::{AgentServices, install_agents};
+pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
 pub use backup::{
     Available as BackupContents, BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE, BackupPreferences,
     RestoreReport, Selection as BackupSelection,
 };
-pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
 pub use chat::AGENT_CHAT_ROUTE;
 pub use sc_agent::{ProviderConnector, StoredProviders};
 

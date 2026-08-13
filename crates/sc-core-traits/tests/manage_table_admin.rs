@@ -50,12 +50,16 @@ async fn describe(env: &Env, cfg: &sc_types::Attrs, args: Json) -> Result<Json> 
 }
 
 /// The law-firm batch, in miniature: two connected tables in one call.
+///
+/// Each declares its own key, because nothing invents one (GOALS) — and the
+/// second table's foreign key resolves against the first's, in the same batch.
 fn erp_batch() -> Json {
     json!({"operations": [
         {
             "op": "create_table", "table": "clients",
             "description": "A client of the firm",
             "fields": [
+                {"name": "id", "type": "int", "primary_key": true},
                 {"name": "name", "type": "text", "required": true},
                 {"name": "vat_number", "type": "text", "unique": true},
             ],
@@ -63,6 +67,7 @@ fn erp_batch() -> Json {
         {
             "op": "create_table", "table": "matters",
             "fields": [
+                {"name": "id", "type": "int", "primary_key": true},
                 {"name": "title", "type": "text", "required": true},
                 {"name": "client", "references": "clients", "summary_field": "name"},
             ],
@@ -97,8 +102,10 @@ async fn a_batch_builds_connected_tables_and_the_key_really_constrains_rows() ->
         }
         other => panic!("expected a key, got {other:?}"),
     }
-    // Every created table gets the identity primary key, unasked.
+    // The key the batch declared — nothing invents one (GOALS) — and an `int`
+    // key numbers itself, which is why the inserts below name no id.
     assert_eq!(matters.primary_key, vec!["id".to_owned()]);
+    assert!(matters.field("id").expect("the key field").primary_key);
 
     // And the foreign key is real: a row inserts through it, and one pointing at
     // a client that does not exist does not.
@@ -125,7 +132,8 @@ async fn a_batch_whose_third_operation_is_invalid_applies_nothing_and_names_the_
         &default_grants(),
         json!({"operations": [
             {"op": "create_table", "table": "clients",
-             "fields": [{"name": "name", "type": "text"}]},
+             "fields": [{"name": "id", "type": "int", "primary_key": true},
+                        {"name": "name", "type": "text"}]},
             {"op": "create_table", "table": "matters",
              "fields": [{"name": "client", "references": "clients"}]},
             {"op": "add_field", "table": "matters", "field": "fee", "type": "guilders"},

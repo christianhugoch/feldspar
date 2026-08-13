@@ -461,6 +461,9 @@ fn virtual_calc_field(meta: &FieldMeta) -> DataField {
         required: false,
         unique: false,
         primary_key: false,
+        // No column, so nothing fills it in: a calculated field is computed on
+        // read.
+        generated: None,
         kind: meta.kind.clone(),
     }
 }

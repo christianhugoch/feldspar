@@ -332,8 +332,16 @@ impl Selection {
                 .filter(|item| item.count.is_some())
                 .map(|item| item.name.clone())
                 .collect(),
-            applications: available.applications.iter().map(|i| i.name.clone()).collect(),
-            file_stores: available.file_stores.iter().map(|i| i.name.clone()).collect(),
+            applications: available
+                .applications
+                .iter()
+                .map(|i| i.name.clone())
+                .collect(),
+            file_stores: available
+                .file_stores
+                .iter()
+                .map(|i| i.name.clone())
+                .collect(),
             users: available.users > 0,
             agents: available.agents > 0,
             triggers: available.triggers > 0,
@@ -556,7 +564,11 @@ impl BackupPreferences {
     /// a table on the production server and takes a backup on a copy that has not
     /// got it yet must not have the exclusion erased by the round trip. That is
     /// why the previous preferences are an input.
-    pub fn of(previous: &BackupPreferences, available: &Available, selection: &Selection) -> BackupPreferences {
+    pub fn of(
+        previous: &BackupPreferences,
+        available: &Available,
+        selection: &Selection,
+    ) -> BackupPreferences {
         let excluded = |offered: &[Item], chosen: &[String], carried: &[String]| -> Vec<String> {
             let mut out: Vec<String> = offered
                 .iter()

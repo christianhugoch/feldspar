@@ -28,7 +28,8 @@ pub use capabilities::DbCapabilities;
 pub use driver::{DatabaseDriver, Transaction};
 pub use row::{Row, RowStream};
 pub use schema::{
-    Column, ColumnDef, ColumnRef, DescribedColumn, ForeignKey, PhysicalTable, SchemaChange,
+    Column, ColumnDef, ColumnGenerator, ColumnRef, DescribedColumn, ForeignKey, PhysicalTable,
+    SchemaChange,
 };
 
 #[cfg(test)]
@@ -115,7 +116,7 @@ mod tests {
                                 name: c.name.clone(),
                                 sql_type: c.sql_type.clone(),
                                 nullable: c.nullable,
-                                default: c.default.clone(),
+                                generated: c.generated.clone(),
                             })
                             .collect(),
                         primary_key: primary_key.clone(),
@@ -253,7 +254,7 @@ mod tests {
                 name: "org".into(),
                 sql_type: "int8".into(),
                 nullable: false,
-                default: None,
+                generated: Some(ColumnGenerator::Identity),
             }],
             primary_key: vec!["org".into()],
             foreign_keys: vec![ForeignKey {

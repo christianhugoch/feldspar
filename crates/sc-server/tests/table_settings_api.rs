@@ -245,13 +245,12 @@ async fn a_table_is_configured_edited_and_forgotten_over_http() -> sc_error::Res
     assert_eq!(books["configured"], json!(false));
     assert_eq!(books["label"], json!("books"));
 
+    // The table is untouched: forgetting settings is not a schema change. It has
+    // the columns it was created with — none, here, since nothing invents a
+    // primary key (GOALS) and this test never added a field.
     let (status, fields) = client.send("GET", "/api/tables/books/fields", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        fields.as_array().unwrap().len(),
-        1,
-        "the id column is still there"
-    );
+    assert_eq!(fields.as_array().unwrap().len(), 0, "{fields}");
 
     // Forgetting settings that are not there is not an error; it says so.
     let (status, body) = client

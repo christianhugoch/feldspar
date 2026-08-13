@@ -28,6 +28,7 @@ use std::io::Read;
 
 use sc_api::{rows, schema_edit};
 use sc_catalog::{Catalog, DataFieldKind, Table, load_file_store_by_name};
+use sc_db::{ColumnGenerator, SchemaChange};
 use sc_error::{Error, Result};
 use sc_query::{Expr, Insert, Statement};
 use serde_json::{Map, Value as Json};
@@ -152,6 +153,7 @@ pub async fn restore_backup(
                 for problem in problems {
                     report.skipped(format!("a row of `{name}`: {problem}"));
                 }
+                rewind_identities(catalog, &table, &mut report).await;
             }
             Err(e) => report.skipped(format!("rows of `{name}`: {}", e.causes())),
         }
@@ -226,9 +228,14 @@ async fn restore_users(catalog: &Catalog, entries: &Entries, report: &mut Restor
             .and_then(Json::as_str)
             .unwrap_or("")
             .to_owned();
-        let id = user.get(sc_auth::COL_ID).and_then(Json::as_str).unwrap_or("");
+        let id = user
+            .get(sc_auth::COL_ID)
+            .and_then(Json::as_str)
+            .unwrap_or("");
         if existing.contains(&email) || existing.contains(id) {
-            report.skipped(format!("user `{email}` is already on this server; kept as it is"));
+            report.skipped(format!(
+                "user `{email}` is already on this server; kept as it is"
+            ));
             continue;
         }
         let (inserted, problems) = insert_rows(catalog, &table, std::slice::from_ref(user)).await;
@@ -309,12 +316,7 @@ async fn restore_table(catalog: &Catalog, entries: &Entries, name: &str) -> Resu
             fields: Vec::new(),
         }
     };
-    schema_edit::apply(
-        catalog,
-        &[operation],
-        &schema_edit::ApplyOptions::default(),
-    )
-    .await?;
+    schema_edit::apply(catalog, &[operation], &schema_edit::ApplyOptions::default()).await?;
     Ok(if exists {
         format!("table `{name}` (settings; it was already here)")
     } else {
@@ -351,25 +353,17 @@ async fn restore_fields(
         let live = match catalog.require(name) {
             Ok(table) => table,
             Err(e) => {
-                report.skipped(format!(
-                    "columns of `{name}`: {}",
-                    e.causes()
-                ));
+                report.skipped(format!("columns of `{name}`: {}", e.causes()));
                 return;
             }
         };
         if live.field(&field_name).is_some() {
-            // The identity primary key every created table gets, and any column
-            // an existing table already has: not news.
+            // A column an existing table already has: not news.
             continue;
         }
-        if field.get("primary_key").and_then(Json::as_bool) == Some(true) {
-            report.skipped(format!(
-                "`{name}.{field_name}` was the primary key in the backup; the restored table \
-                 has the identity key `{}`, so it is restored as an ordinary column",
-                sc_api::schema_edit::DEFAULT_PK_NAME
-            ));
-        }
+        // The primary key travels as what it is — a field that says it is one —
+        // so a restored table has the key the backup had, composite or not.
+        // Nothing invents a key here or anywhere else (GOALS).
         let result = add_field(catalog, name, field).await;
         report.outcome(&format!("column `{name}.{field_name}`"), result);
     }
@@ -443,6 +437,41 @@ fn order_by_references(catalog: &Catalog, tables: &[String]) -> Vec<String> {
 /// pointing at one still points at it.
 ///
 /// Not through [`rows::create_row`], and that is the substance of this function:
+/// Wind every identity column of `table` past the keys the restore just wrote.
+///
+/// A backup carries its rows' keys and they are inserted as given — the identity
+/// is `BY DEFAULT`, so an explicit value is accepted, which is the whole reason
+/// it is not `ALWAYS`. But the sequence behind it never saw those inserts and is
+/// still sitting at 1, so the first row written *after* a restore would be handed
+/// a key some restored row already has. Re-applying the generator is what winds
+/// it, and it is the same change the schema editor emits when a key is switched
+/// on over rows that are already there — the two situations are the same
+/// situation.
+///
+/// Reported rather than raised: a restore that got the rows in is worth having
+/// even if one sequence could not be wound, and the report is where a partial
+/// restore says what to fix by hand.
+async fn rewind_identities(catalog: &Catalog, table: &Table, report: &mut RestoreReport) {
+    for field in &table.fields {
+        if field.generated != Some(ColumnGenerator::Identity) {
+            continue;
+        }
+        let change = SchemaChange::SetColumnGenerator {
+            table: table.name.clone(),
+            column: field.base.name.clone(),
+            generator: Some(ColumnGenerator::Identity),
+        };
+        if let Err(e) = catalog.primary().apply_schema(&change).await {
+            report.skipped(format!(
+                "the numbering of `{}.{}` could not be wound past the restored rows: {}",
+                table.name,
+                field.base.name,
+                e.causes()
+            ));
+        }
+    }
+}
+
 /// that path raises the table's insert **triggers** (§10.2), which during a
 /// restore would fire an installation's automation for every historical row it
 /// ever had. A restore puts data back; it does not replay it.
@@ -556,7 +585,9 @@ async fn restore_file_store(
         // it before the bytes are read: a zip is a file somebody can hand us, and
         // `..` in an entry name is the oldest trick there is.
         if path.split('/').any(|part| part == ".." || part == ".") {
-            report.skipped(format!("file `{path}` of `{name}`: the path is not relative"));
+            report.skipped(format!(
+                "file `{path}` of `{name}`: the path is not relative"
+            ));
             continue;
         }
         match store.write(path, bytes.clone().into()).await {
@@ -572,10 +603,7 @@ async fn restore_file_store(
             && (meta.min_role.is_some() || !meta.attributes.is_empty())
             && let Err(e) = store.set_meta(path, &meta).await
         {
-            report.skipped(format!(
-                "metadata of `{path}` in `{name}`: {}",
-                e.causes()
-            ));
+            report.skipped(format!("metadata of `{path}` in `{name}`: {}", e.causes()));
         }
     }
     if written > 0 {
@@ -805,9 +833,9 @@ fn read_zip(archive: &[u8]) -> Result<Entries> {
     })?;
     let mut out = Entries::new();
     for index in 0..zip.len() {
-        let mut entry = zip
-            .by_index(index)
-            .map_err(|e| Error::invalid(format!("the backup's entry {index} cannot be read: {e}")))?;
+        let mut entry = zip.by_index(index).map_err(|e| {
+            Error::invalid(format!("the backup's entry {index} cannot be read: {e}"))
+        })?;
         if entry.is_dir() {
             continue;
         }
@@ -852,7 +880,11 @@ fn manifest_of(entries: &Entries) -> Result<Map<String, Json>> {
                 super::FORMAT_VERSION
             )));
         }
-        None => return Err(Error::invalid("this backup does not say what version it is")),
+        None => {
+            return Err(Error::invalid(
+                "this backup does not say what version it is",
+            ));
+        }
     }
     Ok(obj.clone())
 }

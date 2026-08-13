@@ -62,6 +62,26 @@ pub enum Access {
     ReadOnly,
 }
 
+/// Set the caller-context GUCs on a transaction **the caller is holding open**,
+/// so statements run on it reach the policies with the right caller.
+///
+/// [`run_in_context`] is the one-statement form: it opens a transaction, sets
+/// these, runs, commits. A caller that needs many statements under one
+/// transaction — a CSV import with its foreign keys deferred to commit (§13.1) —
+/// cannot use it, and must not be left to `SET LOCAL` by hand: forgetting is
+/// silent on a table without policies and fails *closed* on one with them, which
+/// is the confusing half of the pair.
+pub async fn set_caller_context(
+    tx: &mut dyn sc_db::Transaction,
+    context: &CallerContext,
+) -> Result<()> {
+    tx.set_local(ROLE_GUC, &context.role.to_string()).await?;
+    if let Some(user_json) = context.user_json() {
+        tx.set_local(USER_GUC, &user_json).await?;
+    }
+    Ok(())
+}
+
 /// [`run_in_context`] in a `READ ONLY` transaction — see [`Access::ReadOnly`].
 pub async fn run_in_context_read_only(
     catalog: &Catalog,

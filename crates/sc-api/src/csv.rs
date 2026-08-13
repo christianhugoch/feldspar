@@ -58,6 +58,16 @@ use serde_json::{Map, Value as Json};
 use crate::rows;
 use crate::schema_edit;
 
+/// The header cell that means "this column is the table's primary key" when a
+/// table is created from a file.
+///
+/// A convention, and Saltcorn 1's: a CSV has no way to say which column is the
+/// key, and `id` is what an export of a keyed table calls it. Any other name
+/// makes an ordinary field, and a file with no `id` column makes a table with no
+/// key — which is a state, not a failure (GOALS: the admin creates key fields
+/// like any other field).
+const PK_COLUMN: &str = "id";
+
 /// What an import did: the rows that went in, the rows that were replaced, and
 /// the ones that did not with the reason and the line each was on.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -116,6 +126,26 @@ pub async fn export_table(
 /// write "absent" other than by leaving the cell empty, and a `NOT NULL` column
 /// will say so itself. The one exception is a text column, where the empty
 /// string is a value a user may well have meant.
+///
+/// # One transaction, one savepoint per row
+///
+/// The whole import runs inside a single transaction with **`SET CONSTRAINTS
+/// ALL DEFERRED`**, and each row inside a savepoint of its own. That is two
+/// properties at once:
+///
+///   - a row may reference another row of the same file that has not arrived
+///     yet — a self-joining `project` CSV listing a child before its parent —
+///     because the foreign keys are checked at the commit, by which time every
+///     row is there. This is what the `DEFERRABLE` on every generated reference
+///     is for;
+///   - a row that will not go in still does not take the others down with it:
+///     the savepoint rolls that row back and the import carries on, so the two
+///     numbers this returns are still "what landed" and "what did not".
+///
+/// The one thing that cannot be reported per line is a **deferred** violation —
+/// a key that matches nothing anywhere in the file. Postgres raises it at the
+/// commit, when the statement that caused it is long past, so it fails the
+/// import as a whole and says so.
 pub async fn import_table(
     catalog: &Catalog,
     table: &Table,
@@ -145,6 +175,15 @@ pub async fn import_table(
     let mut outcome = ImportOutcome::default();
     let mut wrote_keys = false;
 
+    let mut tx = catalog.primary().begin().await?;
+    // The caller travels with the transaction, not with each statement: `SET
+    // LOCAL` is transaction-scoped, so an RLS table's policies would see no
+    // caller at all (and deny everything) if this were left to the writes.
+    if let Some(context) = context {
+        sc_catalog::set_caller_context(tx.as_mut(), context).await?;
+    }
+    tx.batch("SET CONSTRAINTS ALL DEFERRED").await?;
+
     for (index, record) in reader.records().enumerate() {
         // Line numbers as a spreadsheet counts them: the header is line 1, so
         // the first data row is line 2. An error an admin cannot locate in the
@@ -163,61 +202,123 @@ pub async fn import_table(
             let raw = record.get(position).unwrap_or("");
             body.insert(name.clone(), field_json(table, name, raw));
         }
-        if let Err(e) = summaries.resolve(catalog, table, &mut body, context).await {
-            outcome.errors.push(format!("line {line}: {}", e.causes()));
-            continue;
-        }
 
-        // The primary key decides which write this is. An empty cell is a plain
-        // insert: the export of a table whose keys the admin does not care about
-        // is imported by clearing the column, and that has to keep working.
-        let key = pk.as_deref().and_then(|pk| match body.get(pk) {
-            Some(Json::String(s)) if !s.is_empty() => Some(s.clone()),
-            Some(Json::Number(n)) => Some(n.to_string()),
-            _ => None,
-        });
-        if let (Some(pk), None) = (pk.as_deref(), key.as_ref()) {
-            body.remove(pk);
-        }
-        if body.is_empty() {
-            outcome
-                .errors
-                .push(format!("line {line}: the row has no values"));
-            continue;
-        }
-
-        let result = match key {
-            None => rows::create_row_ctx(catalog, table, &Json::Object(body), context)
-                .await
-                .map(|_| Written::Inserted),
-            Some(key) => {
-                if !keys_seen.insert(key.clone()) {
-                    outcome.errors.push(format!(
-                        "line {line}: the primary key {key} appears more than once in the file"
-                    ));
-                    continue;
-                }
-                wrote_keys = true;
-                write_by_key(catalog, table, &key, body, context).await
-            }
-        };
+        // From here on the row touches the database, so it gets a savepoint: a
+        // failed statement poisons a Postgres transaction, and without one the
+        // next row would fail with "current transaction is aborted" rather than
+        // with anything about itself.
+        tx.batch(&format!("SAVEPOINT {ROW_SAVEPOINT}")).await?;
+        let mut executor = rows::Executor::Transaction(tx.as_mut());
+        let result = write_row(
+            catalog,
+            table,
+            pk.as_deref(),
+            body,
+            context,
+            &mut summaries,
+            &mut keys_seen,
+            &mut executor,
+        )
+        .await;
         match result {
-            Ok(Written::Inserted) => outcome.inserted += 1,
-            Ok(Written::Updated) => outcome.updated += 1,
-            Err(e) => outcome.errors.push(format!("line {line}: {}", e.causes())),
+            Ok(written) => {
+                match written {
+                    Written::Inserted => outcome.inserted += 1,
+                    Written::InsertedWithKey => {
+                        outcome.inserted += 1;
+                        wrote_keys = true;
+                    }
+                    Written::Updated => {
+                        outcome.updated += 1;
+                        wrote_keys = true;
+                    }
+                }
+                tx.batch(&format!("RELEASE SAVEPOINT {ROW_SAVEPOINT}"))
+                    .await?;
+            }
+            Err(e) => {
+                outcome.errors.push(format!("line {line}: {}", e.causes()));
+                tx.batch(&format!("ROLLBACK TO SAVEPOINT {ROW_SAVEPOINT}"))
+                    .await?;
+            }
         }
     }
+
+    if outcome.inserted + outcome.updated == 0 {
+        // Nothing to keep. Rolling back rather than committing an empty
+        // transaction is the same outcome and says what happened.
+        let _ = tx.rollback().await;
+        return Ok(outcome);
+    }
+    tx.commit().await.map_err(|e| {
+        Error::invalid(format!(
+            "the import was rolled back when it was committed: {}. \
+             A reference that matches no row anywhere in the file fails here rather \
+             than on its own line, because that is when the database checks it.",
+            e.causes()
+        ))
+    })?;
 
     // A key the file chose is a key the sequence has not issued. Leaving it
     // behind would make the *next* ordinary insert collide with a row this
     // import placed — which would look like a bug in the row editor, not in the
     // import that caused it.
-    if wrote_keys && outcome.inserted + outcome.updated > 0 {
-        if let Some(pk) = pk.as_deref() {
-            advance_identity_sequence(catalog, &table.name, pk).await?;
-        }
+    if wrote_keys && let Some(pk) = pk.as_deref() {
+        advance_identity_sequence(catalog, &table.name, pk).await?;
     }
     Ok(outcome)
+}
+
+/// The savepoint each row is written inside. Structural, never user data.
+const ROW_SAVEPOINT: &str = "sc_csv_row";
+
+/// Write one row of the file: resolve its summary-valued keys, decide whether
+/// its primary key makes it an insert or a replacement, and do it.
+///
+/// Split out of [`import_table`] so that everything which can fail for *this
+/// row* is one `Result` the savepoint can be wound back on — including the
+/// lookups, which read through the same transaction and so can see the rows
+/// earlier lines put there.
+#[allow(clippy::too_many_arguments)]
+async fn write_row(
+    catalog: &Catalog,
+    table: &Table,
+    pk: Option<&str>,
+    mut body: Map<String, Json>,
+    context: Option<&CallerContext>,
+    summaries: &mut SummaryLookups,
+    keys_seen: &mut HashSet<String>,
+    executor: &mut rows::Executor<'_>,
+) -> Result<Written> {
+    summaries
+        .resolve(catalog, table, &mut body, context, executor)
+        .await?;
+
+    // The primary key decides which write this is. An empty cell is a plain
+    // insert: the export of a table whose keys the admin does not care about is
+    // imported by clearing the column, and that has to keep working.
+    let key = pk.and_then(|pk| match body.get(pk) {
+        Some(Json::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Json::Number(n)) => Some(n.to_string()),
+        _ => None,
+    });
+    if let (Some(pk), None) = (pk, key.as_ref()) {
+        body.remove(pk);
+    }
+    if body.is_empty() {
+        return Err(Error::invalid("the row has no values"));
+    }
+
+    let Some(key) = key else {
+        rows::create_row_in(catalog, table, &Json::Object(body), context, executor).await?;
+        return Ok(Written::Inserted);
+    };
+    if !keys_seen.insert(key.clone()) {
+        return Err(Error::invalid(format!(
+            "the primary key {key} appears more than once in the file"
+        )));
+    }
+    write_by_key(catalog, table, &key, body, context, executor).await
 }
 
 /// Create a table from a CSV document and fill it with the document's rows.
@@ -225,8 +326,11 @@ pub async fn import_table(
 /// The fields are **deduced**: one per header cell, named as the header's label
 /// would name it, typed by what every non-empty cell in that column turns out to
 /// be, and `NOT NULL` when the column has no empty cell at all. A column called
-/// `id` is not a field — it is the identity primary key every created table gets
-/// (§3.3), and its values are used as the keys of the imported rows.
+/// `id` is a field like the others, and additionally the **primary key** — of
+/// whatever type its values turn out to be, an integer or a UUID or text. No
+/// table is created with a key it did not declare (GOALS), so a file with no
+/// `id` column makes a table with no primary key, which the field list says in
+/// red until the admin adds one.
 ///
 /// **All or nothing.** Unlike an import into a table that already exists, a
 /// rejected row here drops the whole table and reports the errors: the schema
@@ -241,20 +345,17 @@ pub async fn create_table_from_csv(
     let columns = plan_columns(document)?;
     let fields: Vec<schema_edit::FieldSpec> = columns
         .iter()
-        .filter(|c| !c.is_primary_key)
         .map(|c| schema_edit::FieldSpec {
             name: c.name.clone(),
             type_name: c.type_name.clone(),
             label: c.label.clone(),
             required: c.required,
+            primary_key: c.is_primary_key,
             ..schema_edit::FieldSpec::default()
         })
         .collect();
     if fields.is_empty() {
-        return Err(Error::invalid(
-            "the CSV has no columns to make fields from; a table needs at least one \
-             column besides `id`",
-        ));
+        return Err(Error::invalid("the CSV has no columns to make fields from"));
     }
     schema_edit::apply(
         catalog,
@@ -365,23 +466,16 @@ pub fn plan_columns(document: &str) -> Result<Vec<CsvColumn>> {
             .collect();
         let required = filled.len() == values.len();
         let basic = detect_type(&filled);
-        let is_primary_key = name == schema_edit::DEFAULT_PK_NAME;
-        if is_primary_key {
-            // The primary key of a created table is `bigint generated by default
-            // as identity` (§3.3), and this file is going to supply its values.
-            // Neither a gap nor a non-integer can be one.
-            if !required {
-                return Err(Error::invalid(
-                    "a column called `id` becomes the table's primary key, so it must \
-                     have a value in every row",
-                ));
-            }
-            if basic != BasicType::Int {
-                return Err(Error::invalid(
-                    "a column called `id` becomes the table's primary key, which is a \
-                     whole number; rename the column to import it as a field",
-                ));
-            }
+        // A column called `id` is the table's key, of whatever type its values
+        // are: whole numbers make an identity key, UUIDs a `uuid` one, anything
+        // else a key the file supplies. A key column with a gap in it is the one
+        // thing no type can rescue — a primary key cannot be null.
+        let is_primary_key = name == PK_COLUMN;
+        if is_primary_key && !required {
+            return Err(Error::invalid(
+                "a column called `id` becomes the table's primary key, so it must \
+                 have a value in every row",
+            ));
         }
         columns.push(CsvColumn {
             header: head.clone(),
@@ -457,6 +551,9 @@ fn map_header(table: &Table, header: &[String]) -> Result<Vec<Option<String>>> {
 /// Which of the two writes an upsert turned out to be.
 enum Written {
     Inserted,
+    /// Inserted carrying the key the file gave it — the case the identity
+    /// sequence has to be caught up with afterwards.
+    InsertedWithKey,
     Updated,
 }
 
@@ -468,29 +565,35 @@ async fn write_by_key(
     key: &str,
     body: Map<String, Json>,
     context: Option<&CallerContext>,
+    executor: &mut rows::Executor<'_>,
 ) -> Result<Written> {
-    if row_exists(catalog, table, key, context).await? {
-        // `update_row_ctx` ignores the key in the body — it addresses the row —
+    if row_exists(catalog, table, key, context, executor).await? {
+        // `update_row_in` ignores the key in the body — it addresses the row —
         // so the column stays as the file has it either way.
-        rows::update_row_ctx(catalog, table, key, &Json::Object(body), context).await?;
+        rows::update_row_in(catalog, table, key, &Json::Object(body), context, executor).await?;
         Ok(Written::Updated)
     } else {
-        rows::create_row_ctx(catalog, table, &Json::Object(body), context).await?;
-        Ok(Written::Inserted)
+        rows::create_row_in(catalog, table, &Json::Object(body), context, executor).await?;
+        Ok(Written::InsertedWithKey)
     }
 }
 
 /// Whether `table` already has a row with this primary key.
+///
+/// Read on the import's own transaction, so a key an earlier line inserted
+/// counts as present — otherwise the file's second mention of a key would insert
+/// a duplicate rather than replacing it.
 async fn row_exists(
     catalog: &Catalog,
     table: &Table,
     key: &str,
     context: Option<&CallerContext>,
+    executor: &mut rows::Executor<'_>,
 ) -> Result<bool> {
     let pk = rows::single_pk(table)?;
     let value = rows::column_value(table, &pk, &Json::String(key.to_owned()))?;
     let filter = Expr::col(&pk).eq(Expr::lit(value));
-    let found = rows::select_values(catalog, table, Some(filter), context).await?;
+    let found = rows::select_values_in(catalog, table, Some(filter), context, executor).await?;
     Ok(!found.is_empty())
 }
 
@@ -548,6 +651,7 @@ impl SummaryLookups {
         table: &Table,
         body: &mut Map<String, Json>,
         context: Option<&CallerContext>,
+        executor: &mut rows::Executor<'_>,
     ) -> Result<()> {
         for field in &table.fields {
             let DataFieldKind::Key {
@@ -578,9 +682,17 @@ impl SummaryLookups {
                         &target_field.0,
                         &text,
                         context,
+                        executor,
                     )
                     .await?;
-                    self.resolved.insert(cache_key, found.clone());
+                    // Only a *hit* is cached. A miss may be a row a later line
+                    // of this very file inserts — a self-joining table whose
+                    // parent is named before it exists — and caching that would
+                    // make the file's order matter again, which is the thing the
+                    // deferred constraints are here to stop mattering.
+                    if found.is_some() {
+                        self.resolved.insert(cache_key, found.clone());
+                    }
                     found
                 }
             };
@@ -603,6 +715,7 @@ impl SummaryLookups {
 
 /// The key of the row of `target` whose summary field holds `text`, if there is
 /// one.
+#[allow(clippy::too_many_arguments)]
 async fn summary_key(
     catalog: &Catalog,
     target: &Table,
@@ -610,12 +723,13 @@ async fn summary_key(
     target_field: &str,
     text: &str,
     context: Option<&CallerContext>,
+    executor: &mut rows::Executor<'_>,
 ) -> Result<Option<Json>> {
     let Ok(value) = rows::column_value(target, summary, &Json::String(text.to_owned())) else {
         return Ok(None);
     };
     let filter = Expr::col(summary).eq(Expr::lit(value));
-    let found = rows::select_values(catalog, target, Some(filter), context).await?;
+    let found = rows::select_values_in(catalog, target, Some(filter), context, executor).await?;
     Ok(found
         .first()
         .and_then(|row| row.get(target_field))
@@ -960,19 +1074,26 @@ mod tests {
     }
 
     #[test]
-    fn an_id_column_becomes_the_primary_key_and_must_be_whole_and_complete() {
+    fn an_id_column_becomes_the_primary_key_of_whatever_type_it_holds() {
         let plan = plan_columns("id,cost\n1,5\n2,0.5\n").expect("planned");
         assert!(plan[0].is_primary_key);
         assert_eq!(plan[0].type_name, "int");
 
+        // A UUID key and a text key are keys too: the key is a field like any
+        // other, so its type is the one its values have (GOALS).
+        let plan = plan_columns(
+            "id,cost\n179f7e88-ae48-495e-a080-68c471fac2ac,5\nd1403829-cc1e-49b5-bcdc-488973e640ba,2\n",
+        )
+        .expect("planned");
+        assert!(plan[0].is_primary_key);
+        assert_eq!(plan[0].type_name, "uuid");
+
+        let plan = plan_columns("id,cost\nBook,5\nPencil,0.5\n").expect("planned");
+        assert!(plan[0].is_primary_key);
+        assert_eq!(plan[0].type_name, "text");
+
+        // The one thing no type rescues: a key cannot be null.
         let e = plan_columns("id,cost\n1,5\n,0.5\n").expect_err("a gap in the key");
         assert!(e.causes().contains("every row"), "message: {}", e.causes());
-
-        let e = plan_columns("id,cost\nBook,5\nPencil,0.5\n").expect_err("a text key");
-        assert!(
-            e.causes().contains("whole number"),
-            "message: {}",
-            e.causes()
-        );
     }
 }

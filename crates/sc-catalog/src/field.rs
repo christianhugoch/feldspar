@@ -15,7 +15,7 @@
 //! from this crate, so a caller reaching for `sc_catalog::BaseField` still finds
 //! it.
 
-use sc_db::{Column, ColumnDef};
+use sc_db::{Column, ColumnDef, ColumnGenerator};
 use sc_types::TypeRef;
 
 /// Type-specific attributes carried by a field or table, always a JSON object
@@ -72,6 +72,13 @@ pub struct DataField {
     /// Whether the column is part of the table's primary key (possibly
     /// composite).
     pub primary_key: bool,
+    /// How the column fills itself in when a write omits it, if it does.
+    ///
+    /// A database fact and never an overlay one — introspection reads it back
+    /// off the column ([`from_column`](DataField::from_column)), so what the
+    /// admin UI says about a key ("this one numbers itself") is what the column
+    /// actually does rather than what creating it was supposed to do.
+    pub generated: Option<ColumnGenerator>,
     /// What the field references, if anything.
     pub kind: DataFieldKind,
 }
@@ -130,6 +137,7 @@ impl DataField {
             required: false,
             unique: false,
             primary_key: false,
+            generated: None,
             kind: DataFieldKind::Plain,
         }
     }
@@ -155,6 +163,12 @@ impl DataField {
     /// Make the column part of the primary key.
     pub fn primary_key(mut self) -> DataField {
         self.primary_key = true;
+        self
+    }
+
+    /// Have the column fill itself in — see [`DataField::generated`].
+    pub fn generated(mut self, generator: ColumnGenerator) -> DataField {
+        self.generated = Some(generator);
         self
     }
 
@@ -189,6 +203,7 @@ impl DataField {
         if self.required {
             col = col.not_null();
         }
+        col.generated = self.generated.clone();
         if self.unique {
             col = col.unique();
         }
@@ -218,6 +233,7 @@ impl DataField {
             required: !col.nullable,
             unique: false,
             primary_key,
+            generated: col.generated.clone(),
             kind,
         }
     }

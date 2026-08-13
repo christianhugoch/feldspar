@@ -28,6 +28,33 @@ use serde_json::{Map, Value as Json};
 
 use crate::convert::{json_to_value, value_to_json};
 
+/// Where a row operation's statement actually runs.
+///
+/// Almost always [`Pooled`](Executor::Pooled): the table's provider takes a
+/// connection from the pool, or — on a table with row-level security — a
+/// one-statement transaction that sets the caller GUCs first. The exception is a
+/// caller holding **one transaction open across many rows**, which is what a CSV
+/// import is (§13.1): the writes have to share a transaction for the foreign-key
+/// checks to be deferrable to its commit, and the reads have to share it or they
+/// would not see the rows the import has already written.
+///
+/// It is an explicit parameter rather than something hidden in the context
+/// because it changes when a write becomes visible and when it becomes
+/// permanent. Two consequences the caller owns: **events fire as the rows are
+/// written**, before the commit (a trigger reading the table on another
+/// connection will not see them yet), and a rollback undoes rows whose events
+/// have already gone out.
+pub enum Executor<'a> {
+    /// The ordinary path: the table's provider, or an RLS caller-context
+    /// transaction when the table has policies.
+    Pooled,
+    /// A transaction the caller opened, set up and will commit. Every statement
+    /// joins it; the caller-context GUCs are the caller's to have set (see
+    /// [`sc_catalog::set_caller_context`]), because they are `SET LOCAL` to this
+    /// transaction and nothing here can add them afterwards.
+    Transaction(&'a mut dyn sc_db::Transaction),
+}
+
 /// Every row of `table`, as a JSON array of objects.
 pub async fn list_rows(catalog: &Catalog, table: &Table) -> Result<Json> {
     list_rows_where(catalog, table, None, None).await
@@ -411,13 +438,26 @@ pub async fn select_values(
     filter: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
+    select_values_in(catalog, table, filter, context, &mut Executor::Pooled).await
+}
+
+/// [`select_values`] on a caller's [`Executor`] — a read inside the caller's
+/// transaction, which is the only way to see the rows that transaction has
+/// written but not yet committed.
+pub async fn select_values_in(
+    catalog: &Catalog,
+    table: &Table,
+    filter: Option<Expr>,
+    context: Option<&CallerContext>,
+    executor: &mut Executor<'_>,
+) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
     let mut columns = vec![Projection::all()];
     columns.extend(calc_projections(catalog, table)?);
     let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
     if let Some(filter) = filter {
         select = select.filter(filter);
     }
-    let fetched = run_read(catalog, table, &select, context, false).await?;
+    let fetched = run_read_in(catalog, table, &select, context, false, executor).await?;
     Ok(fetched.iter().map(row_values).collect())
 }
 
@@ -437,6 +477,18 @@ pub async fn create_row_ctx(
     body: &Json,
     context: Option<&CallerContext>,
 ) -> Result<Json> {
+    create_row_in(catalog, table, body, context, &mut Executor::Pooled).await
+}
+
+/// [`create_row_ctx`] on a caller's [`Executor`] — the same insert, the same
+/// coercion, the same event, run wherever the caller says.
+pub async fn create_row_in(
+    catalog: &Catalog,
+    table: &Table,
+    body: &Json,
+    context: Option<&CallerContext>,
+    executor: &mut Executor<'_>,
+) -> Result<Json> {
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
     let mut columns = Vec::with_capacity(obj.len());
@@ -453,7 +505,7 @@ pub async fn create_row_ctx(
     let mut returning = vec![Projection::all()];
     returning.extend(calc_projections(catalog, table)?);
     let insert = Insert::row(table.name.clone(), columns, values).returning(returning);
-    let rows = run_write(catalog, table, Statement::from(insert), context).await?;
+    let rows = run_write_in(catalog, table, Statement::from(insert), context, executor).await?;
     let row = rows
         .into_iter()
         .next()
@@ -483,6 +535,39 @@ pub(crate) async fn update_row_guarded(
     guard: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<Json> {
+    update_row_guarded_in(
+        catalog,
+        table,
+        id,
+        body,
+        guard,
+        context,
+        &mut Executor::Pooled,
+    )
+    .await
+}
+
+/// [`update_row_ctx`] on a caller's [`Executor`] — see [`create_row_in`].
+pub async fn update_row_in(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    body: &Json,
+    context: Option<&CallerContext>,
+    executor: &mut Executor<'_>,
+) -> Result<Json> {
+    update_row_guarded_in(catalog, table, id, body, None, context, executor).await
+}
+
+async fn update_row_guarded_in(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    body: &Json,
+    guard: Option<Expr>,
+    context: Option<&CallerContext>,
+    executor: &mut Executor<'_>,
+) -> Result<Json> {
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
     let pk = single_pk(table)?;
@@ -504,7 +589,7 @@ pub(crate) async fn update_row_guarded(
     // the pair: dispatch is after-commit by design (decision 1), and a row that
     // changed in between is a race the event reports rather than prevents.
     let old_row = match catalog.observes_writes(&table.name, WriteOp::Update) {
-        true => read_row(catalog, table, &pk, id, context).await?,
+        true => read_row_in(catalog, table, &pk, id, context, executor).await?,
         false => None,
     };
     let mut returning = vec![Projection::all()];
@@ -515,7 +600,7 @@ pub(crate) async fn update_row_guarded(
         filter: Some(guarded_filter(table, &pk, id, guard)?),
         returning,
     };
-    let rows = run_write(catalog, table, Statement::from(update), context).await?;
+    let rows = run_write_in(catalog, table, Statement::from(update), context, executor).await?;
     let row = rows
         .into_iter()
         .next()
@@ -608,16 +693,21 @@ async fn emit(
 /// One row by primary key, as the JSON an event carries — the pre-image an
 /// update's `old_row` needs. `None` when no such row (or none the caller may
 /// see, which for an event is the same thing: the update will not match either).
-async fn read_row(
+///
+/// Read on the caller's [`Executor`], so a pre-image taken inside a transaction
+/// sees what that transaction has written.
+async fn read_row_in(
     catalog: &Catalog,
     table: &Table,
     pk: &str,
     id: &str,
     context: Option<&CallerContext>,
+    executor: &mut Executor<'_>,
 ) -> Result<Option<Json>> {
     let filter = pk_filter(table, pk, id)?;
-    let rows = list_rows_where(catalog, table, Some(filter), context).await?;
-    Ok(rows.as_array().and_then(|rows| rows.first()).cloned())
+    let select = read_select(catalog, table, &RowQuery::new().where_(Some(filter)))?;
+    let rows = run_read_in(catalog, table, &select, context, false, executor).await?;
+    Ok(rows.first().map(row_to_json))
 }
 
 /// `pk = id`, ANDed with the ownership guard when one applies.
@@ -937,6 +1027,35 @@ pub(crate) async fn run_read(
     context: Option<&CallerContext>,
     reaches_rls: bool,
 ) -> Result<Vec<Row>> {
+    run_read_in(
+        catalog,
+        table,
+        select,
+        context,
+        reaches_rls,
+        &mut Executor::Pooled,
+    )
+    .await
+}
+
+/// [`run_read`] on a caller's executor: unchanged when it is
+/// [`Pooled`](Executor::Pooled), and otherwise the caller's transaction, whose
+/// GUCs (and whose deferred constraints) are already set.
+pub(crate) async fn run_read_in(
+    catalog: &Catalog,
+    table: &Table,
+    select: &Select,
+    context: Option<&CallerContext>,
+    reaches_rls: bool,
+    executor: &mut Executor<'_>,
+) -> Result<Vec<Row>> {
+    if let Executor::Transaction(tx) = executor {
+        return tx
+            .query(&Statement::Select(Box::new(select.clone())))
+            .await?
+            .try_collect()
+            .await;
+    }
     match in_context(table, context, reaches_rls) {
         Some(context) => {
             sc_catalog::run_in_context(
@@ -965,6 +1084,20 @@ async fn run_write(
     statement: Statement,
     context: Option<&CallerContext>,
 ) -> Result<Vec<Row>> {
+    run_write_in(catalog, table, statement, context, &mut Executor::Pooled).await
+}
+
+/// [`run_write`] on a caller's executor — see [`run_read_in`].
+async fn run_write_in(
+    catalog: &Catalog,
+    table: &Table,
+    statement: Statement,
+    context: Option<&CallerContext>,
+    executor: &mut Executor<'_>,
+) -> Result<Vec<Row>> {
+    if let Executor::Transaction(tx) = executor {
+        return tx.query(&statement).await?.try_collect().await;
+    }
     match in_context(table, context, false) {
         Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
         None => {

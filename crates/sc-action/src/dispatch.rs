@@ -464,7 +464,7 @@ mod tests {
                     name: "id".into(),
                     sql_type: "int8".into(),
                     nullable: false,
-                    default: None,
+                    generated: None,
                 }],
                 primary_key: vec!["id".into()],
                 foreign_keys: Vec::new(),

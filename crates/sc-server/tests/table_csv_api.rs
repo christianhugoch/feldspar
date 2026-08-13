@@ -133,12 +133,24 @@ async fn setup() -> sc_error::Result<(Client, TestDb)> {
     Ok((client, db))
 }
 
-/// A `book` table with a text title, an integer page count and a date.
+/// A `book` table with an integer key, a text title, a page count and a date.
+///
+/// The key is a field like any other and is declared here: nothing invents one
+/// (GOALS), and an export/import round trip is about the key as much as the
+/// values.
 async fn create_book_table(client: &mut Client) {
     let (status, _) = client
         .send("POST", "/api/tables", Some(json!({ "name": "book" })))
         .await;
     assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/tables/book/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "adding the key");
     for (name, ty) in [("title", "text"), ("pages", "int"), ("published", "date")] {
         let (status, _) = client
             .send(
@@ -156,23 +168,33 @@ async fn rows_are_counted_without_reading_them() -> sc_error::Result<()> {
     let (mut client, _db) = setup().await?;
     create_book_table(&mut client).await;
 
-    let (status, body) = client.send("GET", "/api/tables/book/rows/count", None).await;
+    let (status, body) = client
+        .send("GET", "/api/tables/book/rows/count", None)
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["count"], json!(0));
 
     for title in ["Dune", "Emma"] {
         let (status, _) = client
-            .send("POST", "/api/tables/book/rows", Some(json!({ "title": title })))
+            .send(
+                "POST",
+                "/api/tables/book/rows",
+                Some(json!({ "title": title })),
+            )
             .await;
         assert_eq!(status, StatusCode::CREATED);
     }
 
-    let (_, body) = client.send("GET", "/api/tables/book/rows/count", None).await;
+    let (_, body) = client
+        .send("GET", "/api/tables/book/rows/count", None)
+        .await;
     assert_eq!(body["count"], json!(2));
 
     // A table that is not there is a 404, not a count of zero: "no such table"
     // and "no rows" are different answers and the page shows different things.
-    let (status, _) = client.send("GET", "/api/tables/nope/rows/count", None).await;
+    let (status, _) = client
+        .send("GET", "/api/tables/nope/rows/count", None)
+        .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     Ok(())
 }
@@ -188,7 +210,9 @@ async fn a_table_exports_to_csv_and_imports_back_from_it() -> sc_error::Result<(
         json!({ "title": "Dune, part one", "pages": 412, "published": "1965-08-01" }),
         json!({ "title": "Line\nbreak", "pages": 7, "published": null }),
     ] {
-        let (status, _) = client.send("POST", "/api/tables/book/rows", Some(row)).await;
+        let (status, _) = client
+            .send("POST", "/api/tables/book/rows", Some(row))
+            .await;
         assert_eq!(status, StatusCode::CREATED);
     }
 
@@ -215,6 +239,13 @@ async fn a_table_exports_to_csv_and_imports_back_from_it() -> sc_error::Result<(
         .send("POST", "/api/tables", Some(json!({ "name": "wishlist" })))
         .await;
     assert_eq!(status, StatusCode::CREATED);
+    client
+        .send(
+            "POST",
+            "/api/tables/wishlist/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
     for (name, ty) in [("title", "text"), ("pages", "int"), ("published", "date")] {
         client
             .send(
@@ -281,7 +312,9 @@ async fn a_bad_row_is_reported_by_line_and_the_good_rows_still_land() -> sc_erro
     assert!(message.starts_with("line 3:"), "message: {message}");
     assert!(message.contains("pages"), "message: {message}");
 
-    let (_, body) = client.send("GET", "/api/tables/book/rows/count", None).await;
+    let (_, body) = client
+        .send("GET", "/api/tables/book/rows/count", None)
+        .await;
     assert_eq!(body["count"], json!(2));
 
     // A header naming a column the table does not have is **ignored**, and the
@@ -299,7 +332,9 @@ async fn a_bad_row_is_reported_by_line_and_the_good_rows_still_land() -> sc_erro
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["inserted"], json!(1));
     assert_eq!(body["errors"], json!([]));
-    let (_, body) = client.send("GET", "/api/tables/book/rows/count", None).await;
+    let (_, body) = client
+        .send("GET", "/api/tables/book/rows/count", None)
+        .await;
     assert_eq!(body["count"], json!(3), "the known column was written");
     Ok(())
 }

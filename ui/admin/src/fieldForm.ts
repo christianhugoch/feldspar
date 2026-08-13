@@ -60,6 +60,20 @@ export type FieldForm = {
   /** The chosen `listFieldTypes` entry's name. */
   typeName: string;
   nullable: boolean;
+  /** Part of the table's primary key — a field like any other (GOALS). */
+  primaryKey: boolean;
+  /**
+   * Whether the column already fills itself in — read back off the column, not
+   * inferred from its type, so a key that came from a hand-written
+   * `CREATE TABLE` says what it really does.
+   */
+  generated: boolean;
+  /**
+   * The key the field had when the form opened, which is what tells ticking the
+   * box ("this will start numbering itself") apart from describing a key that is
+   * already there ("this one does not, and never will unless it is recreated").
+   */
+  wasPrimaryKey: boolean;
   /** Computed on read, with no stored column (§7.3). */
   calculated: boolean;
   expression: string;
@@ -76,6 +90,9 @@ export const EMPTY_FIELD_FORM: FieldForm = {
   description: "",
   typeName: "",
   nullable: true,
+  primaryKey: false,
+  generated: false,
+  wasPrimaryKey: false,
   calculated: false,
   expression: "",
   attrs: {},
@@ -106,6 +123,9 @@ export function fieldForm(field: FieldItem): FieldForm {
     description: field.description,
     typeName: field.type,
     nullable: field.nullable,
+    primaryKey: field.primary_key,
+    generated: field.generated,
+    wasPrimaryKey: field.primary_key,
     attrs: readConfig(field.attributes),
   };
   if (kind?.type === "calc") {
@@ -135,6 +155,34 @@ export function fieldForm(field: FieldItem): FieldForm {
   return base;
 }
 
+/**
+ * What the primary-key tick box has to say about the key's *value*, which is the
+ * question ticking it immediately raises: who puts a number in this column?
+ *
+ * Three answers, and which one is true is not a property of the type alone. An
+ * `int` key numbers itself and a `uuid` key generates itself — but only from the
+ * moment the box is ticked, because that is when the column is given its
+ * generator. So a key that is *already* there is described by what the column
+ * actually does (`generated`, read back by introspection), and a key about to be
+ * made is described by what ticking the box will do to it. The two differ for
+ * exactly the table Saltcorn is built to pick up as it finds it: one created
+ * outside the admin UI, whose `id` is an ordinary `bigint` nobody fills in.
+ */
+export function keyValueNote(form: FieldForm): string {
+  const willGenerate = form.typeName === "int" || form.typeName === "uuid";
+  const generates = form.generated || (!form.wasPrimaryKey && willGenerate);
+  if (!generates) {
+    return "Identifies the row. Nothing fills this key in, so whoever writes the row supplies it.";
+  }
+  const how =
+    form.typeName === "uuid"
+      ? "generates a UUID for itself"
+      : form.typeName === "int"
+        ? "numbers itself"
+        : "fills itself in";
+  return `Identifies the row. This key ${how} — leave it blank and the database assigns one.`;
+}
+
 /** A kind's parameters as the attribute form edits them: everything on the kind
  * object except the discriminator that said which kind it is. */
 function kindConfig(kind: object): Record<string, string> {
@@ -154,6 +202,9 @@ function kindConfig(kind: object): Record<string, string> {
 export function fieldFormError(form: FieldForm, selected: FieldTypeItem | null): string | null {
   if (!selected) return "Choose a type for the field.";
   if (form.calculated) {
+    // Three of these, now: a calculated field has no column, so there is nothing
+    // for a key to be made of, and the server says the same thing.
+    if (form.primaryKey) return "A calculated field cannot be part of the primary key.";
     return form.expression.trim() === "" ? "A calculated field needs a formula." : null;
   }
   if (selected.name === "key" && !keyIsComplete(form.key)) {
@@ -201,6 +252,9 @@ export function createFieldBody(form: FieldForm, selected: FieldTypeItem): Creat
     description: form.description.trim(),
     // A calculated field is virtual: there is no column to make NOT NULL.
     required: !form.calculated && !form.nullable,
+    // Nothing invents a key, so this is the only way a table gets one: the box
+    // on the field being added (GOALS).
+    primary_key: form.primaryKey,
     ...fieldTypeBody(form, selected),
   };
 }
@@ -219,6 +273,9 @@ export function updateFieldBody(form: FieldForm, selected: FieldTypeItem): Updat
   return {
     label: form.label.trim(),
     description: form.description.trim(),
+    // The one column property an edit may change, because a table with no key
+    // could otherwise only get one by being recreated — see the endpoint.
+    primary_key: form.primaryKey,
     ...fieldTypeBody(form, selected),
   };
 }

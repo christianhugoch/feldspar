@@ -19,12 +19,14 @@
 //!   - a large integer is an `int` column, because `int` here is 64-bit and
 //!     Saltcorn 1's was 32-bit — its fallback to a text column was working
 //!     around the narrower type;
-//!   - a text or UUID `id` column is refused rather than becoming a non-integer
-//!     primary key, because every table this server creates has the identity key
-//!     `id` (§3.3);
-//!   - a foreign key pointing *forward* in the file is rejected on its line
-//!     rather than deferred, because an import is not a transaction here
-//!     (§13.1) and the constraint is not deferrable.
+//!   - a header cell of pure punctuation is refused rather than silently
+//!     dropped, because a file with one is a file with a problem in it.
+//!
+//! Two things Saltcorn 1 does that this suite also expects, and which the tables
+//! here are shaped by: a table is created with **no primary key** unless a field
+//! says it is one (GOALS), so every fixture declares its key like any other
+//! field, and a CSV's `id` column becomes that key — of whatever type its values
+//! turn out to be, integer or UUID or text.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
@@ -239,8 +241,18 @@ async fn setup() -> sc_error::Result<(Client, TestDb)> {
 }
 
 /// Saltcorn 1's fixture: `books`, with a required author and a page count.
+///
+/// The key is declared like any other field, because nothing invents one
+/// (GOALS): an `int` field with `primary_key` numbers itself, which is what the
+/// inserts here rely on.
 async fn books(client: &mut Client) {
     client.create_table("books").await;
+    client
+        .create_field(
+            "books",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        )
+        .await;
     client
         .create_field(
             "books",
@@ -440,6 +452,12 @@ async fn a_date_column_is_read_as_iso_and_anything_else_is_rejected() -> sc_erro
     client
         .create_field(
             "name_dobs",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        )
+        .await;
+    client
+        .create_field(
+            "name_dobs",
             json!({ "name": "name", "type": "text", "required": true }),
         )
         .await;
@@ -488,6 +506,12 @@ async fn book_reviews(client: &mut Client) -> (i64, i64) {
         .await;
 
     client.create_table("book_reviews").await;
+    client
+        .create_field(
+            "book_reviews",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        )
+        .await;
     client
         .create_field(
             "book_reviews",
@@ -578,9 +602,15 @@ async fn a_summary_value_matching_nothing_is_the_rows_error() -> sc_error::Resul
 }
 
 #[tokio::test]
-async fn a_self_join_key_resolves_within_the_file_in_dependency_order() -> sc_error::Result<()> {
+async fn a_self_join_key_may_point_forward_in_the_file() -> sc_error::Result<()> {
     let (mut client, _db) = setup().await?;
     client.create_table("project").await;
+    client
+        .create_field(
+            "project",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        )
+        .await;
     client
         .create_field(
             "project",
@@ -602,13 +632,13 @@ async fn a_self_join_key_resolves_within_the_file_in_dependency_order() -> sc_er
         )
         .await;
 
-    // **Divergence from Saltcorn 1**, stated: it imports inside one transaction
-    // with the foreign keys deferred, so a row may point at a row later in the
-    // file. Here each row is its own write (§13.1) against a constraint that is
-    // not deferrable, so a parent must already exist — which is why this file
-    // lists the parent first. The forward reference is the case below.
+    // Saltcorn 1's own self-join case, and the reason the import holds one
+    // transaction with `SET CONSTRAINTS ALL DEFERRED`: line 2 points at a row
+    // line 3 has not created yet. Row by row against an immediate constraint
+    // this is impossible; deferred to the commit, by which time both rows are
+    // there, it is ordinary.
     let (status, body) = client
-        .import("project", "id,name,parent\n2,Homework,\n1,Biology, 2")
+        .import("project", "id,name,parent\n1,Biology, 2\n2,Homework,")
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["inserted"], json!(2), "errors: {}", body["errors"]);
@@ -616,10 +646,23 @@ async fn a_self_join_key_resolves_within_the_file_in_dependency_order() -> sc_er
     let row = client.row_where("project", "name", "Biology").await;
     assert_eq!(row["parent"], json!(2));
 
-    // A row pointing at a key that is nowhere yet is refused on its line, with
-    // the good rows around it still landing.
+    // A **summary** value is a different matter, and the difference is worth
+    // pinning: resolving `Chores` to a key is a read, and a read cannot see a
+    // row that does not exist yet, deferred constraints or not. What it *can*
+    // see — because it runs on the import's own transaction — is a row an
+    // earlier line of the same file inserted and nothing has committed.
+    let (status, body) = client
+        .import("project", "id,name,parent\n3,Chores,\n4,Reading, Chores")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["inserted"], json!(2), "errors: {}", body["errors"]);
+    let row = client.row_where("project", "name", "Reading").await;
+    assert_eq!(row["parent"], json!(3));
+
+    // The other way round, the summary is refused on its own line — the lookup
+    // happens there, so that is where it can be reported.
     let (_, body) = client
-        .import("project", "id,name,parent\n3,Reading, 99\n4,Chores,")
+        .import("project", "id,name,parent\n7,Shopping, Cooking\n8,Cooking,")
         .await;
     assert_eq!(body["inserted"], json!(1));
     let errors = body["errors"].as_array().unwrap();
@@ -629,6 +672,22 @@ async fn a_self_join_key_resolves_within_the_file_in_dependency_order() -> sc_er
         "message: {}",
         errors[0]
     );
+
+    // What deferral cannot rescue: a key that matches nothing **anywhere** in
+    // the file. Postgres raises that at the commit, when the line that caused it
+    // is long past, so the import fails whole and says why rather than pinning
+    // it on a line it cannot know.
+    let (status, body) = client
+        .import("project", "id,name,parent\n5,Errands, 99\n6,Laundry,")
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("rolled back"),
+        "the refusal says the import was undone: {body}"
+    );
+    // And undone means undone: neither row of that file is there.
+    let rows = client.rows("project").await;
+    assert_eq!(rows.len(), 5, "rows: {rows:?}");
     Ok(())
 }
 
@@ -686,8 +745,14 @@ async fn a_table_is_created_from_a_csv_with_its_types_deduced() -> sc_error::Res
     assert_eq!(typed("cost"), "float");
     assert_eq!(typed("count"), "int");
     assert_eq!(typed("vatable"), "bool");
-    // The identity primary key every created table gets, and nothing else.
-    assert_eq!(fields.len(), 5, "fields: {fields:?}");
+    // Four columns in the file, four fields — and **no primary key**, because
+    // the file declared none and nothing invents one (GOALS). The field list
+    // says so in red until the admin adds one.
+    assert_eq!(fields.len(), 4, "fields: {fields:?}");
+    assert!(
+        fields.iter().all(|f| f["primary_key"] == json!(false)),
+        "fields: {fields:?}"
+    );
 
     let row = client.row_where("invoice", "item", "Pencil").await;
     assert_eq!(row["vatable"], json!(true));
@@ -726,10 +791,10 @@ async fn a_duplicated_header_is_one_column() -> sc_error::Result<()> {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    // item, cost, vatable and the identity key: the second `cost` is dropped
-    // rather than refused, and the first one is the answer.
+    // item, cost and vatable: the second `cost` is dropped rather than refused,
+    // and the first one is the answer.
     let fields = client.fields("invoice1").await;
-    assert_eq!(fields.len(), 4, "fields: {fields:?}");
+    assert_eq!(fields.len(), 3, "fields: {fields:?}");
     let row = client.row_where("invoice1", "item", "Book").await;
     assert_eq!(row["cost"], json!(5.0));
     Ok(())
@@ -747,11 +812,7 @@ async fn an_id_column_becomes_the_primary_key() -> sc_error::Result<()> {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let fields = client.fields("Invoice3").await;
-    assert_eq!(
-        fields.len(),
-        4,
-        "id is the key, not a fourth field: {fields:?}"
-    );
+    assert_eq!(fields.len(), 4, "fields: {fields:?}");
     let id = fields
         .iter()
         .find(|f| f["name"] == json!("id"))
@@ -776,27 +837,36 @@ async fn an_id_column_becomes_the_primary_key() -> sc_error::Result<()> {
 }
 
 #[tokio::test]
-async fn an_id_column_that_is_not_whole_and_complete_creates_nothing() -> sc_error::Result<()> {
+async fn an_id_column_may_not_have_gaps_whatever_its_type() -> sc_error::Result<()> {
     let (mut client, _db) = setup().await?;
 
-    // A gap in the key column.
+    // A gap in the key column. No type rescues this: a primary key cannot be
+    // null, so the file is refused and no table is left behind.
     let (status, body) = client
         .create_from_csv("invoice4", "id,cost, vatable\n1, 5, f\n, 0.5, t")
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("every row"), "{body}");
     assert!(!client.table_exists("invoice4").await);
+    Ok(())
+}
 
-    // **Divergence from Saltcorn 1**, stated: it would make this a `String`
-    // primary key (and a UUID column a `UUID` one). Every table created here has
-    // the identity key `id` (§3.3), so a text `id` column is refused with the
-    // one thing that would fix it.
+#[tokio::test]
+async fn a_text_or_uuid_id_column_becomes_a_key_of_that_type() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+
+    // Saltcorn 1's `String` and `UUID` primary keys, and the same answer here:
+    // the key is a field like any other, so it is of whatever type its values
+    // are. Nothing about a key says "integer".
     let (status, body) = client
         .create_from_csv("invoice5", "id,cost, vatable\nBook, 5, f\nPencil, 0.5, t")
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body.to_string().contains("whole number"), "{body}");
-    assert!(!client.table_exists("invoice5").await);
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let fields = client.fields("invoice5").await;
+    let id = fields.iter().find(|f| f["name"] == json!("id")).unwrap();
+    assert_eq!(id["primary_key"], json!(true));
+    assert_eq!(id["type"], json!("text"));
+    assert_eq!(client.rows("invoice5").await.len(), 2);
 
     let (status, body) = client
         .create_from_csv(
@@ -804,8 +874,26 @@ async fn an_id_column_that_is_not_whole_and_complete_creates_nothing() -> sc_err
             "id,cost\n179f7e88-ae48-495e-a080-68c471fac2ac, 5\nd1403829-cc1e-49b5-bcdc-488973e640ba, 0.5",
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(!client.table_exists("invoice6").await);
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let fields = client.fields("invoice6").await;
+    let id = fields.iter().find(|f| f["name"] == json!("id")).unwrap();
+    assert_eq!(id["primary_key"], json!(true));
+    assert_eq!(id["type"], json!("uuid"));
+    let rows = client.rows("invoice6").await;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .any(|r| r["id"] == json!("179f7e88-ae48-495e-a080-68c471fac2ac")),
+        "the file's own UUIDs are the keys: {rows:?}"
+    );
+
+    // And a UUID key fills itself in for a row that does not bring one, which is
+    // what makes the table usable from a form afterwards.
+    let row = client.insert("invoice6", json!({ "cost": 1.5 })).await;
+    assert!(
+        row["id"].as_str().is_some_and(|id| id.len() == 36),
+        "a generated UUID key: {row}"
+    );
     Ok(())
 }
 

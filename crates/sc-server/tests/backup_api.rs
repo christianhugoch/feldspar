@@ -33,10 +33,10 @@ use axum::http::{Request, StatusCode, header};
 use sc_api::admin_endpoints;
 use sc_auth::SessionStore;
 use sc_catalog::{Catalog, DataField};
-use sc_files::FileStoreDef;
 use sc_config::{MODE_CUSTOM, SSL_MODE, SSL_PRIVATE_KEY, stored_config};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
+use sc_files::FileStoreDef;
 use sc_server::{
     AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router_with_apps,
     default_js_evaluator, install_agents, install_triggers,
@@ -211,6 +211,18 @@ async fn furnish(server: &mut Server) -> sc_error::Result<()> {
         .send("POST", "/api/tables", Some(json!({ "name": "books" })))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    // A key that numbers itself, so the restore has a sequence to get right as
+    // well as rows: the backup carries the keys the rows already have, and the
+    // next row written after a restore must not be handed one of them again.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/books/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, body) = server
         .client
         .send(
@@ -241,7 +253,11 @@ async fn furnish(server: &mut Server) -> sc_error::Result<()> {
     for title in ["Dune", "Solaris"] {
         let (status, body) = server
             .client
-            .send("POST", "/api/tables/books/rows", Some(json!({ "title": title })))
+            .send(
+                "POST",
+                "/api/tables/books/rows",
+                Some(json!({ "title": title })),
+            )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
     }
@@ -406,7 +422,12 @@ async fn backup_everything(server: &mut Server) -> Vec<u8> {
             )),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert_eq!(
         headers.get(header::CONTENT_TYPE).unwrap(),
         "application/zip"
@@ -417,14 +438,19 @@ async fn backup_everything(server: &mut Server) -> Vec<u8> {
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(disposition.starts_with("attachment; filename=\"saltcorn-backup-"), "{disposition}");
+    assert!(
+        disposition.starts_with("attachment; filename=\"saltcorn-backup-"),
+        "{disposition}"
+    );
     bytes
 }
 
 /// One entry of a zip, as text.
 fn entry(archive: &[u8], path: &str) -> String {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a zip");
-    let mut file = zip.by_name(path).unwrap_or_else(|_| panic!("no `{path}` in the backup"));
+    let mut file = zip
+        .by_name(path)
+        .unwrap_or_else(|_| panic!("no `{path}` in the backup"));
     let mut text = String::new();
     file.read_to_string(&mut text).expect("readable text");
     text
@@ -471,7 +497,11 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
     let (status, uploaded, _) = {
         let (status, bytes, _) = target
             .client
-            .raw("POST", "/backup/upload", Some((archive.clone(), "application/zip")))
+            .raw(
+                "POST",
+                "/backup/upload",
+                Some((archive.clone(), "application/zip")),
+            )
             .await;
         let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value, ())
@@ -507,7 +537,10 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
     assert_eq!(books["description"], json!("Everything on the shelf"));
     assert_eq!(books["min_role_read"], json!(100));
 
-    let (status, fields) = target.client.send("GET", "/api/tables/books/fields", None).await;
+    let (status, fields) = target
+        .client
+        .send("GET", "/api/tables/books/fields", None)
+        .await;
     assert_eq!(status, StatusCode::OK, "{fields}");
     let title = fields
         .as_array()
@@ -517,7 +550,10 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
         .expect("the restored column");
     assert_eq!(title["label"], json!("The title"));
 
-    let (status, rows) = target.client.send("GET", "/api/tables/books/rows", None).await;
+    let (status, rows) = target
+        .client
+        .send("GET", "/api/tables/books/rows", None)
+        .await;
     assert_eq!(status, StatusCode::OK, "{rows}");
     let titles: Vec<&str> = rows
         .as_array()
@@ -526,6 +562,27 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
         .filter_map(|r| r["title"].as_str())
         .collect();
     assert_eq!(titles, vec!["Dune", "Solaris"]);
+
+    // The rows kept the keys they were backed up with, and the numbering was
+    // wound past them: a sequence still sitting at 1 would hand the next row a
+    // key `Dune` already has.
+    let keys: Vec<i64> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["id"].as_i64())
+        .collect();
+    assert_eq!(keys, vec![1, 2]);
+    let (status, added) = target
+        .client
+        .send(
+            "POST",
+            "/api/tables/books/rows",
+            Some(json!({ "title": "Roadside Picnic" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{added}");
+    assert_eq!(added["id"], json!(3), "{added}");
 
     // The file's bytes went into *this* server's store.
     let (status, file) = target
@@ -571,7 +628,10 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line.as_str().unwrap_or_default().contains("`blog` built and serving")),
+            .any(|line| line
+                .as_str()
+                .unwrap_or_default()
+                .contains("`blog` built and serving")),
         "the build is reported: {report}"
     );
     assert_eq!(
@@ -629,11 +689,10 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
     assert_eq!(status, StatusCode::OK, "{users}");
     assert_eq!(users.as_array().unwrap().len(), 1, "{users}");
     assert!(
-        report["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w.as_str().unwrap_or_default().contains("already on this server")),
+        report["warnings"].as_array().unwrap().iter().any(|w| w
+            .as_str()
+            .unwrap_or_default()
+            .contains("already on this server")),
         "the kept account is reported: {report}"
     );
     Ok(())
@@ -674,7 +733,12 @@ async fn what_a_backup_includes_is_remembered_as_what_was_left_out() -> sc_error
             )),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     // The rows really were left out of the file, not merely absent from the dialog.
     assert!(has_entry(&bytes, "tables/books/table.json"));
     assert!(!has_entry(&bytes, "tables/books/rows.json"));
@@ -701,11 +765,9 @@ async fn what_a_backup_includes_is_remembered_as_what_was_left_out() -> sc_error
         .catalog
         .create_table(
             "reviews",
-            &[
-                DataField::plain("id", TypeRef::Basic(BasicType::Int))
-                    .required()
-                    .primary_key(),
-            ],
+            &[DataField::plain("id", TypeRef::Basic(BasicType::Int))
+                .required()
+                .primary_key()],
         )
         .await?;
     let (status, options) = server.client.send("GET", "/api/backup", None).await;
@@ -744,7 +806,12 @@ async fn rows_are_never_backed_up_without_their_table() -> sc_error::Result<()> 
             )),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert!(!has_entry(&bytes, "tables/books/rows.json"));
     assert!(!has_entry(&bytes, "tables/books/table.json"));
     assert!(has_entry(&bytes, "users.json"));
@@ -828,7 +895,11 @@ async fn every_backup_route_is_admin_only() -> sc_error::Result<()> {
 
     let (status, _, _) = server
         .client
-        .raw("POST", "/backup/upload", Some((b"zip".to_vec(), "application/zip")))
+        .raw(
+            "POST",
+            "/backup/upload",
+            Some((b"zip".to_vec(), "application/zip")),
+        )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 

@@ -23,6 +23,7 @@ import {
   createFieldBody,
   fieldForm,
   fieldFormError,
+  keyValueNote,
   newFieldForm,
   updateFieldBody,
   type FieldItem,
@@ -41,6 +42,7 @@ function field(over: Partial<FieldItem>): FieldItem {
     required: false,
     unique: false,
     primary_key: false,
+    generated: false,
     kind: { type: "plain" },
     attributes: {},
     ...over,
@@ -175,6 +177,7 @@ describe("saving an edited field", () => {
     expect(updateFieldBody({ ...form, attrs: { max_length: "100" } }, STRING)).toEqual({
       label: "",
       description: "",
+      primary_key: false,
       type: "string",
       attributes: { max_length: 100 },
     });
@@ -189,6 +192,7 @@ describe("saving an edited field", () => {
     expect(updateFieldBody(fieldForm(stored), FILE)).toEqual({
       label: "Cover",
       description: "",
+      primary_key: false,
       type: "text",
       kind: {
         type: "file",
@@ -210,6 +214,7 @@ describe("saving an edited field", () => {
     expect(updateFieldBody(fieldForm(stored), KEY)).toEqual({
       label: "",
       description: "",
+      primary_key: false,
       kind: { type: "key", target_table: "people", target_field: "id" },
     });
   });
@@ -219,6 +224,7 @@ describe("saving an edited field", () => {
     expect(updateFieldBody(form, TEXT)).toEqual({
       label: "Title",
       description: "The book's title",
+      primary_key: false,
       type: "text",
     });
   });
@@ -238,6 +244,7 @@ describe("adding a field", () => {
       label: "",
       description: "",
       required: true,
+      primary_key: false,
       type: "text",
     });
   });
@@ -255,9 +262,38 @@ describe("adding a field", () => {
       label: "",
       description: "",
       required: false,
+      primary_key: false,
       type: "float",
       kind: { type: "calc", expression: "w * h" },
     });
+  });
+});
+
+describe("the primary key, which is a field like any other", () => {
+  it("round-trips the key flag, so opening a key field and saving keeps it", () => {
+    // The whole-object contract makes this load-bearing: `updateField` states
+    // the key on every save, so a form that failed to read it back would drop
+    // the table's key the next time anyone edited its label.
+    const form = fieldForm(field({ name: "id", type: "int8", primary_key: true }));
+    expect(form.primaryKey).toBe(true);
+    expect(updateFieldBody(form, TEXT).primary_key).toBe(true);
+    expect(updateFieldBody({ ...form, primaryKey: false }, TEXT).primary_key).toBe(false);
+  });
+
+  it("sends the key on a new field, which is the only way a table gets one", () => {
+    const form = { ...newFieldForm("int"), name: "id", primaryKey: true, nullable: false };
+    expect(createFieldBody(form, { ...TEXT, name: "int" }).primary_key).toBe(true);
+  });
+
+  it("refuses a calculated key, which has no column to key on", () => {
+    const form = {
+      ...newFieldForm("float"),
+      name: "area",
+      calculated: true,
+      expression: "w * h",
+      primaryKey: true,
+    };
+    expect(fieldFormError(form, TEXT)).toMatch(/calculated/);
   });
 });
 
@@ -282,5 +318,45 @@ describe("what the form itself refuses", () => {
     // the attribute — this form's job is only to send what was typed.
     const form = { ...newFieldForm("string"), name: "title", attrs: { max_length: "nonsense" } };
     expect(fieldFormError(form, STRING)).toBeNull();
+  });
+});
+
+describe("what the key tick box says about filling the key in", () => {
+  it("promises generation for the types that get it, and nothing for the rest", () => {
+    const int = { ...newFieldForm("int"), name: "id", primaryKey: true };
+    expect(keyValueNote(int)).toMatch(/numbers itself/);
+    expect(keyValueNote({ ...int, typeName: "uuid" })).toMatch(/generates a UUID/);
+    // No sensible value to invent for a text key, so it says so rather than
+    // implying the database will produce one.
+    expect(keyValueNote({ ...int, typeName: "text" })).toMatch(/whoever writes the row/);
+  });
+
+  it("describes a key that already exists by what its column does, not its type", () => {
+    // The case introspection-first makes real: a table created outside the
+    // admin UI whose `id` is an ordinary bigint nobody fills in. Its type says
+    // "int", but ticking the box will not change it — it is already the key.
+    const found = fieldForm(
+      field({ name: "id", type: "int", sql_type: "int8", primary_key: true, required: true }),
+    );
+    expect(keyValueNote(found)).toMatch(/whoever writes the row/);
+
+    const identity = fieldForm(
+      field({
+        name: "id",
+        type: "int",
+        sql_type: "int8",
+        primary_key: true,
+        required: true,
+        generated: true,
+      }),
+    );
+    expect(keyValueNote(identity)).toMatch(/numbers itself/);
+  });
+
+  it("promises generation to a column that is becoming the key", () => {
+    // The same bigint column, not yet a key: ticking the box is what gives it
+    // its identity, so here the type does predict what happens.
+    const notYet = fieldForm(field({ name: "code", type: "int", sql_type: "int8" }));
+    expect(keyValueNote({ ...notYet, primaryKey: true })).toMatch(/numbers itself/);
   });
 });

@@ -10,7 +10,10 @@
 // Rows are arbitrary JSON (`listRows` returns `Array<unknown>`), so each is
 // treated as a record keyed by field name. The editor is a single form that
 // creates a new row or, when a row's "Edit" button is pressed, updates the
-// selected one (addressed by its `id`).
+// selected one — addressed by the table's **primary key**, whatever it is
+// called. Nothing invents a key (GOALS), so a table may have none, and then
+// there is no way to say *which* row to change: the buttons go away and the
+// panel says why, rather than sending an update nothing can address.
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -137,17 +140,20 @@ function Rows({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Columns to show and edit: every declared field. `id` is server-generated
-  // and a calc field is computed on read (writing one is refused), so both are
-  // shown in the table but never editable inputs.
-  const editable = useMemo(
-    () => (fields ?? []).filter((f) => f.name !== "id" && !isCalc(f)),
-    [fields],
-  );
-  const columns = useMemo(() => {
-    const names = (fields ?? []).map((f) => f.name);
-    return names.includes("id") ? names : ["id", ...names];
+  // The column a row is addressed by. A composite key has no single value to
+  // put in a URL, so it is treated as "not addressable" here for the same
+  // reason no key is — the row endpoints take one id (§13.1).
+  const pk = useMemo(() => {
+    const keys = (fields ?? []).filter((f) => f.primary_key);
+    return keys.length === 1 ? keys[0].name : null;
   }, [fields]);
+
+  // Columns to show and edit: every declared field except a calculated one,
+  // which is computed on read and refused on write. The key **is** editable —
+  // a text or UUID key is a value somebody types — except while editing a row,
+  // where it is what identifies the row being changed.
+  const editable = useMemo(() => (fields ?? []).filter((f) => !isCalc(f)), [fields]);
+  const columns = useMemo(() => (fields ?? []).map((f) => f.name), [fields]);
 
   const reset = () => {
     setValues({});
@@ -160,7 +166,14 @@ function Rows({
     setError(null);
     const body: RowRecord = {};
     for (const f of editable) {
-      body[f.name] = parseInput(values[f.name] ?? "");
+      const value = parseInput(values[f.name] ?? "");
+      // A blank box on a column that fills itself in means "let it" — an
+      // identity key numbers itself, a UUID key generates itself — and sending
+      // an explicit null instead would be refused by the NOT NULL every key
+      // column has. Whether it does is read off the column rather than assumed
+      // from the key, because a key of any other type is one somebody types.
+      if (f.generated && value === null) continue;
+      body[f.name] = value;
     }
     try {
       if (editingId !== null) {
@@ -177,21 +190,29 @@ function Rows({
     }
   };
 
+  /** The row's key as a string, or `null` when the table has no single key. */
+  const keyOf = (row: RowRecord): string | null => {
+    if (pk === null) return null;
+    const value = row[pk];
+    return value === undefined || value === null ? null : String(value);
+  };
+
   const edit = (row: RowRecord) => {
     const next: Record<string, string> = {};
     for (const f of editable) {
       next[f.name] = display(row[f.name]);
     }
     setValues(next);
-    setEditingId(row.id === undefined || row.id === null ? null : String(row.id));
+    setEditingId(keyOf(row));
   };
 
   const remove = async (row: RowRecord) => {
-    if (row.id === undefined || row.id === null) return;
+    const key = keyOf(row);
+    if (key === null) return;
     setError(null);
     try {
-      await api.deleteRow(table, String(row.id));
-      if (editingId === String(row.id)) reset();
+      await api.deleteRow(table, key);
+      if (editingId === key) reset();
       onChange();
     } catch {
       setError("Could not delete the row.");
@@ -203,6 +224,13 @@ function Rows({
       <Card.Header>{editingId !== null ? "Edit row" : "New row"}</Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
+        {pk === null && (fields?.length ?? 0) > 0 && (
+          <Alert variant="warning">
+            This table has no single-column primary key, so a row cannot be picked out to
+            change or delete. Rows can still be added and read. Give one field the
+            <strong> Primary key</strong> tick on the table page to edit them.
+          </Alert>
+        )}
 
         <Form onSubmit={submit} className="mb-4">
           {editable.length === 0 && (
@@ -225,6 +253,11 @@ function Rows({
                 ) : (
                   <Form.Control
                     value={values[f.name] ?? ""}
+                    // The key addresses the row being edited; changing it here
+                    // would mean "move this row to another key", which is not
+                    // what the form is for.
+                    disabled={f.name === pk && editingId !== null}
+                    placeholder={f.generated ? "assigned by the database if left blank" : ""}
                     onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}
                   />
                 )}
@@ -263,22 +296,26 @@ function Rows({
               </tr>
             )}
             {rows?.map((row, i) => (
-              <tr key={(row.id as string | undefined) ?? i}>
+              <tr key={keyOf(row) ?? i}>
                 {columns.map((c) => (
                   <td key={c}>{display(row[c])}</td>
                 ))}
                 <td className="text-end">
-                  <Button
-                    size="sm"
-                    variant="outline-secondary"
-                    className="me-2"
-                    onClick={() => edit(row)}
-                  >
-                    Edit
-                  </Button>
-                  <Button size="sm" variant="outline-danger" onClick={() => remove(row)}>
-                    Delete
-                  </Button>
+                  {keyOf(row) !== null && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        className="me-2"
+                        onClick={() => edit(row)}
+                      >
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="outline-danger" onClick={() => remove(row)}>
+                        Delete
+                      </Button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

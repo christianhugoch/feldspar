@@ -11,9 +11,10 @@
 //! Data crosses the wire as plain JSON. The row endpoints are thin wrappers over
 //! [`sc_api::rows`], the shared row-CRUD layer an application's REST API runs
 //! too — the admin API is not a privileged special case, it is the same
-//! machinery (design §13.1). A row is addressed by its single-column primary key
-//! (composite keys are post-MVP), and `createTable` gives a new table a default
-//! identity `id` key so the row editor has something to address.
+//! machinery (design §13.1). A row is addressed by its single-column primary
+//! key; `createTable` invents none (GOALS), so a new table has no key until a
+//! field says it is one, and until then the row endpoints that address a single
+//! row refuse — which is what the field list's red banner is warning about.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -175,9 +176,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let obj = require_object(&ctx.body)?;
                 let name = non_empty_str_field(obj, "name")?.trim().to_owned();
                 // One operation through the shared schema editor (§3.3): the
-                // identity primary key, the identifier check and the live
-                // re-projection are all its, so the admin API and an agent
-                // create a table the same way.
+                // identifier check and the live re-projection are its, so the
+                // admin API and an agent create a table the same way. With no
+                // fields, this makes an empty table with **no primary key** —
+                // the admin adds the key as a field, like any other (GOALS).
                 schema_edit::apply(
                     &catalog,
                     &[schema_edit::Operation::CreateTable {
@@ -462,6 +464,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     type_name: Some(optional_str(obj, "type")),
                     kind: Some(parse_field_kind(obj)?),
                     attributes: Some(attributes_field(obj)?),
+                    // Unlike the rest of this body, **omitted means leave it**:
+                    // a form that did not ask about the key must not be able to
+                    // drop one, and the field editor sends it only when the
+                    // admin ticked or unticked the box.
+                    primary_key: obj
+                        .get("primary_key")
+                        .filter(|v| !v.is_null())
+                        .and_then(Json::as_bool),
                 };
                 schema_edit::apply(
                     &catalog,
@@ -1777,12 +1787,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let previous = stored_backup_preferences(&catalog).await?;
                 let preferences =
                     crate::backup::BackupPreferences::of(&previous, &available, &selection);
-                sc_config::set_config(
-                    &catalog,
-                    sc_config::BACKUP_INCLUDE,
-                    preferences.to_json(),
-                )
-                .await?;
+                sc_config::set_config(&catalog, sc_config::BACKUP_INCLUDE, preferences.to_json())
+                    .await?;
 
                 let bytes = crate::backup::write_backup(&catalog, &selection).await?;
                 Ok(HandlerResponse::download(crate::handler::Download {
@@ -2410,6 +2416,12 @@ pub(crate) fn field_json(field: &DataField, description: &str) -> Json {
         // Introspected, like `unique`: what a field editor needs to say which
         // column a reference onto this table should point at by default.
         "primary_key": field.primary_key,
+        // Whether the database fills the column in when a write omits it — an
+        // identity key numbering itself, a `uuid` key generating itself. The
+        // editor needs it to tell the admin which keys they must type, and the
+        // row form needs it to leave a blank one out of the insert instead of
+        // sending a null the `NOT NULL` would refuse.
+        "generated": field.generated.is_some(),
         "kind": field_kind_json(&field.kind),
         "attributes": Json::Object(field.base.attributes.clone()),
     })
@@ -2500,6 +2512,7 @@ pub(crate) fn field_spec_from_body(obj: &Map<String, Json>) -> Result<schema_edi
         description: optional_str(obj, "description"),
         required: optional_bool(obj, "required")?,
         unique: optional_bool(obj, "unique")?,
+        primary_key: optional_bool(obj, "primary_key")?,
         kind: parse_field_kind(obj)?,
         attributes: attributes_field(obj)?,
     })

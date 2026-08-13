@@ -507,10 +507,19 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
 async fn a_key_field_takes_its_storage_type_from_its_target() -> sc_error::Result<()> {
     let (mut client, _catalog, _db) = setup().await?;
 
-    // The table to point at, with a column to summarise rows by.
+    // The table to point at: its key, declared like any other field (nothing
+    // invents one), and a column to summarise rows by.
     client
         .send("POST", "/api/tables", Some(json!({ "name": "author" })))
         .await;
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/author/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, body) = client
         .send(
             "POST",

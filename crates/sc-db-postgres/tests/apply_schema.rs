@@ -2,7 +2,7 @@
 //! against a real Postgres, verified by introspecting the result. Also asserts
 //! the "no invented `id` column" rule and `if_exists` semantics.
 
-use sc_db::{ColumnDef, SchemaChange};
+use sc_db::{ColumnDef, ColumnGenerator, SchemaChange};
 use sc_db_postgres::PgDriver;
 use sc_test_harness::TestDb;
 
@@ -64,7 +64,7 @@ async fn create_alter_and_drop_round_trip_through_introspect() -> sc_error::Resu
         .find(|c| c.name == "active")
         .expect("column added");
     assert_eq!(active.sql_type, "bool");
-    assert!(active.default.as_deref().unwrap_or("").contains("true"));
+    assert!(matches!(&active.generated, Some(ColumnGenerator::Default(d)) if d.contains("true")));
 
     // Drop a column.
     driver

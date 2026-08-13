@@ -40,7 +40,7 @@ import {
   IconPlus,
   IconUpload,
 } from "../icons";
-import { PageBody, PageHeader, StatusBadge } from "../layout";
+import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import type {
   ListFieldsResponse,
   ListFieldTypesResponse,
@@ -51,6 +51,7 @@ import {
   createFieldBody,
   fieldForm,
   fieldFormError,
+  keyValueNote,
   newFieldForm,
   updateFieldBody,
   type FieldForm,
@@ -909,11 +910,32 @@ function Fields({
     }
   };
 
+  // Nothing invents a primary key (GOALS), so a table can genuinely be without
+  // one — and a table without one cannot be edited row by row, cannot be
+  // referenced by another table's key and cannot be upserted into from a CSV.
+  // That is worth saying loudly and exactly once: here, over the fields, which
+  // is where it is fixed. `fields === null` is "not loaded yet", not "no key".
+  const hasPrimaryKey = fields === null || fields.some((f) => f.primary_key);
+
   return (
     <Card className="mb-4">
       <Card.Header>Fields</Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
+        {!hasPrimaryKey && (
+          <Alert variant="danger">
+            <AlertBody>
+              <Alert.Heading className="h6">This table has no primary key</Alert.Heading>
+              <p className="mb-0">
+                Its rows cannot be edited or deleted one at a time, no other table can
+                reference it, and an import cannot replace a row it already has. Add a field
+                and tick <strong>Primary key</strong> — an <code>int</code> key numbers itself
+                and a <code>uuid</code> key generates itself — or tick it on a field that is
+                already unique for every row.
+              </p>
+            </AlertBody>
+          </Alert>
+        )}
         <Table size="sm" hover responsive className="table-vcenter mb-3">
           <thead>
             <tr>
@@ -921,13 +943,14 @@ function Fields({
               <th>Type</th>
               <th>Kind</th>
               <th>Nullable</th>
+              <th>Key</th>
               <th className="text-end">Actions</th>
             </tr>
           </thead>
           <tbody>
             {fields?.length === 0 && (
               <tr>
-                <td colSpan={5} className="text-muted">
+                <td colSpan={6} className="text-muted">
                   No fields yet.
                 </td>
               </tr>
@@ -940,6 +963,13 @@ function Fields({
                 </td>
                 <td>{kindLabel(f.kind)}</td>
                 <td>{f.nullable ? "yes" : "no"}</td>
+                <td>
+                  {f.primary_key && (
+                    <StatusBadge tone="blue" title="Part of the primary key">
+                      key
+                    </StatusBadge>
+                  )}
+                </td>
                 <td className="text-end">
                   <div className="btn-list justify-content-end flex-nowrap">
                     <Button
@@ -1109,10 +1139,11 @@ function Fields({
                     id="fieldNullable"
                     type="checkbox"
                     label="Nullable"
-                    checked={form.nullable}
+                    checked={form.nullable && !form.primaryKey}
                     // A NOT NULL is the column's, and changing one on a table
-                    // with rows in it is a migration (§3.3).
-                    disabled={isEdit}
+                    // with rows in it is a migration (§3.3). A key column is
+                    // NOT NULL whatever this says, so it shows that way.
+                    disabled={isEdit || form.primaryKey}
                     onChange={(e) => update({ nullable: e.target.checked })}
                   />
                   {isEdit && (
@@ -1120,6 +1151,23 @@ function Fields({
                       Whether the column accepts nulls cannot be changed here.
                     </Form.Text>
                   )}
+
+                  {/* The key is a field like any other (GOALS): nothing invents
+                      one, so this box is how a table gets it — and, ticked on
+                      more than one field, how it gets a composite one. */}
+                  <Form.Check
+                    className="mt-2 mb-1"
+                    id="fieldPrimaryKey"
+                    type="checkbox"
+                    label="Primary key"
+                    checked={form.primaryKey}
+                    onChange={(e) => update({ primaryKey: e.target.checked })}
+                  />
+                  <Form.Text muted className="d-block">
+                    {form.primaryKey
+                      ? keyValueNote(form)
+                      : "Tick this on more than one field for a composite key."}
+                  </Form.Text>
                 </>
               )}
             </Modal.Body>

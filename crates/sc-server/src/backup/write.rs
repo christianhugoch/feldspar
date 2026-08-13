@@ -177,9 +177,11 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
             &format!("{dir}/store.json"),
             &json!({ "definition": backup_store_def_json(&def), "files": files }),
         )?;
-        contents
-            .file_stores
-            .push(Item::new(def.name.clone()).labelled(def.description.clone()).counting(count));
+        contents.file_stores.push(
+            Item::new(def.name.clone())
+                .labelled(def.description.clone())
+                .counting(count),
+        );
     }
 
     // --- users and the roles they point at ----------------------------------
@@ -192,7 +194,11 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
     if selection.users {
         let users_table = catalog.require(sc_auth::USERS_TABLE)?;
         let users = table_rows(catalog, &users_table).await?;
-        let roles: Vec<Json> = sc_auth::list_roles(catalog).await?.iter().map(role_json).collect();
+        let roles: Vec<Json> = sc_auth::list_roles(catalog)
+            .await?
+            .iter()
+            .map(role_json)
+            .collect();
         contents.users = i64::try_from(users.len()).unwrap_or(i64::MAX);
         zip.json(
             "users.json",
@@ -260,7 +266,8 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
 /// Every row of a table as JSON, ordered by its primary key where it has a
 /// single one so two backups of an unchanged table are the same file.
 async fn table_rows(catalog: &Catalog, table: &Table) -> Result<Vec<Json>> {
-    let mut select = Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
+    let mut select =
+        Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
     if let Ok(pk) = rows::single_pk(table) {
         select.order = vec![OrderBy::asc(Expr::col(pk))];
     }
@@ -308,7 +315,8 @@ impl ZipBuilder {
     fn new() -> ZipBuilder {
         ZipBuilder {
             zip: zip::ZipWriter::new(Cursor::new(Vec::new())),
-            options: SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+            options: SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
         }
     }
 

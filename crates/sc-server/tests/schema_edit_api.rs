@@ -185,6 +185,15 @@ async fn setup(tag: &str) -> sc_error::Result<Harness> {
     client
         .send("POST", "/api/tables", Some(json!({ "name": "posts" })))
         .await;
+    // The key, declared like any other field — nothing invents one (GOALS) —
+    // and needed here because `comments.post` points at it.
+    client
+        .send(
+            "POST",
+            "/api/tables/posts/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
     client
         .send(
             "POST",

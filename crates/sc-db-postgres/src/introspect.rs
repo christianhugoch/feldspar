@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use sc_db::{Column, ForeignKey, PhysicalTable};
+use sc_db::{Column, ColumnGenerator, ForeignKey, PhysicalTable};
 use sc_error::{Error, Result};
 use tokio_postgres::{Client, Row};
 
@@ -30,8 +30,14 @@ const TABLES_SQL: &str = "\
 /// Every column of every user table, in declaration order. `udt_name` is the
 /// backend's own type name (`int8`, `text`, `timestamptz`, …), matching what
 /// `apply_schema` emits, rather than the friendlier `data_type`.
+///
+/// `is_identity` as well as `column_default`, because an identity column has no
+/// default to report — the two are separate spellings of the one fact that the
+/// database fills the column in, and reading only the first would make every
+/// identity key look like a key somebody has to type.
 const COLUMNS_SQL: &str = "\
-    SELECT table_schema, table_name, column_name, udt_name, is_nullable, column_default \
+    SELECT table_schema, table_name, column_name, udt_name, is_nullable, column_default, \
+           is_identity \
     FROM information_schema.columns \
     WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
     ORDER BY table_schema, table_name, ordinal_position";
@@ -92,11 +98,16 @@ pub async fn introspect(client: &Client) -> Result<Vec<PhysicalTable>> {
         let key: TableKey = (row.get(0), row.get(1));
         if let Some(table) = tables.get_mut(&key) {
             let is_nullable: String = row.get(4);
+            let column_default: Option<String> = row.get(5);
+            let is_identity: String = row.get(6);
             table.columns.push(Column {
                 name: row.get(2),
                 sql_type: row.get(3),
                 nullable: is_nullable == "YES",
-                default: row.get(5),
+                generated: match is_identity == "YES" {
+                    true => Some(ColumnGenerator::Identity),
+                    false => column_default.map(ColumnGenerator::Default),
+                },
             });
         }
     }

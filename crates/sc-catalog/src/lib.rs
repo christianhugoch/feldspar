@@ -56,7 +56,7 @@ pub use projection::SchemaProjection;
 pub use provider::{DriverTableProvider, TableProvider};
 pub use rls::{
     Access, ROLE_GUC, disable_rls, disable_rls_sql, enable_rls, enable_rls_sql, run_in_context,
-    run_in_context_read_only,
+    run_in_context_read_only, set_caller_context,
 };
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
@@ -68,7 +68,7 @@ pub use table_meta::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_db::{Column, ForeignKey, PhysicalTable};
+    use sc_db::{Column, ColumnGenerator, ForeignKey, PhysicalTable};
     use sc_types::{BasicType, TypeRef};
 
     #[test]
@@ -88,15 +88,23 @@ mod tests {
     }
 
     #[test]
-    fn primary_key_field_has_no_default_and_maps_type() {
+    fn a_key_fields_generator_travels_onto_its_column() {
         let id = DataField::plain("id", TypeRef::Basic(BasicType::Uuid))
             .required()
             .primary_key();
         let col = id.to_column_def();
         assert_eq!(col.sql_type, "uuid");
         assert!(!col.nullable);
-        assert!(col.default.is_none());
         assert!(id.primary_key);
+        // Nothing is invented here: a field that says nothing about filling
+        // itself in gets a column that does not.
+        assert!(col.generated.is_none());
+
+        let generated = id.generated(ColumnGenerator::Default("gen_random_uuid()".into()));
+        assert_eq!(
+            generated.to_column_def().generated,
+            Some(ColumnGenerator::Default("gen_random_uuid()".into()))
+        );
     }
 
     #[test]
@@ -118,19 +126,19 @@ mod tests {
                     name: "id".into(),
                     sql_type: "int8".into(),
                     nullable: false,
-                    default: None,
+                    generated: None,
                 },
                 Column {
                     name: "title".into(),
                     sql_type: "text".into(),
                     nullable: false,
-                    default: None,
+                    generated: None,
                 },
                 Column {
                     name: "author".into(),
                     sql_type: "int8".into(),
                     nullable: true,
-                    default: None,
+                    generated: None,
                 },
             ],
             primary_key: vec!["id".into()],

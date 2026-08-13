@@ -7,6 +7,7 @@
 //! tables — which is itself the point of "no discovery step": every reachable
 //! table is returned without any registration.
 
+use sc_db::ColumnGenerator;
 use sc_db_postgres::PgDriver;
 use sc_test_harness::TestDb;
 
@@ -71,9 +72,9 @@ async fn introspects_columns_keys_and_foreign_keys() -> sc_error::Result<()> {
     let active = member.columns.iter().find(|c| c.name == "active").unwrap();
     assert_eq!(active.sql_type, "bool");
     assert!(
-        active.default.as_deref().unwrap_or("").contains("true"),
+        matches!(&active.generated, Some(ColumnGenerator::Default(d)) if d.contains("true")),
         "expected a default containing `true`, got {:?}",
-        active.default
+        active.generated
     );
 
     // Two foreign keys; look them up by their local column so the assertions do
