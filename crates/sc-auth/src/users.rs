@@ -35,6 +35,15 @@ pub const COL_ROLE: &str = "role";
 pub const COL_PASSWORD_HASH: &str = "password_hash";
 /// The initial email/identifier column.
 pub const COL_EMAIL: &str = "email";
+/// Whether the account is barred from signing in.
+///
+/// Nullable, and `NULL` reads as *enabled*: disabling is the exceptional state,
+/// so the column says something only about the accounts an admin has acted on.
+/// It is a system column like the password hash — an admin never edits it as a
+/// field, they use the users screen's disable action — but unlike the hash it is
+/// carried on the [`User`](crate::User), because every session lookup has to ask
+/// the question ([`User::is_disabled`](crate::User::is_disabled)).
+pub const COL_DISABLED: &str = "disabled";
 
 /// The most-privileged role: full access.
 pub const ROLE_ADMIN: u8 = 1;
@@ -57,12 +66,31 @@ pub fn role_in_range(role: u8) -> bool {
 fn users_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let uuid = || TypeRef::Basic(BasicType::Uuid);
+    let bool_ = || TypeRef::Basic(BasicType::Bool);
     vec![
         DataField::plain(COL_ID, uuid()).required().primary_key(),
         crate::roles::user_role_field(),
         DataField::plain(COL_EMAIL, text()).required().unique(),
         DataField::plain(COL_PASSWORD_HASH, text()),
+        DataField::plain(COL_DISABLED, bool_()),
     ]
+}
+
+/// The columns the system owns, which an admin neither fills in on the user form
+/// nor edits as a field.
+///
+/// The users table is the one table an admin is invited to add columns to (§7.1),
+/// so the user form is generated from whatever columns are there — and it has to
+/// know which of them are not theirs to type into: the generated id, the role
+/// (its own select), the identifier, the hash (never shown), and the disabled
+/// flag (an action on the users screen, not a text box).
+pub const SYSTEM_USER_COLUMNS: [&str; 5] =
+    [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH, COL_DISABLED];
+
+/// Whether `column` is one of the columns the system owns
+/// ([`SYSTEM_USER_COLUMNS`]) rather than an admin-added field.
+pub fn is_system_user_column(column: &str) -> bool {
+    SYSTEM_USER_COLUMNS.contains(&column)
 }
 
 /// Ensure the roles, users and session-grant tables exist, creating them if
@@ -99,7 +127,20 @@ mod tests {
     fn schema_has_uuid_pk_role_email_and_password_hash() {
         let fields = users_fields();
         let names: Vec<&str> = fields.iter().map(|f| f.base.name.as_str()).collect();
-        assert_eq!(names, [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH]);
+        assert_eq!(
+            names,
+            [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH, COL_DISABLED]
+        );
+
+        // Every column the schema declares is the system's; an admin-added one
+        // is by definition not in the list.
+        assert!(names.iter().all(|n| is_system_user_column(n)));
+        assert!(!is_system_user_column("nickname"));
+
+        // Nullable: `NULL` is an ordinary enabled account, which is what every
+        // account created before an admin disabled anybody looks like.
+        let disabled = fields.iter().find(|f| f.base.name == COL_DISABLED).unwrap();
+        assert!(!disabled.required);
 
         let id = &fields[0];
         assert!(id.primary_key && id.required);

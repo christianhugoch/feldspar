@@ -27,6 +27,8 @@ import type { ListActionsResponse, ListTriggersResponse } from "../client";
 import { navigate } from "../App";
 import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
+import { OptionalRoleSelect } from "../roleSelect";
+import { useRoles } from "../roles";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
 
 type ActionInfo = ListActionsResponse[number];
@@ -104,6 +106,7 @@ function timingFields(kind: string): TimingField[] {
  * one's table is its own, and the form reads it from the stored trigger.
  */
 export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: string }) {
+  const roles = useRoles();
   const [actions, setActions] = useState<ActionInfo[] | null>(null);
   const [tables, setTables] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -117,7 +120,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
   const [onlyIf, setOnlyIf] = useState("");
   const [actionName, setActionName] = useState("");
   const [config, setConfig] = useState<Record<string, string>>({});
-  const [minRole, setMinRole] = useState("");
+  const [minRole, setMinRole] = useState<number | null>(null);
   const [enabled, setEnabled] = useState(true);
   // The periodic timing, held as strings so an empty box stays empty rather than
   // becoming a 0 the admin did not type.
@@ -154,7 +157,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           setOnlyIf(existing.only_if ?? "");
           setActionName(existing.action);
           setConfig(readConfig(existing.configuration));
-          setMinRole(existing.min_role == null ? "" : String(existing.min_role));
+          setMinRole(existing.min_role ?? null);
           setEnabled(existing.enabled);
           setTiming({
             minute: existing.minute == null ? "" : String(existing.minute),
@@ -205,7 +208,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
         only_if: tableEvent && onlyIf.trim() !== "" ? onlyIf.trim() : null,
         action: actionName,
         configuration: buildConfig(spec, config),
-        min_role: minRole.trim() === "" ? null : Number(minRole),
+        min_role: minRole,
         enabled,
         minute: timingValue("minute"),
         hour: timingValue("hour"),
@@ -277,21 +280,17 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
               </Form.Group>
             </Col>
             <Col md={6}>
-              <Form.Group className="mb-3" controlId="triggerMinRole">
-                <Form.Label>Minimum role</Form.Label>
-                <Form.Control
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={minRole}
-                  placeholder="admin only"
-                  onChange={(e) => setMinRole(e.target.value)}
-                />
-                <Form.Text muted>
-                  Who may run this trigger through an application&apos;s API. 1 is admin, 100
-                  is public. Leave blank for admin only.
-                </Form.Text>
-              </Form.Group>
+              <OptionalRoleSelect
+                id="triggerMinRole"
+                label="Minimum role"
+                value={minRole}
+                roles={roles}
+                blank="Admin only"
+                onChange={setMinRole}
+              >
+                Who may run this trigger through an application&apos;s API: the least
+                privileged role still allowed.
+              </OptionalRoleSelect>
             </Col>
           </Row>
 

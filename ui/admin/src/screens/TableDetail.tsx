@@ -58,7 +58,8 @@ import {
   type FieldKind,
 } from "../fieldForm";
 import { keyStorage, reconcileKey, type KeyKind } from "../keyField";
-import { roleOptions, useRoles, type Roles } from "../roles";
+import { RoleSelect } from "../roleSelect";
+import { useRoles } from "../roles";
 import { SettingsFields } from "../settings";
 
 /** A one-line description of a field's kind for the fields table. */
@@ -717,34 +718,6 @@ function Settings({
         </Form>
       </Card.Body>
     </Card>
-  );
-}
-
-/** A select over the roles the server offers, with the current value included. */
-function RoleSelect({
-  id,
-  label,
-  value,
-  roles,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  value: number;
-  roles: Roles;
-  onChange: (role: number) => void;
-}) {
-  return (
-    <Form.Group className="mb-3" controlId={id}>
-      <Form.Label>{label}</Form.Label>
-      <Form.Select value={value} onChange={(e) => onChange(Number(e.target.value))}>
-        {roleOptions(value, roles).map((option) => (
-          <option key={option.role} value={option.role}>
-            {option.name} ({option.role})
-          </option>
-        ))}
-      </Form.Select>
-    </Form.Group>
   );
 }
 

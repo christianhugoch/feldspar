@@ -47,6 +47,8 @@ import type {
 import { navigate } from "../App";
 import { IconArrowLeft, IconFolder } from "../icons";
 import { AlertBody, PageBody, PageHeader } from "../layout";
+import { OptionalRoleSelect } from "../roleSelect";
+import { useRoles } from "../roles";
 import {
   SettingsFields,
   buildConfig,
@@ -62,6 +64,7 @@ type StoreItem = ListFileStoresResponse[number];
 type OperationInputs = Record<string, Record<string, string>>;
 
 export function FileStoreForm({ storeId }: { storeId?: string }) {
+  const roles = useRoles();
   const [backends, setBackends] = useState<BackendInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +77,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
   const [description, setDescription] = useState("");
   const [backendName, setBackendName] = useState("");
   const [config, setConfig] = useState<Record<string, string>>({});
-  const [minRole, setMinRole] = useState("");
+  const [minRole, setMinRole] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -96,7 +99,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
           setDescription(existing.description);
           setBackendName(existing.backend);
           setConfig(readConfig(existing.config));
-          setMinRole(existing.min_role == null ? "" : String(existing.min_role));
+          setMinRole(existing.min_role ?? null);
         } else {
           setBackendName(list[0]?.name ?? "");
         }
@@ -125,7 +128,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
         description: description.trim(),
         backend: backendName,
         config: buildConfig(spec, config),
-        min_role: minRole.trim() === "" ? null : Number(minRole),
+        min_role: minRole,
       };
       const saved = storeId
         ? await api.updateFileStore(storeId, body)
@@ -210,21 +213,17 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
               </Form.Group>
             </Col>
             <Col md={6}>
-              <Form.Group className="mb-3" controlId="storeMinRole">
-                <Form.Label>Minimum role</Form.Label>
-                <Form.Control
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={minRole}
-                  placeholder="unrestricted"
-                  onChange={(e) => setMinRole(e.target.value)}
-                />
-                <Form.Text muted>
-                  1 is admin, 100 is public; lower is more restrictive. Leave blank for no
-                  store-wide restriction. Applies before any per-file rule.
-                </Form.Text>
-              </Form.Group>
+              <OptionalRoleSelect
+                id="storeMinRole"
+                label="Minimum role"
+                value={minRole}
+                roles={roles}
+                blank="Unrestricted"
+                onChange={setMinRole}
+              >
+                The least privileged role still allowed. Unrestricted means no store-wide
+                rule. Applies before any per-file rule.
+              </OptionalRoleSelect>
             </Col>
           </Row>
 

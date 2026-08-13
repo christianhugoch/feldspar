@@ -775,6 +775,15 @@ async fn apply_response(
         SessionAction::Keep => jar,
         SessionAction::Start(user) => match state.sessions.login(user.clone()).await {
             Ok(token) => {
+                // The session the request arrived with is replaced, not joined:
+                // the cookie is about to name the new one, so leaving the old one
+                // live would leave a credential nobody can present and nobody can
+                // withdraw. That is what makes `becomeUser` a swap — the admin
+                // session that authorised it does not survive behind the session
+                // it turned into.
+                if let Some(previous) = &session_token {
+                    let _ = state.sessions.logout(previous).await;
+                }
                 // After the session exists, not before: an event that says
                 // someone logged in must not fire for a login that then failed.
                 fire_login(state, &user).await;
@@ -795,6 +804,16 @@ async fn apply_response(
                 let _ = state.sessions.logout(token).await;
             }
             jar.remove(Cookie::build((SESSION_COOKIE, "")).path("/").build())
+        }
+        // Somebody else's sessions (or, if the admin named themselves, their own
+        // — in which case the cookie they still hold simply stops resolving).
+        // The jar is untouched either way: this response is about an account, not
+        // about this request's session.
+        SessionAction::EndUser(user_id) => {
+            if let Err(e) = state.sessions.end_user_sessions(user_id).await {
+                log_failure("could not end the user's sessions", &e);
+            }
+            jar
         }
     };
     (status, jar, Json(resp.body)).into_response()

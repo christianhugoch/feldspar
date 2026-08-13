@@ -25,6 +25,8 @@ import { api, errorMessage, uploadFile } from "../api";
 import type { BrowseFilesResponse, GetFileMetaResponse } from "../client";
 import { ideUrl, navigate } from "../App";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
+import { OptionalRoleSelect } from "../roleSelect";
+import { roleLabel, useRoles } from "../roles";
 
 type Entry = BrowseFilesResponse[number];
 
@@ -436,11 +438,12 @@ function PermissionsModal({
   onSaved: (saved: GetFileMetaResponse) => void;
   onError: (message: string) => void;
 }) {
-  const [value, setValue] = useState("");
+  const roles = useRoles();
+  const [value, setValue] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setValue(meta?.min_role == null ? "" : String(meta.min_role));
+    setValue(meta?.min_role ?? null);
   }, [meta]);
 
   if (!meta) return null;
@@ -450,7 +453,7 @@ function PermissionsModal({
     try {
       const saved = await api.setFileMeta(store, {
         path: meta.path,
-        min_role: value.trim() === "" ? null : Number(value),
+        min_role: value,
         // Attributes are round-tripped untouched: this dialog edits the access
         // rule, and silently dropping the free-form attributes stored beside it
         // would be a destructive side effect of opening it.
@@ -473,28 +476,25 @@ function PermissionsModal({
         <Modal.Title className="h6">Permissions — {meta.path}</Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        <Form.Group className="mb-3" controlId="metaMinRole">
-          <Form.Label>Minimum role</Form.Label>
-          <Form.Control
-            type="number"
-            min={1}
-            max={100}
-            value={value}
-            placeholder="unrestricted"
-            onChange={(e) => setValue(e.target.value)}
-          />
-          <Form.Text muted>
-            1 is admin, 100 is public; lower is more restrictive. Leave blank to set no rule
-            here.
-          </Form.Text>
-        </Form.Group>
+        <OptionalRoleSelect
+          id="metaMinRole"
+          label="Minimum role"
+          value={value}
+          roles={roles}
+          blank="Unrestricted"
+          onChange={setValue}
+        >
+          The least privileged role still allowed. Unrestricted sets no rule here.
+        </OptionalRoleSelect>
 
         <div className="mb-0">
           <span className="me-2">Effective:</span>
           {meta.effective_min_role == null ? (
             <StatusBadge tone="secondary">Unrestricted</StatusBadge>
           ) : (
-            <StatusBadge tone="blue">Role {meta.effective_min_role} or lower</StatusBadge>
+            <StatusBadge tone="blue">
+              {roleLabel(meta.effective_min_role, roles)} or lower
+            </StatusBadge>
           )}
           {inherited && (
             <div className="text-muted small mt-2">

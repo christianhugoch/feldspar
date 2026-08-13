@@ -18,8 +18,13 @@ use crate::users::{COL_EMAIL, COL_PASSWORD_HASH, USERS_TABLE};
 ///
 /// Returns `Ok(Some(user))` when a user with that email exists and the password
 /// matches, and `Ok(None)` for every ordinary failure — unknown email, a user
-/// with no password set, or a wrong password. Only an infrastructure fault (a
-/// broken stored hash, a database error) yields [`Err`].
+/// with no password set, a wrong password, or a **disabled** account. Only an
+/// infrastructure fault (a broken stored hash, a database error) yields [`Err`].
+///
+/// A disabled account collapses into the same `None` as a wrong password on
+/// purpose: "that account is disabled" tells an attacker which addresses are
+/// registered, and tells the account's owner nothing they can act on. The admin
+/// who disabled it is the one who knows.
 ///
 /// Matching on the email column is exact; normalising identifiers (case,
 /// unicode) is a policy decision deferred past the MVP. This function applies no
@@ -56,7 +61,15 @@ pub async fn authenticate(catalog: &Catalog, email: &str, password: &str) -> Res
         return Ok(None);
     }
 
-    Ok(Some(User::from_row(&row)?))
+    // The password is checked before the flag rather than after, so that a
+    // disabled account costs an attacker the same argon2 verification as any
+    // other and cannot be identified by how fast it says no.
+    let user = User::from_row(&row)?;
+    if user.is_disabled() {
+        return Ok(None);
+    }
+
+    Ok(Some(user))
 }
 
 /// Authenticate credentials and require **admin** access — the role gate for the

@@ -25,7 +25,7 @@ use sc_action::{
     ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, EventKind, Trigger, TriggerId, delete_trigger,
     list_triggers, load_trigger, save_trigger,
 };
-use sc_api::auth::{credentials, user_summary_json};
+use sc_api::auth::{credentials, user_row_json, user_summary_json};
 use sc_api::csv as csv_rows;
 use sc_api::rows::{self, require_object};
 use sc_api::schema_edit;
@@ -38,8 +38,10 @@ use sc_app::{
     require_scaffoldable, save_application, scaffold_app, update_app_client,
 };
 use sc_auth::{
-    COL_EMAIL, COL_ID, COL_ROLE, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, any_user_exists,
-    authenticate_admin, create_first_user, create_user, delete_role, list_roles, save_role,
+    COL_EMAIL, NewUser, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, UserUpdate,
+    any_user_exists, authenticate_admin, create_first_user, create_user_with, delete_role,
+    delete_user, list_roles, load_user, random_password, save_role, set_user_disabled,
+    set_user_password, update_user,
 };
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, DataField, DataFieldKind, FIELD_META_TABLE, FieldId,
@@ -57,7 +59,7 @@ use sc_llm::{
     LlmProviderDef, LlmProviderDefId, LlmRequest, connect_provider, delete_llm_provider,
     list_llm_providers, load_llm_provider, provider_config_spec, save_llm_provider,
 };
-use sc_query::{Expr, Projection, Select, Source, Statement};
+use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement, Value};
 use sc_types::{
     FormField, Operation, OperationScope, registered_rich_types, rich_type_config_spec,
 };
@@ -2048,11 +2050,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |_ctx| {
             let catalog = catalog.clone();
             async move {
-                let select = Select::from(Source::table(USERS_TABLE)).columns(vec![
-                    Projection::expr(Expr::col(COL_ID)),
-                    Projection::expr(Expr::col(COL_EMAIL)),
-                    Projection::expr(Expr::col(COL_ROLE)),
-                ]);
+                // `SELECT *`, not the three columns it used to be: the users
+                // table is the one table an admin adds their own columns to
+                // (§7.1), and the users screen is where they expect to see them.
+                // `User::from_row` drops the password hash on the way past, so
+                // "everything" still never includes that.
+                let mut select =
+                    Select::from(Source::table(USERS_TABLE)).columns(vec![Projection::all()]);
+                select.order = vec![OrderBy::asc(Expr::col(COL_EMAIL))];
                 let rows = catalog
                     .primary()
                     .query(&Statement::from(select))
@@ -2061,7 +2066,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .await?;
                 let mut out = Vec::with_capacity(rows.len());
                 for row in &rows {
-                    out.push(user_summary_json(&User::from_row(row)?));
+                    out.push(user_row_json(&User::from_row(row)?));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -2074,13 +2079,159 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let obj = require_object(&ctx.body)?;
-                let email = non_empty_str_field(obj, "email")?;
-                let password = non_empty_str_field(obj, "password")?;
-                let role = int_field(obj, "role")?;
-                let role = u8::try_from(role)
-                    .map_err(|_| Error::invalid(format!("role {role} is not in 1..=100")))?;
-                let user = create_user(&catalog, email, password, role).await?;
-                Ok(HandlerResponse::ok(user_summary_json(&user)).with_status(201))
+                let users = catalog.require(USERS_TABLE)?;
+                let created = create_user_with(
+                    &catalog,
+                    NewUser {
+                        email: non_empty_str_field(obj, "email")?.to_owned(),
+                        // Absent or blank asks for a generated password, which
+                        // comes back in this response and nowhere else.
+                        password: optional_str(obj, "password"),
+                        role: user_role_field(obj)?,
+                        extra: user_extra_values(&users, obj)?,
+                    },
+                )
+                .await?;
+                Ok(HandlerResponse::ok(json!({
+                    "user": user_row_json(&created.user),
+                    "generated_password": created.generated_password,
+                }))
+                .with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateUser", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let users = catalog.require(USERS_TABLE)?;
+                let user = update_user(
+                    &catalog,
+                    id,
+                    UserUpdate {
+                        email: Some(non_empty_str_field(obj, "email")?.to_owned()),
+                        role: Some(user_role_field(obj)?),
+                        // Blank here means "leave it alone" — the form's password
+                        // box is empty because the admin is not changing it, not
+                        // because they want the account to have no password.
+                        password: Some(optional_str(obj, "password")).filter(|p| !p.is_empty()),
+                        extra: user_extra_values(&users, obj)?,
+                    },
+                )
+                .await?;
+                Ok(HandlerResponse::ok(user_row_json(&user)))
+            }
+        }
+    });
+
+    reg.register("deleteUser", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                refuse_self(&ctx, id, "delete")?;
+                if !delete_user(&catalog, id).await? {
+                    return Err(Error::not_found(format!("no user with id {id}")));
+                }
+                // The account is gone, so the sessions holding it must go with
+                // it — not because they would still work (a session resolves by
+                // reading the user, and there is no user), but because leaving
+                // rows that resolve to nobody is leaving litter.
+                Ok(HandlerResponse::end_user_sessions(
+                    id,
+                    json!({ "deleted": true }),
+                ))
+            }
+        }
+    });
+
+    reg.register("setUserDisabled", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let disabled = bool_field(obj, "disabled")?;
+                if disabled {
+                    refuse_self(&ctx, id, "disable")?;
+                }
+                let user = set_user_disabled(&catalog, id, disabled).await?;
+                let body = user_row_json(&user);
+                // Disabling stops them signing in again; ending the sessions is
+                // what stops the one they are in the middle of.
+                Ok(match disabled {
+                    true => HandlerResponse::end_user_sessions(id, body),
+                    false => HandlerResponse::ok(body),
+                })
+            }
+        }
+    });
+
+    reg.register("forceLogoutUser", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                // Read it first, so forcing a logout on somebody who is not there
+                // is a 404 rather than a cheerful "ended 0 sessions".
+                if load_user(&catalog, id).await?.is_none() {
+                    return Err(Error::not_found(format!("no user with id {id}")));
+                }
+                Ok(HandlerResponse::end_user_sessions(
+                    id,
+                    json!({ "ok": true }),
+                ))
+            }
+        }
+    });
+
+    reg.register("becomeUser", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let user = load_user(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no user with id {id}")))?;
+                // A disabled account cannot be signed into by its owner, so it
+                // cannot be signed into over their head either.
+                if user.is_disabled() {
+                    return Err(Error::invalid(
+                        "that account is disabled; enable it before becoming it",
+                    ));
+                }
+                let body = user_summary_json(&user);
+                // A swap, not an addition: starting a session ends the one the
+                // request arrived with, so the admin session does not stay live
+                // behind the one it just became.
+                Ok(HandlerResponse::start_session(user, body))
+            }
+        }
+    });
+
+    reg.register("setRandomPassword", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let password = random_password();
+                let user = set_user_password(&catalog, id, &password).await?;
+                // The one response that carries a readable password. Every live
+                // session keeps working — a password reset is not a logout, and
+                // an admin who wants both has "force logout" next to this.
+                Ok(HandlerResponse::ok(json!({
+                    "email": user.get(COL_EMAIL).and_then(sc_query::Value::as_text).unwrap_or_default(),
+                    "password": password,
+                })))
             }
         }
     });
@@ -3296,6 +3447,61 @@ fn parse_app_id(raw: &str) -> Result<AppId> {
     uuid::Uuid::parse_str(raw)
         .map(AppId)
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid application id")))
+}
+
+fn parse_user_id(raw: &str) -> Result<uuid::Uuid> {
+    uuid::Uuid::parse_str(raw)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid user id")))
+}
+
+/// The `role` of a user body, narrowed to the `1..=100` byte.
+fn user_role_field(obj: &Map<String, Json>) -> Result<u8> {
+    let role = int_field(obj, "role")?;
+    u8::try_from(role).map_err(|_| Error::invalid(format!("role {role} is not in 1..=100")))
+}
+
+/// The `extra` bag of a user body: the columns the admin has added to the users
+/// table, coerced to each column's type.
+///
+/// Unknown columns and system columns are both refused — the first by
+/// [`rows::column_value`], which is the same coercion every row write goes
+/// through, and the second by `sc-auth`, since each system column has its own way
+/// in. A body with no `extra` at all is an empty bag, not an error: a users table
+/// nobody has added a column to is the ordinary case.
+fn user_extra_values(users: &Table, obj: &Map<String, Json>) -> Result<BTreeMap<String, Value>> {
+    let Some(extra) = obj.get("extra") else {
+        return Ok(BTreeMap::new());
+    };
+    if extra.is_null() {
+        return Ok(BTreeMap::new());
+    }
+    let extra = require_object(extra)?;
+    let mut out = BTreeMap::new();
+    for (column, json) in extra {
+        if sc_auth::is_system_user_column(column) {
+            return Err(Error::invalid(format!(
+                "`{column}` is not an admin-defined field of the users table"
+            )));
+        }
+        out.insert(column.clone(), rows::column_value(users, column, json)?);
+    }
+    Ok(out)
+}
+
+/// Refuse an operation an admin is aiming at their own account.
+///
+/// Disabling or deleting yourself is a request to lock yourself out mid-session,
+/// and the users screen is reached only *through* that session. Nothing about it
+/// is unsafe for the system — an installation can have another admin do it — so
+/// this is a guard rail, not an access rule, and it names the account rather than
+/// pretending the operation does not exist.
+fn refuse_self(ctx: &crate::handler::HandlerCtx, id: uuid::Uuid, verb: &str) -> Result<()> {
+    if ctx.user.as_ref().is_some_and(|u| u.id == id) {
+        return Err(Error::invalid(format!(
+            "you cannot {verb} the account you are signed in as"
+        )));
+    }
+    Ok(())
 }
 
 /// The bundler's combined output, for the build log: stdout then stderr.

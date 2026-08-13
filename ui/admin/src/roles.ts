@@ -41,17 +41,22 @@ export function roleLabel(role: number, roles: Roles): string {
 
 /**
  * The choices to offer for a role select, with `current` included even when the
- * server did not list it.
+ * server did not list it. A `null` current is a field with no role set, which
+ * adds nothing: what the blank stands for is the caller's to name.
  *
  * A table configured for a role that has since been deleted must still show that
  * role as its current value — a select that silently snapped to the nearest
  * listed one would change who can reach the data the next time the form was
  * saved, and would do it without saying so.
  */
-export function roleOptions(current: number, roles: Roles): { role: number; name: string }[] {
+export function roleOptions(
+  current: number | null,
+  roles: Roles,
+): { role: number; name: string }[] {
   const listed = (roles ?? []).map((r) => ({ role: r.role, name: r.name }));
-  const options = listed.some((r) => r.role === current)
-    ? listed
-    : [...listed, { role: current, name: `Role ${current}` }];
+  const options =
+    current == null || listed.some((r) => r.role === current)
+      ? listed
+      : [...listed, { role: current, name: `Role ${current}` }];
   return options.sort((a, b) => a.role - b.role);
 }

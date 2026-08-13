@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use sc_auth::{COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, USERS_TABLE, bootstrap};
+use sc_auth::{
+    COL_DISABLED, COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, USERS_TABLE, bootstrap,
+};
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
@@ -60,6 +62,12 @@ async fn bootstrap_creates_users_table() -> sc_error::Result<()> {
     assert!(!pw.required);
     assert_eq!(pw.base.type_, TypeRef::Basic(BasicType::Text));
 
+    // The disabled flag: nullable boolean, since `NULL` is an ordinary enabled
+    // account and that is what every account starts as.
+    let disabled = users.field(COL_DISABLED).expect("disabled field");
+    assert!(!disabled.required);
+    assert_eq!(disabled.base.type_, TypeRef::Basic(BasicType::Bool));
+
     // The table is reflected in a fresh driver introspection.
     let introspected = driver.introspect().await?;
     let physical = introspected
@@ -67,7 +75,10 @@ async fn bootstrap_creates_users_table() -> sc_error::Result<()> {
         .find(|t| t.name == USERS_TABLE)
         .expect("users present in introspection");
     let cols: Vec<&str> = physical.columns.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(cols, [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH]);
+    assert_eq!(
+        cols,
+        [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH, COL_DISABLED]
+    );
     assert_eq!(physical.primary_key, vec![COL_ID.to_string()]);
 
     // Idempotent: a second bootstrap returns the existing table, no error.

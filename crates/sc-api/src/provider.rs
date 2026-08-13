@@ -21,6 +21,7 @@ use sc_catalog::Catalog;
 use sc_error::Result;
 use serde_json::Value as Json;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::endpoint::{EndpointSet, Method};
 
@@ -126,9 +127,21 @@ pub enum SessionAction {
     #[default]
     Keep,
     /// Start a session for this user (login): mint a token and carry it.
+    ///
+    /// Whatever session the caller arrived with is ended, so a login replaces a
+    /// session rather than adding one. That is what makes "become user" a
+    /// *swap*: the admin session that authorised it does not stay live behind
+    /// the one it turned into.
     Start(User),
     /// End the current session (logout): drop the token.
     End,
+    /// End **every** session belonging to this user, whoever is asking.
+    ///
+    /// Not "the current session" and not necessarily the caller's: an admin
+    /// forcing somebody out, or the sessions that must not outlive an account
+    /// being disabled or deleted. The caller's own cookie is left alone — if
+    /// they named themselves, it simply stops resolving.
+    EndUser(Uuid),
 }
 
 /// A raw-bytes response body — a file download — with the content type the

@@ -136,6 +136,17 @@ impl HandlerResponse {
         }
     }
 
+    /// A `200 OK` response that also ends every session belonging to `user_id` —
+    /// an admin forcing somebody out, or the sessions that must not outlive an
+    /// account being disabled or deleted. The caller's own cookie is untouched.
+    pub fn end_user_sessions(user_id: uuid::Uuid, body: Value) -> HandlerResponse {
+        HandlerResponse {
+            body,
+            status: 200,
+            session: SessionAction::EndUser(user_id),
+        }
+    }
+
     /// Override the HTTP status (e.g. `201` for a created resource).
     pub fn with_status(mut self, status: u16) -> HandlerResponse {
         self.status = status;

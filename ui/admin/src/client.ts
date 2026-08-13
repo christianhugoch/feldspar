@@ -96,9 +96,17 @@ export type ListFrameworksResponse = Array<{ name: string; label: string; descri
 export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }>; supports_custom_queries: boolean }>;
 export type DescribeCustomQueryRequest = { name: string; description?: string | null; method: string; path: string; sql: string; params: Array<{ name: string; type: string; required?: boolean | null }>; min_role?: number | null; tables?: Array<string> | null };
 export type DescribeCustomQueryResponse = { columns: Array<{ name: string; type: string }> };
-export type ListUsersResponse = Array<{ id: string; email: string; role: number }>;
-export type CreateUserRequest = { email: string; password: string; role: number };
-export type CreateUserResponse = { id: string; email: string; role: number };
+export type ListUsersResponse = Array<{ id: string; email: string; role: number; disabled: boolean; extra: unknown }>;
+export type CreateUserRequest = { email: string; password?: string | null; role: number; extra?: unknown | null };
+export type CreateUserResponse = { user: { id: string; email: string; role: number; disabled: boolean; extra: unknown }; generated_password?: string | null };
+export type UpdateUserRequest = { email: string; password?: string | null; role: number; extra?: unknown | null };
+export type UpdateUserResponse = { id: string; email: string; role: number; disabled: boolean; extra: unknown };
+export type DeleteUserResponse = { deleted: boolean };
+export type SetUserDisabledRequest = { disabled: boolean };
+export type SetUserDisabledResponse = { id: string; email: string; role: number; disabled: boolean; extra: unknown };
+export type ForceLogoutUserResponse = { ok: boolean };
+export type BecomeUserResponse = { id: string; email: string; role: number };
+export type SetRandomPasswordResponse = { email: string; password: string };
 export type ListTriggersResponse = Array<{ id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null }>;
 export type CreateTriggerRequest = { name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null };
 export type CreateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; action: string; configuration: unknown; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null };
@@ -180,6 +188,12 @@ export interface ApiClient {
   describeCustomQuery(body: DescribeCustomQueryRequest): Promise<DescribeCustomQueryResponse>;
   listUsers(): Promise<ListUsersResponse>;
   createUser(body: CreateUserRequest): Promise<CreateUserResponse>;
+  updateUser(id: string, body: UpdateUserRequest): Promise<UpdateUserResponse>;
+  deleteUser(id: string): Promise<DeleteUserResponse>;
+  setUserDisabled(id: string, body: SetUserDisabledRequest): Promise<SetUserDisabledResponse>;
+  forceLogoutUser(id: string): Promise<ForceLogoutUserResponse>;
+  becomeUser(id: string): Promise<BecomeUserResponse>;
+  setRandomPassword(id: string): Promise<SetRandomPasswordResponse>;
   listTriggers(): Promise<ListTriggersResponse>;
   createTrigger(body: CreateTriggerRequest): Promise<CreateTriggerResponse>;
   updateTrigger(id: string, body: UpdateTriggerRequest): Promise<UpdateTriggerResponse>;
@@ -801,6 +815,56 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("createUser", res);
       return (await res.json()) as CreateUserResponse;
+    },
+    async updateUser(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${id}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateUser", res);
+      return (await res.json()) as UpdateUserResponse;
+    },
+    async deleteUser(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteUser", res);
+      return (await res.json()) as DeleteUserResponse;
+    },
+    async setUserDisabled(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${id}/disabled`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("setUserDisabled", res);
+      return (await res.json()) as SetUserDisabledResponse;
+    },
+    async forceLogoutUser(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${id}/force-logout`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("forceLogoutUser", res);
+      return (await res.json()) as ForceLogoutUserResponse;
+    },
+    async becomeUser(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${id}/become`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("becomeUser", res);
+      return (await res.json()) as BecomeUserResponse;
+    },
+    async setRandomPassword(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${id}/random-password`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("setRandomPassword", res);
+      return (await res.json()) as SetRandomPasswordResponse;
     },
     async listTriggers() {
       const res = await doFetch(`${baseUrl}/api/triggers`, {

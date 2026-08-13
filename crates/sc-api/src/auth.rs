@@ -60,6 +60,48 @@ pub fn user_summary_json(user: &User) -> Json {
     })
 }
 
+/// The **administrator's** view of a user: the summary, plus whether the account
+/// is disabled and every admin-added column of the row.
+///
+/// A second shape rather than a wider [`user_summary_schema`], because the two
+/// answer different questions. The summary says who the caller is and travels on
+/// every login and `authStatus`; this one is the users screen's row, and the
+/// users screen is the one place that has to show a table whose columns the
+/// admin themselves added (§7.1). Widening the summary would put those columns —
+/// which may be anything at all — into every login response.
+pub fn user_row_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("email", TypeSchema::text()),
+        StructField::new("role", TypeSchema::int()),
+        StructField::new("disabled", TypeSchema::bool()),
+        // Keyed by column name, since only the admin's own schema knows what is
+        // in here — `listFields` on the users table is what names them.
+        StructField::new("extra", TypeSchema::json()),
+    ])
+}
+
+/// A user rendered for the admin users screen, matching [`user_row_schema`].
+///
+/// The password hash is not in [`User::extra`] to begin with (it is dropped when
+/// the row is read), so there is nothing to filter here beyond splitting the
+/// columns the system owns out of the ones the admin added.
+pub fn user_row_json(user: &User) -> Json {
+    let extra: serde_json::Map<String, Json> = user
+        .extra
+        .iter()
+        .filter(|(column, _)| !sc_auth::is_system_user_column(column))
+        .map(|(column, value)| (column.clone(), crate::convert::value_to_json(value)))
+        .collect();
+    json!({
+        "id": user.id.to_string(),
+        "email": user.get(COL_EMAIL).and_then(Value::as_text).unwrap_or_default(),
+        "role": i64::from(user.role),
+        "disabled": user.is_disabled(),
+        "extra": Json::Object(extra),
+    })
+}
+
 /// Email + password out of a login body, matching [`credentials_schema`].
 ///
 /// Both must be present and non-blank; an empty password is a malformed request,

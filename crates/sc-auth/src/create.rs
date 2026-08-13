@@ -5,66 +5,101 @@
 //! forcing [admin](crate::ROLE_ADMIN), and it does **not** require the users
 //! table to be empty. The UUID id is generated in Rust (not by a database
 //! default) and the password is hashed with argon2id before it is stored.
+//!
+//! The users table is the one table an admin is invited to add columns to, so
+//! creating a user is not four fixed values: [`NewUser::extra`] carries whatever
+//! else the table has, and the caller — which has the catalog, and therefore the
+//! column types — hands the values over already coerced.
+
+use std::collections::BTreeMap;
 
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_query::{Expr, Insert, Statement, Value};
 use uuid::Uuid;
 
-use crate::password::hash_password;
-use crate::roles::load_role;
+use crate::password::{hash_password, random_password};
 use crate::user::User;
 use crate::users::USERS_TABLE;
-use crate::users::{COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, role_in_range};
+use crate::users::{COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE};
 
-/// Create a user with the given email, plaintext password, and role, returning
-/// the resulting [`User`].
+/// What an admin supplies when creating a user.
+#[derive(Debug, Clone, Default)]
+pub struct NewUser {
+    /// The identifier they will sign in with.
+    pub email: String,
+    /// The password, or **blank to have one generated** — see
+    /// [`CreatedUser::generated_password`].
+    pub password: String,
+    /// The role, `1..=100`, which must already exist in `_sc_roles`.
+    pub role: u8,
+    /// Admin-added columns, keyed by column name and already coerced to each
+    /// column's type. System columns ([`SYSTEM_USER_COLUMNS`](crate::SYSTEM_USER_COLUMNS))
+    /// are refused here: they are set by the fields above, not through the bag.
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// A freshly created user, and the password it was given if nobody chose one.
+pub struct CreatedUser {
+    /// The user as stored.
+    pub user: User,
+    /// The generated password, in **plaintext and for exactly this long**: it is
+    /// stored only as an argon2 hash, so this is the one moment anybody can read
+    /// it, and the caller's job is to put it in front of the admin who has to
+    /// pass it on. `None` when the admin chose the password themselves — there
+    /// is nothing to tell them that they did not just type.
+    pub generated_password: Option<String>,
+}
+
+/// Create a user, generating a password when none was given.
 ///
-/// Fails with [`Error::invalid`] if the email or password is blank, the role is
-/// outside `1..=100`, or **no such role exists**. That last check is not
-/// redundant with the foreign key on `users.role`: the constraint is what makes
-/// the state impossible, and this is what makes the refusal legible — "role 40
-/// does not exist" rather than a raw constraint violation naming an index. A
-/// duplicate email violates the table's `UNIQUE` constraint and surfaces as a
-/// database error. Unlike
-/// [`create_first_user`](crate::create_first_user) this imposes no
-/// empty-table precondition — it is the general "admin adds a user" path.
-pub async fn create_user(catalog: &Catalog, email: &str, password: &str, role: u8) -> Result<User> {
-    let email = email.trim();
+/// Fails with [`Error::invalid`] if the email is blank, the role is outside
+/// `1..=100`, **no such role exists**, or [`extra`](NewUser::extra) names a
+/// system column. The role check is not redundant with the foreign key on
+/// `users.role`: the constraint is what makes the state impossible, and this is
+/// what makes the refusal legible — "role 40 does not exist" rather than a raw
+/// constraint violation naming an index. A duplicate email violates the table's
+/// `UNIQUE` constraint and surfaces as a database error.
+pub async fn create_user_with(catalog: &Catalog, new: NewUser) -> Result<CreatedUser> {
+    let email = new.email.trim();
     if email.is_empty() {
         return Err(Error::invalid("email is required"));
     }
-    if password.is_empty() {
-        return Err(Error::invalid("password is required"));
-    }
-    if !role_in_range(role) {
-        return Err(Error::invalid(format!("role {role} is not in 1..=100")));
-    }
-    if load_role(catalog, role).await?.is_none() {
-        return Err(Error::invalid(format!(
-            "role {role} does not exist; create it before assigning users to it"
-        )));
-    }
+    crate::manage::require_role_exists(catalog, new.role).await?;
+    crate::manage::reject_system_columns(&new.extra)?;
+
+    // A blank password is a request, not a mistake: an admin who does not want
+    // to invent one gets a generated one back to hand over.
+    let (password, generated) = match new.password.is_empty() {
+        true => {
+            let password = random_password();
+            (password.clone(), Some(password))
+        }
+        false => (new.password.clone(), None),
+    };
 
     // Hash before touching the database — argon2id is deliberately slow.
-    let password_hash = hash_password(password)?;
+    let password_hash = hash_password(&password)?;
     let id = Uuid::new_v4();
 
-    let insert = Insert::row(
-        USERS_TABLE,
-        vec![
-            COL_ID.into(),
-            COL_ROLE.into(),
-            COL_EMAIL.into(),
-            COL_PASSWORD_HASH.into(),
-        ],
-        vec![
-            Expr::lit(id),
-            Expr::lit(i64::from(role)),
-            Expr::lit(email),
-            Expr::lit(password_hash),
-        ],
-    );
+    let mut columns = vec![
+        COL_ID.to_owned(),
+        COL_ROLE.to_owned(),
+        COL_EMAIL.to_owned(),
+        COL_PASSWORD_HASH.to_owned(),
+    ];
+    let mut values = vec![
+        Expr::lit(id),
+        Expr::lit(i64::from(new.role)),
+        Expr::lit(email),
+        Expr::lit(password_hash),
+    ];
+    for (column, value) in &new.extra {
+        columns.push(column.clone());
+        values.push(Expr::lit(value.clone()));
+    }
+
+    let insert = Insert::row(USERS_TABLE, columns, values);
     catalog
         .primary()
         .query(&Statement::from(insert))
@@ -72,8 +107,36 @@ pub async fn create_user(catalog: &Catalog, email: &str, password: &str, role: u
         .try_collect()
         .await?;
 
-    let mut user = User::new(id, role)?;
+    let mut user = User::new(id, new.role)?;
     user.extra
         .insert(COL_EMAIL.to_owned(), Value::Text(email.to_owned()));
-    Ok(user)
+    user.extra.extend(new.extra);
+    Ok(CreatedUser {
+        user,
+        generated_password: generated,
+    })
+}
+
+/// Create a user with the given email, plaintext password, and role, returning
+/// the resulting [`User`].
+///
+/// [`create_user_with`] for the common case, and the one difference is worth
+/// keeping: here a blank password is an [`Error::invalid`] rather than a request
+/// to generate one, because a caller passing an empty string to a function that
+/// takes a password has not decided anything.
+pub async fn create_user(catalog: &Catalog, email: &str, password: &str, role: u8) -> Result<User> {
+    if password.is_empty() {
+        return Err(Error::invalid("password is required"));
+    }
+    let created = create_user_with(
+        catalog,
+        NewUser {
+            email: email.to_owned(),
+            password: password.to_owned(),
+            role,
+            extra: BTreeMap::new(),
+        },
+    )
+    .await?;
+    Ok(created.user)
 }

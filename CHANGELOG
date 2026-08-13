@@ -2,6 +2,83 @@
 
 Changes in reverse chronological order.
 
+## The users screen manages users
+
+The users screen could list users and create one, with a form beside the list that asked
+for an email, a password and a role. Everything else an administrator does to an account
+had no way in: a user could not be edited at all, a column added to the users table was
+invisible to the form that creates users, and the role a new user got by default was
+Public — the role of somebody who has not signed in, which is never what the person
+filling in the form meant.
+
+The form is now generated from the users table. §7.1 makes that table the one table an
+admin is invited to add columns to, so a fixed three-box form is wrong the moment they do:
+the fields come from `listFields("users")` minus the columns the system owns (`id`, `role`,
+`email`, `password_hash`, `disabled` — named once, in `sc_auth::SYSTEM_USER_COLUMNS`, and
+mirrored in `ui/admin/src/userForm.ts`). Those columns travel in an `extra` bag on the wire,
+coerced through the same `column_value` every row write uses, and the bag refuses a system
+column: writing a password hash through a map of column values would have been a way in.
+
+The form is also a dialog now, opened from "Add user" or from each row's Edit button, the
+same shape the fields list on the table page has — the list stays the page and the edit is
+the interruption. The default role is the role nearest 80, breaking a tie towards the lower
+number so that an installation with roles at 60 and 100 does not land back on Public.
+
+Each row carries a menu of the things that are *not* edits, each an endpoint of its own
+because each does something a column write cannot:
+
+- **Set random password** replaces the password with 20 characters from the OS CSPRNG,
+  drawn by rejection sampling from an alphabet with `l`, `I`, `O` and `0` left out — a
+  generated password is transcribed into a chat message and out of one, so it is chosen to
+  be read aloud and the length covers the entropy.
+- **Force logout** drops every session the account holds, without touching the account.
+- **Disable user** stops it signing in *and* ends the sessions it is in the middle of; the
+  row, the role and everything the admin recorded stay, which is the difference from
+  deleting. A disabled account collapses into the same "no" as a wrong password, so the
+  login screen does not become a way to enumerate addresses.
+- **Become user** swaps the caller's session for that user's with no password. An admin who
+  can reset that password can already sign in as them, so this is convenience rather than
+  new authority — and it costs the admin their admin session, which `SessionAction::Start`
+  now guarantees by ending whatever session the request arrived with.
+- **Delete user**, and disabling, refuse the account the caller is signed in as: locking
+  yourself out of the screen you are standing on is a guard rail worth having.
+
+Creating a user with the password left blank generates one too, and both paths end in the
+one dialog that shows a password in plain text: a monospace block with the site, the email
+and the password, and a copy button, because the hash is all that is stored and this is the
+only moment anybody can read it.
+
+Behind it: `users.disabled` (nullable boolean, `NULL` = enabled) joins the users schema;
+`authenticate` and session resolution both refuse a disabled user; `SessionStore` gained
+`end_user_sessions`, and `SessionAction` an `EndUser` variant so a handler can ask for it
+without holding the store. `listUsers` returns the whole row rather than three columns, and
+`createUser` answers `{ user, generated_password }`.
+
+## Minimum role is always a select
+
+Every minimum-role input in the admin UI was an `<input type="number">` between 1 and 100:
+the agent's, the trigger's, the file store's and the individual file's. A role is a row in
+`_sc_roles` with a name an admin chose, so typing its number was the wrong question twice
+over — it invited a number no role has, and it told the admin nothing about which number
+meant which role. Only the table page's read/write rules were selects.
+
+They are all selects now, over the roles `listRoles` reports. The table page's local
+`RoleSelect` moved to `ui/admin/src/roleSelect.tsx` and is the one place a role is picked,
+in two shapes because the two cases differ in what an empty value means and that is worth
+being a type error rather than a convention: `RoleSelect` for a field that must name a role,
+and `OptionalRoleSelect` for one that may name none — with the caller naming what having no
+role means there ("Admin only" for an agent or a trigger, "Unrestricted" for a store or a
+file), since that sentence is different on every screen and is the whole meaning of the
+choice. `roleOptions` accordingly takes `number | null`, and still keeps a current role the
+server no longer lists, so a store pointing at a deleted role does not silently widen its
+access on the next save. The four forms now hold their minimum role as `number | null`
+rather than a string awaiting `Number()`, and the file manager's *effective* role badge
+names the role instead of printing "Role 40".
+
+The number boxes that remain are not roles and stay as they are: an agent's temperature and
+step limit, a periodic trigger's hour and minute, and the number of a role being created —
+which is the one place a role number is genuinely being chosen rather than referenced.
+
 ## Add Example to formula placeholders 
 
 Prepended "Example: " to placeholders for formulas in the admin ui, because due to low 

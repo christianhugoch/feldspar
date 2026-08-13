@@ -31,6 +31,8 @@ import type {
 import { navigate } from "../App";
 import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
+import { OptionalRoleSelect } from "../roleSelect";
+import { useRoles } from "../roles";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
 
 type TraitInfo = ListAgentTraitsResponse[number];
@@ -63,6 +65,7 @@ const ATTRIBUTES = [
 ] as const;
 
 export function AgentForm({ agentId }: { agentId?: string }) {
+  const roles = useRoles();
   const [traits, setTraits] = useState<TraitInfo[] | null>(null);
   const [providers, setProviders] = useState<ProviderItem[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -74,7 +77,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [minRole, setMinRole] = useState("");
+  const [minRole, setMinRole] = useState<number | null>(null);
   const [enabled, setEnabled] = useState<Enabled[]>([]);
   const [attributes, setAttributes] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState("");
@@ -105,7 +108,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           setProvider(existing.provider);
           setModel(existing.model ?? "");
           setSystemPrompt(existing.system_prompt);
-          setMinRole(existing.min_role == null ? "" : String(existing.min_role));
+          setMinRole(existing.min_role ?? null);
           setEnabled(
             existing.traits.map((t) => ({
               trait: t.trait,
@@ -143,7 +146,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           trait: entry.trait,
           config: buildConfig(specOf(entry.trait), entry.config),
         })),
-        min_role: minRole.trim() === "" ? null : Number(minRole),
+        min_role: minRole,
         // The sparse attributes: what was typed, nothing that was not. An empty
         // box is not a zero.
         attributes: Object.fromEntries(
@@ -222,21 +225,16 @@ export function AgentForm({ agentId }: { agentId?: string }) {
               </Form.Group>
             </Col>
             <Col md={6}>
-              <Form.Group className="mb-3" controlId="agentMinRole">
-                <Form.Label>Minimum role</Form.Label>
-                <Form.Control
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={minRole}
-                  placeholder="admin only"
-                  onChange={(e) => setMinRole(e.target.value)}
-                />
-                <Form.Text muted>
-                  Who may chat with this agent. 1 is admin, 100 is public. Leave blank for
-                  admin only.
-                </Form.Text>
-              </Form.Group>
+              <OptionalRoleSelect
+                id="agentMinRole"
+                label="Minimum role"
+                value={minRole}
+                roles={roles}
+                blank="Admin only"
+                onChange={setMinRole}
+              >
+                Who may chat with this agent: the least privileged role still allowed.
+              </OptionalRoleSelect>
             </Col>
           </Row>
 

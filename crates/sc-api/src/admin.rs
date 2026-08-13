@@ -12,7 +12,7 @@
 //! *contract* — methods, paths, schemas, and auth — that both the server and the
 //! generated client are held to.
 
-use crate::auth::{credentials_schema, user_summary_schema};
+use crate::auth::{credentials_schema, user_row_schema, user_summary_schema};
 use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, Method, PathSpec};
 use crate::schema::{StructField, TypeSchema, ValueType};
 
@@ -1108,21 +1108,128 @@ pub fn admin_endpoints() -> EndpointSet {
 
     // --- users --------------------------------------------------------------
 
+    // The users screen manages accounts the same way every other screen manages
+    // its objects — a list, a form, and the operations that are not edits.
+    //
+    // Four of these are *not* row edits and that is why they are endpoints of
+    // their own rather than fields of `updateUser`: disabling an account,
+    // dropping its sessions, becoming it, and resetting its password each do
+    // something a column write cannot (they touch sessions, or they hand back a
+    // secret that exists only in that response). Spelling them as booleans in an
+    // update body would hide that.
+
     set.register(
         Endpoint::new("listUsers", Method::Get, api().lit("users"))
-            .output(TypeSchema::array(user_summary_schema()))
+            .output(TypeSchema::array(user_row_schema()))
             .auth(AuthRequirement::admin()),
     );
 
     set.register(
         Endpoint::new("createUser", Method::Post, api().lit("users"))
-            .input(TypeSchema::struct_of([
-                StructField::new("email", TypeSchema::text()),
-                StructField::new("password", TypeSchema::text()),
-                StructField::new("role", TypeSchema::int()),
+            .input(user_input_schema())
+            // The row, plus the password if one was generated because the admin
+            // left it blank — the only moment it is readable (§7.1).
+            .output(TypeSchema::struct_of([
+                StructField::new("user", user_row_schema()),
+                StructField::new(
+                    "generated_password",
+                    TypeSchema::optional(TypeSchema::text()),
+                ),
             ]))
-            .output(user_summary_schema())
             .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateUser",
+            Method::Put,
+            api().lit("users").param("id", ValueType::Uuid),
+        )
+        .input(user_input_schema())
+        .output(user_row_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteUser",
+            Method::Delete,
+            api().lit("users").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "setUserDisabled",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("disabled"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "disabled",
+            TypeSchema::bool(),
+        )]))
+        .output(user_row_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "forceLogoutUser",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("force-logout"),
+        )
+        // `ok`, not a count of sessions ended: the sessions are dropped by the
+        // transport (which owns the store) after the handler has returned, so a
+        // number here would be one the handler had to guess.
+        .output(TypeSchema::struct_of([StructField::new(
+            "ok",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Swap the caller's own session for one belonging to this user, with no
+    // password: an admin who can reset that password can already sign in as them
+    // (§7.1), so this adds convenience rather than authority — and it costs the
+    // admin their admin session, which is the honest price of the swap.
+    set.register(
+        Endpoint::new(
+            "becomeUser",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("become"),
+        )
+        .output(user_summary_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "setRandomPassword",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("random-password"),
+        )
+        .output(TypeSchema::struct_of([
+            StructField::new("email", TypeSchema::text()),
+            StructField::new("password", TypeSchema::text()),
+        ]))
+        .auth(AuthRequirement::admin()),
     );
 
     // --- triggers -----------------------------------------------------------
@@ -1319,6 +1426,27 @@ fn role_schema() -> TypeSchema {
         StructField::new("name", TypeSchema::text()),
         StructField::new("description", TypeSchema::text()),
         StructField::new("builtin", TypeSchema::bool()),
+    ])
+}
+
+/// The body of a user create or edit — the same shape for both, since a user
+/// form is a user form.
+///
+/// `password` is optional and its blank means two different things by design, one
+/// per operation: **on create** it asks for a generated password (returned once,
+/// in the response), and **on update** it leaves the stored hash alone. The
+/// alternative — making the admin type a password to change a role — is what
+/// makes people reuse one.
+///
+/// `extra` carries the columns the admin has added to the users table (§7.1),
+/// keyed by column name; the system's own columns are refused there, since each
+/// has its own way in.
+fn user_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("email", TypeSchema::text()),
+        StructField::new("password", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("role", TypeSchema::int()),
+        StructField::new("extra", TypeSchema::optional(TypeSchema::json())),
     ])
 }
 

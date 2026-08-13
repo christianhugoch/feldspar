@@ -921,3 +921,15 @@ div.navbar-brand > a:hover {
   max-height: 15rem;
   overflow-y: auto;
 }
+
+/* The credentials block on the users screen: a password being read off a screen
+   and pasted into a message, so the two things that matter are that every
+   character is distinguishable (monospace, which `<pre>` already gives) and that
+   a long site URL wraps instead of scrolling out of the dialog. Selectable as
+   one block, because the copy button copies exactly what is shown. */
+.user-credentials {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+  margin-bottom: 0;
+}

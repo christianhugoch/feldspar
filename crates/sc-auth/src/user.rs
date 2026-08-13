@@ -20,7 +20,7 @@ use sc_query::Value;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::users::{COL_ID, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN, role_in_range};
+use crate::users::{COL_DISABLED, COL_ID, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN, role_in_range};
 
 /// A user of the system: the two guaranteed fields plus an opaque bag of the
 /// admin-defined columns (technical design §7.1).
@@ -92,6 +92,17 @@ impl User {
     /// Whether this user is an administrator (`role == 1`).
     pub fn is_admin(&self) -> bool {
         self.role == ROLE_ADMIN
+    }
+
+    /// Whether this account has been disabled by an administrator.
+    ///
+    /// `NULL` and `false` both mean enabled — the column says something only
+    /// about accounts somebody has acted on. Unlike the password hash the flag
+    /// *is* carried in [`extra`](User::extra), because the two places that must
+    /// ask (credential [`authenticate`](crate::authenticate)ion and session
+    /// resolution) both hold a `User` rather than a row.
+    pub fn is_disabled(&self) -> bool {
+        matches!(self.get(COL_DISABLED), Some(Value::Bool(true)))
     }
 
     /// Whether this user meets a `min_role` gate. Roles run 1–100 with **lower =
@@ -175,6 +186,23 @@ mod tests {
         );
         assert!(!user.extra.contains_key(COL_PASSWORD_HASH));
         assert_eq!(user.extra.len(), 1);
+    }
+
+    #[test]
+    fn disabled_is_read_from_the_row_and_null_means_enabled() {
+        let id = Uuid::new_v4();
+        let with = |disabled: Value| {
+            User::from_row(&row(
+                &[COL_ID, COL_ROLE, COL_DISABLED],
+                vec![Value::Uuid(id), Value::Int(40), disabled],
+            ))
+            .unwrap()
+        };
+        assert!(with(Value::Bool(true)).is_disabled());
+        assert!(!with(Value::Bool(false)).is_disabled());
+        // A column nobody has ever written is an ordinary, enabled account.
+        assert!(!with(Value::Null).is_disabled());
+        assert!(!User::new(id, 40).unwrap().is_disabled());
     }
 
     #[test]

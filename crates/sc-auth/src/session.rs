@@ -350,11 +350,16 @@ impl SessionStore {
                 }
                 // Reading the user is what makes a deleted user's session stop
                 // being one — see `session_fields`, which leaves the foreign key
-                // out precisely because this check does not need it.
+                // out precisely because this check does not need it. A disabled
+                // user is the same case: the row is there, the account is not.
                 let Some(user) = load_user(catalog, user_id).await? else {
                     self.invalidate(token)?;
                     return Ok(None);
                 };
+                if user.is_disabled() {
+                    self.invalidate(token)?;
+                    return Ok(None);
+                }
                 self.cache_put(token, &user, expires_at);
                 Ok(Some(user))
             }
@@ -375,6 +380,45 @@ impl SessionStore {
             Backend::Database { catalog, .. } => {
                 self.invalidate(token)?;
                 delete_session(catalog, &token_hash(token)).await
+            }
+        }
+    }
+
+    /// End **every** session belonging to one user, returning how many rows went.
+    ///
+    /// The admin screen's "force logout", and what disabling or deleting a user
+    /// does on the way past: a credential that has already been handed out is not
+    /// withdrawn by changing what the account may do, only by dropping the
+    /// sessions holding it.
+    ///
+    /// The same caveat as [`logout`](SessionStore::logout), and no worse: the
+    /// rows go immediately and this node forgets its cached copies, while another
+    /// node's cache honours a token it already resolved until the entry goes
+    /// stale ([`CACHE_TTL_SECONDS`]).
+    pub async fn end_user_sessions(&self, user_id: Uuid) -> Result<usize> {
+        match &self.backend {
+            Backend::Memory(entries) => {
+                let mut guard = entries.write().map_err(|_| poisoned())?;
+                let before = guard.len();
+                guard.retain(|_, e| e.user.id != user_id);
+                Ok(before - guard.len())
+            }
+            Backend::Database { catalog, .. } => {
+                // The cache is keyed by token, so the tokens to forget are found
+                // by asking the cached users who they are — the rows are gone
+                // either way, this is only about the copies in front of them.
+                let stale: Vec<String> = {
+                    let cache = self.cache.lock().map_err(|_| poisoned())?;
+                    cache
+                        .iter()
+                        .filter(|(_, cached)| cached.user.id == user_id)
+                        .map(|(token, _)| token.clone())
+                        .collect()
+                };
+                for token in &stale {
+                    self.invalidate(token)?;
+                }
+                delete_sessions_for_user(catalog, user_id).await
             }
         }
     }
@@ -510,6 +554,20 @@ async fn delete_session(catalog: &Catalog, token_hash: &str) -> Result<bool> {
     Ok(!rows(catalog, Statement::from(delete)).await?.is_empty())
 }
 
+/// Delete every session row naming `user_id`, returning how many there were.
+///
+/// A free function for the same reason [`create_session`] is one: the rows are
+/// the session, so a caller holding the database can end them without a running
+/// server's [`SessionStore`] to ask. [`SessionStore::end_user_sessions`] is this
+/// plus the local cache eviction.
+pub async fn delete_sessions_for_user(catalog: &Catalog, user_id: Uuid) -> Result<usize> {
+    let delete = Delete {
+        returning: vec![Projection::expr(Expr::col(COL_TOKEN_HASH))],
+        ..Delete::from(SESSIONS_TABLE).filter(Expr::col(COL_USER).eq(Expr::lit(user_id)))
+    };
+    Ok(rows(catalog, Statement::from(delete)).await?.len())
+}
+
 /// Delete every session that has lapsed.
 async fn sweep_sessions(catalog: &Catalog) -> Result<()> {
     let delete = Delete::from(SESSIONS_TABLE).filter(Expr::binary(
@@ -619,6 +677,23 @@ mod tests {
         let store = SessionStore::with_ttl(Duration::zero());
         let token = store.login(admin()).await.unwrap();
         assert_eq!(store.user_for(&token).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn ending_a_users_sessions_ends_all_of_them_and_nobody_elses() {
+        let store = SessionStore::default();
+        let user = admin();
+        let phone = store.login(user.clone()).await.unwrap();
+        let laptop = store.login(user.clone()).await.unwrap();
+        let other = store.login(admin()).await.unwrap();
+
+        assert_eq!(store.end_user_sessions(user.id).await.unwrap(), 2);
+        assert_eq!(store.user_for(&phone).await.unwrap(), None);
+        assert_eq!(store.user_for(&laptop).await.unwrap(), None);
+        assert!(store.user_for(&other).await.unwrap().is_some());
+
+        // Idempotent: a user with nothing to end ends nothing.
+        assert_eq!(store.end_user_sessions(user.id).await.unwrap(), 0);
     }
 
     #[tokio::test]

@@ -272,8 +272,10 @@ async fn full_admin_api_story() -> sc_error::Result<()> {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(body["email"], json!("editor@example.com"));
-    assert_eq!(body["role"], json!(40));
+    assert_eq!(body["user"]["email"], json!("editor@example.com"));
+    assert_eq!(body["user"]["role"], json!(40));
+    // A password was given, so there is nothing to reveal.
+    assert_eq!(body["generated_password"], Value::Null);
 
     let (_, body) = client.send("GET", "/api/users", None).await;
     let emails: Vec<&str> = body

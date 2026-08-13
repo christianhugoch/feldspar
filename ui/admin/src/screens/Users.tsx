@@ -1,37 +1,71 @@
-// Users screen: list users and create new ones.
+// Users screen: the accounts, the form that makes and edits one, and the things
+// an admin does to an account that are not edits.
 //
-// A user's role is a reference to a row in `_sc_roles` (design §7.1, §9), so the
-// form offers the roles that exist rather than a free integer: a number with no
-// role behind it is a user whose privileges cannot be described, and the
-// database refuses it. New roles are made on the Roles screen.
+// Three decisions shape it.
+//
+// **The form is the users table.** Per design §7.1 the users table is the one
+// table an admin is invited to add columns to, so a fixed email/password/role
+// form is wrong the moment they do: the fields come from `listFields("users")`
+// minus the columns the system owns (`userForm.ts`), and a column added on the
+// table page is a box on this form without anything here changing.
+//
+// **The form is a dialog, like a field's.** It is opened from a row or from "Add
+// user" and closes when the save lands, so the list stays the page and the edit
+// is the interruption — the same shape the fields list on the table page has.
+//
+// **What is not an edit is in the row's menu.** Disabling, forcing a logout,
+// becoming somebody, resetting a password: each does something a column write
+// cannot, so each is an action with its own confirmation rather than a checkbox
+// in the form. A reset (and a create with a blank password) ends in the one
+// dialog that shows a password in plain text — the only moment it is readable —
+// with a copy button, because it is about to be pasted into a message.
 
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Card from "react-bootstrap/Card";
-import Col from "react-bootstrap/Col";
+import Dropdown from "react-bootstrap/Dropdown";
 import Form from "react-bootstrap/Form";
-import Row from "react-bootstrap/Row";
+import Modal from "react-bootstrap/Modal";
 import Table from "react-bootstrap/Table";
 
-import { api } from "../api";
-import type { ListUsersResponse } from "../client";
+import { api, errorMessage } from "../api";
+import type { ListFieldsResponse, ListUsersResponse } from "../client";
 import { navigate } from "../App";
-import { PageBody, PageHeader } from "../layout";
+import { IconDots, IconPlus } from "../icons";
+import { PageBody, PageHeader, StatusBadge } from "../layout";
+import { RoleSelect } from "../roleSelect";
 import { roleLabel, useRoles } from "../roles";
+import {
+  adminUserFields,
+  credentialsText,
+  displayValue,
+  editUserForm,
+  loginUrl,
+  newUserForm,
+  userBody,
+  type Credentials,
+  type UserForm,
+  type UserRow,
+} from "../userForm";
+
+/** Which user the dialog is editing, or `"new"` for one that does not exist yet. */
+type Editing = { mode: "new" } | { mode: "edit"; user: UserRow };
 
 export function Users() {
   const [users, setUsers] = useState<ListUsersResponse | null>(null);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [role, setRole] = useState(100);
+  const [fields, setFields] = useState<ListFieldsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Editing | null>(null);
+  const [credentials, setCredentials] = useState<Credentials | null>(null);
   const [busy, setBusy] = useState(false);
   const roles = useRoles();
 
   const load = async () => {
     try {
-      setUsers(await api.listUsers());
+      const [list, columns] = await Promise.all([api.listUsers(), api.listFields("users")]);
+      setUsers(list);
+      setFields(columns);
     } catch {
       setError("Could not load users.");
     }
@@ -41,21 +75,63 @@ export function Users() {
     void load();
   }, []);
 
-  const create = async (e: FormEvent) => {
-    e.preventDefault();
+  /** Run one row action, refresh the list, and surface the server's own refusal. */
+  const act = async (fallback: string, action: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
     try {
-      await api.createUser({ email: email.trim(), password, role });
-      setEmail("");
-      setPassword("");
+      await action();
       await load();
-    } catch {
-      setError("Could not create the user.");
+    } catch (err) {
+      setError(errorMessage(err, fallback));
     } finally {
       setBusy(false);
     }
   };
+
+  const remove = (user: UserRow) => {
+    if (!window.confirm(`Delete ${user.email}? This cannot be undone.`)) return;
+    void act("Could not delete the user.", () => api.deleteUser(user.id));
+  };
+
+  const setDisabled = (user: UserRow, disabled: boolean) =>
+    void act(
+      disabled ? "Could not disable the user." : "Could not enable the user.",
+      () => api.setUserDisabled(user.id, { disabled }),
+    );
+
+  const forceLogout = (user: UserRow) =>
+    void act("Could not end the sessions.", () => api.forceLogoutUser(user.id));
+
+  const resetPassword = (user: UserRow) => {
+    if (!window.confirm(`Replace ${user.email}'s password with a random one?`)) return;
+    void act("Could not set a new password.", async () => {
+      const reset = await api.setRandomPassword(user.id);
+      setCredentials({ email: reset.email, password: reset.password, url: loginUrl() });
+    });
+  };
+
+  /**
+   * Become a user: the session this page is being served under is swapped for
+   * theirs, so there is nothing to refresh — the admin UI is no longer this
+   * caller's to see. Reloading is what makes that plain rather than leaving a
+   * screen full of buttons that now all fail.
+   */
+  const become = (user: UserRow) => {
+    if (
+      !window.confirm(
+        `Continue as ${user.email}? Your admin session ends — you will have to sign in again.`,
+      )
+    ) {
+      return;
+    }
+    void act("Could not become that user.", async () => {
+      await api.becomeUser(user.id);
+      window.location.reload();
+    });
+  };
+
+  const columns = adminUserFields(fields);
 
   return (
     <>
@@ -63,92 +139,332 @@ export function Users() {
         pretitle="Access"
         title="Users"
         actions={
-          <Button variant="outline-secondary" onClick={() => navigate("/roles")}>
-            Roles
-          </Button>
+          <>
+            <Button variant="outline-secondary" onClick={() => navigate("/roles")}>
+              Roles
+            </Button>
+            <Button onClick={() => setEditing({ mode: "new" })}>
+              <IconPlus className="icon-2" />
+              Add user
+            </Button>
+          </>
         }
       />
       <PageBody>
-        {error && <Alert variant="danger">{error}</Alert>}
+        {error && (
+          <Alert variant="danger" dismissible onClose={() => setError(null)}>
+            {error}
+          </Alert>
+        )}
 
-        <Row>
-          <Col lg={7} className="mb-4">
-            <div className="card">
-              <div className="card-header">
-                <h3 className="card-title">Users</h3>
-              </div>
-              <Table hover responsive className="card-table table-vcenter">
-                <thead>
-                  <tr>
-                    <th>Email</th>
-                    <th>Role</th>
+        <Card>
+          <Card.Header>
+            <h3 className="card-title">Users</h3>
+          </Card.Header>
+          <Table hover responsive className="card-table table-vcenter">
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Status</th>
+                {columns.map((f) => (
+                  <th key={f.name}>{f.label || f.name}</th>
+                ))}
+                <th className="w-1" />
+              </tr>
+            </thead>
+            <tbody>
+              {users?.length === 0 && (
+                <tr>
+                  <td colSpan={4 + columns.length} className="text-muted">
+                    No users yet.
+                  </td>
+                </tr>
+              )}
+              {users?.map((u) => {
+                const bag = (u.extra ?? {}) as Record<string, unknown>;
+                return (
+                  <tr key={u.id}>
+                    <td>{u.email}</td>
+                    <td>{roleLabel(u.role, roles)}</td>
+                    <td>
+                      {u.disabled ? (
+                        <StatusBadge tone="red">Disabled</StatusBadge>
+                      ) : (
+                        <StatusBadge tone="green">Active</StatusBadge>
+                      )}
+                    </td>
+                    {columns.map((f) => (
+                      <td key={f.name}>{displayValue(bag[f.name])}</td>
+                    ))}
+                    <td>
+                      <div className="btn-list justify-content-end flex-nowrap">
+                        <Button
+                          size="sm"
+                          variant="outline-secondary"
+                          disabled={busy}
+                          onClick={() => setEditing({ mode: "edit", user: u })}
+                        >
+                          Edit
+                        </Button>
+                        <Dropdown align="end">
+                          <Dropdown.Toggle
+                            variant="outline-secondary"
+                            size="sm"
+                            className="btn-icon"
+                            id={`user-menu-${u.id}`}
+                            disabled={busy}
+                            aria-label={`More actions for ${u.email}`}
+                          >
+                            <IconDots className="icon-2" />
+                          </Dropdown.Toggle>
+                          {/* Positioned against the viewport, not the table: the
+                              rows table scrolls sideways when the admin has added
+                              columns, and a menu laid out inside that box is
+                              clipped by it. */}
+                          <Dropdown.Menu renderOnMount popperConfig={{ strategy: "fixed" }}>
+                            <Dropdown.Item onClick={() => resetPassword(u)}>
+                              Set random password
+                            </Dropdown.Item>
+                            <Dropdown.Item onClick={() => forceLogout(u)}>
+                              Force logout
+                            </Dropdown.Item>
+                            <Dropdown.Item onClick={() => become(u)}>Become user</Dropdown.Item>
+                            <Dropdown.Divider />
+                            <Dropdown.Item onClick={() => setDisabled(u, !u.disabled)}>
+                              {u.disabled ? "Enable user" : "Disable user"}
+                            </Dropdown.Item>
+                            <Dropdown.Item className="text-danger" onClick={() => remove(u)}>
+                              Delete user
+                            </Dropdown.Item>
+                          </Dropdown.Menu>
+                        </Dropdown>
+                      </div>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {users?.length === 0 && (
-                    <tr>
-                      <td colSpan={2} className="text-muted">
-                        No users yet.
-                      </td>
-                    </tr>
-                  )}
-                  {users?.map((u) => (
-                    <tr key={u.id}>
-                      <td>{u.email}</td>
-                      <td>{roleLabel(u.role, roles)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-            </div>
-          </Col>
-          <Col lg={5} className="mb-4">
-            <Card>
-              <Card.Header>Add user</Card.Header>
-              <Card.Body>
-                <Form onSubmit={create}>
-                  <Form.Group className="mb-2" controlId="userEmail">
-                    <Form.Label>Email</Form.Label>
-                    <Form.Control
-                      type="email"
-                      value={email}
-                      autoComplete="off"
-                      required
-                      onChange={(e) => setEmail(e.target.value)}
-                    />
-                  </Form.Group>
-                  <Form.Group className="mb-2" controlId="userPassword">
-                    <Form.Label>Password</Form.Label>
-                    <Form.Control
-                      type="password"
-                      value={password}
-                      autoComplete="new-password"
-                      required
-                      onChange={(e) => setPassword(e.target.value)}
-                    />
-                  </Form.Group>
-                  <Form.Group className="mb-3" controlId="userRole">
-                    <Form.Label>Role</Form.Label>
-                    <Form.Select value={role} onChange={(e) => setRole(Number(e.target.value))}>
-                      {(roles ?? []).map((r) => (
-                        <option key={r.role} value={r.role}>
-                          {r.name} ({r.role})
-                        </option>
-                      ))}
-                    </Form.Select>
-                    <Form.Text muted>
-                      Lower is more privileged. Add roles on the <a href="#/roles">Roles</a> screen.
-                    </Form.Text>
-                  </Form.Group>
-                  <Button type="submit" disabled={busy}>
-                    Create user
-                  </Button>
-                </Form>
-              </Card.Body>
-            </Card>
-          </Col>
-        </Row>
+                );
+              })}
+            </tbody>
+          </Table>
+        </Card>
+
+        <UserDialog
+          editing={editing}
+          fields={fields}
+          roles={roles}
+          onClose={() => setEditing(null)}
+          onSaved={(created) => {
+            setEditing(null);
+            if (created) setCredentials(created);
+            void load();
+          }}
+        />
+
+        <CredentialsDialog
+          credentials={credentials}
+          onClose={() => setCredentials(null)}
+        />
       </PageBody>
     </>
+  );
+}
+
+/** The add/edit dialog: email, password, role, and one input per admin field. */
+function UserDialog({
+  editing,
+  fields,
+  roles,
+  onClose,
+  onSaved,
+}: {
+  editing: Editing | null;
+  fields: ListFieldsResponse | null;
+  roles: ReturnType<typeof useRoles>;
+  onClose: () => void;
+  onSaved: (credentials: Credentials | null) => void;
+}) {
+  const [form, setForm] = useState<UserForm>(() => newUserForm(roles));
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Reset whenever the dialog opens: on the user being edited, or blank (on the
+  // default role) for a new one. Keyed on the dialog opening rather than on
+  // every render, so typing is not fought.
+  useEffect(() => {
+    if (!editing) return;
+    setError(null);
+    setForm(
+      editing.mode === "edit" ? editUserForm(editing.user, fields) : newUserForm(roles),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+
+  const isEdit = editing?.mode === "edit";
+  const columns = adminUserFields(fields);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (editing.mode === "edit") {
+        await api.updateUser(editing.user.id, userBody(form));
+        onSaved(null);
+      } else {
+        const created = await api.createUser(userBody(form));
+        // A blank password was a request for a generated one, and this response
+        // is the only place it is ever readable.
+        onSaved(
+          created.generated_password
+            ? {
+                email: created.user.email,
+                password: created.generated_password,
+                url: loginUrl(),
+              }
+            : null,
+        );
+      }
+    } catch (err) {
+      setError(
+        errorMessage(err, isEdit ? "Could not save the user." : "Could not create the user."),
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal show={editing !== null} onHide={onClose} scrollable>
+      {/* The form wraps the whole modal so the footer's button is its submit and
+          Return in a text box does what the button does. */}
+      <Form onSubmit={save}>
+        <Modal.Header closeButton>
+          <Modal.Title className="h4">
+            {editing?.mode === "edit" ? `Edit ${editing.user.email}` : "Add user"}
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {error && <Alert variant="danger">{error}</Alert>}
+
+          <Form.Group className="mb-3" controlId="userEmail">
+            <Form.Label>Email</Form.Label>
+            <Form.Control
+              type="email"
+              value={form.email}
+              autoComplete="off"
+              autoFocus
+              required
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+            />
+          </Form.Group>
+
+          <Form.Group className="mb-3" controlId="userPassword">
+            <Form.Label>Password</Form.Label>
+            <Form.Control
+              type="password"
+              value={form.password}
+              autoComplete="new-password"
+              placeholder={isEdit ? "Unchanged" : "Generated"}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+            />
+            <Form.Text muted>
+              {isEdit
+                ? "Leave blank to keep the current password."
+                : "Leave blank and a random password is generated, shown once for you to pass on."}
+            </Form.Text>
+          </Form.Group>
+
+          <RoleSelect
+            id="userRole"
+            label="Role"
+            roles={roles}
+            value={form.role}
+            onChange={(role) => setForm({ ...form, role })}
+          >
+            Lower is more privileged. Add roles on the <a href="#/roles">Roles</a> screen.
+          </RoleSelect>
+
+          {columns.map((f) => (
+            <Form.Group className="mb-3" controlId={`user-${f.name}`} key={f.name}>
+              <Form.Label>{f.label || f.name}</Form.Label>
+              <Form.Control
+                value={form.extra[f.name] ?? ""}
+                onChange={(e) =>
+                  setForm({ ...form, extra: { ...form.extra, [f.name]: e.target.value } })
+                }
+              />
+              {f.description && <Form.Text muted>{f.description}</Form.Text>}
+            </Form.Group>
+          ))}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" type="button" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={busy}>
+            {isEdit ? "Save changes" : "Create user"}
+          </Button>
+        </Modal.Footer>
+      </Form>
+    </Modal>
+  );
+}
+
+/**
+ * The one dialog that shows a password in plain text.
+ *
+ * It exists because the password is only readable in the response that made it:
+ * it is stored as an argon2 hash, so if this dialog is closed without the
+ * password being copied, nobody — including the admin who just created it — can
+ * ever read it again, and the only remedy is another reset. Hence the monospace
+ * block (so an `l` and a `1` are told apart), the copy button (so it is
+ * transcribed exactly), and the sentence saying it will not be shown again.
+ */
+function CredentialsDialog({
+  credentials,
+  onClose,
+}: {
+  credentials: Credentials | null;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setCopied(false);
+  }, [credentials]);
+
+  const text = credentials ? credentialsText(credentials) : "";
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch {
+      // A clipboard the browser will not hand over is not an error worth a
+      // banner: the text is on screen and selectable, which is the fallback.
+      setCopied(false);
+    }
+  };
+
+  return (
+    <Modal show={credentials !== null} onHide={onClose}>
+      <Modal.Header closeButton>
+        <Modal.Title className="h4">Password set</Modal.Title>
+      </Modal.Header>
+      <Modal.Body>
+        <p>
+          Send these to {credentials?.email} over a channel you trust. The password is not
+          stored in a readable form and will not be shown again.
+        </p>
+        <pre className="border rounded p-3 mb-3 user-credentials">{text}</pre>
+        <Button variant="outline-secondary" onClick={() => void copy()}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </Modal.Body>
+      <Modal.Footer>
+        <Button onClick={onClose}>Done</Button>
+      </Modal.Footer>
+    </Modal>
   );
 }
