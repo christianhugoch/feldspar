@@ -49,6 +49,7 @@ import { Login } from "./screens/Login";
 import { Roles } from "./screens/Roles";
 import { Settings } from "./screens/Settings";
 import { Tables } from "./screens/Tables";
+import { TableData } from "./screens/TableData";
 import { TableDetail } from "./screens/TableDetail";
 import { Triggers } from "./screens/Triggers";
 import { TriggerForm } from "./screens/TriggerForm";
@@ -373,6 +374,10 @@ function ThemeToggle({ theme, onToggle }: { theme: string; onToggle: () => void 
  * than about a record — today the GraphQL explorer, which runs its queries under
  * that admin's own authority and has to say whose. */
 function Screen({ route, user }: { route: string; user: CurrentUser }) {
+  const tableDataMatch = route.match(/^\/tables\/([^/]+)\/data$/);
+  if (tableDataMatch) {
+    return <TableData table={decodeURIComponent(tableDataMatch[1])} />;
+  }
   const tableMatch = route.match(/^\/tables\/([^/]+)$/);
   if (tableMatch) {
     return <TableDetail table={decodeURIComponent(tableMatch[1])} />;
@@ -393,6 +398,12 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   if (route === "/triggers/new") {
     return <TriggerForm />;
+  }
+  // "Create trigger" on a table's own page: the same form, with that table
+  // already chosen as the one the trigger fires on.
+  const triggerForTableMatch = route.match(/^\/triggers\/new\/([^/]+)$/);
+  if (triggerForTableMatch) {
+    return <TriggerForm table={decodeURIComponent(triggerForTableMatch[1])} />;
   }
   const triggerEditMatch = route.match(/^\/triggers\/([^/]+)\/edit$/);
   if (triggerEditMatch) {

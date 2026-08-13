@@ -237,6 +237,50 @@ export function IconTrash(props: IconProps) {
   );
 }
 
+/** Open a table's rows for editing — the "Edit" tile on the table-data card. */
+export function IconPencil(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M7 7h-1a2 2 0 0 0 -2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2 -2v-1" />
+      <path d="M20.385 6.585a2.1 2.1 0 0 0 -2.97 -2.97l-8.415 8.385v3h3l8.385 -8.415z" />
+      <path d="M16 5l3 3" />
+    </Svg>
+  );
+}
+
+/** Take the table's rows away as a file. */
+export function IconDownload(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2" />
+      <path d="M7 11l5 5l5 -5" />
+      <path d="M12 4l0 12" />
+    </Svg>
+  );
+}
+
+/** Put rows into the table from a file. */
+export function IconUpload(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2" />
+      <path d="M7 9l5 -5l5 5" />
+      <path d="M12 4l0 12" />
+    </Svg>
+  );
+}
+
+/** The overflow menu's own handle: everything rarer than the tiles beside it. */
+export function IconDots(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+      <path d="M12 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+      <path d="M19 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+    </Svg>
+  );
+}
+
 /** A tool call, in the transcript. */
 export function IconTool(props: IconProps) {
   return (

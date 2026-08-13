@@ -51,6 +51,51 @@ body,
   margin: 0;
 }
 
+/* One action on the table page's "Table data" strip: a large icon over its
+ * label, in a row of them beside the row count.
+ *
+ * Not a `.btn`. Tabler sizes any `.icon` inside a button from
+ * `--tblr-btn-icon-size` and pulls it in with negative margins, so a button is
+ * exactly the wrong container for an icon meant to be the size of a heading —
+ * `.icon-lg` on it does nothing. These are their own control instead: a bare
+ * button with the link colour, the icon sized here, and the label under it.
+ *
+ * `label.data-tile` is the same tile wrapping a hidden `<input type="file">`,
+ * which is the only way a browser opens a file picker. */
+.data-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.75rem;
+  border: 0;
+  background: none;
+  color: var(--tblr-primary);
+  cursor: pointer;
+}
+
+.data-tile .icon {
+  width: 2rem;
+  height: 2rem;
+  stroke-width: 1.5;
+}
+
+.data-tile:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.data-tile:disabled {
+  color: var(--tblr-secondary);
+  cursor: default;
+}
+
+/* The same strip's overflow menu. Its handle is the three dots themselves, so
+ * Bootstrap's caret beside them is a second affordance for the one thing —
+ * and Tabler ships no class to turn it off. */
+.data-menu-toggle::after {
+  display: none;
+}
+
 /* Match the brand wordmark to the sidebar's menu links. */
 div.navbar-brand > a > span {
   color: var(--tblr-navbar-color);

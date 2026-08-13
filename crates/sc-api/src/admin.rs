@@ -289,6 +289,26 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // How many rows there are, without reading them. The table page shows this
+    // beside the link to the rows themselves, and a page that had to fetch every
+    // row to print one number would cost what the data costs.
+    set.register(
+        Endpoint::new(
+            "countRows",
+            Method::Get,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rows")
+                .lit("count"),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "count",
+            TypeSchema::int(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     set.register(
         Endpoint::new(
             "createRow",
@@ -328,6 +348,56 @@ pub fn admin_endpoints() -> EndpointSet {
                 .lit("rows")
                 .param("id", ValueType::Text),
         )
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- rows in bulk, as CSV ----------------------------------------------
+    //
+    // The document crosses as a **string** in a JSON envelope rather than as a
+    // file download and a file upload. Both directions could have been raw
+    // routes outside this set — as the binary file upload is — but neither has
+    // to be: CSV is text, so it fits the endpoint model exactly, and keeping it
+    // inside means the typed client carries both and the CSRF and auth
+    // machinery applies without a second path to remember. The export names the
+    // file it should be saved as, because the browser is the one doing the
+    // saving and only the server knows the table.
+
+    set.register(
+        Endpoint::new(
+            "exportTableCsv",
+            Method::Get,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("csv"),
+        )
+        .output(TypeSchema::struct_of([
+            StructField::new("filename", TypeSchema::text()),
+            StructField::new("csv", TypeSchema::text()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Every row that parses and validates is inserted; the rest come back as
+    // messages naming their line. The two numbers are the answer — "it worked"
+    // and "it failed" are both wrong for a file with three bad rows in it.
+    set.register(
+        Endpoint::new(
+            "importTableCsv",
+            Method::Post,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("csv"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "csv",
+            TypeSchema::text(),
+        )]))
+        .output(TypeSchema::struct_of([
+            StructField::new("inserted", TypeSchema::int()),
+            StructField::new("errors", TypeSchema::array(TypeSchema::text())),
+        ]))
         .auth(AuthRequirement::admin()),
     );
 

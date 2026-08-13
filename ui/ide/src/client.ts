@@ -26,10 +26,14 @@ export type UpdateFieldResponse = { name: string; label: string; description: st
 export type DeleteFieldResponse = { dropped: string };
 export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 export type ListRowsResponse = Array<unknown>;
+export type CountRowsResponse = { count: number };
 export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
 export type UpdateRowRequest = unknown;
 export type UpdateRowResponse = unknown;
+export type ExportTableCsvResponse = { filename: string; csv: string };
+export type ImportTableCsvRequest = { csv: string };
+export type ImportTableCsvResponse = { inserted: number; errors: Array<string> };
 export type ListFileStoresResponse = Array<{ id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null }>;
 export type CreateFileStoreRequest = { name: string; description: string; backend: string; config: unknown; min_role?: number | null };
 export type CreateFileStoreResponse = { id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null };
@@ -128,9 +132,12 @@ export interface ApiClient {
   deleteField(table: string, field: string): Promise<DeleteFieldResponse>;
   listFieldTypes(): Promise<ListFieldTypesResponse>;
   listRows(table: string): Promise<ListRowsResponse>;
+  countRows(table: string): Promise<CountRowsResponse>;
   createRow(table: string, body: CreateRowRequest): Promise<CreateRowResponse>;
   updateRow(table: string, id: string, body: UpdateRowRequest): Promise<UpdateRowResponse>;
   deleteRow(table: string, id: string): Promise<void>;
+  exportTableCsv(table: string): Promise<ExportTableCsvResponse>;
+  importTableCsv(table: string, body: ImportTableCsvRequest): Promise<ImportTableCsvResponse>;
   listFileStores(): Promise<ListFileStoresResponse>;
   createFileStore(body: CreateFileStoreRequest): Promise<CreateFileStoreResponse>;
   updateFileStore(id: string, body: UpdateFileStoreRequest): Promise<UpdateFileStoreResponse>;
@@ -385,6 +392,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("listRows", res);
       return (await res.json()) as ListRowsResponse;
     },
+    async countRows(table) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/count`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("countRows", res);
+      return (await res.json()) as CountRowsResponse;
+    },
     async createRow(table, body) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
         method: "POST",
@@ -410,6 +425,23 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteRow", res);
       return;
+    },
+    async exportTableCsv(table) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/csv`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("exportTableCsv", res);
+      return (await res.json()) as ExportTableCsvResponse;
+    },
+    async importTableCsv(table, body) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/csv`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("importTableCsv", res);
+      return (await res.json()) as ImportTableCsvResponse;
     },
     async listFileStores() {
       const res = await doFetch(`${baseUrl}/api/file-stores`, {

@@ -96,7 +96,14 @@ function timingFields(kind: string): TimingField[] {
   return EVENT_KINDS.find((k) => k.value === kind)?.timing ?? [];
 }
 
-export function TriggerForm({ triggerId }: { triggerId?: string }) {
+/**
+ * The trigger editor, for a new trigger or an existing one.
+ *
+ * `table` pre-selects the table a new trigger fires on — what "Create trigger"
+ * on a table's own page means. It applies only to a new trigger: an existing
+ * one's table is its own, and the form reads it from the stored trigger.
+ */
+export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: string }) {
   const [actions, setActions] = useState<ActionInfo[] | null>(null);
   const [tables, setTables] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -106,7 +113,7 @@ export function TriggerForm({ triggerId }: { triggerId?: string }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [when, setWhen] = useState("insert");
-  const [channel, setChannel] = useState("");
+  const [channel, setChannel] = useState(table ?? "");
   const [onlyIf, setOnlyIf] = useState("");
   const [actionName, setActionName] = useState("");
   const [config, setConfig] = useState<Record<string, string>>({});

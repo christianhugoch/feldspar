@@ -26,6 +26,9 @@
 
 pub mod auth;
 pub mod convert;
+// `csv`, not `bulk`: the module is named for the format it speaks. Inside it
+// the crate of the same name is reached as `::csv`.
+pub mod csv;
 pub mod filter;
 pub mod rows;
 pub mod schema_edit;

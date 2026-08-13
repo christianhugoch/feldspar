@@ -2,6 +2,67 @@
 
 Changes in reverse chronological order.
 
+## The table page is laid out the way Saltcorn 1 lays it out, and a table's rows go in and out as CSV
+
+The table page was two columns — fields on the left, the row editor on the right — with the
+settings form above both and a Drop button in the header. It is now the shape Saltcorn 1
+settled on, which is the order an admin actually works in:
+
+1. **Fields**, full width at the top. Nothing below it means anything until the columns do.
+   Adding one is a **modal** behind an "Add field" button rather than a form beside the list:
+   the form is much the taller of the two — a Key's three dependent selects, a rich type's
+   whole attribute spec — so side by side it either squeezed the list into half a page or left
+   a column of white space under it, depending on which type was chosen.
+2. **Table data**, a shallow strip: the row count, and four things one does with the *data*
+   rather than with the table — Edit, Download CSV, Upload CSV, and a `⋯` menu holding the
+   rare and irreversible (Drop table, and Forget settings for a table that has any).
+3. **Triggers on this table** — what fires when its rows change, with Create trigger.
+4. **Edit table properties** — the `_sc_tables` overlay, last, because it is set once.
+
+The **rows have moved to a screen of their own** (`#/tables/<name>/data`), which is what the
+Edit tile opens. That is the split Saltcorn 1 makes and it earns itself twice: the table page
+is a page you read, the row grid is one you scroll and type in — and the table page now costs
+a **count** instead of every row in the table. `countRows` is the new endpoint behind that,
+answered by `aggregate_values` through the same read path as any other, so an RLS-enforced
+table counts the rows the caller may see rather than the rows that exist.
+
+**CSV in and out** is new, in `sc_api::csv` and two endpoints:
+
+- The document crosses as a **string in a JSON envelope**, not as a file download and a file
+  upload. Both could have been raw routes outside the `EndpointSet`, as the binary file upload
+  is; neither has to be. CSV is text, so it fits the endpoint model exactly, and staying
+  inside it means the typed client carries both and the CSRF and auth machinery applies with
+  no second path to remember. The browser makes the download from a blob; the export names the
+  file, because only the server knows the table.
+- An import goes **row by row through `rows::create_row_ctx`** — the same function the row
+  endpoints and an application's REST provider write through — so a CSV write is held to
+  every rule an ordinary write is: coercion, rich-type attributes, `File` field paths,
+  ownership, RLS, and the insert triggers that fire afterwards. A bulk loader that went
+  straight to `INSERT` would be a second write path with none of that.
+- An import is **not a transaction**. Each row stands or falls on its own and a refusal is
+  reported with its line number — a 5000-line export with three bad dates in it is a file to
+  fix three lines of, not a file to refuse whole. A *header* naming a column the table does
+  not have is refused before anything is written, because that is a wrong-file mistake rather
+  than a bad-row one. A blank cell is null, except in a text column where the empty string is
+  a value someone may have meant.
+- Calculated fields are left out of an export: they are refused on write, so including them
+  would produce a file that could not be imported back, and a round trip is what an export is
+  for.
+
+The `csv` crate is a new workspace dependency (`csv` + `csv-core`; its other dependencies were
+already in the tree). A hand-rolled splitter is a line of code until the first quoted field
+with an embedded comma or newline in it — which is exactly what a spreadsheet exports.
+
+"Create trigger" on a table's page opens the trigger form with that table already chosen
+(`#/triggers/new/<table>`).
+
+Tested: the CSV round trip over HTTP against real Postgres, through the quoting a comma and an
+embedded newline force; a bad row reported by line while the good rows still land; a wrong
+header refused with nothing written; the row count before and after inserts, and a 404 rather
+than a zero for a table that is not there. In the SPA, that the triggers card shows the row
+events on *this* table and not a scheduled job that happens to write to it, and that the new
+data screen still belongs to the Tables section of the sidebar.
+
 ## The server can be reached over HTTPS, and settings have somewhere to live
 
 Two things arrive together because neither is much use alone: a **settings table**, and the

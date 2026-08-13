@@ -290,6 +290,43 @@ pub async fn aggregate_values(
     Ok(rows.first().map(row_values).unwrap_or_default())
 }
 
+/// The alias `count_rows` reads its one value back under. Structural — chosen
+/// here, never user data — so it cannot collide with a column an admin declared.
+const ROW_COUNT_KEY: &str = "_sc_count";
+
+/// How many rows `table` has, as [`aggregate_values`] answers it.
+///
+/// A count rather than the length of a listing: the admin's table page shows
+/// this beside the link to the rows, and reading every row of a large table to
+/// find out how many there are would make the page cost what the data costs.
+/// It goes through the same read path, so an RLS-enforced table counts the rows
+/// the caller may see rather than the rows that exist.
+pub async fn count_rows(
+    catalog: &Catalog,
+    table: &Table,
+    context: Option<&CallerContext>,
+) -> Result<i64> {
+    let count = sc_expr::aggregate_expr(&sc_expr::AggFunc::Count, false, None, &table.name)?;
+    let values = aggregate_values(
+        catalog,
+        table,
+        vec![Projection::expr_as(count, ROW_COUNT_KEY)],
+        None,
+        context,
+    )
+    .await?;
+    match values.get(ROW_COUNT_KEY) {
+        Some(Value::Int(n)) => Ok(*n),
+        // `count(*)` is `bigint` in Postgres and an integer everywhere else, so
+        // anything but an int here means the driver mapped it to something this
+        // does not know about rather than that the table is empty.
+        other => Err(Error::msg(format!(
+            "`count(*)` over `{}` came back as {other:?}",
+            table.name
+        ))),
+    }
+}
+
 /// The `SELECT` one [`RowQuery`] renders to: every column plus the calculated
 /// fields and the query's own extra projections, filtered, ordered and bounded.
 fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Select> {

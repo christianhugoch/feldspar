@@ -1,15 +1,30 @@
-// Table detail: manage a single table's fields and edit its rows.
+// Table detail: everything about one table, top to bottom.
 //
-// Fields come from `listFields`; rows are arbitrary JSON (`listRows` returns
-// `Array<unknown>`), so we treat each row as a record keyed by field name. The
-// row editor is a single form that creates a new row or, when a row's "Edit"
-// button is pressed, updates the selected one (addressed by its `id`).
+// The order is the one Saltcorn 1 settled on, and it is the order an admin
+// works in rather than the order the API is grouped in:
+//
+//   1. **Fields** — what the table *is*. Nothing below it makes sense until the
+//      columns do, so it comes first and gets the full width.
+//   2. **Table data** — one shallow strip of tiles: how many rows there are, the
+//      way through to them, CSV out and CSV in, and a menu for the rare and
+//      irreversible. The rows themselves live on their own screen
+//      (`TableData`), which is what keeps this page cheap to open: one
+//      `countRows` rather than every row in the table.
+//   3. **Triggers on this table** — what happens when its rows change. Filtered
+//      from the trigger list by channel, because a trigger's channel *is* its
+//      table (§10.2).
+//   4. **Edit table properties** — the `_sc_tables` overlay: labels, roles,
+//      ownership. Last because it is the part an admin sets once.
+//
+// Fields come from `listFields`; the settings come from the tables listing,
+// which already carries every overlay field.
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Card from "react-bootstrap/Card";
 import Col from "react-bootstrap/Col";
+import Dropdown from "react-bootstrap/Dropdown";
 import Form from "react-bootstrap/Form";
 import Modal from "react-bootstrap/Modal";
 import Row from "react-bootstrap/Row";
@@ -17,14 +32,21 @@ import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import { navigate } from "../App";
-import { IconArrowLeft } from "../icons";
-import { PageBody, PageHeader } from "../layout";
+import {
+  IconArrowLeft,
+  IconDots,
+  IconDownload,
+  IconPencil,
+  IconPlus,
+  IconUpload,
+} from "../icons";
+import { PageBody, PageHeader, StatusBadge } from "../layout";
 import type {
-  BrowseFilesResponse,
   CreateFieldRequest,
   ListFieldsResponse,
   ListFieldTypesResponse,
   ListTablesResponse,
+  ListTriggersResponse,
 } from "../client";
 import {
   EMPTY_KEY,
@@ -37,9 +59,6 @@ import {
 import { roleOptions, useRoles, type Roles } from "../roles";
 import { SettingsFields, buildConfig } from "../settings";
 
-/** One merged field as `listFields` reports it. */
-type FieldInfo = ListFieldsResponse[number];
-
 /** A field's kind, narrowed from the `unknown` the API types it as. */
 type FieldKind = {
   type?: string;
@@ -48,17 +67,6 @@ type FieldKind = {
   target_table?: string;
   expression?: string;
 } | null;
-
-/** The store a `File` field points at, or `null` for any other kind. */
-function fileStoreOf(field: FieldInfo): string | null {
-  const kind = field.kind as FieldKind;
-  return kind && kind.type === "file" ? (kind.store ?? "") : null;
-}
-
-/** Whether a field is a non-stored calculated field (no column, computed on read). */
-function isCalc(field: FieldInfo): boolean {
-  return (field.kind as FieldKind)?.type === "calc";
-}
 
 /** A one-line description of a field's kind for the fields table. */
 function kindLabel(kind: unknown): string {
@@ -80,36 +88,36 @@ function categoryLabel(category: string): string {
 /** One table as `listTables` reports it, including its overlay settings. */
 type TableSummary = ListTablesResponse[number];
 
-/** A row as returned by `listRows` — arbitrary JSON keyed by column name. */
-type RowRecord = Record<string, unknown>;
+/** One trigger as `listTriggers` reports it. */
+type TriggerItem = ListTriggersResponse[number];
 
-/** Render a JSON cell value as a compact string for the rows table. */
-function display(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
+/** The events that happen *to a table's rows* — the ones whose channel is a
+ * table name, and so the ones this page can show as "on this table" (§10.2). */
+const TABLE_EVENTS = ["insert", "update", "delete"];
 
 /**
- * Best-effort parse of a form input into JSON: `5` → number, `true` → boolean,
- * plain text stays a string. The server coerces to each column's type, so this
- * only needs to turn obvious scalars into their JSON form.
+ * The triggers that fire on `table`'s rows, out of every trigger there is.
+ *
+ * Both halves matter. The kind must be a **row** event, because a `never` or a
+ * `daily` trigger whose *action configuration* happens to name this table is
+ * not a trigger on it — it is a trigger that writes to it, which is a different
+ * question. And the channel must be this table: for the row events the channel
+ * *is* the table (§10.2), so this is the whole binding, and there is nothing
+ * else to look at.
  */
-function parseInput(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === "") return null;
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    return raw;
-  }
+export function triggersOnTable(
+  triggers: ListTriggersResponse,
+  table: string,
+): ListTriggersResponse {
+  return triggers.filter((t) => TABLE_EVENTS.includes(t.when) && t.channel === table);
 }
 
 export function TableDetail({ table }: { table: string }) {
   const [fields, setFields] = useState<ListFieldsResponse | null>(null);
   const [fieldTypes, setFieldTypes] = useState<ListFieldTypesResponse | null>(null);
-  const [rows, setRows] = useState<RowRecord[] | null>(null);
+  const [rowCount, setRowCount] = useState<number | null>(null);
   const [settings, setSettings] = useState<TableSummary | null>(null);
+  const [triggers, setTriggers] = useState<TriggerItem[] | null>(null);
   // Every table in the catalog: what a Key field's target is chosen from. This
   // table is included — a key onto its own table (a parent link) is legitimate.
   const [tables, setTables] = useState<ListTablesResponse | null>(null);
@@ -121,16 +129,18 @@ export function TableDetail({ table }: { table: string }) {
       // The settings come from the tables listing rather than a per-table
       // endpoint: the list already carries every overlay field, so a second
       // endpoint would be a second thing to keep in step with it.
-      const [f, ft, r, t] = await Promise.all([
+      const [f, ft, c, t, tr] = await Promise.all([
         api.listFields(table),
         api.listFieldTypes(),
-        api.listRows(table),
+        api.countRows(table),
         api.listTables(),
+        api.listTriggers(),
       ]);
       setFields(f);
       setFieldTypes(ft);
-      setRows(r as RowRecord[]);
+      setRowCount(c.count);
       setTables(t);
+      setTriggers(tr);
       setSettings(t.find((candidate) => candidate.name === table) ?? null);
     } catch {
       setError("Could not load the table.");
@@ -141,6 +151,130 @@ export function TableDetail({ table }: { table: string }) {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [table]);
+
+  return (
+    <>
+      <PageHeader
+        pretitle="Table"
+        title={settings?.label || table}
+        actions={
+          <Button variant="outline-secondary" onClick={() => navigate("/tables")}>
+            <IconArrowLeft className="icon-2" />
+            Tables
+          </Button>
+        }
+      />
+      <PageBody>
+        {error && <Alert variant="danger">{error}</Alert>}
+
+        <Fields
+          table={table}
+          fields={fields}
+          fieldTypes={fieldTypes}
+          tables={tables}
+          onChange={load}
+        />
+
+        <TableData
+          table={table}
+          rowCount={rowCount}
+          configured={settings?.configured ?? false}
+          onChange={load}
+        />
+
+        <Triggers table={table} triggers={triggers} onChange={load} />
+
+        <Settings table={table} settings={settings} onChange={load} />
+      </PageBody>
+    </>
+  );
+}
+
+/**
+ * The table-data strip: how much data there is, and the four things one does
+ * with the data rather than with the table.
+ *
+ * Deliberately **shallow** — a row of tiles, not a panel. Everything on it is a
+ * single click that leaves this page or moves a file, so there is nothing to
+ * lay out beyond the tiles themselves, and its height is what keeps the fields
+ * above it and the properties below it on the same screen.
+ */
+function TableData({
+  table,
+  rowCount,
+  configured,
+  onChange,
+}: {
+  table: string;
+  rowCount: number | null;
+  configured: boolean;
+  onChange: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  /** One message per row an import refused, each naming its line. */
+  const [rejected, setRejected] = useState<string[]>([]);
+
+  /**
+   * Save the table's rows as a CSV file.
+   *
+   * The document arrives as text in the endpoint's JSON (the endpoint model has
+   * no bytes shape, and CSV is text), so the download is made here from a blob
+   * and an object URL. The link is clicked and revoked in the same turn — there
+   * is nothing to leave in the document, and the SPA is the only thing that
+   * ever wanted the URL.
+   */
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    setRejected([]);
+    try {
+      const { filename, csv } = await api.exportTableCsv(table);
+      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(errorMessage(err, "Could not export the rows."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Read a chosen CSV file and import it.
+   *
+   * Both numbers are reported, because both are true of a real file: an import
+   * is not a transaction (each row stands on its own), so "42 rows added, 3
+   * refused" is the answer, and the three come back with their line numbers so
+   * they can be found in the file.
+   */
+  const upload = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    setRejected([]);
+    try {
+      const csv = await file.text();
+      const { inserted, errors } = await api.importTableCsv(table, { csv });
+      setNotice(
+        `${inserted} row${inserted === 1 ? "" : "s"} added from ${file.name}` +
+          (errors.length > 0 ? `, ${errors.length} refused.` : "."),
+      );
+      setRejected(errors);
+      onChange();
+    } catch (err) {
+      // The server's own refusal — a header naming a column the table does not
+      // have, a file that is not CSV — says what to fix.
+      setError(errorMessage(err, "Could not import the file."));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /**
    * Drop the table, its columns, its rows and its settings row.
@@ -161,44 +295,265 @@ export function TableDetail({ table }: { table: string }) {
     }
   };
 
+  const forget = async () => {
+    if (
+      !window.confirm(
+        `Forget the settings for "${table}"?\n\n` +
+          "It returns to admin-only. The table and its rows are not touched.",
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    try {
+      await api.deleteTableSettings(table);
+      onChange();
+    } catch (err) {
+      setError(errorMessage(err, "Could not forget the settings."));
+    }
+  };
+
   return (
-    <>
-      <PageHeader
-        pretitle="Table"
-        title={settings?.label || table}
-        actions={
-          <>
-            <Button variant="outline-danger" className="me-2" onClick={dropTable}>
-              Drop table
-            </Button>
-            <Button variant="outline-secondary" onClick={() => navigate("/tables")}>
-              <IconArrowLeft className="icon-2" />
-              Tables
-            </Button>
-          </>
-        }
-      />
-      <PageBody>
+    <Card className="mb-4">
+      <Card.Header>Table data</Card.Header>
+      <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
+        {notice && (
+          <Alert
+            variant={rejected.length > 0 ? "warning" : "success"}
+            onClose={() => setNotice(null)}
+            dismissible
+          >
+            <div className="flex-fill">
+              <div>{notice}</div>
+              {rejected.length > 0 && (
+                <ul className="small mb-0 mt-2">
+                  {rejected.map((message) => (
+                    <li key={message}>{message}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Alert>
+        )}
+        <div className="d-flex flex-wrap align-items-center justify-content-around gap-3 text-center">
+          <div>
+            <div className="h1 mb-0">{rowCount ?? "—"}</div>
+            <div className="text-muted">{rowCount === 1 ? "Row" : "Rows"}</div>
+          </div>
 
-        <Settings table={table} settings={settings} onChange={load} />
+          <Tile
+            label="Edit"
+            icon={<IconPencil />}
+            onClick={() => navigate(`/tables/${encodeURIComponent(table)}/data`)}
+          />
 
-        <Row>
-          <Col lg={5} className="mb-4">
-            <Fields
-              table={table}
-              fields={fields}
-              fieldTypes={fieldTypes}
-              tables={tables}
-              onChange={load}
-            />
-          </Col>
-          <Col lg={7} className="mb-4">
-            <Rows table={table} fields={fields} rows={rows} onChange={load} />
-          </Col>
-        </Row>
-      </PageBody>
-    </>
+          <Tile
+            label="Download CSV"
+            icon={<IconDownload />}
+            disabled={busy}
+            onClick={() => void download()}
+          />
+
+          <UploadTile disabled={busy} onFile={(file) => void upload(file)} />
+
+          <Dropdown align="end">
+            <Dropdown.Toggle
+              variant="outline-secondary"
+              size="sm"
+              className="data-menu-toggle btn-icon"
+              id="table-data-menu"
+              aria-label="More table actions"
+            >
+              <IconDots className="icon-2" />
+            </Dropdown.Toggle>
+            <Dropdown.Menu>
+              {configured && (
+                <Dropdown.Item onClick={() => void forget()}>Forget settings</Dropdown.Item>
+              )}
+              <Dropdown.Item className="text-danger" onClick={() => void dropTable()}>
+                Drop table
+              </Dropdown.Item>
+            </Dropdown.Menu>
+          </Dropdown>
+        </div>
+      </Card.Body>
+    </Card>
+  );
+}
+
+/** One tile of the table-data strip: a large icon over its label (`admin.css`). */
+function Tile({
+  label,
+  icon,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" className="data-tile" disabled={disabled} onClick={onClick}>
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+/**
+ * The upload tile: the same shape as the others, over a hidden file input.
+ *
+ * A file cannot be chosen without one — the browser only opens the picker from
+ * a real `<input type="file">` — so the input is present and invisible and the
+ * tile is its label. The value is cleared after each pick so that choosing the
+ * *same* file again still fires a change.
+ */
+function UploadTile({
+  disabled,
+  onFile,
+}: {
+  disabled?: boolean;
+  onFile: (file: File) => void;
+}) {
+  return (
+    <label className="data-tile mb-0">
+      <IconUpload />
+      <span>Upload CSV</span>
+      <input
+        type="file"
+        accept=".csv,text/csv"
+        className="d-none"
+        disabled={disabled}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (file) onFile(file);
+        }}
+      />
+    </label>
+  );
+}
+
+/**
+ * The triggers that fire on this table's rows (§10.2).
+ *
+ * Filtered from the whole trigger list rather than fetched by table, because a
+ * trigger's **channel is its table** for the three row events — there is no
+ * separate binding to query. Everything about a trigger is edited on the
+ * trigger form; this card exists so that "what happens when a row of this table
+ * changes?" is answerable from the table, which is where it is asked.
+ */
+function Triggers({
+  table,
+  triggers,
+  onChange,
+}: {
+  table: string;
+  triggers: TriggerItem[] | null;
+  onChange: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const mine = useMemo(() => triggersOnTable(triggers ?? [], table), [triggers, table]);
+
+  const remove = async (trigger: TriggerItem) => {
+    if (
+      !window.confirm(
+        `Delete the trigger "${trigger.name}"?\n\n` +
+          "Its configuration is deleted with it. Switch it off instead if you " +
+          "only want it to stop firing.",
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    try {
+      await api.deleteTrigger(trigger.id);
+      onChange();
+    } catch (err) {
+      setError(errorMessage(err, "Could not delete the trigger."));
+    }
+  };
+
+  return (
+    <Card className="mb-4">
+      <Card.Header>Triggers on this table</Card.Header>
+      <Card.Body>
+        {error && <Alert variant="danger">{error}</Alert>}
+        <p className="text-muted">Triggers run actions in response to events on this table.</p>
+        {mine.length > 0 && (
+          <Table size="sm" hover responsive className="table-vcenter">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Event</th>
+                <th>Runs</th>
+                <th>Status</th>
+                <th className="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mine.map((trigger) => (
+                <tr key={trigger.id}>
+                  <td>
+                    {trigger.name}
+                    {trigger.description && (
+                      <div className="text-muted small">{trigger.description}</div>
+                    )}
+                  </td>
+                  <td>
+                    {trigger.when}
+                    {trigger.only_if && (
+                      <div className="text-muted small font-monospace text-break">
+                        if {trigger.only_if}
+                      </div>
+                    )}
+                  </td>
+                  <td className="text-break">{trigger.action}</td>
+                  <td>
+                    {trigger.error ? (
+                      <StatusBadge tone="red" title={trigger.error}>
+                        Not usable
+                      </StatusBadge>
+                    ) : trigger.enabled ? (
+                      <StatusBadge tone="green">Enabled</StatusBadge>
+                    ) : (
+                      <StatusBadge tone="secondary">Off</StatusBadge>
+                    )}
+                  </td>
+                  <td className="text-end">
+                    <div className="btn-list justify-content-end flex-nowrap">
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        href={`#/triggers/${encodeURIComponent(trigger.id)}/edit`}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        onClick={() => void remove(trigger)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+        <Button
+          size="sm"
+          onClick={() => navigate(`/triggers/new/${encodeURIComponent(table)}`)}
+        >
+          <IconPlus className="icon-2" />
+          Create trigger
+        </Button>
+      </Card.Body>
+    </Card>
   );
 }
 
@@ -268,22 +623,9 @@ function Settings({
     }
   };
 
-  const forget = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteTableSettings(table);
-      onChange();
-    } catch {
-      setError("Could not forget the settings.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <Card className="mb-4">
-      <Card.Header>Settings</Card.Header>
+      <Card.Header>Edit table properties</Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
         {saved && !error && (
@@ -370,19 +712,13 @@ function Settings({
               </Form.Text>
             </Form.Group>
           )}
-          <div className="d-flex gap-2 mt-2">
-            <Button type="submit" size="sm" disabled={busy}>
-              Save settings
-            </Button>
-            {settings?.configured && (
-              <Button size="sm" variant="outline-secondary" disabled={busy} onClick={forget}>
-                Forget settings
-              </Button>
-            )}
-          </div>
+          <Button type="submit" size="sm" disabled={busy}>
+            Save settings
+          </Button>
           {settings?.configured && (
             <Form.Text muted className="d-block mt-2">
-              Forgetting returns the table to admin-only. It never touches the table or its rows.
+              &ldquo;Forget settings&rdquo;, on the table-data menu above, returns the table to
+              admin-only. It never touches the table or its rows.
             </Form.Text>
           )}
         </Form>
@@ -422,6 +758,13 @@ function RoleSelect({
 /**
  * The fields (columns) panel: list and add (design §3.4).
  *
+ * The card is the **list**; adding is a modal behind an "Add field" button. The
+ * form is the taller of the two by some way — a Key's three dependent selects, a
+ * rich type's whole attribute spec — and side by side it either squeezed the
+ * list into half a page or left a column of white space under it, depending on
+ * which type was chosen. In a modal it can be as tall as it needs to be, and the
+ * card goes back to being the reference an admin reads.
+ *
  * The "add field" type input is a pick-list assembled from `listFieldTypes` —
  * basic types, rich types and the Key/File kinds in one list — and choosing a
  * type renders **its** declared attribute form beneath, driven entirely by the
@@ -442,6 +785,8 @@ function Fields({
   tables: ListTablesResponse | null;
   onChange: () => void;
 }) {
+  /** Whether the add-field modal is open. */
+  const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [typeName, setTypeName] = useState("");
   const [nullable, setNullable] = useState(true);
@@ -458,7 +803,12 @@ function Fields({
   const [keyKind, setKeyKind] = useState<KeyKind>(EMPTY_KEY);
   const [targetFields, setTargetFields] = useState<ListFieldsResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  // Two error slots, because the two things this card does now happen in two
+  // places: a refused drop belongs on the card, beside the row it was about,
+  // and everything the add form can be told belongs in the modal the admin is
+  // looking at.
   const [error, setError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const selected = fieldTypes?.find((t) => t.name === typeName) ?? null;
   const basicTypes = useMemo(
@@ -511,26 +861,38 @@ function Fields({
         setKeyKind((k) => (k.target_table === target ? reconcileKey(k, list) : k));
       })
       .catch(() => {
-        if (!cancelled) setError(`Could not read the fields of “${target}”.`);
+        if (!cancelled) setFormError(`Could not read the fields of “${target}”.`);
       });
     return () => {
       cancelled = true;
     };
   }, [keyKind.target_table]);
 
+  /** Open the modal on an empty form — never on what the last one left behind. */
+  const openAdd = () => {
+    setName("");
+    setNullable(true);
+    setCalculated(false);
+    setExpression("");
+    setAttrs({});
+    setKeyKind(EMPTY_KEY);
+    setFormError(null);
+    setAdding(true);
+  };
+
   const add = async (e: FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !selected) return;
     if (calculated && !expression.trim()) {
-      setError("A calculated field needs a formula.");
+      setFormError("A calculated field needs a formula.");
       return;
     }
     if (!calculated && selected.name === "key" && !keyIsComplete(keyKind)) {
-      setError("A key needs a table and a field to point at.");
+      setFormError("A key needs a table and a field to point at.");
       return;
     }
     setBusy(true);
-    setError(null);
+    setFormError(null);
     try {
       const body: CreateFieldRequest = { name: name.trim(), type: selected.name, required: !nullable };
       if (calculated) {
@@ -553,12 +915,12 @@ function Fields({
         body.attributes = buildConfig(selected.config_spec, attrs);
       }
       await api.createField(table, body);
-      setName("");
-      setExpression("");
-      setAttrs({});
+      // The field is in the list behind the modal now, so the modal's work is
+      // done. A refusal leaves it open, on the values that were refused.
+      setAdding(false);
       onChange();
     } catch (err) {
-      setError(errorMessage(err, "Could not add the field."));
+      setFormError(errorMessage(err, "Could not add the field."));
     } finally {
       setBusy(false);
     }
@@ -588,11 +950,11 @@ function Fields({
   };
 
   return (
-    <Card>
+    <Card className="mb-4">
       <Card.Header>Fields</Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
-        <Table size="sm" className="mb-3">
+        <Table size="sm" hover responsive className="table-vcenter mb-3">
           <thead>
             <tr>
               <th>Name</th>
@@ -603,6 +965,13 @@ function Fields({
             </tr>
           </thead>
           <tbody>
+            {fields?.length === 0 && (
+              <tr>
+                <td colSpan={5} className="text-muted">
+                  No fields yet.
+                </td>
+              </tr>
+            )}
             {fields?.map((f) => (
               <tr key={f.name}>
                 <td>{f.name}</td>
@@ -625,96 +994,121 @@ function Fields({
             ))}
           </tbody>
         </Table>
-        <Form onSubmit={add}>
-          <Form.Group className="mb-2" controlId="fieldName">
-            <Form.Label>Name</Form.Label>
-            <Form.Control value={name} onChange={(e) => setName(e.target.value)} />
-          </Form.Group>
-          <Form.Group className="mb-2" controlId="fieldType">
-            <Form.Label>{calculated ? "Value type" : "Type"}</Form.Label>
-            <Form.Select value={typeName} onChange={(e) => setTypeName(e.target.value)}>
-              {typeCategories.map((category) => {
-                const items = (fieldTypes ?? []).filter((t) => t.category === category);
-                if (items.length === 0) return null;
-                return (
-                  <optgroup key={category} label={categoryLabel(category)}>
-                    {items.map((t) => (
-                      <option key={t.name} value={t.name}>
-                        {t.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                );
-              })}
-            </Form.Select>
-            {calculated && (
-              <Form.Text muted>
-                How the computed value is shown. Its real type comes from the expression.
-              </Form.Text>
-            )}
-          </Form.Group>
+        <Button size="sm" onClick={openAdd}>
+          <IconPlus className="icon-2" />
+          Add field
+        </Button>
 
-          <Form.Check
-            className="mb-2"
-            id="fieldCalculated"
-            type="checkbox"
-            label="Calculated (computed on read, no stored column)"
-            checked={calculated}
-            onChange={(e) => setCalculated(e.target.checked)}
-          />
-
-          {calculated ? (
-            <Form.Group className="mb-3" controlId="fieldExpression">
-              <Form.Label>Formula</Form.Label>
-              <Form.Control
-                as="textarea"
-                rows={2}
-                className="font-monospace"
-                value={expression}
-                placeholder="pages * 2"
-                onChange={(e) => setExpression(e.target.value)}
-              />
-              <Form.Text muted>
-                A JavaScript expression over the row&apos;s fields, Ⱶ-joinfields, Ↄ-aggregations
-                and other calculated fields — never <code>user</code> or the operation flags.
-              </Form.Text>
-            </Form.Group>
-          ) : (
-            <>
-              {selected?.name === "key" ? (
-                // A Key's parameters are the one set the spec-driven form cannot
-                // render: each depends on the one above it.
-                <KeyFields
-                  tables={tables}
-                  targetFields={targetFields}
-                  value={keyKind}
-                  onChange={setKeyKind}
+        <Modal show={adding} onHide={() => setAdding(false)} size="lg" scrollable>
+          {/* The form wraps the whole modal so that the footer's button is the
+              form's submit and Return in a text box does what the button does. */}
+          <Form onSubmit={add}>
+            <Modal.Header closeButton>
+              <Modal.Title className="h4">Add field to {table}</Modal.Title>
+            </Modal.Header>
+            <Modal.Body>
+              {formError && <Alert variant="danger">{formError}</Alert>}
+              <Form.Group className="mb-2" controlId="fieldName">
+                <Form.Label>Name</Form.Label>
+                <Form.Control
+                  value={name}
+                  autoFocus
+                  onChange={(e) => setName(e.target.value)}
                 />
-              ) : (
-                /* The chosen type's own attributes / a kind's parameters, rendered
-                   from its spec — no per-type code lives here. */
-                <SettingsFields
-                  spec={selected?.config_spec ?? []}
-                  values={attrs}
-                  onChange={(key, v) => setAttrs((a) => ({ ...a, [key]: v }))}
-                  idPrefix="field-attr"
-                />
-              )}
+              </Form.Group>
+              <Form.Group className="mb-2" controlId="fieldType">
+                <Form.Label>{calculated ? "Value type" : "Type"}</Form.Label>
+                <Form.Select value={typeName} onChange={(e) => setTypeName(e.target.value)}>
+                  {typeCategories.map((category) => {
+                    const items = (fieldTypes ?? []).filter((t) => t.category === category);
+                    if (items.length === 0) return null;
+                    return (
+                      <optgroup key={category} label={categoryLabel(category)}>
+                        {items.map((t) => (
+                          <option key={t.name} value={t.name}>
+                            {t.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    );
+                  })}
+                </Form.Select>
+                {calculated && (
+                  <Form.Text muted>
+                    How the computed value is shown. Its real type comes from the expression.
+                  </Form.Text>
+                )}
+              </Form.Group>
 
               <Form.Check
-                className="mb-3"
-                id="fieldNullable"
+                className="mb-2"
+                id="fieldCalculated"
                 type="checkbox"
-                label="Nullable"
-                checked={nullable}
-                onChange={(e) => setNullable(e.target.checked)}
+                label="Calculated (computed on read, no stored column)"
+                checked={calculated}
+                onChange={(e) => setCalculated(e.target.checked)}
               />
-            </>
-          )}
-          <Button type="submit" size="sm" disabled={busy || !name.trim() || !selected}>
-            Add field
-          </Button>
-        </Form>
+
+              {calculated ? (
+                <Form.Group className="mb-1" controlId="fieldExpression">
+                  <Form.Label>Formula</Form.Label>
+                  <Form.Control
+                    as="textarea"
+                    rows={2}
+                    className="font-monospace"
+                    value={expression}
+                    placeholder="pages * 2"
+                    onChange={(e) => setExpression(e.target.value)}
+                  />
+                  <Form.Text muted>
+                    A JavaScript expression over the row&apos;s fields, Ⱶ-joinfields,
+                    Ↄ-aggregations and other calculated fields — never <code>user</code> or the
+                    operation flags.
+                  </Form.Text>
+                </Form.Group>
+              ) : (
+                <>
+                  {selected?.name === "key" ? (
+                    // A Key's parameters are the one set the spec-driven form cannot
+                    // render: each depends on the one above it.
+                    <KeyFields
+                      tables={tables}
+                      targetFields={targetFields}
+                      value={keyKind}
+                      onChange={setKeyKind}
+                    />
+                  ) : (
+                    /* The chosen type's own attributes / a kind's parameters, rendered
+                       from its spec — no per-type code lives here. */
+                    <SettingsFields
+                      spec={selected?.config_spec ?? []}
+                      values={attrs}
+                      onChange={(key, v) => setAttrs((a) => ({ ...a, [key]: v }))}
+                      idPrefix="field-attr"
+                    />
+                  )}
+
+                  <Form.Check
+                    className="mb-1"
+                    id="fieldNullable"
+                    type="checkbox"
+                    label="Nullable"
+                    checked={nullable}
+                    onChange={(e) => setNullable(e.target.checked)}
+                  />
+                </>
+              )}
+            </Modal.Body>
+            <Modal.Footer>
+              <Button variant="secondary" type="button" onClick={() => setAdding(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy || !name.trim() || !selected}>
+                Add field
+              </Button>
+            </Modal.Footer>
+          </Form>
+        </Modal>
       </Card.Body>
     </Card>
   );
@@ -810,284 +1204,6 @@ function KeyFields({
         </Form.Select>
         <Form.Text muted>How a referenced row is shown. Optional.</Form.Text>
       </Form.Group>
-    </>
-  );
-}
-
-/** The rows panel: the row editor plus the rows table. */
-function Rows({
-  table,
-  fields,
-  rows,
-  onChange,
-}: {
-  table: string;
-  fields: ListFieldsResponse | null;
-  rows: RowRecord[] | null;
-  onChange: () => void;
-}) {
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Columns to show and edit: every declared field. `id` is server-generated
-  // and a calc field is computed on read (writing one is refused), so both are
-  // shown in the table but never editable inputs.
-  const editable = useMemo(
-    () => (fields ?? []).filter((f) => f.name !== "id" && !isCalc(f)),
-    [fields],
-  );
-  const columns = useMemo(() => {
-    const names = (fields ?? []).map((f) => f.name);
-    return names.includes("id") ? names : ["id", ...names];
-  }, [fields]);
-
-  const reset = () => {
-    setValues({});
-    setEditingId(null);
-  };
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    const body: RowRecord = {};
-    for (const f of editable) {
-      body[f.name] = parseInput(values[f.name] ?? "");
-    }
-    try {
-      if (editingId !== null) {
-        await api.updateRow(table, editingId, body);
-      } else {
-        await api.createRow(table, body);
-      }
-      reset();
-      onChange();
-    } catch {
-      setError(editingId !== null ? "Could not update the row." : "Could not create the row.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const edit = (row: RowRecord) => {
-    const next: Record<string, string> = {};
-    for (const f of editable) {
-      next[f.name] = display(row[f.name]);
-    }
-    setValues(next);
-    setEditingId(row.id === undefined || row.id === null ? null : String(row.id));
-  };
-
-  const remove = async (row: RowRecord) => {
-    if (row.id === undefined || row.id === null) return;
-    setError(null);
-    try {
-      await api.deleteRow(table, String(row.id));
-      if (editingId === String(row.id)) reset();
-      onChange();
-    } catch {
-      setError("Could not delete the row.");
-    }
-  };
-
-  return (
-    <Card>
-      <Card.Header>Rows</Card.Header>
-      <Card.Body>
-        {error && <Alert variant="danger">{error}</Alert>}
-
-        <Form onSubmit={submit} className="mb-4">
-          {editable.length === 0 && (
-            <p className="text-muted">Add a field before creating rows.</p>
-          )}
-          {editable.map((f) => {
-            const store = fileStoreOf(f);
-            return (
-              <Form.Group className="mb-2" controlId={`row-${f.name}`} key={f.name}>
-                <Form.Label>{f.name}</Form.Label>
-                {store !== null ? (
-                  // A File field is a path in the field's store, so it is picked
-                  // from that store rather than typed — the same browse endpoints
-                  // the file manager uses.
-                  <FileFieldInput
-                    store={store}
-                    value={values[f.name] ?? ""}
-                    onChange={(v) => setValues({ ...values, [f.name]: v })}
-                  />
-                ) : (
-                  <Form.Control
-                    value={values[f.name] ?? ""}
-                    onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}
-                  />
-                )}
-              </Form.Group>
-            );
-          })}
-          {editable.length > 0 && (
-            <div className="d-flex gap-2">
-              <Button type="submit" size="sm" disabled={busy}>
-                {editingId !== null ? "Save changes" : "Add row"}
-              </Button>
-              {editingId !== null && (
-                <Button size="sm" variant="secondary" onClick={reset} type="button">
-                  Cancel
-                </Button>
-              )}
-            </div>
-          )}
-        </Form>
-
-        <Table size="sm" hover responsive>
-          <thead>
-            <tr>
-              {columns.map((c) => (
-                <th key={c}>{c}</th>
-              ))}
-              <th className="text-end">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows?.length === 0 && (
-              <tr>
-                <td colSpan={columns.length + 1} className="text-muted">
-                  No rows yet.
-                </td>
-              </tr>
-            )}
-            {rows?.map((row, i) => (
-              <tr key={(row.id as string | undefined) ?? i}>
-                {columns.map((c) => (
-                  <td key={c}>{display(row[c])}</td>
-                ))}
-                <td className="text-end">
-                  <Button size="sm" variant="outline-secondary" className="me-2" onClick={() => edit(row)}>
-                    Edit
-                  </Button>
-                  <Button size="sm" variant="outline-danger" onClick={() => remove(row)}>
-                    Delete
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      </Card.Body>
-    </Card>
-  );
-}
-
-/**
- * A row input for a `File` field: the chosen path, plus a "Choose" button that
- * opens a browser over the field's store (design §3.4).
- *
- * A File field is a path *within* a store, so a free-text box would let a typo
- * point it anywhere; browsing the store instead means every value is a path that
- * exists in the store the field is bound to. It reuses `browseFiles` — the same
- * endpoint the file manager is built on — rather than a new surface.
- */
-function FileFieldInput({
-  store,
-  value,
-  onChange,
-}: {
-  store: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const [show, setShow] = useState(false);
-  const [dir, setDir] = useState("");
-  const [entries, setEntries] = useState<BrowseFilesResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!show) return;
-    let cancelled = false;
-    setError(null);
-    setEntries(null);
-    api
-      .browseFiles(store, { dir })
-      .then((list) => {
-        if (!cancelled) setEntries(list);
-      })
-      .catch(() => {
-        if (!cancelled) setError(`Could not browse the store “${store}”.`);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [show, dir, store]);
-
-  const open = () => {
-    setDir("");
-    setShow(true);
-  };
-
-  const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
-
-  return (
-    <>
-      <div className="d-flex gap-2">
-        <Form.Control
-          value={value}
-          placeholder={`path in ${store}`}
-          onChange={(e) => onChange(e.target.value)}
-        />
-        <Button size="sm" variant="outline-secondary" type="button" onClick={open}>
-          Choose…
-        </Button>
-      </div>
-
-      <Modal show={show} onHide={() => setShow(false)}>
-        <Modal.Header closeButton>
-          <Modal.Title className="h6">
-            {store}
-            {dir && ` / ${dir}`}
-          </Modal.Title>
-        </Modal.Header>
-        <Modal.Body>
-          {error && <Alert variant="danger">{error}</Alert>}
-          {!entries && !error && <p className="text-muted mb-0">Loading…</p>}
-          {entries && (
-            <div className="list-group">
-              {dir !== "" && (
-                <button
-                  type="button"
-                  className="list-group-item list-group-item-action"
-                  onClick={() => setDir(parent)}
-                >
-                  ← up
-                </button>
-              )}
-              {entries.length === 0 && <div className="list-group-item text-muted">Empty.</div>}
-              {entries.map((entry) => (
-                <button
-                  key={entry.path}
-                  type="button"
-                  className="list-group-item list-group-item-action d-flex justify-content-between"
-                  onClick={() => {
-                    if (entry.is_dir) {
-                      setDir(entry.path);
-                    } else {
-                      onChange(entry.path);
-                      setShow(false);
-                    }
-                  }}
-                >
-                  <span>
-                    {entry.is_dir ? "📁 " : "📄 "}
-                    {entry.name}
-                  </span>
-                  {!entry.is_dir && entry.size != null && (
-                    <span className="text-muted small">{entry.size} B</span>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
-        </Modal.Body>
-      </Modal>
     </>
   );
 }

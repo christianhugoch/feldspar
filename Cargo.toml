@@ -167,6 +167,13 @@ regex-lite = "0.1"
 # Extension → MIME mapping for a `File` field's MIME allow-list (§3.5). Already in
 # the tree (tower-http's `fs` feature), pinned here as a first-class dependency.
 mime_guess = "2"
+# RFC 4180 CSV reader/writer for a table's bulk import/export (§13.1). A
+# hand-rolled splitter is a line of code until the first quoted field with an
+# embedded comma, newline or doubled quote in it — which is precisely what a
+# spreadsheet exports — so the format is delegated to the crate that already
+# gets those right. `csv` + `csv-core` are the only additions: its remaining
+# dependencies (serde, memchr, itoa, ryu) are already in the tree.
+csv = "1"
 
 # --- HTTP server framework ---------------------------------------------------
 #

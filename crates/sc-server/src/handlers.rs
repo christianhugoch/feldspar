@@ -26,6 +26,7 @@ use sc_action::{
     list_triggers, load_trigger, save_trigger,
 };
 use sc_api::auth::{credentials, user_summary_json};
+use sc_api::csv as csv_rows;
 use sc_api::rows::{self, require_object};
 use sc_api::schema_edit;
 use sc_api::{ApiRequest, GRAPHQL_PROVIDER, Method as ApiMethod};
@@ -533,6 +534,20 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("countRows", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let count =
+                    rows::count_rows(&catalog, &table, Some(&admin_caller(ctx.user.as_ref())))
+                        .await?;
+                Ok(HandlerResponse::ok(json!({ "count": count })))
+            }
+        }
+    });
+
     reg.register("createRow", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -583,6 +598,57 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 rows::delete_row_ctx(&catalog, &table, id, Some(&admin_caller(ctx.user.as_ref())))
                     .await?;
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    // --- rows in bulk, as CSV ----------------------------------------------
+
+    reg.register("exportTableCsv", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let document = csv_rows::export_table(
+                    &catalog,
+                    &table,
+                    Some(&admin_caller(ctx.user.as_ref())),
+                )
+                .await?;
+                // The browser saves the file, so the server says what to call
+                // it: the table's own name is the only thing that makes three
+                // downloads distinguishable in a downloads folder.
+                Ok(HandlerResponse::ok(json!({
+                    "filename": format!("{}.csv", table.name),
+                    "csv": document,
+                })))
+            }
+        }
+    });
+
+    reg.register("importTableCsv", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let document = require_object(&ctx.body)?
+                    .get("csv")
+                    .and_then(Json::as_str)
+                    .ok_or_else(|| Error::invalid("`csv` must be the CSV document as text"))?
+                    .to_owned();
+                let outcome = csv_rows::import_table(
+                    &catalog,
+                    &table,
+                    &document,
+                    Some(&admin_caller(ctx.user.as_ref())),
+                )
+                .await?;
+                Ok(HandlerResponse::ok(json!({
+                    "inserted": outcome.inserted,
+                    "errors": outcome.errors,
+                })))
             }
         }
     });

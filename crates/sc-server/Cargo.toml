@@ -90,6 +90,9 @@ reqwest.workspace = true
 # The scripted provider (`sc-agent`'s `testing` feature, decision 7): the chat
 # socket is driven through a whole turn without a vendor and without a token.
 sc-agent = { workspace = true, features = ["testing"] }
+# The CSV round-trip test reshapes an exported document before importing it, and
+# reads it with the same parser the server wrote it with.
+csv.workspace = true
 
 [lints]
 workspace = true
