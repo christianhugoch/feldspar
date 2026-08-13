@@ -99,7 +99,7 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     cat.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
     // What the boot path does with `--base-domain`: the generated documentation
     // needs it to say where the application can be opened.
-    cat.set_public_origin(sc_catalog::PublicOrigin::new("example.com", 3000));
+    cat.set_public_origin(sc_catalog::PublicOrigin::new("example.com", 3032));
 
     let report = scaffold_app(&cat, &todo_app(), None).await?;
     assert_eq!(report.project, "todo");
@@ -151,8 +151,8 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     // the command-line build both do at boot), so both documents name the URL to
     // open rather than describing one — and the session command that gets a
     // browser past the sign-in page.
-    assert!(agents.contains("http://todo.example.com:3000"), "{agents}");
-    assert!(readme.contains("http://todo.example.com:3000"), "{readme}");
+    assert!(agents.contains("http://todo.example.com:3032"), "{agents}");
+    assert!(readme.contains("http://todo.example.com:3032"), "{readme}");
     assert!(
         agents.contains("saltcorn auth token --app todo --admin"),
         "{agents}"

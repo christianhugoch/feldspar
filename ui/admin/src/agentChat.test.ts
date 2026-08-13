@@ -60,8 +60,8 @@ function session(agent = "librarian", initial?: { runId?: string | null; entries
 
 describe("where the socket is", () => {
   it("is the same origin as the page, on the route the server mounts", () => {
-    expect(agentChatUrl({ protocol: "http:", host: "localhost:3000" })).toBe(
-      `ws://localhost:3000${AGENT_CHAT_ROUTE}`,
+    expect(agentChatUrl({ protocol: "http:", host: "localhost:3032" })).toBe(
+      `ws://localhost:3032${AGENT_CHAT_ROUTE}`,
     );
   });
 

@@ -2,6 +2,19 @@
 
 Changes in reverse chronological order.
 
+## The default port is 3032
+
+The server bound `127.0.0.1:3000` unless told otherwise. 3000 is the busiest port on a
+developer's machine — it is the default for Create React App, Next.js, Rails, Grafana and
+Saltcorn 1 itself — so the first thing a new install did was collide with whatever was
+already running, and the second was to be reachable at a URL that might belong to something
+else. The default is now `127.0.0.1:3032`.
+
+This is one number in `sc_server::DEFAULT_BIND`, mirrored in `sc-cli`'s `DEFAULT_HTTP_PORT`
+(the port an application's URL carries when nothing said which — the build commands never
+construct a `ServerConfig`, so it is named in both places). `--bind` is unchanged, and the
+README and every tutorial now say `:3032` in the URLs they tell you to open.
+
 ## The table page is laid out the way Saltcorn 1 lays it out, and a table's rows go in and out as CSV
 
 The table page was two columns — fields on the left, the row editor on the right — with the

@@ -63,7 +63,7 @@ at least one book whose `published` is empty — a null is a case worth seeing.
 | Tables | `authors`, `books` |
 | APIs (Provider / Mount) | `REST` / `/api` |
 
-Save. The server scaffolds the project and mounts the app at `http://library.localhost:3000`.
+Save. The server scaffolds the project and mounts the app at `http://library.localhost:3032`.
 
 **The REST row has one setting**, rendered from what the provider declares about itself:
 **Row cap per list read**, default **500**. It is the largest page a list read will answer
@@ -80,30 +80,30 @@ app's own API — the REST provider projects it, along with `logout` and `whoami
 ```bash
 # One GET first, for the CSRF cookie a mutating request has to echo. It answers
 # 401 while you are anonymous, which is fine — every response mints the cookie.
-curl -c jar -b jar -s -o /dev/null http://library.localhost:3000/api/whoami
+curl -c jar -b jar -s -o /dev/null http://library.localhost:3032/api/whoami
 CSRF=$(awk '$6=="sc_csrf" {print $7}' jar)
 
 curl -c jar -b jar -H "x-csrf-token: $CSRF" -H 'content-type: application/json' \
   -d '{"email":"admin@example.com","password":"…"}' \
-  http://library.localhost:3000/api/login
+  http://library.localhost:3032/api/login
 ```
 
 Now read. Each of these is one statement:
 
 ```bash
 # Everything, up to the row cap.
-curl -c jar -b jar -s 'http://library.localhost:3000/api/books'
+curl -c jar -b jar -s 'http://library.localhost:3032/api/books'
 
 # Just two columns, renamed.
-curl -c jar -b jar -s 'http://library.localhost:3000/api/books?select=name:title,published'
+curl -c jar -b jar -s 'http://library.localhost:3032/api/books?select=name:title,published'
 
 # Columns of the related row, through the key.
 curl -c jar -b jar -s \
-  'http://library.localhost:3000/api/books?select=title,author(name,country)'
+  'http://library.localhost:3032/api/books?select=title,author(name,country)'
 
 # Filtered, ordered, paged — and the milestone's own query.
 curl -c jar -b jar -s \
-  'http://library.localhost:3000/api/books?select=title,published,author(name,country)&published=gte.2020-01-01&order=published.desc&limit=20'
+  'http://library.localhost:3032/api/books?select=title,published,author(name,country)&published=gte.2020-01-01&order=published.desc&limit=20'
 ```
 
 `author(name,country)` comes back nested, as an object under the key you asked for:
@@ -147,13 +147,13 @@ the reason the reserved words are four short ones.
 Ask for something outside the subset and you get a **400 that names it**:
 
 ```bash
-curl -c jar -b jar -s 'http://library.localhost:3000/api/books?titel=eq.Piranesi'
+curl -c jar -b jar -s 'http://library.localhost:3032/api/books?titel=eq.Piranesi'
 # `books` has no field `titel` to filter on
 
-curl -c jar -b jar -s 'http://library.localhost:3000/api/books?pages=between.1'
+curl -c jar -b jar -s 'http://library.localhost:3032/api/books?pages=between.1'
 # `between` is not a comparison; the comparisons are eq, ne, gt, gte, lt, lte, in, nin, like, ilike, is_null
 
-curl -c jar -b jar -s 'http://library.localhost:3000/api/books?select=title,author!inner(name)'
+curl -c jar -b jar -s 'http://library.localhost:3032/api/books?select=title,author!inner(name)'
 # `!inner` on `author` is not taken by this API — a read here is one table plus
 # correlated subqueries, and `!inner` changes which rows of it come back
 ```
@@ -351,7 +351,7 @@ parameters (a `GET` or `DELETE` query takes them there; anything else takes a ty
 
 ```bash
 curl -c jar -b jar -s \
-  'http://library.localhost:3000/api/reports/top-authors?since=2020-01-01'
+  'http://library.localhost:3032/api/reports/top-authors?since=2020-01-01'
 # [{"name":"Susanna Clarke","n":1}, …]
 ```
 

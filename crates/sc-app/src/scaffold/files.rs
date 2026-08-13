@@ -174,7 +174,7 @@ impl ProjectContext<'_> {
     /// process was never told the base domain, a placeholder naming the one
     /// thing the reader has to substitute.
     ///
-    /// Never a guess. A generated document that said `http://localhost:3000`
+    /// Never a guess. A generated document that said `http://localhost:3032`
     /// because that is the usual answer would be wrong on every deployment that
     /// is not this one, and wrong in the file a reader trusts most.
     fn app_url_or_placeholder(&self) -> String {
@@ -2194,17 +2194,17 @@ mod tests {
         let endpoints = endpoints(&tables);
 
         // Told where it serves: the app's own subdomain of the base domain,
-        // carrying the port because 3000 is not a default.
+        // carrying the port because 3032 is not a default.
         let known = project_files(&ctx_at(
             &app,
             &tables,
             &endpoints,
-            PublicOrigin::new("example.com", 3000),
+            PublicOrigin::new("example.com", 3032),
         ));
         for path in ["AGENTS.md", "src/saltcorn/README.md"] {
             let doc = file(&known, path);
             assert!(
-                doc.contains("http://todo.example.com:3000"),
+                doc.contains("http://todo.example.com:3032"),
                 "{path}: {doc}"
             );
             assert!(

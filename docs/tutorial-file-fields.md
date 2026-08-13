@@ -6,7 +6,7 @@ the politeness of the client. **Everything below happens in a browser.**
 
 This continues from [tutorial-react-todo.md](tutorial-react-todo.md): you have a server started
 with `--base-domain localhost`, a `tasks` table, and a React `todo` app on
-`http://todo.localhost:3000`. Nothing here depends on that app's specifics — any table and any
+`http://todo.localhost:3032`. Nothing here depends on that app's specifics — any table and any
 application will do — but the names below assume it.
 
 ## What a `File` field is
@@ -153,7 +153,7 @@ Showing an attachment is a link — the browser sends the session cookie, so a p
 
 (For programmatic use, `api.downloadTasksAttachment(id)` resolves to a `Blob`.)
 
-Press **Build**, reload `todo.localhost:3000`, sign in as `member@example.com`, and attach a PDF
+Press **Build**, reload `todo.localhost:3032`, sign in as `member@example.com`, and attach a PDF
 to a task. Then try a `.txt` file: the picker's filter will resist, and if you override it the
 server answers 400 — *`attachment`: file `tasks/notes.txt` has MIME type `text/plain`, which is
 not allowed* — and writes nothing.

@@ -69,7 +69,7 @@ impl PublicOrigin {
         format!("{subdomain}.{}", self.base_domain)
     }
 
-    /// The URL to open an application at: `http://blog.example.com:3000`.
+    /// The URL to open an application at: `http://blog.example.com:3032`.
     ///
     /// The port is **omitted when it is the scheme's default**, because a URL
     /// with `:443` in it is one a reader has to think about, and this one is
@@ -91,9 +91,9 @@ mod tests {
 
     #[test]
     fn an_apps_url_is_its_subdomain_under_the_base_domain() {
-        let origin = PublicOrigin::new("example.com", 3000);
+        let origin = PublicOrigin::new("example.com", 3032);
         assert_eq!(origin.host_for("blog"), "blog.example.com");
-        assert_eq!(origin.url_for("blog"), "http://blog.example.com:3000");
+        assert_eq!(origin.url_for("blog"), "http://blog.example.com:3032");
     }
 
     #[test]

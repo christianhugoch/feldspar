@@ -14,10 +14,10 @@ saltcorn serve --base-domain localhost
 ```
 
 `--base-domain localhost` turns on subdomain routing, so an app with subdomain `todo` is
-reachable at `http://todo.localhost:3000` — browsers resolve `*.localhost` to 127.0.0.1. Without
+reachable at `http://todo.localhost:3032` — browsers resolve `*.localhost` to 127.0.0.1. Without
 a base domain the server has no way to address an app, so it serves the admin UI only.
 
-That is the whole command line. Sign in to the admin UI at `http://localhost:3000`.
+That is the whole command line. Sign in to the admin UI at `http://localhost:3032`.
 
 A deployment with more than one database can put this in `saltcorn.toml` beside the connection
 parameters instead — `base_domain`, `bind` and `secure_cookies` in the `[environments.NAME]`
@@ -104,7 +104,7 @@ error, or the TypeScript error with the file and line.
 ## Step 5 — Open the app
 
 ```
-http://todo.localhost:3000
+http://todo.localhost:3032
 ```
 
 You get a sign-in screen, because **routes require a signed-in user unless they say otherwise**.
@@ -136,7 +136,7 @@ would have got — the same user, the same role, the same limits. It writes
 
 ```js
 const context = await browser.newContext({ storageState: '.saltcorn-session.json' });
-await (await context.newPage()).goto('http://todo.localhost:3000/');
+await (await context.newPage()).goto('http://todo.localhost:3032/');
 ```
 
 `--format netscape` writes a `cookies.txt` for `curl --cookie` instead. Both files are written
@@ -218,7 +218,7 @@ project. Next to the source link on the app's row there is **(edit code)** — t
 on the store's row under **File stores**, and in the file manager's toolbar. It opens
 
 ```
-http://localhost:3000/ide/?store=apps
+http://localhost:3032/ide/?store=apps
 ```
 
 in a new tab, and that is **VS Code**: the project tree on the left, tabs of editors, the command
@@ -284,7 +284,7 @@ The whole log is in the **Saltcorn Build** output channel either way. Try it: pu
 back, save, Build, and `TS2339` appears on the line you broke — the build's own diagnostics, from
 `tsc --noEmit`, in the tab you have open.
 
-Then reload `todo.localhost:3000`. No restart, and other applications keep serving throughout.
+Then reload `todo.localhost:3032`. No restart, and other applications keep serving throughout.
 
 ### Commit it
 

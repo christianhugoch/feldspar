@@ -150,7 +150,7 @@ this one hands you a typed client and stays out of the way.
 ## Step 6 — Open the app
 
 Rebuild after changes (**Build** again — no server restart), then visit
-`http://todo.localhost:3000`.
+`http://todo.localhost:3032`.
 
 ## Notes
 

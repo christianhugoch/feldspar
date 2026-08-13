@@ -285,7 +285,7 @@ other users can read it.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--bind <addr>` | address:port to listen on | `127.0.0.1:3000` |
+| `--bind <addr>` | address:port to listen on | `127.0.0.1:3032` |
 | `--static-dir <dir>` | directory holding the built admin bundle | (the embedded bundle, unless built with `SC_BUILD_ADMIN=0`) |
 | `--session-ttl-hours <n>` | session lifetime | `24` |
 | `--secure-cookies` | set the `Secure` attribute on session/CSRF cookies (use behind HTTPS) | off |
@@ -366,7 +366,7 @@ Local development, connecting with a URL and serving the pre-built bundle
 target/release/saltcorn serve \
   --database-url postgres://saltcorn:change-me@localhost:5432/saltcorn \
   --static-dir ui/admin/dist \
-  --bind 127.0.0.1:3000
+  --bind 127.0.0.1:3032
 ```
 
 Individual DB parts, listening on all interfaces:
@@ -385,14 +385,14 @@ then unnecessary):
 cargo build --release -p sc-cli
 target/release/saltcorn serve \
   --database-url postgres://saltcorn:change-me@localhost:5432/saltcorn \
-  --bind 127.0.0.1:3000
+  --bind 127.0.0.1:3032
 ```
 
 Using environment variables (handy for systemd/containers), behind a TLS proxy:
 
 ```bash
 export DATABASE_URL=postgres://saltcorn:change-me@localhost:5432/saltcorn
-target/release/saltcorn serve --bind 127.0.0.1:3000 --secure-cookies
+target/release/saltcorn serve --bind 127.0.0.1:3032 --secure-cookies
 ```
 
 One box, three databases: the parameters in `~/.config/saltcorn/saltcorn.toml`
@@ -416,7 +416,7 @@ sends) and shuts down gracefully.
 ## 7. First run: create the admin user
 
 1. Start the server (§6).
-2. Open the admin URL in a browser, e.g. `http://127.0.0.1:3000`.
+2. Open the admin URL in a browser, e.g. `http://127.0.0.1:3032`.
 3. The SPA detects that no user exists yet and shows a **create-first-user**
    screen. Enter an email and password; that first user is created as **role 1
    (admin)** and logged straight in.
@@ -426,10 +426,10 @@ If you did not build the web UI, you can drive the same flow over the API:
 
 ```bash
 # Is there a user yet?
-curl -s http://127.0.0.1:3000/api/auth/status
+curl -s http://127.0.0.1:3032/api/auth/status
 
 # Create the first admin (only works while no user exists).
-curl -s -X POST http://127.0.0.1:3000/api/first-user \
+curl -s -X POST http://127.0.0.1:3032/api/first-user \
   -H 'content-type: application/json' \
   -d '{"email":"admin@example.com","password":"a-strong-password"}'
 ```
@@ -442,7 +442,7 @@ The server exposes an unauthenticated liveness route for load balancers,
 orchestrators, and smoke tests:
 
 ```bash
-curl -s http://127.0.0.1:3000/health
+curl -s http://127.0.0.1:3032/health
 # {"status":"ok"}
 ```
 
@@ -466,7 +466,7 @@ A `200` here means the process booted and is accepting requests.
     `ui/admin`), or
   - rebuild the binary with `cargo build --release -p sc-cli` and `SC_BUILD_ADMIN`
     unset, then run without `--static-dir`.
-  Confirm with `curl -i http://localhost:3000/` — a working setup returns a document
+  Confirm with `curl -i http://localhost:3032/` — a working setup returns a document
   linking `/assets/index-<hash>.js`, and that URL returns
   `content-type: text/javascript`.
 - **Login/session doesn't stick behind HTTPS.** Add `--secure-cookies` so the

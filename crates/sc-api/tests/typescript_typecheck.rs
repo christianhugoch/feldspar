@@ -35,7 +35,7 @@ const USAGE_TS: &str = r#"
 import { createClient, LoginResponse } from "./client";
 
 export async function exercise(): Promise<void> {
-  const api = createClient({ baseUrl: "http://localhost:3000" });
+  const api = createClient({ baseUrl: "http://localhost:3032" });
 
   // No-body GET returning a struct with a nested optional.
   const status = await api.authStatus();

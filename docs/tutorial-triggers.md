@@ -6,7 +6,7 @@ as a typed API call. Then have the server run something every night while nobody
 
 This continues from [tutorial-ownership.md](tutorial-ownership.md): you have a server started
 with `--base-domain localhost`, a `tasks` table (`id`, `title`, `done`, `owner`) served by a
-React `todo` app on `http://todo.localhost:3000`, a **Member (40)** role, and a user
+React `todo` app on `http://todo.localhost:3032`, a **Member (40)** role, and a user
 `member@example.com` who holds it. Any table and any app will do — the names below just assume
 those.
 
@@ -71,7 +71,7 @@ Go to **Triggers → New trigger**:
 }
 ```
 
-Press **Save**. Now open the app at `http://todo.localhost:3000`, sign in as
+Press **Save**. Now open the app at `http://todo.localhost:3032`, sign in as
 `member@example.com`, and tick a task off. Back in the admin UI, open **Tables → task_audit**; the
 **Rows** card has one row: the task's id, `completed: Draft the report`, and the member's email.
 
@@ -145,7 +145,7 @@ const { deleted } = await api.runArchiveDone({});
 ```
 
 To try it without editing the app, use the browser console on
-`http://todo.localhost:3000` while signed in as the member. A mutating request has to echo the
+`http://todo.localhost:3032` while signed in as the member. A mutating request has to echo the
 CSRF cookie in a header — that is what the generated client is doing for you above:
 
 ```js

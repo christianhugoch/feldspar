@@ -7,7 +7,7 @@ policies, visible in `psql`. **Everything up to the last step happens in a brows
 
 This continues from [tutorial-file-fields.md](tutorial-file-fields.md): you have a server
 started with `--base-domain localhost`, a `tasks` table served by a React `todo` app on
-`http://todo.localhost:3000`, a **Member (40)** role, and a user `member@example.com` who
+`http://todo.localhost:3032`, a **Member (40)** role, and a user `member@example.com` who
 holds it. Nothing here needs the `File` field from that tutorial — any table and any
 application will do — but the names below assume it.
 
@@ -85,7 +85,7 @@ admin), add three tasks:
 | Book the venue | `member@example.com` |
 | Renew the domain | `member2@example.com` |
 
-Open the app at `http://todo.localhost:3000` and sign in as **`member@example.com`**: the list
+Open the app at `http://todo.localhost:3032` and sign in as **`member@example.com`**: the list
 shows *Draft the report* and *Book the venue*, and not the third. Sign out, sign in as
 **`member2@example.com`**: only *Renew the domain*. Sign in as **admin**: all three.
 

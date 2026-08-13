@@ -119,7 +119,7 @@ impl SessionFormat {
 /// connected to any more.
 #[derive(Debug, Clone)]
 pub struct Target {
-    /// The origin the application is reached at, e.g. `http://127.0.0.1:3000`.
+    /// The origin the application is reached at, e.g. `http://127.0.0.1:3032`.
     pub url: String,
     /// The `Host` header to send, e.g. `blog.example.com`.
     pub host: String,
@@ -140,7 +140,7 @@ impl Target {
     }
 }
 
-/// The port in an origin like `http://127.0.0.1:3000`, when it carries one.
+/// The port in an origin like `http://127.0.0.1:3032`, when it carries one.
 fn port_of(url: &str) -> Option<u16> {
     url.rsplit(':').next()?.trim_end_matches('/').parse().ok()
 }
@@ -535,7 +535,7 @@ mod tests {
 
     fn insecure_target() -> Target {
         Target {
-            url: "http://blog.example.com:3000".to_owned(),
+            url: "http://blog.example.com:3032".to_owned(),
             host: "blog.example.com".to_owned(),
             secure: false,
         }
@@ -695,10 +695,10 @@ mod tests {
         // `--url` points at the loopback; the browser must still be told the
         // name the server routes on.
         let target = Target {
-            url: "http://127.0.0.1:3000".to_owned(),
+            url: "http://127.0.0.1:3032".to_owned(),
             host: "blog.example.com".to_owned(),
             secure: false,
         };
-        assert_eq!(target.browser_url(), "http://blog.example.com:3000");
+        assert_eq!(target.browser_url(), "http://blog.example.com:3032");
     }
 }

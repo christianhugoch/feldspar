@@ -465,7 +465,7 @@ pub async fn mount_all(apps: &AppMounts) {
 /// `blog.example.com` under base domain `example.com` is the app `blog`; the
 /// base domain itself, a host under a different domain, or a deeper label
 /// (`a.b.example.com`) is not an app — those fall through to the admin. The port
-/// is ignored, so `blog.example.com:3000` resolves in local development.
+/// is ignored, so `blog.example.com:3032` resolves in local development.
 ///
 /// Returns `None` when no base domain is configured: app routing is opt-in, and
 /// guessing an app from an arbitrary `Host` header would let a request pick its
@@ -501,7 +501,7 @@ mod tests {
         let base = Some("example.com");
         assert_eq!(subdomain_of("blog.example.com", base), Some("blog"));
         // The port is ignored, so local development resolves.
-        assert_eq!(subdomain_of("blog.example.com:3000", base), Some("blog"));
+        assert_eq!(subdomain_of("blog.example.com:3032", base), Some("blog"));
         // A fully-qualified name with a trailing dot is the same host.
         assert_eq!(subdomain_of("blog.example.com.", base), Some("blog"));
 

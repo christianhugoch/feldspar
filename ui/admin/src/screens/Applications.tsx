@@ -28,7 +28,7 @@ type BuildStatus = "unbuilt" | "building" | "built" | "failed";
 
 /** The URL an app is served at: `<subdomain>.<the admin's host>`. The admin runs
  * on the base domain, so its own host (with port) is what the subdomain sits on —
- * `blog.example.com` or, in local dev, `blog.localhost:3000`. */
+ * `blog.example.com` or, in local dev, `blog.localhost:3032`. */
 function appUrl(subdomain: string): string {
   return `${window.location.protocol}//${subdomain}.${window.location.host}`;
 }

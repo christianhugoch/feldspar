@@ -243,18 +243,18 @@ a browser does:
 
 ```bash
 # 1. One GET, for the CSRF cookie a mutating request has to echo.
-curl -c jar -b jar -s -o /dev/null http://staff.localhost:3000/graphql/schema.graphql
+curl -c jar -b jar -s -o /dev/null http://staff.localhost:3032/graphql/schema.graphql
 CSRF=$(awk '$6=="sc_csrf" {print $7}' jar)
 
 # 2. Sign in. (Skip it to see what an anonymous caller — the public role — gets.)
 curl -c jar -b jar -H "x-csrf-token: $CSRF" -H 'content-type: application/json' \
   -d '{"email":"admin@example.com","password":"…"}' \
-  http://staff.localhost:3000/api/login
+  http://staff.localhost:3032/api/login
 
 # 3. Ask.
 curl -c jar -b jar -H "x-csrf-token: $CSRF" -H 'content-type: application/json' \
   -d '{"query":"{ departments { name employees_aggregate { count } } }"}' \
-  http://staff.localhost:3000/graphql
+  http://staff.localhost:3032/graphql
 ```
 
 **A GraphQL endpoint answers `200` with its errors in the body**, validation failures included,

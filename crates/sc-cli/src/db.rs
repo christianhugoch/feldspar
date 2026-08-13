@@ -101,7 +101,7 @@ impl Serving<'_> {
 /// deployment in the documentation uses. Named here rather than borrowed from
 /// the server so this crate's *build* commands, which never construct a
 /// `ServerConfig`, do not depend on one.
-const DEFAULT_HTTP_PORT: u16 = 3000;
+const DEFAULT_HTTP_PORT: u16 = 3032;
 
 /// Default host when neither `--db-host` nor `PGHOST` is set.
 const DEFAULT_HOST: &str = "localhost";

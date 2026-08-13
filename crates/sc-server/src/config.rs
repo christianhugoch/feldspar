@@ -14,7 +14,7 @@ use sc_error::{Error, Result};
 use crate::tls::TlsSettings;
 
 /// Default address the server binds when `--bind` is not given.
-pub const DEFAULT_BIND: &str = "127.0.0.1:3000";
+pub const DEFAULT_BIND: &str = "127.0.0.1:3032";
 
 /// Runtime configuration for the HTTP server.
 #[derive(Debug, Clone)]
@@ -63,7 +63,7 @@ impl Default for ServerConfig {
             // `DEFAULT_BIND` is a valid literal, so parsing it cannot fail.
             addr: DEFAULT_BIND
                 .parse()
-                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 3000))),
+                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 3032))),
             static_dir: None,
             ide_dir: None,
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
@@ -134,9 +134,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_bind_to_localhost_3000() {
+    fn defaults_bind_to_localhost_3032() {
         let cfg = ServerConfig::default();
-        assert_eq!(cfg.addr.to_string(), "127.0.0.1:3000");
+        assert_eq!(cfg.addr.to_string(), "127.0.0.1:3032");
         assert!(cfg.static_dir.is_none());
         assert!(cfg.ide_dir.is_none());
         assert!(!cfg.secure_cookies);

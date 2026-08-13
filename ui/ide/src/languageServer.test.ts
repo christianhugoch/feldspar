@@ -9,8 +9,8 @@ import { languageServerUrl, noSemanticsMessage } from "./languageServer";
 
 describe("where the language server's socket is", () => {
   it("is the same origin as the page, on the route the server mounts", () => {
-    expect(languageServerUrl({ protocol: "http:", host: "localhost:3000" }, "app-source")).toBe(
-      "ws://localhost:3000/ide/lsp/app-source",
+    expect(languageServerUrl({ protocol: "http:", host: "localhost:3032" }, "app-source")).toBe(
+      "ws://localhost:3032/ide/lsp/app-source",
     );
   });
 

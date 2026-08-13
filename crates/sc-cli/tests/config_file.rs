@@ -95,9 +95,9 @@ url = "{}"
         "--config",
         file.path(),
         "--bind",
-        "127.0.0.1:3000",
+        "127.0.0.1:3032",
     ])?;
-    assert_eq!(rest, ["--bind", "127.0.0.1:3000"]);
+    assert_eq!(rest, ["--bind", "127.0.0.1:3032"]);
     assert_eq!(cfg.environment(), Some("test"));
     assert!(
         cfg.source().expect("a source").contains("test"),
@@ -230,7 +230,7 @@ fn an_environment_carries_where_its_applications_are_served() {
             .public_origin(None)
             .expect("an origin")
             .url_for("todo"),
-        "http://todo.localhost:3000"
+        "http://todo.localhost:3032"
     );
 
     // A flag outranks the file, the same way every other setting does.
@@ -239,7 +239,7 @@ fn an_environment_carries_where_its_applications_are_served() {
             .public_origin(Some("other.test"))
             .expect("an origin")
             .url_for("todo"),
-        "http://todo.other.test:3000"
+        "http://todo.other.test:3032"
     );
 }
 
