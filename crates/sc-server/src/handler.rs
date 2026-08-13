@@ -96,6 +96,24 @@ impl HandlerCtx {
     }
 }
 
+/// A file the response *is*, rather than describes: a backup archive.
+///
+/// The mirror image of [`HandlerCtx::raw_body`] and there for the same reason —
+/// the endpoint model is JSON-only, so a `TypeSchema` cannot describe bytes. A
+/// handler that produces a download is therefore reached by a route outside the
+/// `EndpointSet` (see [`crate::BACKUP_CREATE_ROUTE`]) while still living in this
+/// registry, which is what keeps it behind the same session and admin checks as
+/// every typed endpoint.
+#[derive(Debug, Clone)]
+pub struct Download {
+    /// The bytes to serve.
+    pub bytes: bytes::Bytes,
+    /// The `Content-Type` to serve them under.
+    pub content_type: String,
+    /// The name the browser should save it as, carried in `Content-Disposition`.
+    pub filename: String,
+}
+
 /// A handler's result: a JSON body, an HTTP status, and an optional session
 /// action for the dispatcher to apply.
 #[derive(Debug, Clone)]
@@ -106,6 +124,10 @@ pub struct HandlerResponse {
     pub status: u16,
     /// The session change to apply, if any.
     pub session: SessionAction,
+    /// Bytes to serve instead of the JSON body, for the routes that produce a
+    /// file. Only the routes outside the typed endpoint set look at this; a typed
+    /// endpoint leaves it `None`, because its response is its `TypeSchema`.
+    pub download: Option<Download>,
 }
 
 impl HandlerResponse {
@@ -115,6 +137,17 @@ impl HandlerResponse {
             body,
             status: 200,
             session: SessionAction::Keep,
+            download: None,
+        }
+    }
+
+    /// A `200 OK` response that *is* a file (see [`Download`]).
+    pub fn download(download: Download) -> HandlerResponse {
+        HandlerResponse {
+            body: Value::Null,
+            status: 200,
+            session: SessionAction::Keep,
+            download: Some(download),
         }
     }
 
@@ -124,6 +157,7 @@ impl HandlerResponse {
             body,
             status: 200,
             session: SessionAction::Start(user),
+            download: None,
         }
     }
 
@@ -133,6 +167,7 @@ impl HandlerResponse {
             body,
             status: 200,
             session: SessionAction::End,
+            download: None,
         }
     }
 
@@ -144,6 +179,7 @@ impl HandlerResponse {
             body,
             status: 200,
             session: SessionAction::EndUser(user_id),
+            download: None,
         }
     }
 

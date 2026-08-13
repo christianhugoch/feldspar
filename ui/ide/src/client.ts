@@ -119,6 +119,9 @@ export type ListActionsResponse = Array<{ name: string; description: string; con
 export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; help: string }> }>; values: unknown };
 export type UpdateSettingsRequest = { values: unknown };
 export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; help: string }> }>; values: unknown };
+export type GetBackupOptionsResponse = { available: { tables: Array<{ name: string; label: string; count?: number | null }>; applications: Array<{ name: string; label: string; count?: number | null }>; file_stores: Array<{ name: string; label: string; count?: number | null }>; users: number; agents: number; triggers: number; ssl: boolean }; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; agents: boolean; triggers: boolean; ssl: boolean } };
+export type RestoreBackupRequest = { id: string; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; agents: boolean; triggers: boolean; ssl: boolean } };
+export type RestoreBackupResponse = { restored: Array<string>; warnings: Array<string> };
 
 export interface ApiClient {
   authStatus(): Promise<AuthStatusResponse>;
@@ -202,6 +205,8 @@ export interface ApiClient {
   listActions(): Promise<ListActionsResponse>;
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
+  getBackupOptions(): Promise<GetBackupOptionsResponse>;
+  restoreBackup(body: RestoreBackupRequest): Promise<RestoreBackupResponse>;
 }
 
 export interface ClientOptions {
@@ -933,6 +938,23 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("updateSettings", res);
       return (await res.json()) as UpdateSettingsResponse;
+    },
+    async getBackupOptions() {
+      const res = await doFetch(`${baseUrl}/api/backup`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getBackupOptions", res);
+      return (await res.json()) as GetBackupOptionsResponse;
+    },
+    async restoreBackup(body) {
+      const res = await doFetch(`${baseUrl}/api/backup/restore`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("restoreBackup", res);
+      return (await res.json()) as RestoreBackupResponse;
     },
   };
 }

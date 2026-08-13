@@ -59,14 +59,47 @@ pub struct ConfigSection {
     pub fields: Vec<ConfigDef>,
 }
 
+/// What the Backup screen includes: the selection an admin made last time,
+/// stored so a tuned selection survives the dialog being closed.
+///
+/// [`internal_defs`] rather than a section, because it is not a setting anybody
+/// types into a form — the shape is the Backup tab's, and the tab is what edits
+/// it.
+pub const BACKUP_INCLUDE: &str = "backup_include";
+
 /// Every section, in screen order.
 pub fn config_sections() -> &'static [ConfigSection] {
     static SECTIONS: OnceLock<Vec<ConfigSection>> = OnceLock::new();
     SECTIONS.get_or_init(|| vec![crate::ssl::ssl_section()])
 }
 
-/// Every declared key's [`FormField`], flattened — the spec a whole settings
-/// payload is validated against.
+/// Keys that are stored configuration but belong to **no settings form**.
+///
+/// A key has to be declared to be stored at all ([`crate::store`] refuses an
+/// undeclared one, which is what gives every value a type to be checked
+/// against), but not every stored value is a setting an admin edits in a
+/// generic form: the Backup tab's include-selection is written by the screen
+/// that owns it, in the shape that screen defines. Declaring those here keeps
+/// the write checkable and keeps them out of [`config_spec`] — the spec the
+/// settings form renders and validates against — so no form grows a control for
+/// a value it cannot edit.
+pub fn internal_defs() -> &'static [ConfigDef] {
+    static DEFS: OnceLock<Vec<ConfigDef>> = OnceLock::new();
+    DEFS.get_or_init(|| {
+        vec![ConfigDef::new(
+            // `Json`, because the value is a record of lists and flags rather
+            // than a scalar — the one shape a `FormField` accepts wholesale.
+            FormField::new(BACKUP_INCLUDE, sc_types::BasicType::Json)
+                .label("What a backup includes"),
+        )]
+    })
+}
+
+/// Every key of every **section**'s [`FormField`], flattened — the spec a whole
+/// settings *form* payload is validated against.
+///
+/// Deliberately not [`internal_defs`]: those are not on the form, so they are
+/// neither rendered nor read back by it.
 pub fn config_spec() -> Vec<FormField> {
     config_sections()
         .iter()
@@ -74,24 +107,30 @@ pub fn config_spec() -> Vec<FormField> {
         .collect()
 }
 
-/// The declaration for `key`, if there is one.
+/// The declaration for `key`, if there is one — from the sections or from
+/// [`internal_defs`], since both are keys the table may hold.
 pub fn definition(key: &str) -> Option<FormField> {
-    config_sections()
-        .iter()
-        .flat_map(|section| section.fields.iter())
+    all_defs()
         .find(|def| def.key() == key)
         .map(|def| def.field.clone())
 }
 
-/// Every declared key's name, in section order.
+/// Every declared key's name, sections first.
 pub fn known_keys() -> Vec<&'static str> {
-    config_sections()
-        .iter()
-        .flat_map(|section| section.fields.iter())
+    all_defs()
         .map(|def| def.field.name())
         // The declarations are `'static` (behind a `OnceLock`), so the names are
         // too — which is what lets an error message list them without cloning.
         .collect()
+}
+
+/// Every declaration this server understands: the sections' fields, then the
+/// keys no form shows.
+fn all_defs() -> impl Iterator<Item = &'static ConfigDef> {
+    config_sections()
+        .iter()
+        .flat_map(|section| section.fields.iter())
+        .chain(internal_defs().iter())
 }
 
 #[cfg(test)]
@@ -105,7 +144,17 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), keys.len(), "duplicate configuration key");
-        assert_eq!(config_spec().len(), keys.len());
+        assert_eq!(config_spec().len() + internal_defs().len(), keys.len());
+    }
+
+    /// The keys no form shows are storable — `definition` finds them, so a write
+    /// is checked — but they are **not** in the form's spec, which is what keeps
+    /// the settings screen from rendering a control for them.
+    #[test]
+    fn an_internal_key_is_declared_but_not_on_the_form() {
+        assert!(definition(BACKUP_INCLUDE).is_some());
+        assert!(known_keys().contains(&BACKUP_INCLUDE));
+        assert!(!config_spec().iter().any(|f| f.name() == BACKUP_INCLUDE));
     }
 
     #[test]

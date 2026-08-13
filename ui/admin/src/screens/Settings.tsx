@@ -1,12 +1,19 @@
-// Settings screen: the values in `_sc_config`, rendered from their declarations.
+// Settings screen: the values in `_sc_config`, rendered from their declarations —
+// and, beside them, backup and restore.
 //
-// This screen knows **nothing about any particular setting**. The server sends
-// sections, each with a list of fields carrying the same declaration a file
-// store's backend or an LLM provider sends (`settings.tsx`'s `FieldSpec`), plus
-// a sentence of help; this renders whatever arrives and posts back what was
-// edited. Adding a setting is a Rust declaration and a redeployed server — there
-// is no matching change here, which is the point of declaring settings as data
-// (§6.2, §13.5).
+// The screen is **tabbed**, and the split is by what the admin came to do rather
+// than by where the data lives: "SSL" is the settings form, "Backup" is the pair of
+// operations that produce and consume a file. Both are settings of the
+// installation, and neither belongs on the other's page: a form whose Save button
+// sat next to a "Restore" button would be a form with two very different verbs on
+// it.
+//
+// The SSL tab knows **nothing about any particular setting**. The server sends
+// sections, each with a list of fields carrying the same declaration a file store's
+// backend or an LLM provider sends (`settings.tsx`'s `FieldSpec`), plus a sentence
+// of help; this renders whatever arrives and posts back what was edited. Adding a
+// setting is a Rust declaration and a redeployed server — there is no matching
+// change here, which is the point of declaring settings as data (§6.2, §13.5).
 //
 // Two behaviours are worth naming because they are not obvious from the code:
 //
@@ -20,7 +27,7 @@
 //   certificate and private key do not match" is worth more than anything this
 //   screen could invent.
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Spinner from "react-bootstrap/Spinner";
@@ -35,6 +42,7 @@ import {
   readConfig,
   type FieldSpec,
 } from "../settings";
+import { BackupTab } from "./BackupTab";
 
 /** One section as the API describes it. */
 type Section = GetSettingsResponse["sections"][number];
@@ -64,7 +72,77 @@ export function settingsPayload(
   return payload;
 }
 
+/** The tabs this screen has, in the order they are shown. The value is the
+ * identity used in state and in each tab's `id`, so it is stable. */
+export const SETTINGS_TABS = [
+  { id: "ssl", label: "SSL" },
+  { id: "backup", label: "Backup" },
+] as const;
+
+/** Which tab is showing. */
+export type SettingsTab = (typeof SETTINGS_TABS)[number]["id"];
+
 export function Settings() {
+  const [tab, setTab] = useState<SettingsTab>("ssl");
+
+  return (
+    <>
+      <PageHeader title="Settings" />
+      <PageBody>
+        {/* Hand-built rather than react-bootstrap's `Tabs`, for the reason the
+            multi-select is hand-built: the admin SPA is served under a strict CSP
+            with no inline styles, and these are Tabler's own `.nav-tabs` classes
+            with nothing but classes doing the work. Each panel is mounted only
+            while it is showing, which is what makes the Backup tab's first render
+            the thing that loads its options. */}
+        <ul className="nav nav-tabs mb-3" role="tablist">
+          {SETTINGS_TABS.map((entry) => (
+            <li className="nav-item" key={entry.id} role="presentation">
+              <button
+                type="button"
+                id={`settings-tab-${entry.id}`}
+                className={`nav-link${tab === entry.id ? " active" : ""}`}
+                role="tab"
+                aria-selected={tab === entry.id}
+                onClick={() => setTab(entry.id)}
+              >
+                {entry.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        <TabPanel id="ssl" showing={tab}>
+          <SslSettings />
+        </TabPanel>
+        <TabPanel id="backup" showing={tab}>
+          <BackupTab />
+        </TabPanel>
+      </PageBody>
+    </>
+  );
+}
+
+/** One tab's contents, rendered only while its tab is the one selected. */
+function TabPanel({
+  id,
+  showing,
+  children,
+}: {
+  id: SettingsTab;
+  showing: SettingsTab;
+  children: ReactNode;
+}) {
+  if (id !== showing) return null;
+  return (
+    <div role="tabpanel" aria-labelledby={`settings-tab-${id}`}>
+      {children}
+    </div>
+  );
+}
+
+/** The settings form: every section the server declares, saved as one act. */
+function SslSettings() {
   const [sections, setSections] = useState<Section[] | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -106,74 +184,64 @@ export function Settings() {
   };
 
   if (!sections) {
-    return (
-      <>
-        <PageHeader title="Settings" />
-        <PageBody>
-          {error ? (
-            <Alert variant="danger">{error}</Alert>
-          ) : (
-            <Spinner animation="border" role="status" />
-          )}
-        </PageBody>
-      </>
+    return error ? (
+      <Alert variant="danger">{error}</Alert>
+    ) : (
+      <Spinner animation="border" role="status" />
     );
   }
 
   return (
     <>
-      <PageHeader title="Settings" />
-      <PageBody>
-        {error && (
-          <Alert variant="danger">
-            <AlertBody>{error}</AlertBody>
-          </Alert>
-        )}
-        {saved && (
-          <Alert variant="success" dismissible onClose={() => setSaved(false)}>
-            <AlertBody>
-              Settings saved. Certificate and port changes take effect when the server
-              restarts.
-            </AlertBody>
-          </Alert>
-        )}
+      {error && (
+        <Alert variant="danger">
+          <AlertBody>{error}</AlertBody>
+        </Alert>
+      )}
+      {saved && (
+        <Alert variant="success" dismissible onClose={() => setSaved(false)}>
+          <AlertBody>
+            Settings saved. Certificate and port changes take effect when the server
+            restarts.
+          </AlertBody>
+        </Alert>
+      )}
 
-        <form onSubmit={(e) => void save(e)}>
-          {sections.map((section) => (
-            <div className="card mb-4" key={section.name}>
-              <div className="card-header">
-                <div>
-                  <h3 className="card-title">{section.label}</h3>
-                  <p className="card-subtitle text-secondary mb-0">{section.description}</p>
-                </div>
-              </div>
-              <div className="card-body">
-                {section.fields.map((field) => (
-                  <div key={field.name}>
-                    <SettingField
-                      field={field}
-                      value={values[field.name] ?? ""}
-                      onChange={(v) => setValues((current) => ({ ...current, [field.name]: v }))}
-                      idPrefix={`setting-${section.name}`}
-                    />
-                    {/* The help sits under the control rather than in the label:
-                        these are sentences, and a label is a name. */}
-                    {field.help && (
-                      <div className="form-hint mt-n2 mb-3 text-secondary">{field.help}</div>
-                    )}
-                  </div>
-                ))}
+      <form onSubmit={(e) => void save(e)}>
+        {sections.map((section) => (
+          <div className="card mb-4" key={section.name}>
+            <div className="card-header">
+              <div>
+                <h3 className="card-title">{section.label}</h3>
+                <p className="card-subtitle text-secondary mb-0">{section.description}</p>
               </div>
             </div>
-          ))}
-
-          <div className="btn-list">
-            <Button type="submit" disabled={busy}>
-              {busy ? "Saving…" : "Save settings"}
-            </Button>
+            <div className="card-body">
+              {section.fields.map((field) => (
+                <div key={field.name}>
+                  <SettingField
+                    field={field}
+                    value={values[field.name] ?? ""}
+                    onChange={(v) => setValues((current) => ({ ...current, [field.name]: v }))}
+                    idPrefix={`setting-${section.name}`}
+                  />
+                  {/* The help sits under the control rather than in the label:
+                      these are sentences, and a label is a name. */}
+                  {field.help && (
+                    <div className="form-hint mt-n2 mb-3 text-secondary">{field.help}</div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
-        </form>
-      </PageBody>
+        ))}
+
+        <div className="btn-list">
+          <Button type="submit" disabled={busy}>
+            {busy ? "Saving…" : "Save settings"}
+          </Button>
+        </div>
+      </form>
     </>
   );
 }

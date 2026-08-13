@@ -37,6 +37,7 @@ use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::apps::{AppMounts, MountedApp, subdomain_of};
+use crate::backup::{BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE};
 use crate::chat::{AGENT_CHAT_ROUTE, agent_chat_upgrade};
 use crate::config::ServerConfig;
 use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
@@ -202,6 +203,19 @@ pub fn build_router_with_apps(
         // is repeated here rather than inherited. CSRF is *not* repeated: the
         // middleware wraps every route including this one.
         .route("/upload/{store}/{*path}", axum::routing::post(upload))
+        // Backup and restore, **outside** the typed `EndpointSet` for the same
+        // reason the upload above is: one route's response is a file and the
+        // other's request is one, and a `TypeSchema` has no bytes shape. Both
+        // still dispatch through the handler registry, so both are behind the
+        // same session lookup, the same admin check and the same CSRF middleware
+        // as every typed endpoint — the auth is repeated here rather than
+        // inherited because `dispatch` is what usually applies it.
+        //
+        // The *choice* of what to back up and what to restore travels as JSON
+        // through typed endpoints (`getBackupOptions`, `restoreBackup`); only the
+        // archive itself comes through here.
+        .route(BACKUP_CREATE_ROUTE, axum::routing::post(create_backup))
+        .route(BACKUP_UPLOAD_ROUTE, axum::routing::post(upload_backup))
         // The file-store IDE's language server (design §12.1). A real route
         // rather than a branch of the fallback, because a WebSocket upgrade is
         // not a request the fallback's `Bytes` body could survive: it has to be
@@ -330,6 +344,127 @@ async fn upload(
             .await
         }
     }
+}
+
+/// Build a backup and serve it as a file (see [`BACKUP_CREATE_ROUTE`]).
+///
+/// The request body is JSON — the selection — and the response is a zip, which is
+/// the half the endpoint model cannot describe. The work is the `createBackup`
+/// handler's: it holds the catalog, it persists the selection, and it is where an
+/// admin-only check has already been applied by the time the bytes exist.
+async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> Response {
+    let (user, session_token) = match admin_of(&state, &jar).await {
+        Ok(pair) => pair,
+        Err(response) => return *response,
+    };
+    let Some(handler) = state.handlers.get("createBackup").cloned() else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "this server has no backup handler registered",
+        );
+    };
+    let selection = if body.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}"));
+            }
+        }
+    };
+    let caller = user.clone();
+    let ctx = HandlerCtx {
+        raw_body: None,
+        path_params: HashMap::new(),
+        query: Vec::new(),
+        body: selection,
+        user,
+    };
+    match handler(ctx).await {
+        Ok(resp) => apply_response(&state, jar, session_token, resp).await,
+        Err(e) => {
+            error_out(
+                &state,
+                &e,
+                Audience::Admin,
+                "POST",
+                BACKUP_CREATE_ROUTE,
+                caller.as_ref(),
+            )
+            .await
+        }
+    }
+}
+
+/// Take delivery of a backup file (see [`BACKUP_UPLOAD_ROUTE`]).
+///
+/// The body is the zip. Nothing is restored here: the response says what the file
+/// holds and hands back a token the typed `restoreBackup` names once the admin has
+/// chosen from it. That is one upload rather than two — the alternative, sending
+/// the file again with the choice, means a browser holding a large archive twice
+/// and an admin waiting for it twice.
+async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body) -> Response {
+    let (user, session_token) = match admin_of(&state, &jar).await {
+        Ok(pair) => pair,
+        Err(response) => return *response,
+    };
+    let Some(handler) = state.handlers.get("uploadBackup").cloned() else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "this server has no backup handler registered",
+        );
+    };
+    let bytes = match axum::body::to_bytes(body, MAX_UPLOAD_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("the backup exceeds the {MAX_UPLOAD_BYTES} byte limit"),
+            );
+        }
+    };
+    let caller = user.clone();
+    let ctx = HandlerCtx {
+        raw_body: Some(bytes),
+        path_params: HashMap::new(),
+        query: Vec::new(),
+        body: Value::Null,
+        user,
+    };
+    match handler(ctx).await {
+        Ok(resp) => apply_response(&state, jar, session_token, resp).await,
+        Err(e) => {
+            error_out(
+                &state,
+                &e,
+                Audience::Admin,
+                "POST",
+                BACKUP_UPLOAD_ROUTE,
+                caller.as_ref(),
+            )
+            .await
+        }
+    }
+}
+
+/// The session behind an admin-only route outside the endpoint set: the caller,
+/// and the token their cookie carried (which [`apply_response`] needs to leave the
+/// session where it found it).
+///
+/// The `Err` is the refusal to serve, ready to return — the same two answers
+/// `dispatch` gives, so a route that does its own auth cannot accidentally give a
+/// different one.
+async fn admin_of(
+    state: &AppState,
+    jar: &CookieJar,
+) -> std::result::Result<(Option<User>, Option<String>), Box<Response>> {
+    let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    let user = session_user(state, jar).await?;
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        return Err(Box::new(rejection));
+    }
+    Ok((user, session_token))
 }
 
 /// The IDE's language-server socket (design §12.1): admin-only, one process per
@@ -603,6 +738,9 @@ async fn dispatch_app(
                         body: resp.body,
                         status: resp.status,
                         session: resp.session,
+                        // A provider's raw body is served above, before this
+                        // point: an application's download never reaches here.
+                        download: None,
                     },
                 )
                 .await,
@@ -816,6 +954,26 @@ async fn apply_response(
             jar
         }
     };
+    // A response that *is* a file: the bytes under their own content type, named
+    // so a browser's save dialog offers the right thing. There is no JSON body to
+    // send alongside them, which is why this is a separate arm rather than a
+    // header on the one below.
+    if let Some(file) = resp.download {
+        let mut out = (status, jar, file.bytes).into_response();
+        if let Ok(value) = HeaderValue::from_str(&file.content_type) {
+            out.headers_mut().insert(header::CONTENT_TYPE, value);
+        }
+        // The filename is server-built (a timestamp and the host's own name), so
+        // it needs no escaping beyond the quotes — but it is still checked rather
+        // than trusted, because a header value that will not parse must not take
+        // the download with it.
+        if let Ok(value) =
+            HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file.filename))
+        {
+            out.headers_mut().insert(header::CONTENT_DISPOSITION, value);
+        }
+        return out;
+    }
     (status, jar, Json(resp.body)).into_response()
 }
 

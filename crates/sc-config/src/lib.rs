@@ -28,7 +28,10 @@ pub mod ssl;
 pub mod store;
 
 pub use acme::{ACME_CACHE_TABLE, AcmeCache, bootstrap_acme_cache};
-pub use defs::{ConfigDef, ConfigSection, config_sections, config_spec, definition, known_keys};
+pub use defs::{
+    BACKUP_INCLUDE, ConfigDef, ConfigSection, config_sections, config_spec, definition,
+    internal_defs, known_keys,
+};
 pub use ssl::{
     ACME_CONTACT_EMAIL, ACME_DIRECTORY_URL, HTTPS_PORT, LETSENCRYPT_PRODUCTION,
     LETSENCRYPT_STAGING, MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, REDIRECT_HTTP_TO_HTTPS,

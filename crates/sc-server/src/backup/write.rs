@@ -1,0 +1,345 @@
+//! Writing a backup: the selection in, a zip out.
+//!
+//! Everything here is a read, so nothing in this file can damage an
+//! installation — which is why it is worth keeping the writing separate from the
+//! restoring even though they share a layout.
+//!
+//! Two things it does *not* do, deliberately:
+//!
+//! - **It does not redact.** A file store's backend settings and the SSL private
+//!   key are written as they are stored. A backup with the private key replaced by
+//!   the redaction sentinel would restore an installation that cannot serve HTTPS,
+//!   and one with a store's credentials removed would restore a store that cannot
+//!   connect. The zip is therefore as sensitive as the database, and the dialog
+//!   says so where the admin chooses.
+//! - **It does not stream.** The zip is built in memory and handed to the
+//!   response whole. A backup is bounded by the installation's own size and the
+//!   admin asked for it; streaming would mean deciding what to do about a table
+//!   changing underneath a half-written file, which is a bigger question than the
+//!   memory it saves.
+
+use std::io::{Cursor, Write};
+
+use sc_api::rows;
+use sc_catalog::{Catalog, FIELD_META_TABLE, Table, list_field_meta_for_table, list_file_stores};
+use sc_error::{Error, Result};
+use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement};
+use serde_json::{Map, Value as Json, json};
+use zip::write::SimpleFileOptions;
+
+use super::{Available, Item, MANIFEST_FILE, SSL_SECTION, Selection};
+use crate::handlers::{
+    agent_json, application_json, backup_file_meta_json, backup_store_def_json, field_json,
+    role_json, table_json, trigger_json, trigger_table,
+};
+
+/// What can be included in a backup of this server, right now.
+///
+/// The `users` table is **not** among the tables: user accounts are the Users
+/// choice, which carries the table's rows (password hashes included) along with
+/// the roles they point at. Offering it twice would let an admin tick "users" and
+/// untick the `users` table and get something incoherent.
+pub async fn available(catalog: &Catalog) -> Result<Available> {
+    let mut tables = Vec::new();
+    for table in catalog.tables()? {
+        if table.is_system() || table.name == sc_auth::USERS_TABLE {
+            continue;
+        }
+        let count = rows::count_rows(catalog, &table, None).await.unwrap_or(0);
+        tables.push(
+            Item::new(table.name.clone())
+                .labelled(table.label.clone())
+                .counting(count),
+        );
+    }
+
+    let applications = sc_app::list_applications(catalog)
+        .await?
+        .iter()
+        .map(|app| Item::new(app.subdomain.clone()).labelled(app.name.clone()))
+        .collect();
+
+    // Defined stores, not merely connected ones: a store whose directory is not
+    // mounted right now is still a definition worth backing up, and its files
+    // simply come out empty. The count is left unknown — answering it would mean
+    // walking every store every time the dialog opens.
+    let file_stores = list_file_stores(catalog)
+        .await?
+        .iter()
+        .map(|def| Item::new(def.name.clone()).labelled(def.description.clone()))
+        .collect();
+
+    let users = match catalog.get(sc_auth::USERS_TABLE)? {
+        Some(users) => rows::count_rows(catalog, &users, None).await.unwrap_or(0),
+        None => 0,
+    };
+
+    Ok(Available {
+        tables,
+        applications,
+        file_stores,
+        users,
+        agents: i64::try_from(sc_agent::list_agents(catalog).await?.len()).unwrap_or(i64::MAX),
+        triggers: i64::try_from(sc_action::list_triggers(catalog).await?.len()).unwrap_or(i64::MAX),
+        // There is always an SSL section to include, even when every value in it
+        // is the default — "serve plain HTTP" is a setting an admin may well want
+        // restored onto a copy of a production server.
+        ssl: true,
+    })
+}
+
+/// Build the zip for `selection`.
+///
+/// The bytes are the whole answer: what went into them is *in* them, in the
+/// manifest, which is the same thing a restore reads back with
+/// [`inspect`](super::inspect). A second copy of that record travelling beside the
+/// file would be a second copy to keep true.
+pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Vec<u8>> {
+    let mut zip = ZipBuilder::new();
+    let mut contents = Available::default();
+
+    // --- tables: the overlay, the columns, and the rows ---------------------
+    let rls = catalog.primary().capabilities().row_level_security;
+    let has_field_meta = catalog.get(FIELD_META_TABLE)?.is_some();
+    for name in &selection.tables {
+        let table = catalog.require(name)?;
+        let metas = if has_field_meta {
+            list_field_meta_for_table(catalog, &table.name).await?
+        } else {
+            Vec::new()
+        };
+        let fields: Vec<Json> = table
+            .fields
+            .iter()
+            .map(|f| {
+                let description = metas
+                    .iter()
+                    .find(|m| m.field_name == f.base.name)
+                    .map(|m| m.description.clone())
+                    .unwrap_or_default();
+                field_json(f, &description)
+            })
+            .collect();
+        zip.json(
+            &format!("tables/{name}/table.json"),
+            &json!({ "table": table_json(&table, rls), "fields": fields }),
+        )?;
+
+        let mut count = None;
+        if selection.includes_data(name) {
+            let rows = table_rows(catalog, &table).await?;
+            count = Some(i64::try_from(rows.len()).unwrap_or(i64::MAX));
+            zip.json(&format!("tables/{name}/rows.json"), &Json::Array(rows))?;
+        }
+        contents.tables.push({
+            let item = Item::new(table.name.clone()).labelled(table.label.clone());
+            match count {
+                Some(count) => item.counting(count),
+                None => item,
+            }
+        });
+    }
+
+    // --- applications -------------------------------------------------------
+    for app in sc_app::list_applications(catalog).await? {
+        if !selection.includes_application(&app.subdomain) {
+            continue;
+        }
+        zip.json(
+            &format!("applications/{}.json", app.subdomain),
+            &application_json(&app),
+        )?;
+        contents
+            .applications
+            .push(Item::new(app.subdomain.clone()).labelled(app.name.clone()));
+    }
+
+    // --- file stores: the definition, the metadata, and the bytes -----------
+    for def in list_file_stores(catalog).await? {
+        if !selection.includes_store(&def.name) {
+            continue;
+        }
+        let dir = format!("file-stores/{}", def.name);
+        let mut files = Vec::new();
+        // A defined store that is not connected right now backs up as its
+        // definition and no files, rather than failing the whole backup: the
+        // definition is the part that is hard to recreate by hand.
+        if let Ok(store) = catalog.require_file_store(&def.name) {
+            for path in walk(store.as_ref(), "").await? {
+                let bytes = store.read(&path).await?;
+                let meta = store.get_meta(&path).await.unwrap_or_default();
+                zip.bytes(&format!("{dir}/files/{path}"), &bytes)?;
+                files.push(backup_file_meta_json(&path, &meta));
+            }
+        }
+        let count = i64::try_from(files.len()).unwrap_or(i64::MAX);
+        zip.json(
+            &format!("{dir}/store.json"),
+            &json!({ "definition": backup_store_def_json(&def), "files": files }),
+        )?;
+        contents
+            .file_stores
+            .push(Item::new(def.name.clone()).labelled(def.description.clone()).counting(count));
+    }
+
+    // --- users and the roles they point at ----------------------------------
+    //
+    // One entry, because a user without their role is a foreign key pointing at
+    // nothing. The rows are the table's own — **including `password_hash`**,
+    // which is the difference between a restored installation people can sign in
+    // to and one where every account needs a new password. A hash is what the
+    // database holds and what a restore has to put back.
+    if selection.users {
+        let users_table = catalog.require(sc_auth::USERS_TABLE)?;
+        let users = table_rows(catalog, &users_table).await?;
+        let roles: Vec<Json> = sc_auth::list_roles(catalog).await?.iter().map(role_json).collect();
+        contents.users = i64::try_from(users.len()).unwrap_or(i64::MAX);
+        zip.json(
+            "users.json",
+            &json!({ "roles": roles, "users": Json::Array(users) }),
+        )?;
+    }
+
+    // --- agents -------------------------------------------------------------
+    if selection.agents {
+        let agents: Vec<Json> = sc_agent::list_agents(catalog)
+            .await?
+            .iter()
+            .map(|agent| agent_json(agent, None))
+            .collect();
+        contents.agents = i64::try_from(agents.len()).unwrap_or(i64::MAX);
+        zip.json("agents.json", &Json::Array(agents))?;
+    }
+
+    // --- triggers ----------------------------------------------------------
+    if selection.triggers {
+        let mut triggers = Vec::new();
+        for trigger in sc_action::list_triggers(catalog).await? {
+            if !selection.includes_trigger(trigger_table(&trigger)) {
+                continue;
+            }
+            triggers.push(trigger_json(&trigger, None));
+        }
+        contents.triggers = i64::try_from(triggers.len()).unwrap_or(i64::MAX);
+        zip.json("triggers.json", &Json::Array(triggers))?;
+    }
+
+    // --- the SSL settings ---------------------------------------------------
+    if selection.ssl {
+        let stored = sc_config::all_config(catalog).await?;
+        let mut values = Map::new();
+        for field in sc_config::config_sections()
+            .iter()
+            .filter(|section| section.name == SSL_SECTION)
+            .flat_map(|section| section.fields.iter())
+        {
+            if let Some(value) = stored.get(field.key()) {
+                values.insert(field.key().to_owned(), value.clone());
+            }
+        }
+        contents.ssl = true;
+        zip.json("settings/ssl.json", &Json::Object(values))?;
+    }
+
+    // The manifest goes in last so it can describe what was actually written —
+    // a store that turned out to be unreachable, a table whose rows were left
+    // out — rather than what was asked for.
+    zip.json(
+        MANIFEST_FILE,
+        &json!({
+            "format": super::FORMAT,
+            "version": super::FORMAT_VERSION,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "contents": contents.to_json(),
+        }),
+    )?;
+
+    zip.finish()
+}
+
+/// Every row of a table as JSON, ordered by its primary key where it has a
+/// single one so two backups of an unchanged table are the same file.
+async fn table_rows(catalog: &Catalog, table: &Table) -> Result<Vec<Json>> {
+    let mut select = Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
+    if let Ok(pk) = rows::single_pk(table) {
+        select.order = vec![OrderBy::asc(Expr::col(pk))];
+    }
+    let fetched = catalog
+        .primary()
+        .query(&Statement::from(select))
+        .await?
+        .try_collect()
+        .await?;
+    Ok(fetched.iter().map(rows::row_to_json).collect())
+}
+
+/// Every file in a store, depth-first, as store-relative paths.
+///
+/// Directories are not recorded: an empty directory carries no information a
+/// restore could not recreate, and every non-empty one is implied by the paths of
+/// the files in it.
+async fn walk(store: &dyn sc_files::FileStore, dir: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(dir) = pending.pop() {
+        for entry in store.list(&dir).await? {
+            if entry.is_dir {
+                pending.push(entry.path);
+            } else {
+                out.push(entry.path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// A zip being built in memory.
+///
+/// Thin on purpose: it exists so the entry options are stated once and so the
+/// callers above read as a list of what goes into a backup rather than as zip
+/// plumbing.
+struct ZipBuilder {
+    zip: zip::ZipWriter<Cursor<Vec<u8>>>,
+    options: SimpleFileOptions,
+}
+
+impl ZipBuilder {
+    fn new() -> ZipBuilder {
+        ZipBuilder {
+            zip: zip::ZipWriter::new(Cursor::new(Vec::new())),
+            options: SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+        }
+    }
+
+    /// Add a JSON entry, pretty-printed: a backup is a thing people open and
+    /// read, and `git diff` on an unpacked one is a real way to answer "what
+    /// changed".
+    fn json(&mut self, path: &str, value: &Json) -> Result<()> {
+        let text = serde_json::to_vec_pretty(value)
+            .map_err(|e| Error::msg(format!("could not serialise {path}: {e}")))?;
+        self.bytes(path, &text)
+    }
+
+    fn bytes(&mut self, path: &str, bytes: &[u8]) -> Result<()> {
+        self.zip
+            .start_file(path, self.options)
+            .map_err(|e| zip_error(path, &e.to_string()))?;
+        self.zip
+            .write_all(bytes)
+            .map_err(|e| zip_error(path, &e.to_string()))?;
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Vec<u8>> {
+        Ok(self
+            .zip
+            .finish()
+            .map_err(|e| zip_error("the archive", &e.to_string()))?
+            .into_inner())
+    }
+}
+
+fn zip_error(path: &str, message: &str) -> Error {
+    Error::msg(format!("could not write {path} into the backup: {message}"))
+}

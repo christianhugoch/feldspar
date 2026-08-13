@@ -4,13 +4,15 @@
 // client of the server's endpoint set can call that server unaided — which is
 // what every consumer of it needs, this SPA and a scaffolded app alike.
 //
-// What remains here is `uploadFile`: a POST to a route *outside* the typed
-// endpoint set (raw bytes cannot be described by a `TypeSchema`), and therefore
-// the one request in this SPA that has to satisfy the CSRF contract by hand.
-// `browserFetch` is what does that, and is also what makes the session cookie's
-// journey explicit rather than relying on `fetch`'s default.
+// What remains here are the requests whose *bytes* cannot be described by a
+// `TypeSchema`, and which are therefore served by routes outside the typed
+// endpoint set: `uploadFile`, and the two halves of backup and restore
+// (`createBackup`, whose response is a zip, and `uploadBackup`, whose request is
+// one). Each has to satisfy the CSRF contract by hand; `browserFetch` is what does
+// that, and is also what makes the session cookie's journey explicit rather than
+// relying on `fetch`'s default.
 
-import { createClient, type ApiClient } from "./client";
+import { createClient, type ApiClient, type GetBackupOptionsResponse } from "./client";
 
 /** Header the server expects the CSRF cookie echoed in (matches `CSRF_HEADER`). */
 const CSRF_HEADER = "x-csrf-token";
@@ -40,13 +42,13 @@ export const api: ApiClient = createClient({ fetch: browserFetch });
 /**
  * Upload a file's bytes to a store.
  *
- * **The one admin operation not in the generated client**, and deliberately so.
- * The endpoint model is JSON-only — a `TypeSchema` has no bytes shape — so a raw
- * binary body cannot be described by it, and the server serves this from a route
- * outside the typed `EndpointSet` (`POST /upload/{store}/{*path}`). Everything
- * else in this SPA goes through the generated client; this is the exception, so
- * it lives here beside the other hand-written browser concerns rather than being
- * scattered into a screen.
+ * **Not in the generated client**, and deliberately so. The endpoint model is
+ * JSON-only — a `TypeSchema` has no bytes shape — so a raw binary body cannot be
+ * described by it, and the server serves this from a route outside the typed
+ * `EndpointSet` (`POST /upload/{store}/{*path}`). Everything else in this SPA goes
+ * through the generated client except the backup calls below, which are outside it
+ * for the same reason; the exceptions live here beside the other hand-written
+ * browser concerns rather than being scattered into a screen.
  *
  * `writeFile` remains the typed path for small text files (the editor uses it);
  * this is for arbitrary bytes at arbitrary size.
@@ -67,10 +69,87 @@ export async function uploadFile(
     `/upload/${encodeURIComponent(store)}/${encodedPath}`,
     { method: "POST", body: file },
   );
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`uploadFile failed: ${res.status}${text ? `: ${text}` : ""}`);
+  if (!res.ok) throw await rawError("uploadFile", res);
+}
+
+/** The error a route outside the typed endpoint set failed with, in the same shape
+ * the generated client throws — `<name> failed: <status>[: <server message>]` — so
+ * `errorStatus` and `errorMessage` below read it the same way. */
+async function rawError(op: string, res: Response): Promise<Error> {
+  let detail = "";
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === "object" && "error" in body) {
+      const message = (body as { error: unknown }).error;
+      if (typeof message === "string") detail = `: ${message}`;
+    }
+  } catch {
+    // Non-JSON body: the status alone will have to describe the failure.
   }
+  return new Error(`${op} failed: ${res.status}${detail}`);
+}
+
+/**
+ * Ask the server to build a backup, and hand the browser the file.
+ *
+ * The second call not in the generated client, for the mirror-image reason
+ * `uploadFile` is not: the response *is* a zip, and the endpoint model has no
+ * bytes shape to describe it with. The selection still travels as JSON, so this is
+ * an ordinary POST whose response happens to be a file.
+ *
+ * The download is done by clicking a link at an object URL rather than by
+ * navigating: a navigation cannot carry the CSRF header, and the archive is
+ * already in memory by the time the response resolves. The name comes from the
+ * server's `Content-Disposition` when it sent one, since the server is what knows
+ * the date the backup was taken.
+ */
+export async function createBackup(include: unknown): Promise<void> {
+  const res = await browserFetch("/backup/create", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ include }),
+  });
+  if (!res.ok) throw await rawError("createBackup", res);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filenameFrom(res.headers.get("content-disposition")) ?? "saltcorn-backup.zip";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Freed on the next tick rather than immediately: revoking the URL before the
+  // click has been dispatched cancels the download in some browsers.
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/** The `filename="…"` of a `Content-Disposition` header, if it has one. */
+function filenameFrom(header: string | null): string | null {
+  const match = header?.match(/filename="([^"]+)"/);
+  return match ? match[1] : null;
+}
+
+/** What an uploaded backup turned out to hold, and the token that names it while
+ * the admin decides what to take from it. */
+export type UploadedBackup = {
+  id: string;
+  created_at: string | null;
+  available: GetBackupOptionsResponse["available"];
+  include: GetBackupOptionsResponse["include"];
+};
+
+/**
+ * Hand a backup file to the server and get back what is in it.
+ *
+ * Nothing is restored by this: the file waits on the server while the admin
+ * unticks what they do not want, and `restoreBackup` (which *is* in the generated
+ * client) names it by the `id` this returns. One upload rather than two — the
+ * alternative is sending a large archive again with the choice attached.
+ */
+export async function uploadBackup(file: File): Promise<UploadedBackup> {
+  const res = await browserFetch("/backup/upload", { method: "POST", body: file });
+  if (!res.ok) throw await rawError("uploadBackup", res);
+  return (await res.json()) as UploadedBackup;
 }
 
 /**

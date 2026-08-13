@@ -2,6 +2,129 @@
 
 Changes in reverse chronological order.
 
+## Backup and restore, on a tab of their own
+
+The Settings screen was one form — the SSL section — and there was no way to get an
+installation out of a database or into another one. It is now tabbed: **SSL** is the
+settings form exactly as it was, and **Backup** is the pair of operations that
+produce and consume a file. The split is by verb rather than by subject; a form
+whose Save button sat beside a Restore button would be a form with two very
+different consequences on it.
+
+**A backup is the admin API's own JSON, in a zip.** Every metadata record it
+carries — a table's settings and its columns, an application, an agent, a trigger,
+a role — is written in the shape the endpoint that *lists* one returns, and read
+back through the parser the endpoint that *creates* one uses (`handlers.rs`'s
+`*_json` / `*_from_body` pairs, now `pub(crate)` for exactly this). A second
+serialisation of an application would have been a second thing to keep in step with
+the first, and its failure would have been silent: a field added to the form and
+forgotten here, restored as its default a year later. Table rows and file contents
+are the two things with no admin-API shape to borrow, so they are written as what
+they are — a JSON array of row objects, and bytes. The layout, one directory per
+kind:
+
+```
+manifest.json                       what this file holds, and when it was taken
+tables/<table>/table.json           { table, fields } — the overlay + the columns
+tables/<table>/rows.json            [ { column: value, … }, … ]
+applications/<subdomain>.json       one application
+file-stores/<store>/store.json      { definition, files: [ { path, meta } ] }
+file-stores/<store>/files/<path>    the bytes, as they are
+users.json                          { roles, users } — password hashes included
+agents.json / triggers.json         [ … ]
+settings/ssl.json                   the SSL section's stored values
+```
+
+**Backup now** opens a dialog over what this server has: multi-selects (the
+component the application form's table picker uses) for table definitions, table
+data, applications and file stores, and a tick box each for users and roles, agents,
+triggers and the SSL settings. Everything is included by default. Three rules are
+enforced where they are made rather than left to the server to discover:
+
+- **rows cannot be included without their table's definition** — the data picker
+  offers what the definitions picker has left, so unticking a table takes its rows
+  with it. The server narrows the payload as well, because a client bug must not
+  produce rows nothing can read;
+- **a trigger on a table that is being left out is left out with it**. Triggers are
+  one choice, not one per trigger, but a trigger whose `insert` channel names an
+  excluded table has nothing to fire on;
+- **the file is as sensitive as the database**, and the dialog says so where the
+  choice is made. Nothing is redacted: a store's credentials and the TLS private key
+  travel in the clear, because a backup carrying the redaction sentinel restores an
+  installation that cannot serve HTTPS and a store that cannot connect.
+
+The choice is **remembered as what was left out**, in `_sc_config` under
+`backup_include`, and it is saved by taking the backup rather than by a Save button
+of its own — the answer to "what should a backup include" is the backup that was
+just taken. Exclusions rather than inclusions because a stored list of what to
+include would freeze the installation as it was the day the dialog was tuned: the
+table added next week would be missing from every backup after it, and nothing would
+say so. `sc-config` grew `internal_defs()` for keys like this one — stored
+configuration that no settings *form* renders, declared so the write is still
+type-checked and still refuses an unknown key, but kept out of `config_spec()` so no
+form grows a control for a value it cannot edit.
+
+**Restore** takes a file, and the same dialog comes back over the manifest's
+contents with everything ticked. One dialog for both, because the two questions are
+the same question asked of two sources; the server describes what is available in
+one shape whether it is describing this installation or an uploaded file, so the
+screen never asks which it is looking at.
+
+A restore **adds; it does not destroy.** Nothing drops a table, deletes a row,
+replaces an account or repoints a file store that is already defined — an admin
+restoring onto a server with things in it gets what was missing and is *told* what
+was left alone, in a report of two lists. The alternative, a restore that makes the
+server match the file, would be an admin one click from deleting the installation
+they are standing in, and the destructive verbs already exist elsewhere in the admin
+UI where each is individually deliberate. Concretely: an account matching by id or
+email is kept (so a backup cannot overwrite the password of the admin running the
+restore and lock them out of the screen they are on), an existing store keeps its
+definition and the backup's files are written into it (a backup's store points at a
+path on the machine it was taken from), an existing column is left at the type the
+database says it is, and rows are inserted **without raising the table's insert
+triggers** — a restore puts data back, it does not replay an installation's history.
+Every item is restored on its own, so an application naming a table that is not in
+the file loses that application and nothing else; tables are created in one pass and
+their columns added in a second, which is what lets two tables that reference each
+other be restored at all, and rows go in in dependency order.
+
+**A restored application is built and mounted, not merely stored.** Restore and go:
+an installation that came back without its applications serving is not one anybody
+has finished restoring, and the admin has no way to know which of them was waiting
+on a button. Each one therefore goes through the same `build_and_mount` the Build
+button does — the bundler over the source tree the file stores restored moments
+earlier, which is why applications are restored *after* them, and then a live
+remount, so the app answers on its subdomain as soon as the restore finishes. A
+first build installs the project's dependencies, so a source tree that arrived
+without its `node_modules` is not a special case. A build that fails is a warning
+against an application that is *saved* — the bundler's own diagnostics, and pressing
+Build once its source is in place is the repair — and the one cost is time: a restore
+including applications takes as long as their builds do, which the Restore card says
+before the admin starts.
+
+Two of the four operations are typed endpoints (`getBackupOptions`,
+`restoreBackup`) and two are routes outside the endpoint set — `POST /backup/create`,
+whose response *is* a zip, and `POST /backup/upload`, whose request is one — for the
+reason the binary file upload is outside it: a `TypeSchema` has no bytes shape. Both
+still dispatch through the handler registry, so both are behind the same session
+lookup, the same admin check and the same CSRF middleware as everything typed;
+`HandlerResponse` gained an optional `Download` for the one that answers with a file.
+The restore is deliberately two requests — hand the file over, then say what to take
+from it — with the archive held in memory for half an hour between them, because
+what to restore cannot be chosen until the file has been read and re-uploading a
+large archive to say so doubles the wait on the operation an admin is already nervous
+about.
+
+`zip` (8.x, `deflate-flate2-zlib-rs` only) is the one new dependency: DEFLATE
+through a pure-Rust zlib, so §16's no-C-dependencies posture holds here as it does
+for TLS, and the file opens with `unzip` like any other.
+
+The round trip is tested where it matters — `backup_api.rs` furnishes one server
+with a configured table, rows, a file store with a file in it, a role, a trigger and
+a pasted certificate, backs it up through the HTTP route a browser posts to, and
+restores it into a *second* server, then reads what arrived back through the ordinary
+admin API rather than out of the zip.
+
 ## The users screen manages users
 
 The users screen could list users and create one, with a form beside the list that asked

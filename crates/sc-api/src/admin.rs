@@ -1333,7 +1333,95 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // --- backup & restore ---------------------------------------------------
+    // Two of the four backup operations are here; the other two are routes outside
+    // this set, because one *is* a file and the other *takes* one, and a
+    // `TypeSchema` has no bytes shape (the same reason the binary file upload is
+    // outside it). The split is along that line and no other: what an admin
+    // includes, and what a restore did, are ordinary typed JSON and belong in the
+    // generated client.
+
+    // What this server has to offer a backup, and the selection the admin last
+    // made — one response, because the dialog needs both to open and asking for
+    // them separately would let them disagree.
+    set.register(
+        Endpoint::new("getBackupOptions", Method::Get, api().lit("backup"))
+            .output(TypeSchema::struct_of([
+                StructField::new("available", backup_contents_schema()),
+                StructField::new("include", backup_selection_schema()),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // Restore from an archive already uploaded (`/backup/upload` handed back its
+    // `id`), taking the parts `include` names.
+    //
+    // The two lists rather than a single "ok": a restore is dozens of independent
+    // acts and some of them are routinely skipped — an account that is already
+    // here, a trigger on a table the admin left out. Reporting that as success
+    // would hide it and as failure would be wrong.
+    set.register(
+        Endpoint::new("restoreBackup", Method::Post, api().lit("backup").lit("restore"))
+            .input(TypeSchema::struct_of([
+                StructField::new("id", TypeSchema::text()),
+                StructField::new("include", backup_selection_schema()),
+            ]))
+            .output(TypeSchema::struct_of([
+                StructField::new("restored", TypeSchema::array(TypeSchema::text())),
+                StructField::new("warnings", TypeSchema::array(TypeSchema::text())),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
     set
+}
+
+/// One thing a backup can include or leave out: what it is called, what to show,
+/// and how much of it there is (rows or files; `null` where counting it would cost
+/// more than the number is worth).
+fn backup_item_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("count", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// Everything that could go into a backup — of this server, or of a backup file
+/// that has been uploaded. **One schema for both**, which is what lets one dialog
+/// drive the backup and the restore: the difference between them is where the
+/// value came from, not what it is.
+fn backup_contents_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("tables", TypeSchema::array(backup_item_schema())),
+        StructField::new("applications", TypeSchema::array(backup_item_schema())),
+        StructField::new("file_stores", TypeSchema::array(backup_item_schema())),
+        // Counts rather than flags, because "back up the users" is a different
+        // decision when there are two of them and when there are twelve thousand.
+        StructField::new("users", TypeSchema::int()),
+        StructField::new("agents", TypeSchema::int()),
+        StructField::new("triggers", TypeSchema::int()),
+        StructField::new("ssl", TypeSchema::bool()),
+    ])
+}
+
+/// What one backup or restore includes.
+///
+/// `table_data` is separate from `tables` because metadata and rows are separate
+/// decisions — a schema-only backup is a real thing to want — and it is a **subset**
+/// of it: rows restored into a table nobody described would be unreadable, so the
+/// server narrows this to `tables` on the way in rather than trusting it.
+fn backup_selection_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("tables", TypeSchema::array(TypeSchema::text())),
+        StructField::new("table_data", TypeSchema::array(TypeSchema::text())),
+        StructField::new("applications", TypeSchema::array(TypeSchema::text())),
+        StructField::new("file_stores", TypeSchema::array(TypeSchema::text())),
+        StructField::new("users", TypeSchema::bool()),
+        StructField::new("agents", TypeSchema::bool()),
+        StructField::new("triggers", TypeSchema::bool()),
+        StructField::new("ssl", TypeSchema::bool()),
+    ])
 }
 
 /// A `PathSpec` rooted at the admin API prefix.

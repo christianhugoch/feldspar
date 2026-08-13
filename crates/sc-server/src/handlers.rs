@@ -236,14 +236,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // loaded, so an omitted value here means the admin cleared it.
                 // `alter_table` in an agent's batch is the other case, and the
                 // difference is spelled at exactly these two call sites.
-                let settings = schema_edit::TableSettings {
-                    label: Some(str_field(obj, "label")?.to_owned()),
-                    description: Some(str_field(obj, "description")?.to_owned()),
-                    min_role_read: Some(role_field(obj, "min_role_read")?),
-                    min_role_write: Some(role_field(obj, "min_role_write")?),
-                    ownership_formula: Some(str_field(obj, "ownership_formula")?.to_owned()),
-                    rls_enabled: Some(bool_field(obj, "rls_enabled")?),
-                };
+                let settings = table_settings_from_body(obj)?;
                 schema_edit::apply(
                     &catalog,
                     &[schema_edit::Operation::AlterTable {
@@ -382,7 +375,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let table_name = ctx.path_param("table")?.to_owned();
                 let obj = require_object(&ctx.body)?;
                 let description = optional_str(obj, "description");
-                // The wire shape is parsed here; what a field *means* — the
+                // The wire shape is parsed by `field_spec_from_body`; what a field *means* — the
                 // storage type behind a rich type, the foreign key behind a
                 // `Key`, the calculated-field check, the DDL-then-overlay
                 // sequence and the live re-projection — is the schema editor's
@@ -395,16 +388,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // and names the omission for anything else. Requiring it here
                 // would make the admin UI ask for an answer it cannot know and
                 // the database would refuse.
-                let field = schema_edit::FieldSpec {
-                    name: non_empty_str_field(obj, "name")?.to_owned(),
-                    type_name: optional_str(obj, "type"),
-                    label: optional_str(obj, "label"),
-                    description: description.clone(),
-                    required: optional_bool(obj, "required")?,
-                    unique: optional_bool(obj, "unique")?,
-                    kind: parse_field_kind(obj)?,
-                    attributes: attributes_field(obj)?,
-                };
+                let field = field_spec_from_body(obj)?;
                 let name = field.name.trim().to_owned();
                 schema_edit::apply(
                     &catalog,
@@ -1706,6 +1690,131 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- backup & restore ---------------------------------------------------
+    // Four handlers for one screen, split by what crosses the wire rather than by
+    // what they do (§16): the *choice* is JSON and typed, the *archive* is bytes
+    // and is not. `createBackup` and `uploadBackup` are reached by routes outside
+    // the endpoint set (see `crate::router`) and are in this registry all the same,
+    // so all four are behind the same admin check and the same catalog.
+    //
+    // The uploaded archive waits in `pending` between the upload and the restore,
+    // because what to restore cannot be chosen until the file has been read.
+
+    let pending = crate::backup::PendingUploads::new();
+
+    // What this server has to offer, plus the selection the admin last made — so
+    // the dialog opens on their tuned choice rather than on everything, and on
+    // *everything* the first time.
+    reg.register("getBackupOptions", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let available = crate::backup::available(&catalog).await?;
+                let preferences = stored_backup_preferences(&catalog).await?;
+                Ok(HandlerResponse::ok(json!({
+                    "available": available.to_json(),
+                    "include": preferences.selection(&available).to_json(),
+                })))
+            }
+        }
+    });
+
+    // Build the archive, and remember what was asked for.
+    //
+    // The selection is persisted **here**, on the way to producing a file, rather
+    // than by a save button of its own: the admin's answer to "what should a backup
+    // include" is exactly the backup they just took, and a screen that made them
+    // state it twice would drift.
+    reg.register("createBackup", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let available = crate::backup::available(&catalog).await?;
+                let selection = match ctx.body.get("include") {
+                    Some(value) => crate::backup::Selection::from_json(value)?,
+                    // No selection at all means everything, which is the default
+                    // the screen starts from and what a script with no opinion
+                    // should get.
+                    None => crate::backup::Selection::everything(&available),
+                };
+                let previous = stored_backup_preferences(&catalog).await?;
+                let preferences =
+                    crate::backup::BackupPreferences::of(&previous, &available, &selection);
+                sc_config::set_config(
+                    &catalog,
+                    sc_config::BACKUP_INCLUDE,
+                    preferences.to_json(),
+                )
+                .await?;
+
+                let bytes = crate::backup::write_backup(&catalog, &selection).await?;
+                Ok(HandlerResponse::download(crate::handler::Download {
+                    bytes: Bytes::from(bytes),
+                    content_type: "application/zip".to_owned(),
+                    filename: backup_filename(),
+                }))
+            }
+        }
+    });
+
+    // Take delivery of a file and say what is in it. Nothing is written.
+    reg.register("uploadBackup", {
+        let pending = pending.clone();
+        move |ctx| {
+            let pending = pending.clone();
+            async move {
+                let bytes = ctx.raw_body()?.clone();
+                let (contents, manifest) = crate::backup::inspect(&bytes)?;
+                let id = pending.keep(bytes)?;
+                Ok(HandlerResponse::ok(json!({
+                    "id": id.to_string(),
+                    "created_at": manifest.get("created_at"),
+                    "available": contents.to_json(),
+                    // Everything the file holds, ticked: the admin excludes from
+                    // there, which is the same direction the backup dialog works
+                    // in.
+                    "include": crate::backup::Selection::everything(&contents).to_json(),
+                })))
+            }
+        }
+    });
+
+    reg.register("restoreBackup", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        let pending = pending.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            let pending = pending.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let id = parse_uuid(non_empty_str_field(obj, "id")?, "uploaded backup")?;
+                let selection = match obj.get("include") {
+                    Some(value) => crate::backup::Selection::from_json(value)?,
+                    None => {
+                        return Err(Error::invalid(
+                            "`include` must say what to restore from the backup",
+                        ));
+                    }
+                };
+                let bytes = pending.take(id)?;
+                let report =
+                    crate::backup::restore_backup(&catalog, &apps, &bytes, &selection).await?;
+                // A restore can create tables and stores an application's API is
+                // projected from, so the mounted apps are re-projected once at the
+                // end — the same thing a schema change through the admin API does.
+                reproject_apps(&apps);
+                Ok(HandlerResponse::ok(json!({
+                    "restored": report.restored,
+                    "warnings": report.warnings,
+                })))
+            }
+        }
+    });
+
     reg.register("listApplications", {
         let catalog = catalog.clone();
         move |_ctx| {
@@ -2240,12 +2349,20 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 }
 
 // --- request/response shaping --------------------------------------------------
+//
+// A note on visibility, because several of these are `pub(crate)` rather than
+// private: they are the admin API's *wire shape*, and a backup is the admin
+// API's JSON in a zip (see [`crate::backup`]). The writer builds a backup out of
+// the same `*_json` functions the endpoints answer with, and the restorer feeds
+// it back through the same `*_from_body` parsers the endpoints accept — so a
+// field added to an application, an agent or a trigger reaches the backup format
+// the moment it reaches the API, with nothing to remember.
 
 /// A field (column) with its `_sc_fields` overlay merged on (§3.2): the
 /// introspected column facts plus the overlay's type, kind, label, description and
 /// attributes. `description` is passed in because it lives only in the overlay
 /// row, not the merged [`DataField`].
-fn field_json(field: &DataField, description: &str) -> Json {
+pub(crate) fn field_json(field: &DataField, description: &str) -> Json {
     json!({
         "name": field.base.name,
         "label": field.base.label,
@@ -2335,6 +2452,40 @@ fn parse_field_kind(obj: &Map<String, Json>) -> Result<DataFieldKind> {
     }
 }
 
+/// The field a `createField` body describes, ready for the schema editor.
+///
+/// Shared with a restore, which is handed exactly the `field_json` a `listFields`
+/// would have returned: one parser, so a field kind the editor learns to write is
+/// a field kind a backup can carry.
+pub(crate) fn field_spec_from_body(obj: &Map<String, Json>) -> Result<schema_edit::FieldSpec> {
+    Ok(schema_edit::FieldSpec {
+        name: non_empty_str_field(obj, "name")?.to_owned(),
+        type_name: optional_str(obj, "type"),
+        label: optional_str(obj, "label"),
+        description: optional_str(obj, "description"),
+        required: optional_bool(obj, "required")?,
+        unique: optional_bool(obj, "unique")?,
+        kind: parse_field_kind(obj)?,
+        attributes: attributes_field(obj)?,
+    })
+}
+
+/// The whole-object table settings an `updateTable` body carries: every value
+/// stated, so an omitted one means cleared (see `updateTable` for why that is the
+/// right reading *here* and the wrong one in an agent's batch).
+pub(crate) fn table_settings_from_body(
+    obj: &Map<String, Json>,
+) -> Result<schema_edit::TableSettings> {
+    Ok(schema_edit::TableSettings {
+        label: Some(str_field(obj, "label")?.to_owned()),
+        description: Some(str_field(obj, "description")?.to_owned()),
+        min_role_read: Some(role_field(obj, "min_role_read")?),
+        min_role_write: Some(role_field(obj, "min_role_write")?),
+        ownership_formula: Some(str_field(obj, "ownership_formula")?.to_owned()),
+        rls_enabled: Some(bool_field(obj, "rls_enabled")?),
+    })
+}
+
 /// The overlay description for a field, from the metas loaded for its table.
 fn description_of(metas: &[FieldMeta], field: &str) -> String {
     metas
@@ -2348,7 +2499,7 @@ fn description_of(metas: &[FieldMeta], field: &str) -> String {
 
 /// An [`Application`] as the API returns it (matching `application_schema`): the
 /// id plus every field, with the nested framework/CSP/attributes as plain JSON.
-fn application_json(app: &Application) -> Json {
+pub(crate) fn application_json(app: &Application) -> Json {
     json!({
         "id": app.id.to_string(),
         "name": app.name,
@@ -2567,7 +2718,7 @@ async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Op
 /// [`CspPolicy::strict`], so the minimal body is `{ name, subdomain, framework }`.
 /// Save-time validation (framework config against its spec) happens in
 /// `save_application`, not here.
-fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
+pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
     let obj = require_object(body)?;
     let name = non_empty_str_field(obj, "name")?.to_owned();
     let subdomain = non_empty_str_field(obj, "subdomain")?.to_owned();
@@ -3024,7 +3175,77 @@ fn ephemeral_file_store_json(catalog: &Catalog, name: &str) -> Result<Json> {
 /// The backend's settings are *not* validated here: `save_file_store` checks
 /// them against the backend's declared spec, which is the single place that
 /// knows how, and doing it twice would risk the two drifting.
-fn file_store_from_body(id: FileStoreDefId, body: &Json) -> Result<FileStoreDef> {
+/// A store's definition for a **backup**: the `createFileStore` shape, with the
+/// backend settings *not* redacted.
+///
+/// The one place a secret is written out deliberately. `file_store_json` redacts,
+/// as everything that answers a browser must; a backup restored onto a fresh
+/// server has to be able to connect the store, and a definition carrying the
+/// sentinel where its credential was is a store that will not. The zip is
+/// therefore as sensitive as the database it came from, which the Backup screen
+/// says beside the choice.
+pub(crate) fn backup_store_def_json(def: &FileStoreDef) -> Json {
+    json!({
+        "name": def.name,
+        "description": def.description,
+        "backend": def.backend,
+        "config": Json::Object(def.config.clone()),
+        "min_role": def.min_role,
+    })
+}
+
+/// One file's stored metadata for a backup: the rules that were *set*, not the
+/// effective ones.
+///
+/// `file_meta_json` reports `effective_min_role` too, which is the right answer
+/// for a screen and the wrong one to restore: it is computed from the
+/// directories above the file, so writing it back would turn an inherited rule
+/// into a rule of its own.
+pub(crate) fn backup_file_meta_json(path: &str, meta: &FileMeta) -> Json {
+    json!({
+        "path": path,
+        "min_role": meta.min_role,
+        "attributes": meta
+            .attributes
+            .iter()
+            .map(|(k, v)| (k.clone(), Json::String(v.clone())))
+            .collect::<Map<String, Json>>(),
+    })
+}
+
+/// A file's metadata back from a backup, in the shape `setFileMeta` accepts.
+pub(crate) fn backup_file_meta_from_json(value: &Json) -> Result<(String, FileMeta)> {
+    let obj = require_object(value)?;
+    let path = non_empty_str_field(obj, "path")?.to_owned();
+    let attributes = match obj.get("attributes") {
+        Some(Json::Object(o)) => o
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|text| (k.clone(), text.to_owned())))
+            .collect::<BTreeMap<String, String>>(),
+        _ => BTreeMap::new(),
+    };
+    Ok((
+        path,
+        FileMeta {
+            min_role: optional_role(obj, "min_role")?,
+            attributes,
+        },
+    ))
+}
+
+/// The table a trigger fires on, or `None` when it is not a table event.
+///
+/// The channel *is* the table for `insert`/`update`/`delete` and is something
+/// else entirely for a channel-based or scheduled trigger, so the distinction is
+/// made once, here, rather than at each place that needs to ask.
+pub(crate) fn trigger_table(trigger: &Trigger) -> Option<&str> {
+    match trigger.when {
+        EventKind::Insert | EventKind::Update | EventKind::Delete => trigger.channel.as_deref(),
+        _ => None,
+    }
+}
+
+pub(crate) fn file_store_from_body(id: FileStoreDefId, body: &Json) -> Result<FileStoreDef> {
     let obj = require_object(body)?;
     let name = non_empty_str_field(obj, "name")?.to_owned();
     let backend = non_empty_str_field(obj, "backend")?.to_owned();
@@ -3147,7 +3368,7 @@ fn parse_llm_provider_id(raw: &str) -> Result<LlmProviderDefId> {
 
 /// One stored agent as JSON (matching `agent_schema`), with the reason it cannot
 /// run when there is one (§11.2 — a broken agent stays listed and editable).
-fn agent_json(agent: &sc_agent::Agent, problem: Option<String>) -> Json {
+pub(crate) fn agent_json(agent: &sc_agent::Agent, problem: Option<String>) -> Json {
     json!({
         "id": agent.id.0,
         "name": agent.name,
@@ -3175,7 +3396,7 @@ fn agent_json(agent: &sc_agent::Agent, problem: Option<String>) -> Json {
 /// which is a real agent (one that only talks), while a `traits` of the wrong
 /// shape is a refusal naming the entry — an agent half-read is one that would
 /// answer with the wrong tools.
-fn agent_from_body(id: sc_agent::AgentId, body: &Json) -> Result<sc_agent::Agent> {
+pub(crate) fn agent_from_body(id: sc_agent::AgentId, body: &Json) -> Result<sc_agent::Agent> {
     let obj = require_object(body)?;
     let mut agent = sc_agent::Agent::with_id(
         id,
@@ -3302,7 +3523,7 @@ async fn agents_using_provider(catalog: &Catalog, id: LlmProviderDefId) -> Resul
 /// [`triggers_of`] does: a process that never installed agents cannot list or
 /// save one, and pretending there are none would make a save look like it
 /// worked.
-fn agents_of(apps: &AppMounts) -> Result<crate::AgentServices> {
+pub(crate) fn agents_of(apps: &AppMounts) -> Result<crate::AgentServices> {
     apps.agents().cloned().ok_or_else(|| {
         Error::config("this server has no agents installed, so agents cannot be managed")
     })
@@ -3314,7 +3535,7 @@ fn agents_of(apps: &AppMounts) -> Result<crate::AgentServices> {
 /// installed triggers (a test, an admin-only server assembled by hand) cannot
 /// list, save or run one, and pretending there are none would make a save look
 /// like it worked.
-fn triggers_of(apps: &AppMounts) -> Result<Arc<sc_action::TriggerDispatcher>> {
+pub(crate) fn triggers_of(apps: &AppMounts) -> Result<Arc<sc_action::TriggerDispatcher>> {
     apps.triggers().cloned().ok_or_else(|| {
         Error::config(
             "this server has no trigger dispatcher installed, so triggers cannot be managed",
@@ -3346,7 +3567,7 @@ fn reproject_apps(apps: &AppMounts) {
 
 /// One stored trigger as JSON, with the reason it is not usable when there is
 /// one (§10.2 — a broken trigger stays listed and editable).
-fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
+pub(crate) fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
     json!({
         "id": trigger.id.0,
         "name": trigger.name,
@@ -3377,7 +3598,7 @@ fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
 /// the action is registered and configured the way it declares, the `only_if`
 /// resolves) is `validate_trigger`'s, called by `save_trigger`, so there is one
 /// authority for it and the admin gets the same message the loader would.
-fn trigger_from_body(id: TriggerId, body: &Json) -> Result<Trigger> {
+pub(crate) fn trigger_from_body(id: TriggerId, body: &Json) -> Result<Trigger> {
     let obj = require_object(body)?;
     let when = EventKind::parse(non_empty_str_field(obj, "when")?)?;
     let mut trigger = Trigger::with_id(
@@ -3561,6 +3782,25 @@ async fn settings_json(catalog: &Catalog) -> Result<Json> {
     Ok(json!({ "sections": sections, "values": Json::Object(values) }))
 }
 
+/// The selection an admin last made, or "everything" when they never have.
+async fn stored_backup_preferences(catalog: &Catalog) -> Result<crate::backup::BackupPreferences> {
+    let stored = sc_config::stored_config(catalog, sc_config::BACKUP_INCLUDE).await?;
+    Ok(match stored {
+        Some(value) => crate::backup::BackupPreferences::from_json(&value),
+        None => crate::backup::BackupPreferences::default(),
+    })
+}
+
+/// What a downloaded backup is called: the date and time it was taken, to the
+/// second, so a directory of them sorts chronologically and two taken the same
+/// afternoon do not overwrite each other.
+fn backup_filename() -> String {
+    format!(
+        "saltcorn-backup-{}.zip",
+        chrono::Utc::now().format("%Y-%m-%d-%H%M%S")
+    )
+}
+
 /// A [`FormField`] as the API returns it (matching `form_field_schema`): enough
 /// for the admin UI to render and label a control for it.
 fn form_field_json(field: &FormField) -> Json {
@@ -3652,7 +3892,7 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
 /// `configured` is the overlay's *presence*, not its content. A table an admin
 /// deliberately set to admin-only and one nobody has ever opened both report
 /// `1`/`1`; only the first has a row, and only the first can be "forgotten".
-fn table_json(table: &Table, rls_available: bool) -> Json {
+pub(crate) fn table_json(table: &Table, rls_available: bool) -> Json {
     json!({
         "name": table.name,
         "label": table.label,
@@ -3710,7 +3950,7 @@ fn role_field(obj: &Map<String, Json>, key: &str) -> Result<u8> {
 /// `builtin` travels with the role so the UI can decline to offer a delete it
 /// would only be refused for — admin and public are what "administer" and
 /// "anonymous caller" mean, and neither is an installation's to remove.
-fn role_json(role: &Role) -> Json {
+pub(crate) fn role_json(role: &Role) -> Json {
     json!({
         "role": role.role,
         "name": role.name,
