@@ -284,8 +284,11 @@ async fn a_bad_row_is_reported_by_line_and_the_good_rows_still_land() -> sc_erro
     let (_, body) = client.send("GET", "/api/tables/book/rows/count", None).await;
     assert_eq!(body["count"], json!(2));
 
-    // A header naming a column the table does not have is the wrong file, not a
-    // bad row: nothing is written and the refusal names the column.
+    // A header naming a column the table does not have is **ignored**, and the
+    // rest of the row is written: a real export carries columns the table was
+    // never given, and refusing the file for one of them would refuse most
+    // files. (The wrong-file mistake is caught by the required-field check —
+    // see `a_required_field_no_column_supplies_refuses_the_file`.)
     let (status, body) = client
         .send(
             "POST",
@@ -293,13 +296,11 @@ async fn a_bad_row_is_reported_by_line_and_the_good_rows_still_land() -> sc_erro
             Some(json!({ "csv": "title,isbn\nDune,123\n" })),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        body.to_string().contains("isbn"),
-        "the refusal should name the column: {body}"
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["inserted"], json!(1));
+    assert_eq!(body["errors"], json!([]));
     let (_, body) = client.send("GET", "/api/tables/book/rows/count", None).await;
-    assert_eq!(body["count"], json!(2), "nothing was written");
+    assert_eq!(body["count"], json!(3), "the known column was written");
     Ok(())
 }
 

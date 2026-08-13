@@ -2,6 +2,66 @@
 
 Changes in reverse chronological order.
 
+## A table from a CSV file, and an import that behaves like Saltcorn 1's
+
+The tables list asked for a name in a box beside a Create button, which could only
+make one kind of table. It is now a **+ New table** button over a dialog: a name, a
+**Type** — *New database table* or *Create from CSV* — and, for the second, the
+file. Choosing a file into an empty name box fills the name in from the file's own
+name. The dialog's rules (when Create may be pressed, what a file suggests the
+table be called) are in `ui/admin/src/newTable.ts` so they can be tested without a
+browser; the screen is the React around them.
+
+**Creating from a CSV deduces the schema and imports the rows.** One field per
+header cell, named the way a label names a field (`Item Name` → `item_name`, the
+label kept), typed by what every non-empty cell in that column turns out to be
+(`bool`, `int`, `float`, `date`, `timestamp`, `uuid`, `json`, else `text`), and
+`NOT NULL` when the column has no empty cell at all. The **whole** file is read to
+decide, not a sample of it: Saltcorn 1 looks at the first 500 lines, and a type the
+501st contradicts is a row rejected for a reason nothing in the file explains. A
+column called `id` is not a field — it is the identity primary key every created
+table gets (§3.3) — and its values become the rows' keys.
+
+It is **all or nothing**, unlike an import into a table that already exists: a row
+the deduced schema will not take means the deduction was wrong, so the table is
+dropped and the errors reported rather than leaving a half-filled table nobody
+asked for. `POST /api/tables/csv` (`createTableFromCsv`) is the endpoint; a
+duplicated header is one column, and a header that cannot make an identifier at all
+is refused before anything is created.
+
+**The import into an existing table now matches Saltcorn 1** where it did not, with
+a suite ported from that project's own CSV tests (`table_csv_import.rs`, 22 tests):
+
+- a header cell finds its field by **name, by label, or by the name its label would
+  make**, so a spreadsheet titled for people imports without being edited first;
+- a column the table does not have is **ignored** rather than refusing the file.
+  What catches the wrong file is the new check that every **required** field is
+  covered by some column — refusing a real export for carrying a column nobody
+  asked for would refuse most real exports;
+- a file naming the **primary key upserts**: a key that is there replaces that row,
+  a key that is not is inserted with it, a blank key cell is an ordinary insert, and
+  the same key twice in one file is that line's error. The identity sequence is
+  moved past the keys the file chose afterwards, or the next ordinary insert would
+  collide with a row the import placed;
+- a **`Key` column may hold the summary value** — the author's name, not the
+  author's id — which is looked up in the target table (and cached per file); a
+  summary that matches nothing is the row's error, naming the value and where it
+  was looked for;
+- **cells are trimmed**: `Joe Celko, 856` is how a person writes a CSV row, and
+  ` 856` is not an integer to anything that parses one.
+
+`importTableCsv` now answers with `updated` beside `inserted`, and the table page
+says "3 replaced" when a file rewrote rows rather than adding them — "0 rows added"
+for a file that rewrote the whole table reads as nothing having happened.
+
+Four behaviours are deliberately **not** Saltcorn 1's, and each is a test that says
+so: a date is ISO-8601 only (there is no locale to read `15.03.2011` against); a
+large integer is an `int` column, because `int` here is 64 bits and Saltcorn 1's
+fallback to text was working around a 32-bit one; a text or UUID `id` column is
+refused rather than becoming a non-integer primary key; and a `Key` pointing
+*forward* in the file is rejected on its line rather than deferred, because an
+import is not a transaction here and the constraint is not deferrable.
+
 ## Backup and restore, on a tab of their own
 
 The Settings screen was one form — the SSL section — and there was no way to get an

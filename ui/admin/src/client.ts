@@ -9,6 +9,8 @@ export type LoginResponse = { id: string; email: string; role: number };
 export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean }>;
 export type CreateTableRequest = { name: string };
 export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean };
+export type CreateTableFromCsvRequest = { name: string; csv: string };
+export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean }; inserted: number };
 export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean };
 export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean };
 export type DropTableResponse = { dropped: string };
@@ -33,7 +35,7 @@ export type UpdateRowRequest = unknown;
 export type UpdateRowResponse = unknown;
 export type ExportTableCsvResponse = { filename: string; csv: string };
 export type ImportTableCsvRequest = { csv: string };
-export type ImportTableCsvResponse = { inserted: number; errors: Array<string> };
+export type ImportTableCsvResponse = { inserted: number; updated: number; errors: Array<string> };
 export type ListFileStoresResponse = Array<{ id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null }>;
 export type CreateFileStoreRequest = { name: string; description: string; backend: string; config: unknown; min_role?: number | null };
 export type CreateFileStoreResponse = { id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null };
@@ -130,6 +132,7 @@ export interface ApiClient {
   logout(): Promise<void>;
   listTables(): Promise<ListTablesResponse>;
   createTable(body: CreateTableRequest): Promise<CreateTableResponse>;
+  createTableFromCsv(body: CreateTableFromCsvRequest): Promise<CreateTableFromCsvResponse>;
   updateTable(table: string, body: UpdateTableRequest): Promise<UpdateTableResponse>;
   dropTable(table: string): Promise<DropTableResponse>;
   deleteTableSettings(table: string): Promise<DeleteTableSettingsResponse>;
@@ -302,6 +305,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("createTable", res);
       return (await res.json()) as CreateTableResponse;
+    },
+    async createTableFromCsv(body) {
+      const res = await doFetch(`${baseUrl}/api/tables/csv`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createTableFromCsv", res);
+      return (await res.json()) as CreateTableFromCsvResponse;
     },
     async updateTable(table, body) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}`, {

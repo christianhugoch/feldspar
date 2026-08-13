@@ -254,9 +254,13 @@ function TableData({
     setRejected([]);
     try {
       const csv = await file.text();
-      const { inserted, errors } = await api.importTableCsv(table, { csv });
+      const { inserted, updated, errors } = await api.importTableCsv(table, { csv });
       setNotice(
         `${inserted} row${inserted === 1 ? "" : "s"} added from ${file.name}` +
+          // A file that names primary keys replaces rows as well as adding
+          // them, and "0 rows added" for a file that rewrote the whole table
+          // would read as nothing having happened.
+          (updated > 0 ? `, ${updated} replaced` : "") +
           (errors.length > 0 ? `, ${errors.length} refused.` : "."),
       );
       setRejected(errors);

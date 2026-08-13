@@ -76,6 +76,29 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // Create a table **from a CSV file**: the fields deduced from the header and
+    // the values under it, then every row imported (§13.1). A separate endpoint
+    // rather than an optional `csv` on `createTable`, because it is a different
+    // operation with a different failure mode — this one can fail *after* the
+    // table exists, and answers by dropping it, which is not something the plain
+    // create can do.
+    set.register(
+        Endpoint::new(
+            "createTableFromCsv",
+            Method::Post,
+            api().lit("tables").lit("csv"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("name", TypeSchema::text()),
+            StructField::new("csv", TypeSchema::text()),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("table", table_schema()),
+            StructField::new("inserted", TypeSchema::int()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Set a table's configuration: the `_sc_tables` overlay fields, and only
     // those (§9). A `PUT` on the table's own path rather than a nested
     // `…/settings` resource, because from the admin's side there is one table
@@ -378,9 +401,11 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // Every row that parses and validates is inserted; the rest come back as
-    // messages naming their line. The two numbers are the answer — "it worked"
-    // and "it failed" are both wrong for a file with three bad rows in it.
+    // Every row that parses and validates is written; the rest come back as
+    // messages naming their line. The three numbers are the answer — "it worked"
+    // and "it failed" are both wrong for a file with three bad rows in it, and a
+    // file naming primary keys **replaces** rows as well as adding them, which
+    // an admin must be told apart from having added them all over again.
     set.register(
         Endpoint::new(
             "importTableCsv",
@@ -396,6 +421,7 @@ pub fn admin_endpoints() -> EndpointSet {
         )]))
         .output(TypeSchema::struct_of([
             StructField::new("inserted", TypeSchema::int()),
+            StructField::new("updated", TypeSchema::int()),
             StructField::new("errors", TypeSchema::array(TypeSchema::text())),
         ]))
         .auth(AuthRequirement::admin()),

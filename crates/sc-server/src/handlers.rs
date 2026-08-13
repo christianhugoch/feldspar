@@ -194,6 +194,40 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("createTableFromCsv", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+                let document = obj
+                    .get("csv")
+                    .and_then(Json::as_str)
+                    .ok_or_else(|| Error::invalid("`csv` must be the CSV document as text"))?
+                    .to_owned();
+                // The fields, the table and the rows are all `sc-api`'s: this
+                // endpoint chooses nothing the CLI or an agent doing the same
+                // thing would choose differently. A file the rows will not go
+                // into leaves no table behind, which is why the failure here is
+                // an ordinary error and not a half-made table plus a warning.
+                let (table, outcome) = csv_rows::create_table_from_csv(
+                    &catalog,
+                    &name,
+                    &document,
+                    Some(&admin_caller(ctx.user.as_ref())),
+                )
+                .await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(json!({
+                    "table": table_json(&table, rls),
+                    "inserted": outcome.inserted,
+                }))
+                .with_status(201))
+            }
+        }
+    });
+
     reg.register("dropTable", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -633,6 +667,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 .await?;
                 Ok(HandlerResponse::ok(json!({
                     "inserted": outcome.inserted,
+                    "updated": outcome.updated,
                     "errors": outcome.errors,
                 })))
             }
