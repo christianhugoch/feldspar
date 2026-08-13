@@ -15,7 +15,9 @@
 
 use std::collections::BTreeMap;
 
-use sc_db::{Column, ColumnGenerator, ForeignKey, PhysicalTable};
+use sc_db::{
+    Column, ColumnGenerator, ForeignKey, PhysicalConstraint, PhysicalConstraintKind, PhysicalTable,
+};
 use sc_error::{Error, Result};
 use tokio_postgres::{Client, Row};
 
@@ -71,6 +73,57 @@ const FK_SQL: &str = "\
       AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
     ORDER BY n.nspname, t.relname, c.conname, k.ord";
 
+/// Unique constraints, one row per constrained column, ordered within each
+/// constraint so a jointly-unique key is reassembled in the order it was
+/// declared. The comment comes along: it is where the constraint's error message
+/// lives (see [`PhysicalConstraint::comment`]).
+const UNIQUE_SQL: &str = "\
+    SELECT n.nspname, t.relname, c.conname, a.attname, obj_description(c.oid, 'pg_constraint') \
+    FROM pg_constraint c \
+    JOIN pg_class t ON t.oid = c.conrelid \
+    JOIN pg_namespace n ON n.oid = t.relnamespace \
+    JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+    WHERE c.contype = 'u' \
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+    ORDER BY n.nspname, t.relname, c.conname, k.ord";
+
+/// Indexes **no constraint owns**. A primary key and a unique constraint each
+/// have an index behind them; reporting those here as well would show every
+/// constraint twice and offer a `DROP INDEX` that Postgres refuses. `conindid`
+/// is the join that excludes them.
+///
+/// Columns come from `indkey` (attribute numbers, zero for an expression) and
+/// the expression from `pg_get_expr`, so an ordinary index reports its columns
+/// and a full-text one reports the expression it is over.
+const INDEX_SQL: &str = "\
+    SELECT n.nspname, t.relname, i.relname, am.amname, \
+           (SELECT array_agg(a.attname ORDER BY k.ord) \
+              FROM unnest(ix.indkey::int[]) WITH ORDINALITY AS k(attnum, ord) \
+              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum), \
+           pg_get_expr(ix.indexprs, ix.indrelid), \
+           obj_description(i.oid, 'pg_class') \
+    FROM pg_index ix \
+    JOIN pg_class i ON i.oid = ix.indexrelid \
+    JOIN pg_class t ON t.oid = ix.indrelid \
+    JOIN pg_namespace n ON n.oid = t.relnamespace \
+    JOIN pg_am am ON am.oid = i.relam \
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
+      AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid) \
+    ORDER BY n.nspname, t.relname, i.relname";
+
+/// Row-level triggers, which is how a row constraint is enforced. `tgisinternal`
+/// excludes the ones Postgres creates for its own foreign keys and deferred
+/// constraints — those are the foreign keys, already reported as such.
+const TRIGGER_SQL: &str = "\
+    SELECT n.nspname, t.relname, g.tgname, obj_description(g.oid, 'pg_trigger') \
+    FROM pg_trigger g \
+    JOIN pg_class t ON t.oid = g.tgrelid \
+    JOIN pg_namespace n ON n.oid = t.relnamespace \
+    WHERE NOT g.tgisinternal \
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+    ORDER BY n.nspname, t.relname, g.tgname";
+
 /// The `(schema, table)` identity used to collate rows from the separate
 /// queries.
 type TableKey = (String, String);
@@ -90,6 +143,7 @@ pub async fn introspect(client: &Client) -> Result<Vec<PhysicalTable>> {
                 columns: Vec::new(),
                 primary_key: Vec::new(),
                 foreign_keys: Vec::new(),
+                constraints: Vec::new(),
             },
         );
     }
@@ -146,6 +200,61 @@ pub async fn introspect(client: &Client) -> Result<Vec<PhysicalTable>> {
                     referenced_columns,
                 });
             }
+        }
+    }
+
+    // Unique constraints span multiple rows, like foreign keys; collate by
+    // constraint name, keeping the column order the key was declared in.
+    type UniqueParts = (Vec<String>, Option<String>); // (columns, comment)
+    let mut uniques: BTreeMap<TableKey, BTreeMap<String, UniqueParts>> = BTreeMap::new();
+    for row in run(client, UNIQUE_SQL).await? {
+        let key: TableKey = (row.get(0), row.get(1));
+        let conname: String = row.get(2);
+        let column: String = row.get(3);
+        let comment: Option<String> = row.get(4);
+        let entry = uniques
+            .entry(key)
+            .or_default()
+            .entry(conname)
+            .or_insert_with(|| (Vec::new(), comment));
+        entry.0.push(column);
+    }
+    for (key, constraints) in uniques {
+        if let Some(table) = tables.get_mut(&key) {
+            for (name, (columns, comment)) in constraints {
+                table.constraints.push(PhysicalConstraint {
+                    name,
+                    kind: PhysicalConstraintKind::Unique { columns },
+                    comment,
+                });
+            }
+        }
+    }
+
+    for row in run(client, INDEX_SQL).await? {
+        let key: TableKey = (row.get(0), row.get(1));
+        if let Some(table) = tables.get_mut(&key) {
+            let columns: Option<Vec<String>> = row.get(4);
+            table.constraints.push(PhysicalConstraint {
+                name: row.get(2),
+                kind: PhysicalConstraintKind::Index {
+                    columns: columns.unwrap_or_default(),
+                    expression: row.get(5),
+                    method: row.get(3),
+                },
+                comment: row.get(6),
+            });
+        }
+    }
+
+    for row in run(client, TRIGGER_SQL).await? {
+        let key: TableKey = (row.get(0), row.get(1));
+        if let Some(table) = tables.get_mut(&key) {
+            table.constraints.push(PhysicalConstraint {
+                name: row.get(2),
+                kind: PhysicalConstraintKind::RowTrigger,
+                comment: row.get(3),
+            });
         }
     }
 

@@ -280,6 +280,57 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- table constraints (§5) ---------------------------------------------
+    //
+    // A constraint has no `update`, and that is deliberate: what it constrains
+    // *is* its identity — a unique constraint over a different pair of fields is
+    // a different rule, and a changed formula is a different trigger. So the
+    // three verbs are list, create and delete, and "edit" is delete-then-create,
+    // which is also exactly what the database would do.
+    set.register(
+        Endpoint::new(
+            "listConstraints",
+            Method::Get,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("constraints"),
+        )
+        .output(TypeSchema::array(constraint_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createConstraint",
+            Method::Post,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("constraints"),
+        )
+        .input(create_constraint_schema())
+        .output(constraint_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteConstraint",
+            Method::Delete,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("constraints")
+                .param("constraint", ValueType::Text),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "dropped",
+            TypeSchema::text(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // The registered field types (basic, rich) and kinds (Key, File) with their
     // attribute specs, so the field editor can render a form for a type it knows
     // nothing about — the same contract `listFrameworks` has (§13.3).
@@ -1614,6 +1665,53 @@ fn create_field_schema() -> TypeSchema {
         // primary key at all, and gets one when a field says it is one. More
         // than one field may, and then the key is composite in field order.
         StructField::new("primary_key", TypeSchema::optional(TypeSchema::bool())),
+    ])
+}
+
+/// One constraint on a table (§5): what kind it is, what it names, and the
+/// message its violation is reported with.
+///
+/// `name` is the database object's own name — the constraint's, the index's or
+/// the trigger's — because that is what a violation reports and what a delete
+/// addresses. It is **derived** on create rather than asked for (see
+/// `TableConstraint::derived_name`), so the screen shows a name the admin did
+/// not have to invent and adding the same rule twice collides by name.
+fn constraint_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        // `unique` | `index` | `full_text_search` | `formula`.
+        StructField::new("type", TypeSchema::text()),
+        StructField::new("fields", TypeSchema::array(TypeSchema::text())),
+        StructField::new("expression", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("method", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("language", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("formula", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("error_message", TypeSchema::optional(TypeSchema::text())),
+        // Whether Saltcorn created it, which is what the screen needs to know
+        // before offering to delete a constraint somebody else's migration owns.
+        StructField::new("managed", TypeSchema::bool()),
+    ])
+}
+
+/// The body that adds a constraint. One shape for four kinds, because the
+/// alternative is four endpoints whose bodies differ by two fields — and the
+/// kind decides which of them are read, which the handler says by name when one
+/// is missing.
+fn create_constraint_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("type", TypeSchema::text()),
+        // Jointly-unique: the fields that are unique *together*.
+        StructField::new(
+            "fields",
+            TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+        ),
+        // Full-text search: the text-search configuration.
+        StructField::new("language", TypeSchema::optional(TypeSchema::text())),
+        // A row constraint: the formula, and the short name it is known by —
+        // the one kind whose identity cannot be derived from its fields.
+        StructField::new("formula", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("name", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("error_message", TypeSchema::optional(TypeSchema::text())),
     ])
 }
 

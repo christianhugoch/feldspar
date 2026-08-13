@@ -1095,19 +1095,69 @@ async fn run_write_in(
     context: Option<&CallerContext>,
     executor: &mut Executor<'_>,
 ) -> Result<Vec<Row>> {
-    if let Executor::Transaction(tx) = executor {
-        return tx.query(&statement).await?.try_collect().await;
+    let outcome = match executor {
+        Executor::Transaction(tx) => match tx.query(&statement).await {
+            Ok(stream) => stream.try_collect().await,
+            Err(e) => Err(e),
+        },
+        _ => match in_context(table, context, false) {
+            Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
+            None => match catalog.provider(table).write(&statement).await {
+                Ok(stream) => stream.try_collect().await,
+                Err(e) => Err(e),
+            },
+        },
+    };
+    outcome.map_err(|e| constraint_message(table, e))
+}
+
+/// A constraint violation, said in the admin's own words.
+///
+/// A jointly-unique constraint is enforced by the database, so what a caller
+/// sees when they break it is Postgres's `duplicate key value violates unique
+/// constraint "sc_uq_member_org_email"` — which names an object they have never
+/// heard of and does not say what to do. The admin wrote a sentence for exactly
+/// this moment (it is why the constraint form asks for one); this is where it is
+/// substituted, on **one** funnel, so every write path gets it: the admin UI,
+/// the REST API, an action, a CSV import.
+///
+/// A row constraint arrives the same way — its trigger names itself in the
+/// error's `CONSTRAINT` field, exactly as Postgres does for a unique violation,
+/// so one lookup serves both. What the constraint changes is not only the
+/// wording: a rule the *caller* broke is a 400 naming it, not the 500 an
+/// unexplained database error deserves.
+///
+/// An error naming no constraint of this table passes through untouched, because
+/// inventing a friendly message for a fault nobody anticipated is how a real one
+/// gets hidden.
+fn constraint_message(table: &Table, error: Error) -> Error {
+    let chain = sc_error::format_chain(&error);
+    match sc_catalog::violated_constraint(&table.constraints, &chain) {
+        Some(constraint) => Error::invalid(
+            constraint
+                .error_message
+                .clone()
+                // No message of the admin's: the database's own sentence, which
+                // for a row constraint is the generated one naming the rule and
+                // for a unique violation is Postgres's. Better than the whole
+                // chain, which carries the statement and its bind count.
+                .unwrap_or_else(|| database_message(&chain)),
+        ),
+        None => error,
     }
-    match in_context(table, context, false) {
-        Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
-        None => {
-            catalog
-                .provider(table)
-                .write(&statement)
-                .await?
-                .try_collect()
-                .await
-        }
+}
+
+/// The server's own sentence out of a driver error chain.
+///
+/// `sc-db-postgres` formats a database failure as `<message> [<sqlstate>]`
+/// (optionally ` (constraint "…")`) followed by the statement, so the message is
+/// everything before the SQLSTATE. A chain in any other shape is returned whole:
+/// a half-parsed error is worse than a verbose one.
+fn database_message(chain: &str) -> String {
+    let start = chain.find(": ").map_or(0, |i| i + 2);
+    match chain[start..].find(" [") {
+        Some(end) => chain[start..start + end].trim().to_owned(),
+        None => chain.to_owned(),
     }
 }
 
@@ -1132,6 +1182,7 @@ mod tests {
                 columns: Vec::new(),
                 primary_key: vec!["id".into()],
                 foreign_keys: Vec::new(),
+                constraints: Vec::new(),
             },
         );
         table.rls_enabled = rls_enabled;

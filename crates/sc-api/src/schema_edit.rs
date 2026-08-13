@@ -57,10 +57,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sc_catalog::{
-    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, DataField, DataFieldKind, FIELD_META_TABLE, FieldId,
-    FieldMeta, SchemaChanged, SchemaProjection, SchemaStep, Table, TableId, TableMeta,
-    disable_rls_sql, enable_rls_sql, load_field_meta_by_field, load_table_meta_by_name,
-    save_field_meta_row, save_table_meta_row,
+    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
+    FIELD_META_TABLE, FieldId, FieldMeta, SchemaChanged, SchemaProjection, SchemaStep, Table,
+    TableConstraint, TableId, TableMeta, create_constraint_steps, disable_rls_sql,
+    drop_constraint_steps, enable_rls_sql, formula_fields, load_field_meta_by_field,
+    load_table_meta_by_name, save_field_meta_row, save_table_meta_row, validate_formula,
 };
 use sc_db::{ColumnGenerator, SchemaChange};
 use sc_error::{Error, Result};
@@ -367,6 +368,29 @@ pub enum Operation {
         /// The table.
         table: String,
     },
+    /// Add a constraint — a jointly-unique key, an index, a full-text index or a
+    /// row constraint — to a table.
+    ///
+    /// The constraint's `name` may be empty, in which case it is derived from
+    /// what the constraint *is* ([`TableConstraint::derived_name`]); a row
+    /// constraint needs `given_name`, because a formula's identity cannot be
+    /// derived from its fields.
+    AddConstraint {
+        /// The table.
+        table: String,
+        /// The short name an admin gave a row constraint; ignored by the other
+        /// kinds, which name themselves.
+        given_name: String,
+        /// The constraint to create.
+        constraint: TableConstraint,
+    },
+    /// Drop a constraint by the name it is listed under.
+    DropConstraint {
+        /// The table.
+        table: String,
+        /// The constraint, index or trigger name.
+        name: String,
+    },
 }
 
 impl Operation {
@@ -380,6 +404,8 @@ impl Operation {
             Operation::AlterField { .. } => "alter_field",
             Operation::DropField { .. } => "drop_field",
             Operation::DropTable { .. } => "drop_table",
+            Operation::AddConstraint { .. } => "add_constraint",
+            Operation::DropConstraint { .. } => "drop_constraint",
         }
     }
 
@@ -391,6 +417,8 @@ impl Operation {
             | Operation::AddField { table, .. }
             | Operation::AlterField { table, .. }
             | Operation::DropField { table, .. }
+            | Operation::AddConstraint { table, .. }
+            | Operation::DropConstraint { table, .. }
             | Operation::DropTable { table } => table,
         }
     }
@@ -413,6 +441,10 @@ pub struct Applied {
     pub fields_altered: Vec<String>,
     /// Fields dropped, as `table.field`.
     pub fields_dropped: Vec<String>,
+    /// Constraints added, as `table.constraint`.
+    pub constraints_added: Vec<String>,
+    /// Constraints dropped, as `table.constraint`.
+    pub constraints_dropped: Vec<String>,
     /// Things the caller has to be told in words, because they are not visible
     /// in the schema afterwards — chiefly that a table stopped enforcing RLS.
     pub notes: Vec<String>,
@@ -538,6 +570,12 @@ struct MetaWrite {
     what: MetaOp,
 }
 
+/// Whether a planned constraint is being created or dropped.
+enum ConstraintOp {
+    Add(Box<TableConstraint>),
+    Drop(Box<TableConstraint>),
+}
+
 enum MetaOp {
     SaveTable(Box<TableMeta>),
     ForgetTable(String),
@@ -575,6 +613,14 @@ struct Plan {
     /// Calculated-field expressions to validate against the final schema, as
     /// `(table, field, expression)`.
     deferred_calc: Vec<(String, String, String)>,
+    /// Row-constraint formulae to validate against the final schema, as
+    /// `(table, formula)` — deferred beside the calculated fields, because a
+    /// constraint on a table this batch is building names its fields.
+    deferred_constraints: Vec<(String, String)>,
+    /// Constraints to create or drop, in the order they were asked for. The DDL
+    /// is generated in `steps` rather than here: a formula's expression must be
+    /// built against the schema the batch ends with.
+    constraints: Vec<(String, ConstraintOp)>,
     changes: Vec<SchemaChanged>,
     applied: Applied,
 }
@@ -596,6 +642,8 @@ impl Plan {
             rls_dirty: BTreeSet::new(),
             dropped: BTreeSet::new(),
             deferred_calc: Vec::new(),
+            deferred_constraints: Vec::new(),
+            constraints: Vec::new(),
             changes: Vec::new(),
             applied: Applied::default(),
         })
@@ -649,6 +697,22 @@ impl Plan {
             Operation::DropTable { table } => {
                 grants.check(grants.drop, "drop a table", GRANT_DROP)?;
                 self.drop_table(index, op, table)
+            }
+            Operation::AddConstraint {
+                table,
+                given_name,
+                constraint,
+            } => {
+                grants.check(grants.edit, "add a constraint", GRANT_EDIT)?;
+                self.add_constraint(table, given_name, constraint)
+            }
+            Operation::DropConstraint { table, name } => {
+                // Dropping, not editing: a constraint is a rule the data has
+                // been kept to, and taking it away is the operation whose damage
+                // is invisible afterwards — the same reason `drop` is its own
+                // grant for a column.
+                grants.check(grants.drop, "drop a constraint", GRANT_DROP)?;
+                self.drop_constraint(table, name)
             }
         }
     }
@@ -888,6 +952,9 @@ impl Plan {
             });
         }
         self.projection.insert(projected);
+        // A new text column belongs in the table's full-text index, or the
+        // index quietly stops covering the table it says it covers.
+        self.refresh_full_text_index(table);
 
         if let Some(mut meta) = resolved.meta {
             // Reuse the stored row when one is somehow already there (a column
@@ -1109,6 +1176,29 @@ impl Plan {
                 quoted(&referencing)
             )));
         }
+        // Postgres would drop the unique constraint and the index along with the
+        // column, silently — a rule the data has been kept to for a year would
+        // disappear with one field. Named here instead, so dropping it is a
+        // decision somebody makes twice. A row constraint is included: its
+        // trigger would survive the drop and fail at the next write with a
+        // `plpgsql` error naming a column that is no longer there.
+        let constraining: Vec<String> = projected
+            .constraints
+            .iter()
+            .filter(|c| match &c.kind {
+                ConstraintKind::Formula { formula } => {
+                    formula_fields(&self.projection, table, formula).contains(field)
+                }
+                kind => kind.fields().iter().any(|f| f == field),
+            })
+            .map(|c| c.name.clone())
+            .collect();
+        if !constraining.is_empty() {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is constrained by {}; drop those constraints first",
+                quoted(&constraining)
+            )));
+        }
         if projected
             .ownership
             .as_ref()
@@ -1130,6 +1220,7 @@ impl Plan {
         let mut projected = projected;
         projected.fields.retain(|f| f.base.name != field);
         self.projection.insert(projected);
+        self.refresh_full_text_index(table);
 
         self.metas.push(MetaWrite {
             index,
@@ -1176,6 +1267,206 @@ impl Plan {
         self.applied.tables_dropped.push(table.to_owned());
         self.changes
             .push(SchemaChanged::TableDropped(table.to_owned()));
+        Ok(())
+    }
+
+    // --- constraints ------------------------------------------------------------
+
+    /// Add a constraint to a table: check what can be checked now, put it on the
+    /// projected table, and leave the DDL to [`steps`](Plan::steps).
+    ///
+    /// The DDL is deferred for the reason the policies' is: a row constraint's
+    /// formula may name a field an earlier operation in this batch added, and
+    /// the expression has to be generated against the schema the batch *ends*
+    /// with, not the one this operation sees.
+    fn add_constraint(
+        &mut self,
+        table: &str,
+        given_name: &str,
+        constraint: &TableConstraint,
+    ) -> Result<()> {
+        self.require_editable(table)?;
+        let projected = self
+            .projection
+            .get(table)
+            .ok_or_else(|| Error::not_found(format!("table `{table}` is not in the catalog")))?
+            .clone();
+
+        let mut constraint = constraint.clone();
+        constraint.error_message = constraint
+            .error_message
+            .map(|m| m.trim().to_owned())
+            .filter(|m| !m.is_empty());
+
+        // Every field a constraint names must be a real, stored column: an index
+        // on a calculated field is an index on nothing, and Postgres's error for
+        // it names a column the admin never created.
+        let mut named = constraint.kind.fields();
+        if let ConstraintKind::Unique { fields } = &constraint.kind {
+            if fields.is_empty() {
+                return Err(Error::invalid(
+                    "a jointly-unique constraint needs at least one field",
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            if let Some(dup) = fields.iter().find(|f| !seen.insert((*f).clone())) {
+                return Err(Error::invalid(format!(
+                    "field `{dup}` is named twice in the same unique constraint"
+                )));
+            }
+        }
+        if let ConstraintKind::Index { fields, .. } = &constraint.kind
+            && fields.is_empty()
+        {
+            return Err(Error::invalid("an index needs a field to index"));
+        }
+        named.sort();
+        named.dedup();
+        for field in &named {
+            match projected.field(field) {
+                Some(f) if f.is_calc() => {
+                    return Err(Error::invalid(format!(
+                        "`{table}.{field}` is a calculated field: it has no column to \
+                         constrain or index"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    return Err(Error::not_found(format!(
+                        "table `{table}` has no field `{field}`; it has {}",
+                        field_list(&projected)
+                    )));
+                }
+            }
+        }
+
+        if let ConstraintKind::Formula { formula } = &constraint.kind {
+            let given = given_name.trim();
+            check_identifier(given, "constraint")?;
+            if formula.trim().is_empty() {
+                return Err(Error::invalid("a row constraint needs a formula"));
+            }
+            // Validated against the schema the batch ends with, beside the
+            // calculated fields and for the same reason.
+            self.deferred_constraints
+                .push((table.to_owned(), formula.clone()));
+        }
+
+        if constraint.name.trim().is_empty() {
+            constraint.name =
+                TableConstraint::derived_name(table, &constraint.kind, given_name.trim());
+        }
+        if let Some(existing) = projected
+            .constraints
+            .iter()
+            .find(|c| c.name == constraint.name)
+        {
+            // Named by what it is, so this is "you already have this rule" and
+            // not merely a name clash — and the message says which rule.
+            return Err(Error::invalid(format!(
+                "table `{table}` already has the constraint `{}` ({})",
+                existing.name,
+                existing.kind.type_name()
+            )));
+        }
+
+        let mut projected = projected;
+        projected.constraints.push(constraint.clone());
+        self.projection.insert(projected);
+        self.constraints
+            .push((table.to_owned(), ConstraintOp::Add(Box::new(constraint))));
+        self.applied
+            .constraints_added
+            .push(format!("{table}.{}", self.last_constraint_name()));
+        self.note_changed(table);
+        Ok(())
+    }
+
+    /// The name of the constraint most recently pushed — for the report, which
+    /// says what happened rather than what was asked for (the name may have been
+    /// derived).
+    fn last_constraint_name(&self) -> String {
+        match self.constraints.last() {
+            Some((_, ConstraintOp::Add(c))) => c.name.clone(),
+            Some((_, ConstraintOp::Drop(c))) => c.name.clone(),
+            None => String::new(),
+        }
+    }
+
+    /// Rebuild a table's full-text index when its text fields change.
+    ///
+    /// A full-text index is over **every** text field of the table (decision 8),
+    /// so a field added to or dropped from it changes what the index should be.
+    /// Postgres would drop the index along with a column it names — silently,
+    /// leaving a table that says it has a full-text index and does not — and a
+    /// *new* text column would simply never be searchable. Both are the same
+    /// fix: drop what is there and create it again from the fields the table now
+    /// has. A table with no text field left keeps the drop and says so, because
+    /// there is nothing to index.
+    fn refresh_full_text_index(&mut self, table: &str) {
+        let Some(projected) = self.projection.get(table) else {
+            return;
+        };
+        let Some(fts) = projected
+            .constraints
+            .iter()
+            .find(|c| matches!(c.kind, ConstraintKind::FullTextSearch { .. }))
+            .cloned()
+        else {
+            return;
+        };
+        // Already being rebuilt by another operation in this batch — once is
+        // enough, and twice would be a create over a create.
+        if self
+            .constraints
+            .iter()
+            .any(|(t, op)| t == table && matches!(op, ConstraintOp::Drop(c) if c.name == fts.name))
+        {
+            return;
+        }
+        self.constraints
+            .push((table.to_owned(), ConstraintOp::Drop(Box::new(fts.clone()))));
+        let has_text = projected
+            .fields
+            .iter()
+            .any(|f| !f.is_calc() && f.base.type_.as_basic() == Some(&sc_types::BasicType::Text));
+        if has_text {
+            self.constraints
+                .push((table.to_owned(), ConstraintOp::Add(Box::new(fts))));
+        } else {
+            self.applied.notes.push(format!(
+                "`{table}` has no text fields left, so its full-text search index \
+                 (`{}`) was dropped rather than rebuilt",
+                fts.name
+            ));
+        }
+    }
+
+    fn drop_constraint(&mut self, table: &str, name: &str) -> Result<()> {
+        self.require_editable(table)?;
+        let projected = self
+            .projection
+            .get(table)
+            .ok_or_else(|| Error::not_found(format!("table `{table}` is not in the catalog")))?
+            .clone();
+        let constraint = projected
+            .constraints
+            .iter()
+            .find(|c| c.name == name)
+            .cloned()
+            .ok_or_else(|| {
+                Error::not_found(format!("table `{table}` has no constraint `{name}`"))
+            })?;
+
+        let mut projected = projected;
+        projected.constraints.retain(|c| c.name != name);
+        self.projection.insert(projected);
+        self.constraints
+            .push((table.to_owned(), ConstraintOp::Drop(Box::new(constraint))));
+        self.applied
+            .constraints_dropped
+            .push(format!("{table}.{name}"));
+        self.note_changed(table);
         Ok(())
     }
 
@@ -1381,6 +1672,9 @@ impl Plan {
         for (table, field, expression) in &self.deferred_calc {
             validate_calc_expression(&shape, table, field, expression)?;
         }
+        for (table, formula) in &self.deferred_constraints {
+            validate_formula(&self.projection, table, formula)?;
+        }
         for name in &self.rls_dirty {
             let Some(table) = self.projection.get(name) else {
                 continue;
@@ -1396,6 +1690,25 @@ impl Plan {
     fn steps(&mut self, catalog: &Catalog) -> Result<Vec<SchemaStep>> {
         let mut steps: Vec<SchemaStep> = self.ddl.iter().cloned().map(SchemaStep::Change).collect();
         let dialect = catalog.primary().dialect();
+        // After the columns (a constraint may name one this batch added) and
+        // before the policies (which are the last thing that can reference
+        // anything).
+        for (table_name, op) in &self.constraints {
+            let Some(table) = self.projection.get(table_name) else {
+                continue;
+            };
+            match op {
+                ConstraintOp::Add(constraint) => steps.extend(create_constraint_steps(
+                    dialect,
+                    &self.projection,
+                    table,
+                    constraint,
+                )?),
+                ConstraintOp::Drop(constraint) => {
+                    steps.extend(drop_constraint_steps(dialect, table_name, constraint));
+                }
+            }
+        }
         for name in &self.rls_dirty {
             let Some(table) = self.projection.get(name) else {
                 continue;

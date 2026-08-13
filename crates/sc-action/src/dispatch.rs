@@ -468,6 +468,7 @@ mod tests {
                 }],
                 primary_key: vec!["id".into()],
                 foreign_keys: Vec::new(),
+                constraints: Vec::new(),
             },
         )
     }

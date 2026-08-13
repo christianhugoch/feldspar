@@ -51,6 +51,7 @@ fn table(name: &str, fields: Vec<DataField>) -> Table {
         ownership: None,
         ownership_error: None,
         rls_enabled: false,
+        constraints: Vec::new(),
     }
 }
 

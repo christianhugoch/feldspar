@@ -16,6 +16,38 @@ use tokio_postgres::types::{ToSql, Type};
 use crate::dialect::PgDialect;
 use crate::value::{PgParam, decode};
 
+/// What went wrong, as the *server* said it — the part a
+/// `tokio_postgres::Error` hides behind a terse "db error".
+///
+/// Three things come out of a `DbError` and all three matter upstream:
+///
+/// - the **SQLSTATE**, which is the only reliable classification of a failure
+///   (`23505` unique violation, `23514` check violation, `42501` policy
+///   violation) — matching on message text is guesswork, and `sc-catalog`'s
+///   policy mapping was reduced to exactly that for want of the code;
+/// - the server's **message**, which for a row constraint's trigger *is* the
+///   sentence the admin wrote for this moment;
+/// - the **constraint** it names, which is how the layer above knows *which*
+///   rule was broken and whose message to say instead.
+///
+/// The format is stable because upper layers read it back
+/// (`sc_api::rows::constraint_message`): `<message> [<sqlstate>]` with, when
+/// there is one, ` (constraint "<name>")`.
+pub(crate) fn db_error(e: &tokio_postgres::Error) -> String {
+    match e.as_db_error() {
+        Some(db) => {
+            let constraint = db
+                .constraint()
+                .map(|c| format!(" (constraint \"{c}\")"))
+                .unwrap_or_default();
+            format!("{} [{}]{constraint}", db.message(), db.code().code())
+        }
+        // A connection or protocol failure has no SQLSTATE; the chain is all
+        // there is, and it is what this always printed.
+        None => sc_error::format_chain(e),
+    }
+}
+
 /// Render `stmt` to Postgres SQL, run it on `client`, and materialise the rows.
 ///
 /// Any statement kind is accepted; a non-`RETURNING` mutation simply yields no
@@ -67,7 +99,7 @@ pub(crate) async fn run_query(
     .map_err(|e| {
         Error::database(format!(
             "query failed: {}\n  sql: {sql}\n  ({} bind parameter(s))",
-            sc_error::format_chain(&e),
+            db_error(&e),
             binds.len(),
         ))
     })?;
@@ -141,7 +173,7 @@ pub(crate) async fn run_ddl(
     client.batch_execute(&sql).await.map_err(|e| {
         Error::database(format!(
             "apply_schema failed: {}\n  sql: {sql}",
-            sc_error::format_chain(&e)
+            db_error(&e)
         ))
     })?;
     Ok(())

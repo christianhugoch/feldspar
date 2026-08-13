@@ -26,6 +26,10 @@ export type CreateFieldResponse = { name: string; label: string; description: st
 export type UpdateFieldRequest = { type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null; primary_key?: boolean | null };
 export type UpdateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; primary_key: boolean; generated: boolean; kind: unknown; attributes: unknown };
 export type DeleteFieldResponse = { dropped: string };
+export type ListConstraintsResponse = Array<{ name: string; type: string; fields: Array<string>; expression?: string | null; method?: string | null; language?: string | null; formula?: string | null; error_message?: string | null; managed: boolean }>;
+export type CreateConstraintRequest = { type: string; fields?: Array<string> | null; language?: string | null; formula?: string | null; name?: string | null; error_message?: string | null };
+export type CreateConstraintResponse = { name: string; type: string; fields: Array<string>; expression?: string | null; method?: string | null; language?: string | null; formula?: string | null; error_message?: string | null; managed: boolean };
+export type DeleteConstraintResponse = { dropped: string };
 export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean }> }>;
 export type ListRowsResponse = Array<unknown>;
 export type CountRowsResponse = { count: number };
@@ -144,6 +148,9 @@ export interface ApiClient {
   createField(table: string, body: CreateFieldRequest): Promise<CreateFieldResponse>;
   updateField(table: string, field: string, body: UpdateFieldRequest): Promise<UpdateFieldResponse>;
   deleteField(table: string, field: string): Promise<DeleteFieldResponse>;
+  listConstraints(table: string): Promise<ListConstraintsResponse>;
+  createConstraint(table: string, body: CreateConstraintRequest): Promise<CreateConstraintResponse>;
+  deleteConstraint(table: string, constraint: string): Promise<DeleteConstraintResponse>;
   listFieldTypes(): Promise<ListFieldTypesResponse>;
   listRows(table: string): Promise<ListRowsResponse>;
   countRows(table: string): Promise<CountRowsResponse>;
@@ -406,6 +413,31 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteField", res);
       return (await res.json()) as DeleteFieldResponse;
+    },
+    async listConstraints(table) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listConstraints", res);
+      return (await res.json()) as ListConstraintsResponse;
+    },
+    async createConstraint(table, body) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createConstraint", res);
+      return (await res.json()) as CreateConstraintResponse;
+    },
+    async deleteConstraint(table, constraint) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints/${constraint}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteConstraint", res);
+      return (await res.json()) as DeleteConstraintResponse;
     },
     async listFieldTypes() {
       const res = await doFetch(`${baseUrl}/api/field-types`, {

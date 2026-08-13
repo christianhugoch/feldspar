@@ -10,10 +10,14 @@
 //      irreversible. The rows themselves live on their own screen
 //      (`TableData`), which is what keeps this page cheap to open: one
 //      `countRows` rather than every row in the table.
-//   3. **Triggers on this table** — what happens when its rows change. Filtered
+//   3. **Constraints** — the rules the table's rows are kept to, and the indexes
+//      that make reading it faster. Below the fields because every one of them
+//      is *about* fields, and above the triggers because a constraint is part of
+//      what the table is rather than something that happens to it.
+//   4. **Triggers on this table** — what happens when its rows change. Filtered
 //      from the trigger list by channel, because a trigger's channel *is* its
 //      table (§10.2).
-//   4. **Edit table properties** — the `_sc_tables` overlay: labels, roles,
+//   5. **Edit table properties** — the `_sc_tables` overlay: labels, roles,
 //      ownership. Last because it is the part an admin sets once.
 //
 // Fields come from `listFields`; the settings come from the tables listing,
@@ -42,11 +46,23 @@ import {
 } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import type {
+  ListConstraintsResponse,
   ListFieldsResponse,
   ListFieldTypesResponse,
   ListTablesResponse,
   ListTriggersResponse,
 } from "../client";
+import {
+  TEXT_SEARCH_LANGUAGES,
+  constraintFormError,
+  constraintSummary,
+  constraintTypeLabel,
+  createConstraintBody,
+  newConstraintForm,
+  type ConstraintForm,
+  type ConstraintItem,
+  type ConstraintType,
+} from "../constraintForm";
 import {
   createFieldBody,
   fieldForm,
@@ -112,6 +128,7 @@ export function TableDetail({ table }: { table: string }) {
   const [fieldTypes, setFieldTypes] = useState<ListFieldTypesResponse | null>(null);
   const [rowCount, setRowCount] = useState<number | null>(null);
   const [settings, setSettings] = useState<TableSummary | null>(null);
+  const [constraints, setConstraints] = useState<ListConstraintsResponse | null>(null);
   const [triggers, setTriggers] = useState<TriggerItem[] | null>(null);
   // Every table in the catalog: what a Key field's target is chosen from. This
   // table is included — a key onto its own table (a parent link) is legitimate.
@@ -124,18 +141,20 @@ export function TableDetail({ table }: { table: string }) {
       // The settings come from the tables listing rather than a per-table
       // endpoint: the list already carries every overlay field, so a second
       // endpoint would be a second thing to keep in step with it.
-      const [f, ft, c, t, tr] = await Promise.all([
+      const [f, ft, c, t, tr, cons] = await Promise.all([
         api.listFields(table),
         api.listFieldTypes(),
         api.countRows(table),
         api.listTables(),
         api.listTriggers(),
+        api.listConstraints(table),
       ]);
       setFields(f);
       setFieldTypes(ft);
       setRowCount(c.count);
       setTables(t);
       setTriggers(tr);
+      setConstraints(cons);
       setSettings(t.find((candidate) => candidate.name === table) ?? null);
     } catch {
       setError("Could not load the table.");
@@ -174,6 +193,13 @@ export function TableDetail({ table }: { table: string }) {
           table={table}
           rowCount={rowCount}
           configured={settings?.configured ?? false}
+          onChange={load}
+        />
+
+        <Constraints
+          table={table}
+          fields={fields}
+          constraints={constraints}
           onChange={load}
         />
 
@@ -432,6 +458,321 @@ function UploadTile({
         }}
       />
     </label>
+  );
+}
+
+/**
+ * The table's constraints: the rules its rows are kept to, and the indexes that
+ * make reading it faster (design §5).
+ *
+ * Saltcorn 1 puts these behind a "Constraints" link on its table page, on a
+ * screen of their own. Here they are a card, because this page is already where
+ * a table's *shape* is edited and every constraint is about the fields directly
+ * above it — a second screen would be a second place to look for one thing.
+ *
+ * Four kinds share the card, the list and one modal, and differ only in what the
+ * modal asks:
+ *
+ *   - **Jointly unique** ticks the fields that are unique *together*, which is
+ *     the whole point of it — a single field's uniqueness is a property of the
+ *     field and is set on the field.
+ *   - **Index** picks one field.
+ *   - **Full-text search** picks a language and covers every text field there is.
+ *   - **Row constraint** takes a formula and a short name.
+ *
+ * The two that a row can *violate* also take a message, which is what whoever
+ * broke the rule is shown instead of Postgres naming a constraint they have
+ * never heard of.
+ *
+ * There is no Edit: what a constraint constrains **is** its identity — a unique
+ * key over a different pair of fields is a different rule, and a changed formula
+ * is a different trigger — so changing one is deleting it and adding the one you
+ * meant, which is also exactly what the database does.
+ */
+function Constraints({
+  table,
+  fields,
+  constraints,
+  onChange,
+}: {
+  table: string;
+  fields: ListFieldsResponse | null;
+  constraints: ListConstraintsResponse | null;
+  onChange: () => void;
+}) {
+  const [form, setForm] = useState<ConstraintForm | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // A constraint is over stored columns; a calculated field has none.
+  const columns = useMemo(
+    () => (fields ?? []).filter((f) => (f.kind as FieldKind)?.type !== "calc"),
+    [fields],
+  );
+  const update = (patch: Partial<ConstraintForm>) =>
+    setForm((current) => (current ? { ...current, ...patch } : current));
+
+  const open = (type: ConstraintType) => {
+    setFormError(null);
+    setForm(newConstraintForm(type));
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!form) return;
+    const invalid = constraintFormError(form);
+    if (invalid) {
+      setFormError(invalid);
+      return;
+    }
+    setBusy(true);
+    setFormError(null);
+    try {
+      await api.createConstraint(table, createConstraintBody(form));
+      setForm(null);
+      onChange();
+    } catch (err) {
+      setFormError(errorMessage(err, "Could not add the constraint."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (constraint: ConstraintItem) => {
+    if (
+      !window.confirm(
+        `Delete the ${constraintTypeLabel(constraint.type).toLowerCase()} ` +
+          `"${constraint.name}"?\n\n` +
+          "The rows already in the table are not changed; only the rule is " +
+          "removed, and rows that would have been refused will be accepted.",
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    try {
+      await api.deleteConstraint(table, constraint.name);
+      onChange();
+    } catch (err) {
+      setError(errorMessage(err, "Could not delete the constraint."));
+    }
+  };
+
+  const listed = constraints ?? [];
+  return (
+    <Card className="mb-4">
+      <Card.Header>Constraints and indexes</Card.Header>
+      <Card.Body>
+        {error && <Alert variant="danger">{error}</Alert>}
+        <p className="text-muted">
+          Rules the database keeps this table&apos;s rows to, and indexes that make reading it
+          faster. They are enforced by the database itself, so they hold whichever way a row
+          is written.
+        </p>
+        {listed.length > 0 && (
+          <Table size="sm" hover responsive className="table-vcenter">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>What</th>
+                <th>Message</th>
+                <th className="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {listed.map((constraint) => (
+                <tr key={constraint.name}>
+                  <td>
+                    {constraintTypeLabel(constraint.type)}
+                    <div className="text-muted small font-monospace text-break">
+                      {constraint.name}
+                    </div>
+                  </td>
+                  <td className="font-monospace text-break">{constraintSummary(constraint)}</td>
+                  <td className="text-break">
+                    {constraint.error_message ?? <span className="text-muted">—</span>}
+                  </td>
+                  <td className="text-end">
+                    <div className="btn-list justify-content-end flex-nowrap">
+                      {!constraint.managed && (
+                        // Not made here, so it is somebody else's migration —
+                        // deletable, but said so before it is deleted.
+                        <StatusBadge tone="secondary" title="Not created by Saltcorn">
+                          External
+                        </StatusBadge>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        onClick={() => void remove(constraint)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+        <div className="btn-list">
+          <Button size="sm" onClick={() => open("unique")}>
+            <IconPlus className="icon-2" />
+            Jointly unique
+          </Button>
+          <Button size="sm" variant="outline-secondary" onClick={() => open("index")}>
+            <IconPlus className="icon-2" />
+            Index
+          </Button>
+          <Button
+            size="sm"
+            variant="outline-secondary"
+            onClick={() => open("full_text_search")}
+          >
+            <IconPlus className="icon-2" />
+            Full-text search
+          </Button>
+          <Button size="sm" variant="outline-secondary" onClick={() => open("formula")}>
+            <IconPlus className="icon-2" />
+            Row constraint
+          </Button>
+        </div>
+
+        <Modal show={form !== null} onHide={() => setForm(null)} scrollable>
+          <Form onSubmit={save}>
+            <Modal.Header closeButton>
+              <Modal.Title className="h4">
+                {form ? `Add ${constraintTypeLabel(form.type).toLowerCase()} to ${table}` : ""}
+              </Modal.Title>
+            </Modal.Header>
+            <Modal.Body>
+              {formError && <Alert variant="danger">{formError}</Alert>}
+              {form?.type === "unique" && (
+                <Form.Group className="mb-2">
+                  <Form.Label>Fields that are unique together</Form.Label>
+                  {columns.map((field) => (
+                    <Form.Check
+                      key={field.name}
+                      type="checkbox"
+                      id={`unique-${field.name}`}
+                      label={field.label || field.name}
+                      checked={form.fields.includes(field.name)}
+                      onChange={(e) =>
+                        update({
+                          fields: e.target.checked
+                            ? [...form.fields, field.name]
+                            : form.fields.filter((f) => f !== field.name),
+                        })
+                      }
+                    />
+                  ))}
+                  <Form.Text muted>
+                    No two rows may share the same combination of these fields.
+                  </Form.Text>
+                </Form.Group>
+              )}
+              {form?.type === "index" && (
+                <Form.Group className="mb-2" controlId="constraintIndexField">
+                  <Form.Label>Field</Form.Label>
+                  <Form.Select
+                    value={form.fields[0] ?? ""}
+                    onChange={(e) => update({ fields: e.target.value ? [e.target.value] : [] })}
+                  >
+                    <option value="">Choose a field…</option>
+                    {columns.map((field) => (
+                      <option key={field.name} value={field.name}>
+                        {field.label || field.name}
+                      </option>
+                    ))}
+                  </Form.Select>
+                  <Form.Text muted>
+                    An index makes searching and joining on this field faster, and writes a
+                    little slower.
+                  </Form.Text>
+                </Form.Group>
+              )}
+              {form?.type === "full_text_search" && (
+                <Form.Group className="mb-2" controlId="constraintLanguage">
+                  <Form.Label>Language</Form.Label>
+                  <Form.Select
+                    value={form.language}
+                    onChange={(e) => update({ language: e.target.value })}
+                  >
+                    {TEXT_SEARCH_LANGUAGES.map((language) => (
+                      <option key={language} value={language}>
+                        {language}
+                      </option>
+                    ))}
+                  </Form.Select>
+                  <Form.Text muted>
+                    Indexes every text field of the table together. The language decides how
+                    words are reduced to their stems, so it has to match the one a search uses.
+                  </Form.Text>
+                </Form.Group>
+              )}
+              {form?.type === "formula" && (
+                <>
+                  <Form.Group className="mb-2" controlId="constraintName">
+                    <Form.Label>Name</Form.Label>
+                    <Form.Control
+                      value={form.name}
+                      autoFocus
+                      placeholder="positive_salary"
+                      onChange={(e) => update({ name: e.target.value })}
+                    />
+                    <Form.Text muted>
+                      A short name for this rule. It appears in the error when no message is
+                      given.
+                    </Form.Text>
+                  </Form.Group>
+                  <Form.Group className="mb-2" controlId="constraintFormula">
+                    <Form.Label>Formula</Form.Label>
+                    <Form.Control
+                      as="textarea"
+                      rows={2}
+                      className="font-monospace"
+                      value={form.formula}
+                      placeholder="salary > 0"
+                      onChange={(e) => update({ formula: e.target.value })}
+                    />
+                    <Form.Text muted>
+                      Must be true of every row. In scope:{" "}
+                      {columns.map((f) => f.name).join(", ") || "no fields yet"}. Join fields
+                      (<code>authorⱵname</code>) and aggregations
+                      (<code>reviewsↃbook.length</code>) may be used;{" "}
+                      <code>user</code> may not, because the database checks this and has no
+                      session.
+                    </Form.Text>
+                  </Form.Group>
+                </>
+              )}
+              {form && form.type !== "index" && form.type !== "full_text_search" && (
+                <Form.Group className="mb-2" controlId="constraintMessage">
+                  <Form.Label>Error message</Form.Label>
+                  <Form.Control
+                    value={form.errorMessage}
+                    onChange={(e) => update({ errorMessage: e.target.value })}
+                  />
+                  <Form.Text muted>
+                    Shown to whoever breaks the rule. Left blank, they see the database&apos;s
+                    own message, which names the constraint.
+                  </Form.Text>
+                </Form.Group>
+              )}
+            </Modal.Body>
+            <Modal.Footer>
+              <Button variant="outline-secondary" onClick={() => setForm(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy}>
+                {busy ? "Adding…" : "Add constraint"}
+              </Button>
+            </Modal.Footer>
+          </Form>
+        </Modal>
+      </Card.Body>
+    </Card>
   );
 }
 

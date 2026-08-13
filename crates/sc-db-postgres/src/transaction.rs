@@ -92,7 +92,7 @@ impl Transaction for PgTransaction {
         client.batch_execute(sql).await.map_err(|e| {
             Error::database(format!(
                 "batch failed: {}\n  sql: {sql}",
-                sc_error::format_chain(&e)
+                crate::exec::db_error(&e)
             ))
         })?;
         Ok(())
@@ -104,7 +104,13 @@ impl Transaction for PgTransaction {
         client
             .batch_execute("COMMIT")
             .await
-            .map_err(|e| Error::database(format!("commit transaction: {e}")))?;
+            // The last thing a deferred constraint can fail at is the commit
+            // itself (§5), so this error carries the same detail a statement's
+            // does — without it, "commit transaction: db error" would be the
+            // whole report of a row constraint that was put off to here.
+            .map_err(|e| {
+                Error::database(format!("commit transaction: {}", crate::exec::db_error(&e)))
+            })?;
         Ok(())
     }
 

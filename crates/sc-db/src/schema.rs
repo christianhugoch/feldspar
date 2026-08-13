@@ -38,6 +38,70 @@ pub struct PhysicalTable {
     /// Foreign-key constraints declared on this table.
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKey>,
+    /// The unique constraints, indexes and row-constraint triggers on this
+    /// table, as the database holds them.
+    ///
+    /// Read back rather than stored, for the reason the primary key and the
+    /// foreign keys are: these are facts the database knows, and a second copy
+    /// in an overlay row would be a second answer to the same question (§9). A
+    /// constraint somebody added in `psql` is therefore one of these, and shows
+    /// up wherever the others do.
+    #[serde(default)]
+    pub constraints: Vec<PhysicalConstraint>,
+}
+
+/// One unique constraint, index or row-constraint trigger, exactly as the
+/// database holds it.
+///
+/// The `comment` is what makes this more than a name: Postgres has nowhere to
+/// put the *error message* an admin wrote for a violated constraint, nor the
+/// *formula* a row-constraint trigger was generated from, and both are
+/// Saltcorn's rather than the backend's. They ride in the object's comment,
+/// which is attached to it, dropped with it and carried by `pg_dump` — the one
+/// place a comment is the natural store rather than a hiding place. The driver
+/// reads it as opaque text; what the text *means* is the catalog's (§9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalConstraint {
+    /// The constraint's, index's or trigger's name, unqualified.
+    pub name: String,
+    /// Which of the three it is.
+    pub kind: PhysicalConstraintKind,
+    /// The object's comment, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// The three shapes a backend has for what an admin can add to a table.
+///
+/// Deliberately three rather than four: a full-text search index *is* an index,
+/// distinguished only by being over an expression rather than columns, and a
+/// backend that reported it as a fourth kind would be deciding a question that
+/// belongs to the layer above (§6's rule for types, applied to indexes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PhysicalConstraintKind {
+    /// A `UNIQUE` constraint over one or more columns, in key order.
+    Unique {
+        /// The constrained columns.
+        columns: Vec<String>,
+    },
+    /// An index that no constraint owns — a primary key's and a unique
+    /// constraint's own indexes are reported as those constraints, not twice.
+    Index {
+        /// The indexed columns, in index order; empty for an expression index.
+        #[serde(default)]
+        columns: Vec<String>,
+        /// The indexed expression, for an index that is over one rather than
+        /// over columns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expression: Option<String>,
+        /// The access method (`btree`, `gin`, …).
+        method: String,
+    },
+    /// A row-level trigger that is not one of the backend's own internal ones —
+    /// what a row constraint is implemented as (see the catalog's constraint
+    /// module).
+    RowTrigger,
 }
 
 /// One column of a [`PhysicalTable`].
@@ -205,6 +269,104 @@ pub enum SchemaChange {
         column: String,
         /// The generator to give it; `None` removes whatever it has.
         generator: Option<ColumnGenerator>,
+    },
+    /// Add a `UNIQUE` constraint over one or more columns — a table-level
+    /// constraint, which is what "jointly unique" needs and what
+    /// [`ColumnDef::unique`] cannot express.
+    AddUniqueConstraint {
+        /// The table to alter.
+        table: String,
+        /// The constraint's name. Given rather than left to the backend,
+        /// because it is the handle the constraint is later dropped by and the
+        /// name a violation reports.
+        name: String,
+        /// The columns that are jointly unique, in order.
+        columns: Vec<String>,
+    },
+    /// Drop a named table constraint.
+    DropConstraint {
+        /// The table to alter.
+        table: String,
+        /// The constraint to drop.
+        name: String,
+        /// Suppress an error when it does not exist.
+        #[serde(default)]
+        if_exists: bool,
+    },
+    /// Create an index over columns or over an expression.
+    CreateIndex {
+        /// The table to index.
+        table: String,
+        /// The index's name.
+        name: String,
+        /// What is indexed.
+        on: IndexOn,
+        /// The access method, when it is not the backend's default (`gin` for a
+        /// full-text index). `None` leaves the backend to pick.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+    },
+    /// Drop an index by name.
+    DropIndex {
+        /// The index to drop.
+        name: String,
+        /// Suppress an error when it does not exist.
+        #[serde(default)]
+        if_exists: bool,
+    },
+    /// Set or remove the comment on a constraint, an index or a trigger.
+    ///
+    /// The comment is where a constraint's Saltcorn metadata lives — the error
+    /// message and, for a row constraint, the formula it was generated from (see
+    /// [`PhysicalConstraint::comment`]). It is a schema change like any other so
+    /// that it joins the same transaction as the object it describes: a
+    /// constraint that committed without its message would be a constraint
+    /// whose violation says the wrong thing.
+    SetComment {
+        /// What is being commented on.
+        target: CommentTarget,
+        /// The comment text, or `None` to remove it.
+        comment: Option<String>,
+    },
+}
+
+/// What a [`SchemaChange::CreateIndex`] indexes.
+///
+/// The expression form is what a full-text index needs (`to_tsvector(…)` over
+/// several columns at once). As with [`ColumnDef::sql_type`], it is a
+/// **structural SQL fragment** built by trusted code from the catalog, never
+/// text a caller sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "on", content = "value")]
+pub enum IndexOn {
+    /// One or more columns, in index order.
+    Columns(Vec<String>),
+    /// A single expression.
+    Expression(String),
+}
+
+/// The object a [`SchemaChange::SetComment`] is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "on")]
+pub enum CommentTarget {
+    /// A table constraint, which is named relative to its table.
+    Constraint {
+        /// The table the constraint is on.
+        table: String,
+        /// The constraint's name.
+        name: String,
+    },
+    /// An index, which is named in its own right.
+    Index {
+        /// The index's name.
+        name: String,
+    },
+    /// A trigger, which is named relative to its table.
+    Trigger {
+        /// The table the trigger is on.
+        table: String,
+        /// The trigger's name.
+        name: String,
     },
 }
 

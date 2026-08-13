@@ -29,8 +29,8 @@ use zip::write::SimpleFileOptions;
 
 use super::{Available, Item, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::handlers::{
-    agent_json, application_json, backup_file_meta_json, backup_store_def_json, field_json,
-    role_json, table_json, trigger_json, trigger_table,
+    agent_json, application_json, backup_file_meta_json, backup_store_def_json, constraint_json,
+    field_json, role_json, table_json, trigger_json, trigger_table,
 };
 
 /// What can be included in a backup of this server, right now.
@@ -120,9 +120,19 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
                 field_json(f, &description)
             })
             .collect();
+        // The constraints go in the backup for the reason the fields do: a
+        // restore that recreated the columns and not the rules would hand back a
+        // table that accepts what the original refused, and say nothing about it
+        // (§5.1). They are *read* off the table, so what is written is what the
+        // database has — including a constraint somebody added by hand.
+        let constraints: Vec<Json> = table.constraints.iter().map(constraint_json).collect();
         zip.json(
             &format!("tables/{name}/table.json"),
-            &json!({ "table": table_json(&table, rls), "fields": fields }),
+            &json!({
+                "table": table_json(&table, rls),
+                "fields": fields,
+                "constraints": constraints,
+            }),
         )?;
 
         let mut count = None;

@@ -14,7 +14,7 @@
 //! emits **exactly** the columns given and **never** invents an `id` column. A
 //! primary key is declared only when one is asked for, and may be composite.
 
-use sc_db::{ColumnDef, ColumnGenerator, SchemaChange};
+use sc_db::{ColumnDef, ColumnGenerator, CommentTarget, IndexOn, SchemaChange};
 use sc_error::{Error, Result};
 use sc_query::SqlDialect;
 
@@ -174,8 +174,110 @@ pub fn render(dialect: &PgDialect, change: &SchemaChange) -> Result<String> {
             }
             sql
         }
+        SchemaChange::AddUniqueConstraint {
+            table,
+            name,
+            columns,
+        } => {
+            if columns.is_empty() {
+                return Err(Error::invalid(format!(
+                    "unique constraint `{name}` on `{table}` names no columns"
+                )));
+            }
+            format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({})",
+                dialect.quote_ident(table),
+                dialect.quote_ident(name),
+                quoted_list(dialect, columns)
+            )
+        }
+        SchemaChange::DropConstraint {
+            table,
+            name,
+            if_exists,
+        } => {
+            format!(
+                "ALTER TABLE {} DROP CONSTRAINT {}{}",
+                dialect.quote_ident(table),
+                if_exists_clause(*if_exists),
+                dialect.quote_ident(name)
+            )
+        }
+        SchemaChange::CreateIndex {
+            table,
+            name,
+            on,
+            method,
+        } => {
+            // The `USING` clause and, for an expression index, the expression
+            // itself are structural SQL fragments from trusted code — the same
+            // rule `sql_type` and a column default are passed under, and the
+            // same one DDL leaves no alternative to.
+            let using = match method {
+                Some(m) => format!(" USING {m}"),
+                None => String::new(),
+            };
+            let target = match on {
+                IndexOn::Columns(columns) => {
+                    if columns.is_empty() {
+                        return Err(Error::invalid(format!(
+                            "index `{name}` on `{table}` names no columns"
+                        )));
+                    }
+                    quoted_list(dialect, columns)
+                }
+                // Parenthesised: Postgres requires an index expression to be,
+                // unless it is a bare function call — and "unless" is not a rule
+                // worth carrying when the extra parentheses are free.
+                IndexOn::Expression(expr) => format!("({expr})"),
+            };
+            format!(
+                "CREATE INDEX {} ON {}{using} ({target})",
+                dialect.quote_ident(name),
+                dialect.quote_ident(table),
+            )
+        }
+        SchemaChange::DropIndex { name, if_exists } => {
+            format!(
+                "DROP INDEX {}{}",
+                if_exists_clause(*if_exists),
+                dialect.quote_ident(name)
+            )
+        }
+        SchemaChange::SetComment { target, comment } => {
+            // `NULL` — the keyword, not a quoted string — is how a comment is
+            // removed; `IS ''` would leave an empty comment behind, which reads
+            // back as "somebody commented this and said nothing".
+            let text = match comment {
+                Some(text) => quote_string(text),
+                None => "NULL".to_owned(),
+            };
+            let what = match target {
+                CommentTarget::Constraint { table, name } => format!(
+                    "CONSTRAINT {} ON {}",
+                    dialect.quote_ident(name),
+                    dialect.quote_ident(table)
+                ),
+                CommentTarget::Index { name } => format!("INDEX {}", dialect.quote_ident(name)),
+                CommentTarget::Trigger { table, name } => format!(
+                    "TRIGGER {} ON {}",
+                    dialect.quote_ident(name),
+                    dialect.quote_ident(table)
+                ),
+            };
+            format!("COMMENT ON {what} IS {text}")
+        }
     };
     Ok(sql)
+}
+
+/// A comma-separated list of quoted identifiers.
+fn quoted_list(dialect: &PgDialect, items: &[String]) -> String {
+    items
+        .iter()
+        .map(|c| dialect.quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A SQL string literal holding `value` — for the one place a name is passed as
@@ -430,6 +532,110 @@ mod tests {
             unlogged: false,
         };
         assert!(render(&PgDialect::new(), &change).is_err());
+    }
+
+    #[test]
+    fn a_jointly_unique_constraint_is_a_table_level_constraint() {
+        // The column-level `UNIQUE` a `ColumnDef` carries cannot say "these two
+        // together", which is the whole of what this variant exists for.
+        assert_eq!(
+            render_ok(&SchemaChange::AddUniqueConstraint {
+                table: "member".into(),
+                name: "sc_uq_member_org_email".into(),
+                columns: vec!["org".into(), "email".into()],
+            }),
+            "ALTER TABLE \"member\" ADD CONSTRAINT \"sc_uq_member_org_email\" \
+             UNIQUE (\"org\", \"email\")"
+        );
+        assert_eq!(
+            render_ok(&SchemaChange::DropConstraint {
+                table: "member".into(),
+                name: "sc_uq_member_org_email".into(),
+                if_exists: true,
+            }),
+            "ALTER TABLE \"member\" DROP CONSTRAINT IF EXISTS \"sc_uq_member_org_email\""
+        );
+        // A constraint over no columns is a mistake by the caller building it,
+        // caught here rather than as a syntax error from Postgres.
+        assert!(
+            render(
+                &PgDialect::new(),
+                &SchemaChange::AddUniqueConstraint {
+                    table: "member".into(),
+                    name: "sc_uq_member".into(),
+                    columns: Vec::new(),
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn an_index_is_over_columns_or_over_an_expression() {
+        assert_eq!(
+            render_ok(&SchemaChange::CreateIndex {
+                table: "book".into(),
+                name: "sc_ix_book_author".into(),
+                on: IndexOn::Columns(vec!["author".into()]),
+                method: None,
+            }),
+            "CREATE INDEX \"sc_ix_book_author\" ON \"book\" (\"author\")"
+        );
+        // The full-text form: an expression, and the access method that can
+        // index one. Parenthesised whatever the expression is.
+        assert_eq!(
+            render_ok(&SchemaChange::CreateIndex {
+                table: "book".into(),
+                name: "sc_fts_book".into(),
+                on: IndexOn::Expression("to_tsvector('english', coalesce(\"title\", ''))".into()),
+                method: Some("gin".into()),
+            }),
+            "CREATE INDEX \"sc_fts_book\" ON \"book\" USING gin \
+             ((to_tsvector('english', coalesce(\"title\", ''))))"
+        );
+        assert_eq!(
+            render_ok(&SchemaChange::DropIndex {
+                name: "sc_fts_book".into(),
+                if_exists: true,
+            }),
+            "DROP INDEX IF EXISTS \"sc_fts_book\""
+        );
+    }
+
+    #[test]
+    fn a_comment_carries_the_metadata_and_null_takes_it_away() {
+        // Where a constraint's error message and a row constraint's formula
+        // live. The text is a string literal, so an apostrophe in an admin's
+        // message doubles rather than ending it.
+        assert_eq!(
+            render_ok(&SchemaChange::SetComment {
+                target: CommentTarget::Constraint {
+                    table: "member".into(),
+                    name: "sc_uq_member_org_email".into(),
+                },
+                comment: Some("that's taken".into()),
+            }),
+            "COMMENT ON CONSTRAINT \"sc_uq_member_org_email\" ON \"member\" IS 'that''s taken'"
+        );
+        assert_eq!(
+            render_ok(&SchemaChange::SetComment {
+                target: CommentTarget::Index {
+                    name: "sc_fts_book".into()
+                },
+                comment: None,
+            }),
+            "COMMENT ON INDEX \"sc_fts_book\" IS NULL"
+        );
+        assert_eq!(
+            render_ok(&SchemaChange::SetComment {
+                target: CommentTarget::Trigger {
+                    table: "emp".into(),
+                    name: "sc_ck_emp_paid".into(),
+                },
+                comment: Some("{}".into()),
+            }),
+            "COMMENT ON TRIGGER \"sc_ck_emp_paid\" ON \"emp\" IS '{}'"
+        );
     }
 
     #[test]

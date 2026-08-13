@@ -28,8 +28,8 @@ pub use capabilities::DbCapabilities;
 pub use driver::{DatabaseDriver, Transaction};
 pub use row::{Row, RowStream};
 pub use schema::{
-    Column, ColumnDef, ColumnGenerator, ColumnRef, DescribedColumn, ForeignKey, PhysicalTable,
-    SchemaChange,
+    Column, ColumnDef, ColumnGenerator, ColumnRef, CommentTarget, DescribedColumn, ForeignKey,
+    IndexOn, PhysicalConstraint, PhysicalConstraintKind, PhysicalTable, SchemaChange,
 };
 
 #[cfg(test)]
@@ -121,6 +121,7 @@ mod tests {
                             .collect(),
                         primary_key: primary_key.clone(),
                         foreign_keys: Vec::new(),
+                        constraints: Vec::new(),
                     });
                     Ok(())
                 }
@@ -262,6 +263,7 @@ mod tests {
                 referenced_table: "organisation".into(),
                 referenced_columns: vec!["id".into()],
             }],
+            constraints: Vec::new(),
         };
         let json = serde_json::to_string(&table).unwrap();
         let back: PhysicalTable = serde_json::from_str(&json).unwrap();

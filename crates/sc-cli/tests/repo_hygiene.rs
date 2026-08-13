@@ -344,6 +344,16 @@ fn tutorials_are_cross_linked() {
         "the REST-queries tutorial builds on the React tutorial and should link it"
     );
     assert!(
+        rest.contains("tutorial-constraints.md"),
+        "the REST-queries tutorial should point at the constraints tutorial as a next step"
+    );
+    let constraints = read(&root, "docs/tutorial-constraints.md");
+    assert!(
+        constraints.contains("tutorial-ownership.md"),
+        "the constraints tutorial is the other half of `the database decides` and should \
+         link the ownership tutorial"
+    );
+    assert!(
         rest.contains("tutorial-ownership.md"),
         "the REST-queries tutorial leans on the ownership rules and should link them"
     );
@@ -676,6 +686,75 @@ fn the_rest_tutorial_reaches_the_motivating_query_and_its_rules() {
         assert!(
             tutorial.contains(fragment),
             "the REST tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// The constraints milestone, held to what it built (§5.1): where a constraint
+/// lives, what enforces a row constraint, and the two rules that are refusals
+/// rather than features.
+#[test]
+fn the_design_records_what_the_constraints_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        // Where a constraint lives, and why there is no table for it.
+        "no `_sc_constraints`",
+        "saltcorn_constraint",
+        "AddUniqueConstraint",
+        // What enforces a row constraint, and the shape of the generated body.
+        "CONSTRAINT TRIGGER",
+        "(SELECT (NEW).*)",
+        "DEFERRABLE INITIALLY IMMEDIATE",
+        "ERRCODE = 'check_violation'",
+        // …and how the admin's own sentence gets back to the caller.
+        "(constraint \"<name>\")",
+        // The names, and the two refusals the schema editor owns.
+        "sc_uq_<table>_<fields>",
+        "dropped from under it",
+        "rebuilt whenever its text fields change",
+    ] {
+        assert!(
+            design.contains(fragment),
+            "the design should record `{fragment}`"
+        );
+    }
+}
+
+/// The constraints tutorial has to reach all four kinds *and* the two things a
+/// reader would otherwise meet in production: a rule refusing a write that never
+/// went near Saltcorn, and a formula refused for asking a question the database
+/// cannot answer.
+#[test]
+fn the_constraints_tutorial_covers_all_four_kinds_and_their_refusals() {
+    let root = workspace_root();
+    let tutorial = read(&root, "docs/tutorial-constraints.md");
+    for fragment in [
+        // The four kinds, by the name the screen calls them.
+        "Jointly unique",
+        "Full-text search",
+        "Row constraint",
+        "sc_uq_books_author_title",
+        // The message, which is the whole reason the form asks for one.
+        "You already have a book by that title.",
+        // A formula that reaches another table — the case a CHECK cannot do.
+        "authorⱵname",
+        "booksↃauthor.length",
+        // …and the two it may not ask.
+        "the database has no session",
+        "_insert",
+        // Enforced where it counts.
+        "INSERT INTO books",
+        // Read back rather than stored, including somebody else's.
+        "External",
+        "no second copy",
+        // The refusals the schema editor owns, and the deferral.
+        "It is refused, by",
+        "SET CONSTRAINTS ALL DEFERRED",
+    ] {
+        assert!(
+            tutorial.contains(fragment),
+            "the constraints tutorial should cover `{fragment}`"
         );
     }
 }

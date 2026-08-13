@@ -131,8 +131,10 @@ async fn run_in_context_mode(
 /// A `USING` policy filters rows silently (an update/delete simply affects
 /// none), so the only error Postgres raises is a **`WITH CHECK` violation** on
 /// an insert or update — SQLSTATE `42501`, whose message names "row-level
-/// security policy". The SQLSTATE code is not in the error's rendered text by
-/// the time it reaches here, so the message is what is matched.
+/// security policy". Either spelling is matched: the driver now carries the
+/// SQLSTATE in the text it formats (§5's constraint work needed the code for the
+/// same reason this did), and the message is kept as the fallback for a driver
+/// that does not.
 fn map_policy_violation(e: Error) -> Error {
     let chain = sc_error::format_chain(&e);
     if chain.contains("row-level security") || chain.contains("42501") {

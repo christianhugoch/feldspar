@@ -250,6 +250,23 @@ async fn furnish(server: &mut Server) -> sc_error::Result<()> {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
+    // A rule the table's rows are kept to. Not stored in any `_sc_*` table
+    // (§5.1), so a backup that carried the columns and not this would hand back
+    // a table that accepts what the original refused.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/books/constraints",
+            Some(json!({
+                "type": "unique",
+                "fields": ["title"],
+                "error_message": "that book is on the shelf already",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
     for title in ["Dune", "Solaris"] {
         let (status, body) = server
             .client
@@ -523,6 +540,25 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
         .await;
     assert_eq!(status, StatusCode::OK, "{report}");
 
+    // The constraint came across, with its message — and it is *enforced*, which
+    // is the only claim worth making about a restored rule.
+    let (status, constraints) = target
+        .client
+        .send("GET", "/api/tables/books/constraints", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{constraints}");
+    let restored = constraints
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|c| c["name"] == json!("sc_uq_books_title"))
+        })
+        .unwrap_or_else(|| panic!("the unique constraint should be restored: {constraints}"));
+    assert_eq!(restored["fields"], json!(["title"]));
+    assert_eq!(
+        restored["error_message"],
+        json!("that book is on the shelf already")
+    );
     // --- read it back through the ordinary admin API -------------------------
     let (status, tables) = target.client.send("GET", "/api/tables", None).await;
     assert_eq!(status, StatusCode::OK, "{tables}");
@@ -583,6 +619,24 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
         .await;
     assert_eq!(status, StatusCode::CREATED, "{added}");
     assert_eq!(added["id"], json!(3), "{added}");
+
+    // …and the restored rule is *enforced*, in the words it was written in,
+    // which is the only claim about a restored constraint worth making. (After
+    // the key assertion above, because a refused insert has still taken a number
+    // from the sequence.)
+    let (status, refused) = target
+        .client
+        .send(
+            "POST",
+            "/api/tables/books/rows",
+            Some(json!({ "title": "Dune" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused.to_string().contains("on the shelf already"),
+        "{refused}"
+    );
 
     // The file's bytes went into *this* server's store.
     let (status, file) = target

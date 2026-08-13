@@ -71,6 +71,7 @@ fn the_generated_client_echoes_the_csrf_cookie_on_mutations() -> std::io::Result
         ownership: None,
         ownership_error: None,
         rls_enabled: false,
+        constraints: Vec::new(),
     };
     let provider = RestProvider::project("/api", &[posts]);
     let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));

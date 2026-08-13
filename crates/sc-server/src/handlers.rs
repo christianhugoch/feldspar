@@ -45,11 +45,11 @@ use sc_auth::{
     set_user_password, update_user,
 };
 use sc_catalog::{
-    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, DataField, DataFieldKind, FIELD_META_TABLE, FieldId,
-    FieldMeta, FileStoreId, Table, TableId, check_file_store_saveable, connect_file_store_def,
-    delete_file_store, file_kind_config_spec, key_kind_config_spec, list_field_meta_for_table,
-    list_file_stores, load_file_store, load_file_store_by_name, orphan_table_meta, resolve_options,
-    save_file_store,
+    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
+    FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId, Table, TableConstraint, TableId,
+    check_file_store_saveable, connect_file_store_def, delete_file_store, file_kind_config_spec,
+    key_kind_config_spec, list_field_meta_for_table, list_file_stores, load_file_store,
+    load_file_store_by_name, orphan_table_meta, resolve_options, save_file_store,
 };
 use sc_error::{Error, Result};
 use sc_files::{
@@ -514,6 +514,81 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 )
                 .await?;
                 Ok(HandlerResponse::ok(json!({ "dropped": field })))
+            }
+        }
+    });
+
+    // --- table constraints (§5) ---------------------------------------------
+
+    reg.register("listConstraints", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // Read straight off the merged table, which is to say straight
+                // off the database: a constraint is not stored anywhere else, so
+                // there is nothing here to look up beside it (§5).
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let out: Vec<Json> = table.constraints.iter().map(constraint_json).collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createConstraint", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table_name = ctx.path_param("table")?.to_owned();
+                let obj = require_object(&ctx.body)?;
+                let (given_name, constraint) = constraint_from_body(obj)?;
+                // Through the schema editor like every other schema change, so
+                // an agent adding a constraint and this endpoint cannot drift —
+                // and so the DDL joins one transaction with anything else in the
+                // batch (§3.3).
+                let name =
+                    TableConstraint::derived_name(&table_name, &constraint.kind, &given_name);
+                schema_edit::apply(
+                    &catalog,
+                    &[schema_edit::Operation::AddConstraint {
+                        table: table_name.clone(),
+                        given_name,
+                        constraint,
+                    }],
+                    &schema_edit::ApplyOptions::default(),
+                )
+                .await?;
+                let table = catalog.require(&table_name)?;
+                let created = table
+                    .constraints
+                    .iter()
+                    .find(|c| c.name == name)
+                    .ok_or_else(|| {
+                        Error::msg(format!("constraint `{name}` missing after create"))
+                    })?;
+                Ok(HandlerResponse::ok(constraint_json(created)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("deleteConstraint", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table = ctx.path_param("table")?.to_owned();
+                let name = ctx.path_param("constraint")?.to_owned();
+                schema_edit::apply(
+                    &catalog,
+                    &[schema_edit::Operation::DropConstraint {
+                        table,
+                        name: name.clone(),
+                    }],
+                    &schema_edit::ApplyOptions::default(),
+                )
+                .await?;
+                Ok(HandlerResponse::ok(json!({ "dropped": name })))
             }
         }
     });
@@ -2425,6 +2500,102 @@ pub(crate) fn field_json(field: &DataField, description: &str) -> Json {
         "kind": field_kind_json(&field.kind),
         "attributes": Json::Object(field.base.attributes.clone()),
     })
+}
+
+/// One constraint on the wire. Every kind uses one shape, with the fields that
+/// do not apply left null — which is what lets the screen render a list of four
+/// different things without four branches for the data and four for the display.
+pub(crate) fn constraint_json(constraint: &TableConstraint) -> Json {
+    let (fields, expression, method, language, formula) = match &constraint.kind {
+        ConstraintKind::Unique { fields } => (fields.clone(), None, None, None, None),
+        ConstraintKind::Index {
+            fields,
+            expression,
+            method,
+        } => (
+            fields.clone(),
+            expression.clone(),
+            Some(method.clone()),
+            None,
+            None,
+        ),
+        ConstraintKind::FullTextSearch { language } => {
+            (Vec::new(), None, None, Some(language.clone()), None)
+        }
+        ConstraintKind::Formula { formula } => {
+            (Vec::new(), None, None, None, Some(formula.clone()))
+        }
+    };
+    json!({
+        "name": constraint.name,
+        "type": constraint.kind.type_name(),
+        "fields": fields,
+        "expression": expression,
+        "method": method,
+        "language": language,
+        "formula": formula,
+        "error_message": constraint.error_message,
+        "managed": constraint.is_saltcorn(),
+    })
+}
+
+/// Read a `createConstraint` body into the short name an admin gave (only a row
+/// constraint has one) and the constraint itself.
+///
+/// The `type` decides which of the body's fields are read, and a missing one is
+/// named rather than defaulted: a unique constraint with no fields would be a
+/// constraint over nothing, and a row constraint with no formula a trigger that
+/// checks nothing.
+fn constraint_from_body(obj: &Map<String, Json>) -> Result<(String, TableConstraint)> {
+    let type_name = non_empty_str_field(obj, "type")?.trim().to_owned();
+    let kind = match type_name.as_str() {
+        "unique" => ConstraintKind::Unique {
+            fields: string_array(obj, "fields")?,
+        },
+        "index" => ConstraintKind::Index {
+            fields: string_array(obj, "fields")?,
+            expression: None,
+            method: "btree".to_owned(),
+        },
+        "full_text_search" => ConstraintKind::FullTextSearch {
+            // The default is the ordinary one: an installation that has not
+            // thought about stemming wants English rather than an error.
+            language: match optional_str(obj, "language").trim() {
+                "" => "english".to_owned(),
+                given => given.to_owned(),
+            },
+        },
+        "formula" => ConstraintKind::Formula {
+            formula: non_empty_str_field(obj, "formula")?.trim().to_owned(),
+        },
+        other => {
+            return Err(Error::invalid(format!(
+                "`{other}` is not a constraint type; it is one of `unique`, `index`, \
+                 `full_text_search` or `formula`"
+            )));
+        }
+    };
+    let mut constraint = TableConstraint::new(String::new(), kind);
+    constraint.error_message = Some(optional_str(obj, "error_message"))
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty());
+    Ok((optional_str(obj, "name").trim().to_owned(), constraint))
+}
+
+/// A required array-of-strings field, e.g. the fields of a unique constraint.
+fn string_array(obj: &Map<String, Json>, key: &str) -> Result<Vec<String>> {
+    let array = obj
+        .get(key)
+        .and_then(Json::as_array)
+        .ok_or_else(|| Error::invalid(format!("`{key}` must be an array of field names")))?;
+    array
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| Error::invalid(format!("`{key}` must be an array of field names")))
+        })
+        .collect()
 }
 
 /// A field kind as `{ type, …parameters }` — the wire shape `createField` and

@@ -1887,6 +1887,7 @@ mod tests {
             ownership: None,
             ownership_error: None,
             rls_enabled: false,
+            constraints: Vec::new(),
         }
     }
 

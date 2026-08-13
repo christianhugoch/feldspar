@@ -414,3 +414,5 @@ re-emits, or **rescaffolds** when the directory is empty, and tells you which of
   and aggregates over child rows: the questions this query string deliberately does not ask.
 - [tutorial-ownership.md](tutorial-ownership.md) — the roles, formulae and RLS that step 5 leans
   on.
+- [tutorial-constraints.md](tutorial-constraints.md) — the rules the *database* keeps about a
+  row, which every query in this tutorial meets on the way in.

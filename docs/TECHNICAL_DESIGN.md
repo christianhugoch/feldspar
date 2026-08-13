@@ -310,6 +310,76 @@ Design rules from GOALS:
   Per GOALS, we **do not** run schema-changing migrations during early development — we
   evolve the initial setup instead until the metadata schema is stable.
 
+### 5.1 Table constraints
+
+A table's **constraints** — its jointly-unique keys, its indexes, its full-text index and its
+row constraints — are modelled the way its primary key and its foreign keys are: as facts of the
+live schema. `PhysicalTable::constraints` is what `introspect()` reads back, `Table::constraints`
+is the merged view, and `SchemaChange` grew `AddUniqueConstraint`, `DropConstraint`,
+`CreateIndex`, `DropIndex` and `SetComment` to create them. **There is no `_sc_constraints`
+table**, and that is the §9 rule applied rather than an omission: a constraint is something the
+database knows, so storing it again would be storing a second answer. A `UNIQUE` added in `psql`
+is therefore listed beside Saltcorn's own, a restored dump keeps its constraints with no metadata
+to restore beside them, and there is no state where the two disagree.
+
+Two things about a constraint are Saltcorn's and not Postgres's: the **error message** an admin
+writes for its violation, and the **formula** a row constraint was generated from. Both ride in
+the object's comment (`COMMENT ON CONSTRAINT` / `ON INDEX` / `ON TRIGGER`) as one JSON object
+under a `saltcorn_constraint` key — attached to the object, dropped with it, carried by
+`pg_dump`, and impossible to outlive what it describes. A comment that is absent, is prose, or
+is JSON without that key leaves a constraint that still works and is still listed, with no
+message; a **trigger** without it is not treated as a row constraint at all, because a trigger is
+also how the rest of the world implements auditing and denormalisation, and listing somebody's
+audit trigger as a rule an admin may delete would be listing it as something it is not.
+
+A **row constraint** is a formula over the row that must be true of every row, and it is
+enforced by a `plpgsql` `CONSTRAINT TRIGGER` — not by a `CHECK`, because GOALS requires join
+fields and aggregations in constraint formulae and a `CHECK` may not query another table. The
+function evaluates the *same* `sc_query::Expr` the ownership translator produces (§7.3), over a
+derived table that gives the row being written the table's own name:
+
+```sql
+SELECT (<translated formula>) INTO sc_ok FROM (SELECT (NEW).*) AS "<table>";
+IF sc_ok IS DISTINCT FROM true THEN
+  RAISE EXCEPTION '%', '<the admin's message>'
+    USING ERRCODE = 'check_violation', CONSTRAINT = '<the constraint's name>';
+END IF;
+```
+
+so the expression needs no rewriting and a formula means one thing whether it is enforced by a
+policy, evaluated at runtime, or checked here. The trigger is `DEFERRABLE INITIALLY IMMEDIATE`
+for the reason the foreign keys are (§13.1) — unchanged at the statement, deferrable to commit
+by a caller holding the transaction, which is what lets rows that point at each other arrive in
+a file's order — and therefore `AFTER`, which is what a deferrable trigger is.
+
+`CONSTRAINT = '<name>'` is the last piece: it puts the constraint's name in the error the same
+way Postgres does for a unique violation, so `sc-api::rows` has **one** lookup for both. A write
+that breaks a rule comes back as a 400 carrying the admin's sentence rather than a 500 carrying
+`duplicate key value violates unique constraint "sc_uq_…"`. For that to work the driver keeps
+the SQLSTATE and the constraint name in the error text it formats (`<message> [<sqlstate>]
+(constraint "<name>")`), which is also what `sc-catalog`'s policy-violation mapping had been
+matching message text for want of.
+
+Names are **derived** from what a constraint is — `sc_uq_<table>_<fields>`,
+`sc_ix_<table>_<field>`, `sc_fts_<table>`, `sc_ck_<table>_<name>` — so adding the same rule twice
+collides by name instead of quietly creating two constraints enforcing one rule, and a name over
+Postgres's 63-byte limit is truncated with a hash suffix rather than silently truncated by the
+backend into somebody else's name. A row constraint additionally takes a short name from the
+admin, because it is the one kind whose identity cannot be derived from its fields.
+
+A **backup** carries a table's constraints in its `table.json` and the restore adds them after
+the rows, the order `pg_dump` uses — a unique constraint over restored data is checked in one
+pass rather than once per insert, and a row constraint created first would judge each row as it
+arrived against a table whose other rows are not in yet. There is no `_sc_*` table for a backup
+to have picked them up from incidentally, so a restore without this would rebuild the columns
+and the rows and quietly drop every rule.
+
+Finally, the schema editor knows what a constraint needs: a field a constraint names cannot be
+dropped from under it (Postgres would drop a unique constraint with the column, silently, and
+leave a row constraint's trigger to fail at the next write), and a table's full-text index is
+rebuilt whenever its text fields change, because that index is over *every* text field and an
+index that stopped covering the table it claims to cover is the failure nobody notices.
+
 The **primary database** is one connected driver, distinguished by the fact that it hosts
 the `_sc_*` metadata tables and the `users` table. Additional databases are connected for
 data only. (MVP: single database, same as the primary store.)
@@ -804,6 +874,13 @@ git repositories are recognised as such.
 The **overlay** principle for `_sc_tables`/`_sc_fields` is the key to "legacy databases just
 work": introspection yields the tables and fields; the overlay only *adds* access rules and
 attributes where present. A newly connected database needs zero metadata rows.
+
+The overlay principle also decides where things **do not** go. A table's constraints — its
+jointly-unique keys, its indexes and its row constraints — have no `_sc_*` table at all, because
+they are facts the database already holds: they are created as the objects they are, read back by
+introspection, and carry what Postgres has nowhere to put (an error message, a formula) in the
+object's own comment (§5.1). A metadata table for them would be the one thing this section
+forbids — a second copy of something introspection yields.
 
 The overlay principle does **not** extend to every `_sc_*` table, and the distinction decides
 what the MVP can defer. A table exists in the database whether or not `_sc_tables` has a row

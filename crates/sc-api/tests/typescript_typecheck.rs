@@ -171,6 +171,7 @@ fn generated_app_rest_client_type_checks() -> std::io::Result<()> {
         ownership: None,
         ownership_error: None,
         rls_enabled: false,
+        constraints: Vec::new(),
     };
     let provider = RestProvider::project("/api", &[posts]);
     let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));

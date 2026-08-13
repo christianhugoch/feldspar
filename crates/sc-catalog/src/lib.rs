@@ -20,6 +20,7 @@
 mod calc;
 mod caller;
 mod catalog;
+mod constraint;
 mod events;
 mod field;
 mod field_meta;
@@ -35,6 +36,11 @@ mod table_meta;
 
 pub use caller::CallerContext;
 pub use catalog::{Catalog, SchemaStep};
+pub use constraint::{
+    ConstraintKind, META_KEY as CONSTRAINT_META_KEY, TableConstraint, constrained_fields,
+    create_constraint_steps, drop_constraint_steps, formula_fields, full_text_expression,
+    validate_formula, violated_constraint,
+};
 pub use events::{TableEvents, TableWrite, WriteOp};
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
 pub use field_meta::{
@@ -147,6 +153,7 @@ mod tests {
                 referenced_table: "person".into(),
                 referenced_columns: vec!["id".into()],
             }],
+            constraints: Vec::new(),
         }
     }
 

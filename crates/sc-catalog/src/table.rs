@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use sc_db::PhysicalTable;
 use sc_types::{BaseField, BasicType, RichTypeRef, TypeRef};
 
+use crate::constraint::TableConstraint;
 use crate::field::{Attrs, DataField, DataFieldKind, DbId, FieldId, TableId};
 use crate::field_meta::FieldMeta;
 use crate::table_meta::{TableMeta, TableMetaId};
@@ -119,6 +120,14 @@ pub struct Table {
     /// Whether row-level security is enabled for this table (§7.3; enforcement
     /// is Phase 6's — until then the flag is stored and surfaced, not acted on).
     pub rls_enabled: bool,
+    /// The table's constraints: its jointly-unique keys, its indexes and its row
+    /// constraints (see [`constraint`](crate::constraint)).
+    ///
+    /// Read back from the database rather than stored, which is why it sits here
+    /// beside `primary_key` and not in the overlay: a constraint *is* a fact of
+    /// the schema (§9's rule), so a `UNIQUE` added in `psql` is in this list and
+    /// nothing Saltcorn stores can disagree with it.
+    pub constraints: Vec<TableConstraint>,
 }
 
 impl Table {
@@ -160,6 +169,11 @@ impl Table {
             ownership: None,
             ownership_error: None,
             rls_enabled: false,
+            constraints: physical
+                .constraints
+                .iter()
+                .filter_map(TableConstraint::from_physical)
+                .collect(),
         }
     }
 
@@ -194,6 +208,7 @@ impl Table {
             ownership: None,
             ownership_error: None,
             rls_enabled: false,
+            constraints: Vec::new(),
         }
     }
 
@@ -507,6 +522,7 @@ mod tests {
             ownership: None,
             ownership_error: None,
             rls_enabled: false,
+            constraints: Vec::new(),
         }
     }
 

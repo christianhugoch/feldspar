@@ -27,7 +27,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 use sc_api::{rows, schema_edit};
-use sc_catalog::{Catalog, DataFieldKind, Table, load_file_store_by_name};
+use sc_catalog::{
+    Catalog, ConstraintKind, DataFieldKind, Table, TableConstraint, load_file_store_by_name,
+};
 use sc_db::{ColumnGenerator, SchemaChange};
 use sc_error::{Error, Result};
 use sc_query::{Expr, Insert, Statement};
@@ -157,6 +159,15 @@ pub async fn restore_backup(
             }
             Err(e) => report.skipped(format!("rows of `{name}`: {}", e.causes())),
         }
+    }
+
+    // Constraints last, **after** the rows, exactly as `pg_dump` orders them: a
+    // unique constraint created over the restored data checks it in one pass
+    // rather than once per insert, and a row constraint created first would have
+    // judged every row as it arrived — against a table whose other rows were not
+    // in yet (§5.1).
+    for name in &restored_tables {
+        restore_constraints(catalog, &entries, name, &mut report).await;
     }
 
     // --- file stores: the definition, then the bytes, then the rules ---------
@@ -367,6 +378,134 @@ async fn restore_fields(
         let result = add_field(catalog, name, field).await;
         report.outcome(&format!("column `{name}.{field_name}`"), result);
     }
+}
+
+/// Add the constraints the backup describes and this table has not got.
+///
+/// Without this a restore would hand back a table that **accepts what the
+/// original refused** — the columns and the rows, with none of the rules that
+/// were the point of half of them — and would say nothing about it. Constraints
+/// are not stored in an `_sc_*` table (§5.1), so they travel in the backup as
+/// what the database reported, which is also how a constraint somebody added by
+/// hand comes back.
+///
+/// Two things are deliberately not attempted. A constraint the table already has
+/// is left alone rather than replaced, like a column that is already there. And
+/// an index over an **expression** that Saltcorn did not create is reported as
+/// skipped rather than approximated: what could be recreated from it is an index
+/// over no columns, which is not the index the backup described.
+async fn restore_constraints(
+    catalog: &Catalog,
+    entries: &Entries,
+    name: &str,
+    report: &mut RestoreReport,
+) {
+    let Ok(document) = json_entry(entries, &format!("tables/{name}/table.json")) else {
+        return;
+    };
+    for value in array_field(&document, "constraints") {
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let constraint_name = obj
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if constraint_name.is_empty() {
+            continue;
+        }
+        let live = match catalog.require(name) {
+            Ok(table) => table,
+            Err(e) => {
+                report.skipped(format!("constraints of `{name}`: {}", e.causes()));
+                return;
+            }
+        };
+        if live.constraints.iter().any(|c| c.name == constraint_name) {
+            continue;
+        }
+        let what = format!("constraint `{constraint_name}` on `{name}`");
+        let constraint = match constraint_from_backup(obj) {
+            Ok(constraint) => constraint,
+            Err(e) => {
+                report.skipped(format!("{what}: {}", e.causes()));
+                continue;
+            }
+        };
+        let result = schema_edit::apply(
+            catalog,
+            &[schema_edit::Operation::AddConstraint {
+                table: name.to_owned(),
+                given_name: String::new(),
+                constraint,
+            }],
+            &schema_edit::ApplyOptions::default(),
+        )
+        .await
+        .map(|_| what.clone());
+        report.outcome(&what, result);
+    }
+}
+
+/// One constraint out of a backup's `table.json`, keeping the name it had — a
+/// restored constraint reports itself by the same name a violation would have
+/// named before the backup was taken.
+fn constraint_from_backup(obj: &Map<String, Json>) -> Result<TableConstraint> {
+    let text = |key: &str| {
+        obj.get(key)
+            .and_then(Json::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let fields: Vec<String> = obj
+        .get("fields")
+        .and_then(Json::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Json::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let type_name = obj
+        .get("type")
+        .and_then(Json::as_str)
+        .ok_or_else(|| Error::invalid("a constraint entry needs a `type`"))?;
+    let kind = match type_name {
+        "unique" => ConstraintKind::Unique { fields },
+        "index" if fields.is_empty() => {
+            return Err(Error::invalid(
+                "an index over an expression is not one this restore can recreate; \
+                 add it by hand",
+            ));
+        }
+        "index" => ConstraintKind::Index {
+            fields,
+            expression: None,
+            method: text("method").unwrap_or_else(|| "btree".to_owned()),
+        },
+        "full_text_search" => ConstraintKind::FullTextSearch {
+            language: text("language").unwrap_or_else(|| "english".to_owned()),
+        },
+        "formula" => ConstraintKind::Formula {
+            formula: text("formula")
+                .ok_or_else(|| Error::invalid("a row constraint entry needs a `formula`"))?,
+        },
+        other => {
+            return Err(Error::invalid(format!(
+                "`{other}` is not a constraint type"
+            )));
+        }
+    };
+    let name = obj
+        .get("name")
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let mut constraint = TableConstraint::new(name, kind);
+    constraint.error_message = text("error_message");
+    Ok(constraint)
 }
 
 async fn add_field(catalog: &Catalog, table: &str, field: &Map<String, Json>) -> Result<String> {
