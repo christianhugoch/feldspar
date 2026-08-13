@@ -2,6 +2,12 @@
 
 Changes in reverse chronological order.
 
+## Settings picks its section with pills
+
+The Settings screen's SSL/Backup switcher is `nav nav-pills` rather than `nav
+nav-tabs`. Tabler styles both, and nothing but the class changes: the folder-tab
+strip becomes a row of rounded buttons with the showing one filled.
+
 ## A key that is switched on afterwards fills itself in too
 
 The primary-key tick box gave a table its key but not the means to write a row into

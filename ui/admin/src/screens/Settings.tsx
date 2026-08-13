@@ -91,11 +91,11 @@ export function Settings() {
       <PageBody>
         {/* Hand-built rather than react-bootstrap's `Tabs`, for the reason the
             multi-select is hand-built: the admin SPA is served under a strict CSP
-            with no inline styles, and these are Tabler's own `.nav-tabs` classes
+            with no inline styles, and these are Tabler's own `.nav-pills` classes
             with nothing but classes doing the work. Each panel is mounted only
             while it is showing, which is what makes the Backup tab's first render
             the thing that loads its options. */}
-        <ul className="nav nav-tabs mb-3" role="tablist">
+        <ul className="nav nav-pills mb-3" role="tablist">
           {SETTINGS_TABS.map((entry) => (
             <li className="nav-item" key={entry.id} role="presentation">
               <button
