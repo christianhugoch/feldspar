@@ -2,6 +2,12 @@
 
 Changes in reverse chronological order.
 
+## Add Example to formula placeholders 
+
+Prepended "Example: " to placeholders for formulas in the admin ui, because due to low 
+contrast in dark-mode, it is difficult to see if the input contents is the placeholder 
+or an entered formula
+
 ## A field can be edited from the fields list
 
 The fields list on the table page could add a field and drop one, and nothing in between.

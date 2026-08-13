@@ -676,7 +676,7 @@ function Settings({
               rows={2}
               className="font-monospace"
               value={formula}
-              placeholder="owner === user.id"
+              placeholder="Example: owner === user.id"
               onChange={(e) => setFormula(e.target.value)}
             />
             <Form.Text muted>

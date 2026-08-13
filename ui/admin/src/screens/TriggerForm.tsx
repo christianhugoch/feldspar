@@ -414,7 +414,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                     rows={2}
                     className="font-monospace"
                     value={onlyIf}
-                    placeholder="pages > 100"
+                    placeholder="Example: pages > 100"
                     onChange={(e) => setOnlyIf(e.target.value)}
                   />
                   <Form.Text muted>
