@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## A field can be edited from the fields list
+
+The fields list on the table page could add a field and drop one, and nothing in between.
+A field's label, its rich type, its attributes and its kind are all overlay settings that
+`updateField` has always been able to change (§3.3) — there was simply no way to reach it
+from the admin UI, so a `String` field created with the wrong `max_length` had to be
+dropped, taking its data with it, and made again.
+
+Each row of the list now has an **Edit** button, and it opens the **same modal** the Add
+button does, seeded from the field. One modal rather than two, because a field is one thing
+to describe however it got there, and two forms would be two places for "a File's parameters
+live on the `kind` object, not in `attributes`" to be got right or wrong independently. The
+form's model moved out of the screen into `ui/admin/src/fieldForm.ts`, where the round trip —
+a field as `listFields` reports it, into the form, back out as a request that means the same
+thing — is a set of plain functions and is asserted without a browser.
+
+What an edit may change is narrower than what an add may, and the modal says so rather than
+offering what it would then drop: the **name** and the **nullability** are shown disabled
+(a rename or a NOT NULL is a migration, which is out of scope), and so is **Calculated**,
+since whether a field has a column at all is settled when it is made. Everything else — the
+type, a rich type's attributes, a File's store and folder, a Key's target and summary — is
+editable, and the modal gained **Label** and **Description** inputs, which the add form never
+had. Those two are not a flourish: `updateField` is whole-object like `updateTable`, so a
+form that could not *show* a label would have cleared it every time an admin opened a field
+to change something else.
+
+One server-side fix came out of the round trip. `updateField` recorded whatever `type` it was
+given as the overlay's rich type, including a **basic** type name — and the editor sends back
+the type it read, which for a plain `text` column is `text`. That left the overlay naming a
+rich type that is not registered: `listFields` went on describing the field correctly while
+the catalog reported it as broken. It now records only a rich name, which is what `createField`
+has always stored for the same field (`resolve_field_type` already returned exactly this).
+The new `field_api` test writes every field of a table straight back as it read it and asserts
+both that nothing changed and that the catalog has no merge issues — which is the half that
+`listFields` alone cannot show.
+
 ## The default port is 3032
 
 The server bound `127.0.0.1:3000` unless told otherwise. 3000 is the busiest port on a

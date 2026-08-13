@@ -88,7 +88,12 @@ impl Client {
 }
 
 /// A router over the admin endpoints with a logged-in admin and a `book` table.
-async fn setup() -> sc_error::Result<(Client, TestDb)> {
+///
+/// The catalog comes back alongside the client because one thing the API does not
+/// report is whether an overlay row still *merges*: a field configured as a rich
+/// type that is not registered is reported as an issue, not as an error, and the
+/// only way to assert it did not happen is to ask the catalog.
+async fn setup() -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
     let db = TestDb::new().await?;
     db.client()
         .await?
@@ -111,7 +116,7 @@ async fn setup() -> sc_error::Result<(Client, TestDb)> {
     let apps = Arc::new(AppMounts::new(catalog.clone()));
     let router = build_router(
         &sc_api::admin_endpoints(),
-        admin_handlers(catalog, apps),
+        admin_handlers(catalog.clone(), apps),
         sessions,
         &ServerConfig::default(),
     )?;
@@ -129,7 +134,7 @@ async fn setup() -> sc_error::Result<(Client, TestDb)> {
     client
         .send("POST", "/api/tables", Some(json!({ "name": "book" })))
         .await;
-    Ok((client, db))
+    Ok((client, catalog, db))
 }
 
 /// The field named `name` from a `listFields` array.
@@ -144,7 +149,7 @@ fn field<'a>(fields: &'a Value, name: &str) -> &'a Value {
 
 #[tokio::test]
 async fn create_read_and_edit_a_rich_field_and_a_file_field() -> sc_error::Result<()> {
-    let (mut client, _db) = setup().await?;
+    let (mut client, _catalog, _db) = setup().await?;
 
     // A rich `String` field: `type` is the rich type's name, and its attributes
     // ride along. The SQL type is derived (text), never sent.
@@ -217,9 +222,65 @@ async fn create_read_and_edit_a_rich_field_and_a_file_field() -> sc_error::Resul
     Ok(())
 }
 
+/// The round trip the field editor performs when an admin opens a field, changes
+/// one thing and saves: every field is read from `listFields` and written
+/// straight back through `updateField`.
+///
+/// `updateField` is whole-object — what is left out is cleared — so the editor
+/// re-sends everything it read, including the type of a field that has no rich
+/// type at all. That is the case worth pinning down: `text` names the column's
+/// *basic* type, so it must be recorded as "no rich type" rather than as a rich
+/// type called `text`, which is not registered and would leave the field's
+/// overlay reported as broken while `listFields` went on describing it correctly.
+#[tokio::test]
+async fn a_field_read_and_written_straight_back_is_unchanged() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    for body in [
+        json!({ "name": "title", "type": "text" }),
+        json!({ "name": "subtitle", "type": "string", "attributes": { "max_length": 200 } }),
+        json!({ "name": "pages", "type": "int" }),
+    ] {
+        let (status, body) = client
+            .send("POST", "/api/tables/book/fields", Some(body))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    let (_, before) = client.send("GET", "/api/tables/book/fields", None).await;
+    for f in before.as_array().unwrap() {
+        let name = f["name"].as_str().unwrap();
+        // Exactly what the editor sends back: the whole overlay, and nothing that
+        // belongs to the column.
+        let (status, body) = client
+            .send(
+                "PUT",
+                &format!("/api/tables/book/fields/{name}"),
+                Some(json!({
+                    "type": f["type"],
+                    "label": f["label"],
+                    "description": f["description"],
+                    "attributes": f["attributes"],
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    }
+
+    let (_, after) = client.send("GET", "/api/tables/book/fields", None).await;
+    assert_eq!(after, before, "a field written back unchanged is unchanged");
+
+    // And no field is left configured as something the catalog cannot merge —
+    // the failure `listFields` alone would not show.
+    let issues = catalog.field_overlay_issues()?;
+    assert!(issues.is_empty(), "{issues:?}");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn list_field_types_offers_basic_rich_and_kinds_with_specs() -> sc_error::Result<()> {
-    let (mut client, _db) = setup().await?;
+    let (mut client, _catalog, _db) = setup().await?;
 
     let (status, body) = client.send("GET", "/api/field-types", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -261,7 +322,7 @@ async fn list_field_types_offers_basic_rich_and_kinds_with_specs() -> sc_error::
 
 #[tokio::test]
 async fn an_unknown_type_is_refused_by_name() -> sc_error::Result<()> {
-    let (mut client, _db) = setup().await?;
+    let (mut client, _catalog, _db) = setup().await?;
 
     let (status, body) = client
         .send(
@@ -297,7 +358,7 @@ async fn an_unknown_type_is_refused_by_name() -> sc_error::Result<()> {
 /// with a broken expression refused up front.
 #[tokio::test]
 async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
-    let (mut client, _db) = setup().await?;
+    let (mut client, _catalog, _db) = setup().await?;
 
     // A real column the calc field reads.
     let (status, body) = client
@@ -444,7 +505,7 @@ async fn create_and_read_a_calculated_field() -> sc_error::Result<()> {
 /// and what it is shown as are chosen together.
 #[tokio::test]
 async fn a_key_field_takes_its_storage_type_from_its_target() -> sc_error::Result<()> {
-    let (mut client, _db) = setup().await?;
+    let (mut client, _catalog, _db) = setup().await?;
 
     // The table to point at, with a column to summarise rows by.
     client

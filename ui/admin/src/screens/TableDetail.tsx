@@ -42,31 +42,24 @@ import {
 } from "../icons";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
 import type {
-  CreateFieldRequest,
   ListFieldsResponse,
   ListFieldTypesResponse,
   ListTablesResponse,
   ListTriggersResponse,
 } from "../client";
 import {
-  EMPTY_KEY,
-  keyIsComplete,
-  keyKindRequest,
-  keyStorage,
-  reconcileKey,
-  type KeyKind,
-} from "../keyField";
+  createFieldBody,
+  fieldForm,
+  fieldFormError,
+  newFieldForm,
+  updateFieldBody,
+  type FieldForm,
+  type FieldItem,
+  type FieldKind,
+} from "../fieldForm";
+import { keyStorage, reconcileKey, type KeyKind } from "../keyField";
 import { roleOptions, useRoles, type Roles } from "../roles";
-import { SettingsFields, buildConfig } from "../settings";
-
-/** A field's kind, narrowed from the `unknown` the API types it as. */
-type FieldKind = {
-  type?: string;
-  store?: string;
-  folder?: string | null;
-  target_table?: string;
-  expression?: string;
-} | null;
+import { SettingsFields } from "../settings";
 
 /** A one-line description of a field's kind for the fields table. */
 function kindLabel(kind: unknown): string {
@@ -755,22 +748,32 @@ function RoleSelect({
   );
 }
 
+/** What the field modal is open on: a new field, or one that exists. */
+type Editing = { mode: "add" } | { mode: "edit"; field: string };
+
 /**
- * The fields (columns) panel: list and add (design §3.4).
+ * The fields (columns) panel: list, add and edit (design §3.4).
  *
- * The card is the **list**; adding is a modal behind an "Add field" button. The
- * form is the taller of the two by some way — a Key's three dependent selects, a
- * rich type's whole attribute spec — and side by side it either squeezed the
- * list into half a page or left a column of white space under it, depending on
- * which type was chosen. In a modal it can be as tall as it needs to be, and the
- * card goes back to being the reference an admin reads.
+ * The card is the **list**; adding and editing are the same modal behind the
+ * "Add field" button and each row's Edit button. The form is the taller of the
+ * two by some way — a Key's three dependent selects, a rich type's whole
+ * attribute spec — and side by side it either squeezed the list into half a page
+ * or left a column of white space under it, depending on which type was chosen.
+ * In a modal it can be as tall as it needs to be, and the card goes back to
+ * being the reference an admin reads.
  *
- * The "add field" type input is a pick-list assembled from `listFieldTypes` —
- * basic types, rich types and the Key/File kinds in one list — and choosing a
- * type renders **its** declared attribute form beneath, driven entirely by the
- * type's `config_spec` with no per-type code here. That is the same "settings as
- * data" move a file-store backend's form is built on: a rich type or a kind added
- * to the server's registry gets a working form with no change to this file.
+ * One modal for both, because a field is one thing to describe however it got
+ * here, and the alternative is two forms that have to agree about where a File's
+ * parameters live. What differs is only what may be changed: an edit writes the
+ * `_sc_fields` overlay and nothing else (§3.3), so the name and the NOT NULL are
+ * shown disabled rather than offered and quietly dropped.
+ *
+ * The type input is a pick-list assembled from `listFieldTypes` — basic types,
+ * rich types and the Key/File kinds in one list — and choosing a type renders
+ * **its** declared attribute form beneath, driven entirely by the type's
+ * `config_spec` with no per-type code here. That is the same "settings as data"
+ * move a file-store backend's form is built on: a rich type or a kind added to
+ * the server's registry gets a working form with no change to this file.
  */
 function Fields({
   table,
@@ -785,66 +788,55 @@ function Fields({
   tables: ListTablesResponse | null;
   onChange: () => void;
 }) {
-  /** Whether the add-field modal is open. */
-  const [adding, setAdding] = useState(false);
-  const [name, setName] = useState("");
-  const [typeName, setTypeName] = useState("");
-  const [nullable, setNullable] = useState(true);
-  // A calculated field is virtual — no column, only an expression computed on
-  // read (design §7.3 / Phase 8). When checked, the type picker names the
-  // value's *display* type and `expression` holds the formula.
-  const [calculated, setCalculated] = useState(false);
-  const [expression, setExpression] = useState("");
-  // Attribute-form values (rich type attributes, or a kind's parameters),
-  // keyed by spec-field name. Reset whenever the chosen type changes.
-  const [attrs, setAttrs] = useState<Record<string, string>>({});
-  // A Key's parameters, which the generic attribute form cannot render: they
-  // depend on each other (see `keyField.ts`). Unused for any other kind.
-  const [keyKind, setKeyKind] = useState<KeyKind>(EMPTY_KEY);
+  /** What the modal is open on, or `null` when it is closed. */
+  const [editing, setEditing] = useState<Editing | null>(null);
+  const [form, setForm] = useState<FieldForm>(newFieldForm(""));
   const [targetFields, setTargetFields] = useState<ListFieldsResponse | null>(null);
   const [busy, setBusy] = useState(false);
   // Two error slots, because the two things this card does now happen in two
   // places: a refused drop belongs on the card, beside the row it was about,
-  // and everything the add form can be told belongs in the modal the admin is
+  // and everything the field form can be told belongs in the modal the admin is
   // looking at.
   const [error, setError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
-  const selected = fieldTypes?.find((t) => t.name === typeName) ?? null;
+  const update = (patch: Partial<FieldForm>) => setForm((f) => ({ ...f, ...patch }));
+
+  /** Whether the modal is editing a field that exists — which is what decides
+   * what it may change, not just what it says at the top. */
+  const isEdit = editing?.mode === "edit";
+  const selected = fieldTypes?.find((t) => t.name === form.typeName) ?? null;
   const basicTypes = useMemo(
     () => (fieldTypes ?? []).filter((t) => t.category === "basic"),
     [fieldTypes],
   );
   // A calc field has no column, so a kind (Key/File) makes no sense for it —
   // the picker offers only value types (basic + rich) while it is checked.
-  const typeCategories = calculated ? ["basic", "rich"] : ["basic", "rich", "kind"];
+  const typeCategories = form.calculated ? ["basic", "rich"] : ["basic", "rich", "kind"];
 
   // Default the picker to the first type once the list loads.
   useEffect(() => {
-    if (!typeName && fieldTypes && fieldTypes.length > 0) {
-      setTypeName(fieldTypes[0].name);
+    if (!form.typeName && fieldTypes && fieldTypes.length > 0) {
+      update({ typeName: fieldTypes[0].name });
     }
-  }, [fieldTypes, typeName]);
-
-  // A different type has different attributes, so clear what was entered.
-  useEffect(() => {
-    setAttrs({});
-  }, [typeName]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fieldTypes, form.typeName]);
 
   // Turning on "calculated" while a kind is selected would leave an invalid
   // pairing; fall back to the first value type.
   useEffect(() => {
-    if (calculated && selected?.category === "kind") {
-      setTypeName(basicTypes[0]?.name ?? "");
+    if (form.calculated && selected?.category === "kind") {
+      update({ typeName: basicTypes[0]?.name ?? "" });
     }
-  }, [calculated, selected, basicTypes]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.calculated, selected, basicTypes]);
 
   // The chosen target table's own fields, so the target and summary selects
   // offer what that table actually has. Loaded here rather than from the tables
   // listing because `listTables` reports settings, not columns — and a table's
   // fields change under this screen as often as they are edited on it.
   useEffect(() => {
-    const target = keyKind.target_table;
+    const target = form.key.target_table;
     if (!target) {
       setTargetFields(null);
       return;
@@ -858,7 +850,9 @@ function Fields({
         // Re-check the selects against what the table has: a target field left
         // over from the previously chosen table would name a column of the
         // wrong one.
-        setKeyKind((k) => (k.target_table === target ? reconcileKey(k, list) : k));
+        setForm((f) =>
+          f.key.target_table === target ? { ...f, key: reconcileKey(f.key, list) } : f,
+        );
       })
       .catch(() => {
         if (!cancelled) setFormError(`Could not read the fields of “${target}”.`);
@@ -866,61 +860,50 @@ function Fields({
     return () => {
       cancelled = true;
     };
-  }, [keyKind.target_table]);
+  }, [form.key.target_table]);
 
   /** Open the modal on an empty form — never on what the last one left behind. */
   const openAdd = () => {
-    setName("");
-    setNullable(true);
-    setCalculated(false);
-    setExpression("");
-    setAttrs({});
-    setKeyKind(EMPTY_KEY);
+    setForm(newFieldForm(fieldTypes?.[0]?.name ?? ""));
     setFormError(null);
-    setAdding(true);
+    setEditing({ mode: "add" });
   };
 
-  const add = async (e: FormEvent) => {
+  /** Open the modal on a field that exists, seeded from what the server says it
+   * is — so saving without touching anything is a no-op rather than a reset. */
+  const openEdit = (field: FieldItem) => {
+    setForm(fieldForm(field));
+    setFormError(null);
+    setEditing({ mode: "edit", field: field.name });
+  };
+
+  const save = async (e: FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !selected) return;
-    if (calculated && !expression.trim()) {
-      setFormError("A calculated field needs a formula.");
-      return;
-    }
-    if (!calculated && selected.name === "key" && !keyIsComplete(keyKind)) {
-      setFormError("A key needs a table and a field to point at.");
+    if (!editing || !form.name.trim() || !selected) return;
+    const invalid = fieldFormError(form, selected);
+    if (invalid) {
+      setFormError(invalid);
       return;
     }
     setBusy(true);
     setFormError(null);
     try {
-      const body: CreateFieldRequest = { name: name.trim(), type: selected.name, required: !nullable };
-      if (calculated) {
-        // Virtual field: no column, never nullable, no storage kind. The chosen
-        // type stays as the value's display type; the expression is the field.
-        body.required = false;
-        body.kind = { type: "calc", expression: expression.trim() };
-      } else if (selected.name === "key") {
-        // No `type`: a key is stored as whatever its target is stored as, and
-        // the server derives that from the field it points at rather than
-        // trusting an answer this form would have to guess.
-        delete body.type;
-        body.kind = keyKindRequest(keyKind);
-      } else if (selected.category === "kind") {
-        // A File is a path, so it is stored as text; its parameters come from
-        // the kind's declared spec like any other settings form.
-        body.type = "text";
-        body.kind = { type: selected.name, ...buildConfig(selected.config_spec, attrs) };
-      } else if (selected.category === "rich") {
-        body.attributes = buildConfig(selected.config_spec, attrs);
+      if (editing.mode === "edit") {
+        await api.updateField(table, editing.field, updateFieldBody(form, selected));
+      } else {
+        await api.createField(table, createFieldBody(form, selected));
       }
-      await api.createField(table, body);
       // The field is in the list behind the modal now, so the modal's work is
       // done. A refusal leaves it open, on the values that were refused.
-      setAdding(false);
+      setEditing(null);
       onChange();
     } catch (err) {
-      setFormError(errorMessage(err, "Could not add the field."));
+      setFormError(
+        errorMessage(
+          err,
+          editing.mode === "edit" ? "Could not save the field." : "Could not add the field.",
+        ),
+      );
     } finally {
       setBusy(false);
     }
@@ -981,14 +964,24 @@ function Fields({
                 <td>{kindLabel(f.kind)}</td>
                 <td>{f.nullable ? "yes" : "no"}</td>
                 <td className="text-end">
-                  <Button
-                    size="sm"
-                    variant="outline-danger"
-                    disabled={busy}
-                    onClick={() => void drop(f.name)}
-                  >
-                    Delete
-                  </Button>
+                  <div className="btn-list justify-content-end flex-nowrap">
+                    <Button
+                      size="sm"
+                      variant="outline-secondary"
+                      disabled={busy}
+                      onClick={() => openEdit(f)}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline-danger"
+                      disabled={busy}
+                      onClick={() => void drop(f.name)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -999,26 +992,61 @@ function Fields({
           Add field
         </Button>
 
-        <Modal show={adding} onHide={() => setAdding(false)} size="lg" scrollable>
+        <Modal show={editing !== null} onHide={() => setEditing(null)} size="lg" scrollable>
           {/* The form wraps the whole modal so that the footer's button is the
               form's submit and Return in a text box does what the button does. */}
-          <Form onSubmit={add}>
+          <Form onSubmit={save}>
             <Modal.Header closeButton>
-              <Modal.Title className="h4">Add field to {table}</Modal.Title>
+              <Modal.Title className="h4">
+                {isEdit ? `Edit ${table}.${form.name}` : `Add field to ${table}`}
+              </Modal.Title>
             </Modal.Header>
             <Modal.Body>
               {formError && <Alert variant="danger">{formError}</Alert>}
-              <Form.Group className="mb-2" controlId="fieldName">
-                <Form.Label>Name</Form.Label>
+              <Row>
+                <Col md={6}>
+                  <Form.Group className="mb-2" controlId="fieldName">
+                    <Form.Label>Name</Form.Label>
+                    <Form.Control
+                      value={form.name}
+                      autoFocus={!isEdit}
+                      // A rename is a migration, which `updateField` does not do
+                      // (§3.3) — shown rather than hidden, because the name is
+                      // the first thing that says which field this is.
+                      disabled={isEdit}
+                      onChange={(e) => update({ name: e.target.value })}
+                    />
+                    {isEdit && <Form.Text muted>A field cannot be renamed.</Form.Text>}
+                  </Form.Group>
+                </Col>
+                <Col md={6}>
+                  <Form.Group className="mb-2" controlId="fieldLabel">
+                    <Form.Label>Label</Form.Label>
+                    <Form.Control
+                      value={form.label}
+                      placeholder={form.name}
+                      onChange={(e) => update({ label: e.target.value })}
+                    />
+                    <Form.Text muted>Shown instead of the name. Blank uses the name.</Form.Text>
+                  </Form.Group>
+                </Col>
+              </Row>
+              <Form.Group className="mb-2" controlId="fieldDescription">
+                <Form.Label>Description</Form.Label>
                 <Form.Control
-                  value={name}
-                  autoFocus
-                  onChange={(e) => setName(e.target.value)}
+                  value={form.description}
+                  onChange={(e) => update({ description: e.target.value })}
                 />
               </Form.Group>
               <Form.Group className="mb-2" controlId="fieldType">
-                <Form.Label>{calculated ? "Value type" : "Type"}</Form.Label>
-                <Form.Select value={typeName} onChange={(e) => setTypeName(e.target.value)}>
+                <Form.Label>{form.calculated ? "Value type" : "Type"}</Form.Label>
+                <Form.Select
+                  value={form.typeName}
+                  // A different type has different attributes, so what was
+                  // entered for the last one is cleared rather than sent under
+                  // names the new type does not have.
+                  onChange={(e) => update({ typeName: e.target.value, attrs: {} })}
+                >
                   {typeCategories.map((category) => {
                     const items = (fieldTypes ?? []).filter((t) => t.category === category);
                     if (items.length === 0) return null;
@@ -1033,10 +1061,17 @@ function Fields({
                     );
                   })}
                 </Form.Select>
-                {calculated && (
+                {form.calculated ? (
                   <Form.Text muted>
                     How the computed value is shown. Its real type comes from the expression.
                   </Form.Text>
+                ) : (
+                  isEdit && (
+                    <Form.Text muted>
+                      The column&apos;s storage is unchanged — this is how its value is read
+                      and shown.
+                    </Form.Text>
+                  )
                 )}
               </Form.Group>
 
@@ -1045,20 +1080,24 @@ function Fields({
                 id="fieldCalculated"
                 type="checkbox"
                 label="Calculated (computed on read, no stored column)"
-                checked={calculated}
-                onChange={(e) => setCalculated(e.target.checked)}
+                checked={form.calculated}
+                // Whether a field has a column is settled when it is made:
+                // turning this on would leave a column nothing reads, and off
+                // would leave a field with no column at all.
+                disabled={isEdit}
+                onChange={(e) => update({ calculated: e.target.checked })}
               />
 
-              {calculated ? (
+              {form.calculated ? (
                 <Form.Group className="mb-1" controlId="fieldExpression">
                   <Form.Label>Formula</Form.Label>
                   <Form.Control
                     as="textarea"
                     rows={2}
                     className="font-monospace"
-                    value={expression}
+                    value={form.expression}
                     placeholder="pages * 2"
-                    onChange={(e) => setExpression(e.target.value)}
+                    onChange={(e) => update({ expression: e.target.value })}
                   />
                   <Form.Text muted>
                     A JavaScript expression over the row&apos;s fields, Ⱶ-joinfields,
@@ -1074,16 +1113,16 @@ function Fields({
                     <KeyFields
                       tables={tables}
                       targetFields={targetFields}
-                      value={keyKind}
-                      onChange={setKeyKind}
+                      value={form.key}
+                      onChange={(key) => update({ key })}
                     />
                   ) : (
                     /* The chosen type's own attributes / a kind's parameters, rendered
                        from its spec — no per-type code lives here. */
                     <SettingsFields
                       spec={selected?.config_spec ?? []}
-                      values={attrs}
-                      onChange={(key, v) => setAttrs((a) => ({ ...a, [key]: v }))}
+                      values={form.attrs}
+                      onChange={(key, v) => setForm((f) => ({ ...f, attrs: { ...f.attrs, [key]: v } }))}
                       idPrefix="field-attr"
                     />
                   )}
@@ -1093,18 +1132,26 @@ function Fields({
                     id="fieldNullable"
                     type="checkbox"
                     label="Nullable"
-                    checked={nullable}
-                    onChange={(e) => setNullable(e.target.checked)}
+                    checked={form.nullable}
+                    // A NOT NULL is the column's, and changing one on a table
+                    // with rows in it is a migration (§3.3).
+                    disabled={isEdit}
+                    onChange={(e) => update({ nullable: e.target.checked })}
                   />
+                  {isEdit && (
+                    <Form.Text muted className="d-block">
+                      Whether the column accepts nulls cannot be changed here.
+                    </Form.Text>
+                  )}
                 </>
               )}
             </Modal.Body>
             <Modal.Footer>
-              <Button variant="secondary" type="button" onClick={() => setAdding(false)}>
+              <Button variant="secondary" type="button" onClick={() => setEditing(null)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={busy || !name.trim() || !selected}>
-                Add field
+              <Button type="submit" disabled={busy || !form.name.trim() || !selected}>
+                {isEdit ? "Save field" : "Add field"}
               </Button>
             </Modal.Footer>
           </Form>

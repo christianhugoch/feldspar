@@ -917,8 +917,15 @@ impl Plan {
             } else {
                 // An unknown type name is refused here; whether a known rich type
                 // fits the column is the merge's to report (§3.2).
-                resolve_field_type(type_name)?;
-                Some(type_name.to_owned())
+                //
+                // Only a *rich* name is recorded, which is what `resolve_field_type`
+                // returns and what `resolve_field` stores when the field is created.
+                // A caller that names the column's basic type — `text` for a field
+                // that reads back as `text`, which is what an editor round-tripping a
+                // field sends — is saying "no rich type", not "the rich type `text`":
+                // recording the latter would leave an overlay naming a rich type that
+                // is not registered, and the merge would report the field as broken.
+                resolve_field_type(type_name)?.1
             };
         }
         if let Some(kind) = &settings.kind {
