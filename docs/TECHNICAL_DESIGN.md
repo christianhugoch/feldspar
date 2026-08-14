@@ -2248,7 +2248,9 @@ pub enum TypeSchema {               // enough to describe args & results and emi
   whose columns are known — so an `EndpointSet` also carries a `ResourceModel` per table (its
   columns and their wire types, which of them a write may set, which are keys into another
   projected table, and the endpoint each operation is performed by). The generated client turns
-  one model into one row interface and one object with methods — `api.tasks.list()`,
+  one model into one row interface (the write shapes are *derived* from it — an insert is the
+  same columns with a different set of them required, said as two key lists rather than as a
+  second copy of the table) and one object with methods — `api.tasks.list()`,
   `.get(id)`, `.create(row)`, `.update(id, row)`, `.delete(id)`, plus a file column's
   `download`/`upload` — rather than four loose methods with `unknown` in their signatures. The
   model *names* its endpoints rather than restating their paths or auth, so an operation the

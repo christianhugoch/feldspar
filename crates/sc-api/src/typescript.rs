@@ -135,6 +135,12 @@ pub fn generate_client(set: &EndpointSet) -> String {
     let mut types: Vec<&str> = vec!["ClientOptions"];
     if !tables.is_empty() {
         types.push("Selected");
+        if tables
+            .iter()
+            .any(|t| t.model.ops.create.is_some() || t.model.ops.update.is_some())
+        {
+            types.push("Insertable");
+        }
         if tables.iter().any(|t| t.model.ops.delete.is_some()) {
             types.push("Deleted");
         }
@@ -165,8 +171,8 @@ pub fn generate_client(set: &EndpointSet) -> String {
     out.push_str("export type { ClientOptions } from \"./helper\";\n");
     if !tables.is_empty() {
         out.push_str(
-            "export type { Deleted, FileApi, FilterOp, FilterValue, Filters, Order, OrderKey, \
-             Selected, TableSchema } from \"./helper\";\n",
+            "export type { Deleted, FileApi, FilterOp, FilterValue, Filters, Insertable, Order, \
+             OrderKey, Selected, TableSchema } from \"./helper\";\n",
         );
     }
     out.push('\n');
@@ -599,20 +605,32 @@ impl TableClient<'_> {
         out.push_str("}\n\n");
 
         if self.model.ops.create.is_some() || self.model.ops.update.is_some() {
+            // Derived from the row rather than written out again: an insert
+            // holds the same columns with the same types, and differs only in
+            // which of them the *caller* has to supply. Saying that as two key
+            // lists says it once — a column renamed in the row is renamed here,
+            // and the two cannot describe different tables.
             let _ = writeln!(
                 out,
                 "/**\n \
-                 * What an insert into `{name}` may say. A column the database fills in — a\n \
-                 * key that numbers itself, one with a default — may be left out; a `NOT NULL`\n \
-                 * column with nothing to fall back on may not.\n \
-                 */"
+                 * What an insert into `{name}` may say. The columns named here must be\n \
+                 * given; the rest may be left out, because the database has something to\n \
+                 * fall back on{read_only_note}.\n \
+                 */",
+                read_only_note = match self.read_only_keys().is_empty() {
+                    true => String::new(),
+                    false => ". The last list is the calculated columns, which no write may \
+                              set"
+                    .to_owned(),
+                }
             );
-            let _ = writeln!(out, "export interface {p}Insert {{");
-            for f in self.model.fields.iter().filter(|f| f.writable()) {
-                let opt = if f.optional_on_insert() { "?" } else { "" };
-                let _ = writeln!(out, "  {}{opt}: {};", f.name, write_field_type(f));
-            }
-            out.push_str("}\n\n");
+            let required = key_union(&self.required_keys());
+            let read_only = self.read_only_keys();
+            let args = match read_only.is_empty() {
+                true => format!("{p}Row, {required}"),
+                false => format!("{p}Row, {required}, {}", key_union(&read_only)),
+            };
+            let _ = writeln!(out, "export type {p}Insert = Insertable<{args}>;\n");
             let _ = writeln!(out, "/** What an update of `{name}` may change. */");
             let _ = writeln!(out, "export type {p}Update = Partial<{p}Insert>;\n");
         }
@@ -845,6 +863,27 @@ impl TableClient<'_> {
         out
     }
 
+    /// The columns an insert must supply: writable, `NOT NULL`, and with nothing
+    /// for the database to fall back on.
+    fn required_keys(&self) -> Vec<&str> {
+        self.model
+            .fields
+            .iter()
+            .filter(|f| f.writable() && !f.optional_on_insert())
+            .map(|f| f.name.as_str())
+            .collect()
+    }
+
+    /// The columns no write may set: the calculated ones.
+    fn read_only_keys(&self) -> Vec<&str> {
+        self.model
+            .fields
+            .iter()
+            .filter(|f| !f.writable())
+            .map(|f| f.name.as_str())
+            .collect()
+    }
+
     /// Whether this table's read declares the query parameter `name` — which is
     /// what decides whether the client names the type that parameter is typed
     /// with.
@@ -882,10 +921,17 @@ fn row_field_type(f: &ResourceField) -> String {
     }
 }
 
-/// A column's type in a write body. `null` is a value a write may set, so a
-/// nullable column takes it; a `NOT NULL` one does not.
-fn write_field_type(f: &ResourceField) -> String {
-    row_field_type(f)
+/// A set of column names as a TypeScript key union — `"title" | "author"`, or
+/// `never` for none, which is the empty union `Pick`/`Omit` already understand.
+fn key_union(keys: &[&str]) -> String {
+    match keys.is_empty() {
+        true => "never".to_owned(),
+        false => keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    }
 }
 
 /// Whether a name can be written as a bare property (`api.tasks`) rather than
@@ -978,6 +1024,24 @@ export type OrderKey<Row> =
 
 /** `order`: one key, or a precedence list of them. */
 export type Order<Row> = OrderKey<Row> | `${OrderKey<Row>},${string}`;
+
+/** Flatten an intersection, so a hover shows the object rather than the pieces. */
+type Flatten<T> = { [K in keyof T]: T[K] } & {};
+
+/**
+ * A write body over a table's row: `Required` must be given, everything else may
+ * be, and `ReadOnly` cannot be given at all.
+ *
+ * A row and an insert hold the same columns with the same types and differ only
+ * in which of them the *caller* has to supply — so a generated client says that
+ * difference as two lists of column names rather than as a second copy of the
+ * table, which could describe a different one.
+ */
+export type Insertable<
+  Row,
+  Required extends keyof Row,
+  ReadOnly extends keyof Row = never,
+> = Flatten<Pick<Row, Required> & Partial<Omit<Row, Required | ReadOnly>>>;
 
 /** The bytes behind a file column. */
 export interface FileApi<Id> {
@@ -1072,9 +1136,6 @@ type UnionToIntersection<U> = (U extends unknown ? (x: U) => void : never) exten
   (x: infer I) => void
   ? I
   : never;
-
-/** Flatten an intersection, so a hover shows the object rather than the pieces. */
-type Flatten<T> = { [K in keyof T]: T[K] } & {};
 
 /** What a read with the select `Sel` answers with. */
 export type Selected<S extends TableSchema, Sel extends string> = string extends Sel

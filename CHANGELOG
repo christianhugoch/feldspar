@@ -30,11 +30,23 @@ await api.posts.delete(created.id);
 await api.posts.cover.upload(1, "cover.png", file);
 ```
 
-`PostsRow` is the table's columns with their nullability; `PostsInsert` is what an
-insert may say — a `NOT NULL` column with no default is *required*, a key that
-numbers itself is not — and `PostsUpdate` is `Partial<PostsInsert>`. A calculated
-column appears in the row and in neither write type, which is the rule the row
-layer already enforced at runtime. `get(id)` is `list` with the key filtered and
+**There is one interface per table, and the write shapes are derived from it.** A
+row and an insert hold the same columns with the same types and differ only in
+which of them the *caller* has to supply, so the client says that difference as
+two lists of column names rather than as a second copy of the table:
+
+```ts
+export interface PostsRow { id: number; title: string; published: string | null; … }
+export type PostsInsert = Insertable<PostsRow, "title" | "author", "word_count">;
+export type PostsUpdate = Partial<PostsInsert>;
+```
+
+`Insertable<Row, Required, ReadOnly>` — `Pick` the required, `Partial` the rest,
+`Omit` the read-only, flattened so a hover shows the object — lives in the helper.
+A `NOT NULL` column with no default is required; a key that numbers itself is not;
+a calculated column is in the row and in no write, which is the rule the row layer
+already enforced at runtime. Rename a column and the two lists cannot go on
+describing a table that no longer exists. `get(id)` is `list` with the key filtered and
 one row asked for, so it needs no endpoint of its own. Endpoints with no table
 behind them — the app's own `login`/`logout`/`whoami`, exposed triggers, custom SQL
 queries — stay loose methods, because that is what they are. A table whose name

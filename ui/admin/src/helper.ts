@@ -81,6 +81,24 @@ export type OrderKey<Row> =
 /** `order`: one key, or a precedence list of them. */
 export type Order<Row> = OrderKey<Row> | `${OrderKey<Row>},${string}`;
 
+/** Flatten an intersection, so a hover shows the object rather than the pieces. */
+type Flatten<T> = { [K in keyof T]: T[K] } & {};
+
+/**
+ * A write body over a table's row: `Required` must be given, everything else may
+ * be, and `ReadOnly` cannot be given at all.
+ *
+ * A row and an insert hold the same columns with the same types and differ only
+ * in which of them the *caller* has to supply — so a generated client says that
+ * difference as two lists of column names rather than as a second copy of the
+ * table, which could describe a different one.
+ */
+export type Insertable<
+  Row,
+  Required extends keyof Row,
+  ReadOnly extends keyof Row = never,
+> = Flatten<Pick<Row, Required> & Partial<Omit<Row, Required | ReadOnly>>>;
+
 /** The bytes behind a file column. */
 export interface FileApi<Id> {
   /** Read them. */
@@ -174,9 +192,6 @@ type UnionToIntersection<U> = (U extends unknown ? (x: U) => void : never) exten
   (x: infer I) => void
   ? I
   : never;
-
-/** Flatten an intersection, so a hover shows the object rather than the pieces. */
-type Flatten<T> = { [K in keyof T]: T[K] } & {};
 
 /** What a read with the select `Sel` answers with. */
 export type Selected<S extends TableSchema, Sel extends string> = string extends Sel
