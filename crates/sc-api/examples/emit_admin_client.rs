@@ -4,14 +4,19 @@
 //! set (design §13.1). That client is a **generated** artifact: this example is
 //! the single command that produces it, so the checked-in `ui/admin/src/client.ts`
 //! never drifts from the Rust endpoint contract. A test
-//! (`tests/admin_client_sync.rs`) asserts the committed file matches this output.
+//! (`tests/admin_client_sync.rs`) asserts the committed files match this output.
+//!
+//! Two files, not one: the client imports the generic half of itself — how a
+//! request is made, how a failure is reported, the types a table's reads are
+//! expressed in — from a `helper.ts` beside it, which is the same text for every
+//! generated client. Given a path, this writes both.
 //!
 //! Usage:
 //!
 //! ```text
-//! # print to stdout
+//! # print the client to stdout
 //! cargo run -p sc-api --example emit_admin_client
-//! # or write to the SPA source tree
+//! # or write the client and its helper into the SPA source tree
 //! cargo run -p sc-api --example emit_admin_client -- ui/admin/src/client.ts
 //! ```
 
@@ -20,7 +25,12 @@ use std::io::Write;
 fn main() -> std::io::Result<()> {
     let client = sc_api::generate_client(&sc_api::admin_endpoints());
     match std::env::args().nth(1) {
-        Some(path) => std::fs::write(path, client),
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            let helper = path.with_file_name(sc_api::CLIENT_HELPER_FILE);
+            std::fs::write(&helper, sc_api::client_helper())?;
+            std::fs::write(path, client)
+        }
         None => std::io::stdout().write_all(client.as_bytes()),
     }
 }

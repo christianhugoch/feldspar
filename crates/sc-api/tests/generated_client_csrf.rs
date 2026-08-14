@@ -41,7 +41,7 @@ const calls: Call[] = [];
 
 const api = createClient();
 await api.login({ email: "a@b.c", password: "pw" });
-await api.listPosts();
+await api.posts.list();
 
 console.log(JSON.stringify(calls));
 "#;
@@ -78,7 +78,11 @@ fn the_generated_client_echoes_the_csrf_cookie_on_mutations() -> std::io::Result
 
     let dir = std::env::temp_dir().join(format!("sc-api-csrf-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("client.ts"), &client_ts)?;
+    std::fs::write(dir.join("client.ts"), for_node(&client_ts))?;
+    std::fs::write(
+        dir.join(sc_api::CLIENT_HELPER_FILE),
+        sc_api::client_helper(),
+    )?;
     std::fs::write(dir.join("driver.ts"), DRIVER_TS)?;
 
     let output = Command::new("node").arg(dir.join("driver.ts")).output()?;
@@ -143,7 +147,11 @@ console.log(JSON.stringify(seen));
     let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));
     let dir = std::env::temp_dir().join(format!("sc-api-csrf-node-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("client.ts"), &client_ts)?;
+    std::fs::write(dir.join("client.ts"), for_node(&client_ts))?;
+    std::fs::write(
+        dir.join(sc_api::CLIENT_HELPER_FILE),
+        sc_api::client_helper(),
+    )?;
     std::fs::write(dir.join("driver.ts"), DRIVER)?;
 
     let output = Command::new("node").arg(dir.join("driver.ts")).output()?;
@@ -156,4 +164,16 @@ console.log(JSON.stringify(seen));
     let headers: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(headers[sc_api::auth::CSRF_HEADER].is_null(), "{headers}");
     Ok(())
+}
+
+/// The generated client, with its one relative import made resolvable by Node.
+///
+/// A TypeScript project must import `"./helper"`: an explicit `.ts` extension is
+/// an error unless `allowImportingTsExtensions` is on, and no consumer should be
+/// made to turn that on. Node, running the same file through its own type
+/// stripping, resolves no extension at all. The generated text is the one every
+/// project gets; this rewrite is the only difference between what is executed
+/// here and what is shipped.
+fn for_node(client_ts: &str) -> String {
+    client_ts.replace("from \"./helper\"", "from \"./helper.ts\"")
 }

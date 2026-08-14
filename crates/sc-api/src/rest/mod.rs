@@ -74,6 +74,7 @@ use crate::endpoint::{
 };
 use crate::ownership;
 use crate::provider::{ApiProvider, ApiRequest, ApiResponse};
+use crate::resource::{ResourceField, ResourceFile, ResourceModel};
 use crate::rows;
 use crate::schema::{TypeSchema, ValueType};
 
@@ -271,8 +272,17 @@ impl RestProvider {
                 .auth(AuthRequirement::LoggedIn),
         );
 
+        // The tables as a *generated consumer* sees them (§13.1): the row shapes
+        // and which endpoint performs which operation on them. Collected here
+        // and registered after the loop, since the endpoint set is borrowed by
+        // the registering closure for the whole of it.
+        let mut resources: Vec<ResourceModel> = Vec::new();
+        let exposed: std::collections::HashSet<&str> =
+            tables.iter().map(|t| t.name.as_str()).collect();
+
         for table in tables {
             let name = &table.name;
+            let mut resource = resource_model(table, &exposed);
             // A table with an ownership formula relaxes its endpoints to
             // Public (§7.3): the formula decides `user === null` — an admin
             // may grant anonymous callers rows — so the gate moves from the
@@ -300,6 +310,8 @@ impl RestProvider {
                 endpoints.register(ep);
             };
 
+            resource.ops.list = Some(op_name("list", name));
+            resource.ops.create = Some(op_name("create", name));
             add(
                 RestOp::List,
                 Endpoint::new(op_name("list", name), Method::Get, collection())
@@ -325,8 +337,12 @@ impl RestProvider {
             // Row-addressing endpoints need exactly one primary-key column to
             // address by; `single_pk` is the same rule the row layer enforces.
             let Ok(pk) = rows::single_pk(table) else {
+                resources.push(resource);
                 continue;
             };
+            resource.primary_key = Some(pk.clone());
+            resource.ops.update = Some(op_name("update", name));
+            resource.ops.delete = Some(op_name("delete", name));
             let id_ty = table
                 .field(&pk)
                 .and_then(|f| f.base.type_.as_basic())
@@ -362,6 +378,11 @@ impl RestProvider {
                 }
                 let field = &data_field.base.name;
                 let scoped = format!("{name}_{field}");
+                resource.ops.files.push(ResourceFile {
+                    field: field.clone(),
+                    download: op_name("download", &scoped),
+                    upload: op_name("upload", &scoped),
+                });
                 let file_item = || path_at(&mount).lit(name).param("id", id_ty).lit(field);
                 add(
                     RestOp::Download {
@@ -390,6 +411,11 @@ impl RestProvider {
                     .handler(HandlerRef::named(op_name("upload", &scoped))),
                 );
             }
+            resources.push(resource);
+        }
+
+        for resource in resources {
+            endpoints.register_resource(resource);
         }
 
         // The app's exposed triggers, one `POST {mount}/actions/{name}` each.
@@ -1270,6 +1296,39 @@ fn normalize_mount(raw: &str) -> String {
     }
 }
 
+/// One table as a generated consumer sees it (§13.1): the shape of its rows, so
+/// a client can type them, and the keys among them that point at *another*
+/// projected table, so an embedded `?select=author(name)` can be typed too.
+///
+/// `exposed` is the set of table names this API projects. A key into a table
+/// outside it keeps its scalar type and gains no relation: the API has no way to
+/// read that table, so an embed through the key is not something a caller can
+/// ask for here.
+fn resource_model(table: &Table, exposed: &std::collections::HashSet<&str>) -> ResourceModel {
+    let mut model = ResourceModel::new(&table.name);
+    for field in &table.fields {
+        let ty = field
+            .base
+            .type_
+            .as_basic()
+            .map_or(ValueType::Text, ValueType::from_basic);
+        let mut rf = ResourceField::new(&field.base.name, ty);
+        rf.required = field.required;
+        rf.has_default = field.generated.is_some();
+        rf.primary_key = field.primary_key;
+        // A calculated field is read on the way out and refused on the way in
+        // (`rows::reject_calc_writes`), so it belongs in a row and in no write.
+        rf.read_only = matches!(field.kind, DataFieldKind::Calc { .. });
+        if let DataFieldKind::Key { target_table, .. } = &field.kind
+            && exposed.contains(target_table.0.as_str())
+        {
+            rf.references = Some(target_table.0.clone());
+        }
+        model.fields.push(rf);
+    }
+    model
+}
+
 /// The endpoint (and generated client method) name for an operation on a table:
 /// `list` + `blog_posts` → `listBlogPosts`. Table names are unique, so these are
 /// unique too; the result is a valid TypeScript identifier as long as the table
@@ -1473,13 +1532,18 @@ mod tests {
             &[table_with_file_field("posts", AccessRules::default())],
         );
         let ts = crate::generate_client(p.endpoints());
-        // A download resolves to a Blob; an upload takes what fetch can send raw.
+        // A file column hangs its two calls off the table's own object: a
+        // download resolves to a Blob, an upload takes what fetch can send raw.
+        assert!(ts.contains("  cover: FileApi<number>;"), "{ts}");
         assert!(
-            ts.contains("downloadPostsCover(id: number): Promise<Blob>"),
+            ts.contains("      async download(id: number): Promise<Blob> {"),
             "{ts}"
         );
         assert!(
-            ts.contains("uploadPostsCover(id: number, filename: string, body: BodyInit)"),
+            ts.contains(
+                "      async upload(id: number, filename: string, body: BodyInit): \
+                 Promise<unknown> {"
+            ),
             "{ts}"
         );
         // The upload body goes out unencoded, with no JSON content type.
@@ -1626,7 +1690,8 @@ mod tests {
         // A generated client types it like any other endpoint.
         let ts = crate::generate_client(p.endpoints());
         assert!(ts.contains("search("));
-        assert!(ts.contains("listPosts(query?: ListPostsQuery)"));
+        // …beside the table's own object, which is where its four endpoints went.
+        assert!(ts.contains("posts: PostsApi;"), "{ts}");
     }
 
     /// A custom SQL query is an endpoint like any other — typed client method,
@@ -1702,6 +1767,45 @@ mod tests {
         assert_eq!(p.endpoints().find("login").unwrap().method, Method::Post);
         assert!(p.endpoints().find("listLogin").is_some());
         assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4);
+
+        // In the generated client the two would want the same property, so the
+        // *table* yields: `login()` is a name the server fixed for every app,
+        // and renaming it would break the ones that call it.
+        let ts = crate::generate_client(p.endpoints());
+        assert!(ts.contains("  loginTable: LoginApi;"), "{ts}");
+        assert!(ts.contains("login(body: LoginRequest)"), "{ts}");
+        assert_eq!(
+            crate::client_property(p.endpoints(), "login").as_deref(),
+            Some("loginTable")
+        );
+    }
+
+    /// A table whose rows cannot be addressed gets the two operations it can
+    /// answer and no others — the client says exactly what the projection did.
+    #[test]
+    fn a_keyless_table_gets_a_client_object_with_only_the_reads_it_can_answer() {
+        let p = RestProvider::project("/api", &[keyless("logs")]);
+        let ts = crate::generate_client(p.endpoints());
+        assert!(ts.contains("  logs: LogsApi;"), "{ts}");
+        assert!(ts.contains("  list<S extends string = \"\">"), "{ts}");
+        assert!(ts.contains("  create(row: LogsInsert)"), "{ts}");
+        // No key to address a row by, so no `get`, `update` or `delete` — and no
+        // `LogsUpdate` type for a call that cannot be made.
+        for absent in ["  get<S extends", "  update(id", "  delete(id"] {
+            assert!(!ts.contains(absent), "{absent} must be absent:\n{ts}");
+        }
+    }
+
+    /// The model names endpoints; a name the set does not have is a mistake in
+    /// the projection, not something to discover in a generated client that
+    /// calls a route the server never mounted.
+    #[test]
+    #[should_panic(expected = "which is not registered")]
+    fn a_resource_naming_an_endpoint_the_set_lacks_is_refused() {
+        let mut set = EndpointSet::new();
+        let mut model = crate::ResourceModel::new("ghosts");
+        model.ops.list = Some("listGhosts".to_owned());
+        set.register_resource(model);
     }
 
     #[test]
@@ -1710,9 +1814,21 @@ mod tests {
         let ts = crate::generate_client(p.endpoints());
         // Same generator as the admin API: an app's client is not special-cased.
         assert!(ts.contains("export interface ApiClient {"));
-        assert!(ts.contains("listPosts(query?: ListPostsQuery): Promise<ListPostsResponse>"));
-        assert!(ts.contains("updatePosts(id: number"));
+        // A table is one object with methods over its own row type, not four
+        // loose methods returning `unknown` (§13.1).
+        assert!(ts.contains("  posts: PostsApi;"), "{ts}");
+        assert!(ts.contains("export interface PostsRow {"), "{ts}");
+        assert!(
+            ts.contains(
+                "  list<S extends string = \"\">(query?: PostsQuery<S>): \
+                 Promise<Array<PostsSelected<S>>>;"
+            ),
+            "{ts}"
+        );
+        assert!(ts.contains("  update(id: number, row: PostsUpdate): Promise<PostsRow>;"));
         assert!(ts.contains("/api/posts/${id}"));
+        // …and no loose method survives beside it.
+        assert!(!ts.contains("listPosts("), "{ts}");
     }
 
     #[test]
@@ -1736,13 +1852,22 @@ mod tests {
         );
 
         let ts = crate::generate_client(p.endpoints());
+        // The read's query type is the endpoint's parameters, typed against the
+        // table's own columns: a column that is not there is a compile error
+        // rather than the 400 it would otherwise become.
         assert!(
             ts.contains(
-                "export type ListPostsQuery = { select?: string; order?: string; \
-                 limit?: number; offset?: number; filter?: Record<string, string> };"
+                "export type PostsQuery<S extends string = \"\"> = {\n\
+                 \x20 /** Columns and embeds to return, e.g. `\"id,title\"`. Omit for whole rows. */\n\
+                 \x20 select?: S;\n\
+                 \x20 /** `\"published.desc\"`, or a precedence list of such keys. */\n\
+                 \x20 order?: Order<PostsRow>;\n\
+                 \x20 limit?: number;\n\
+                 \x20 offset?: number;\n"
             ),
             "{ts}"
         );
+        assert!(ts.contains("  filter?: Filters<PostsRow>;"), "{ts}");
         // A filter's *keys* are column names, so each entry is a pair of its own
         // — `?published=gte.2020-01-01`, not `?filter=…`.
         assert!(

@@ -16,17 +16,28 @@ use std::path::PathBuf;
 
 #[test]
 fn committed_admin_clients_match_generator() {
-    let generated = sc_api::generate_client(&sc_api::admin_endpoints());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Both halves: the client is this endpoint set's, the helper is every
+    // client's, and a stale helper beside a fresh client is the same drift by
+    // another route.
+    let files = [
+        (
+            "client.ts",
+            sc_api::generate_client(&sc_api::admin_endpoints()),
+        ),
+        (sc_api::CLIENT_HELPER_FILE, sc_api::client_helper()),
+    ];
 
     for ui in ["ui/admin", "ui/ide"] {
-        let path = root.join(ui).join("src/client.ts");
-        let committed = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        assert_eq!(
-            committed, generated,
-            "{ui}/src/client.ts is stale. Regenerate it with:\n  \
-             cargo run -p sc-api --example emit_admin_client -- {ui}/src/client.ts"
-        );
+        for (name, generated) in &files {
+            let path = root.join(ui).join("src").join(name);
+            let committed = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            assert_eq!(
+                &committed, generated,
+                "{ui}/src/{name} is stale. Regenerate it with:\n  \
+                 cargo run -p sc-api --example emit_admin_client -- {ui}/src/client.ts"
+            );
+        }
     }
 }

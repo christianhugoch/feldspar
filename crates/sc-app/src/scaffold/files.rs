@@ -23,9 +23,11 @@
 //! §13.3 describes, and — for an application that exposes no auth endpoints — an
 //! anonymous one with no auth layer at all.
 
+use std::fmt::Write as _;
+
 use sc_api::{
-    EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, generate_client,
-    generate_graphql_client, op_name,
+    CLIENT_HELPER_FILE, EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, client_helper,
+    client_property, generate_client, generate_graphql_client, op_name,
 };
 use sc_auth::{ROLE_ADMIN, Role};
 use sc_catalog::{PublicOrigin, Table};
@@ -255,8 +257,16 @@ pub fn runtime_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
             generate_client(ctx.endpoints),
         ),
         GeneratedFile::new(
+            format!("{REACT_RUNTIME_SUBDIR}/{CLIENT_HELPER_FILE}"),
+            client_helper(),
+        ),
+        GeneratedFile::new(
             format!("{REACT_RUNTIME_SUBDIR}/hooks.ts"),
             hooks_ts(ctx.tables, ctx.endpoints),
+        ),
+        GeneratedFile::new(
+            format!("{REACT_RUNTIME_SUBDIR}/store.ts"),
+            store_ts(ctx.tables, ctx.endpoints),
         ),
         GeneratedFile::new(
             format!("{REACT_RUNTIME_SUBDIR}/{RUNTIME_SCHEMA_FILE}"),
@@ -642,11 +652,25 @@ fn base_domain_line(ctx: &ProjectContext<'_>) -> String {
 /// Saltcorn in general.
 fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
     let mut files = format!(
-        "- `{REACT_CLIENT_FILE}` — the typed client. One method per endpoint this \
-         application exposes, with the request and response types the server \
-         declares.\n\
+        "- `{REACT_CLIENT_FILE}` — the typed client. **One object per table** \
+         (`api.tasks.list()`, `.get(id)`, `.create(row)`, `.update(id, row)`, \
+         `.delete(id)`), plus a row interface per table (`TasksRow`, `TasksInsert`, \
+         `TasksUpdate`) and one loose method per endpoint that has no table behind \
+         it. A read's `select` is typed too: `list({{ select: \"id,title\" }})` \
+         answers `{{ id, title }}`, and `list({{ select: \"id,author(name)\" }})` \
+         nests the embedded row — the shape is read off the string by the \
+         compiler.\n\
          - `hooks.ts` — React hooks over that client, one set per table \
-         (`useTasks()`, `useCreateTask()`, …).\n\
+         (`useTasks()`, `useCreateTasks()`, …), sharing one cache: any write to a \
+         table re-runs every read of it.\n\
+         - `store.ts` — a writable, **optimistic** view of a table \
+         (`useTasksStore()`): `rows` with the writes in flight already applied, \
+         `add` / `update` / `remove` that show the change at once and take it back \
+         if the server refuses it. Build on this when a change should appear \
+         before the round trip; on `hooks.ts` when it should not.\n\
+         - `{CLIENT_HELPER_FILE}` — the half of the client that is the same in every \
+         application: how a request is made, how a failure is reported, and the \
+         types a read's `select`, `filter` and `order` are expressed in.\n\
          - `{RUNTIME_SCHEMA_FILE}` — the `CREATE TABLE` definitions of the tables \
          this application declares. A description, not a migration.\n"
     );
@@ -754,8 +778,9 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          \n\
          The server writes that directory and overwrites it on every build and on \
          every change to the application's API definition. It holds the typed \
-         client, the React hooks over it, this application's `{RUNTIME_SCHEMA_FILE}`, \
-         and its own README: **read \
+         client (one object per table: `api.tasks.list()`, `.create(row)`, …), the \
+         React hooks over it, the optimistic per-table store in `store.ts`, this \
+         application's `{RUNTIME_SCHEMA_FILE}`, and its own README: **read \
          [`{REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}`]({REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE})** \
          before writing code that talks to the server.\n\
          \n\
@@ -1218,6 +1243,13 @@ fn route_path(table: &str, tables: &[&Table]) -> String {
 /// up showing real rows in real columns, so the admin's first act is editing
 /// working code rather than replacing a placeholder.
 fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
+    // A table the store can be built over gets the store's page: the same list
+    // and form, with every write shown before the server has confirmed it. The
+    // rest — a keyless table, one the app exposes without writes — get the page
+    // built on the hooks directly, which is what a store cannot be built on.
+    if storable(table, endpoints) {
+        return store_page_tsx(table);
+    }
     let pascal = pascal(&table.name);
     let row_type = format!("{pascal}Row");
     // What the page may do is what the app's API offers, not what the table looks
@@ -1361,6 +1393,114 @@ export default function {pascal}Page() {{
 }}
 "#,
         title = title(&table.name)
+    )
+}
+
+/// The page of a table the store can be built over: the list, a create form and
+/// a delete button, with every write on screen before the server has answered.
+///
+/// The point of generating *this* page rather than the one built on the hooks is
+/// that it is the version an app would end up writing anyway — a row appears the
+/// moment it is typed, a deleted row goes at once, and a write the server refuses
+/// takes its change back and says why.
+fn store_page_tsx(table: &Table) -> String {
+    let name = &table.name;
+    let pascal = pascal(name);
+    let pk = single_pk(table).unwrap_or_default();
+
+    let headers = table
+        .fields
+        .iter()
+        .map(|f| format!("            <th>{}</th>", f.base.label))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cells = table
+        .fields
+        .iter()
+        .map(|f| {
+            format!(
+                "              <td>{{String(row.{} ?? \"\")}}</td>",
+                f.base.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The key is the database's to issue, so the form does not offer it.
+    let inputs: Vec<&sc_catalog::DataField> = table
+        .fields
+        .iter()
+        .filter(|f| !f.primary_key && !matches!(f.kind, sc_catalog::DataFieldKind::Calc { .. }))
+        .collect();
+    let empty_form = inputs
+        .iter()
+        .map(|f| format!("  {}: {}", f.base.name, ts_empty(f)))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let form_fields = inputs
+        .iter()
+        .map(|f| form_control(&f.base.name, basic_type(f)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"import {{ useState }} from "react";
+import {{ use{pascal}Store }} from "../saltcorn/store";
+
+const empty = {{
+{empty_form}
+}};
+
+export default function {pascal}Page() {{
+  const {name} = use{pascal}Store();
+  const [form, setForm] = useState(empty);
+
+  if ({name}.error) return <p className="sc-error">{{{name}.error.message}}</p>;
+
+  return (
+    <section>
+      <h1>{title}</h1>
+      <form
+        className="card"
+        onSubmit={{(e) => {{
+          e.preventDefault();
+          // The row is on screen before this resolves; the store puts it back
+          // if the server refuses it.
+          void {name}.add(form);
+          setForm(empty);
+        }}}}
+      >
+{form_fields}
+        <button type="submit">Add</button>
+      </form>
+      {{{name}.writeError && <p className="sc-error">{{{name}.writeError.message}}</p>}}
+      {{{name}.loading ? (
+        <p>Loading…</p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+{headers}
+            <th />
+            </tr>
+          </thead>
+          <tbody>
+            {{{name}.rows.map((row) => (
+              <tr key={{String(row.{pk})}} style={{{{ opacity: row.$pending ? 0.5 : 1 }}}}>
+{cells}
+              <td>
+                <button onClick={{() => void {name}.remove(row.{pk})}}>Delete</button>
+              </td>
+              </tr>
+            ))}}
+          </tbody>
+        </table>
+      )}}
+    </section>
+  );
+}}
+"#,
+        title = title(name)
     )
 }
 
@@ -1551,25 +1691,45 @@ th {
 
 // --- the generated runtime --------------------------------------------------
 
-/// `src/saltcorn/hooks.ts`: a row type and a hook set **per table**, over the
-/// generated client.
+/// `src/saltcorn/hooks.ts`: a hook set **per table**, over that table's object on
+/// the generated client.
 ///
 /// This is the file that justifies generating the runtime instead of shipping it
 /// as an npm package (§2.1): `useTasks()` returns `TasksRow[]`, and `TasksRow`
 /// comes from this app's own columns. A registry package could only offer
 /// `useRows("tasks"): unknown[]`, which is the part worth having thrown away.
 ///
+/// The row types themselves are the *client's* — generated from the same columns
+/// as the methods that answer with them — and are re-exported here so a page has
+/// one import for its types and its hooks.
+///
 /// The cache is deliberately tiny: one version counter per table, bumped by any
 /// mutation of that table, with `useSyncExternalStore` re-running the affected
 /// queries. That is the whole invalidation model a per-table REST API needs, and
 /// it is why no query library is a dependency.
 fn hooks_ts(tables: &[Table], endpoints: &EndpointSet) -> String {
+    let tables = exposed_tables(tables, endpoints);
     let mut out = String::from(GENERATED_HEADER);
     out.push_str(
+        "\nimport { useCallback, useEffect, useState, useSyncExternalStore } from \"react\";\n\
+         import { createClient, type ApiClient } from \"./client\";\n",
+    );
+    // The row types this file names, imported where imports belong. What each
+    // table *re-exports* is written beside its hooks, so a reader sees the whole
+    // of a table in one place.
+    let row_types: Vec<String> = tables
+        .iter()
+        .flat_map(|t| used_row_types(t, endpoints))
+        .collect();
+    if !row_types.is_empty() {
+        let _ = writeln!(
+            out,
+            "import type {{ {} }} from \"./client\";",
+            row_types.join(", ")
+        );
+    }
+    out.push_str(
         r#"
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import { createClient, type ApiClient } from "./client";
-
 /** The app's typed API client. Endpoint paths already include the API mount. */
 export const api: ApiClient = createClient();
 
@@ -1684,62 +1844,325 @@ export function useMutation<A>(table: string, fn: (arg: A) => Promise<unknown>):
 "#,
     );
 
-    for table in exposed_tables(tables, endpoints) {
+    for table in tables {
         out.push('\n');
         out.push_str(&table_hooks(table, endpoints));
     }
     out
 }
 
-/// The hooks for one table: its row type, the list query, and one mutation per
-/// write **the app's API actually projects**.
+/// `src/saltcorn/store.ts`: a **writable, optimistic** view of a table, over the
+/// same cache the hooks read through.
 ///
-/// Each hook is emitted only when the client has the method it calls. Asking the
-/// endpoint set rather than re-deriving the rule (a keyless table has no
-/// row-addressed endpoints, an unexposed table has none at all) is what keeps the
-/// two halves of the runtime from disagreeing.
-fn table_hooks(table: &Table, endpoints: &EndpointSet) -> String {
+/// The hooks are the honest primitives — a read, a write, and an invalidation —
+/// and an app built straight on them shows the user a spinner between clicking
+/// and seeing. Every app that cares then writes the same layer: apply the change
+/// locally, send it, put it back if the server refuses, and drop the local copy
+/// once the server's own answer arrives. That layer is what this is, and it is
+/// general because none of those four steps knows anything about a particular
+/// table — only how to identify a row and what a not-yet-saved one looks like,
+/// which is exactly what the per-table wrappers below supply.
+///
+/// What is deliberately *not* here is policy: no toasts, no undo timers, no
+/// sorting. Those are the app's, and an app that wants them has `rows` and the
+/// row a delete answers with to build them from.
+fn store_ts(tables: &[Table], endpoints: &EndpointSet) -> String {
+    let stores: Vec<&Table> = exposed_tables(tables, endpoints)
+        .into_iter()
+        .filter(|t| storable(t, endpoints))
+        .collect();
+
+    let mut out = String::from(GENERATED_HEADER);
+    // A file that imports a runtime it then has nothing to use fails the
+    // project's own type-check under `noUnusedLocals`, so an app with no table a
+    // store can be built over gets the explanation instead of the machinery.
+    if stores.is_empty() {
+        out.push_str(
+            "\n// No table here can have a store: a store needs a table whose rows can be\n\
+             // addressed (a single-column primary key) and inserted, changed and deleted\n\
+             // through this app's API. Add one and this file fills itself in.\n\
+             export {};\n",
+        );
+        return out;
+    }
+
+    let types = stores
+        .iter()
+        .map(|t| {
+            let p = pascal(&t.name);
+            format!("  type {p}Row,\n  type {p}Insert,\n  type {p}Update,")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = write!(
+        out,
+        "{STORE_IMPORTS}import {{\n{types}\n}} from \"./client\";\n{STORE_RUNTIME}"
+    );
+    for table in stores {
+        out.push('\n');
+        out.push_str(&table_store(table, endpoints));
+    }
+    out
+}
+
+/// Whether a table can have a store: one that cannot address, insert or delete a
+/// row cannot have a write applied to it locally either.
+fn storable(table: &Table, endpoints: &EndpointSet) -> bool {
+    single_pk(table).is_some()
+        && ["create", "update", "delete"]
+            .iter()
+            .all(|op| has_op(endpoints, op, &table.name))
+}
+
+/// One table's store: the generic one, told how to identify a row of this table
+/// and how to draw one the server has not seen yet.
+fn table_store(table: &Table, endpoints: &EndpointSet) -> String {
     let name = &table.name;
     let pascal = pascal(name);
-    let row = format!("{pascal}Row");
-    let fields = table
+    let obj = client_object(endpoints, name);
+    let pk = single_pk(table).unwrap_or_default();
+    let pk_ty = key_ts_type(endpoints, name);
+    // A row that only exists locally still needs a key, and the server has not
+    // issued one: a negative number (or a `draft-` string) cannot collide with
+    // one it will issue, and is gone the moment the real row arrives.
+    let draft_id = match pk_ty {
+        "number" => "-key".to_owned(),
+        _ => "`draft-${key}`".to_owned(),
+    };
+    let defaults = table
         .fields
         .iter()
+        .filter(|f| f.base.name != pk)
         .map(|f| {
-            let optional = if f.required { "" } else { "?" };
-            let null = if f.required { "" } else { " | null" };
-            format!(
-                "  {}{optional}: {}{null};",
-                f.base.name,
-                ts_type(basic_type(f))
-            )
+            let value = if f.required { ts_empty(f) } else { "null" };
+            format!("        {}: {value},", f.base.name)
         })
         .collect::<Vec<_>>()
         .join("\n");
 
-    let list = op_name("list", name);
+    format!(
+        r#"// --- {name} ---
+
+/** `{name}`, with writes shown before the server has confirmed them. */
+export function use{pascal}Store(): RowStore<{pascal}Row, {pascal}Insert, {pascal}Update, {pk_ty}> {{
+  return useRowStore(
+    "{name}",
+    api.{obj},
+    (row) => row.{pk},
+    // The columns the caller did not give, spread *under* the ones they did:
+    // written the other way round, the defaults would overwrite the row.
+    (row, key) => ({{
+      ...{{
+        {pk}: {draft_id},
+{defaults}
+      }},
+      ...row,
+    }}),
+  );
+}}
+"#
+    )
+}
+
+/// What `store.ts` imports before anything it declares.
+const STORE_IMPORTS: &str = r#"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, invalidate, useQuery } from "./hooks";
+"#;
+
+/// The table-independent half of `store.ts` — everything the per-table wrappers
+/// below it are wrappers *around*.
+const STORE_RUNTIME: &str = r#"
+/** A row as the store holds it: the row, plus whether the server has it yet. */
+export type StoreRow<Row> = Row & { readonly $pending: boolean };
+
+/** The calls a store makes on a table's object of the generated client. */
+export type RowApi<Row, Insert, Update, Id> = {
+  list(): Promise<Row[]>;
+  create(row: Insert): Promise<Row>;
+  update(id: Id, row: Update): Promise<Row>;
+  delete(id: Id): Promise<unknown>;
+};
+
+/** A table, read and written, with every write shown before it lands. */
+export type RowStore<Row, Insert, Update, Id> = {
+  /** The server's rows, with the writes in flight applied over them. */
+  rows: StoreRow<Row>[];
+  /** True until there is something to show. */
+  loading: boolean;
+  /** A read that failed. */
+  error: Error | undefined;
+  /** The last write that failed. Its optimistic change has been taken back. */
+  writeError: Error | undefined;
+  /** True while any write is in flight. */
+  saving: boolean;
+  /** Insert a row, showing it at once. Answers the row the server wrote. */
+  add(row: Insert): Promise<Row | undefined>;
+  /** Change a row, showing the change at once. */
+  update(id: Id, row: Update): Promise<Row | undefined>;
+  /**
+   * Delete a row, hiding it at once. Answers the row **as it was**, which is
+   * what an "undo" has to put back — the server will not hand it over twice.
+   */
+  remove(id: Id): Promise<Row | undefined>;
+  /** Re-read the table. */
+  refresh(): void;
+};
+
+/** One write, held here from the moment it is made until the server answers. */
+type Write<Row, Id> = { key: number; settled: boolean } & (
+  | { kind: "insert"; row: Row }
+  | { kind: "update"; id: Id; row: Partial<Row> }
+  | { kind: "remove"; id: Id }
+);
+
+/**
+ * A table's rows with the writes in flight applied over them.
+ *
+ * The four steps every optimistic UI writes by hand: apply the change locally,
+ * send it, take it back if the server refuses, and drop the local copy once the
+ * server's own answer has arrived. Nothing here knows which table it is looking
+ * at — `identify` says which row is which, and `draft` says what a row that has
+ * not been saved yet looks like, which is all a table has to say about itself.
+ */
+export function useRowStore<Row extends object, Insert, Update extends Partial<Row>, Id>(
+  table: string,
+  rowApi: RowApi<Row, Insert, Update, Id>,
+  identify: (row: Row) => Id,
+  draft: (row: Insert, key: number) => Row,
+): RowStore<Row, Insert, Update, Id> {
+  const query = useQuery<Row[]>(table, () => rowApi.list());
+  const [writes, setWrites] = useState<Write<Row, Id>[]>([]);
+  const [writeError, setWriteError] = useState<Error | undefined>(undefined);
+  const nextKey = useRef(0);
+  const server = query.data;
+
+  // A settled write is one the server has answered, so the next list to arrive
+  // *is* that answer and the local copy has nothing left to add.
+  useEffect(() => {
+    if (!server) return;
+    setWrites((prev) => (prev.some((w) => w.settled) ? prev.filter((w) => !w.settled) : prev));
+  }, [server]);
+
+  const rows = useMemo(() => {
+    let out: StoreRow<Row>[] = (server ?? []).map((row) => ({ ...row, $pending: false }));
+    for (const write of writes) {
+      if (write.kind === "insert") {
+        out = [...out, { ...write.row, $pending: true }];
+      } else if (write.kind === "remove") {
+        out = out.filter((row) => identify(row) !== write.id);
+      } else {
+        out = out.map((row) =>
+          identify(row) === write.id ? { ...row, ...write.row, $pending: true } : row,
+        );
+      }
+    }
+    return out;
+    // `identify` is a new closure every render; what changes the answer is the
+    // server's rows and the writes standing over them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server, writes]);
+
+  const run = useCallback(
+    async <T>(write: Write<Row, Id>, call: () => Promise<T>): Promise<T | undefined> => {
+      setWrites((prev) => [...prev, write]);
+      setWriteError(undefined);
+      try {
+        const answer = await call();
+        setWrites((prev) => prev.map((w) => (w.key === write.key ? { ...w, settled: true } : w)));
+        invalidate(table);
+        return answer;
+      } catch (e: unknown) {
+        // The optimistic change was a claim about what the server would do, and
+        // it did not: take it back rather than leave the user looking at it.
+        setWrites((prev) => prev.filter((w) => w.key !== write.key));
+        setWriteError(e instanceof Error ? e : new Error(String(e)));
+        return undefined;
+      }
+    },
+    [table],
+  );
+
+  // Plain functions rather than memoised ones: each closes over this render's
+  // rows, and a store's writes are called from events, not from dependency
+  // arrays, so a stable identity would buy nothing and could go stale.
+  const add = (row: Insert): Promise<Row | undefined> => {
+    const key = ++nextKey.current;
+    return run({ key, settled: false, kind: "insert", row: draft(row, key) }, () =>
+      rowApi.create(row),
+    );
+  };
+
+  const update = (id: Id, row: Update): Promise<Row | undefined> => {
+    const key = ++nextKey.current;
+    return run({ key, settled: false, kind: "update", id, row }, () => rowApi.update(id, row));
+  };
+
+  const remove = async (id: Id): Promise<Row | undefined> => {
+    const gone = rows.find((row) => identify(row) === id);
+    const key = ++nextKey.current;
+    const done = await run({ key, settled: false, kind: "remove", id }, () => rowApi.delete(id));
+    return done === undefined ? undefined : gone;
+  };
+
+  return {
+    rows,
+    loading: query.loading && server === undefined,
+    error: query.error,
+    writeError,
+    saving: writes.some((w) => !w.settled),
+    add,
+    update,
+    remove,
+    refresh: query.refresh,
+  };
+}
+"#;
+
+/// The hooks for one table: its types, the list query, and one mutation per
+/// write **the app's API actually projects**.
+///
+/// The row types are not written here — they are `client.ts`'s, generated from
+/// the same columns as the methods that return them, and re-exported so a page
+/// has one place to import from. Each hook is emitted only when the client has
+/// the method it calls: asking the endpoint set rather than re-deriving the rule
+/// (a keyless table has no row-addressed endpoints, an unexposed table has none
+/// at all) is what keeps the two halves of the runtime from disagreeing.
+fn table_hooks(table: &Table, endpoints: &EndpointSet) -> String {
+    let name = &table.name;
+    let pascal = pascal(name);
+    let row = format!("{pascal}Row");
+    let obj = client_object(endpoints, name);
+    let writes = has_op(endpoints, "create", name) || has_op(endpoints, "update", name);
+
+    let mut exported = vec![format!("type {row}")];
+    if writes {
+        exported.push(format!("type {pascal}Insert"));
+        exported.push(format!("type {pascal}Update"));
+    }
+    let exported = exported.join(", ");
+
     let mut out = format!(
         r#"// --- {name} ---
 
-/** A row of `{name}`, as its columns are today. */
-export type {row} = {{
-{fields}
-}};
+// The row types come from the generated client, which derives them from this
+// table's own columns; re-exported so a page imports its types and its hooks
+// from one place.
+export {{ {exported} }} from "./client";
 
 /** Every row of `{name}`, re-fetched when anything writes to it. */
 export function use{pascal}(): Query<{row}[]> {{
-  return useQuery("{name}", () => api.{list}() as Promise<{row}[]>);
+  return useQuery("{name}", () => api.{obj}.list());
 }}
 "#
     );
 
     if has_op(endpoints, "create", name) {
-        let create = op_name("create", name);
         out.push_str(&format!(
             r#"
 /** Insert a row into `{name}`. */
-export function useCreate{pascal}(): Mutation<Partial<{row}>> {{
-  return useMutation("{name}", (body) => api.{create}(body));
+export function useCreate{pascal}(): Mutation<{pascal}Insert> {{
+  return useMutation("{name}", (row) => api.{obj}.create(row));
 }}
 "#
         ));
@@ -1749,11 +2172,7 @@ export function useCreate{pascal}(): Mutation<Partial<{row}>> {{
     // single-column primary key, so the hooks follow the endpoints rather than
     // re-deciding it.
     if let Some(pk) = single_pk(table) {
-        let pk_ty = table
-            .fields
-            .iter()
-            .find(|f| f.base.name == pk)
-            .map_or("string", |f| ts_type(basic_type(f)));
+        let pk_ty = key_ts_type(endpoints, name);
         out.push_str(&format!(
             r#"
 /** One row of `{name}`, selected from the list by its primary key. */
@@ -1764,29 +2183,66 @@ export function use{pascal}Row(id: {pk_ty}): Query<{row} | undefined> {{
 "#
         ));
         if has_op(endpoints, "update", name) {
-            let update = op_name("update", name);
             out.push_str(&format!(
                 r#"
-/** Replace a row of `{name}`. */
-export function useUpdate{pascal}(): Mutation<{{ id: {pk_ty}; body: Partial<{row}> }}> {{
-  return useMutation("{name}", ({{ id, body }}) => api.{update}(id, body));
+/** Change a row of `{name}`. */
+export function useUpdate{pascal}(): Mutation<{{ id: {pk_ty}; row: {pascal}Update }}> {{
+  return useMutation("{name}", ({{ id, row }}) => api.{obj}.update(id, row));
 }}
 "#
             ));
         }
         if has_op(endpoints, "delete", name) {
-            let delete = op_name("delete", name);
             out.push_str(&format!(
                 r#"
 /** Delete a row of `{name}`. */
 export function useDelete{pascal}(): Mutation<{pk_ty}> {{
-  return useMutation("{name}", (id) => api.{delete}(id));
+  return useMutation("{name}", (id) => api.{obj}.delete(id));
 }}
 "#
             ));
         }
     }
     out
+}
+
+/// The row types of one table that `hooks.ts` itself names.
+///
+/// What the file *uses* and what it re-exports are different lists — a read-only
+/// table's hooks never mention its insert type — and an import of a type nothing
+/// names is a `noUnusedLocals` failure in generated code the admin never wrote.
+fn used_row_types(table: &Table, endpoints: &EndpointSet) -> Vec<String> {
+    let name = &table.name;
+    let pascal = pascal(name);
+    let mut used = vec![format!("{pascal}Row")];
+    if has_op(endpoints, "create", name) {
+        used.push(format!("{pascal}Insert"));
+    }
+    if has_op(endpoints, "update", name) && single_pk(table).is_some() {
+        used.push(format!("{pascal}Update"));
+    }
+    used
+}
+
+/// The TypeScript type of a table's primary key, as the *client* types it.
+///
+/// Read off the endpoint set's own model of the table rather than mapped again
+/// from the column: this is the type the generated `update(id, …)` takes, and a
+/// second mapping here would be free to disagree with it — which is a hook that
+/// does not compile against the client it calls.
+fn key_ts_type(endpoints: &EndpointSet, table: &str) -> &'static str {
+    endpoints
+        .resource(table)
+        .and_then(|r| r.key_field())
+        .map_or("string", |f| f.ty.ts_type())
+}
+
+/// The property this table hangs off the generated client under — `api.tasks`.
+///
+/// Asked of the client generator rather than assumed, because it is the one that
+/// resolves a table whose name collides with an endpoint's.
+fn client_object(endpoints: &EndpointSet, table: &str) -> String {
+    client_property(endpoints, table).unwrap_or_else(|| table.to_owned())
 }
 
 // --- naming and type helpers ------------------------------------------------
@@ -1835,17 +2291,6 @@ fn basic_type(field: &sc_catalog::DataField) -> BasicType {
         .unwrap_or(BasicType::Text)
 }
 
-/// The TypeScript type a column's values arrive as over JSON.
-fn ts_type(ty: BasicType) -> &'static str {
-    match ty {
-        BasicType::Bool => "boolean",
-        BasicType::Int | BasicType::Float => "number",
-        BasicType::Json => "unknown",
-        // Decimal, uuid, dates and times all cross the wire as strings.
-        _ => "string",
-    }
-}
-
 /// The empty value a create form starts a column at.
 fn ts_empty(field: &sc_catalog::DataField) -> &'static str {
     match basic_type(field) {
@@ -1869,12 +2314,10 @@ mod tests {
             database: DbId::primary(),
             source: TableSource::Database,
             fields: vec![
-                DataField::plain(
-                    "id",
-                    TypeRef::from_sql_type("bigint generated by default as identity"),
-                )
-                .required()
-                .primary_key(),
+                DataField::plain("id", TypeRef::from_sql_type("bigint"))
+                    .required()
+                    .primary_key()
+                    .generated(sc_db::ColumnGenerator::Identity),
                 DataField::plain("title", TypeRef::Basic(BasicType::Text)).required(),
                 DataField::plain("done", TypeRef::Basic(BasicType::Bool)),
             ],
@@ -1892,12 +2335,7 @@ mod tests {
     }
 
     fn endpoints(tables: &[Table]) -> EndpointSet {
-        let provider = RestProvider::project("/api", tables);
-        let mut set = EndpointSet::new();
-        for ep in provider.endpoints().iter() {
-            set.register(ep.clone());
-        }
-        set
+        RestProvider::project("/api", tables).endpoints().clone()
     }
 
     /// The `todo` application these files are generated for.
@@ -1991,7 +2429,9 @@ mod tests {
             "src/app.css",
             "src/pages/Tasks.tsx",
             "src/saltcorn/client.ts",
+            "src/saltcorn/helper.ts",
             "src/saltcorn/hooks.ts",
+            "src/saltcorn/store.ts",
             "src/saltcorn/schema.sql",
             "src/saltcorn/README.md",
         ] {
@@ -2010,12 +2450,14 @@ mod tests {
         let tables = [tasks()];
         let app = todo();
         let files = runtime_files(&ctx(&app, &tables, &endpoints(&tables), None));
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 6);
         // Every regenerated file says so, each in a syntax its own reader can
         // parse; nothing outside the directory does, because nothing outside it
         // is overwritten.
         assert!(file(&files, "src/saltcorn/hooks.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/saltcorn/store.ts").contains("DO NOT EDIT"));
         assert!(file(&files, "src/saltcorn/client.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/saltcorn/helper.ts").contains("DO NOT EDIT"));
         assert!(file(&files, "src/saltcorn/schema.sql").starts_with("-- Schema generated"));
         assert!(
             file(&files, "src/saltcorn/README.md").contains("overwritten without warning"),
@@ -2301,20 +2743,69 @@ mod tests {
     }
 
     #[test]
-    fn hooks_are_typed_per_table_from_the_apps_own_columns() {
+    fn hooks_are_typed_per_table_over_the_tables_own_client_object() {
         let tables = [tasks()];
-        let hooks = hooks_ts(&tables, &endpoints(&tables));
+        let eps = endpoints(&tables);
+        let client = generate_client(&eps);
+        let hooks = hooks_ts(&tables, &eps);
+
         // The row type is this app's columns, with nullability from the schema —
-        // the thing an npm package could not have contained (§2.1).
-        assert!(hooks.contains("export type TasksRow = {"), "{hooks}");
-        assert!(hooks.contains("  title: string;"), "{hooks}");
-        assert!(hooks.contains("  done?: boolean | null;"), "{hooks}");
-        // And the hooks call the endpoint names the client was generated with.
-        assert!(hooks.contains("api.listTasks()"), "{hooks}");
-        assert!(hooks.contains("api.createTasks(body)"), "{hooks}");
-        assert!(hooks.contains("api.updateTasks(id, body)"), "{hooks}");
-        assert!(hooks.contains("api.deleteTasks(id)"), "{hooks}");
+        // the thing an npm package could not have contained (§2.1). It is
+        // declared once, in the client, and re-exported here so a page has one
+        // place to import from.
+        assert!(client.contains("export interface TasksRow {"), "{client}");
+        assert!(client.contains("  title: string;"), "{client}");
+        assert!(client.contains("  done: boolean | null;"), "{client}");
+        assert!(
+            hooks.contains(
+                "export { type TasksRow, type TasksInsert, type TasksUpdate } from \"./client\";"
+            ),
+            "{hooks}"
+        );
+        // And the hooks call the table's own object on that client, not four
+        // loose methods.
+        assert!(hooks.contains("api.tasks.list()"), "{hooks}");
+        assert!(hooks.contains("api.tasks.create(row)"), "{hooks}");
+        assert!(hooks.contains("api.tasks.update(id, row)"), "{hooks}");
+        assert!(hooks.contains("api.tasks.delete(id)"), "{hooks}");
         assert!(hooks.contains("export function useTasks(): Query<TasksRow[]>"));
+    }
+
+    /// The store is the layer an app would otherwise write by hand: a write is
+    /// on screen before the server has answered, and is taken back if it refuses.
+    #[test]
+    fn a_writable_table_gets_an_optimistic_store_over_the_same_cache() {
+        let tables = [tasks()];
+        let store = store_ts(&tables, &endpoints(&tables));
+        assert!(store.contains("export function useRowStore<"), "{store}");
+        assert!(
+            store.contains(
+                "export function useTasksStore(): RowStore<TasksRow, TasksInsert, TasksUpdate, number>"
+            ),
+            "{store}"
+        );
+        // It is told the two things a table has to say about itself, and nothing
+        // else: which row is which, and what an unsaved one looks like.
+        assert!(store.contains("(row) => row.id,"), "{store}");
+        assert!(store.contains("id: -key,"), "{store}");
+        // Over the same cache the hooks read through, so a write here re-runs a
+        // query there rather than leaving two views of one table disagreeing.
+        assert!(store.contains("import { api, invalidate, useQuery } from \"./hooks\";"));
+    }
+
+    /// A table whose rows cannot be addressed cannot have a store — and the file
+    /// says so rather than importing a runtime it has nothing to use, which the
+    /// project's own `noUnusedLocals` would refuse.
+    #[test]
+    fn a_table_without_addressable_rows_gets_no_store() {
+        let mut keyless = tasks();
+        keyless.primary_key.clear();
+        for field in &mut keyless.fields {
+            field.primary_key = false;
+        }
+        let store = store_ts(&[keyless.clone()], &endpoints(&[keyless]));
+        assert!(!store.contains("useRowStore"), "{store}");
+        assert!(store.contains("export {};"), "{store}");
     }
 
     #[test]
@@ -2408,11 +2899,15 @@ mod tests {
     /// not have either. What a page reads is beside the point here; what matters
     /// is that nothing can sign in.
     fn endpoints_without_auth() -> EndpointSet {
+        let full = endpoints(&[tasks()]);
         let mut set = EndpointSet::new();
-        for ep in endpoints(&[tasks()]).iter() {
+        for ep in full.iter() {
             if !sc_api::AUTH_ENDPOINTS.contains(&ep.name.as_str()) {
                 set.register(ep.clone());
             }
+        }
+        for resource in full.resources() {
+            set.register_resource(resource.clone());
         }
         set
     }

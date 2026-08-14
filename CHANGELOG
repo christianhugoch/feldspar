@@ -2,6 +2,105 @@
 
 Changes in reverse chronological order.
 
+## The generated TypeScript client: one object per table, typed rows, and a typed `select`
+
+The client an application gets had four methods per table — `listTasks`,
+`createTasks`, `updateTasks`, `deleteTasks` — and every one of them spoke in
+`unknown`, because an endpoint knows how a request is made and nothing about the
+table behind it. Both halves of that are fixed here.
+
+**An `EndpointSet` now carries the tables behind its endpoints.** A new
+`ResourceModel` (`crates/sc-api/src/resource.rs`) records a table's columns and
+their wire types, which of them a write may set, which are keys into *another
+projected table*, and the endpoint name each operation is performed by. It
+restates nothing an endpoint already knows: it names its endpoints rather than
+copying their paths or auth, so an operation the projection did not register — a
+keyless table has no `update` — is simply absent, and `register_resource` refuses
+a model naming an endpoint the set does not have. `RestProvider::project` builds
+one per table; `app_endpoints_with` carries them across providers.
+
+**So a table is one object with methods, over a row type of its own.**
+
+```ts
+const posts: PostsRow[] = await api.posts.list();
+const one = await api.posts.get(1);
+const created = await api.posts.create({ title: "hello", author: 1 });
+await api.posts.update(created.id, { title: "goodbye" });
+await api.posts.delete(created.id);
+await api.posts.cover.upload(1, "cover.png", file);
+```
+
+`PostsRow` is the table's columns with their nullability; `PostsInsert` is what an
+insert may say — a `NOT NULL` column with no default is *required*, a key that
+numbers itself is not — and `PostsUpdate` is `Partial<PostsInsert>`. A calculated
+column appears in the row and in neither write type, which is the rule the row
+layer already enforced at runtime. `get(id)` is `list` with the key filtered and
+one row asked for, so it needs no endpoint of its own. Endpoints with no table
+behind them — the app's own `login`/`logout`/`whoami`, exposed triggers, custom SQL
+queries — stay loose methods, because that is what they are. A table whose name
+collides with one of those takes a `Table` suffix rather than shadowing it.
+
+**A read's query string is typed against the table's own columns**: `filter` is one
+entry per column and each value is `` `${FilterOp}.${string}` ``, `order` is a
+column optionally suffixed `.asc`/`.desc`. A column that is not there is now a
+compile error rather than the 400 it used to be.
+
+**And the `select` is read by the compiler.** `?select=` changes the shape of the
+answer, so the answer's *type* is computed from the string:
+
+```ts
+const rows = await api.posts.list({ select: "id,author(name,country)" });
+rows[0].author?.name; // string | undefined — the key is nullable, so the embed is
+```
+
+That is a small parser written in TypeScript's type system (split on top-level
+commas, `alias:column`, `key(…)` embeds to any depth), emitted once per client and
+only when the set has tables. A select assembled at runtime — typed `string`, not a
+literal — degrades to the whole row plus unknown extras rather than to a lie about
+it. This is why there is one `list` rather than one method for rows and another for
+embeds.
+
+**The React runtime follows.** `hooks.ts` calls `api.tasks.list()` and re-exports
+the client's row types instead of declaring a second copy of them; the primary key
+type a hook takes is read off the resource model, so the hook and the client method
+it calls cannot disagree about it.
+
+**A new generated file, `src/saltcorn/store.ts`: the optimistic layer every app
+was going to write anyway.** `useTasksStore()` answers `rows` with the writes in
+flight already applied, plus `add` / `update` / `remove` that show the change at
+once, take it back if the server refuses it, and drop the local copy when the
+server's own answer arrives. A row that is not saved yet carries `$pending`, and
+`remove` answers the row **as it was**, which is what an undo has to put back. It
+is general because nothing in it knows which table it is looking at: a table says
+only which row is which and what an unsaved one looks like. Policy — toasts, undo
+timers, sorting — is deliberately not in it. A table whose rows cannot be addressed
+gets no store, and the file says so rather than importing a runtime it cannot use.
+The scaffolded page for a writable table is now built on the store, so a new row
+appears as it is typed.
+
+**The generic half of the client is a file of its own, `helper.ts`.** How a
+request is made, how a failure is reported, `ClientOptions`, and the types a
+read's `select`/`filter`/`order` are expressed in are the *same text* in every
+application — so they are no longer a hundred and fifty lines of preamble in
+front of the part that is about this application. `client.ts` imports exactly
+what it names (an import of a helper it has no use for would be a
+`noUnusedLocals` failure in somebody else's project) and re-exports the shared
+vocabulary, so a consumer still has one module to import from. Every emitter
+writes the pair: the scaffold's `src/saltcorn/`, an app's configured client path,
+and the two checked-in admin clients (`ui/admin/src/helper.ts`,
+`ui/ide/src/helper.ts`, regenerated by the same one command). The import is
+extensionless — `"./helper"` — because a `.ts` extension is an error in a
+TypeScript project unless `allowImportingTsExtensions` is on, and no consumer
+should be made to turn that on for a generated file.
+
+Tested by `tsc` rather than by string matching: `crates/sc-api/tests/typescript_typecheck.rs`
+type-checks a two-table client and asserts the *negative* half with
+`@ts-expect-error` — a filter on a column that does not exist, a selected row
+reaching for a column it did not select, a string where the key is a number, an
+insert missing a required column, a write to a calculated column. The scaffold's
+own `npm run build` type-check covers the hooks, the store and the generated page,
+and both admin SPAs type-check against the regenerated pair.
+
 ## Git file stores: choose the checkout directory, or adopt one that exists
 
 A git store now has a **working-copy directory** setting, set when the store is

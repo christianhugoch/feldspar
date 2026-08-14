@@ -2242,6 +2242,27 @@ pub enum TypeSchema {               // enough to describe args & results and emi
   TypeScript **type declarations and a typed API-consumer library**. GOALS requires this for
   both the admin UI and per-application APIs, so `ui/admin` and every code-framework app get a
   type-checked client that cannot drift from the server contract.
+- **A table is described as a table, not as four endpoints.** An `Endpoint` says how a request
+  is made; it says nothing about the table behind it, because most endpoints have none. A
+  table-backed API has four endpoints per table that are only meaningful together, over rows
+  whose columns are known — so an `EndpointSet` also carries a `ResourceModel` per table (its
+  columns and their wire types, which of them a write may set, which are keys into another
+  projected table, and the endpoint each operation is performed by). The generated client turns
+  one model into one row interface and one object with methods — `api.tasks.list()`,
+  `.get(id)`, `.create(row)`, `.update(id, row)`, `.delete(id)`, plus a file column's
+  `download`/`upload` — rather than four loose methods with `unknown` in their signatures. The
+  model *names* its endpoints rather than restating their paths or auth, so an operation the
+  projection did not register (a keyless table has no `update`) is simply absent.
+- **Two files, not one.** A generated client is half contract and half plumbing: the
+  endpoints, tables and rows are this application's, while how a request is made, how a
+  failure is reported and the types a read is expressed in are the same text everywhere. The
+  second half is emitted as `helper.ts` beside `client.ts`, which imports exactly what it
+  names and re-exports the shared vocabulary. Every emitter writes the pair.
+- **A `select` is typed by the compiler.** `?select=title,author(name)` changes the shape of
+  the answer, so `list`'s return type is computed *from the select string* by a small parser
+  written in the type system. That is why there is one `list` rather than one method for rows
+  and another for embeds: a select assembled at runtime (typed `string`, not a literal)
+  degrades to the whole row plus unknown extras rather than to a lie about it.
 
 **A query parameter is part of the endpoint.** Path parameters were always in the value; query
 parameters had to join them the moment an endpoint's *interesting* input arrived that way —
@@ -2616,8 +2637,9 @@ What is generated:
   point, the app shell, the login screen, the route list, a stylesheet, and **one page per
   table the app declares**, using that table's real columns.
 - `AGENTS.md` at the project **root** — see the contract below.
-- The runtime under `src/saltcorn/`: the typed client and the typed hooks, from the app's own
-  `EndpointSet`, plus the directory's own `README.md` and `schema.sql`.
+- The runtime under `src/saltcorn/`: the typed client and its `helper.ts`, the typed hooks
+  and the optimistic per-table store (`store.ts`), from the app's own `EndpointSet`, plus the
+  directory's own `README.md` and `schema.sql`.
 
 Three rules it obeys. **It never overwrites**: scaffolding into a directory with anything in
 it is refused, naming the directory, before a byte is written — a generator that clobbers is

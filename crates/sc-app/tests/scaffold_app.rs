@@ -122,14 +122,16 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
         "src/app.css",
         "AGENTS.md",
         "src/saltcorn/client.ts",
+        "src/saltcorn/helper.ts",
         "src/saltcorn/hooks.ts",
+        "src/saltcorn/store.ts",
         "src/saltcorn/schema.sql",
         "src/saltcorn/README.md",
     ] {
         assert!(project.join(expected).is_file(), "missing {expected}");
     }
-    // 12 project files + one page for the app's one table + the four-file runtime.
-    assert_eq!(report.files.len(), 17);
+    // 12 project files + one page for the app's one table + the six-file runtime.
+    assert_eq!(report.files.len(), 19);
 
     // What a coding agent opening this project finds: a root file pointing at the
     // generated directory, and in it a README and a `schema.sql` describing the
@@ -182,15 +184,20 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     // for `tasks`, and the hooks carry its columns and their nullability.
     assert!(project.join("src/pages/Tasks.tsx").is_file());
     let hooks = std::fs::read_to_string(project.join("src/saltcorn/hooks.ts"))?;
-    assert!(hooks.contains("export type TasksRow"), "{hooks}");
-    assert!(hooks.contains("title: string;"), "{hooks}");
-    assert!(hooks.contains("done?: boolean | null;"), "{hooks}");
-    assert!(hooks.contains("api.listTasks()"), "{hooks}");
+    assert!(hooks.contains("type TasksRow"), "{hooks}");
+    assert!(hooks.contains("api.tasks.list()"), "{hooks}");
+    // …and a store over the same table, so a write shows before it lands.
+    let store = std::fs::read_to_string(project.join("src/saltcorn/store.ts"))?;
+    assert!(store.contains("export function useTasksStore()"), "{store}");
 
     // The client is generated at the conventional path the scaffold imports
-    // from, so the two halves of the runtime meet without a setting.
+    // from, so the two halves of the runtime meet without a setting. The row
+    // type is the app's own columns, with their nullability.
     let client = std::fs::read_to_string(project.join("src/saltcorn/client.ts"))?;
-    assert!(client.contains("listTasks("), "{client}");
+    assert!(client.contains("export interface TasksRow {"), "{client}");
+    assert!(client.contains("title: string;"), "{client}");
+    assert!(client.contains("done: boolean | null;"), "{client}");
+    assert!(client.contains("tasks: TasksApi;"), "{client}");
     assert!(client.contains("/api/tasks"), "{client}");
     let routes = std::fs::read_to_string(project.join("src/routes.tsx"))?;
     assert!(routes.contains("./pages/Tasks"), "{routes}");
@@ -264,6 +271,7 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
         "src/App.tsx",
         "src/pages/Tasks.tsx",
         "src/saltcorn/client.ts",
+        "src/saltcorn/helper.ts",
         "src/saltcorn/hooks.ts",
     ] {
         assert!(tmp.path().join(expected).is_file(), "missing {expected}");
@@ -295,7 +303,9 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
         written,
         [
             "src/saltcorn/client.ts",
+            "src/saltcorn/helper.ts",
             "src/saltcorn/hooks.ts",
+            "src/saltcorn/store.ts",
             "src/saltcorn/schema.sql",
             "src/saltcorn/README.md",
         ]
@@ -366,7 +376,9 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
         written,
         [
             "todo/src/saltcorn/client.ts",
+            "todo/src/saltcorn/helper.ts",
             "todo/src/saltcorn/hooks.ts",
+            "todo/src/saltcorn/store.ts",
             "todo/src/saltcorn/schema.sql",
             "todo/src/saltcorn/README.md",
         ]
@@ -374,7 +386,7 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
 
     let hooks = std::fs::read_to_string(project.join("src/saltcorn/hooks.ts"))?;
     assert!(hooks.contains("export function useNotes()"), "{hooks}");
-    assert!(hooks.contains("export type NotesRow"), "{hooks}");
+    assert!(hooks.contains("type NotesRow"), "{hooks}");
     // The schema description follows the tables, for the same reason and on the
     // same schedule: an agent writing SQL against this project must not be
     // reading last week's columns.
@@ -427,7 +439,9 @@ async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populat
         files,
         &[
             "todo/src/saltcorn/client.ts",
+            "todo/src/saltcorn/helper.ts",
             "todo/src/saltcorn/hooks.ts",
+            "todo/src/saltcorn/store.ts",
             "todo/src/saltcorn/schema.sql",
             "todo/src/saltcorn/README.md",
         ]

@@ -100,10 +100,19 @@ async fn app_client_is_generated_from_the_apps_own_endpoint_set() -> Result<()> 
     // factory, typed methods over the app's own tables.
     assert!(ts.contains("export interface ApiClient {"));
     assert!(ts.contains("export function createClient("));
-    // A list method takes the read query string's options object (§13.4),
-    // optional because every parameter in it is.
-    assert!(ts.contains("listPosts(query?: ListPostsQuery)"));
-    assert!(ts.contains("createPosts("));
+    // The declared table is one object on the client, with a row type of its
+    // own; its read takes the query string's options object (§13.4), optional
+    // because every parameter in it is.
+    assert!(ts.contains("  posts: PostsApi;"), "{ts}");
+    assert!(ts.contains("export interface PostsRow {"), "{ts}");
+    assert!(
+        ts.contains("list<S extends string = \"\">(query?: PostsQuery<S>)"),
+        "{ts}"
+    );
+    assert!(
+        ts.contains("create(row: PostsInsert): Promise<PostsRow>;"),
+        "{ts}"
+    );
     assert!(ts.contains("/api/posts"));
 
     // The app authenticates through its own API, so the client has login too.
@@ -282,9 +291,14 @@ async fn the_client_is_emitted_into_the_apps_source_tree_before_the_bundler_runs
     // The build reports where the client landed...
     assert_eq!(report.client_path.as_deref(), Some("web/src/client.ts"));
 
-    // ...it is really in the app's source tree...
+    // ...the helper it imports landed beside it, since one without the other
+    // does not compile...
+    let helper = std::fs::read_to_string(web.join("src").join("helper.ts"))?;
+    assert_eq!(helper, sc_api::client_helper());
+
+    // ...the client is really in the app's source tree...
     let emitted = std::fs::read_to_string(web.join("src").join("client.ts"))?;
-    assert!(emitted.contains("listPosts(query?: ListPostsQuery)"));
+    assert!(emitted.contains("list<S extends string = \"\">(query?: PostsQuery<S>)"));
     assert_eq!(emitted, app_client(&blog(), &cat)?);
 
     // ...and the bundler consumed it: the build only succeeds if the client
@@ -313,7 +327,7 @@ async fn emit_client_is_a_no_op_without_a_client_path() -> Result<()> {
     let source = app_source_from_config(&no_client)?;
     assert_eq!(source.client_path, None);
     let written = emit_client(&cat, &source, &app_endpoints(&blog(), &cat)?).await?;
-    assert!(written.is_none());
+    assert!(written.is_empty());
 
     // Nothing was written to the store.
     let store = cat.require_file_store("apps")?;

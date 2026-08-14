@@ -539,6 +539,16 @@ pub fn app_endpoints_with(
             }
             set.register(endpoint.clone());
         }
+        // The tables behind those endpoints travel with them (§13.1), so the
+        // generated client can type a row rather than call it `unknown`. A table
+        // two providers both project is described once: the description is of
+        // the *table*, and the first projection to give one is as good as the
+        // second — the endpoints it names are its own either way.
+        for resource in provider.endpoints().resources() {
+            if set.resource(&resource.name).is_none() {
+                set.register_resource(resource.clone());
+            }
+        }
     }
     Ok(set)
 }

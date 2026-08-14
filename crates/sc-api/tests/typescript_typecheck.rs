@@ -25,7 +25,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sc_api::{ApiProvider, RestProvider};
-use sc_catalog::{AccessRules, DataField, DbId, Table, TableId, TableSource};
+use sc_catalog::{
+    AccessRules, DataField, DataFieldKind, DbId, FieldId, FileStoreId, Table, TableId, TableSource,
+};
+use sc_db::ColumnGenerator;
 use sc_types::{BasicType, TypeRef};
 
 /// A usage module that calls a cross-section of the admin endpoints with
@@ -54,36 +57,83 @@ export async function exercise(): Promise<void> {
 }
 "#;
 
-/// A usage module for an application's REST client. The app declares one table,
-/// `posts`, with a `bigint` key and a `text` column, so its projected client must
-/// type `updatePosts`/`deletePosts` to take a `number` id — passing a string is a
-/// compile error, which is the whole point of generating the client.
+/// A usage module for an application's REST client. The app declares two
+/// tables — `posts`, with a key into `authors` and a file column — so the
+/// generated client must hang one object off each, type its rows from its own
+/// columns, and read the shape of a `select` out of the string it was written
+/// with. Every `@ts-expect-error` below is an assertion in the other direction:
+/// the line *must* fail to compile, or this test fails.
 const APP_USAGE_TS: &str = r#"
-import { createClient, ListPostsQuery } from "./client";
+import { createClient, type PostsRow, type AuthorsRow, type PostsQuery } from "./client";
 
 export async function exercise(): Promise<void> {
   const api = createClient({ baseUrl: "https://blog.example.com" });
 
-  // The app's own tables are methods, not stringly-typed arguments.
-  const posts = await api.listPosts();
-  const created = await api.createPosts({ title: "hello" });
+  // A table is one object with methods, not four loose methods.
+  const posts: PostsRow[] = await api.posts.list();
+  const title: string = posts[0].title;
+  // A nullable column is nullable; a `NOT NULL` one is not.
+  const published: string | null = posts[0].published;
 
-  // A read's query string is typed too (§13.4): `select`/`order`/`limit`/
-  // `offset` are scalars, and the filters are an explicit map of column to
-  // `op.value` — honest about being a string vocabulary.
-  const query: ListPostsQuery = {
-    select: "title,author(name,country)",
+  // A read's query string is typed against this table's own columns (§13.4).
+  const query: PostsQuery<"title"> = {
+    select: "title",
     order: "published.desc",
     limit: 20,
     filter: { published: "gte.2020-01-01" },
   };
-  const page = await api.listPosts(query);
+  const titles = await api.posts.list(query);
+  const justTitle: string = titles[0].title;
 
-  // The primary key is typed from the column: `id bigint` => number.
-  await api.updatePosts(1, { title: "goodbye" });
-  await api.deletePosts(1);
+  // The `select` decides the shape of the answer, and the compiler reads that
+  // shape out of the string: embeds nest, aliases rename, and a key that may be
+  // null answers a row that may be null.
+  const embedded = await api.posts.list({ select: "id,author(name,country)" });
+  const authorName: string = embedded[0].author!.name;
+  const aliased = await api.posts.list({ select: "who:author(label:name)" });
+  const label: string | undefined = aliased[0].who?.label;
 
-  void posts; void created; void page;
+  // One row by key, and the same select typing on it. Without a select it is
+  // the whole row; with one it is what the select asked for.
+  const whole: PostsRow | undefined = await api.posts.get(1);
+  const one = await api.posts.get(1, { select: "title" });
+  const oneTitle: string | undefined = one?.title;
+
+  // Writes are typed from the columns too: a required column with no default
+  // must be given, the key that numbers itself must not.
+  const created = await api.posts.create({ title: "hello", author: 1 });
+  const updated = await api.posts.update(created.id, { title: "goodbye" });
+  const gone = await api.posts.delete(updated.id);
+  const wasDeleted: true = gone.deleted;
+
+  // A file column carries its own two calls.
+  const cover = await api.posts.cover.download(1);
+  await api.posts.cover.upload(1, "cover.png", cover);
+
+  // The second table is its own object, with its own row type.
+  const authors: AuthorsRow[] = await api.authors.list();
+
+  // A select assembled at runtime cannot be read by the compiler, so the answer
+  // degrades to the whole row rather than to a lie about it.
+  const dynamic: string = (await api.posts.list({ select: String(1) }))[0].title;
+
+  // @ts-expect-error `nope` is not a column of posts, so it cannot be filtered on
+  await api.posts.list({ filter: { nope: "eq.1" } });
+  // @ts-expect-error a filter value names a comparison
+  await api.posts.list({ filter: { title: "hello" } });
+  // @ts-expect-error `sideways` is not an ordering direction
+  await api.posts.list({ order: "title.sideways" });
+  // @ts-expect-error a selected row has only what was selected
+  void (await api.posts.list({ select: "id" }))[0].title;
+  // @ts-expect-error the key is a number, and a string is not one
+  await api.posts.delete("1");
+  // @ts-expect-error a required column with no default is not optional
+  await api.posts.create({ author: 1 });
+  // @ts-expect-error a calculated column is read-only
+  await api.posts.update(1, { word_count: 3 });
+
+  void published; void justTitle; void authorName; void label; void oneTitle;
+  void wasDeleted; void authors; void dynamic; void whole;
 }
 "#;
 
@@ -153,17 +203,73 @@ fn generated_admin_client_type_checks() -> std::io::Result<()> {
 fn generated_app_rest_client_type_checks() -> std::io::Result<()> {
     // A projection needs only `Table` values, so this stays a unit-speed test
     // with no database: the client an app gets is a pure function of its tables.
-    let posts = Table {
-        id: TableId("posts".to_owned()),
-        name: "posts".to_owned(),
+    let provider = RestProvider::project("/api", &blog_tables());
+    let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));
+    type_check("app-rest", &client_ts, APP_USAGE_TS)
+}
+
+/// A two-table blog: `posts` keyed into `authors`, with a required column, a
+/// nullable one, a calculated one and a file column — one of everything the
+/// generated row types have to distinguish between.
+fn blog_tables() -> Vec<Table> {
+    let mut author = DataField::plain("author", TypeRef::Basic(BasicType::Int)).required();
+    author.kind = DataFieldKind::Key {
+        target_table: TableId("authors".to_owned()),
+        target_field: FieldId("id".to_owned()),
+        summary_field: None,
+    };
+    let mut cover = DataField::plain("cover", TypeRef::Basic(BasicType::Text));
+    cover.kind = DataFieldKind::File {
+        store: FileStoreId("uploads".to_owned()),
+        folder: None,
+        mime_allow: Vec::new(),
+    };
+    let mut word_count = DataField::plain("word_count", TypeRef::Basic(BasicType::Int));
+    word_count.kind = DataFieldKind::Calc {
+        expression: "1".to_owned(),
+    };
+
+    vec![
+        table(
+            "posts",
+            vec![
+                key_column("id"),
+                DataField::plain("title", TypeRef::Basic(BasicType::Text)).required(),
+                DataField::plain("published", TypeRef::Basic(BasicType::Date)),
+                author,
+                cover,
+                word_count,
+            ],
+        ),
+        table(
+            "authors",
+            vec![
+                key_column("id"),
+                DataField::plain("name", TypeRef::Basic(BasicType::Text)).required(),
+                DataField::plain("country", TypeRef::Basic(BasicType::Text)),
+            ],
+        ),
+    ]
+}
+
+/// An identity primary key: `NOT NULL`, but the database fills it in, so a
+/// generated insert type must leave it out rather than demand it.
+fn key_column(name: &str) -> DataField {
+    DataField::plain(name, TypeRef::Basic(BasicType::Int))
+        .primary_key()
+        .required()
+        .generated(ColumnGenerator::Identity)
+}
+
+fn table(name: &str, fields: Vec<DataField>) -> Table {
+    Table {
+        id: TableId(name.to_owned()),
+        name: name.to_owned(),
         database: DbId::primary(),
         source: TableSource::Database,
-        fields: vec![
-            DataField::plain("id", TypeRef::Basic(BasicType::Int)).primary_key(),
-            DataField::plain("title", TypeRef::Basic(BasicType::Text)),
-        ],
+        fields,
         primary_key: vec!["id".to_owned()],
-        label: "posts".to_owned(),
+        label: name.to_owned(),
         description: String::new(),
         access: AccessRules::default(),
         attributes: Default::default(),
@@ -172,10 +278,7 @@ fn generated_app_rest_client_type_checks() -> std::io::Result<()> {
         ownership_error: None,
         rls_enabled: false,
         constraints: Vec::new(),
-    };
-    let provider = RestProvider::project("/api", &[posts]);
-    let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));
-    type_check("app-rest", &client_ts, APP_USAGE_TS)
+    }
 }
 
 /// Type-check `client_ts` against `usage_ts` with `tsc --noEmit --strict`,
@@ -192,6 +295,13 @@ fn type_check(tag: &str, client_ts: &str, usage_ts: &str) -> std::io::Result<()>
     let dir = std::env::temp_dir().join(format!("sc-api-tsc-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("client.ts"), client_ts)?;
+    // The generic half of the client, which the client imports: every emitter
+    // writes the pair, so type-checking one without the other would be checking
+    // something nobody ships.
+    std::fs::write(
+        dir.join(sc_api::CLIENT_HELPER_FILE),
+        sc_api::client_helper(),
+    )?;
     std::fs::write(dir.join("usage.ts"), usage_ts)?;
 
     let output = Command::new(&tsc)
@@ -206,6 +316,7 @@ fn type_check(tag: &str, client_ts: &str, usage_ts: &str) -> std::io::Result<()>
             "esnext",
         ])
         .arg(dir.join("client.ts"))
+        .arg(dir.join(sc_api::CLIENT_HELPER_FILE))
         .arg(dir.join("usage.ts"))
         .output()
         .unwrap_or_else(|e| panic!("failed to run tsc at {}: {e}", tsc.display()));

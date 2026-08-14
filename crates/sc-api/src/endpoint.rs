@@ -12,6 +12,7 @@
 //! through this **same** machinery, so the admin SPA consumes a generated typed
 //! client exactly as an application would.
 
+use crate::resource::ResourceModel;
 use crate::schema::{TypeSchema, ValueType};
 use serde::{Deserialize, Serialize};
 
@@ -391,6 +392,13 @@ impl Endpoint {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EndpointSet {
     endpoints: Vec<Endpoint>,
+    /// The tables behind those endpoints, when the projection knows of any
+    /// (design §13.1). See [`crate::resource`]: this is what lets a generated
+    /// client type a row rather than call it `unknown`, and it is carried here
+    /// so every consumer of a set — the server, the client generator, a stored
+    /// application — sees the same contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resources: Vec<ResourceModel>,
 }
 
 impl EndpointSet {
@@ -398,6 +406,7 @@ impl EndpointSet {
     pub fn new() -> EndpointSet {
         EndpointSet {
             endpoints: Vec::new(),
+            resources: Vec::new(),
         }
     }
 
@@ -438,6 +447,40 @@ impl EndpointSet {
     /// Find an endpoint by name.
     pub fn find(&self, name: &str) -> Option<&Endpoint> {
         self.endpoints.iter().find(|e| e.name == name)
+    }
+
+    /// Record the table behind a group of endpoints already registered here
+    /// (see [`ResourceModel`]).
+    ///
+    /// Panics on a duplicate `name`, and on naming an endpoint the set does not
+    /// have — a model that points at nothing would generate a client method
+    /// calling an endpoint the server never mounted, which is precisely the
+    /// drift the generated client exists to prevent.
+    pub fn register_resource(&mut self, resource: ResourceModel) -> &mut EndpointSet {
+        assert!(
+            !self.resources.iter().any(|r| r.name == resource.name),
+            "duplicate resource `{}`",
+            resource.name
+        );
+        for op in resource.endpoint_names() {
+            assert!(
+                self.endpoints.iter().any(|e| e.name == op),
+                "resource `{}` names endpoint `{op}`, which is not registered",
+                resource.name
+            );
+        }
+        self.resources.push(resource);
+        self
+    }
+
+    /// The tables behind these endpoints, in registration order.
+    pub fn resources(&self) -> impl Iterator<Item = &ResourceModel> {
+        self.resources.iter()
+    }
+
+    /// The resource named `name`, if there is one.
+    pub fn resource(&self, name: &str) -> Option<&ResourceModel> {
+        self.resources.iter().find(|r| r.name == name)
     }
 }
 

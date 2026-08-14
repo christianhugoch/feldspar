@@ -38,6 +38,7 @@ mod endpoint;
 mod graphql;
 mod ownership;
 mod provider;
+mod resource;
 mod rest;
 mod schema;
 mod typescript;
@@ -58,6 +59,7 @@ pub use ownership::{
     read_rows_as, update_row_as,
 };
 pub use provider::{ApiProvider, ApiRequest, ApiResponse, RawBody, SessionAction};
+pub use resource::{ResourceField, ResourceFile, ResourceModel, ResourceOps};
 pub use rest::custom::{
     CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, QueryColumn, custom_queries,
     describe_custom_query, set_custom_queries, validate_custom_queries,
@@ -67,7 +69,7 @@ pub use rest::{
     rest_config_spec, rest_row_cap,
 };
 pub use schema::{StructField, TypeSchema, ValueType};
-pub use typescript::generate_client;
+pub use typescript::{CLIENT_HELPER_FILE, client_helper, client_property, generate_client};
 
 #[cfg(test)]
 mod tests {

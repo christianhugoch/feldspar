@@ -246,11 +246,13 @@ async fn wait_for(path: &Path, needle: &str) -> String {
 #[tokio::test]
 async fn adding_a_column_rewrites_the_apps_generated_directory() -> sc_error::Result<()> {
     let mut h = setup("column").await?;
-    let hooks_ts = h.project.join("src/saltcorn/hooks.ts");
+    // The row type the app's components are written against lives in the
+    // generated client, beside the methods that answer with it.
+    let client_ts = h.project.join("src/saltcorn/client.ts");
     let schema_sql = h.project.join("src/saltcorn/schema.sql");
 
     // What the scaffold wrote describes the table as it was.
-    assert!(!std::fs::read_to_string(&hooks_ts)?.contains("done"));
+    assert!(!std::fs::read_to_string(&client_ts)?.contains("done"));
     assert!(!std::fs::read_to_string(&schema_sql)?.contains("done"));
 
     let (status, body) = h
@@ -265,13 +267,14 @@ async fn adding_a_column_rewrites_the_apps_generated_directory() -> sc_error::Re
 
     // The typed row the app's components are written against has the new
     // column...
-    let hooks = wait_for(&hooks_ts, "done").await;
-    assert!(hooks.contains("done?: boolean | null"), "{hooks}");
+    let client = wait_for(&client_ts, "done").await;
+    assert!(client.contains("done: boolean | null"), "{client}");
     // ...and `schema.sql` has the column a custom SQL query may now name. Both,
     // from one change: one is what the app's code holds and the other is what an
     // agent writes SQL against, and a change that updated only one of them would
-    // leave the other quietly lying. (`client.ts` is rewritten on the same pass;
-    // its text moves when the *endpoint set* moves, which the next test does.)
+    // leave the other quietly lying. (`hooks.ts` and `store.ts` are rewritten on
+    // the same pass; their text moves when the *endpoint set* moves, which the
+    // next test does.)
     let schema = wait_for(&schema_sql, "done").await;
     assert!(schema.contains(r#""done" bool"#), "{schema}");
     assert!(schema.contains(r#"CREATE TABLE "tasks""#), "{schema}");
@@ -347,7 +350,9 @@ async fn the_update_client_endpoint_regenerates_and_rescaffolds() -> sc_error::R
         files,
         [
             "todo/src/saltcorn/client.ts",
+            "todo/src/saltcorn/helper.ts",
             "todo/src/saltcorn/hooks.ts",
+            "todo/src/saltcorn/store.ts",
             "todo/src/saltcorn/schema.sql",
             "todo/src/saltcorn/README.md",
         ],

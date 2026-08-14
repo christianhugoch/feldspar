@@ -331,7 +331,10 @@ pub async fn build_application(
     source: &AppSource,
     dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<BuildReport> {
-    let client_path = emit_client(cat, source, &app_endpoints_with(app, cat, dispatcher)?).await?;
+    let client_path = emit_client(cat, source, &app_endpoints_with(app, cat, dispatcher)?)
+        .await?
+        .into_iter()
+        .next();
     // A `react` app's generated runtime is more than the client: its hooks are
     // typed from this app's tables, so they are regenerated on the same schedule
     // and for the same reason (§2.1/§2.3). Adding a table in the admin UI makes
@@ -347,24 +350,42 @@ pub async fn build_application(
 }
 
 /// Write `endpoints` as a generated TypeScript client into the app's source
-/// tree, at [`AppSource::client_path`].
+/// tree, at [`AppSource::client_path`] — **and its helper beside it**.
 ///
-/// Returns the path written, or `None` when the app declares no client path.
-/// Written through the [`FileStore`](sc_files::FileStore), not the local
-/// filesystem, so the source tree is reached the same way everything else
+/// Two files: the client is this application's endpoints and tables, and it
+/// imports the half that is the same in every application (how a request is
+/// made, how a failure is reported, the types a read is expressed in) from a
+/// `helper.ts` in the same directory. One without the other does not compile, so
+/// nothing writes one without the other.
+///
+/// Returns the paths written, in that order, or nothing when the app declares no
+/// client path. Written through the [`FileStore`](sc_files::FileStore), not the
+/// local filesystem, so the source tree is reached the same way everything else
 /// reaches it (and the store's own traversal sandboxing applies).
 pub async fn emit_client(
     cat: &Catalog,
     source: &AppSource,
     endpoints: &EndpointSet,
-) -> Result<Option<String>> {
+) -> Result<Vec<String>> {
     let Some(path) = &source.client_path else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let store = cat.require_file_store(&source.store.0)?;
     let client = generate_client(endpoints);
     store.write(path, Bytes::from(client.into_bytes())).await?;
-    Ok(Some(path.clone()))
+    let helper = sibling(path, sc_api::CLIENT_HELPER_FILE);
+    store
+        .write(&helper, Bytes::from(sc_api::client_helper().into_bytes()))
+        .await?;
+    Ok(vec![path.clone(), helper])
+}
+
+/// A path beside `path`: same directory, given file name.
+fn sibling(path: &str, name: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/{name}"),
+        None => name.to_owned(),
+    }
 }
 
 /// Rewrite an application's **generated** files from its current definition —
@@ -396,10 +417,7 @@ pub async fn emit_app_client(
         return emit_react_runtime(cat, app, &source, dispatcher).await;
     }
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
-    Ok(emit_client(cat, &source, &endpoints)
-        .await?
-        .into_iter()
-        .collect())
+    emit_client(cat, &source, &endpoints).await
 }
 
 /// Build an application and return a [`CodeFramework`] serving the result, with
