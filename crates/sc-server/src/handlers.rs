@@ -54,7 +54,8 @@ use sc_catalog::{
 use sc_error::{Error, Result};
 use sc_files::{
     Entry, FileMeta, FileStoreDef, FileStoreDefId, backend_config_spec, backend_operations,
-    check_access, effective_min_role, filter_visible, registered_backends, run_backend_operation,
+    check_access, display_config, effective_min_role, filter_visible, registered_backends,
+    run_backend_operation,
 };
 use sc_llm::{
     LlmProviderDef, LlmProviderDefId, LlmRequest, connect_provider, delete_llm_provider,
@@ -3122,7 +3123,13 @@ fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
         // its `public_key` is public — so this is currently a no-op, and that is
         // the point: an S3 backend's secret is redacted by declaring it, not by
         // editing this function.
-        "config": Json::Object(redacted_config(&def.backend, &def.config)),
+        //
+        // `display_config` first, for the other direction: a setting the admin
+        // left blank and the backend then settled — a git store's working-copy
+        // directory — is shown as what it actually is rather than as the blank
+        // that is stored. It is read-only on the edit form, so a blank one would
+        // leave the admin with nowhere to learn where their files are.
+        "config": Json::Object(shown_config(def)),
         "min_role": def.min_role,
         "connected": connected.is_some(),
         // Only meaningful when not connected; a connected store has had any
@@ -3133,17 +3140,19 @@ fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
     }))
 }
 
-/// A file-store config with its backend's [`secret`](FormField::secret) settings
-/// replaced by the sentinel.
+/// A stored store's config as the admin should see it: what the backend decided
+/// for itself filled in ([`display_config`]), then its
+/// [`secret`](FormField::secret) settings replaced by the sentinel.
 ///
 /// An unknown backend redacts nothing rather than failing: this is called while
 /// *listing*, and a store whose backend a plugin used to supply must still be
 /// listable and editable so the admin can repoint it. There is nothing to leak
 /// in that case either — no spec means no field is declared secret.
-fn redacted_config(backend: &str, config: &sc_types::Attrs) -> sc_types::Attrs {
-    match backend_config_spec(backend) {
-        Ok(spec) => sc_types::redact_attrs(&spec, config),
-        Err(_) => config.clone(),
+fn shown_config(def: &FileStoreDef) -> sc_types::Attrs {
+    let config = display_config(def);
+    match backend_config_spec(&def.backend) {
+        Ok(spec) => sc_types::redact_attrs(&spec, &config),
+        Err(_) => config,
     }
 }
 

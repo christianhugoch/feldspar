@@ -256,6 +256,31 @@ pub fn backend_config_spec(name: &str) -> Result<Vec<FormField>> {
     }
 }
 
+/// A stored definition's settings as the admin's form should **show** them: what
+/// is stored, plus any value the backend decided for itself.
+///
+/// The counterpart to [`validate_file_store_config`], and deliberately not its
+/// inverse. Validation asks what the admin said; this answers what is true. They
+/// differ for exactly one kind of setting — one the admin may leave blank and the
+/// backend then settles, of which a git store's working-copy directory is the
+/// first: blank is the right thing to store (the directory is derived, and a
+/// stored copy could disagree with the derivation) and the wrong thing to
+/// display, since the control is read-only and an empty one reads as "there
+/// isn't one".
+///
+/// **Output only.** Nothing here reaches a row: a form hands the filled-in value
+/// straight back on the next save, and
+/// [`preserve_create_only`](sc_types::preserve_create_only) drops it again
+/// because there is nothing stored for it. That is what keeps the derivation the
+/// single answer rather than seeding a second one.
+pub fn display_config(def: &FileStoreDef) -> Attrs {
+    let mut config = def.config.clone();
+    if def.backend == GIT_BACKEND {
+        crate::git::fill_display_config(def, &mut config);
+    }
+    config
+}
+
 /// Check a [`FileStoreDef`]'s settings against its backend's declared spec.
 ///
 /// Called **on save** (see `sc_catalog::save_file_store`), which is the point of
@@ -457,6 +482,34 @@ mod tests {
         // No `path` setting — that is the `local` backend's, and a git store's
         // directory is a different question with a different name.
         assert!(!names.contains(&CFG_PATH));
+    }
+
+    #[test]
+    fn a_store_that_named_no_directory_is_shown_the_one_it_got() {
+        // The setting is read-only on an edit, so a store that let Saltcorn
+        // choose must still be able to say where its files are. Where it got to
+        // is `clone_path`'s answer — here the directory the clone recorded,
+        // which is what a store in this state has.
+        let mut def = FileStoreDef::git("web app", "git@example.com:me/app.git");
+        crate::record_clone_path(&mut def, std::path::Path::new("/data/git-stores/web_app"));
+        // Nothing is stored for the setting — the directory is derived, and a
+        // stored copy could disagree with the derivation …
+        assert!(def.config.get(CFG_DIR).is_none());
+        // … but what is shown is the answer that derivation gives.
+        let shown = display_config(&def);
+        assert_eq!(
+            shown.get(CFG_DIR).and_then(serde_json::Value::as_str),
+            Some("/data/git-stores/web_app")
+        );
+        // Every other setting is passed through untouched.
+        assert_eq!(shown.get(CFG_URL), def.config.get(CFG_URL));
+
+        // A store that named its own directory is left exactly as it is, and so
+        // is a backend that has no such setting.
+        let named = FileStoreDef::git("app", "u").with(CFG_DIR, "/srv/checkout");
+        assert_eq!(display_config(&named), named.config);
+        let local = FileStoreDef::local("docs", "/srv/docs");
+        assert_eq!(display_config(&local), local.config);
     }
 
     #[test]

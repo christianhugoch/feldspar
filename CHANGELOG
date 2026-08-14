@@ -37,6 +37,16 @@ working tree either. The form is the courtesy; the save path is the rule. Any
 backend, including one supplied by a plugin, gets the same behaviour by declaring
 the flag.
 
+**A store that left the directory blank is shown the one it got.** Blank stays
+blank in the row, because the location is derived and a stored copy of a derived
+answer is a second answer that can disagree — but the control is read-only on an
+edit, so an empty one would leave the admin with nowhere to learn where their
+files are. `display_config` fills it in on the way out only, and the round trip
+cannot pin it: the form hands the value straight back on the next save and
+`preserve_create_only` drops it again, there being nothing stored for it. It is a
+registry function rather than a line in the serialiser, so a backend added later
+that settles a blank setting for itself gets the same treatment by saying so.
+
 **`clone_path` gained a middle term.** The recorded `clone_path` attribute still
 wins, then the configured directory, then the Saltcorn-owned
 `<data dir>/git-stores/<name>`. The attribute outranks the setting because the two

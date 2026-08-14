@@ -908,6 +908,78 @@ async fn a_chosen_working_copy_directory_is_used_and_then_fixed() -> sc_error::R
     Ok(())
 }
 
+/// A store that left the directory blank is **shown the directory it got**.
+///
+/// Blank is the right thing to store — the working copy's location is derived
+/// (`clone_path`), and a stored copy of a derived answer is a second answer that
+/// can disagree — but the wrong thing to show: the control is read-only on an
+/// edit, so a blank one tells an admin nothing about where their files are.
+///
+/// So the value is filled in on the way out only, and the round trip proves it
+/// does not creep into the row: the form hands it straight back on the next
+/// save, and the save drops it again because it is `create_only` with nothing
+/// stored for it.
+#[tokio::test]
+async fn a_store_that_named_no_directory_is_shown_the_one_it_got() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+    let origin = origin_with_a_commit("shown");
+
+    let (status, created) = create_git_store(&mut client, "shown", &origin.to_string_lossy()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    // Nothing was typed for it, and the response names the working copy anyway.
+    let shown = created["config"]["directory"].as_str().unwrap().to_owned();
+    assert_eq!(shown, data_dir().join("git-stores/shown").to_string_lossy());
+    let id = created["id"].as_str().unwrap().to_owned();
+    let report = operation(&mut client, &id, "status", None).await;
+    assert_eq!(
+        working_copy_line(&report)
+            .trim_start_matches("Working copy:")
+            .trim(),
+        shown,
+        "the shown directory must be the one git is actually in"
+    );
+
+    // The row itself holds nothing for the setting: one answer, derived.
+    let stored = sc_catalog::load_file_store_by_name(&catalog, "shown")
+        .await?
+        .expect("the store was created");
+    assert!(
+        stored.config.get("directory").is_none(),
+        "{:?}",
+        stored.config
+    );
+
+    // The form hands the shown value back on the next save — and it is dropped
+    // again rather than pinned, so the derivation stays the only answer.
+    let (status, updated) = client
+        .send(
+            "PUT",
+            &format!("/api/file-stores/{id}"),
+            Some(json!({
+                "name": "shown",
+                "description": "",
+                "backend": "git",
+                "config": { "url": origin.to_string_lossy(), "directory": shown },
+                "min_role": Value::Null,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["connected"], json!(true));
+    assert_eq!(updated["config"]["directory"], json!(shown));
+    let stored = sc_catalog::load_file_store_by_name(&catalog, "shown")
+        .await?
+        .expect("the store still exists");
+    assert!(
+        stored.config.get("directory").is_none(),
+        "{:?}",
+        stored.config
+    );
+
+    Ok(())
+}
+
 /// A directory that **already holds a checkout** is adopted as it stands, with
 /// no URL given at all — the case the directory setting exists for.
 ///

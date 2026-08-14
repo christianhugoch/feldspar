@@ -73,6 +73,12 @@ pub const CFG_URL: &str = "url";
 /// tree, it would abandon it, along with anything uncommitted in it. That is
 /// also why [`ATTR_CLONE_PATH`] still exists and still wins — the setting is
 /// what the admin asked for, the attribute is what happened.
+///
+/// Left blank, it stays blank in the row — the location is then derived, and a
+/// stored copy of a derived answer is a second answer that can disagree — but it
+/// is **shown** as the directory the store actually got
+/// ([`display_config`](crate::display_config)). A control that is read-only and
+/// empty would otherwise tell an admin nothing about where their files are.
 pub const CFG_DIR: &str = "directory";
 
 /// The `branch` setting of the [`git`](GIT_BACKEND) backend: which branch to

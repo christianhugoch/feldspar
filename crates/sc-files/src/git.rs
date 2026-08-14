@@ -199,6 +199,38 @@ fn configured_dir(def: &FileStoreDef) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Fill in the working-copy directory for a store that never named one — the
+/// git half of [`display_config`](crate::display_config).
+///
+/// Leaving the admin's blank is what a store that let Saltcorn choose looks like
+/// in the database, and it is the right thing to *store*: the directory is
+/// derived, and writing the derived answer back into the settings would be a
+/// second copy of it that could disagree with [`clone_path`]. But it is the
+/// wrong thing to *show*. The setting is read-only on an edit, so an empty
+/// control says "no working copy" where the truth is "one Saltcorn placed", and
+/// the admin has nowhere else to learn where their files are.
+///
+/// So the answer is filled in on the way out and never on the way in — which is
+/// also why a save cannot pin it: the form hands this value straight back, and
+/// [`preserve_create_only`](sc_types::preserve_create_only) drops it again
+/// because nothing is stored for it.
+///
+/// A definition that already names a directory is left alone, and so is one
+/// whose path cannot be worked out — a daemon with no `HOME` and no
+/// [`DATA_DIR_ENV`]. Showing nothing is right there: there is genuinely no
+/// answer, and inventing one would name a directory nothing will use.
+pub(crate) fn fill_display_config(def: &FileStoreDef, config: &mut Attrs) {
+    if configured_dir(def).is_some() {
+        return;
+    }
+    if let Ok(path) = clone_path(def) {
+        config.insert(
+            CFG_DIR.to_owned(),
+            serde_json::Value::String(path.to_string_lossy().into_owned()),
+        );
+    }
+}
+
 /// The git backend's own save-time check, on top of the generic one every
 /// backend's settings go through (see
 /// [`validate_file_store_config`](crate::validate_file_store_config)).
