@@ -1410,6 +1410,35 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // Send one message through the **stored** email settings (§18.2).
+    //
+    // A section may have an *act* as well as fields, and this is the first one:
+    // "are these settings right" is a question only the network can answer, and
+    // an admin who has to wait for a trigger to fire to find out has no way to
+    // tell a wrong password from a wrong template.
+    //
+    // It tests what is **saved**, not what is typed — the transport is built
+    // from `_sc_config` — so the answer is about the configuration this
+    // installation will actually send with. `to` defaults to the signed-in
+    // admin's own address, because the admin pressing the button is the one
+    // person guaranteed to be able to check whether it arrived.
+    set.register(
+        Endpoint::new(
+            "sendTestEmail",
+            Method::Post,
+            api().lit("settings").lit("email").lit("test"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "to",
+            TypeSchema::optional(TypeSchema::text()),
+        )]))
+        .output(TypeSchema::struct_of([StructField::new(
+            "sent_to",
+            TypeSchema::text(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- backup & restore ---------------------------------------------------
     // Two of the four backup operations are here; the other two are routes outside
     // this set, because one *is* a file and the other *takes* one, and a

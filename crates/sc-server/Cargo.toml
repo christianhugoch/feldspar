@@ -46,6 +46,10 @@ sc-types.workspace = true
 # serves. The ACME cache is a table there too, because it is *what this
 # deployment serves TLS with* rather than anything this crate should own.
 sc-config.workspace = true
+# The mail transport (§18.2), for the one message this crate sends itself: the
+# Email settings tab's test message, built from what is stored so it tests the
+# configuration rather than the form.
+sc-email.workspace = true
 
 tokio.workspace = true
 # The backup archive (`backup`): an installation's metadata, rows and files as one

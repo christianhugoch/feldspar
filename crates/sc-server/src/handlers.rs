@@ -51,6 +51,7 @@ use sc_catalog::{
     key_kind_config_spec, list_field_meta_for_table, list_file_stores, load_file_store,
     load_file_store_by_name, orphan_table_meta, resolve_options, save_file_store,
 };
+use sc_email::Mailer;
 use sc_error::{Error, Result};
 use sc_files::{
     Entry, FileMeta, FileStoreDef, FileStoreDefId, backend_config_spec, backend_operations,
@@ -69,6 +70,21 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::apps::{AppMounts, build_and_mount};
 use crate::handler::{HandlerRegistry, HandlerResponse};
+
+/// The `text/plain` half of the Email tab's test message.
+///
+/// It says what it is and where it came from, because the person who receives it
+/// may not be the person who pressed the button — a shared `postmaster@` address
+/// is a common answer to "who do I send this to" — and an unexplained email from
+/// a machine is a support ticket.
+const TEST_EMAIL_TEXT: &str = "This is a test message from Saltcorn.\n\nIf you received it, the \
+                               SMTP settings saved under Settings \u{2192} Email work.";
+
+/// The `text/html` half. The same sentences: a test message is not the place to
+/// find out whether the two bodies say different things.
+const TEST_EMAIL_HTML: &str = "<p>This is a test message from Saltcorn.</p><p>If you received \
+                               it, the SMTP settings saved under Settings \u{2192} Email \
+                               work.</p>";
 
 /// Build the registry of admin handlers over a shared [`Catalog`] and the live
 /// [`AppMounts`] registry.
@@ -1806,9 +1822,72 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 if ssl.mode == sc_config::SslMode::Custom {
                     crate::tls::check_certificate(&ssl.certificate, &ssl.private_key)?;
                 }
+                // The email section's own cross-field rules, on the same
+                // footing: a username with no password, or credentials over an
+                // unencrypted connection, is refused here rather than at the
+                // first message that fails to send. Reading is the check —
+                // `from_config` runs it — so the result is dropped.
+                sc_config::EmailSettings::from_config(&merged)?;
 
                 sc_config::set_config_many(&catalog, &values).await?;
                 Ok(HandlerResponse::ok(settings_json(&catalog).await?))
+            }
+        }
+    });
+
+    // One message through the **stored** email settings, so an admin can find
+    // out whether they work while they are still on the screen that sets them.
+    //
+    // Everything about it is deliberate. The settings come from `_sc_config`
+    // rather than the request, so this tests what is saved and the note beside
+    // the button says to save first. The recipient defaults to the signed-in
+    // admin's own address, because they are the one person who can go and look.
+    // And the transport's error is returned **verbatim**: "connection refused",
+    // "authentication failed" and "relay access denied" are three different
+    // problems with three different fixes, and the whole value of a test button
+    // is learning which one you have.
+    reg.register("sendTestEmail", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let settings = sc_config::EmailSettings::load(&catalog).await?.ok_or_else(|| {
+                    Error::invalid(
+                        "no SMTP server is configured: set an SMTP host in Settings → Email and \
+                         save before sending a test message",
+                    )
+                })?;
+
+                // The signed-in admin's own address, unless they named one.
+                let to = match ctx.body.get("to") {
+                    Some(Json::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+                    _ => ctx
+                        .user
+                        .as_ref()
+                        .and_then(|user| user.get(COL_EMAIL))
+                        .and_then(Value::as_text)
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            Error::invalid(
+                                "there is nobody to send the test message to: give an address, \
+                                 or set one on your own account",
+                            )
+                        })?,
+                };
+                let recipients = sc_email::parse_recipients(&to)?;
+
+                let mailer = sc_email::SmtpMailer::new(&settings)?;
+                let mut email = sc_email::Email::new(settings.from.clone());
+                email.to = recipients;
+                email.subject = "Saltcorn test message".to_owned();
+                // Both bodies, because both are what a real message will carry
+                // and a transport that mangles `multipart/alternative` should
+                // fail here rather than on the first receipt.
+                email.text = Some(TEST_EMAIL_TEXT.to_owned());
+                email.html = Some(TEST_EMAIL_HTML.to_owned());
+                mailer.send(&email).await?;
+
+                Ok(HandlerResponse::ok(json!({ "sent_to": to })))
             }
         }
     });

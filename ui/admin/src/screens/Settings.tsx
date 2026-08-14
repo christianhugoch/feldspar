@@ -1,31 +1,35 @@
 // Settings screen: the values in `_sc_config`, rendered from their declarations —
 // and, beside them, backup and restore.
 //
-// The screen is **tabbed**, and the split is by what the admin came to do rather
-// than by where the data lives: "SSL" is the settings form, "Backup" is the pair of
-// operations that produce and consume a file. Both are settings of the
-// installation, and neither belongs on the other's page: a form whose Save button
-// sat next to a "Restore" button would be a form with two very different verbs on
-// it.
+// The screen is **tabbed**, and the tabs are **the sections the server declared**,
+// plus Backup. That is the whole of what this screen knows about how settings are
+// grouped: a section arriving from the server gets a tab labelled with its own
+// label, and nothing here names `ssl` or `email`. Backup is the exception because
+// it is not a section at all — it is the pair of operations that produce and
+// consume a file — and it keeps the end of the strip, where an admin expects it.
 //
-// The SSL tab knows **nothing about any particular setting**. The server sends
+// A settings tab knows **nothing about any particular setting**. The server sends
 // sections, each with a list of fields carrying the same declaration a file store's
 // backend or an LLM provider sends (`settings.tsx`'s `FieldSpec`), plus a sentence
 // of help; this renders whatever arrives and posts back what was edited. Adding a
 // setting is a Rust declaration and a redeployed server — there is no matching
 // change here, which is the point of declaring settings as data (§6.2, §13.5).
 //
-// Two behaviours are worth naming because they are not obvious from the code:
+// Three behaviours are worth naming because they are not obvious from the code:
 //
 // - **A secret arrives as the sentinel** and is posted back unchanged unless the
 //   admin types over it, which is how the private key stays editable without
 //   ever being sent to the browser (`SettingField` handles the input itself).
-// - **Saving is one act.** The server validates the whole payload — including
-//   what the settings mean together, like `custom` mode with no certificate —
-//   and refuses it whole, so this form never leaves half a configuration
-//   applied. The message it refuses with is the server's own, because "the
-//   certificate and private key do not match" is worth more than anything this
-//   screen could invent.
+// - **Saving is one act**, over the whole bag, from whichever tab is showing.
+//   The tabs partition the *display*, not the transaction: the server validates
+//   the settings together — `custom` mode with no certificate, an SMTP username
+//   with no password — and refuses them whole, so a per-tab save would be a way
+//   to leave half a configuration applied. The message it refuses with is the
+//   server's own, because "the certificate and private key do not match" is
+//   worth more than anything this screen could invent.
+// - **The one act is why the values live in this component** rather than in each
+//   panel: a panel holding its own edits would post a bag missing every other
+//   tab's, which the server would read as "clear them".
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -43,6 +47,7 @@ import {
   type FieldSpec,
 } from "../settings";
 import { BackupTab } from "./BackupTab";
+import { TestEmail } from "./TestEmail";
 
 /** One section as the API describes it. */
 type Section = GetSettingsResponse["sections"][number];
@@ -72,18 +77,98 @@ export function settingsPayload(
   return payload;
 }
 
-/** The tabs this screen has, in the order they are shown. The value is the
- * identity used in state and in each tab's `id`, so it is stable. */
-export const SETTINGS_TABS = [
-  { id: "ssl", label: "SSL" },
-  { id: "backup", label: "Backup" },
-] as const;
+/** The Backup tab's identity: the one tab that is not a declared section, and
+ * therefore the one name this screen still has to hold. */
+export const BACKUP_TAB = "backup";
 
-/** Which tab is showing. */
-export type SettingsTab = (typeof SETTINGS_TABS)[number]["id"];
+/** Which tab is showing: a section's `name`, or {@link BACKUP_TAB}. */
+export type SettingsTab = string;
+
+/** One entry in the tab strip. */
+export type TabSpec = { id: SettingsTab; label: string };
+
+/** The tabs this screen has, in the order they are shown: one per declared
+ * section, then Backup.
+ *
+ * A pure function of the sections, so what an admin sees is exactly what the
+ * server declared — a section with no tab, or a tab with no section, cannot
+ * happen because there is nowhere for either to come from. */
+export function settingsTabs(sections: Section[]): TabSpec[] {
+  return [
+    ...sections.map((section) => ({ id: section.name, label: section.label })),
+    { id: BACKUP_TAB, label: "Backup" },
+  ];
+}
+
+/** Which tab a freshly loaded screen opens on: the first settings section, and
+ * Backup only when the server declared no sections at all. */
+export function initialTab(sections: Section[]): SettingsTab {
+  return sections.length > 0 ? sections[0].name : BACKUP_TAB;
+}
 
 export function Settings() {
-  const [tab, setTab] = useState<SettingsTab>("ssl");
+  // The sections are loaded *here* rather than inside a panel because the tab
+  // strip is derived from them: a screen whose panels fetched their own could
+  // not name its own tabs.
+  const [sections, setSections] = useState<Section[] | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [tab, setTab] = useState<SettingsTab>(BACKUP_TAB);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  /** Take a settings response as the screen's state. */
+  const adopt = (response: GetSettingsResponse, opening: boolean) => {
+    setSections(response.sections);
+    setValues(initialValues(allFields(response.sections), readConfig(response.values)));
+    if (opening) setTab(initialTab(response.sections));
+  };
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        adopt(await api.getSettings(), true);
+      } catch {
+        setError("Could not load the settings.");
+      }
+    })();
+  }, []);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!sections) return;
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      // The response is what was *stored*, not what was sent: a cleared box
+      // comes back as the declared default, and a secret as the sentinel.
+      adopt(
+        await api.updateSettings({ values: settingsPayload(allFields(sections), values) }),
+        false,
+      );
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save the settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!sections) {
+    return (
+      <>
+        <PageHeader title="Settings" />
+        <PageBody>
+          {error ? (
+            <Alert variant="danger">{error}</Alert>
+          ) : (
+            <Spinner animation="border" role="status" />
+          )}
+        </PageBody>
+      </>
+    );
+  }
 
   return (
     <>
@@ -96,7 +181,7 @@ export function Settings() {
             while it is showing, which is what makes the Backup tab's first render
             the thing that loads its options. */}
         <ul className="nav nav-pills mb-3" role="tablist">
-          {SETTINGS_TABS.map((entry) => (
+          {settingsTabs(sections).map((entry) => (
             <li className="nav-item" key={entry.id} role="presentation">
               <button
                 type="button"
@@ -112,10 +197,40 @@ export function Settings() {
           ))}
         </ul>
 
-        <TabPanel id="ssl" showing={tab}>
-          <SslSettings />
-        </TabPanel>
-        <TabPanel id="backup" showing={tab}>
+        {sections.map((section) => (
+          <TabPanel id={section.name} showing={tab} key={section.name}>
+            {error && (
+              <Alert variant="danger">
+                <AlertBody>{error}</AlertBody>
+              </Alert>
+            )}
+            {saved && (
+              <Alert variant="success" dismissible onClose={() => setSaved(false)}>
+                <AlertBody>
+                  Settings saved. Certificate and port changes take effect when the server
+                  restarts.
+                </AlertBody>
+              </Alert>
+            )}
+            <form onSubmit={(e) => void save(e)}>
+              <SectionCard
+                section={section}
+                values={values}
+                onChange={(name, v) => setValues((current) => ({ ...current, [name]: v }))}
+              />
+              <div className="btn-list">
+                <Button type="submit" disabled={busy}>
+                  {busy ? "Saving…" : "Save settings"}
+                </Button>
+              </div>
+            </form>
+            {/* Whatever this section has beyond its fields — the Email tab's
+                test message. Outside the form on purpose: it is a different
+                verb, and it acts on what is *stored*. */}
+            <SectionExtra name={section.name} />
+          </TabPanel>
+        ))}
+        <TabPanel id={BACKUP_TAB} showing={tab}>
           <BackupTab />
         </TabPanel>
       </PageBody>
@@ -141,107 +256,52 @@ function TabPanel({
   );
 }
 
-/** The settings form: every section the server declares, saved as one act. */
-function SslSettings() {
-  const [sections, setSections] = useState<Section[] | null>(null);
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  /** Take a settings response as the form's state. */
-  const adopt = (response: GetSettingsResponse) => {
-    setSections(response.sections);
-    setValues(initialValues(allFields(response.sections), readConfig(response.values)));
-  };
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        adopt(await api.getSettings());
-      } catch {
-        setError("Could not load the settings.");
-      }
-    })();
-  }, []);
-
-  const save = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!sections) return;
-    setBusy(true);
-    setError(null);
-    setSaved(false);
-    try {
-      // The response is what was *stored*, not what was sent: a cleared box
-      // comes back as the declared default, and a secret as the sentinel.
-      adopt(await api.updateSettings({ values: settingsPayload(allFields(sections), values) }));
-      setSaved(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save the settings.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (!sections) {
-    return error ? (
-      <Alert variant="danger">{error}</Alert>
-    ) : (
-      <Spinner animation="border" role="status" />
-    );
-  }
-
+/** One section's heading, explanation and controls. */
+function SectionCard({
+  section,
+  values,
+  onChange,
+}: {
+  section: Section;
+  values: Record<string, string>;
+  onChange: (name: string, value: string) => void;
+}) {
   return (
-    <>
-      {error && (
-        <Alert variant="danger">
-          <AlertBody>{error}</AlertBody>
-        </Alert>
-      )}
-      {saved && (
-        <Alert variant="success" dismissible onClose={() => setSaved(false)}>
-          <AlertBody>
-            Settings saved. Certificate and port changes take effect when the server
-            restarts.
-          </AlertBody>
-        </Alert>
-      )}
-
-      <form onSubmit={(e) => void save(e)}>
-        {sections.map((section) => (
-          <div className="card mb-4" key={section.name}>
-            <div className="card-header">
-              <div>
-                <h3 className="card-title">{section.label}</h3>
-                <p className="card-subtitle text-secondary mb-0">{section.description}</p>
-              </div>
-            </div>
-            <div className="card-body">
-              {section.fields.map((field) => (
-                <div key={field.name}>
-                  <SettingField
-                    field={field}
-                    value={values[field.name] ?? ""}
-                    onChange={(v) => setValues((current) => ({ ...current, [field.name]: v }))}
-                    idPrefix={`setting-${section.name}`}
-                  />
-                  {/* The help sits under the control rather than in the label:
-                      these are sentences, and a label is a name. */}
-                  {field.help && (
-                    <div className="form-hint mt-n2 mb-3 text-secondary">{field.help}</div>
-                  )}
-                </div>
-              ))}
-            </div>
+    <div className="card mb-4">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">{section.label}</h3>
+          <p className="card-subtitle text-secondary mb-0">{section.description}</p>
+        </div>
+      </div>
+      <div className="card-body">
+        {section.fields.map((field) => (
+          <div key={field.name}>
+            <SettingField
+              field={field}
+              value={values[field.name] ?? ""}
+              onChange={(v) => onChange(field.name, v)}
+              idPrefix={`setting-${section.name}`}
+            />
+            {/* The help sits under the control rather than in the label:
+                these are sentences, and a label is a name. */}
+            {field.help && (
+              <div className="form-hint mt-n2 mb-3 text-secondary">{field.help}</div>
+            )}
           </div>
         ))}
-
-        <div className="btn-list">
-          <Button type="submit" disabled={busy}>
-            {busy ? "Saving…" : "Save settings"}
-          </Button>
-        </div>
-      </form>
-    </>
+      </div>
+    </div>
   );
+}
+
+/** The **one** place this screen knows a section by name: a section may have an
+ * *act* as well as fields, and an act cannot be declared as a `FormField`.
+ *
+ * Kept to a single lookup so it is obvious what the exception costs — a section
+ * with nothing here renders its form and nothing else, which is every section
+ * but Email. */
+function SectionExtra({ name }: { name: string }) {
+  if (name === "email") return <TestEmail />;
+  return null;
 }

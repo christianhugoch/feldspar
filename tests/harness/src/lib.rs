@@ -20,6 +20,14 @@
 //! // ... db is dropped (and the database deleted) at end of scope ...
 //! # Ok(()) }
 //! ```
+//!
+//! It also carries [`TestSmtp`], a local SMTP server that accepts one message,
+//! for the same reason: a test of the mail transport that never puts bytes on a
+//! socket is a test of a mock.
+
+pub mod smtp;
+
+pub use smtp::{SmtpMessage, TestSmtp};
 
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use sc_error::{Error, Result};

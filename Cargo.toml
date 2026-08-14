@@ -17,9 +17,10 @@ members = [
     "crates/sc-auth",
     "crates/sc-files",
     "crates/sc-config",
-    # Layer 6 — actions & triggers, and the LLM provider seam
+    # Layer 6 — actions & triggers, the LLM provider seam and the mail transport
     "crates/sc-action",
     "crates/sc-llm",
+    "crates/sc-email",
     # Layer 7 — agents: the agent record, the trait extension point, the loop
     "crates/sc-agent",
     # Layer 8 — applications & API
@@ -64,6 +65,7 @@ sc-files = { path = "crates/sc-files" }
 sc-config = { path = "crates/sc-config" }
 sc-action = { path = "crates/sc-action" }
 sc-llm = { path = "crates/sc-llm" }
+sc-email = { path = "crates/sc-email" }
 sc-agent = { path = "crates/sc-agent" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
@@ -312,6 +314,30 @@ async-graphql = { version = "7.2", default-features = false, features = [
 reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "json",
+] }
+
+# --- Mail transport (design §18.2) -------------------------------------------
+#
+# The SMTP client behind `sc-email`'s own `Mailer` seam. `lettre` is the crate
+# for it: it is the maintained Rust SMTP client, it builds the MIME message as
+# well as sending it (so `multipart/alternative` is a method call rather than a
+# hand-written boundary), and it has an async transport over tokio.
+#
+# `default-features = false` drops `native-tls`, `hostname` and the sendmail
+# transport. The rest of the set is chosen to add **no new crates to the tree**:
+# `aws-lc-rs` is the crypto provider the `rustls` pin above already compiles in
+# — two providers in one binary is exactly what that pin exists to prevent — and
+# `rustls-platform-verifier` is the root store `reqwest` 0.13 already brings, so
+# a mail server's certificate is verified against the same roots a webhook's is.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "builder",
+    "pool",
+    "tokio1",
+    "tokio1-rustls",
+    "rustls",
+    "aws-lc-rs",
+    "rustls-platform-verifier",
 ] }
 
 # --- LLM providers -----------------------------------------------------------

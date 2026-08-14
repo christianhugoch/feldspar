@@ -2,6 +2,77 @@
 
 Changes in reverse chronological order.
 
+## Email settings, a transport, and a button that proves they work
+
+An admin can now open **Settings → Email**, type an SMTP host, port, security
+mode, credentials and from-address, save, press **Send test email** and receive
+one. Four pieces, and each is where it is for a reason.
+
+**The settings are ordinary declared config keys** (`sc-config::email`), beside
+`ssl.rs`, so the settings screen renders them with no code that knows what an
+SMTP port is. The password is a `secret` like the TLS private key: redacted on
+read, and a save that posts the sentinel back keeps what is stored. Like it, it
+is *not* encrypted at rest — it sits in the primary database, and saying so is
+better than implying a protection a database dump would disprove.
+
+**The cross-field rules live with the keys**, and every one of them is refused by
+the name of the setting that is wrong: a host with no from-address, a username
+with no password, a password with no username, a from-address that is not a
+mailbox. One of them is a security rule rather than a coherence rule —
+`smtp_security = none` *with* credentials is refused outright, because it would
+put the password on the wire in the clear, and the message says that rather than
+just "invalid". `EmailSettings::load` answers `Option`: an installation with no
+`smtp_host` has no transport, which is a different answer from a transport whose
+settings are wrong, and the two get different messages.
+
+**The Settings screen's tabs are now the sections the server declared**, plus
+Backup. `SETTINGS_TABS` was a constant naming `ssl`, and adding Email under a tab
+labelled "SSL" is the answer that arrangement gives. Deriving them means a
+section added server-side gets a tab with no change in the SPA — the point of
+declaring settings as data — and it means a tab with no section cannot exist,
+because there is nowhere for one to come from. Saving stays **one act** over the
+whole bag from whichever tab is showing: the tabs partition the display, not the
+transaction, because the server validates the settings together and a per-tab
+save would be a way to leave half a configuration applied.
+
+**The transport is a trait with one implementation.** The new `sc-email` crate
+(layer 6, beside `sc-llm`) holds `Email`, the `Mailer` trait, `SmtpMailer` over
+[lettre](https://lettre.rs), and `RecordingMailer`. The trait is not speculation
+about future providers: it is what will let the `send_email` action's tests
+assert *what would have been sent* without an SMTP server, and it is the seam the
+OAuth2/Graph transports and the system emails plug into later. lettre's feature
+set is chosen to add **no new crates to the tree** — `aws-lc-rs` is the crypto
+provider the workspace's rustls pin already compiles in, and
+`rustls-platform-verifier` is the root store reqwest already brings, so a mail
+server's certificate is checked against exactly the roots a webhook's is.
+
+This crate arrives a phase early because the test-email button has nothing to
+send through without it.
+
+**Addresses are parsed, not concatenated**, and parsed *once*: `Mailbox` and
+`parse_mailbox` are in `sc-config` beside the setting they check, and the
+transport reuses them rather than having a second grammar for what an address is.
+`parse_recipients` splits a rendered list on the commas that separate addresses
+and not on the ones inside a quoted display name — `"Lovelace, Ada"
+<ada@example.com>` is one recipient — and names the address it rejected, because
+a recipient string will be a *template* and knowing which of three addresses a
+row produced badly is the difference between a report and a shrug.
+
+**`sendTestEmail` sends through what is stored, not what is typed**, and the note
+under the button says to save first. A button that tested the boxes would report
+success on a configuration that is not the one this installation sends with. The
+transport's error comes back **verbatim**: "connection refused", "authentication
+failed" and "relay access denied" are three different problems with three
+different fixes, and a friendlier summary would throw away the only thing that
+makes the button worth pressing.
+
+Tested against a **real SMTP conversation** — `sc_test_harness::TestSmtp` binds a
+listener on loopback and speaks enough of the protocol to accept a message — for
+both the transport and the button, because a trait-only test proves nothing about
+whether lettre was wired up correctly. It asserts what the server *received*: the
+envelope, the headers, that a blind copy is a recipient and not a header, and
+that credentials are offered only when a username is configured.
+
 ## One interpolation facility: a `{{ }}` token is a formula
 
 Saltcorn 1 has an interpolator *and* a formula evaluator — two scopes, two

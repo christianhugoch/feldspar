@@ -68,6 +68,7 @@ saltcorn/
 │  │                              #    storage & validation, the live set, dispatch, scheduler
 │  ├─ sc-llm/                     # 6. object-safe LlmProvider seam over a provider crate
 │  │                              #    (OpenAI Responses + Anthropic), `_sc_llm_providers` (§11.1)
+│  ├─ sc-email/                   # 6. Email, the Mailer transport seam, SMTP over lettre (§18.2)
 │  ├─ sc-workflow/               # 7. durable workflow engine (steps, runs, traces, recovery)
 │  ├─ sc-agent/                   # 7. Agent record + AgentTrait trait + registry + inference
 │  │                              #    loop + `_sc_agents`/`_sc_runs` storage (§11.2)

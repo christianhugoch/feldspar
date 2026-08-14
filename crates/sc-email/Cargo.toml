@@ -1,0 +1,39 @@
+[package]
+name = "sc-email"
+description = "The mail transport seam: a message, a Mailer, and SMTP (layer 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# `EmailSettings` and `Mailbox`: what an admin configured, and the address
+# grammar this crate parses recipients with. The settings are declared at layer
+# 5 beside every other configuration key, which is what fixes this crate above
+# it.
+sc-config.workspace = true
+async-trait.workspace = true
+# The SMTP client. `default-features = false` drops `native-tls` (the default),
+# because §16's posture is pure-Rust TLS and no OpenSSL anywhere in the tree —
+# the same reason `reqwest` and `axum-server` are pinned to rustls.
+#
+# The feature set is chosen to add **no new crates**: `aws-lc-rs` is the crypto
+# provider the workspace's `rustls` pin already compiles in (two providers in one
+# binary is what that pin exists to prevent), and `rustls-platform-verifier` is
+# the root store `reqwest` 0.13 already brings, so a mail server's certificate is
+# checked against exactly the roots a webhook's is. `pool` keeps a connection
+# alive across the messages one transport sends; `builder` is the MIME writer.
+lettre = { workspace = true }
+
+[dev-dependencies]
+# `TestSmtp`: a listener that speaks enough of the protocol to accept a message.
+# A trait-only test proves nothing about whether `lettre` was wired up
+# correctly, and the harness is where it lives because `sc-server` needs it too.
+sc-test-harness.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
+
+[lints]
+workspace = true

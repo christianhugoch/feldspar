@@ -17,6 +17,8 @@
 //!   certificates it serves HTTPS with (§13.5) — and [`acme`] is where the ACME
 //!   account and the issued certificates are cached, in the database so a
 //!   renewal survives a restart and a second node does not order its own.
+//! - [`email`] is the second section: the SMTP transport every message this
+//!   installation sends goes out through (§18.2).
 //!
 //! The TLS *machinery* is a layer up, in `sc-server`, which is where the
 //! listener and the rustls stack are. This crate says what was configured; it
@@ -24,6 +26,7 @@
 
 pub mod acme;
 pub mod defs;
+pub mod email;
 pub mod ssl;
 pub mod store;
 
@@ -31,6 +34,11 @@ pub use acme::{ACME_CACHE_TABLE, AcmeCache, bootstrap_acme_cache};
 pub use defs::{
     BACKUP_INCLUDE, ConfigDef, ConfigSection, config_sections, config_spec, definition,
     internal_defs, known_keys,
+};
+pub use email::{
+    DEFAULT_SMTP_PORT, EMAIL_FROM, EmailSettings, Mailbox, SECURITY_NONE, SECURITY_STARTTLS,
+    SECURITY_TLS, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SmtpSecurity,
+    email_section, parse_mailbox,
 };
 pub use ssl::{
     ACME_CONTACT_EMAIL, ACME_DIRECTORY_URL, HTTPS_PORT, LETSENCRYPT_PRODUCTION,

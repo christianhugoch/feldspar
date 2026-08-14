@@ -157,48 +157,59 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 2 — Email settings, and the Email tab
 
-- [ ] **`sc-config::email`**: `smtp_host`, `smtp_port` (default 587), `smtp_security`
+- [x] **`sc-config::email`**: `smtp_host`, `smtp_port` (default 587), `smtp_security`
       (`starttls` | `tls` | `none`, default `starttls`), `smtp_username`, `smtp_password`
       (**secret**), `email_from` (a mailbox — `Ada <ada@example.com>` or a bare address), each
       declared as a `ConfigDef` with the sentence that goes under it, in an `email_section()`
       added to `config_sections()`.
-- [ ] **`EmailSettings::load(catalog)`** → `Option<EmailSettings>`, `None` when no host is
+- [x] **`EmailSettings::load(catalog)`** → `Option<EmailSettings>`, `None` when no host is
       configured, plus the cross-field validation that belongs with the keys: a username with no
       password, a `from` that is not a parseable mailbox, `none` security with credentials (which
       would put a password on the wire in the clear — refused, and the message says why).
-- [ ] **The Settings screen's tabs come from the sections** the server sent, plus Backup, with
+      `parse_mailbox`/`Mailbox` live here too, since the *from* address is a setting and a
+      setting is checked where it is declared — and the transport reuses them rather than
+      parsing an address in a second grammar.
+- [x] **The Settings screen's tabs come from the sections** the server sent, plus Backup, with
       the panel rendering only its own section's fields and Save still posting the whole bag
       (decision 6). `SETTINGS_TABS` stops being a constant; the Backup tab keeps its place at
       the end.
-- [ ] **`sendTestEmail`** on the admin API — `POST /api/settings/email/test`, admin-only, body
+- [x] **`sendTestEmail`** on the admin API — `POST /api/settings/email/test`, admin-only, body
       `{ to }` defaulting to the signed-in admin's own address — which builds a transport from
       the **stored** settings (so it tests what is saved, not what is typed) and returns the
       transport's own error verbatim on failure. A **Send test email** button on the Email tab,
       beside a note that the settings must be saved first.
-- [ ] Tests: the section is declared and round-trips through `_sc_config` with the password
+- [x] Tests: the section is declared and round-trips through `_sc_config` with the password
       redacted on read and preserved when the sentinel is posted back; the cross-field rules are
       refused by name; vitest over the tab derivation (a section with no tab, a tab with no
-      section, Backup last) and over the test-email form.
+      section, Backup last) and over the test-email form. Plus the button end to end, against a
+      real SMTP conversation on loopback.
 
 ## Phase 3 — The transport (`sc-email`)
 
-- [ ] **New crate `crates/sc-email`** (layer 6): `Email { from, to, cc, bcc, subject, text,
+Built here rather than after Phase 2, because Phase 2's **Send test email** button has nothing
+to send through without it. The action-facing half — how a `send_email` action reaches a mailer
+— is still Phase 4's.
+
+- [x] **New crate `crates/sc-email`** (layer 6): `Email { from, to, cc, bcc, subject, text,
       html }`, the `Mailer` trait (`async fn send(&self, email: &Email) -> Result<()>`), and
       `parse_recipients` — a rendered recipient string split on commas into mailboxes, each
       parsed, with an error naming *which* address was rejected.
-- [ ] **`SmtpMailer`** over `lettre` 0.11 (`smtp-transport`, `builder`, `tokio1-rustls-tls`,
-      `pool`, `default-features = false`, and the root-store/provider features that match the
-      workspace's existing rustls pin — stated in the `Cargo.toml` comment as the other pins
-      are). `starttls`/`tls`/`none` map to lettre's three builders; credentials are attached
+- [x] **`SmtpMailer`** over `lettre` 0.11 (`smtp-transport`, `builder`, `tokio1`,
+      `tokio1-rustls`, `pool`, `default-features = false`, plus `aws-lc-rs` and
+      `rustls-platform-verifier` — the provider the workspace's rustls pin already compiles in
+      and the root store `reqwest` already brings, so the feature set adds no crate to the
+      tree). `starttls`/`tls`/`none` map to lettre's three builders; credentials are attached
       only when a username is configured. A message with both bodies is `multipart/alternative`,
       with text first, as every mail client expects.
-- [ ] **`RecordingMailer`**: keeps what it was handed. This is what the action's tests assert
+- [x] **`RecordingMailer`**: keeps what it was handed. This is what the action's tests assert
       against, and it is a first-class item rather than a test fixture because two crates use it.
-- [ ] Tests: mailbox parsing (a list, a display name with a comma inside quotes, a rejected
+- [x] Tests: mailbox parsing (a list, a display name with a comma inside quotes, a rejected
       address named in the error); the built message's headers and MIME structure for text-only,
       html-only and both; and **one test against a real SMTP conversation** — a tokio listener
       on `127.0.0.1` speaking enough SMTP to accept a message — because a trait-only test proves
-      nothing about whether `lettre` was wired up correctly.
+      nothing about whether `lettre` was wired up correctly. That listener is
+      `sc_test_harness::TestSmtp`, beside `TestDb`, because `sc-server`'s test-email test needs
+      it too.
 
 ## Phase 4 — The `send_email` action (`sc-core-actions`)
 

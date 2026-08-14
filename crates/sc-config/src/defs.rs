@@ -70,7 +70,7 @@ pub const BACKUP_INCLUDE: &str = "backup_include";
 /// Every section, in screen order.
 pub fn config_sections() -> &'static [ConfigSection] {
     static SECTIONS: OnceLock<Vec<ConfigSection>> = OnceLock::new();
-    SECTIONS.get_or_init(|| vec![crate::ssl::ssl_section()])
+    SECTIONS.get_or_init(|| vec![crate::ssl::ssl_section(), crate::email::email_section()])
 }
 
 /// Keys that are stored configuration but belong to **no settings form**.

@@ -11,12 +11,16 @@
  * - the private key is shown as the redaction sentinel, and *not* sending it
  *   back unchanged would clear the stored certificate's key on the next save of
  *   an unrelated setting.
+ *
+ * And, since the tabs became a function of the sections rather than a constant,
+ * what an admin sees along the top: one tab per declared section, Backup last.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { SECRET_SENTINEL, buildConfig, initialValues, readConfig } from "../settings";
-import { allFields, settingsPayload } from "./Settings";
+import { BACKUP_TAB, allFields, initialTab, settingsPayload, settingsTabs } from "./Settings";
+import { testEmailBody } from "./TestEmail";
 
 /** The shape `getSettings` returns, trimmed to what the model reads. */
 const sections = [
@@ -143,5 +147,83 @@ describe("the settings screen's model", () => {
     );
     values.ssl_private_key = "-----BEGIN PRIVATE KEY-----\nnew\n-----END PRIVATE KEY-----";
     expect(buildConfig(allFields(sections), values).ssl_private_key).toContain("new");
+  });
+});
+
+/** A second section, to say something about *two* of them that one cannot. */
+const emailSection = {
+  name: "email",
+  label: "Email",
+  description: "The SMTP server this installation sends mail through.",
+  fields: [
+    {
+      name: "smtp_host",
+      label: "SMTP host",
+      type: "text",
+      required: false,
+      default: null,
+      options: [],
+      multiline: false,
+      secret: false,
+      create_only: false,
+      help: "The mail server's hostname.",
+    },
+  ],
+};
+
+describe("the settings screen's tabs", () => {
+  it("shows one tab per declared section, labelled as the section is", () => {
+    expect(settingsTabs([...sections, emailSection])).toEqual([
+      { id: "ssl", label: "SSL / TLS certificates" },
+      { id: "email", label: "Email" },
+      { id: BACKUP_TAB, label: "Backup" },
+    ]);
+  });
+
+  /** The whole point of deriving them: a section the server adds gets a tab
+   * without a line changing here, and a tab this screen invented could not
+   * exist because there is nowhere for it to come from. */
+  it("has no tab without a section, and no section without a tab", () => {
+    const tabs = settingsTabs([...sections, emailSection]);
+    const sectionNames = [...sections, emailSection].map((s) => s.name);
+    expect(tabs.filter((t) => t.id !== BACKUP_TAB).map((t) => t.id)).toEqual(sectionNames);
+    // Backup is the one tab that is not a section, and it is last.
+    expect(tabs[tabs.length - 1].id).toBe(BACKUP_TAB);
+    expect(tabs.filter((t) => t.id === BACKUP_TAB)).toHaveLength(1);
+  });
+
+  it("keeps Backup even when the server declares no sections at all", () => {
+    expect(settingsTabs([])).toEqual([{ id: BACKUP_TAB, label: "Backup" }]);
+    expect(initialTab([])).toBe(BACKUP_TAB);
+  });
+
+  it("opens on the first settings section rather than on Backup", () => {
+    expect(initialTab([...sections, emailSection])).toBe("ssl");
+  });
+
+  /** Every section's fields are still edited as **one** payload, from whichever
+   * tab is showing: the tabs partition the display, not the transaction. */
+  it("still saves every section's settings in one act", () => {
+    const spec = allFields([...sections, emailSection]);
+    const values = initialValues(
+      spec,
+      readConfig({ ssl_mode: "custom", smtp_host: "smtp.example.com" }),
+    );
+    const payload = settingsPayload(spec, values);
+    expect(payload.ssl_mode).toBe("custom");
+    expect(payload.smtp_host).toBe("smtp.example.com");
+  });
+});
+
+describe("the test-email form", () => {
+  /** An empty box means "send it to me", which the server spells as an absent
+   * `to`. Sending `""` would ask it to parse the empty string as an address. */
+  it("omits the recipient rather than sending an empty one", () => {
+    expect(testEmailBody("")).toEqual({});
+    expect(testEmailBody("   ")).toEqual({});
+  });
+
+  it("sends the address that was typed, trimmed", () => {
+    expect(testEmailBody("  ada@example.com ")).toEqual({ to: "ada@example.com" });
   });
 });

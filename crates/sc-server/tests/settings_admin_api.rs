@@ -15,6 +15,10 @@
 //!   is a message in front of the admin rather than a server that will not bind
 //!   at the next restart;
 //! - and settings are admin-only, like every other configuration endpoint.
+//!
+//! The Email section (§18.2) is here for the same reasons, plus one of its own:
+//! it is the first section with an *act* as well as fields, and "send a test
+//! message" is only worth having if it sends through what is **stored**.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
@@ -26,13 +30,15 @@ use axum::http::{Request, StatusCode, header};
 use sc_auth::SessionStore;
 use sc_catalog::Catalog;
 use sc_config::{
-    ACME_CONTACT_EMAIL, HTTPS_PORT, MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, SSL_CERTIFICATE,
-    SSL_MODE, SSL_PRIVATE_KEY, SslMode, ssl_settings, stored_config,
+    ACME_CONTACT_EMAIL, EMAIL_FROM, HTTPS_PORT, MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF,
+    SECURITY_NONE, SECURITY_STARTTLS, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY,
+    SMTP_USERNAME, SSL_CERTIFICATE, SSL_MODE, SSL_PRIVATE_KEY, SslMode, ssl_settings,
+    stored_config,
 };
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_server::{AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router};
-use sc_test_harness::TestDb;
+use sc_test_harness::{TestDb, TestSmtp};
 use sc_types::SECRET_SENTINEL;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -357,6 +363,295 @@ async fn a_configuration_that_cannot_serve_is_refused_whole() -> sc_error::Resul
     Ok(())
 }
 
+/// The Email section is declared like every other one, and its password lives
+/// under the same rule the TLS private key does: the sentinel crosses the wire,
+/// the key stays in the table, and a save that hands the sentinel back keeps it.
+#[tokio::test]
+async fn the_email_section_round_trips_with_its_password_redacted() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    let (status, body) = client.send("GET", "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let email = body["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == json!("email"))
+        .expect("an Email section");
+    let fields: Vec<&str> = email["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            SMTP_HOST,
+            SMTP_PORT,
+            SMTP_SECURITY,
+            SMTP_USERNAME,
+            SMTP_PASSWORD,
+            EMAIL_FROM
+        ]
+    );
+    let password = email["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == json!(SMTP_PASSWORD))
+        .expect("the password field");
+    assert_eq!(password["secret"], json!(true));
+    // Submission over STARTTLS, until an admin says otherwise.
+    assert_eq!(body["values"][SMTP_PORT], json!(587));
+    assert_eq!(body["values"][SMTP_SECURITY], json!(SECURITY_STARTTLS));
+
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SMTP_HOST: "smtp.example.com",
+                SMTP_PORT: 465,
+                SMTP_SECURITY: "tls",
+                SMTP_USERNAME: "postmaster@example.com",
+                SMTP_PASSWORD: "hunter2",
+                EMAIL_FROM: "Saltcorn <saltcorn@example.com>",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["values"][SMTP_PASSWORD], json!(SECRET_SENTINEL));
+    assert_eq!(
+        stored_config(&catalog, SMTP_PASSWORD).await?,
+        Some(json!("hunter2"))
+    );
+
+    // What the sender then acts on is what was saved.
+    let settings = sc_config::EmailSettings::load(&catalog)
+        .await?
+        .expect("a configured transport");
+    assert_eq!(settings.host, "smtp.example.com");
+    assert_eq!(settings.port, 465);
+    assert_eq!(settings.from.address, "saltcorn@example.com");
+
+    // Editing an unrelated setting with the sentinel handed back untouched must
+    // not destroy the password — the failure this rule exists for.
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SMTP_HOST: "smtp.example.com",
+                SMTP_PORT: 587,
+                SMTP_SECURITY: SECURITY_STARTTLS,
+                SMTP_USERNAME: "postmaster@example.com",
+                SMTP_PASSWORD: SECRET_SENTINEL,
+                EMAIL_FROM: "Saltcorn <saltcorn@example.com>",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        stored_config(&catalog, SMTP_PASSWORD).await?,
+        Some(json!("hunter2")),
+        "the stored password must survive a save that never saw it"
+    );
+    Ok(())
+}
+
+/// The cross-field rules are refused **by name**, and nothing lands — the same
+/// contract the TLS section's are under.
+#[tokio::test]
+async fn the_email_cross_field_rules_are_refused_whole() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    let refused = |body: &Value, expected: &str| {
+        assert!(
+            body["error"].as_str().unwrap().contains(expected),
+            "expected `{expected}` in {body}"
+        );
+    };
+
+    // A host with nowhere to say the message is from.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": { SMTP_HOST: "smtp.example.com" }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    refused(&body, EMAIL_FROM);
+    assert_eq!(stored_config(&catalog, SMTP_HOST).await?, None);
+
+    // A username with no password.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SMTP_HOST: "smtp.example.com",
+                EMAIL_FROM: "saltcorn@example.com",
+                SMTP_USERNAME: "ada",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    refused(&body, SMTP_PASSWORD);
+
+    // Credentials over an unencrypted connection: a password on the wire.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SMTP_HOST: "smtp.example.com",
+                EMAIL_FROM: "saltcorn@example.com",
+                SMTP_SECURITY: SECURITY_NONE,
+                SMTP_USERNAME: "ada",
+                SMTP_PASSWORD: "hunter2",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    refused(&body, "clear");
+
+    // A from-address that is not one.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SMTP_HOST: "smtp.example.com",
+                EMAIL_FROM: "not-an-address",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    refused(&body, EMAIL_FROM);
+
+    // Nothing at all landed.
+    assert_eq!(stored_config(&catalog, SMTP_HOST).await?, None);
+    assert_eq!(stored_config(&catalog, SMTP_USERNAME).await?, None);
+    Ok(())
+}
+
+/// The Email tab's button, end to end: a real SMTP conversation with a listener
+/// on loopback, driven by what is **stored**.
+#[tokio::test]
+async fn a_test_message_is_sent_through_the_stored_settings() -> sc_error::Result<()> {
+    let (mut client, _catalog, _db) = setup().await?;
+    let server = TestSmtp::start().await?;
+
+    // Nothing is configured yet: the answer points at the screen the admin is
+    // looking at rather than failing somewhere in a transport.
+    let (status, body) = client
+        .send("POST", "/api/settings/email/test", Some(json!({})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("Settings"),
+        "{body}"
+    );
+
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SMTP_HOST: "127.0.0.1",
+                SMTP_PORT: server.port(),
+                SMTP_SECURITY: SECURITY_NONE,
+                EMAIL_FROM: "Saltcorn <saltcorn@example.com>",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    // No `to`: it goes to the signed-in admin's own address, which is the one
+    // person who can go and check whether it arrived.
+    let (status, body) = client
+        .send("POST", "/api/settings/email/test", Some(json!({})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["sent_to"], json!("admin@example.com"));
+
+    let received = server.message().await?;
+    let transcript = received.transcript();
+    assert!(
+        transcript.contains("MAIL FROM:<saltcorn@example.com>"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("RCPT TO:<admin@example.com>"),
+        "{transcript}"
+    );
+    // Both bodies, because that is what a real message carries and a transport
+    // that mangles `multipart/alternative` should fail here.
+    assert!(
+        received.body.contains("multipart/alternative"),
+        "{}",
+        received.body
+    );
+    assert!(
+        received.body.contains("Saltcorn test message"),
+        "{}",
+        received.body
+    );
+    Ok(())
+}
+
+/// A transport that is not there fails with the transport's own words, rather
+/// than a success the admin would believe (decision 12).
+#[tokio::test]
+async fn a_test_message_that_cannot_be_sent_says_so() -> sc_error::Result<()> {
+    let (mut client, _catalog, _db) = setup().await?;
+    // A port nothing is listening on: bound and dropped.
+    let dead_port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SMTP_HOST: "127.0.0.1",
+                SMTP_PORT: dead_port,
+                SMTP_SECURITY: SECURITY_NONE,
+                EMAIL_FROM: "saltcorn@example.com",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (status, body) = client
+        .send("POST", "/api/settings/email/test", Some(json!({})))
+        .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("mail server"),
+        "{body}"
+    );
+
+    // A recipient that is not an address is named, and never reaches a socket.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/settings/email/test",
+            Some(json!({ "to": "not-an-address" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("not-an-address"),
+        "{body}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn settings_are_admin_only() -> sc_error::Result<()> {
     let (client, _catalog, _db) = setup().await?;
@@ -372,6 +667,12 @@ async fn settings_are_admin_only() -> sc_error::Result<()> {
             "/api/settings",
             Some(json!({ "values": { SSL_MODE: MODE_OFF }})),
         )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // …including the act, which would otherwise be a way for anyone to make the
+    // server send mail.
+    let (status, _) = anonymous
+        .send("POST", "/api/settings/email/test", Some(json!({})))
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     Ok(())
