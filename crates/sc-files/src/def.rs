@@ -56,6 +56,25 @@ pub const GIT_BACKEND: &str = "git";
 /// local path.
 pub const CFG_URL: &str = "url";
 
+/// The `directory` setting of the [`git`](GIT_BACKEND) backend: where the
+/// working tree lives, chosen by the admin **when the store is created** and
+/// fixed thereafter.
+///
+/// Optional, and normally left blank — a clone Saltcorn makes is Saltcorn's to
+/// place, in [`clone_dir`](crate::clone_dir). It is here for the two cases where
+/// only the admin can know the answer: a checkout that must live somewhere
+/// specific (a path another process serves from), and a working tree that
+/// **already exists** on the machine — which Saltcorn then adopts as it stands
+/// rather than cloning over, so a repository already checked out on the server
+/// can be connected with no URL at all.
+///
+/// [`create_only`](sc_types::FormField::create_only), because the directory
+/// names *where the working tree was put*: changing it later would not move the
+/// tree, it would abandon it, along with anything uncommitted in it. That is
+/// also why [`ATTR_CLONE_PATH`] still exists and still wins — the setting is
+/// what the admin asked for, the attribute is what happened.
+pub const CFG_DIR: &str = "directory";
+
 /// The `branch` setting of the [`git`](GIT_BACKEND) backend: which branch to
 /// check out. Empty means the repository's default branch.
 pub const CFG_BRANCH: &str = "branch";

@@ -43,10 +43,10 @@ use sc_error::{Context, Error, Repr, Result};
 use sc_types::{Attrs, BasicType, FormField, Operation, validate_attrs};
 
 use crate::def::{
-    CFG_BRANCH, CFG_CREATE, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY, CFG_URL, FileStoreDef,
+    CFG_BRANCH, CFG_CREATE, CFG_DIR, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY, CFG_URL, FileStoreDef,
     GIT_BACKEND, LOCAL_BACKEND,
 };
-use crate::git::{GitFileStore, GitRepo, git_operations};
+use crate::git::{GitFileStore, GitRepo, git_operations, validate_git_config};
 use crate::local::LocalFileStore;
 use crate::store::FileStore;
 
@@ -72,13 +72,23 @@ pub fn local_config_spec() -> Vec<FormField> {
     ]
 }
 
-/// The settings the [`git`](GIT_BACKEND) backend needs: which repository, which
-/// branch, and how to authenticate.
+/// The settings the [`git`](GIT_BACKEND) backend needs: which repository, where
+/// to keep the working copy, which branch, and how to authenticate.
 ///
-/// Note what is *not* here: where to put the clone. A `local` store's directory
-/// is the admin's own and only they can name it; a git clone is a directory
-/// Saltcorn creates, so Saltcorn places it (see [`clone_path`](crate::clone_path))
-/// and asking would be asking for a decision the admin has no basis to make.
+/// **Nothing here is required on its own**, and that is a statement about the
+/// backend rather than a lapse. A URL alone is the ordinary case: Saltcorn
+/// clones it into a directory it places itself (see
+/// [`clone_path`](crate::clone_path)), which is the decision an admin has no
+/// basis to make. A directory alone is the other case the backend supports: a
+/// repository already checked out on the server is adopted as it stands, and the
+/// remote it pushes to is the one that checkout already has. What is genuinely
+/// required is *one of the two*, which is a relation between fields rather than
+/// a property of either — so it is checked by
+/// [`validate_git_config`](crate::git::validate_git_config), not declared here.
+///
+/// The directory is [`create_only`](FormField::create_only): it says where the
+/// working tree was put, so an edit that changed it would abandon that tree
+/// rather than move it.
 ///
 /// `key_path` and `public_key` are ordinary settings even though the deploy-key
 /// button usually fills them in, because an admin pointing a store at a key that
@@ -86,9 +96,10 @@ pub fn local_config_spec() -> Vec<FormField> {
 /// refusing.
 pub fn git_config_spec() -> Vec<FormField> {
     vec![
-        FormField::new(CFG_URL, BasicType::Text)
-            .label("Repository URL")
-            .required(),
+        FormField::new(CFG_URL, BasicType::Text).label("Repository URL"),
+        FormField::new(CFG_DIR, BasicType::Text)
+            .label("Working copy directory (blank to let Saltcorn choose)")
+            .create_only(),
         FormField::new(CFG_BRANCH, BasicType::Text).label("Branch (blank for the default)"),
         FormField::new(CFG_KEY_PATH, BasicType::Text).label("SSH private key file"),
         FormField::new(CFG_PUBLIC_KEY, BasicType::Text)
@@ -254,6 +265,13 @@ pub fn backend_config_spec(name: &str) -> Result<Vec<FormField>> {
 ///
 /// This is the *structural* half of "is this store configured correctly" — see
 /// the module docs for why it deliberately does not touch the filesystem.
+///
+/// Two checks, in order. The declared spec is checked field by field, which is
+/// everything most backends need; then the backend gets to say what a spec of
+/// independent fields cannot — the git backend requires a URL **or** a directory
+/// holding a checkout, which is a relation between two optional settings. Only a
+/// backend with such a relation needs the second half, so it is a match arm and
+/// not a trait method.
 pub fn validate_file_store_config(def: &FileStoreDef) -> Result<()> {
     let spec = backend_config_spec(&def.backend)?;
     validate_attrs(&spec, &def.config).map_err(|e| {
@@ -270,7 +288,12 @@ pub fn validate_file_store_config(def: &FileStoreDef) -> Result<()> {
         } else {
             e
         }
-    })
+    })?;
+
+    if def.backend == GIT_BACKEND {
+        validate_git_config(def)?;
+    }
+    Ok(())
 }
 
 /// Turn a stored definition into a connected [`FileStore`] — the one place a
@@ -412,31 +435,52 @@ mod tests {
     }
 
     #[test]
-    fn the_git_backend_asks_for_a_url_and_nothing_else_mandatory() {
+    fn the_git_backend_declares_no_setting_as_required_on_its_own() {
         let spec = git_config_spec();
         let names: Vec<&str> = spec.iter().map(|f| f.name()).collect();
-        assert_eq!(names, [CFG_URL, CFG_BRANCH, CFG_KEY_PATH, CFG_PUBLIC_KEY]);
-        let required: Vec<&str> = spec
-            .iter()
-            .filter(|f| f.required)
-            .map(|f| f.name())
-            .collect();
-        // Only the URL: a public repository on its default branch needs no key
-        // and no branch, and demanding either would block the simplest case.
-        assert_eq!(required, [CFG_URL]);
+        assert_eq!(
+            names,
+            [CFG_URL, CFG_DIR, CFG_BRANCH, CFG_KEY_PATH, CFG_PUBLIC_KEY]
+        );
+        // Not even the URL: a store may instead name a directory that already
+        // holds a checkout. What is required is one of the two, which is a
+        // relation between fields and is checked separately.
+        assert!(spec.iter().all(|f| !f.required));
         assert!(spec.iter().all(|f| !f.base.label.is_empty()));
 
-        // No `path` setting — where a clone goes is Saltcorn's decision, not a
-        // question for the admin.
+        // The working-copy directory is settable once, when the store is
+        // created: it says where the tree was put, and an edit would abandon it.
+        let dir = spec.iter().find(|f| f.name() == CFG_DIR).unwrap();
+        assert!(dir.create_only);
+        assert!(spec.iter().filter(|f| f.create_only).count() == 1);
+
+        // No `path` setting — that is the `local` backend's, and a git store's
+        // directory is a different question with a different name.
         assert!(!names.contains(&CFG_PATH));
     }
 
     #[test]
-    fn a_git_store_without_a_url_is_rejected_on_save() {
+    fn a_git_store_with_neither_a_url_nor_a_directory_is_rejected_on_save() {
         let def = FileStoreDef::new("app", GIT_BACKEND);
         let err = validate_file_store_config(&def).unwrap_err().to_string();
         assert!(err.contains("app"), "{err}");
         assert!(err.contains(CFG_URL), "{err}");
+        assert!(err.contains(CFG_DIR), "{err}");
+    }
+
+    #[test]
+    fn a_git_store_with_only_a_directory_is_a_valid_definition() {
+        // The whole point of the pairing: a repository already checked out on
+        // the server is connected by naming its directory, with no URL at all.
+        // Whether the directory holds a checkout is reachability, not structure,
+        // so this passes without touching the filesystem.
+        let def = FileStoreDef::new("app", GIT_BACKEND).with(CFG_DIR, "/srv/checkout");
+        assert!(validate_file_store_config(&def).is_ok());
+
+        // A blank directory is no directory, so this is the same as saying
+        // nothing at all.
+        let blank = FileStoreDef::new("app", GIT_BACKEND).with(CFG_DIR, "   ");
+        assert!(validate_file_store_config(&blank).is_err());
     }
 
     #[test]

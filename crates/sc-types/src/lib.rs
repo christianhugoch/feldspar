@@ -45,8 +45,8 @@ mod type_ref;
 pub use attrs::Attrs;
 pub use basic::BasicType;
 pub use field::{
-    BaseField, FormField, OptionsSource, SECRET_SENTINEL, merge_secrets, redact_attrs,
-    validate_attrs,
+    BaseField, FormField, OptionsSource, SECRET_SENTINEL, merge_secrets, preserve_create_only,
+    redact_attrs, validate_attrs,
 };
 pub use json::{json_to_value, value_to_json};
 pub use operation::{Operation, OperationScope};

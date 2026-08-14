@@ -30,8 +30,8 @@ pub use backend::{
     local_config_spec, registered_backends, run_backend_operation, validate_file_store_config,
 };
 pub use def::{
-    ATTR_CLONE_PATH, CFG_BRANCH, CFG_CREATE, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY, CFG_URL,
-    FileStoreDef, FileStoreDefId, GIT_BACKEND, LOCAL_BACKEND,
+    ATTR_CLONE_PATH, CFG_BRANCH, CFG_CREATE, CFG_DIR, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY,
+    CFG_URL, FileStoreDef, FileStoreDefId, GIT_BACKEND, LOCAL_BACKEND,
 };
 pub use git::{
     ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, CommitOutcome, DATA_DIR_ENV, DeployKey, GitChange,

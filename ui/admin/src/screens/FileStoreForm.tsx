@@ -253,12 +253,17 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
               </Form.Group>
 
               {/* The backend's own settings, rendered from its config_spec — no
-                  backend-specific code lives here. */}
+                  backend-specific code lives here. `locked` on an existing store
+                  is the generic form of "this one was decided when the store was
+                  created": a backend declares a setting `create_only` and the
+                  control stops being editable, with nothing here knowing which
+                  setting or which backend. */}
               <SettingsFields
                 spec={spec}
                 values={config}
                 onChange={(key, v) => setConfig((c) => ({ ...c, [key]: v }))}
                 idPrefix="store-cfg"
+                locked={Boolean(storeId)}
               />
 
               {/* Operations that run against these unsaved settings and may fill

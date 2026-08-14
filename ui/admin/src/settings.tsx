@@ -35,6 +35,14 @@ export type FieldSpec = {
    * Submitting the sentinel unchanged keeps what the server has, which is what
    * makes editing a provider's other settings safe. */
   secret?: boolean;
+  /** The value is set when the thing is created and fixed afterwards — a git
+   * store's working-copy directory names where the checkout was put, so an edit
+   * would abandon it rather than move it.
+   *
+   * Rendered read-only on an edit (`locked` below). The server does not trust
+   * that: it puts the stored value back over whatever a save submits. This is
+   * the courtesy of not offering a control that does nothing, not the rule. */
+  create_only?: boolean;
 };
 
 /** What the server substitutes for a secret setting's value on read, and what it
@@ -126,19 +134,31 @@ export function initialValues(
 }
 
 /** One setting rendered as a plain control: a select when it restricts options,
- * a checkbox/number/text otherwise. */
+ * a checkbox/number/text otherwise.
+ *
+ * `locked` means "the thing being configured already exists", which is what
+ * turns a `create_only` field read-only. It is passed in rather than read from
+ * the field because the field cannot know: the same spec renders the create form
+ * and the edit form. */
 export function SettingField({
   field,
   value,
   onChange,
   idPrefix = "cfg",
+  locked = false,
 }: {
   field: FieldSpec;
   value: string;
   onChange: (value: string) => void;
   idPrefix?: string;
+  locked?: boolean;
 }) {
   const controlId = `${idPrefix}-${field.name}`;
+  const fixed = locked && Boolean(field.create_only);
+  // Why the control cannot be edited, said once, wherever it is rendered.
+  const fixedHint = fixed ? (
+    <Form.Text muted>Chosen when this was created; it cannot be changed.</Form.Text>
+  ) : null;
   if (field.options.length > 0) {
     return (
       <Form.Group className="mb-3" controlId={controlId}>
@@ -146,7 +166,11 @@ export function SettingField({
           {field.label}
           {field.required && <span className="text-danger"> *</span>}
         </Form.Label>
-        <Form.Select value={value} onChange={(e) => onChange(e.target.value)}>
+        <Form.Select
+          value={value}
+          disabled={fixed}
+          onChange={(e) => onChange(e.target.value)}
+        >
           <option value="">—</option>
           {field.options.map((opt) => {
             const s = asString(opt);
@@ -157,6 +181,7 @@ export function SettingField({
             );
           })}
         </Form.Select>
+        {fixedHint}
       </Form.Group>
     );
   }
@@ -167,8 +192,10 @@ export function SettingField({
           type="checkbox"
           label={field.label}
           checked={value === "true"}
+          disabled={fixed}
           onChange={(e) => onChange(e.target.checked ? "true" : "false")}
         />
+        {fixedHint}
       </Form.Group>
     );
   }
@@ -187,9 +214,10 @@ export function SettingField({
           className="font-monospace"
           value={value}
           required={field.required}
+          readOnly={fixed}
           onChange={(e) => onChange(e.target.value)}
         />
-        <Form.Text muted>JSON.</Form.Text>
+        {fixedHint ?? <Form.Text muted>JSON.</Form.Text>}
       </Form.Group>
     );
   }
@@ -209,6 +237,7 @@ export function SettingField({
           className="font-monospace small"
           value={value}
           required={field.required}
+          readOnly={fixed}
           onChange={(e) => onChange(e.target.value)}
           onFocus={(e) => e.currentTarget.select()}
         />
@@ -217,6 +246,7 @@ export function SettingField({
           type={field.secret ? "password" : field.type === "int" ? "number" : "text"}
           value={value}
           required={field.required}
+          readOnly={fixed}
           onChange={(e) => onChange(e.target.value)}
           // A secret arrives as the sentinel, and the sentinel is what the
           // server reads as "unchanged". Clearing it on focus is what makes
@@ -228,6 +258,7 @@ export function SettingField({
           onBlur={field.secret ? () => value === "" && onChange(SECRET_SENTINEL) : undefined}
         />
       )}
+      {fixedHint}
       {field.secret && value === SECRET_SENTINEL && (
         <Form.Text muted>Stored. Type to replace it.</Form.Text>
       )}
@@ -241,11 +272,15 @@ export function SettingsFields({
   values,
   onChange,
   idPrefix,
+  locked = false,
 }: {
   spec: FieldSpec[];
   values: Record<string, string>;
   onChange: (name: string, value: string) => void;
   idPrefix?: string;
+  /** The thing being configured already exists, so its `create_only` settings
+   * are shown but not editable. */
+  locked?: boolean;
 }) {
   return (
     <>
@@ -256,6 +291,7 @@ export function SettingsFields({
           value={values[field.name] ?? asString(field.default)}
           onChange={(v) => onChange(field.name, v)}
           idPrefix={idPrefix}
+          locked={locked}
         />
       ))}
     </>

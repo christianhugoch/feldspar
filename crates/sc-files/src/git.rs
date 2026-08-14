@@ -9,11 +9,20 @@
 //! and is delegated to it unchanged. What a git store adds is *where the
 //! directory comes from* and *what else can be done to it*:
 //!
-//! - **Where.** The admin supplies a URL, not a path. The clone lives in an
+//! - **Where.** The admin supplies a URL, not a path, and the clone lives in an
 //!   OS-appropriate data directory ([`data_dir`]) that Saltcorn owns, because a
 //!   directory Saltcorn created by cloning is Saltcorn's to place — unlike a
 //!   `local` store's directory, which is the admin's own and must be named by
-//!   them.
+//!   them. An admin who *does* have a place in mind names it in
+//!   [`CFG_DIR`](crate::CFG_DIR) when creating the store, and only then: the
+//!   setting says where the working tree was put, so changing it afterwards
+//!   would abandon that tree rather than move it.
+//!
+//!   A directory that already holds a checkout is **adopted, not cloned over**
+//!   (see [`GitRepo::ensure_cloned`]). That is what makes the URL optional: a
+//!   repository someone has already cloned onto the server is connected by
+//!   naming its directory and leaving the URL blank, and the remote — if it has
+//!   one — is the one the checkout already points at.
 //! - **What else.** [`GitRepo`] carries `pull`, `push`, `commit_all` and
 //!   `status`. These are not [`FileStore`] methods and deliberately so: the
 //!   trait is the contract every backend answers, and three quarters of its
@@ -52,7 +61,8 @@ use tokio::process::Command;
 
 use crate::backend::OperationOutcome;
 use crate::def::{
-    ATTR_CLONE_PATH, CFG_BRANCH, CFG_KEY_PATH, CFG_PUBLIC_KEY, CFG_URL, FileStoreDef, GIT_BACKEND,
+    ATTR_CLONE_PATH, CFG_BRANCH, CFG_DIR, CFG_KEY_PATH, CFG_PUBLIC_KEY, CFG_URL, FileStoreDef,
+    GIT_BACKEND,
 };
 use crate::local::LocalFileStore;
 use crate::store::{Entry, FileMeta, FileStore};
@@ -146,12 +156,20 @@ fn path_safe(name: &str) -> String {
     }
 }
 
-/// The directory a store's clone lives in: its recorded
-/// [`ATTR_CLONE_PATH`](crate::ATTR_CLONE_PATH) if it has one, else
+/// The directory a store's working tree lives in, in order of authority: its
+/// recorded [`ATTR_CLONE_PATH`](crate::ATTR_CLONE_PATH), then the
+/// [`CFG_DIR`](crate::CFG_DIR) the admin named when creating it, then
 /// `<clone dir>/<name>`.
 ///
-/// The path is *recorded* on first clone rather than derived every time, so that
-/// renaming a store does not orphan its working tree — a rename would otherwise
+/// The recorded attribute wins over the setting because the two answer different
+/// questions: the setting is where the admin *asked* for the checkout, the
+/// attribute is where one *is*. They agree in every ordinary case — the
+/// attribute is written from this function's own answer on the first clone — and
+/// where they could not, following the attribute is what keeps an existing
+/// working tree reachable.
+///
+/// The path is recorded on first clone rather than derived every time, so that
+/// renaming a store does not orphan its working tree: a rename would otherwise
 /// silently point the store at an empty directory and lose whatever was
 /// uncommitted in the old one.
 pub fn clone_path(def: &FileStoreDef) -> Result<PathBuf> {
@@ -163,7 +181,60 @@ pub fn clone_path(def: &FileStoreDef) -> Result<PathBuf> {
     {
         return Ok(PathBuf::from(recorded));
     }
+    if let Some(dir) = configured_dir(def) {
+        return Ok(dir);
+    }
     Ok(clone_dir()?.join(path_safe(&def.name)))
+}
+
+/// The [`CFG_DIR`](crate::CFG_DIR) setting as a path, if the admin gave one.
+///
+/// Whitespace is not a directory, for the same reason whitespace is not a URL:
+/// catching it here means the store falls back to the Saltcorn-owned location
+/// rather than cloning into a directory named `" "`.
+fn configured_dir(def: &FileStoreDef) -> Option<PathBuf> {
+    def.setting(CFG_DIR)
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The git backend's own save-time check, on top of the generic one every
+/// backend's settings go through (see
+/// [`validate_file_store_config`](crate::validate_file_store_config)).
+///
+/// There is exactly one thing to say that a per-field spec cannot: a git store
+/// needs **either** a URL to clone from **or** a directory that already holds a
+/// checkout. Neither is required on its own — that is the whole point of the
+/// pairing — so the requirement is a relation between two settings, and
+/// [`validate_attrs`](sc_types::validate_attrs) checks fields one at a time.
+///
+/// Structural, in the sense the backend module docs give the word: it asks
+/// whether the admin has said enough to describe a store, not whether the
+/// directory is there. A directory that was named but has no checkout in it yet
+/// is a perfectly savable definition — cloning is what fills it, and reporting
+/// its absence is [`GitRepo::ensure_cloned`]'s job.
+pub(crate) fn validate_git_config(def: &FileStoreDef) -> Result<()> {
+    let has_url = def
+        .setting(CFG_URL)
+        .map(str::trim)
+        .is_some_and(|u| !u.is_empty());
+    // A recorded clone path counts as a directory: the store has a working tree
+    // and Saltcorn put it there, so a store created from a URL whose URL is
+    // later cleared stays valid rather than becoming uneditable.
+    let has_recorded_path = def
+        .attributes
+        .get(ATTR_CLONE_PATH)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|p| !p.trim().is_empty());
+    if has_url || has_recorded_path || configured_dir(def).is_some() {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "git file store `{}` needs a `{CFG_URL}` to clone from, or a `{CFG_DIR}` that \
+         already holds a checkout",
+        def.name
+    )))
 }
 
 /// A generated SSH deploy key: the private half's location, and the public half
@@ -326,7 +397,7 @@ pub struct CommitOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitRepo {
     root: PathBuf,
-    url: String,
+    url: Option<String>,
     branch: Option<String>,
     key_path: Option<PathBuf>,
 }
@@ -334,10 +405,16 @@ pub struct GitRepo {
 impl GitRepo {
     /// Build the repository a definition describes.
     ///
-    /// Fails only on a definition that is not a git store or has no URL — both
-    /// of which [`validate_file_store_config`](crate::validate_file_store_config)
-    /// rejects on save, so reaching either here means a caller went around the
-    /// registry.
+    /// Fails only on a definition that is not a git store, which
+    /// [`validate_file_store_config`](crate::validate_file_store_config) rejects
+    /// on save, so reaching it here means a caller went around the registry.
+    ///
+    /// A **missing URL is not a failure**: a store whose directory already holds
+    /// a checkout has nothing to clone, and the remote it pushes to is the one
+    /// that checkout already has. Cloning is where a URL becomes necessary, and
+    /// [`ensure_cloned`](GitRepo::ensure_cloned) is where its absence is
+    /// reported — with the directory that was looked in, which is the fact that
+    /// makes the message actionable.
     pub fn from_def(def: &FileStoreDef) -> Result<GitRepo> {
         if def.backend != GIT_BACKEND {
             return Err(Error::invalid(format!(
@@ -345,20 +422,13 @@ impl GitRepo {
                 def.name, def.backend
             )));
         }
-        let url = def
-            .setting(CFG_URL)
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
-            .ok_or_else(|| {
-                Error::invalid(format!(
-                    "git file store `{}` has no `{CFG_URL}` setting",
-                    def.name
-                ))
-            })?
-            .to_owned();
         Ok(GitRepo {
             root: clone_path(def)?,
-            url,
+            url: def
+                .setting(CFG_URL)
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(str::to_owned),
             branch: def
                 .setting(CFG_BRANCH)
                 .map(str::trim)
@@ -377,9 +447,10 @@ impl GitRepo {
         &self.root
     }
 
-    /// The remote URL.
-    pub fn url(&self) -> &str {
-        &self.url
+    /// The remote URL, or `None` for a store that adopted a directory someone
+    /// else cloned.
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
     }
 
     /// Whether the directory holds a clone. A `.git` *file* counts as well as a
@@ -388,8 +459,9 @@ impl GitRepo {
         self.root.join(".git").exists()
     }
 
-    /// Clone the remote into the working-tree directory, unless it is already
-    /// cloned — in which case this does nothing and says so.
+    /// Clone the remote into the working-tree directory, unless the directory
+    /// **already holds a checkout** — in which case that checkout is adopted as
+    /// it stands and this only says so.
     ///
     /// Idempotent on purpose: it runs on every save of a git store, and a save
     /// that re-cloned would throw away uncommitted work. Changing the URL of an
@@ -397,16 +469,36 @@ impl GitRepo {
     /// wants a different repository makes a different store, which is also the
     /// only reading under which their existing working tree is safe.
     ///
-    /// A clone into a directory that exists but is not empty fails, with git's
-    /// message. That is the right answer rather than something to work around:
-    /// the contents are someone's, and they were not put there by this store.
+    /// Adoption is the same rule, reached from the other side, and it is what a
+    /// store created against an existing checkout relies on: whether the working
+    /// tree got there by this store's own first clone or by someone typing `git
+    /// clone` on the server a year ago, a directory that is a repository is one
+    /// nothing here should overwrite.
+    ///
+    /// Two ways to fail, both of them the right answer:
+    ///
+    /// - **No URL and no checkout.** There is nothing to clone from and nothing
+    ///   to adopt. The message names the directory that was looked in, since the
+    ///   fix is either to supply a URL or to point the store at the checkout the
+    ///   admin meant.
+    /// - **A directory that exists, is not a repository, and is not empty.**
+    ///   git's own refusal, passed through: the contents are someone's, and they
+    ///   were not put there by this store.
     pub async fn ensure_cloned(&self) -> Result<GitOutput> {
         if self.is_cloned() {
             return Ok(GitOutput {
                 success: true,
-                output: format!("already cloned in {}", self.root.display()),
+                output: format!("using the working copy already in {}", self.root.display()),
             });
         }
+        let Some(url) = &self.url else {
+            return Err(Error::invalid(format!(
+                "git file store has no `{CFG_URL}` to clone from, and {} is not a git \
+                 working copy; give a repository URL, or point the store at a directory \
+                 that already holds a checkout",
+                self.root.display()
+            )));
+        };
         let parent = self.root.parent().unwrap_or(&self.root).to_owned();
         tokio::fs::create_dir_all(&parent)
             .await
@@ -417,7 +509,7 @@ impl GitRepo {
             args.push("--branch".to_owned());
             args.push(branch.clone());
         }
-        args.push(self.url.clone());
+        args.push(url.clone());
         args.push(self.root.to_string_lossy().into_owned());
 
         // Run from the parent: the target does not exist yet, so it cannot be
@@ -425,8 +517,8 @@ impl GitRepo {
         let out = self.run(&parent, &args).await?;
         if !out.success {
             return Err(Error::invalid(format!(
-                "cloning {} failed: {}",
-                self.url, out.output
+                "cloning {url} failed: {}",
+                out.output
             )));
         }
         Ok(out)
@@ -1107,10 +1199,19 @@ pub fn parse_change(line: &str) -> Option<GitChange> {
 /// all. The porcelain lines are git's own and are passed through unchanged.
 fn describe(status: &GitStatus, repo: &GitRepo) -> String {
     if !status.cloned {
-        return format!(
-            "Not cloned yet. Cloning will put the working copy in {}.",
-            repo.root().display()
-        );
+        return match repo.url() {
+            Some(_) => format!(
+                "Not cloned yet. Cloning will put the working copy in {}.",
+                repo.root().display()
+            ),
+            // Nothing to clone from: this store was pointed at a directory, and
+            // the directory does not hold a checkout. Saying so names the two
+            // ways out rather than reporting a clone that cannot happen.
+            None => format!(
+                "{} does not hold a git working copy, and no repository URL is set.",
+                repo.root().display()
+            ),
+        };
     }
     let mut lines = Vec::new();
     lines.push(match status.branch.as_str() {
@@ -1221,7 +1322,7 @@ mod tests {
                 .with(CFG_BRANCH, "main")
                 .with(CFG_KEY_PATH, "/keys/app.key");
             let repo = GitRepo::from_def(&def).unwrap();
-            assert_eq!(repo.url(), "git@example.com:me/app.git");
+            assert_eq!(repo.url(), Some("git@example.com:me/app.git"));
             assert_eq!(repo.branch.as_deref(), Some("main"));
             assert_eq!(repo.key_path, Some(PathBuf::from("/keys/app.key")));
             assert!(!repo.is_cloned());
@@ -1238,10 +1339,79 @@ mod tests {
 
     #[test]
     fn a_blank_url_is_no_url() {
-        // Whitespace is not a URL; catching it here means the failure names the
-        // setting rather than being git's "repository '   ' does not exist".
-        let def = FileStoreDef::git("app", "   ");
-        assert!(GitRepo::from_def(&def).is_err());
+        temp_env(|| {
+            unsafe { std::env::set_var(DATA_DIR_ENV, "/tmp/sc-data") };
+            // Whitespace is not a URL. The repository is still buildable — a
+            // store may have a directory instead — but it has nothing to clone
+            // from, which is what stops it being git's "repository '   ' does
+            // not exist".
+            let def = FileStoreDef::git("app", "   ");
+            assert_eq!(GitRepo::from_def(&def).unwrap().url(), None);
+        });
+    }
+
+    #[test]
+    fn a_configured_directory_is_where_the_working_copy_goes() {
+        temp_env(|| {
+            unsafe { std::env::set_var(DATA_DIR_ENV, "/tmp/sc-data") };
+            let def = FileStoreDef::git("app", "git@example.com:me/app.git")
+                .with(CFG_DIR, "/srv/checkout");
+            assert_eq!(clone_path(&def).unwrap(), PathBuf::from("/srv/checkout"));
+            assert_eq!(
+                GitRepo::from_def(&def).unwrap().root(),
+                Path::new("/srv/checkout")
+            );
+
+            // Blank is not a directory: the store falls back to the location
+            // Saltcorn picks rather than a directory named " ".
+            let blank = FileStoreDef::git("app", "u").with(CFG_DIR, "  ");
+            assert_eq!(
+                clone_path(&blank).unwrap(),
+                PathBuf::from("/tmp/sc-data/git-stores/app")
+            );
+        });
+    }
+
+    #[test]
+    fn a_store_may_have_a_directory_and_no_url_at_all() {
+        temp_env(|| {
+            unsafe { std::env::set_var(DATA_DIR_ENV, "/tmp/sc-data") };
+            let def = FileStoreDef::new("app", GIT_BACKEND).with(CFG_DIR, "/srv/checkout");
+            let repo = GitRepo::from_def(&def).unwrap();
+            assert_eq!(repo.url(), None);
+            assert_eq!(repo.root(), Path::new("/srv/checkout"));
+        });
+    }
+
+    #[tokio::test]
+    async fn cloning_with_no_url_and_no_checkout_says_what_is_missing() {
+        // No data-directory override needed: the store names its own directory,
+        // so nothing here consults the one Saltcorn would have picked.
+        let def = FileStoreDef::new("app", GIT_BACKEND).with(CFG_DIR, "/definitely/not/here");
+        let err = GitRepo::from_def(&def)
+            .unwrap()
+            .ensure_cloned()
+            .await
+            .unwrap_err()
+            .to_string();
+        // Both halves of the fix: supply a URL, or point at a real checkout.
+        assert!(err.contains(CFG_URL), "{err}");
+        assert!(err.contains("/definitely/not/here"), "{err}");
+    }
+
+    #[test]
+    fn a_recorded_clone_path_still_wins_over_the_configured_directory() {
+        // They agree in every ordinary case — the attribute is written from
+        // `clone_path`'s own answer. Where they could not, the attribute is
+        // where a working tree *is*, and following it is what keeps that tree
+        // reachable.
+        temp_env(|| {
+            unsafe { std::env::set_var(DATA_DIR_ENV, "/tmp/sc-data") };
+            let mut def = FileStoreDef::git("app", "git@example.com:me/app.git")
+                .with(CFG_DIR, "/srv/checkout");
+            record_clone_path(&mut def, Path::new("/srv/original"));
+            assert_eq!(clone_path(&def).unwrap(), PathBuf::from("/srv/original"));
+        });
     }
 
     #[test]

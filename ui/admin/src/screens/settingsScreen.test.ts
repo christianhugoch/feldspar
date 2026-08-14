@@ -34,6 +34,7 @@ const sections = [
         options: ["off", "letsencrypt", "custom"],
         multiline: false,
         secret: false,
+        create_only: false,
         help: "off serves plain HTTP.",
       },
       {
@@ -45,6 +46,7 @@ const sections = [
         options: [],
         multiline: true,
         secret: true,
+        create_only: false,
         help: "Stored in the database.",
       },
       {
@@ -56,6 +58,7 @@ const sections = [
         options: [],
         multiline: false,
         secret: false,
+        create_only: false,
         help: "",
       },
       {
@@ -67,6 +70,7 @@ const sections = [
         options: [],
         multiline: false,
         secret: false,
+        create_only: false,
         help: "",
       },
     ],

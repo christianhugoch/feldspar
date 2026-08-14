@@ -150,6 +150,21 @@ pub struct FormField {
     /// stops a second reader — a listing endpoint added later, an export — from
     /// leaking a key its author never thought about.
     pub secret: bool,
+    /// Whether the value is fixed **once the thing it configures exists**: the
+    /// admin sets it when creating, and from then on it is shown but not
+    /// editable.
+    ///
+    /// A property of the declaration for the same reason
+    /// [`secret`](FormField::secret) is: it has to reach both consumers at once.
+    /// The admin UI renders the control read-only on an edit, and
+    /// [`preserve_create_only`] puts the stored value back over whatever a save
+    /// submitted, so a client that does not honour the flag — or a hand-written
+    /// request — cannot change it either.
+    ///
+    /// It exists because some settings *place* something rather than describe
+    /// it: a git store's checkout directory names where its working tree was put,
+    /// and editing that afterwards would not move the tree, it would abandon it.
+    pub create_only: bool,
     // Post-MVP (§6.2, §6.3, §12): `fieldview: FieldViewRef` and
     // `visibility: Option<Formula>`. Both name types that do not exist yet —
     // fieldviews and formulas are out of MVP scope — so they are left out rather
@@ -167,6 +182,7 @@ impl FormField {
             options_source: OptionsSource::None,
             multiline: false,
             secret: false,
+            create_only: false,
         }
     }
 
@@ -186,6 +202,13 @@ impl FormField {
     /// sentinel keeps what is stored.
     pub fn secret(mut self) -> FormField {
         self.secret = true;
+        self
+    }
+
+    /// Mark this setting [`create_only`](FormField::create_only): it is set when
+    /// the thing is created and fixed thereafter.
+    pub fn create_only(mut self) -> FormField {
+        self.create_only = true;
         self
     }
 
@@ -408,6 +431,36 @@ pub fn merge_secrets(spec: &[FormField], stored: &Attrs, submitted: &Attrs) -> A
         if out.get(field.name()).and_then(Json::as_str) != Some(SECRET_SENTINEL) {
             continue;
         }
+        match stored.get(field.name()) {
+            Some(value) => {
+                out.insert(field.name().to_owned(), value.clone());
+            }
+            None => {
+                out.remove(field.name());
+            }
+        }
+    }
+    out
+}
+
+/// Put every [`create_only`](FormField::create_only) value back to what is
+/// stored — what an **edit** of an existing record does to the config it was
+/// handed.
+///
+/// The server-side half of the flag, and the half that is load-bearing: the
+/// admin UI renders such a control read-only, but a form is a suggestion and a
+/// request is not obliged to come from one. Doing it here means every consumer
+/// of a spec-declared config gets the guarantee by declaring the field, in the
+/// same place and the same shape [`merge_secrets`] gets its own.
+///
+/// A key absent from `stored` is *removed* from the result rather than taken
+/// from `submitted`: "it was never set" is the stored state, and a save that
+/// could set it would be an edit of a create-only value by another name. Keys
+/// the spec does not describe are left alone — [`validate_attrs`] is what
+/// rejects those.
+pub fn preserve_create_only(spec: &[FormField], stored: &Attrs, submitted: &Attrs) -> Attrs {
+    let mut out = submitted.clone();
+    for field in spec.iter().filter(|f| f.create_only) {
         match stored.get(field.name()) {
             Some(value) => {
                 out.insert(field.name().to_owned(), value.clone());
@@ -710,5 +763,70 @@ mod tests {
         assert!(merged.get("api_key").is_none());
         // And it is then caught as the missing required setting it is.
         assert!(validate_attrs(&spec, &merged).is_err());
+    }
+
+    /// A spec with one ordinary setting and one that is fixed at creation.
+    fn create_only_spec() -> Vec<FormField> {
+        vec![
+            FormField::new("url", BasicType::Text),
+            FormField::new("directory", BasicType::Text).create_only(),
+        ]
+    }
+
+    #[test]
+    fn create_only_is_a_property_of_the_declaration() {
+        let spec = create_only_spec();
+        assert!(!spec[0].create_only);
+        assert!(spec[1].create_only);
+        // Like `secret`, it changes nothing about what the value is, so it still
+        // validates as the text it is.
+        let mut attrs = Attrs::new();
+        attrs.insert("directory".to_owned(), json!("/srv/checkout"));
+        assert!(validate_attrs(&spec, &attrs).is_ok());
+    }
+
+    #[test]
+    fn an_edit_of_a_create_only_setting_keeps_what_is_stored() {
+        let spec = create_only_spec();
+        let mut stored = Attrs::new();
+        stored.insert("url".to_owned(), json!("git@example.com:me/app.git"));
+        stored.insert("directory".to_owned(), json!("/srv/checkout"));
+
+        // The submitted config changes both — only the editable one takes.
+        let mut submitted = Attrs::new();
+        submitted.insert("url".to_owned(), json!("git@example.com:me/other.git"));
+        submitted.insert("directory".to_owned(), json!("/tmp/elsewhere"));
+
+        let merged = preserve_create_only(&spec, &stored, &submitted);
+        assert_eq!(merged.get("directory"), Some(&json!("/srv/checkout")));
+        assert_eq!(
+            merged.get("url"),
+            Some(&json!("git@example.com:me/other.git"))
+        );
+    }
+
+    #[test]
+    fn a_create_only_setting_that_was_never_set_cannot_be_set_by_an_edit() {
+        // Unset is the stored state; letting a save fill it in would be editing
+        // a create-only value under another name.
+        let spec = create_only_spec();
+        let mut submitted = Attrs::new();
+        submitted.insert("directory".to_owned(), json!("/tmp/elsewhere"));
+
+        let merged = preserve_create_only(&spec, &Attrs::new(), &submitted);
+        assert!(merged.get("directory").is_none());
+    }
+
+    #[test]
+    fn preserving_create_only_settings_leaves_a_create_alone() {
+        // On a create there is nothing stored, so nothing is preserved — which
+        // is what makes the setting settable exactly once.
+        let spec = create_only_spec();
+        let mut submitted = Attrs::new();
+        submitted.insert("url".to_owned(), json!("git@example.com:me/app.git"));
+        assert_eq!(
+            preserve_create_only(&spec, &Attrs::new(), &submitted),
+            submitted
+        );
     }
 }

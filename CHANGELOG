@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## Git file stores: choose the checkout directory, or adopt one that exists
+
+A git store now has a **working-copy directory** setting, set when the store is
+created and fixed thereafter, and the repository URL is no longer required. The
+two together make a case that was previously impossible: a repository someone had
+already cloned onto the server could not be connected as a store — the admin had
+to hand Saltcorn a URL and let it clone a second copy somewhere it chose.
+
+**A directory that already holds a checkout is adopted, not cloned over.** That
+was already `ensure_cloned`'s rule for a store's own second save; it is now the
+rule whether the working tree got there by Saltcorn's first clone or by someone
+typing `git clone` on that box a year ago. So a store created with a directory and
+**no URL** connects to the tree as it stands, uncommitted work included, and
+pushes to the remote that checkout already has. A directory with neither a
+checkout nor a URL to clone from is the one failure, and it names both ways out.
+
+**Neither `url` nor `directory` is declared required, and the pairing is checked
+by the backend.** A per-field spec can say "this is required"; it cannot say "one
+of these two". So `git_config_spec` marks neither, and `validate_git_config` — run
+from `validate_file_store_config` after the generic field-by-field pass — rejects a
+store that has said nothing about where its repository comes from. It is still a
+*structural* check in the sense the backend module means: it asks whether the admin
+has described a store, not whether the directory is there, so a named directory
+that has not been cloned into yet still saves and is still editable.
+
+**`create_only` is a new `FormField` property, not a git special case.** The
+directory says *where the working tree was put*, so an edit that changed it would
+abandon the tree rather than move it. Marking that on the declaration reaches both
+consumers at once, exactly as `secret` does: the admin form renders the control
+read-only on an edit, and `preserve_create_only` puts the stored value back over
+whatever a save submits — so a request that went round the form cannot repoint a
+working tree either. The form is the courtesy; the save path is the rule. Any
+backend, including one supplied by a plugin, gets the same behaviour by declaring
+the flag.
+
+**`clone_path` gained a middle term.** The recorded `clone_path` attribute still
+wins, then the configured directory, then the Saltcorn-owned
+`<data dir>/git-stores/<name>`. The attribute outranks the setting because the two
+answer different questions — the setting is where the admin asked for the
+checkout, the attribute is where one *is* — and following the attribute is what
+keeps a renamed store's working tree reachable.
+
 ## Table constraints: rules the database keeps
 
 A table can now carry the four things Saltcorn 1's Constraints screen offers —

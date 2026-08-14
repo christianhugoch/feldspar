@@ -2401,5 +2401,9 @@ fn form_field_schema() -> TypeSchema {
         // input, and what it is handed for this field is the redaction
         // sentinel, never the stored key.
         StructField::new("secret", TypeSchema::bool()),
+        // Whether the value is fixed once the thing exists: the form renders the
+        // control read-only on an edit, and a save that changes it anyway is
+        // overwritten with what is stored.
+        StructField::new("create_only", TypeSchema::bool()),
     ])
 }

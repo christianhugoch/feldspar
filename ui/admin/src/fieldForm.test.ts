@@ -65,6 +65,7 @@ const STRING: FieldTypeItem = {
       options: [],
       multiline: false,
       secret: false,
+      create_only: false,
     },
   ],
 };
@@ -82,6 +83,7 @@ const FILE: FieldTypeItem = {
       options: [],
       multiline: false,
       secret: false,
+      create_only: false,
     },
     {
       name: "folder",
@@ -92,6 +94,7 @@ const FILE: FieldTypeItem = {
       options: [],
       multiline: false,
       secret: false,
+      create_only: false,
     },
     {
       name: "mime_allow",
@@ -102,6 +105,7 @@ const FILE: FieldTypeItem = {
       options: [],
       multiline: false,
       secret: false,
+      create_only: false,
     },
   ],
 };

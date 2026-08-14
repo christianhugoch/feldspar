@@ -840,7 +840,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // Dropping them would orphan a working tree on the next save.
                 def.attributes = existing.attributes.clone();
                 // A secret the form sent back untouched is the sentinel it was
-                // shown, not the key: restore what is stored (§11.1).
+                // shown, not the key: restore what is stored (§11.1). A
+                // create-only setting is restored whatever was sent — the store
+                // exists, so that setting is no longer the admin's to change.
                 def.config = unredacted_config(&def.backend, &existing.config, &def.config);
                 save_file_store(&catalog, &def).await?;
 
@@ -3147,14 +3149,31 @@ fn redacted_config(backend: &str, config: &sc_types::Attrs) -> sc_types::Attrs {
 
 /// The reverse, on the way in: a submitted config whose sentinels have been
 /// replaced by what is stored, so an admin editing a store's *name* does not
-/// save the mask over its key.
+/// save the mask over its key — and whose
+/// [`create_only`](FormField::create_only) settings are put back to what is
+/// stored, because the store already exists.
+///
+/// Both are the same move and belong together: the spec says how a value
+/// submitted for a field is to be read against the one already there. The
+/// create-only half is the load-bearing one for a git store's working-copy
+/// directory — the form renders it read-only, but a request need not come from
+/// the form, and a save that repointed it would abandon the working tree rather
+/// than move it.
+///
+/// **Only reached on an edit.** A create has nothing stored, so there is nothing
+/// to preserve and a create-only setting is settable exactly once, which is what
+/// the flag means.
 fn unredacted_config(
     backend: &str,
     stored: &sc_types::Attrs,
     submitted: &sc_types::Attrs,
 ) -> sc_types::Attrs {
     match backend_config_spec(backend) {
-        Ok(spec) => sc_types::merge_secrets(&spec, stored, submitted),
+        Ok(spec) => sc_types::preserve_create_only(
+            &spec,
+            stored,
+            &sc_types::merge_secrets(&spec, stored, submitted),
+        ),
         Err(_) => submitted.clone(),
     }
 }
@@ -4038,6 +4057,7 @@ fn form_field_json(field: &FormField) -> Json {
         "options": field.static_options(),
         "multiline": field.multiline,
         "secret": field.secret,
+        "create_only": field.create_only,
     })
 }
 

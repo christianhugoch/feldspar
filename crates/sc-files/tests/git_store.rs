@@ -15,9 +15,9 @@ use std::process::Command;
 
 use bytes::Bytes;
 use sc_files::{
-    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, CFG_BRANCH, DATA_DIR_ENV, FileStore, FileStoreDef,
-    GIT_BACKEND, GitFileStore, GitRepo, OP_CHECKOUT, OP_COMMIT, OP_STATUS, clone_path,
-    connect_from_def, generate_deploy_key, record_clone_path, run_backend_operation,
+    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, CFG_BRANCH, CFG_DIR, DATA_DIR_ENV, FileStore,
+    FileStoreDef, GIT_BACKEND, GitFileStore, GitRepo, OP_CHECKOUT, OP_COMMIT, OP_STATUS,
+    clone_path, connect_from_def, generate_deploy_key, record_clone_path, run_backend_operation,
     validate_file_store_config,
 };
 use sc_types::Attrs;
@@ -117,7 +117,11 @@ async fn a_git_store_clones_serves_commits_and_pushes() {
     // not throw away a working tree.
     let again = repo.ensure_cloned().await.unwrap();
     assert!(again.success);
-    assert!(again.output.contains("already cloned"), "{}", again.output);
+    assert!(
+        again.output.contains("using the working copy already in"),
+        "{}",
+        again.output
+    );
 
     // Write through the FileStore API — the admin's file manager or an app's
     // build output — and git sees it.
@@ -461,6 +465,117 @@ async fn a_store_the_admin_has_not_cloned_still_knows_where_it_would_go() {
     let path = with_data_dir(&data, || async { clone_path(&def).unwrap() }).await;
     assert_eq!(path, data.join("git-stores").join("web_app"));
     assert_eq!(def.backend, GIT_BACKEND);
+}
+
+#[tokio::test]
+async fn a_directory_chosen_on_creation_is_where_the_working_copy_lands() {
+    // The admin names the directory, and the clone goes there rather than into
+    // the location Saltcorn would have picked.
+    let origin = origin_with_a_commit("chosen-dir");
+    let workspace = temp_dir("chosen-dir-clone");
+    let chosen = workspace.join("checkouts").join("site");
+
+    let mut def = FileStoreDef::git("app", origin.to_string_lossy().into_owned())
+        .with(CFG_DIR, chosen.to_string_lossy().into_owned());
+    validate_file_store_config(&def).unwrap();
+
+    let repo = GitRepo::from_def(&def).unwrap();
+    assert_eq!(repo.root(), chosen);
+    // The create path records where it cloned, exactly as it does for a
+    // Saltcorn-chosen directory: the setting is what was asked for, the
+    // attribute is what happened.
+    record_clone_path(&mut def, repo.root());
+    repo.ensure_cloned().await.unwrap();
+
+    assert!(chosen.join(".git").exists());
+    let store = connect_from_def(&def).unwrap();
+    assert_eq!(
+        &store.read("README.md").await.unwrap()[..],
+        b"# from the remote\n"
+    );
+}
+
+#[tokio::test]
+async fn an_existing_checkout_is_adopted_rather_than_cloned_over() {
+    // The case the directory setting exists for: a repository someone already
+    // cloned onto the server, connected by naming its directory and **no URL at
+    // all**. Nothing may be re-cloned, and nothing uncommitted may be lost.
+    let origin = origin_with_a_commit("adopt");
+    let workspace = temp_dir("adopt-existing");
+    let existing = workspace.join("already-here");
+    std::fs::create_dir_all(&existing).unwrap();
+    git(&existing, &["clone", &origin.to_string_lossy(), "."]);
+    git(&existing, &["config", "user.email", "someone@example.com"]);
+    git(&existing, &["config", "user.name", "Someone"]);
+    // Uncommitted work, which a re-clone would destroy.
+    std::fs::write(existing.join("scratch.txt"), "mine\n").unwrap();
+
+    let def = FileStoreDef::new("app", GIT_BACKEND)
+        .with(CFG_DIR, existing.to_string_lossy().into_owned());
+    // A definition with no URL is well-formed: the directory is the other half
+    // of the pairing.
+    validate_file_store_config(&def).unwrap();
+
+    let repo = GitRepo::from_def(&def).unwrap();
+    assert!(repo.is_cloned());
+    let out = repo.ensure_cloned().await.unwrap();
+    assert!(out.success);
+    assert!(
+        out.output.contains("using the working copy already in"),
+        "{}",
+        out.output
+    );
+
+    // Adopted as it stands: the remote's file is served, the uncommitted file is
+    // still there, and git still reports it as a change.
+    let store = connect_from_def(&def).unwrap();
+    assert!(store.is_git_repo());
+    assert_eq!(
+        &store.read("README.md").await.unwrap()[..],
+        b"# from the remote\n"
+    );
+    assert_eq!(&store.read("scratch.txt").await.unwrap()[..], b"mine\n");
+
+    let status = repo.status().await.unwrap();
+    assert!(status.cloned);
+    assert_eq!(status.branch, "main");
+    assert!(
+        status.changes.iter().any(|c| c.contains("scratch.txt")),
+        "{:?}",
+        status.changes
+    );
+
+    // And it is a working store, not merely a readable one: the remote the
+    // existing checkout already has is the one it pushes to.
+    store
+        .write("adopted.txt", Bytes::from_static(b"from saltcorn\n"))
+        .await
+        .unwrap();
+    repo.commit_all("adopted").await.unwrap();
+    repo.push().await.unwrap();
+    assert!(
+        git(&origin, &["log", "-1", "--pretty=%s", "main"]).contains("adopted"),
+        "the push should have reached the remote"
+    );
+}
+
+#[tokio::test]
+async fn a_directory_with_no_checkout_and_no_url_has_nothing_to_clone() {
+    // The other side of adoption: an empty directory and no URL is a store that
+    // cannot be brought up, and the message has to name both ways out.
+    let workspace = temp_dir("adopt-empty");
+    let empty = workspace.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+
+    let def =
+        FileStoreDef::new("app", GIT_BACKEND).with(CFG_DIR, empty.to_string_lossy().into_owned());
+    let repo = GitRepo::from_def(&def).unwrap();
+    let err = repo.ensure_cloned().await.unwrap_err().to_string();
+    assert!(err.contains("url"), "{err}");
+    assert!(err.contains(&empty.to_string_lossy().into_owned()), "{err}");
+    // Connecting fails too, and for the reason it always does: there is no
+    // working tree.
+    assert!(connect_from_def(&def).is_err());
 }
 
 /// Run an operation with [`DATA_DIR_ENV`] pointed at `dir`.

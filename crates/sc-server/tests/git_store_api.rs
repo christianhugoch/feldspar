@@ -261,7 +261,22 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
         .iter()
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert_eq!(settings, ["url", "branch", "key_path", "public_key"]);
+    assert_eq!(
+        settings,
+        ["url", "directory", "branch", "key_path", "public_key"]
+    );
+    // The working-copy directory is settable once, when the store is created:
+    // it says where the checkout was put, so an edit would abandon it rather
+    // than move it. The form reads that off the declaration, as it does
+    // `multiline` and `secret`.
+    let directory = git_backend["config_spec"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == json!("directory"))
+        .unwrap();
+    assert_eq!(directory["create_only"], json!(true));
+    assert_eq!(git_backend["config_spec"][0]["create_only"], json!(false));
 
     // And its *operations* are declared the same way, so the form renders a
     // button per operation with no knowledge of what a repository is. This is
@@ -804,6 +819,164 @@ async fn renaming_a_git_store_keeps_its_working_tree() -> sc_error::Result<()> {
         )
         .await;
     assert_eq!(file["text"], json!("work in progress\n"));
+
+    Ok(())
+}
+
+/// A directory chosen on creation is where the working copy goes, and cannot be
+/// changed afterwards.
+///
+/// Both halves matter and only the second needs the server. The form renders the
+/// setting read-only on an edit because the backend declared it `create_only`,
+/// but a form is a suggestion; the save path puts the stored value back over
+/// whatever arrives, so a request that went round the form cannot repoint a
+/// working tree either — which would not move it, it would abandon it.
+#[tokio::test]
+async fn a_chosen_working_copy_directory_is_used_and_then_fixed() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+    let origin = origin_with_a_commit("chosen");
+    let chosen = data_dir().join("chosen-checkouts").join("site");
+
+    let (status, created) = client
+        .send(
+            "POST",
+            "/api/file-stores",
+            Some(json!({
+                "name": "chosen",
+                "description": "",
+                "backend": "git",
+                "config": {
+                    "url": origin.to_string_lossy(),
+                    "directory": chosen.to_string_lossy(),
+                },
+                "min_role": Value::Null,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["connected"], json!(true));
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    // The clone landed where the admin asked, not where Saltcorn would have put
+    // it.
+    assert!(chosen.join(".git").is_dir());
+    let report = operation(&mut client, &id, "status", None).await;
+    assert_eq!(
+        working_copy_line(&report)
+            .trim_start_matches("Working copy:")
+            .trim(),
+        chosen.to_string_lossy()
+    );
+
+    // Now try to move it by editing. The submitted directory is ignored and the
+    // stored one kept.
+    let elsewhere = data_dir().join("chosen-checkouts").join("moved");
+    let (status, updated) = client
+        .send(
+            "PUT",
+            &format!("/api/file-stores/{id}"),
+            Some(json!({
+                "name": "chosen",
+                "description": "",
+                "backend": "git",
+                "config": {
+                    "url": origin.to_string_lossy(),
+                    "directory": elsewhere.to_string_lossy(),
+                },
+                "min_role": Value::Null,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(
+        updated["config"]["directory"],
+        json!(chosen.to_string_lossy())
+    );
+    assert!(
+        !elsewhere.exists(),
+        "nothing may be cloned into the new path"
+    );
+    assert!(catalog.file_store("chosen")?.is_some());
+    let report = operation(&mut client, &id, "status", None).await;
+    assert_eq!(
+        working_copy_line(&report)
+            .trim_start_matches("Working copy:")
+            .trim(),
+        chosen.to_string_lossy()
+    );
+
+    Ok(())
+}
+
+/// A directory that **already holds a checkout** is adopted as it stands, with
+/// no URL given at all — the case the directory setting exists for.
+///
+/// Nothing is cloned over, so uncommitted work in that tree survives, and the
+/// remote the store pushes to is the one the checkout already has.
+#[tokio::test]
+async fn an_existing_checkout_is_adopted_with_no_url() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+    let origin = origin_with_a_commit("adopted");
+    let existing = data_dir().join("already-checked-out");
+    std::fs::create_dir_all(&existing).unwrap();
+    git(&existing, &["clone", &origin.to_string_lossy(), "."]);
+    git(&existing, &["config", "user.email", "someone@example.com"]);
+    git(&existing, &["config", "user.name", "Someone"]);
+    std::fs::write(existing.join("scratch.txt"), "mine\n").unwrap();
+
+    let (status, created) = client
+        .send(
+            "POST",
+            "/api/file-stores",
+            Some(json!({
+                "name": "adopted",
+                "description": "",
+                "backend": "git",
+                // No URL: the directory is the other half of the pairing.
+                "config": { "directory": existing.to_string_lossy() },
+                "min_role": Value::Null,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["connected"], json!(true));
+    assert_eq!(created["is_git_repo"], json!(true));
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert!(catalog.file_store("adopted")?.is_some());
+
+    // Adopted, not re-cloned: the uncommitted file is still there and is
+    // reported as a change.
+    let (_, file) = client
+        .send(
+            "POST",
+            "/api/file-stores/adopted/read",
+            Some(json!({ "path": "scratch.txt" })),
+        )
+        .await;
+    assert_eq!(file["text"], json!("mine\n"));
+    let report = operation(&mut client, &id, "status", None).await;
+    assert!(report.contains("scratch.txt"), "{report}");
+    assert!(report.contains("On branch main"), "{report}");
+
+    // A store with neither a URL nor a directory has nothing to work from, and
+    // is refused where the admin can fix it: on the form.
+    let (status, refused) = client
+        .send(
+            "POST",
+            "/api/file-stores",
+            Some(json!({
+                "name": "nothing",
+                "description": "",
+                "backend": "git",
+                "config": {},
+                "min_role": Value::Null,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    let message = serde_json::to_string(&refused).unwrap();
+    assert!(message.contains("url"), "{message}");
+    assert!(message.contains("directory"), "{message}");
 
     Ok(())
 }
