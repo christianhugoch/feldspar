@@ -20,6 +20,12 @@ sc-catalog.workspace = true
 # The `eval` feature is deliberately *not* enabled here: this crate holds the
 # `JsEvaluator` seam, the server supplies the engine.
 sc-expr.workspace = true
+# The mail transport seam, for the same reason the `JsEvaluator` seam is here: an
+# action that sends mail is handed one through `ActionContext`, and the crate
+# that owns the context has to be able to name the trait. `sc-email` is beside
+# this crate at layer 6 and depends only on layers below it, so this is not a
+# cycle — it is the same shape as `sc-llm` sitting under the agent runner.
+sc-email.workspace = true
 async-trait.workspace = true
 # One macro: `task_local!`, for the error event's re-entrancy guard (§10.2). A
 # flag on the dispatcher would drop a *concurrent* unrelated error; the guard is

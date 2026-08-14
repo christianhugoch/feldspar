@@ -56,15 +56,15 @@ mod triggers;
 mod validate;
 
 pub use action::{Action, ActionContext, ConfigCheck};
-pub use dispatch::{TriggerDispatcher, TriggerRun, fire_trigger};
+pub use dispatch::{ActionServices, TriggerDispatcher, TriggerRun, fire_trigger};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use registry::ActionRegistry;
 pub use schedule::{ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, OFTEN_MINUTES, Schedule, day_name};
 pub use scheduler::Scheduler;
 pub use scope::{
-    EVENT_SCOPE, EventBindings, action_shape, check_formula, check_template, config_str,
-    event_formula_value, formula_map, optional_formula, render_event_template, required_formula,
-    template_scope, typed_value,
+    EVENT_SCOPE, EventBindings, action_shape, check_formula, check_template, config_flag,
+    config_str, event_formula_value, formula_map, optional_formula, optional_template,
+    render_event_template, required_formula, required_template, template_scope, typed_value,
 };
 pub use store::{
     TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers, load_trigger,

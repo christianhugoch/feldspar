@@ -49,6 +49,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use sc_catalog::{CallerContext, Catalog, TableEvents, TableWrite, WriteOp, prefetch_bindings};
+use sc_email::Mailer;
 use sc_error::{Error, Result};
 use sc_expr::{Ambient, Formula, JsEvaluator, Operation, value_from_json};
 use sc_query::Value;
@@ -80,9 +81,26 @@ impl TriggerRun {
     }
 }
 
-/// The live trigger set, the actions it can run, and the engine its formulas
-/// evaluate in — everything one dispatch needs, held in one place a server
-/// installs once.
+/// The process-wide things an action run may need but cannot build for itself:
+/// the JavaScript engine and the mail transport.
+///
+/// One struct rather than a growing list of parameters, because these have
+/// exactly the same shape and exactly the same rule — the process that serves
+/// requests installs them once, a process that does not (a build tool, a unit
+/// test) installs neither, and an action that needs one it was not given says so
+/// by name instead of doing nothing. Adding the next one (§18's queue, a metrics
+/// sink) is a field here rather than another argument at every call site.
+#[derive(Default, Clone)]
+pub struct ActionServices {
+    /// The server's one isolate (§7.3), which an `only_if` and most actions'
+    /// configuration need.
+    pub evaluator: Option<Arc<dyn JsEvaluator>>,
+    /// The mail transport (§18.2), which `send_email` needs.
+    pub mailer: Option<Arc<dyn Mailer>>,
+}
+
+/// The live trigger set, the actions it can run, and the services they run with
+/// — everything one dispatch needs, held in one place a server installs once.
 ///
 /// Cheap to share (`Arc` it): the trigger set is behind an `RwLock` so a save can
 /// swap it in ([`set_triggers`](TriggerDispatcher::set_triggers)) while events
@@ -90,7 +108,7 @@ impl TriggerRun {
 pub struct TriggerDispatcher {
     registry: Arc<ActionRegistry>,
     triggers: RwLock<Arc<Triggers>>,
-    evaluator: Option<Arc<dyn JsEvaluator>>,
+    services: ActionServices,
 }
 
 impl TriggerDispatcher {
@@ -100,14 +118,25 @@ impl TriggerDispatcher {
         TriggerDispatcher {
             registry,
             triggers: RwLock::new(Arc::new(Triggers::empty())),
-            evaluator: None,
+            services: ActionServices::default(),
         }
     }
 
     /// Supply the JavaScript engine (the server's one isolate, §7.3), which an
     /// `only_if` and most actions' configuration need.
     pub fn with_evaluator(mut self, evaluator: Arc<dyn JsEvaluator>) -> TriggerDispatcher {
-        self.evaluator = Some(evaluator);
+        self.services.evaluator = Some(evaluator);
+        self
+    }
+
+    /// Supply the mail transport (§18.2), which `send_email` needs.
+    ///
+    /// Optional in the same way the evaluator is: a process that installs no
+    /// mailer runs every other action normally, and a trigger that sends mail
+    /// fails there with a message saying so rather than at a half-written
+    /// `Option` somewhere further in.
+    pub fn with_mailer(mut self, mailer: Arc<dyn Mailer>) -> TriggerDispatcher {
+        self.services.mailer = Some(mailer);
         self
     }
 
@@ -162,14 +191,8 @@ impl TriggerDispatcher {
         };
         let mut runs = Vec::with_capacity(matched.len());
         for trigger in matched {
-            let outcome = fire_trigger(
-                catalog,
-                &self.registry,
-                self.evaluator.as_ref(),
-                &trigger,
-                event,
-            )
-            .await;
+            let outcome =
+                fire_trigger(catalog, &self.registry, &self.services, &trigger, event).await;
             runs.push(TriggerRun {
                 trigger: trigger.name,
                 outcome,
@@ -263,14 +286,7 @@ impl TriggerDispatcher {
                 .caller(caller.role, caller.user.clone())
                 .chained(caller.chain.clone());
         }
-        let result = fire_trigger(
-            catalog,
-            &self.registry,
-            self.evaluator.as_ref(),
-            trigger,
-            &event,
-        )
-        .await?;
+        let result = fire_trigger(catalog, &self.registry, &self.services, trigger, &event).await?;
         Ok(result.unwrap_or(Json::Null))
     }
 }
@@ -348,21 +364,24 @@ fn event_kind(op: WriteOp) -> EventKind {
 pub async fn fire_trigger(
     catalog: &Catalog,
     registry: &ActionRegistry,
-    evaluator: Option<&Arc<dyn JsEvaluator>>,
+    services: &ActionServices,
     trigger: &Trigger,
     event: &Event,
 ) -> Result<Option<Json>> {
     // The cascade bound, checked before anything else runs: past it, the trigger
     // does not fire and the error names the whole chain (§10.2).
     let chain = event.firing(&trigger.name)?;
-    if !only_if_selects(catalog, evaluator, trigger, event).await? {
+    if !only_if_selects(catalog, services.evaluator.as_ref(), trigger, event).await? {
         return Ok(None);
     }
     let action = registry.require(trigger.action.trim())?;
     let mut ctx =
         ActionContext::new(catalog, event, &trigger.configuration, &trigger.name).with_chain(chain);
-    if let Some(evaluator) = evaluator {
+    if let Some(evaluator) = &services.evaluator {
         ctx = ctx.with_evaluator(evaluator);
+    }
+    if let Some(mailer) = &services.mailer {
+        ctx = ctx.with_mailer(mailer);
     }
     action.run(&mut ctx).await.map(Some)
 }

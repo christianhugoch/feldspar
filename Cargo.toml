@@ -340,6 +340,23 @@ lettre = { version = "0.11", default-features = false, features = [
     "rustls-platform-verifier",
 ] }
 
+# The MJML compiler behind `sc-email::render_mjml`. MJML is the markup an email
+# designer already writes — `mj-section`/`mj-column`/`mj-button` instead of the
+# nested tables and conditional comments a message has to be for Outlook to lay
+# it out — and `mrml` is the Rust reimplementation of it, so a body written that
+# way compiles **in process** rather than through a Node sidecar (v1 ran MJML's
+# own JavaScript implementation, which is why it needs one).
+#
+# `default-features = false` keeps `parse` and `render` and drops `json` (the AST
+# as serde, which nothing here serialises) and `print` (writing MJML back out).
+# The default include loader refuses `mj-include`, which is the behaviour we
+# want: a template is data an admin typed, and it must not be able to make the
+# server read a file or call a URL.
+mrml = { version = "6.0", default-features = false, features = [
+    "parse",
+    "render",
+] }
+
 # --- LLM providers -----------------------------------------------------------
 #
 # The provider calls behind `sc-llm`'s own object-safe seam (design §11.1, TODO

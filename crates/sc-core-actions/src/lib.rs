@@ -1,7 +1,7 @@
 //! The core built-in actions (layer 9; technical design §10.1, TODO Phase 3).
 //!
 //! Every action Saltcorn ships with, in one crate: [`InsertRow`], [`UpdateRows`],
-//! [`DeleteRows`], [`Fetch`] and [`RunJsCode`]. The set
+//! [`DeleteRows`], [`Fetch`], [`RunJsCode`] and [`SendEmail`]. The set
 //! is **deliberately small** — GOALS asks for a minimal one, because control flow
 //! belongs to the workflow engine (§10.3) rather than to a proliferation of
 //! actions — and [`builtin_actions`] is the single constructor that assembles it.
@@ -43,6 +43,7 @@ mod fetch;
 mod insert_row;
 mod rows_scope;
 mod run_js_code;
+mod send_email;
 mod update_rows;
 
 use std::sync::Arc;
@@ -54,6 +55,7 @@ pub use delete_rows::DeleteRows;
 pub use fetch::Fetch;
 pub use insert_row::InsertRow;
 pub use run_js_code::RunJsCode;
+pub use send_email::SendEmail;
 pub use update_rows::UpdateRows;
 
 /// The built-in action set a server installs.
@@ -80,6 +82,7 @@ pub fn register_builtin_actions(registry: &mut ActionRegistry) -> Result<()> {
     registry.register(Arc::new(DeleteRows))?;
     registry.register(Arc::new(Fetch::new()?))?;
     registry.register(Arc::new(RunJsCode))?;
+    registry.register(Arc::new(SendEmail))?;
     Ok(())
 }
 
@@ -97,6 +100,7 @@ mod tests {
                 "fetch",
                 "insert_row",
                 "run_js_code",
+                "send_email",
                 "update_rows"
             ]
         );
@@ -138,5 +142,9 @@ mod tests {
             vec!["url", "method", "headers", "body", "timeout_ms"]
         );
         assert_eq!(names("run_js_code"), vec!["code"]);
+        assert_eq!(
+            names("send_email"),
+            vec!["to", "cc", "bcc", "from", "subject", "html", "mjml", "text"]
+        );
     }
 }

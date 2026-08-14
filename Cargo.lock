@@ -562,7 +562,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1355,6 +1355,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enum-as-inner"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359ee92f81184d7985519e474bda2a5738476334edd3746c9b1265c067afe70"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1817,6 +1829,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "htmlparser"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48ce8546b993eaf241d69ded33b1be6d205dd9857ec879d9d18bd05d3676e144"
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2172,6 +2190,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2437,6 +2464,20 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mrml"
+version = "6.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a92ff9ad398a7d556481a607b912370999bc6441537c90a979c16d73c91a832"
+dependencies = [
+ "enum-as-inner",
+ "htmlparser",
+ "indexmap",
+ "itertools 0.14.0",
+ "rustc-hash",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3502,6 +3543,7 @@ dependencies = [
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",
+ "sc-email",
  "sc-error",
  "sc-expr",
  "sc-query",
@@ -3685,8 +3727,10 @@ dependencies = [
  "sc-api",
  "sc-auth",
  "sc-catalog",
+ "sc-config",
  "sc-db",
  "sc-db-postgres",
+ "sc-email",
  "sc-error",
  "sc-expr",
  "sc-query",
@@ -3762,6 +3806,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "lettre",
+ "mrml",
+ "sc-catalog",
  "sc-config",
  "sc-error",
  "sc-test-harness",

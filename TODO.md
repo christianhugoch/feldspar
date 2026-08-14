@@ -213,27 +213,42 @@ to send through without it. The action-facing half — how a `send_email` action
 
 ## Phase 4 — The `send_email` action (`sc-core-actions`)
 
-- [ ] **`send_email`**, configured as templates: `to`, `cc`, `bcc`, `subject`, `html`, `text`,
+- [x] **`send_email`**, configured as templates: `to`, `cc`, `bcc`, `subject`, `html`, `text`,
       and an optional `from` overriding the configured one. Every one is a `Template` rendered
       against the event (recipients and subject as text, `html` as HTML), and `validate_config`
       checks all of them in the event's scope — so a trigger whose subject names a dropped field
       leaves the live set with a reason, like every other invalid trigger.
-- [ ] **At least one body is required**, and the failure modes are named at save: no bodies, no
+- [x] **An `mjml` flag on the HTML body**, compiled through the `mrml` crate
+      (`sc_email::render_mjml`) **after** interpolation, so a body can be written in the markup
+      an email designer already writes and the `{{ }}` values land in the MJML source rather than
+      in generated tables. Off by default and never inferred from what the body looks like; a
+      static MJML body is compiled at *save* too, so a missing `</mj-section>` is a form error.
+      Deliberately out of scope for this milestone and added anyway, because it is one
+      dependency and one function — what stays out is rendering a *view* as a body, which needs
+      a view renderer.
+- [x] **At least one body is required**, and the failure modes are named at save: no bodies, no
       recipients, an unparseable static address. What can only fail at send — the transport —
       fails with the transport's message, prefixed with the trigger's name.
-- [ ] **The mailer reaches the action the way the evaluator does**: through `ActionContext`,
+- [x] **The mailer reaches the action the way the evaluator does**: through `ActionContext`,
       absent in contexts that have none (client generation, unit tests), so an action asking for
       one out of context gets a named configuration error rather than doing nothing. Registered
-      in `sc-core-actions`' registry beside `insert_row` and `fetch`.
-- [ ] **The `fetch` action's URL becomes a template** — the second adopter, which is what makes
+      in `sc-core-actions`' registry beside `insert_row` and `fetch`. The two seams are now one
+      `ActionServices` the dispatcher holds, and the mailer a server installs is
+      `sc_email::SettingsMailer`, which reads the saved settings per message — so an admin who
+      fixes an SMTP password does not have to restart. `Mailer` gained `sender()`: the
+      from-address is the transport's, not the action's, and it is where "this installation
+      sends no mail" is discovered.
+- [x] **The `fetch` action's URL becomes a template** — the second adopter, which is what makes
       "central" a fact rather than a claim. A URL with no `{{` is parsed and validated exactly as
       today; one with tokens has its templates validated at save and its URL parsed at send, with
       the same "not a valid URL" error it has now.
-- [ ] Tests (real Postgres, `RecordingMailer`): a trigger on `orders` renders `to` from
+- [x] Tests (real Postgres, `RecordingMailer`): a trigger on `orders` renders `to` from
       `customerⱵemail`, the subject from `id`, the HTML body from several fields, and the
       recording mailer holds exactly that message; a null field renders empty; a template naming
       a missing field is refused at save; a run with **no email settings configured** fails with
-      an error pointing at Settings → Email; the `fetch` URL template resolves.
+      an error pointing at Settings → Email; the `fetch` URL template resolves. Plus the MJML
+      body: compiled after interpolation, sent as-is without the flag, refused at save when it
+      does not compile.
 
 ## Phase 5 — Running a trigger against a row
 
@@ -291,9 +306,11 @@ to send through without it. The action-facing half — how a `send_email` action
 
 ## Explicitly OUT of scope for this milestone
 
-- **MJML, and views as email bodies.** v1's best email feature is "render one of your views as
-  the message", and v2 has no view renderer yet (§18.5 is still open). An HTML body is a
-  template, and when there is something to render there will be a body kind that renders it.
+- **Views as email bodies.** v1's best email feature is "render one of your views as the
+  message", and v2 has no view renderer yet (§18.5 is still open). An HTML body is a template,
+  and when there is something to render there will be a body kind that renders it. (**MJML**
+  was on this list and was built anyway, in Phase 4: it is one dependency and one function, and
+  it needs no view renderer.)
 - **Attachments.** They are a File-field read and a MIME part, and neither is hard; they are
   also not on the path from a button to a sent email, and every option added to this action's
   form before the action has been used once is a guess.

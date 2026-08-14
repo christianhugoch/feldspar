@@ -53,7 +53,18 @@ pub async fn install_triggers(
         Arc::clone(agents.providers()),
     )
     .context("registering the agent action")?;
-    let dispatcher = Arc::new(TriggerDispatcher::new(Arc::new(registry)).with_evaluator(evaluator));
+    // The mail transport is the **settings-backed** one, not a transport built
+    // here from the settings as they are now: an admin who fixes an SMTP
+    // password gets it on the next message, which is what the Email section's
+    // own help text promises. It is installed unconditionally, because "this
+    // installation sends no mail" is a message for the trigger that tries to,
+    // not a reason to start the server without a mailer.
+    let mailer = Arc::new(sc_email::SettingsMailer::new(Arc::clone(catalog)));
+    let dispatcher = Arc::new(
+        TriggerDispatcher::new(Arc::new(registry))
+            .with_evaluator(evaluator)
+            .with_mailer(mailer),
+    );
     dispatcher
         .reload(catalog)
         .await

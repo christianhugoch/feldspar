@@ -255,6 +255,49 @@ async fn a_body_formula_replaces_the_event_envelope() -> Result<()> {
     Ok(())
 }
 
+/// The URL is a template, which is what makes "one interpolation facility" a
+/// fact rather than a claim: the same `{{ }}` the email body uses addresses the
+/// request, validated at save and rendered against the row at send.
+#[tokio::test]
+async fn a_url_template_is_rendered_against_the_row() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+    let (url, received) = one_shot(200, "application/json", "{}").await;
+
+    // The listener's URL ends in `/hook`; the trigger addresses the row instead.
+    let base = url.trim_end_matches("/hook").to_owned();
+    let cfg = config(&[
+        (
+            "url",
+            json!(format!(
+                "{base}/books/{{{{ row.id }}}}?title={{{{ row.title }}}}"
+            )),
+        ),
+        ("method", json!("GET")),
+    ]);
+    run(&catalog, &book_insert(), &cfg).await?;
+
+    let request = received.await.unwrap();
+    assert!(
+        request
+            .start_line
+            .starts_with("GET /books/7?title=A%20Book "),
+        "{}",
+        request.start_line
+    );
+
+    // A rendered URL is still parsed and still refused when it is not one: what a
+    // row interpolates is data, and data must not choose the scheme.
+    let cfg = config(&[("url", json!("{{ row.title }}"))]);
+    let msg = run(&catalog, &book_insert(), &cfg)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("not a valid URL"), "{msg}");
+    assert!(msg.contains("A Book"), "the rendered URL is quoted: {msg}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_get_sends_no_body_and_a_text_response_comes_back_as_text() -> Result<()> {
     let db = TestDb::new().await?;
@@ -345,6 +388,12 @@ async fn a_broken_fetch_configuration_is_refused_on_save() -> Result<()> {
                 ("headers", json!({ "bad header": "x" })),
             ],
             &["headers", "bad header"],
+        ),
+        // A URL template naming a field the table does not have: nothing can be
+        // parsed until a row is in hand, but the *token* is checked here.
+        (
+            &[("url", json!("https://x.test/{{ row.titel }}"))],
+            &["url", "titel"],
         ),
         // An unbounded timeout is not on offer.
         (

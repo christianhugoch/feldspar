@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_without_a_from_address_is_refused() {
+    fn a_host_without_a_sender_is_refused() {
         let err = EmailSettings::from_config(&attrs(&[(SMTP_HOST, json!("smtp.example.com"))]))
             .unwrap_err()
             .to_string();
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_from_address_that_is_not_a_mailbox_is_refused() {
+    fn a_sender_that_is_not_a_mailbox_is_refused() {
         for bad in [
             "not-an-address",
             "Ada <ada@example.com",

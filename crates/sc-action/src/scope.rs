@@ -90,6 +90,42 @@ pub fn required_formula(config: &Attrs, key: &str) -> Result<Formula> {
     Formula::parse(&source).map_err(|e| Error::invalid(format!("`{key}`: {e}")))
 }
 
+/// An optional **template** setting, parsed. An absent or blank one is `None`.
+///
+/// Not trimmed, unlike [`config_str`]: a template is prose, and the newline an
+/// admin left at the end of an HTML body is part of what they wrote.
+pub fn optional_template(config: &Attrs, key: &str) -> Result<Option<Template>> {
+    let Some(Json::String(source)) = config.get(key) else {
+        return Ok(None);
+    };
+    if source.trim().is_empty() {
+        return Ok(None);
+    }
+    Template::parse(source)
+        .map(Some)
+        .map_err(|e| Error::invalid(format!("`{key}`: {e}")))
+}
+
+/// A required template setting, parsed.
+pub fn required_template(config: &Attrs, key: &str) -> Result<Template> {
+    optional_template(config, key)?
+        .ok_or_else(|| Error::invalid(format!("the `{key}` setting is required")))
+}
+
+/// A boolean setting. Absent or null is `false`; anything that is not a boolean
+/// is an error naming the setting rather than a silent `false`, for the reason
+/// the timeout is refused rather than clamped — a stored `"true"` means somebody
+/// wrote the configuration by hand and should be told which key is wrong.
+pub fn config_flag(config: &Attrs, key: &str) -> Result<bool> {
+    match config.get(key) {
+        None | Some(Json::Null) => Ok(false),
+        Some(Json::Bool(flag)) => Ok(*flag),
+        Some(other) => Err(Error::invalid(format!(
+            "`{key}` must be true or false, got {other}"
+        ))),
+    }
+}
+
 /// A field → formula map setting (`{"title": "row.title", "at": "user.id"}`),
 /// parsed in the order the stored document gives (which is the order the admin
 /// entered), with a parse failure named against the field it belongs to.

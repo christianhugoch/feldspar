@@ -9,7 +9,15 @@
 //!   the OAuth2 and Microsoft Graph transports §18.2 leaves for later are a new
 //!   implementation rather than a rewrite.
 //! - [`SmtpMailer`] is the one implementation that reaches a network, built from
-//!   the [`EmailSettings`](sc_config::EmailSettings) an admin saved.
+//!   the [`EmailSettings`](sc_config::EmailSettings) an admin saved, and
+//!   [`SettingsMailer`] is the one a server installs: it reads those settings
+//!   afresh for every message, so changing them takes effect on the next one.
+//!
+//! Beside them is [`render_mjml`], which compiles an HTML body written as
+//! [MJML](https://mjml.io) — the markup an email designer writes — into the
+//! table markup a mail client will lay out. It is here rather than in the action
+//! because "what an email body may be written in" is this crate's question, and
+//! the system emails will want the same answer.
 //!
 //! The trait is not speculation about future providers: it is what lets an
 //! action's tests assert *what would have been sent* without an SMTP server,
@@ -22,7 +30,9 @@
 //! rejected. A template renders `to`, so the string this is handed is whatever a
 //! row held, and "which address was wrong" is the only useful answer.
 
-use std::sync::Mutex;
+mod mjml;
+
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lettre::{
@@ -30,8 +40,16 @@ use lettre::{
     message::{Mailbox as LettreMailbox, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
 };
-use sc_config::{EmailSettings, Mailbox, SmtpSecurity, parse_mailbox};
+use sc_catalog::Catalog;
+use sc_config::{EmailSettings, SmtpSecurity};
 use sc_error::{Error, Result};
+
+pub use mjml::render_mjml;
+// The address vocabulary, re-exported: a crate that builds a message should not
+// have to depend on the *settings* crate to name an address. Parsed there, and
+// only there, because the from-address is a setting and a setting is checked
+// where it is declared — this is that one grammar, borrowed.
+pub use sc_config::{Mailbox, parse_mailbox};
 
 /// One message, independent of how it is sent.
 ///
@@ -102,6 +120,23 @@ impl Email {
 pub trait Mailer: Send + Sync {
     /// Send one message, or say why it could not be sent.
     async fn send(&self, email: &Email) -> Result<()>;
+
+    /// The address this transport sends **as**, for a sender that does not name
+    /// one of its own.
+    ///
+    /// On the trait rather than read from the settings by every caller, because
+    /// the from-address is a property of the transport: it is the configured
+    /// `email_from` for SMTP, and it would be the authorised mailbox for an
+    /// OAuth2 or Graph transport, which is not a setting at all. It is also
+    /// where "this installation sends no mail" is discovered — a `send_email`
+    /// action asks for it before it builds a message, so an unconfigured
+    /// installation is an error pointing at Settings → Email rather than a
+    /// connection attempt to nowhere.
+    ///
+    /// Async and fallible because the answer is read at send time: an admin who
+    /// changes the from-address gets it on the next message, not the next
+    /// restart.
+    async fn sender(&self) -> Result<Mailbox>;
 }
 
 /// Split a rendered recipient string into mailboxes.
@@ -161,6 +196,9 @@ fn split_on_unquoted_commas(raw: &str) -> Vec<&str> {
 /// message a test of the *configuration* (§18.2).
 pub struct SmtpMailer {
     transport: AsyncSmtpTransport<Tokio1Executor>,
+    /// The configured `email_from`, kept because it is what
+    /// [`sender`](Mailer::sender) answers.
+    from: Mailbox,
 }
 
 impl SmtpMailer {
@@ -198,12 +236,17 @@ impl SmtpMailer {
         }
         Ok(SmtpMailer {
             transport: builder.build(),
+            from: settings.from.clone(),
         })
     }
 }
 
 #[async_trait]
 impl Mailer for SmtpMailer {
+    async fn sender(&self) -> Result<Mailbox> {
+        Ok(self.from.clone())
+    }
+
     async fn send(&self, email: &Email) -> Result<()> {
         let message = build_message(email)?;
         self.transport
@@ -268,20 +311,103 @@ fn to_lettre(mailbox: &Mailbox) -> Result<LettreMailbox> {
     })
 }
 
+/// The transport an installation actually has: whatever the **saved settings**
+/// say, read afresh for every message.
+///
+/// This is the mailer a server installs, and the indirection is the point. A
+/// transport built once at boot would be the settings as they were at boot: an
+/// admin who fixes a password would have to restart the server for the fix to
+/// take, and the Email section's own help text ("changes take effect on the next
+/// message; nothing here needs a restart") would be false. Reading the settings
+/// per message costs one config lookup against a catalog that already caches
+/// them, and building an [`SmtpMailer`] opens no connection — the socket is the
+/// `send` call's, not the constructor's.
+///
+/// It is also where "this installation sends no mail" is discovered, once, with
+/// a message pointing at the screen that fixes it.
+pub struct SettingsMailer {
+    catalog: Arc<Catalog>,
+}
+
+impl SettingsMailer {
+    /// A mailer over the settings stored in `catalog`.
+    pub fn new(catalog: Arc<Catalog>) -> SettingsMailer {
+        SettingsMailer { catalog }
+    }
+
+    /// The saved settings, or the one error that names what is missing and where
+    /// to put it.
+    ///
+    /// `EmailSettings::load` already distinguishes the two failures this has to
+    /// keep apart: `None` is "no `smtp_host`", which is an installation that was
+    /// never configured, and an `Err` is settings that are configured *wrongly*,
+    /// whose own message says which key is wrong. Collapsing them into one
+    /// "email is not set up" would throw away the half that is actionable.
+    async fn settings(&self) -> Result<EmailSettings> {
+        EmailSettings::load(&self.catalog).await?.ok_or_else(|| {
+            Error::invalid(
+                "this installation has no mail transport: set an SMTP host in \
+                 Settings → Email and save",
+            )
+        })
+    }
+}
+
+#[async_trait]
+impl Mailer for SettingsMailer {
+    async fn sender(&self) -> Result<Mailbox> {
+        Ok(self.settings().await?.from)
+    }
+
+    async fn send(&self, email: &Email) -> Result<()> {
+        SmtpMailer::new(&self.settings().await?)?.send(email).await
+    }
+}
+
 /// A [`Mailer`] that keeps what it was handed and sends nothing.
 ///
 /// The way an action's behaviour is asserted without an SMTP server: the test
 /// runs the trigger and then reads the message, which is a stronger statement
 /// than "the call returned `Ok`".
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RecordingMailer {
     sent: Mutex<Vec<Email>>,
+    /// The identity this stand-in claims — see
+    /// [`sending_as`](RecordingMailer::sending_as).
+    from: Mailbox,
+}
+
+impl Default for RecordingMailer {
+    fn default() -> RecordingMailer {
+        RecordingMailer {
+            sent: Mutex::new(Vec::new()),
+            // `.invalid` is the reserved TLD for exactly this (RFC 2606): a test
+            // that does not care what the from-address is gets one that cannot
+            // be a real address by construction, so a message that escaped into
+            // a real transport would bounce rather than arrive from a domain
+            // somebody owns.
+            from: Mailbox {
+                name: Some("Saltcorn".to_owned()),
+                address: "recorder@example.invalid".to_owned(),
+            },
+        }
+    }
 }
 
 impl RecordingMailer {
     /// A recorder with nothing in it.
     pub fn new() -> RecordingMailer {
         RecordingMailer::default()
+    }
+
+    /// A recorder that claims `from` as the transport's configured identity —
+    /// for a test asserting that a message with no `from` of its own is sent as
+    /// the installation's address.
+    pub fn sending_as(from: Mailbox) -> RecordingMailer {
+        RecordingMailer {
+            from,
+            ..RecordingMailer::default()
+        }
     }
 
     /// Every message handed to this mailer, in order.
@@ -315,6 +441,10 @@ impl RecordingMailer {
 
 #[async_trait]
 impl Mailer for RecordingMailer {
+    async fn sender(&self) -> Result<Mailbox> {
+        Ok(self.from.clone())
+    }
+
     async fn send(&self, email: &Email) -> Result<()> {
         // The same checks the real transport runs, so a test against the
         // recorder cannot pass on a message SMTP would refuse to build.

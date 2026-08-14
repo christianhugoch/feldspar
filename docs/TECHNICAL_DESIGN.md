@@ -79,8 +79,9 @@ saltcorn/
 │  │                              #    (REST/GraphQL/gRPC/tRPC/MCP) + TypeScript consumer gen
 │  ├─ sc-app/                     # 8. Application, Framework provider trait, routing/subdomains
 │  ├─ sc-core-actions/            # 8. the built-in action set (insert_row, update_rows,
-│  │                              #    delete_rows, fetch, run_js_code) — above the row layer,
-│  │                              #    because a trigger's write goes *through* it (§10.1)
+│  │                              #    delete_rows, fetch, run_js_code, send_email) — above the
+│  │                              #    row layer, because a trigger's write goes *through* it
+│  │                              #    (§10.1)
 │  ├─ sc-core-traits/             # 9. the built-in agent traits (table, trigger and coding
 │  │                              #    traits) + the `run_agent` action — same layer, same
 │  │                              #    reason: their writes go through the row layer (§11.3)
@@ -990,11 +991,11 @@ ambient, and `row`/`old` are *out of scope* on an event that has no row (so nami
 (`action_shape`) so an `only_if` and an action's settings cannot disagree about what is
 in scope.
 
-The five built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch` and `run_js_code`,
-and they live in **`sc-core-actions`, above the row layer**. That placement is the design's
-one real constraint on where an action may live: a trigger's write goes through `sc-api`'s
-`rows` module, so it is coerced, validated, `File`-field-checked and *observed* exactly like an
-API caller's write. A second write path would quietly skip all of it.
+The six built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code` and
+`send_email`, and they live in **`sc-core-actions`, above the row layer**. That placement is
+the design's one real constraint on where an action may live: a trigger's write goes through
+`sc-api`'s `rows` module, so it is coerced, validated, `File`-field-checked and *observed*
+exactly like an API caller's write. A second write path would quietly skip all of it.
 
 - `insert_row` / `update_rows` / `delete_rows` take a target table and formulas. The `where`
   of the latter two **selects** rows: translated into SQL when it translates, and falling back
@@ -1005,7 +1006,15 @@ API caller's write. A second write path would quietly skip all of it.
   should be able to cause.
 - `fetch` sends an HTTP request built from the event and returns the parsed response — the
   response is the point, so a directly-run trigger can hand it back to its caller. Its timeout
-  is bounded (60s max) because a trigger runs inside the write or request that fired it.
+  is bounded (60s max) because a trigger runs inside the write or request that fired it. Its
+  **URL is a template**, so a request can be addressed to the row it is about.
+- `send_email` builds one message out of the event and sends it through the `Mailer` seam
+  (§18.2). Every setting — the recipients, the subject, both bodies, an optional `from` — is a
+  `{{ }}` **template** in the same formula language, rendered as text where a value is text (an
+  address, a subject) and as HTML where it is markup. The HTML body may be written as **MJML**
+  and compiled (`mjml`), which is how a message gets a layout that survives Outlook without
+  hand-written tables. The transport is handed in through `ActionContext`, exactly as the
+  JavaScript engine is, which is what lets its tests assert *what would have been sent*.
 - `run_js_code` runs a JavaScript body on the server's isolate with `row`/`old`/`user`/
   `payload` in scope. Deliberately **bounded**: no host API, so the code cannot reach the
   catalog, the network or the disk. Catalog access from a guest language is `sc-code`'s

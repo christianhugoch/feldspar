@@ -2,6 +2,77 @@
 
 Changes in reverse chronological order.
 
+## The `send_email` action, and MJML bodies
+
+A trigger can now send an email. `send_email` joins the built-in set, and every
+part of the message an admin configures — `to`, `cc`, `bcc`, `from`, the subject
+and both bodies — is a `{{ }}` **template** in the formula language everything
+else here is written in, validated in the event's scope when the trigger is saved
+and rendered against the row when it fires. So a receipt is configured by writing
+what it says: `{{ customerⱵemail }}` as the recipient, `Receipt for order
+{{ id }}` as the subject, and the order's own values in the body — with the Ⱶ-path
+*prefetched*, which is the whole reason `render_event_template` exists.
+
+**The escaping follows the part, not the sigil.** The recipients, the subject and
+the text body render as text; the HTML body renders as HTML. A subject put
+through the HTML rule turns `Tea & Coffee` into `Tea &amp; Coffee`, and a
+plain-text receipt full of entities is what nobody wants.
+
+**The HTML body can be written as MJML.** Tick `mjml` and the body is compiled
+through [mrml](https://crates.io/crates/mrml) — the Rust reimplementation of
+[MJML](https://mjml.io) — into the nest of tables and conditional comments a
+message has to be for Outlook to lay it out. Three things about that are
+deliberate. It is compiled **after** interpolation, so the `{{ }}` tokens are
+written into the MJML *source* and escaped by the ordinary HTML rule on the way
+in; interpolating into the generated tables instead would drop a rendered value
+somewhere the author never looked. It is a **declared flag**, never inferred from
+markup that happens to start with `<mjml>`, because guessing what a body is would
+make a plain HTML body's meaning depend on its first tag. And a **static** MJML
+body is compiled at save as well as at send, so a missing `</mj-section>` is a
+message on the form rather than a Tuesday-night failure. Compiling in process is
+the point of choosing mrml over MJML's own implementation: v1 needs a Node
+sidecar for this, and this is a function call.
+
+`mj-include` is refused, because the parser's default loader refuses it: a
+template is data an admin typed, and it must not be able to make the server read
+a file or fetch a URL.
+
+**The mailer reaches the action the way the evaluator does** — through
+`ActionContext`, absent in contexts that have none, so an action asking for one
+out of context gets a named configuration error rather than doing nothing. The
+two are now one `ActionServices` on the dispatcher, because they have the same
+shape and the same rule, and the next one is a field rather than another argument
+at every call site.
+
+What a server installs is **`SettingsMailer`**, which reads the saved settings for
+every message rather than being built from them once at boot. That is not
+fastidiousness: the Email settings section promises that changes take effect on
+the next message and need no restart, and a transport captured at boot would make
+that false. Building one opens no socket, and the settings come from a catalog
+that already caches them.
+
+`Mailer` grew a second method, `sender()`. The from-address is a property of the
+**transport** — the configured `email_from` for SMTP, an authorised mailbox for
+the Graph transport that does not exist yet — so the action asks for it instead
+of reading settings it otherwise has no business knowing about. It is also the
+one place "this installation sends no mail" is discovered, which is why an
+unconfigured installation fails with a sentence naming Settings → Email before
+anything is rendered or connected to.
+
+**The `fetch` action's URL is a template too**, which is what makes "one central
+interpolation facility" a fact rather than a claim. A URL with no `{{` is parsed
+and checked exactly as before; one with tokens has its tokens resolved against the
+event's table at save and its URL parsed at send, with the same "not a valid URL"
+message and the same refusal of any scheme that is not http(s) — which matters
+more now that part of the URL is data.
+
+Tested against a real database, a real V8 and the recording mailer, so the
+assertions are about the *message that would have gone out*: the joined recipient,
+the escaped HTML and unescaped text, a null column rendering as nothing, the
+compiled MJML with its interpolated values inside the generated tables, every way
+the configuration can be wrong refused while the admin is still looking at the
+form, and the unconfigured installation's error.
+
 ## Email settings, a transport, and a button that proves they work
 
 An admin can now open **Settings → Email**, type an SMTP host, port, security

@@ -30,6 +30,10 @@ sc-expr.workspace = true
 sc-types.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+# `send_email`'s message, its address grammar and its MJML compiler. The
+# transport itself is handed to the action through `ActionContext`, so this
+# dependency is for the *message*, not for a way to send one.
+sc-email.workspace = true
 # The `fetch` action's HTTP client (§10.1). Pure-Rust TLS; see the workspace
 # manifest for why it is `rustls-tls` with no default features.
 reqwest.workspace = true
@@ -42,6 +46,11 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
 sc-expr = { workspace = true, features = ["eval"] }
+# `RecordingMailer`, which is what makes `send_email`'s tests assertions about
+# the message rather than about a return value, and `bootstrap_config` for the
+# settings table the settings-backed mailer reads.
+sc-email.workspace = true
+sc-config.workspace = true
 # `net`/`io-util`/`time` are for the `fetch` tests' one-shot HTTP listener: the
 # action is pinned against a real socket rather than a mocked client, so the
 # request it builds and the response it parses are the real bytes.

@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use sc_catalog::Catalog;
+use sc_email::Mailer;
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
 use sc_types::{Attrs, FormField};
@@ -113,6 +114,11 @@ pub struct ActionContext<'a> {
     /// asks through [`evaluator`](ActionContext::evaluator) and gets a named
     /// configuration error rather than silently doing nothing.
     evaluator: Option<&'a Arc<dyn JsEvaluator>>,
+    /// The mail transport, when the caller has one — reached exactly as the
+    /// evaluator is, and absent in exactly the same contexts (client generation,
+    /// a unit test), so an action that sends mail out of context gets a named
+    /// configuration error rather than doing nothing.
+    mailer: Option<&'a Arc<dyn Mailer>>,
     /// The run context: a JSON object the action may read and write. The seam the
     /// workflow engine's durable context grows into.
     pub context: Attrs,
@@ -137,6 +143,7 @@ impl<'a> ActionContext<'a> {
             trigger,
             chain: vec![trigger.to_owned()],
             evaluator: None,
+            mailer: None,
             context: Attrs::new(),
         }
     }
@@ -144,6 +151,13 @@ impl<'a> ActionContext<'a> {
     /// Supply the JavaScript engine (the server's one isolate, §7.3).
     pub fn with_evaluator(mut self, evaluator: &'a Arc<dyn JsEvaluator>) -> ActionContext<'a> {
         self.evaluator = Some(evaluator);
+        self
+    }
+
+    /// Supply the mail transport (§18.2) — the server's
+    /// [`SettingsMailer`](sc_email::SettingsMailer), or a recording one in a test.
+    pub fn with_mailer(mut self, mailer: &'a Arc<dyn Mailer>) -> ActionContext<'a> {
+        self.mailer = Some(mailer);
         self
     }
 
@@ -163,6 +177,24 @@ impl<'a> ActionContext<'a> {
             Error::config(format!(
                 "trigger `{}` needs to evaluate a formula but no JavaScript engine \
                  is available in this context",
+                self.trigger
+            ))
+        })
+    }
+
+    /// The mail transport, or a configuration error naming the trigger.
+    ///
+    /// Fails for the same reason [`evaluator`](ActionContext::evaluator) does: a
+    /// `send_email` with nothing to send through has nothing correct to do, and
+    /// the one thing it must not do is return success. The two errors are
+    /// different sentences on purpose — "no engine here" is a wiring mistake in
+    /// the process, while "no mailer here" is what a caller who never installed
+    /// one sees.
+    pub fn mailer(&self) -> Result<&Arc<dyn Mailer>> {
+        self.mailer.ok_or_else(|| {
+            Error::config(format!(
+                "trigger `{}` sends mail but no mail transport is available in \
+                 this context",
                 self.trigger
             ))
         })

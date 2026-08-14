@@ -27,6 +27,14 @@ async-trait.workspace = true
 # checked against exactly the roots a webhook's is. `pool` keeps a connection
 # alive across the messages one transport sends; `builder` is the MIME writer.
 lettre = { workspace = true }
+# The catalog `SettingsMailer` reads the saved settings through, so a change to
+# them takes effect on the next message rather than at the next restart — which
+# is what the Email section's own help text promises. Layer 4, so this stays a
+# downward dependency.
+sc-catalog.workspace = true
+# The MJML compiler behind `render_mjml`: an HTML body written as MJML is
+# compiled here, in process, with no Node sidecar (§18.2).
+mrml = { workspace = true }
 
 [dev-dependencies]
 # `TestSmtp`: a listener that speaks enough of the protocol to accept a message.

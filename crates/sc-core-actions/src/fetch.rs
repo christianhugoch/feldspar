@@ -3,16 +3,18 @@
 use std::time::Duration;
 
 use sc_error::{Error, Result};
-use sc_expr::Formula;
+use sc_expr::{Formula, RenderMode, Template};
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
 use sc_action::{
     Action, ActionContext, ConfigCheck, EVENT_SCOPE, Event, action_shape, check_formula,
-    config_str, event_formula_value, optional_formula,
+    check_template, event_formula_value, optional_formula, render_event_template,
+    required_template, template_scope,
 };
 
-/// The `url` setting.
+/// The `url` setting — a template, so a request can be addressed to the row it
+/// is about.
 const CFG_URL: &str = "url";
 /// The HTTP method.
 const CFG_METHOD: &str = "method";
@@ -98,7 +100,24 @@ impl Action for Fetch {
         // cannot be built is a message on the form rather than a firing that
         // fails. Each of these is the *same* function `run` uses, so there is no
         // second parser to disagree with the first.
-        url(check.config)?;
+        let shape = action_shape(check.catalog, check.channel)?;
+        let url = url_template(check.config)?;
+        if url.is_literal() {
+            // No tokens: the URL is what it will be at every firing, and it is
+            // parsed and checked here exactly as it always was.
+            parse_url(url.source())?;
+        } else {
+            // With tokens there is nothing to parse until a row is in hand, so
+            // what is checked here is what *can* be: that every identifier in
+            // every token resolves in the event's scope. The parse happens at
+            // send, with the same "not a valid URL" message.
+            check_template(
+                &shape,
+                template_scope(check.channel),
+                &url,
+                &format!("`{CFG_URL}`"),
+            )?;
+        }
         headers(check.config)?;
         timeout(check.config)?;
         let method = method(check.config)?;
@@ -112,14 +131,24 @@ impl Action for Fetch {
                     "a `{method}` request sends no body, but a `{CFG_BODY}` formula was given"
                 )));
             }
-            let shape = action_shape(check.catalog, check.channel)?;
             check_formula(&shape, EVENT_SCOPE, &formula, &format!("`{CFG_BODY}`"))?;
         }
         Ok(())
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
-        let url = url(ctx.config)?;
+        // Rendered as **text**: a URL is not HTML, and escaping one would turn
+        // the `&` between two query parameters into `&amp;`. A URL with no
+        // tokens costs nothing — a literal template renders to itself without
+        // reaching the isolate.
+        let rendered = render_event_template(
+            ctx,
+            &url_template(ctx.config)?,
+            &format!("`{CFG_URL}`"),
+            RenderMode::Text,
+        )
+        .await?;
+        let url = parse_url(&rendered)?;
         let method = method(ctx.config)?;
         let headers = headers(ctx.config)?;
         let timeout = timeout(ctx.config)?;
@@ -202,14 +231,21 @@ fn event_json(event: &Event) -> Json {
     })
 }
 
-/// The configured URL, which must be an absolute `http`/`https` one.
+/// The URL setting, as a template.
+fn url_template(config: &Attrs) -> Result<Template> {
+    required_template(config, CFG_URL)
+}
+
+/// A rendered URL, which must be an absolute `http`/`https` one.
 ///
 /// Anything else is refused by name: a relative URL has nothing to resolve
 /// against server-side, and a `file:`/`data:` scheme is a way to make the server
-/// read something local, which is not what "call an endpoint" means.
-fn url(config: &Attrs) -> Result<reqwest::Url> {
-    let raw = config_str(config, CFG_URL)?;
-    let url = reqwest::Url::parse(&raw)
+/// read something local, which is not what "call an endpoint" means. That check
+/// matters more now that the URL is a template: what a row interpolates into one
+/// is data, and data must not be able to choose the scheme.
+fn parse_url(raw: &str) -> Result<reqwest::Url> {
+    let raw = raw.trim();
+    let url = reqwest::Url::parse(raw)
         .map_err(|e| Error::invalid(format!("`{CFG_URL}`: `{raw}` is not a valid URL: {e}")))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::invalid(format!(
@@ -375,14 +411,46 @@ mod tests {
         for (raw, expected) in [
             ("/webhook", "not a valid URL"),
             ("file:///etc/passwd", "must be http or https"),
-            ("", "required"),
         ] {
-            let cfg = config(&[("url", json!(raw))]);
-            let msg = url(&cfg).unwrap_err().to_string();
+            let msg = parse_url(raw).unwrap_err().to_string();
             assert!(msg.contains(expected), "{raw}: {msg}");
         }
-        let cfg = config(&[("url", json!("https://example.com/hook?a=1"))]);
-        assert_eq!(url(&cfg).unwrap().host_str(), Some("example.com"));
+        assert_eq!(
+            parse_url("https://example.com/hook?a=1")
+                .unwrap()
+                .host_str(),
+            Some("example.com")
+        );
+        // A blank URL is a missing setting, said with the setting's name.
+        let msg = url_template(&config(&[("url", json!(""))]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("required"), "{msg}");
+    }
+
+    /// A URL with tokens is a template; one without is the same string it always
+    /// was, and never reaches the template machinery for anything but a copy.
+    #[test]
+    fn a_url_with_tokens_is_a_template_and_one_without_is_a_literal() {
+        let literal = url_template(&config(&[("url", json!("https://example.com/hook"))])).unwrap();
+        assert!(literal.is_literal());
+        assert_eq!(literal.source(), "https://example.com/hook");
+
+        let templated = url_template(&config(&[(
+            "url",
+            json!("https://example.com/orders/{{ id }}"),
+        )]))
+        .unwrap();
+        assert!(!templated.is_literal());
+        // The token's identifier is what save-time validation resolves against
+        // the event's table; nothing here can parse a URL yet.
+        assert_eq!(templated.tokens().count(), 1);
+
+        // An unclosed token is a parse error naming the setting.
+        let msg = url_template(&config(&[("url", json!("https://x.test/{{ id"))]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("url"), "{msg}");
     }
 
     #[test]
