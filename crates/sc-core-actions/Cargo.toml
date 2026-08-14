@@ -34,6 +34,11 @@ serde_json.workspace = true
 # transport itself is handed to the action through `ActionContext`, so this
 # dependency is for the *message*, not for a way to send one.
 sc-email.workspace = true
+# `send_email`'s attachments: the store the row's file path points into is read
+# through `FileStore`, and `mime_for_path` types the part from the file's own
+# extension — the same inference the File field's `mime_allow` check uses, so a
+# file is described the same way wherever it is described.
+sc-files.workspace = true
 # The `fetch` action's HTTP client (§10.1). Pure-Rust TLS; see the workspace
 # manifest for why it is `rustls-tls` with no default features.
 reqwest.workspace = true

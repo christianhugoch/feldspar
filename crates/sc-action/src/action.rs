@@ -44,6 +44,30 @@ pub trait Action: Send + Sync {
     /// what a trigger's configuration is validated against on save (Phase 2).
     fn config_spec(&self) -> Vec<FormField>;
 
+    /// The configuration this action takes **for a trigger on `channel`**.
+    ///
+    /// The default is [`config_spec`](Action::config_spec), and for almost every
+    /// action that is the whole story: what an HTTP request needs does not depend
+    /// on which table fired it.
+    ///
+    /// It is a separate method because for *some* actions it does. `send_email`
+    /// offers one checkbox per **File field of the table**, because "attach the
+    /// invoice this row points at" cannot be spelled without knowing that
+    /// `invoice` is a file — and the alternative, a free-text list of field
+    /// names, would push the checking to save time and the guessing to the
+    /// admin. The declaration stays data either way: the admin UI still renders
+    /// whatever it is handed and knows nothing about attachments.
+    ///
+    /// Whatever this returns is what the configuration is **validated against**
+    /// ([`validate_trigger`](crate::validate_trigger)), so a setting that is not
+    /// in it for this channel is an unknown setting — which is the point: ticking
+    /// `attach_invoice` on a table with no `invoice` file field is a mistake, not
+    /// a value quietly carried along.
+    fn config_spec_for(&self, catalog: &Catalog, channel: Option<&str>) -> Vec<FormField> {
+        let _ = (catalog, channel);
+        self.config_spec()
+    }
+
     /// Check a configuration beyond what [`config_spec`](Action::config_spec) can
     /// express — the part only this action knows: that a table it names exists and
     /// can be addressed by primary key, that a setting holding a **formula**

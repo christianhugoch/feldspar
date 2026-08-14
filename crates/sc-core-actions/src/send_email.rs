@@ -4,7 +4,8 @@ use sc_action::{
     Action, ActionContext, ConfigCheck, action_shape, check_template, config_flag,
     optional_template, render_event_template, required_template, template_scope,
 };
-use sc_email::{Email, Mailbox, parse_mailbox, parse_recipients, render_mjml};
+use sc_catalog::{Catalog, DataField, DataFieldKind, Table};
+use sc_email::{Attachment, Email, Mailbox, parse_mailbox, parse_recipients, render_mjml};
 use sc_error::{Error, Result};
 use sc_expr::{RenderMode, Template};
 use sc_types::{Attrs, BasicType, FormField};
@@ -26,6 +27,30 @@ const CFG_HTML: &str = "html";
 const CFG_MJML: &str = "mjml";
 /// The `text/plain` body.
 const CFG_TEXT: &str = "text";
+/// The prefix of the per-File-field attachment settings: `attach_invoice` means
+/// "attach the file the row's `invoice` field points at".
+///
+/// A prefix rather than a list setting because the *form* is the point: one
+/// checkbox per File field of the table, offered only where there is a file to
+/// attach, is a question an admin can answer without knowing which of their
+/// columns are files. A free-text list would move that knowledge back onto them
+/// and the checking to save time.
+const CFG_ATTACH_PREFIX: &str = "attach_";
+
+/// The largest file this action will attach.
+///
+/// Mail providers cap a *message* at around 25 MB, and base64 inflates a file by
+/// about a third on the way into one — so 20 MB of PDF is already at the line and
+/// anything past it is a message that will be refused after it has been built.
+/// Refusing here means the admin is told which field and how big, rather than
+/// reading "552 message size exceeds fixed limit" from a mail server.
+///
+/// The file is read before it is measured: the store's contract is
+/// [`read`](sc_files::FileStore::read), which yields the whole thing. So this
+/// bounds what is *sent*, not what is momentarily held — a real cap on the read
+/// needs a `stat` the store trait does not have, and inventing one for this is
+/// out of proportion.
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
 /// Send one email, built from the event by interpolation.
 ///
@@ -41,6 +66,14 @@ const CFG_TEXT: &str = "text";
 /// body renders as **HTML** (decision 3): a subject put through the HTML rule
 /// turns `Tea & Coffee` into `Tea &amp; Coffee`, and a plain-text body becomes a
 /// page of entities.
+///
+/// **A File field of the table can travel with the message.** Every File field
+/// the trigger's table has becomes a checkbox
+/// ([`config_spec_for`](Action::config_spec_for)), and a ticked one attaches the
+/// file the row's own path points at — read from the store that field is
+/// declared against, named after the file, and typed by its extension. A null
+/// path attaches nothing and is not an error; anything else that goes wrong is,
+/// named with the field.
 ///
 /// **The transport is handed in**, through [`ActionContext::mailer`] exactly as
 /// the evaluator is. That is what lets this action's tests assert *what would
@@ -82,6 +115,29 @@ impl Action for SendEmail {
                 .label("Text body")
                 .multiline(),
         ]
+    }
+
+    /// The static settings, plus **one checkbox per File field** of the trigger's
+    /// table (§6.2's "settings as data", now answering a question about the
+    /// table).
+    ///
+    /// Offered only where there is a table: a `login` trigger has no row, so it
+    /// has no file to attach, and a checkbox for one would be a control that
+    /// cannot mean anything. An unresolvable channel yields the static spec —
+    /// "no such table" is [`validate_trigger`](sc_action::validate_trigger)'s
+    /// error to give, and giving it twice in two voices helps nobody.
+    fn config_spec_for(&self, catalog: &Catalog, channel: Option<&str>) -> Vec<FormField> {
+        let mut spec = self.config_spec();
+        let Some(table) = channel.and_then(|name| catalog.get(name).ok().flatten()) else {
+            return spec;
+        };
+        for field in file_fields(&table) {
+            spec.push(
+                FormField::new(attach_key(&field.base.name), BasicType::Bool)
+                    .label(format!("Attach {}", field.base.label)),
+            );
+        }
+        spec
     }
 
     async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
@@ -212,6 +268,8 @@ impl Action for SendEmail {
             );
         }
 
+        email.attachments = attachments(ctx).await?;
+
         // Checked before the transport is opened, so "no recipients" is this
         // action's message rather than an SMTP rejection: a `to` template that
         // rendered to nothing is a null column, not a network problem.
@@ -230,6 +288,11 @@ impl Action for SendEmail {
             "cc": addresses(&email.cc),
             "bcc": addresses(&email.bcc),
             "subject": email.subject,
+            "attachments": email
+                .attachments
+                .iter()
+                .map(|a| a.filename.clone())
+                .collect::<Vec<_>>(),
         }))
     }
 }
@@ -287,6 +350,124 @@ impl Templates {
             .chain(std::iter::once((CFG_SUBJECT, &self.subject))),
         )
     }
+}
+
+/// The File fields of a table, in the order the table declares them — which is
+/// the order the checkboxes appear in and the order the attachments travel in.
+fn file_fields(table: &Table) -> impl Iterator<Item = &DataField> {
+    table
+        .fields
+        .iter()
+        .filter(|field| matches!(field.kind, DataFieldKind::File { .. }))
+}
+
+/// The setting name that attaches `field`.
+fn attach_key(field: &str) -> String {
+    format!("{CFG_ATTACH_PREFIX}{field}")
+}
+
+/// The files this run attaches: for each ticked File field, the bytes the row's
+/// path points at.
+///
+/// **A null or empty path attaches nothing**, and is not an error. That is the
+/// same reading a null column gets everywhere else here (decision 4): an order
+/// with no invoice yet is data, and refusing to send the receipt over it would
+/// make the trigger fail on the rows that are merely incomplete.
+///
+/// Everything else *is* an error, named with the field: a path that points into
+/// a store that is not connected, a file that is not there, one past
+/// [`MAX_ATTACHMENT_BYTES`]. A message that silently arrives without the invoice
+/// it was supposed to carry is the failure nobody notices until the customer
+/// does.
+///
+/// The read runs under the **action's** authority, not the caller's, like every
+/// other thing a trigger does (§10.1): the trigger is the admin's configuration,
+/// and the gate on who may cause it to run is the trigger's own `min_role` plus —
+/// for a row-scoped run — the caller's ability to read the row at all.
+async fn attachments(ctx: &ActionContext<'_>) -> Result<Vec<Attachment>> {
+    // The ticked boxes, by field name. A box that is present and false is a
+    // checkbox the admin left alone — the form posts every one it rendered — so
+    // it is not a request for anything, and a stored value that is not a boolean
+    // at all is named by the loop below rather than silently read as false.
+    let ticked: Vec<&str> = ctx
+        .config
+        .iter()
+        .filter(|(_, value)| value.as_bool() == Some(true))
+        .filter_map(|(key, _)| key.strip_prefix(CFG_ATTACH_PREFIX))
+        .collect();
+    if ticked.is_empty() {
+        return Ok(Vec::new());
+    }
+    // An event with no table has no row, and a file field is a column of one.
+    // Reachable only from a stored configuration that outlived its channel,
+    // because the spec offers no checkbox where there is no table.
+    let Some(channel) = ctx.event.channel.as_deref() else {
+        return Err(Error::invalid(format!(
+            "trigger `{}`: `{}{}` names a file field, but this event has no table",
+            ctx.trigger,
+            CFG_ATTACH_PREFIX,
+            ticked.first().copied().unwrap_or_default()
+        )));
+    };
+    let table = ctx.catalog.require(channel)?;
+    let row = ctx.event.row_object();
+
+    let mut out = Vec::new();
+    // Walked in the table's field order rather than the configuration's, so the
+    // order the files arrive in is the order the admin saw the checkboxes in.
+    for field in file_fields(&table) {
+        let name = field.base.name.as_str();
+        if !config_flag(ctx.config, &attach_key(name))? {
+            continue;
+        }
+        let path = match row.get(name) {
+            Some(Json::String(path)) if !path.trim().is_empty() => path.trim(),
+            // Absent, null or empty: no file, which is not a mistake.
+            _ => continue,
+        };
+        let DataFieldKind::File { store, .. } = &field.kind else {
+            continue;
+        };
+        let failed = |what: String| Error::invalid(format!("trigger `{}`: {what}", ctx.trigger));
+        let store = ctx.catalog.file_store(&store.0)?.ok_or_else(|| {
+            failed(format!(
+                "`{name}`: file store `{}` is not connected, so `{path}` cannot be attached",
+                store.0
+            ))
+        })?;
+        let bytes = store
+            .read(path)
+            .await
+            .map_err(|e| failed(format!("`{name}`: could not read `{path}`: {e}")))?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(failed(format!(
+                "`{name}`: `{path}` is {} bytes, past the {MAX_ATTACHMENT_BYTES}-byte limit on \
+                 one attachment",
+                bytes.len()
+            )));
+        }
+        out.push(Attachment {
+            filename: file_name(path),
+            // The extension is what a mail client will go by anyway; a file whose
+            // name says nothing travels as bytes, which is what
+            // `application/octet-stream` means and what a client shows as "a
+            // file you can save".
+            content_type: sc_files::mime_for_path(path)
+                .unwrap_or_else(|| "application/octet-stream".to_owned()),
+            bytes: bytes.to_vec(),
+        });
+    }
+    Ok(out)
+}
+
+/// The last component of a store path — the name the recipient sees and saves
+/// it under. A store path is `/`-separated by the store contract, so this needs
+/// no platform knowledge.
+fn file_name(path: &str) -> String {
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+        .to_owned()
 }
 
 /// A failure that is about one setting's *rendered value*, named with both the

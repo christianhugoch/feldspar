@@ -51,11 +51,10 @@ pub async fn validate_trigger(
     let action = registry
         .require(trigger.action.trim())
         .map_err(|e| problem(e.to_string()))?;
-    validate_attrs(&action.config_spec(), &trigger.configuration)
-        .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
-    // The name is resolved and the values are of the declared shapes; whether
-    // they *mean* anything is the action's own check, run below once the channel
-    // has been resolved (it is the scope the action's formulas are read in).
+    // The values are checked against the declaration below, once the channel has
+    // been resolved: an action's *spec* can depend on the table
+    // ([`Action::config_spec_for`] — `send_email`'s attachment checkboxes are the
+    // table's File fields), and so can what its settings mean.
 
     if let Some(role) = trigger.min_role
         && !(1..=100).contains(&role)
@@ -100,6 +99,16 @@ pub async fn validate_trigger(
     // stored trigger's timing, so what is refused here and what the scheduler
     // computes cannot disagree.
     crate::Schedule::of(trigger).map_err(|e| problem(e.to_string()))?;
+
+    // The settings are of the shapes the action declares **for this channel**,
+    // and there are no others: an unknown setting is a typo or a stale config,
+    // and one that is stale precisely because the table changed (a File field
+    // renamed out from under an `attach_…`) is the case this ordering catches.
+    validate_attrs(
+        &action.config_spec_for(catalog, channel),
+        &trigger.configuration,
+    )
+    .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
 
     // Everything the spec cannot express: that a named table exists and can be
     // addressed by primary key, that a configured formula parses and resolves in

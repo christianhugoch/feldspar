@@ -639,3 +639,87 @@ async fn the_actions_describe_their_own_settings() -> sc_error::Result<()> {
     assert_eq!(method["default"], json!("POST"));
     Ok(())
 }
+
+/// An action's declaration may depend on the **table** the trigger fires on:
+/// `send_email` offers one attachment checkbox per File field of it. So the
+/// endpoint takes the table, and the answer changes with it — which is what lets
+/// the trigger form show those checkboxes while still knowing nothing about
+/// attachments.
+#[tokio::test]
+async fn an_actions_settings_can_depend_on_the_triggers_table() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+
+    // `books.cover` becomes a File field in a connected store — the arrangement
+    // that puts a checkbox on the form.
+    let dir = std::env::temp_dir().join(format!("sc-trigger-actions-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    sc_catalog::bootstrap_file_stores(&server.catalog).await?;
+    sc_catalog::bootstrap_field_meta(&server.catalog).await?;
+    sc_catalog::save_file_store(
+        &server.catalog,
+        &sc_files::FileStoreDef::local("uploads", dir.to_string_lossy().as_ref()),
+    )
+    .await?;
+    sc_catalog::connect_all_file_stores(&server.catalog).await?;
+    server
+        .catalog
+        .create_field(
+            "books",
+            &sc_catalog::DataField::plain(
+                "cover",
+                sc_types::TypeRef::Basic(sc_types::BasicType::Text),
+            ),
+        )
+        .await?;
+    sc_catalog::save_field_meta(
+        &server.catalog,
+        &sc_catalog::FieldMeta::new("books", "cover").kind(sc_catalog::DataFieldKind::File {
+            store: sc_catalog::FileStoreId("uploads".to_owned()),
+            folder: None,
+            mime_allow: Vec::new(),
+        }),
+    )
+    .await?;
+
+    let settings = |actions: &Value| -> Vec<String> {
+        actions
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .find(|a| a["name"] == json!("send_email"))
+            .and_then(|a| a["config_spec"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|f| f["name"].as_str().map(str::to_owned))
+            .collect()
+    };
+
+    // With no table named, the table-independent declaration.
+    let (status, actions) = server.client.send("GET", "/api/actions", None).await;
+    assert_eq!(status, StatusCode::OK, "{actions}");
+    assert!(!settings(&actions).iter().any(|n| n.starts_with("attach_")));
+
+    // With the table, the checkbox for its File field.
+    let (status, actions) = server
+        .client
+        .send("GET", "/api/actions?table=books", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{actions}");
+    assert!(
+        settings(&actions).contains(&"attach_cover".to_owned()),
+        "{actions}"
+    );
+
+    // A table with no File field is the table-independent answer again — the
+    // checkboxes are the table's files, not a fixed extra setting.
+    let (status, actions) = server
+        .client
+        .send("GET", "/api/actions?table=audit", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{actions}");
+    assert!(!settings(&actions).iter().any(|n| n.starts_with("attach_")));
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}

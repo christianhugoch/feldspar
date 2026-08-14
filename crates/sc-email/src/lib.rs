@@ -37,7 +37,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
-    message::{Mailbox as LettreMailbox, MultiPart, SinglePart},
+    message::{
+        Attachment as LettreAttachment, Mailbox as LettreMailbox, MultiPart, SinglePart,
+        header::ContentType as LettreContentType,
+    },
     transport::smtp::authentication::Credentials,
 };
 use sc_catalog::Catalog;
@@ -73,6 +76,37 @@ pub struct Email {
     pub text: Option<String>,
     /// The `text/html` body.
     pub html: Option<String>,
+    /// Files travelling with the message.
+    pub attachments: Vec<Attachment>,
+}
+
+/// One file attached to a message: what it is called, what it is, and its bytes.
+///
+/// The bytes are owned and in memory, which is what the transport needs anyway —
+/// a MIME part is base64 of the whole file, and there is no streaming SMTP body
+/// to hand a reader to. What that costs is bounded by whoever *builds* the
+/// attachment (the `send_email` action refuses a file past a size limit), not
+/// here: this type is a message part, and a message part has no policy.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// The name the recipient sees, and saves it under.
+    pub filename: String,
+    /// The MIME type, e.g. `application/pdf`.
+    pub content_type: String,
+    /// The file itself.
+    pub bytes: Vec<u8>,
+}
+
+/// Debug written by hand, because the derived one would print every byte of a
+/// two-megabyte PDF into a test failure or a log line.
+impl std::fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attachment")
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("bytes", &format_args!("{} bytes", self.bytes.len()))
+            .finish()
+    }
 }
 
 impl Email {
@@ -86,6 +120,7 @@ impl Email {
             subject: String::new(),
             text: None,
             html: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -280,21 +315,60 @@ pub fn build_message(email: &Email) -> Result<lettre::Message> {
     for address in &email.bcc {
         builder = builder.bcc(to_lettre(address)?);
     }
-    let body = match (&email.text, &email.html) {
+    let body = match (&email.text, &email.html, email.attachments.is_empty()) {
         // Text first inside `multipart/alternative`: the parts are ordered
         // least-preferred first, and every mail client reads the last one it can
         // render. Reversed, a graphical client would show the plain text.
-        (Some(text), Some(html)) => builder.multipart(MultiPart::alternative_plain_html(
+        (Some(text), Some(html), true) => builder.multipart(MultiPart::alternative_plain_html(
             text.clone(),
             html.clone(),
         )),
-        (Some(text), None) => builder.singlepart(SinglePart::plain(text.clone())),
-        (None, Some(html)) => builder.singlepart(SinglePart::html(html.clone())),
+        (Some(text), None, true) => builder.singlepart(SinglePart::plain(text.clone())),
+        (None, Some(html), true) => builder.singlepart(SinglePart::html(html.clone())),
+        // With files, the whole body becomes one part of a `multipart/mixed`
+        // and the attachments are its siblings. That nesting is the structure
+        // every mail client expects — bodies alternative *inside* mixed, never
+        // beside the attachments — and getting it the other way round is how a
+        // message arrives as three files and no text.
+        (text, html, false) => {
+            let mut mixed = MultiPart::mixed().build();
+            match (text, html) {
+                (Some(text), Some(html)) => {
+                    mixed = mixed.multipart(MultiPart::alternative_plain_html(
+                        text.clone(),
+                        html.clone(),
+                    ));
+                }
+                (Some(text), None) => mixed = mixed.singlepart(SinglePart::plain(text.clone())),
+                (None, Some(html)) => mixed = mixed.singlepart(SinglePart::html(html.clone())),
+                // Refused by `check` above.
+                (None, None) => return Err(Error::invalid("an email needs a body")),
+            }
+            for file in &email.attachments {
+                mixed = mixed.singlepart(attachment_part(file)?);
+            }
+            builder.multipart(mixed)
+        }
         // Refused by `check` above; this arm exists because the type says it
         // might happen, not because it can.
-        (None, None) => return Err(Error::invalid("an email needs a body")),
+        (None, None, true) => return Err(Error::invalid("an email needs a body")),
     };
     body.map_err(|e| Error::invalid(format!("could not build the message: {e}")))
+}
+
+/// One attachment as its MIME part.
+///
+/// The content type is parsed rather than pasted into a header: a value that is
+/// not a MIME type would otherwise produce a message whose part no client can
+/// read, and the error names the file it came from.
+fn attachment_part(file: &Attachment) -> Result<SinglePart> {
+    let content_type = LettreContentType::parse(&file.content_type).map_err(|e| {
+        Error::invalid(format!(
+            "attachment `{}`: `{}` is not a usable content type: {e}",
+            file.filename, file.content_type
+        ))
+    })?;
+    Ok(LettreAttachment::new(file.filename.clone()).body(file.bytes.clone(), content_type))
 }
 
 /// Our mailbox as lettre's.
@@ -474,6 +548,7 @@ mod tests {
             subject: "Receipt for order 7".to_owned(),
             text: text.map(str::to_owned),
             html: html.map(str::to_owned),
+            attachments: Vec::new(),
         }
     }
 
@@ -566,6 +641,82 @@ mod tests {
         .unwrap();
         assert!(html_only.contains("text/html"), "{html_only}");
         assert!(!html_only.contains("multipart"), "{html_only}");
+    }
+
+    /// With files, the bodies are nested *inside* a `multipart/mixed` rather
+    /// than sitting beside the attachments — the difference between a message
+    /// that reads as a receipt with an invoice and one that arrives as three
+    /// files and no text.
+    #[test]
+    fn attachments_nest_the_bodies_inside_a_mixed_part() {
+        let mut email = message(Some("plain words"), Some("<p>rich words</p>"));
+        email.attachments = vec![
+            Attachment {
+                filename: "invoice-7.pdf".to_owned(),
+                content_type: "application/pdf".to_owned(),
+                bytes: b"%PDF-1.4 not really".to_vec(),
+            },
+            Attachment {
+                filename: "logo.png".to_owned(),
+                content_type: "image/png".to_owned(),
+                bytes: vec![0x89, b'P', b'N', b'G'],
+            },
+        ];
+        let built = String::from_utf8(build_message(&email).unwrap().formatted()).unwrap();
+
+        assert!(built.contains("multipart/mixed"), "{built}");
+        // The two bodies are still alternatives of each other…
+        let alternative_at = built
+            .find("multipart/alternative")
+            .expect("alternative part");
+        // …and the files come after them, each named and typed.
+        let invoice_at = built.find("invoice-7.pdf").expect("the invoice");
+        assert!(alternative_at < invoice_at, "{built}");
+        assert!(built.contains("application/pdf"), "{built}");
+        assert!(
+            built.contains(r#"attachment; filename="invoice-7.pdf""#),
+            "{built}"
+        );
+        assert!(built.contains(r#"filename="logo.png""#), "{built}");
+        // Base64, so a PNG's bytes cannot break the message.
+        assert!(built.contains("base64"), "{built}");
+
+        // One body plus a file is the same shape with one part fewer.
+        let mut text_only = message(Some("plain words"), None);
+        text_only.attachments = email.attachments.clone();
+        let built = String::from_utf8(build_message(&text_only).unwrap().formatted()).unwrap();
+        assert!(built.contains("multipart/mixed"), "{built}");
+        assert!(!built.contains("multipart/alternative"), "{built}");
+        assert!(built.contains("invoice-7.pdf"), "{built}");
+    }
+
+    #[test]
+    fn an_attachments_content_type_is_parsed_not_pasted() {
+        let mut email = message(Some("hello"), None);
+        email.attachments = vec![Attachment {
+            filename: "notes.txt".to_owned(),
+            content_type: "not a mime type".to_owned(),
+            bytes: b"hi".to_vec(),
+        }];
+        let err = build_message(&email).unwrap_err().to_string();
+        assert!(err.contains("notes.txt"), "{err}");
+        assert!(err.contains("content type"), "{err}");
+    }
+
+    /// The bytes stay out of the debug output: a two-megabyte PDF in a test
+    /// failure or a log line helps nobody.
+    #[test]
+    fn an_attachment_debugs_as_a_size() {
+        let debug = format!(
+            "{:?}",
+            Attachment {
+                filename: "invoice.pdf".to_owned(),
+                content_type: "application/pdf".to_owned(),
+                bytes: vec![0; 1024],
+            }
+        );
+        assert!(debug.contains("1024 bytes"), "{debug}");
+        assert!(!debug.contains("0, 0, 0"), "{debug}");
     }
 
     #[tokio::test]

@@ -93,6 +93,27 @@ function isTableEvent(kind: string): boolean {
   return EVENT_KINDS.find((k) => k.value === kind)?.table ?? false;
 }
 
+/** The table an action's *declaration* should be read for, given the event kind
+ * and the chosen table — `undefined` where there is none.
+ *
+ * An action may declare different settings for different tables: `send_email`
+ * offers one attachment checkbox per File field of the table the trigger fires
+ * on. So the action list is re-read whenever this answer changes, and this
+ * screen still knows nothing about any particular setting — it asks for the
+ * declarations that apply and renders what comes back.
+ *
+ * A kind with no row has no table, and a table event with none chosen yet has
+ * nothing to ask about: both are `undefined`, which is the table-independent
+ * declaration. */
+export function actionSpecTable(
+  when: string,
+  channel: string,
+): string | undefined {
+  if (!isTableEvent(when)) return undefined;
+  const table = channel.trim();
+  return table === "" ? undefined : table;
+}
+
 /** The timing inputs a kind takes; empty for everything that is not periodic. */
 function timingFields(kind: string): TimingField[] {
   return EVENT_KINDS.find((k) => k.value === kind)?.timing ?? [];
@@ -134,10 +155,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
     let cancelled = false;
     const run = async () => {
       try {
-        const [actionList, tableList] = await Promise.all([
-          api.listActions(),
-          api.listTables(),
-        ]);
+        const tableList = await api.listTables();
         let existing: TriggerItem | undefined;
         if (triggerId) {
           existing = (await api.listTriggers()).find((t) => t.id === triggerId);
@@ -147,7 +165,6 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           }
         }
         if (cancelled) return;
-        setActions(actionList);
         setTables(tableList.map((t) => t.name));
         if (existing) {
           setName(existing.name);
@@ -165,8 +182,6 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
             day_of_week:
               existing.day_of_week == null ? "" : String(existing.day_of_week),
           });
-        } else {
-          setActionName(actionList[0]?.name ?? "");
         }
       } catch {
         if (!cancelled) setLoadError("Could not load the actions and tables.");
@@ -177,6 +192,33 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
       cancelled = true;
     };
   }, [triggerId]);
+
+  // The action declarations, re-read whenever the table they may depend on
+  // changes (see `actionSpecTable`). Separate from the load above because it has
+  // a different trigger: that one runs once for the trigger being edited, this
+  // one every time the answer it asks for could have changed.
+  const specTable = actionSpecTable(when, channel);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const actionList = await api.listActions(
+          specTable === undefined ? undefined : { table: specTable },
+        );
+        if (cancelled) return;
+        setActions(actionList);
+        // The default for a new trigger, and only ever a default: an action the
+        // admin (or the stored trigger) already chose stays chosen.
+        setActionName((chosen) => chosen || (actionList[0]?.name ?? ""));
+      } catch {
+        if (!cancelled) setLoadError("Could not load the actions and tables.");
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [specTable]);
 
   const action = actions?.find((a) => a.name === actionName);
   const spec = action?.config_spec ?? [];

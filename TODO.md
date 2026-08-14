@@ -226,6 +226,13 @@ to send through without it. The action-facing half — how a `send_email` action
       Deliberately out of scope for this milestone and added anyway, because it is one
       dependency and one function — what stays out is rendering a *view* as a body, which needs
       a view renderer.
+- [x] **A File field of the table can be attached**: every File field the trigger's table has
+      becomes a checkbox (`Action::config_spec_for`, the first setting declaration that depends
+      on the channel), and a ticked one attaches the file the row's own path points at — read
+      from that field's store, named after the file, typed from its extension. A null path
+      attaches nothing and is not an error; an unreadable one, or a file past the 20 MB limit,
+      is. `listActions` takes an optional `?table=` so the trigger form can ask for the
+      declarations that apply, and still knows nothing about attachments.
 - [x] **At least one body is required**, and the failure modes are named at save: no bodies, no
       recipients, an unparseable static address. What can only fail at send — the transport —
       fails with the transport's message, prefixed with the trigger's name.
@@ -248,7 +255,10 @@ to send through without it. The action-facing half — how a `send_email` action
       a missing field is refused at save; a run with **no email settings configured** fails with
       an error pointing at Settings → Email; the `fetch` URL template resolves. Plus the MJML
       body: compiled after interpolation, sent as-is without the flag, refused at save when it
-      does not compile.
+      does not compile. Plus attachments: the checkbox list is the table's File fields, a ticked
+      one puts the file in the message (bytes, filename and type), a null path sends the message
+      without it, a broken path fails naming the field, `?table=` changes what `listActions`
+      declares, and the file crosses a real SMTP socket base64-encoded.
 
 ## Phase 5 — Running a trigger against a row
 
@@ -311,9 +321,6 @@ to send through without it. The action-facing half — how a `send_email` action
   and when there is something to render there will be a body kind that renders it. (**MJML**
   was on this list and was built anyway, in Phase 4: it is one dependency and one function, and
   it needs no view renderer.)
-- **Attachments.** They are a File-field read and a MIME part, and neither is hard; they are
-  also not on the path from a button to a sent email, and every option added to this action's
-  form before the action has been used once is a guess.
 - **OAuth2 and Microsoft Graph transports.** The `Mailer` trait exists so these are a crate and
   a config option rather than a rewrite. Password SMTP is what an admin can set up in a minute.
 - **System emails** — address verification, password reset, new-device notices. They need the

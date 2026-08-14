@@ -222,7 +222,7 @@ action added by a plugin gets a working form with no change to the admin UI.
 | `delete_rows` | Delete the rows a `where` formula selects (the `where` is required) |
 | `fetch` | Send an HTTP request built from the event; the parsed response is the result |
 | `run_js_code` | Run a JavaScript body against the event and return what it returns |
-| `send_email` | Send an email whose recipients, subject and body are `{{ }}` templates |
+| `send_email` | Send an email whose recipients, subject and body are `{{ }}` templates, optionally attaching a File field of the row |
 
 `fetch` is the webhook: point it at a URL, give it a JSON body of formulas, and its response
 comes back as the trigger's result — so a `none` trigger exposed on your app can be a typed

@@ -1013,8 +1013,12 @@ exactly like an API caller's write. A second write path would quietly skip all o
   `{{ }}` **template** in the same formula language, rendered as text where a value is text (an
   address, a subject) and as HTML where it is markup. The HTML body may be written as **MJML**
   and compiled (`mjml`), which is how a message gets a layout that survives Outlook without
-  hand-written tables. The transport is handed in through `ActionContext`, exactly as the
-  JavaScript engine is, which is what lets its tests assert *what would have been sent*.
+  hand-written tables. Every **File field of the trigger's table** becomes an attachment
+  checkbox, and a ticked one sends the file the row points at — the one place an action's
+  *declaration* depends on the channel (`Action::config_spec_for`), which is also what the
+  configuration is validated against. The transport is handed in through `ActionContext`,
+  exactly as the JavaScript engine is, which is what lets its tests assert *what would have
+  been sent*.
 - `run_js_code` runs a JavaScript body on the server's isolate with `row`/`old`/`user`/
   `payload` in scope. Deliberately **bounded**: no host API, so the code cannot reach the
   catalog, the network or the disk. Catalog access from a guest language is `sc-code`'s

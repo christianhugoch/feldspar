@@ -3733,6 +3733,7 @@ dependencies = [
  "sc-email",
  "sc-error",
  "sc-expr",
+ "sc-files",
  "sc-query",
  "sc-test-harness",
  "sc-types",

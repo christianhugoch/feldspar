@@ -1744,10 +1744,20 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("listActions", {
         let apps = apps.clone();
-        move |_ctx| {
+        let catalog = catalog.clone();
+        move |ctx| {
             let apps = apps.clone();
+            let catalog = catalog.clone();
             async move {
                 let dispatcher = triggers_of(&apps)?;
+                // The table the trigger being edited fires on, when it has one.
+                // An action's declaration may depend on it — `send_email`'s
+                // attachment checkboxes are that table's File fields — and every
+                // other action ignores it.
+                let channel = ctx
+                    .query_get("table")
+                    .map(str::trim)
+                    .filter(|table| !table.is_empty());
                 let out: Vec<Json> = dispatcher
                     .registry()
                     .all()
@@ -1756,7 +1766,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                             "name": action.name(),
                             "description": action.description(),
                             "config_spec": action
-                                .config_spec()
+                                .config_spec_for(&catalog, channel)
                                 .iter()
                                 .map(form_field_json)
                                 .collect::<Vec<_>>(),

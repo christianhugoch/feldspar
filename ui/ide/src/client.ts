@@ -125,6 +125,7 @@ export type UpdateTriggerResponse = { id: string; name: string; description: str
 export type DeleteTriggerResponse = { deleted: boolean };
 export type RunTriggerRequest = unknown;
 export type RunTriggerResponse = { result: unknown };
+export type ListActionsQuery = { table?: string };
 export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean }> }>;
 export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; help: string }> }>; values: unknown };
 export type UpdateSettingsRequest = { values: unknown };
@@ -218,7 +219,7 @@ export interface ApiClient {
   updateTrigger(id: string, body: UpdateTriggerRequest): Promise<UpdateTriggerResponse>;
   deleteTrigger(id: string): Promise<DeleteTriggerResponse>;
   runTrigger(id: string, body: RunTriggerRequest): Promise<RunTriggerResponse>;
-  listActions(): Promise<ListActionsResponse>;
+  listActions(query?: ListActionsQuery): Promise<ListActionsResponse>;
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
   sendTestEmail(body: SendTestEmailRequest): Promise<SendTestEmailResponse>;
@@ -926,8 +927,11 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("runTrigger", res);
       return (await res.json()) as RunTriggerResponse;
     },
-    async listActions() {
-      const res = await doFetch(`${baseUrl}/api/actions`, {
+    async listActions(query) {
+      const search = new URLSearchParams();
+      if (query?.table !== undefined && query?.table !== null) search.append("table", String(query?.table));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/actions${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });

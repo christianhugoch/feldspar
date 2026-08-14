@@ -2,7 +2,7 @@
 
 Changes in reverse chronological order.
 
-## The `send_email` action, and MJML bodies
+## The `send_email` action, MJML bodies and file attachments
 
 A trigger can now send an email. `send_email` joins the built-in set, and every
 part of the message an admin configures — `to`, `cc`, `bcc`, `from`, the subject
@@ -37,6 +37,40 @@ sidecar for this, and this is a function call.
 template is data an admin typed, and it must not be able to make the server read
 a file or fetch a URL.
 
+**A file the row points at can travel with the message.** Every **File field**
+of the trigger's table becomes a checkbox on the action's form, and a ticked one
+attaches the file that row's path names — read from the store that field is
+declared against, named after the file rather than the column, and typed from its
+extension by the same `mime_for_path` the File field's own `mime_allow` check
+uses.
+
+That checkbox is the first place a setting *declaration* depends on the table.
+`Action::config_spec_for(catalog, channel)` is the seam: the default is the
+static spec every other action has, and `send_email` adds one boolean per File
+field. `validate_trigger` then validates against **that** spec, which is what
+makes `attach_invoice` on a table with no `invoice` file field an unknown setting
+rather than a value carried quietly along — so the check happens when the table
+changes underneath a trigger, not at 3am. `listActions` grew an optional
+`?table=`, and the trigger form re-reads the declarations whenever the table
+changes; the screen still knows nothing about attachments, which is the whole
+point of settings-as-data.
+
+The rules around a file are the ones the rest of this system already follows. A
+**null path attaches nothing and is not an error** — an order with no invoice yet
+is data, and failing the receipt over it would break the trigger on every row
+that is merely incomplete. Anything else *is* an error naming the field: a store
+that is not connected, a path that points at nothing, a file past 20 MB. That
+limit is not arbitrary — providers cap a message near 25 MB and base64 adds a
+third on the way in, so past it the message is one the mail server will refuse
+after it has been built, and being told which field and how big beats reading
+"552 message size exceeds fixed limit".
+
+Structurally, attachments make the message a `multipart/mixed` whose first part
+is the body — the two bodies staying `alternative` *inside* it. Getting that
+nesting backwards is how a receipt arrives as three files and no text, so it is
+asserted, including once across a real SMTP socket with bytes that would
+otherwise end the DATA section early.
+
 **The mailer reaches the action the way the evaluator does** — through
 `ActionContext`, absent in contexts that have none, so an action asking for one
 out of context gets a named configuration error rather than doing nothing. The
@@ -66,12 +100,13 @@ event's table at save and its URL parsed at send, with the same "not a valid URL
 message and the same refusal of any scheme that is not http(s) — which matters
 more now that part of the URL is data.
 
-Tested against a real database, a real V8 and the recording mailer, so the
-assertions are about the *message that would have gone out*: the joined recipient,
-the escaped HTML and unescaped text, a null column rendering as nothing, the
-compiled MJML with its interpolated values inside the generated tables, every way
-the configuration can be wrong refused while the admin is still looking at the
-form, and the unconfigured installation's error.
+Tested against a real database, a real V8, a real local file store and the
+recording mailer, so the assertions are about the *message that would have gone
+out*: the joined recipient, the escaped HTML and unescaped text, a null column
+rendering as nothing, the compiled MJML with its interpolated values inside the
+generated tables, the invoice's own bytes as an attachment, every way the
+configuration can be wrong refused while the admin is still looking at the form,
+and the unconfigured installation's error.
 
 ## Email settings, a transport, and a button that proves they work
 

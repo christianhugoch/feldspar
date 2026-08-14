@@ -13,7 +13,7 @@
 //! generated client are held to.
 
 use crate::auth::{credentials_schema, user_row_schema, user_summary_schema};
-use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, Method, PathSpec};
+use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, Method, PathSpec, QueryParam};
 use crate::schema::{StructField, TypeSchema, ValueType};
 
 /// Path prefix every admin endpoint is mounted under.
@@ -1376,8 +1376,18 @@ pub fn admin_endpoints() -> EndpointSet {
     // The registered actions with the settings each declares, so the trigger
     // form renders a configuration form for an action it knows nothing about
     // (§13.3) — the same move the framework and file-store pickers make.
+    //
+    // `?table=` is optional and names the table the trigger being edited fires
+    // on, because an action's declaration may **depend on it**: `send_email`
+    // offers one attachment checkbox per File field of that table
+    // (`Action::config_spec_for`). Without it the answer is the table-independent
+    // spec, which is what every other action has and what a non-table trigger
+    // gets. The screen still knows nothing about any particular setting — it asks
+    // for the declaration for the table it is showing and renders what comes
+    // back.
     set.register(
         Endpoint::new("listActions", Method::Get, api().lit("actions"))
+            .query([QueryParam::new("table", ValueType::Text)])
             .output(TypeSchema::array(action_info_schema()))
             .auth(AuthRequirement::admin()),
     );

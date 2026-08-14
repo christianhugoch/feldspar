@@ -50,6 +50,14 @@ async fn a_message_reaches_an_smtp_server() -> sc_error::Result<()> {
         subject: "Receipt for order 7".to_owned(),
         text: Some("Thank you.".to_owned()),
         html: Some("<p>Thank you.</p>".to_owned()),
+        // A file travels too: base64 of arbitrary bytes across a protocol that
+        // is line-oriented and 7-bit is exactly the sort of thing a trait-only
+        // test cannot tell you went well.
+        attachments: vec![sc_email::Attachment {
+            filename: "invoice-7.pdf".to_owned(),
+            content_type: "application/pdf".to_owned(),
+            bytes: b"%PDF-1.4 \r\n.\r\n binary\x00bytes".to_vec(),
+        }],
     };
     mailer.send(&email).await?;
 
@@ -77,6 +85,12 @@ async fn a_message_reaches_an_smtp_server() -> sc_error::Result<()> {
     assert!(body.contains("Subject: Receipt for order 7"), "{body}");
     assert!(body.contains("To: ada@example.com"), "{body}");
     assert!(body.contains("multipart/alternative"), "{body}");
+    // The attachment arrived, named and typed, and the bytes that would have
+    // ended the DATA section early (a lone `.` on its own line) did not: they are
+    // base64 by the time they reach the wire.
+    assert!(body.contains("multipart/mixed"), "{body}");
+    assert!(body.contains(r#"filename="invoice-7.pdf""#), "{body}");
+    assert!(body.contains("application/pdf"), "{body}");
     // The blind copy is a recipient and not a header: it must not appear in
     // anything the other recipients can read.
     assert!(!body.contains("audit@example.com"), "{body}");
