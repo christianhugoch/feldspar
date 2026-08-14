@@ -42,6 +42,11 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
 tokio = { workspace = true }
+# Rendering a template is the one thing in this crate that needs a real engine
+# rather than the seam: the tests supply `DenoEvaluator`, as `sc-core-actions`'
+# do, because a template facility asserted against a fake evaluator would prove
+# nothing about what an email actually says.
+sc-expr = { workspace = true, features = ["eval"] }
 
 [lints]
 workspace = true

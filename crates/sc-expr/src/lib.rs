@@ -14,6 +14,12 @@
 //!   below `sc-catalog` and never sees a `Table`), yielding an [`Analysis`] or
 //!   an error naming the identifier an admin has to fix.
 //!
+//! - [`Template`] is the same language in a **string**: `{{ }}` tokens, each one
+//!   a `Formula`, validated against the same shape and evaluated by the same
+//!   evaluator. An email's subject, a `fetch` URL and a message body are
+//!   interpolated by this and nothing else, so a token means in a template
+//!   exactly what it means in a calculated field.
+//!
 //! - [`translate`] is the **symbolic evaluator**: it turns a formula into a
 //!   boolean `sc_query::Expr` for one [`Operation`] (the flags fold to
 //!   constants) under one [`UserEnv`] — `Inline` (user values as literals, for
@@ -32,6 +38,7 @@ mod formula;
 mod normalise;
 mod shape;
 mod subquery;
+mod template;
 mod translate;
 
 pub use agg::{AggUse, INVERSE};
@@ -43,6 +50,7 @@ pub use eval::{CodeCall, FormulaCall, JsEvaluator, value_from_json, value_to_jso
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
 pub use subquery::{AggFunc, AggregateSpec, aggregate_expr, correlated_aggregate, correlation};
+pub use template::{Escape, MAX_PASSES, RenderMode, Template, Token};
 pub use translate::{
     AmbientValues, CalcFields, Env, Operation, TranslateError, USER_GUC, UserEnv, join_path_expr,
     join_path_expr_rooted, translate, translate_rooted, translate_value,

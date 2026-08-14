@@ -28,11 +28,11 @@
 
 use std::collections::BTreeMap;
 
-use sc_catalog::{Catalog, Table};
+use sc_catalog::{Catalog, Table, prefetch_bindings};
 use sc_error::{Error, Result};
 use sc_expr::{
-    Ambient, AmbientValues, Formula, FormulaCall, Operation, SchemaShape, TableShape,
-    value_from_json,
+    Ambient, AmbientValues, Formula, FormulaCall, Operation, RenderMode, SchemaShape, TableShape,
+    Template, value_from_json,
 };
 use sc_query::Value;
 use sc_types::{Attrs, BasicType, TypeRef, json_to_value};
@@ -121,6 +121,20 @@ pub fn formula_map(config: &Attrs, key: &str) -> Result<Vec<(String, Formula)>> 
     Ok(out)
 }
 
+/// The scope an action's **templates** range over: the event's table, or
+/// [`EVENT_SCOPE`] where the event has no row.
+///
+/// Deliberately not the same rule as a configured formula's, which is always
+/// [`EVENT_SCOPE`]. A template is written where a person is writing prose —
+/// `Receipt for order {{ id }}`, `{{ customerⱵemail }}` — and demanding
+/// `{{ row.id }}` there buys nothing: the ambiguity a bare identifier creates in
+/// an `insert_row` value (is `title` the source row's or the target's?) does not
+/// exist in a subject line, which has exactly one row in view. `row.id` still
+/// works, and means the same thing.
+pub fn template_scope(channel: Option<&str>) -> &str {
+    channel.unwrap_or(EVENT_SCOPE)
+}
+
 /// Check one configured formula in the scope it will be evaluated in: every
 /// identifier resolves, and none of the operation flags is used.
 pub fn check_formula(
@@ -133,6 +147,33 @@ pub fn check_formula(
         .validate(shape, scope)
         .map_err(|e| Error::invalid(format!("{what}: {e}")))?;
     if !analysis.flags.is_empty() {
+        return Err(Error::invalid(format!(
+            "{what}: the operation flags (`_insert`, `_update`, …) are not available — \
+             the trigger's own event is the operation"
+        )));
+    }
+    Ok(())
+}
+
+/// Check one configured **template** in the scope it will be rendered in: every
+/// token's every identifier resolves, and none of them uses an operation flag.
+///
+/// The template twin of [`check_formula`], and it exists for the same reason:
+/// an action's configuration is validated on save *and* on load, so a subject
+/// line naming a field that was dropped takes its trigger out of the live set
+/// with a reason rather than failing at 3am with the send half done.
+///
+/// `scope` is [`template_scope`]'s answer for the trigger's channel.
+pub fn check_template(
+    shape: &SchemaShape,
+    scope: &str,
+    template: &Template,
+    what: &str,
+) -> Result<()> {
+    let analyses = template
+        .validate(shape, scope)
+        .map_err(|e| Error::invalid(format!("{what}: {e}")))?;
+    if analyses.iter().any(|a| !a.flags.is_empty()) {
         return Err(Error::invalid(format!(
             "{what}: the operation flags (`_insert`, `_update`, …) are not available — \
              the trigger's own event is the operation"
@@ -185,11 +226,22 @@ impl EventBindings {
                 .collect()
         };
         let mut ambient = AmbientValues::new();
-        if event.kind.is_table_event() {
+        // `row` is bound when the event **has** one, not when its kind is a
+        // table event: a `none` trigger run against a row of its table (the row
+        // button, §13.4) carries a row and must read it exactly as an `update`
+        // trigger does, and a table event that somehow arrived without one must
+        // say `row` is unbound rather than bind an empty object that reads as a
+        // row where every field is missing.
+        if event.row.is_some() {
             ambient.insert(
                 Ambient::Row,
                 Some(object(Ambient::Row, &event.row_object())),
             );
+        }
+        // `old` stays a property of the *kind*: only a table event has a
+        // "before", and on an insert or a delete it is in scope and null, which
+        // is what makes `old.x` there a null rather than an error.
+        if event.kind.is_table_event() {
             ambient.insert(
                 Ambient::Old,
                 event
@@ -297,6 +349,70 @@ pub async fn event_formula_value(
         .map_err(|e| Error::invalid(format!("trigger `{}`: {what}: {e}", ctx.trigger)))
 }
 
+/// Render one configured template against the event, in `mode`.
+///
+/// The template twin of [`event_formula_value`], and **not** a call site of it:
+/// this prefetches. A template ranges over the event's row
+/// ([`template_scope`]), so `{{ customerⱵemail }}` is an ordinary Ⱶ-path, and
+/// the evaluator does no I/O — the value has to be fetched first, by the same
+/// [`prefetch_bindings`](sc_catalog::prefetch_bindings) a trigger's `only_if`
+/// and an ownership check use. One prefetch per token over one shared map, so a
+/// path two tokens both read is fetched once.
+///
+/// `what` names the setting being rendered, so a failure points at the subject
+/// line rather than at the trigger as a whole.
+pub async fn render_event_template(
+    ctx: &ActionContext<'_>,
+    template: &Template,
+    what: &str,
+    mode: RenderMode,
+) -> Result<String> {
+    let named = |e: Error| Error::invalid(format!("trigger `{}`: {what}: {e}", ctx.trigger));
+    // A constant costs nothing: no shape, no prefetch, no isolate.
+    if template.is_literal() {
+        return Ok(template.source().to_owned());
+    }
+    let channel = ctx.event.channel.as_deref();
+    let table = match channel {
+        Some(name) => Some(ctx.catalog.require(name).map_err(named)?),
+        None => None,
+    };
+    let shape = action_shape(ctx.catalog, channel)?;
+    let analyses = template
+        .validate(&shape, template_scope(channel))
+        .map_err(named)?;
+
+    // The event's objects, each field typed by its own column — what a prefetch
+    // correlates on has to agree with the database (a uuid compared as text is
+    // a SQL error, not a mismatch).
+    let bindings = EventBindings::with_values(ctx.event, |ambient, field, json| match ambient {
+        Ambient::User | Ambient::Payload => value_from_json(json),
+        Ambient::Row | Ambient::Old => typed_value(table.as_ref(), field, json),
+    });
+    // The bare scope is the event's row, so `{{ id }}` is the row this template
+    // is about and `{{ row.id }}` is the same thing spelled the other way.
+    let mut values: BTreeMap<String, Value> = bindings
+        .ambient
+        .get(&Ambient::Row)
+        .cloned()
+        .flatten()
+        .unwrap_or_default();
+    if let Some(table) = &table {
+        for analysis in &analyses {
+            prefetch_bindings(ctx.catalog, table, analysis, &shape, &mut values)
+                .await
+                .map_err(named)?;
+        }
+    }
+    let evaluator = ctx.evaluator()?;
+    template
+        .render(mode, evaluator.as_ref(), |formula| {
+            bindings.call(formula, Operation::Read, &values)
+        })
+        .await
+        .map_err(named)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +462,30 @@ mod tests {
         // `the_payload_is_in_scope_for_every_kind_and_only_as_an_object`.
         assert_eq!(bindings.ambient.len(), 1);
         assert!(bindings.user.is_some());
+    }
+
+    #[test]
+    fn the_row_is_bound_when_the_event_has_one_whatever_its_kind() {
+        // A `none` trigger run against a row of its table — the row button
+        // (§13.4) — carries a row, and its templates read it exactly as an
+        // `update` trigger's do.
+        let run = Event::new(EventKind::None)
+            .on("orders")
+            .row(json!({ "id": 42, "total": 250 }));
+        let bindings = EventBindings::of(&run);
+        assert_eq!(
+            bindings.ambient[&Ambient::Row]
+                .as_ref()
+                .and_then(|r| r.get("total")),
+            Some(&Value::Int(250))
+        );
+        // There is no "before" for a button run, so `old` is not in scope at all
+        // — naming it is the unknown-identifier error it deserves.
+        assert!(!bindings.ambient.contains_key(&Ambient::Old));
+
+        // And an event with no row binds none, whatever its kind claims.
+        let bare = Event::new(EventKind::None).on("orders");
+        assert!(!EventBindings::of(&bare).ambient.contains_key(&Ambient::Row));
     }
 
     #[test]

@@ -126,27 +126,29 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 1 — The interpolation facility (`sc-expr`, `sc-action`)
 
-- [ ] **`sc-expr::template`**: `Template::parse(&str)` → literal runs and `{{ }}` tokens, each
+- [x] **`sc-expr::template`**: `Template::parse(&str)` → literal runs and `{{ }}` tokens, each
       token an `Escape` (`Html` for a bare token, `Raw` for `!`, `Reinterpolate` for `=`) plus a
       `Formula`. A string with no `{{` parses to a single literal, which is the common case and
       must cost nothing. An unclosed `{{` is an error naming the offending fragment.
-- [ ] **`Template::validate(shape, table)`** → one `Analysis` per token, so the caller gets the
+- [x] **`Template::validate(shape, table)`** → one `Analysis` per token, so the caller gets the
       free variables (Ⱶ-paths and Ↄ-relations included) it must prefetch, and an unknown
       identifier is an error naming the identifier *and the token it is in*.
-- [ ] **`Template::render_html` / `render_text`** over a `JsEvaluator` and the bindings a
+- [x] **`Template::render_html` / `render_text`** over a `JsEvaluator` and the bindings a
       formula takes (bare row, `row`/`old`/`payload`, `user`): tokens evaluated in order,
       `null`/`undefined` → `""`, everything else stringified, HTML-escaped or not per decision
       3. `{{= }}` escapes and then re-interpolates its result, **bounded at 5 passes**, with an
       error naming the template when the bound is hit.
-- [ ] **`sc-action::check_template` and `render_event_template`**, the template twins of
+- [x] **`sc-action::check_template` and `render_event_template`**, the template twins of
       `check_formula` and `event_formula_value` — one place where an action's template is
       validated in the event's scope, and one where it is rendered against the event with every
       Ⱶ-path **prefetched** (`prefetch_bindings`, as `only_if` already does in `dispatch.rs`).
       Today's `event_formula_value` does *not* prefetch, which is why this is a new helper and
-      not a call site.
-- [ ] **`EventBindings` binds `row` when the event *has* one**, rather than when its kind is a
+      not a call site. A template's bare scope is the event's **row** (`template_scope`), not
+      the empty `EVENT_SCOPE` a configured formula ranges over: `{{ id }}` is how a subject
+      line is written, and one row is in view.
+- [x] **`EventBindings` binds `row` when the event *has* one**, rather than when its kind is a
       table event — the change decision 8 needs, and the honest rule either way.
-- [ ] Tests (`sc-expr`, unit): the v1 cases, transcribed — `"hello {{ x }}"` with `{x:1}`,
+- [x] Tests (`sc-expr`, unit): the v1 cases, transcribed — `"hello {{ x }}"` with `{x:1}`,
       `{{ x+1 }}`, `{{ x }}` over `<script>` escaped, `{{! x }}` not, and the reinterpolation
       case (`{{= greeter }}` where `greeter` is `"Hello {{ firstName }}!"` renders
       `"Hello John!"`); plus what v1 does not answer: text mode leaves `&` alone, a token naming

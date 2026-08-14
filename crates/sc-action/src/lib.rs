@@ -62,8 +62,9 @@ pub use registry::ActionRegistry;
 pub use schedule::{ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, OFTEN_MINUTES, Schedule, day_name};
 pub use scheduler::Scheduler;
 pub use scope::{
-    EVENT_SCOPE, EventBindings, action_shape, check_formula, config_str, event_formula_value,
-    formula_map, optional_formula, required_formula, typed_value,
+    EVENT_SCOPE, EventBindings, action_shape, check_formula, check_template, config_str,
+    event_formula_value, formula_map, optional_formula, render_event_template, required_formula,
+    template_scope, typed_value,
 };
 pub use store::{
     TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers, load_trigger,

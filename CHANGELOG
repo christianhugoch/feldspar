@@ -2,6 +2,66 @@
 
 Changes in reverse chronological order.
 
+## One interpolation facility: a `{{ }}` token is a formula
+
+Saltcorn 1 has an interpolator *and* a formula evaluator — two scopes, two
+parsers, two failure modes. v2 has one. `sc_expr::Template` splits a string into
+literal runs and `{{ }}` tokens and hands every token to `Formula::parse`, so a
+subject line is the same language as an ownership rule, a calculated field and a
+trigger's `only_if`:
+
+```
+Receipt for order {{ id }} — {{ customerⱵemail }}
+```
+
+The consequences are the reason for doing it this way. A template
+**validates at save time** against the same `SchemaShape` an `only_if` does, so
+`{{ totl }}` is refused in front of the admin — naming both the identifier and
+the token it is in — rather than at 3am. Its free variables come out of the
+ordinary `Analysis`, so `{{ customerⱵemail }}` is prefetched by the same
+`sc_catalog::prefetch_bindings` that resolves a Ⱶ-path anywhere else. And
+rendering is the one `JsEvaluator`, so `{{ price * quantity }}` means in a
+message exactly what it means in a column.
+
+**v1's three sigils, kept exactly**, because a v1 application's templates are the
+corpus this has to accept: `{{ x }}` renders the value, `{{! x }}` renders it
+without escaping, and `{{= x }}` renders it and then interpolates the result
+again in the same scope. The sigil is the character straight after `{{`, which
+leaves `{{ !x }}` the negation it reads as.
+
+Two deliberate departures. **Re-interpolation is bounded** at five passes: v1's
+is not, so a row holding `{{= self }}` renders forever, and here the bound is hit
+and the error names the template. **A missing binding is an error, not an empty
+string** — every name was classified against the schema when the template was
+saved, so an unresolvable one at render time means the schema changed underneath,
+which this system reports rather than absorbs. A **null column** is still the
+empty string: that is data, not a mistake.
+
+**Escaping is a property of the render, not only of the sigil.** `render_html`
+escapes bare tokens and `render_text` does not, because a subject line put
+through the HTML rule reads `Tea &amp; Coffee` in the mail client and a
+`text/plain` body becomes a page of entities. `{{! }}` and `{{= }}` mean the same
+in both.
+
+Above it, `sc-action` gains the two helpers an action's templates go through —
+`check_template`, run on save *and* on load like every other configuration check,
+and `render_event_template`, which renders against the event with every Ⱶ-path
+**prefetched**. That prefetch is why it is a new helper rather than a call of
+`event_formula_value`, which does not prefetch and would render a customer's
+address as an unbound-name error. A template's bare scope is the event's **row**
+(`template_scope`), not the empty `EVENT_SCOPE` a configured formula gets:
+`Receipt for order {{ id }}` is how a person writes a subject line, and the
+ambiguity that makes a bare identifier wrong in an `insert_row` value does not
+exist where there is exactly one row in view. A constant template — most subject
+lines — costs one string search and never reaches the isolate.
+
+**`EventBindings` now binds `row` when the event *has* one**, rather than when
+its kind is a table event. That is the honest rule either way, and it is the one
+a trigger run against a row of its table needs: the row button that milestone is
+about carries a row on a `none` event, and its templates must read it exactly as
+an `update` trigger's do. `old` stays a property of the kind — only a table event
+has a "before".
+
 ## The generated TypeScript client: one object per table, typed rows, and a typed `select`
 
 The client an application gets had four methods per table — `listTasks`,
