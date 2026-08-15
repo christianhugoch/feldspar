@@ -747,7 +747,7 @@ at query time.
 
 **Who may *write* these rules.** The four settings above — `min_role_read`, `min_role_write`,
 `ownership_formula` and `rls_enabled` — are set by an admin through `updateTable` (§13.1) and,
-since the agents milestone, by an **agent** carrying the `manage_table_admin` trait (§11.3). A
+since the agents milestone, by an **agent** carrying the `admin_copilot` trait (§11.3). A
 reader of this section must not have to infer that from §11, so it is stated here with its two
 conditions: the agent's `allow_access_changes` grant must be on — it is **off by default**, and
 it is a separate grant from `allow_drop` because a drop announces itself while a widened role
@@ -1523,9 +1523,9 @@ its reason kept**, remaining stored, listed and editable, because editing it is 
 
 Deliberately few, and split by what they touch. Each names its target in its configuration —
 there is no trait that can reach *any* table or *any* store, because "which tables may this
-agent see" is the first thing an admin needs to be able to answer. **`manage_table_admin` is
-the single exception**, and the reason is structural rather than an oversight: see the schema
-paragraphs at the end of this section.
+agent see" is the first thing an admin needs to be able to answer. **`admin_copilot` is
+the single exception**, and the reason is structural rather than an oversight: see the
+schema-and-triggers paragraphs at the end of this section.
 
 **Tables.** `query_table` (one configured table; tool arguments are a `where` object, an
 optional field list, an ordering and a bounded `limit`), `insert_row` and `update_rows` /
@@ -1638,7 +1638,7 @@ composing one.
   `may_edit` adds `write_file` and `edit_file`, `may_run_scripts` adds the script runner, and
   both are off by default. A withheld tool is **not declared to the model**, and a call that
   arrives for one anyway (from a stale transcript) is refused naming the checkbox — the
-  `manage_table_admin` shape, for the `manage_table_admin` reason: grants that share a scope
+  `admin_copilot` shape, for the `admin_copilot` reason: grants that share a scope
   belong on one trait, not on several that can disagree about where they point. Tool names are
   still derived from the scope (`edit_file_apps_web`), so the trait over two directories is two
   sets of tools and the same directory twice is a collision refused on save; a derived name longer
@@ -1675,14 +1675,16 @@ composing one.
   **single** glob; a query naming several is searched whole and filtered in the client, because
   sending the first of several would silently drop the files the others named.
 
-**The schema.** `manage_table_admin` is the first **app-building** trait: it describes and edits
-the catalog itself. Asked to "create the database schema for a law firm's ERP system" it creates
-the connected tables and their fields in one act, edits what is already there — including, under
-its own grant, the access rules of §7.3 — drops what it is granted to drop, and answers questions
-about the schema **without ever seeing a row**. Views, triggers and applications are still nobody's
-tool; §11.6's copilot is the rest of that story, and this is where it will stand.
+**The schema and the triggers.** `admin_copilot` is the first **app-building** trait: it
+describes and edits the catalog itself, and the trigger set over it. Asked to "create the database
+schema for a law firm's ERP system" it creates the connected tables and their fields in one act,
+edits what is already there — including, under its own grant, the access rules of §7.3 — drops
+what it is granted to drop, and answers questions about the schema **without ever seeing a row**.
+Asked to "email the client when a matter closes" it writes the trigger that does it. Views and
+applications are still nobody's tool; §11.6's copilot is the rest of that story, and this is where
+it will stand.
 
-Two tools. `describe_schema` reads: every non-system table with its label, description, role
+Six tools, in two halves. `describe_schema` reads: every non-system table with its label, description, role
 floors, ownership-formula **source** (not merely a boolean — a tool that may write a formula and
 can only read a flag has no way to edit one except by overwriting it blind), its
 `ownership_error` where a stored formula stopped validating, `rls_enabled` beside the
@@ -1693,7 +1695,7 @@ per-operation tool turns a twelve-table ERP into forty round trips, each re-send
 transcript and each able to fail halfway with no way back. One list is one turn, one transaction
 and one refusal.
 
-**What was built, where it deviates** (Phase 7, `manage_table_admin`):
+**What was built, where it deviates** (Phase 7, `admin_copilot`):
 
 - **The rule moved out of the handlers first.** Creating a table and creating a field existed only
   as closures inside `sc-server`'s admin handlers, which was fine while an HTTP request was the
@@ -1752,6 +1754,77 @@ and one refusal.
   *n* is a better error than a schema the provider silently flattens.
 - **`alter_table` is read-modify-write; omitted means leave.** A deliberate divergence from
   `updateTable`'s whole-object contract, recorded in §13.1 beside the contract it diverges from.
+
+**The triggers, and the problem they pose.** The other four tools are `describe_triggers`,
+`describe_action`, `save_trigger` and `delete_trigger` — the trigger set read, written and removed
+through `sc_action::save_trigger`, which is the same authority the admin's own form goes through,
+so an agent cannot save a trigger an admin could not have and is refused in the words the admin
+would have read. The dispatcher is reloaded before the tool result comes back, so what was just
+written is live.
+
+The hard part is not the trigger, it is the **action's configuration**. A trigger is one event
+plus one configured action; there is an open-ended set of actions, each declaring its own
+`config_spec`, and some of those specs are not even fixed — `send_email` grows a checkbox per File
+field of the trigger's table. Putting every action's every setting into one tool's JSON schema
+would be a large, mostly-irrelevant declaration re-sent on every model call of every conversation,
+and would go stale the moment a plugin registers an action.
+
+Saltcorn 1 answered this with a **nested inference call**: `create_action` chose the action and
+the trigger conditions, and a second, ad-hoc model call — with a tool built for that one action —
+filled in its parameters. v2 answers it with **progressive disclosure inside the one loop**, which
+is the pattern the ecosystem converged on for the same problem (a discovery tool plus an execution
+tool, schemas fetched on demand rather than carried): `describe_action` returns one action's
+settings when the model asks for them, `save_trigger` takes `configuration` as an open object, and
+a configuration that does not validate comes back as a refusal **carrying the settings it should
+have used**. Four reasons, in the order they mattered:
+
+- **The parameters are exactly what the conversation decides.** A nested call has to be re-briefed,
+  by the model that is about to guess: "email the client, not the fee earner" lives in the
+  transcript the sub-call cannot see. It is the argument §11.3's `subagent` makes for why a child
+  does not inherit its parent's context, read the other way round — delegation pays when the
+  child's *work* is long and noisy, and filling in one form is neither.
+- **A refusal has to reach the model that can fix it.** `validate_trigger` is real: it resolves
+  every configured formula in the scope the event will give it, so a first attempt is often wrong.
+  In one loop that is a tool result and the next turn corrects it; inside a nested call it is
+  either an error nobody can attribute or a retry loop nobody can see.
+- **A hidden second inference is a run nobody can read.** §11 is built on a run being a transcript
+  with one subject, a step budget and a row in `_sc_runs`. A tool that quietly calls the model
+  again has none of those. Where a task genuinely wants its own context window, `subagent` already
+  provides one — visibly.
+- **It costs less.** Saltcorn 1's flow spends two inferences on every action, always. This spends
+  one extra *tool* round trip, only when the model does not already hold the settings — and
+  because the refusal carries them, a model that guesses well pays nothing.
+
+What was kept from Saltcorn 1 is the sequencing it was reaching for — **choose the action, then
+configure it** — made explicit and cheap by `describe_action`'s two levels: every action's name
+and one line, then one action's full settings, resolved for the table the trigger will fire on.
+
+Four more decisions in that half:
+
+- **The four grants cover both halves.** Creating a table and creating a trigger are both
+  `allow_create`; deleting a trigger is `allow_drop`; and a trigger's `min_role` — which decides
+  who may `POST /actions/{name}` — is an **access rule**, so it needs `allow_access_changes`
+  exactly as a table's role floors do. A second set of checkboxes would have been four more
+  decisions for the admin, on the same question, with the same right answers.
+- **`save_trigger` takes one trigger, not a list.** The schema editor takes a list because tables
+  are *connected*; triggers are not — two of them are two independent rows, nothing in one
+  resolves against the other — so a batch would buy an all-or-nothing guarantee nobody needs while
+  making every refusal ambiguous about which trigger caused it.
+- **The name is the identity, and saving under one that exists edits it.** A trigger's UUID is
+  never shown or accepted: the name is what an API path, a Run button and an app's exposed subset
+  already reference. Creating and editing being two *grants* over one tool is what makes the
+  implicit upsert safe — an agent allowed only to build new triggers cannot rewrite one an admin
+  wrote by reusing its name. Omitted means unchanged and `null` clears, as `alter_table` does.
+- **Secrets are masked on the way out and merged back on the way in.** A tool result is written
+  into `_sc_runs` and re-read into the provider's context on every later turn, so a key that
+  reaches one has been copied somewhere nobody thought about. `redact_attrs`/`merge_secrets` —
+  §11.1's pair — apply here for that reason rather than as an access control; the caller is an
+  admin either way.
+- **Mounted applications re-project through a seam here too.** `sc-action` grew a
+  `TriggerObserver`, the sibling of `SchemaObserver` and installed the same way, notified from
+  `TriggerDispatcher::reload` — the one thing every writer of a trigger calls afterwards, whether
+  it is a handler, a restore or an agent. The handlers' own `refresh_triggers` calls are gone
+  rather than double-firing beside it.
 
 **Other agents.** `subagent` exposes **one configured agent** as one tool, so an agent is a
 thing an agent can be given, exactly as a table and a trigger are. The parent hands over one
@@ -1972,7 +2045,7 @@ action returns a value (§10.1), and a caller who wants the deltas is a chat cli
 
 *Not this milestone — but the first of it now exists.* The copilot is an agent composed of
 **app-building** traits, which is why §11.2's `AgentTrait` is the extension point and not a
-closed set. `manage_table_admin` (§11.3) is the first of those traits and the proof of the shape:
+closed set. `admin_copilot` (§11.3) is the first of those traits and the proof of the shape:
 tables and fields are now something an agent creates, edits and drops, under grants an admin
 ticks. What is still ahead of the copilot is the rest of the set — **triggers**, **views** and
 **applications** as traits — plus the staging that turns a set of traits into a copilot. Two

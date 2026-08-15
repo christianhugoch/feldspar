@@ -20,7 +20,7 @@ and reports what it found; asked to do something it runs a trigger it was given.
 file store it reads and greps the project, edits a file, builds the application and reports the
 diagnostics from a build it broke. The same agent is reachable from a **trigger**, so a row
 insert can start it, and the run it produces is readable afterwards in the same history the chat
-panel shows. And — the boundary Phase 7 revises — an agent given `manage_table_admin` **builds the
+panel shows. And — the boundary Phase 7 revises — an agent given `admin_copilot` **builds the
 schema it will then work on**: asked for a law firm's tables it creates the connected tables and
 their fields in one act, answers questions about the schema without seeing a row, refuses a drop
 until the admin ticks the box, and writes the access rules of §7.3 under a grant of their own.
@@ -30,7 +30,7 @@ applications* are out of scope (§11.6). Phases 1–6 build the machinery they w
 against: the provider seam, the agent record, the `AgentTrait` extension point, the loop, the run
 storage and the chat UI — and those phases were held to "if this ends with a trait that constructs
 a table, something has gone wrong". **Phase 7 revises that boundary deliberately**, once the
-machinery is proven, with the first app-building trait: `manage_table_admin`, over the catalog and
+machinery is proven, with the first app-building trait: `admin_copilot`, over the catalog and
 nothing else.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
@@ -320,7 +320,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] **Done when** an insert on a table fires a trigger that runs an agent, the row's data reaches
       the prompt, and the run is readable afterwards in the chat panel's history.
 
-## Phase 7 — `manage_table_admin`: the agent that builds the schema
+## Phase 7 — `admin_copilot`: the agent that builds the schema
 
 The first **app-building** trait, and a deliberate revision of the boundary the milestone header
 drew: an agent asked to "create the database schema for a law firm's ERP system" creates the
@@ -460,7 +460,7 @@ able to fail halfway with no way back. One list is one turn, one transaction and
       chat view would hand them the table editor.
 - [x] `validate_config` has little to check that the spec cannot — there is no table to resolve —
       but it does check the one thing that matters: that the two tool names are free, which is what
-      makes a second `manage_table_admin` on the same agent refusable on save (§11.2) rather than a
+      makes a second `admin_copilot` on the same agent refusable on save (§11.2) rather than a
       duplicate tool the model picks between.
 - [x] Tests: Rust against a real Postgres — a two-table batch with a foreign key, asserting the key
       is in the catalog and a row inserts through it; a batch whose third operation is invalid

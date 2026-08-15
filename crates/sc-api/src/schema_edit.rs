@@ -9,7 +9,7 @@
 //! primary-key field is stored, the DDL-then-overlay sequence, the
 //! calculated-field check, the ownership validation and the RLS sync. That was fine while an
 //! HTTP request was the only way to change a schema. It stopped being fine the
-//! moment an **agent** could (§11.3's `manage_table_admin`): `sc-core-traits` is
+//! moment an **agent** could (§11.3's `admin_copilot`): `sc-core-traits` is
 //! layer 9 and cannot name `sc-server`, so a trait that re-implemented any of it
 //! would be a second answer to "what does creating a field mean", and the two
 //! would drift within a release.

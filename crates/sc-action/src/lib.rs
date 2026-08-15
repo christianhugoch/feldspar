@@ -46,6 +46,7 @@
 mod action;
 mod dispatch;
 mod event;
+mod observer;
 mod registry;
 mod schedule;
 mod scheduler;
@@ -58,6 +59,7 @@ mod validate;
 pub use action::{Action, ActionContext, ConfigCheck};
 pub use dispatch::{ActionServices, TriggerDispatcher, TriggerRun, fire_trigger};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
+pub use observer::TriggerObserver;
 pub use registry::ActionRegistry;
 pub use schedule::{ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, OFTEN_MINUTES, Schedule, day_name};
 pub use scheduler::Scheduler;

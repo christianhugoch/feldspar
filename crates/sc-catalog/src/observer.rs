@@ -7,7 +7,7 @@
 //! for a column that arrived — until a restart. The admin handlers used to fix
 //! that by calling `AppMounts::refresh_table` themselves, which worked only
 //! because every schema change went through a handler. Once an *agent* can edit
-//! the schema (§11.3's `manage_table_admin`), that is no longer true.
+//! the schema (§11.3's `admin_copilot`), that is no longer true.
 //!
 //! So the notification moves to where the change is made, behind the same shape
 //! the write seam already uses ([`TableEvents`](crate::TableEvents)): the mount

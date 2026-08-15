@@ -391,6 +391,8 @@ fn the_agents_tutorial_teaches_each_step_of_the_loop() {
         "template literal",            // …whose prompt is a formula, written the safe way
         "max_steps",                   // the seatbelt
         "sentinel",                    // the redacted key
+        "describe_action",             // …how it finds out what an action takes
+        "save_trigger",                // …and writes the trigger that runs it
     ] {
         assert!(
             agents.contains(fragment),
@@ -499,6 +501,14 @@ fn the_design_records_what_the_agents_milestone_actually_built() {
         "`ProviderConnector` moved down to `sc-agent`",
         "registered apart from the built-in action set",
         "triggered run is given no trigger dispatcher",
+        // §11.3: the trigger half of `admin_copilot`, and the decision it turns
+        // on — an action's settings are fetched when the model asks, not filled
+        // in by a second, hidden inference call the way Saltcorn 1 did it.
+        "**The triggers, and the problem they pose.**",
+        "progressive disclosure inside the one loop",
+        "A hidden second inference is a run nobody can read",
+        "The four grants cover both halves",
+        "`save_trigger` takes one trigger, not a list",
     ] {
         assert!(design.contains(fragment), "§11 should record `{fragment}`");
     }

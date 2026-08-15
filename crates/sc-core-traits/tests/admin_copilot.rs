@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! `manage_table_admin` against a **real** Postgres (TODO Phase 7).
+//! `admin_copilot` against a **real** Postgres (TODO Phase 7).
 //!
 //! Everything this trait does is DDL, transactions and catalog reloads, so a
 //! mock would confirm only that the seam was called. What is pinned here is the
@@ -17,7 +17,7 @@ use sc_agent::RunCaller;
 use sc_error::Result;
 use serde_json::{Value as Json, json};
 
-const TRAIT: &str = "manage_table_admin";
+const TRAIT: &str = "admin_copilot";
 
 /// Everything granted — what an admin who ticked all four boxes has.
 fn all_grants() -> sc_types::Attrs {

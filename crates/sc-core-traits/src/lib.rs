@@ -34,10 +34,13 @@
 //! `package.json` declares under another, which is the bounded thing that ships
 //! instead of a shell (decision 6) — and [`BuildApplication`] builds the
 //! application whose source that store is and hands back its diagnostics. And
-//! **the schema itself**: [`ManageTableAdmin`] describes and edits the catalog —
-//! the first *app-building* trait, and the first that does not name a table in
-//! its configuration, because the tables it makes do not exist when it is
-//! configured. And **other agents**: [`Subagent`] hands one bounded task to one
+//! **the application itself**: [`AdminCopilot`] describes and edits the catalog
+//! *and* the trigger set — the first *app-building* trait, and the first that
+//! does not name a table in its configuration, because the tables it makes do
+//! not exist when it is configured. It is also where the question "how does a
+//! model configure one of an open-ended set of actions, each with its own
+//! settings?" is answered, by handing it those settings when it asks rather than
+//! by a second, hidden inference call. And **other agents**: [`Subagent`] hands one bounded task to one
 //! configured agent, which does it in a context of its own and reports back —
 //! the trait that makes an agent something an agent can be given, and the reason
 //! `sc-agent` grew a [`Delegator`](sc_agent::Delegator) seam.
@@ -58,16 +61,16 @@
 //! - **It names its target in its configuration.** There is no trait that can
 //!   reach *any* table, because "which tables may this agent see?" is the first
 //!   question an admin needs to be able to answer off the agent's definition.
-//!   **[`ManageTableAdmin`] is the one exception**, and a deliberate one: a
+//!   **[`AdminCopilot`] is the one exception**, and a deliberate one: a
 //!   trait that creates tables cannot name them in advance, so it is scoped by
 //!   *what it may do* — four grants — rather than by what it may reach, and it
 //!   refuses any caller who is not an admin (§11.3).
 //! - **Its tool names are derived from that configuration** (`query_books`, not
 //!   `query`), so one trait enabled twice offers two distinguishable tools —
 //!   which is what makes a collision refusable on save (§11.2). See
-//!   [`tool_names`]. `ManageTableAdmin`'s two names are fixed for the same
-//!   reason it names no table; enabling it twice therefore *collides*, which is
-//!   the intended outcome.
+//!   [`tool_names`]. `AdminCopilot`'s six names are fixed for the same reason it
+//!   names no table; enabling it twice therefore *collides*, which is the
+//!   intended outcome.
 //! - **A trait may offer several tools, and may withhold some of them.**
 //!   [`Coding`] offers six over one scope and declares only the ones its grants
 //!   allow, which is how "may this agent change the source?" became a checkbox
@@ -88,12 +91,12 @@
 //!   whose world changed underneath it leaves the live set with a reason instead
 //!   of failing mid-conversation.
 
+mod admin_copilot;
 mod build_application;
 mod coding;
 mod delete_rows;
 mod files;
 mod insert_row;
-mod manage_table_admin;
 mod query_table;
 mod run_agent;
 mod run_trigger;
@@ -112,6 +115,11 @@ pub use table::{CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE};
 
 pub use files::{CFG_ROOT, CFG_STORE, FileScope, configured_scope, slugify};
 
+pub use admin_copilot::{
+    AdminCopilot, CFG_ALLOW_ACCESS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP, CFG_ALLOW_EDIT,
+    TOOL_DELETE_TRIGGER, TOOL_DESCRIBE, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT,
+    TOOL_SAVE_TRIGGER,
+};
 pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use coding::{
     CFG_MAX_CHARS, CFG_MAX_RESULTS, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_TIMEOUT, Coding,
@@ -119,10 +127,6 @@ pub use coding::{
 };
 pub use delete_rows::DeleteRows;
 pub use insert_row::InsertRow;
-pub use manage_table_admin::{
-    CFG_ALLOW_ACCESS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP, CFG_ALLOW_EDIT, ManageTableAdmin,
-    TOOL_DESCRIBE, TOOL_EDIT,
-};
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
 pub use run_agent::{CFG_AGENT, CFG_PROMPT, RunAgent};
 pub use run_trigger::{CFG_TRIGGER, RunTrigger};
@@ -139,6 +143,7 @@ pub use update_rows::{DEFAULT_MAX_WRITE_ROWS, UpdateRows};
 /// the answer to "what will this be called?" the admin UI wants before an agent
 /// is saved and the collision check (§11.2) wants at the moment of saving.
 pub mod tool_names {
+    pub use crate::admin_copilot::tool_names as admin_copilot;
     pub use crate::build_application::tool_name as build_application;
     pub use crate::coding::tool_names as coding;
     pub use crate::coding::{
@@ -148,7 +153,6 @@ pub mod tool_names {
     };
     pub use crate::delete_rows::tool_name as delete_rows;
     pub use crate::insert_row::tool_name as insert_row;
-    pub use crate::manage_table_admin::tool_names as manage_table_admin;
     pub use crate::query_table::tool_name as query_table;
     pub use crate::run_trigger::tool_name as run_trigger;
     pub use crate::subagent::tool_name as subagent;
@@ -190,6 +194,7 @@ pub fn register_agent_actions(
 }
 
 pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
+    registry.register(Arc::new(AdminCopilot))?;
     registry.register(Arc::new(QueryTable))?;
     registry.register(Arc::new(InsertRow))?;
     registry.register(Arc::new(UpdateRows))?;
@@ -197,7 +202,6 @@ pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(RunTrigger))?;
     registry.register(Arc::new(Coding))?;
     registry.register(Arc::new(BuildApplication))?;
-    registry.register(Arc::new(ManageTableAdmin))?;
     registry.register(Arc::new(Subagent))?;
     Ok(())
 }
@@ -212,11 +216,11 @@ mod tests {
         assert_eq!(
             registry.names(),
             vec![
+                "admin_copilot",
                 "build_application",
                 "coding",
                 "delete_rows",
                 "insert_row",
-                "manage_table_admin",
                 "query_table",
                 "run_trigger",
                 "subagent",
@@ -229,16 +233,16 @@ mod tests {
         // a blank form cannot be saved. `coding` names one too (its store); what
         // its blank checkboxes then decide is what it may *do* there.
         //
-        // `manage_table_admin` is the exception, and the reason is the phase's
-        // point: it names no table, because the tables it makes do not exist when
-        // it is configured. Its form is four grants, each with a default, and a
-        // blank one is a meaningful (read-only) configuration rather than an
+        // `admin_copilot` is the exception, and the reason is the phase's point:
+        // it names no table, because the tables it makes do not exist when it is
+        // configured. Its form is four grants, each with a default, and a blank
+        // one is a meaningful (read-only) configuration rather than an
         // incomplete one.
         for trait_ in registry.all() {
             assert!(!trait_.description().is_empty(), "{}", trait_.name());
             let spec = trait_.config_spec();
             assert!(!spec.is_empty(), "{}", trait_.name());
-            if trait_.name() != "manage_table_admin" {
+            if trait_.name() != "admin_copilot" {
                 assert!(spec.iter().any(|f| f.required), "{}", trait_.name());
             }
         }
@@ -248,7 +252,7 @@ mod tests {
     fn registering_the_builtins_twice_is_refused() {
         let mut registry = builtin_traits().unwrap();
         let err = register_builtin_traits(&mut registry).unwrap_err();
-        assert!(err.to_string().contains("query_table"), "{err}");
+        assert!(err.to_string().contains("admin_copilot"), "{err}");
     }
 
     #[test]
@@ -309,9 +313,10 @@ mod tests {
         // asking the admin for it twice would be two places to get it wrong.
         assert_eq!(spec("build_application"), vec![CFG_APPLICATION]);
         // The trait that names no table: four grants, scoping it by what it may
-        // do rather than by what it may reach (§11.3).
+        // do rather than by what it may reach (§11.3) — over the schema and the
+        // triggers alike, which is why there are still four of them.
         assert_eq!(
-            spec("manage_table_admin"),
+            spec("admin_copilot"),
             vec![
                 CFG_ALLOW_CREATE,
                 CFG_ALLOW_EDIT,
@@ -383,13 +388,20 @@ mod tests {
                 tool_names::run_project_script(&scope),
             ]
         );
-        // `manage_table_admin`'s names are fixed rather than derived, and say
-        // the same two things every deployment's do.
+        // `admin_copilot`'s names are fixed rather than derived, and say the
+        // same six things every deployment's do.
         assert_eq!(
-            tool_names::manage_table_admin(),
-            ["describe_schema", "edit_schema"]
+            tool_names::admin_copilot(),
+            [
+                "describe_schema",
+                "edit_schema",
+                "describe_triggers",
+                "describe_action",
+                "save_trigger",
+                "delete_trigger",
+            ]
         );
-        for name in tool_names::manage_table_admin() {
+        for name in tool_names::admin_copilot() {
             assert!(!names.iter().any(|n| n == name));
         }
     }

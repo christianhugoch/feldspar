@@ -17,7 +17,7 @@
 //! script is another** ([`CFG_MAY_RUN_SCRIPTS`]), which adds `run_script`. Both
 //! are off by default, so a read-only coding agent stays the default shape —
 //! the property the six separate grants had and the one worth keeping. Their being
-//! configuration rather than separate traits is `manage_table_admin`'s move, made
+//! configuration rather than separate traits is `admin_copilot`'s move, made
 //! for the same reason: the grants share a scope, and a scope filled in twice is a
 //! scope that can disagree with itself.
 //!

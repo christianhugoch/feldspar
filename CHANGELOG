@@ -2,6 +2,96 @@
 
 Changes in reverse chronological order.
 
+## `admin_copilot`: the schema agent grows the triggers, and learns to ask
+
+`manage_table_admin` is now **`admin_copilot`**, and it configures triggers as
+well as tables. The rename is the honest one: the trait was never about tables
+in the sense the other traits are about a table, and the four grants it is
+scoped by turned out to be exactly the four a trigger needs too. Four tools join
+its two — `describe_triggers`, `describe_action`, `save_trigger` and
+`delete_trigger` — so an agent asked to "email the client when a matter closes"
+writes the trigger that does it, in the same conversation it created the tables.
+
+**Everything goes through `save_trigger`**, the same authority the admin's own
+form goes through: the same `validate_trigger` resolves every configured formula
+in the scope the event will actually give it, against the same action registry
+the dispatcher fires with. An agent cannot save a trigger an admin could not
+have, and is refused in the words the admin would have read. The dispatcher is
+reloaded before the tool result comes back, so what was just written is live —
+the test that matters here is the one where the trigger the agent wrote fires on
+the next insert, through the row layer, with nobody reloading anything.
+
+**The hard part is the action's configuration, and this is the decision.** There
+is an open-ended set of actions, each declaring its own settings, and some of
+those declarations are not even fixed — `send_email` grows a checkbox per File
+field of the trigger's table. Putting every action's every setting into one
+tool's JSON schema would be a large, mostly-irrelevant declaration re-sent on
+every model call of every conversation, stale the moment a plugin registers an
+action.
+
+Saltcorn 1 answered this with a **nested inference call**: `create_action` chose
+the action and the trigger conditions, and a second, ad-hoc model call filled in
+its parameters with a tool built for that one action. v2 answers it with
+**progressive disclosure inside the one loop** — the pattern the ecosystem
+converged on for the same problem, a discovery tool beside an execution tool with
+schemas fetched on demand rather than carried. `describe_action` returns one
+action's settings, resolved for the table the trigger will fire on;
+`save_trigger` takes `configuration` as an open object; and a configuration that
+does not validate comes back as a refusal **carrying the settings it should have
+used**. Four reasons, in the order they mattered:
+
+- **The parameters are exactly what the conversation decides.** A nested call has
+  to be re-briefed, by the model that is about to guess: "email the client, not
+  the fee earner" lives in the transcript the sub-call cannot see. It is
+  `subagent`'s own argument for why a child does not inherit its parent's
+  context, read the other way round — delegation pays when the child's *work* is
+  long and noisy, and filling in one form is neither.
+- **A refusal has to reach the model that can fix it.** Validation is real, so a
+  first attempt is often wrong. In one loop that is a tool result and the next
+  turn corrects it; inside a nested call it is either an error nobody can
+  attribute or a retry loop nobody can see.
+- **A hidden second inference is a run nobody can read.** A run is a transcript
+  with one subject, a step budget and a row in `_sc_runs`. A tool that quietly
+  calls the model again has none of those, and would be the one place in the
+  system where tokens are spent off the record. Where a task genuinely wants its
+  own context window, `subagent` already gives it one, visibly.
+- **It costs less.** Saltcorn 1 spends two inferences on every action, always.
+  This spends one extra *tool* round trip, only when the model does not already
+  hold the settings — and because the refusal carries them, a model that guesses
+  well pays nothing.
+
+What was kept from Saltcorn 1 is the sequencing it was reaching for — choose the
+action, then configure it — made explicit and cheap by `describe_action`'s two
+levels: every action with one line, then one action in full.
+
+**The four grants cover both halves, and are not four more checkboxes.** Creating
+a table and creating a trigger are both `allow_create`; deleting a trigger is
+`allow_drop`; and a trigger's `min_role` — which decides who may `POST
+/actions/{name}` — is an **access rule**, so it needs `allow_access_changes`
+exactly as a table's role floors do. Creating and editing being two grants over
+one tool is also what makes the name-is-the-identity upsert safe: an agent
+allowed only to build new triggers is refused rather than quietly rewriting one
+an admin wrote by reusing its name. Omitted means unchanged and `null` clears, as
+`alter_table` already did; changing the action without new settings is refused
+rather than half-applied; and changing the event to one that has no row clears
+the table and the condition, saying so in the result rather than leaving the
+model to notice.
+
+**Secrets are masked on the way out and merged back on the way in.** A tool
+result is written into `_sc_runs` and re-read into the provider's context on
+every later turn, so a key that reaches one has been copied somewhere nobody
+thought about. `redact_attrs`/`merge_secrets` apply here for that reason rather
+than as an access control — the caller is an admin either way, since every tool
+still refuses a conversation whose user is not role 1.
+
+Underneath, `sc-action` grew a **`TriggerObserver`**, the sibling of
+`SchemaObserver` and installed the same way: a mounted application projects its
+exposed triggers as endpoints at mount time, and that projection has to follow a
+change whether the change came from a handler, a restore or an agent. It is
+notified from `TriggerDispatcher::reload` — the one thing every writer calls
+afterwards — and the handlers' own `refresh_triggers` calls are gone rather than
+double-firing beside it.
+
 ## `subagent`: an agent an agent can be given
 
 An agent can now hand a task to **another agent**. `subagent` joins the built-in

@@ -109,6 +109,7 @@ pub struct TriggerDispatcher {
     registry: Arc<ActionRegistry>,
     triggers: RwLock<Arc<Triggers>>,
     services: ActionServices,
+    observer: RwLock<Option<Arc<dyn crate::TriggerObserver>>>,
 }
 
 impl TriggerDispatcher {
@@ -119,6 +120,7 @@ impl TriggerDispatcher {
             registry,
             triggers: RwLock::new(Arc::new(Triggers::empty())),
             services: ActionServices::default(),
+            observer: RwLock::new(None),
         }
     }
 
@@ -164,11 +166,55 @@ impl TriggerDispatcher {
         Ok(())
     }
 
+    /// Install the observer notified whenever the live set is reloaded — the
+    /// mount registry, so an application's exposed-trigger endpoints follow a
+    /// change with no restart.
+    ///
+    /// Set once, at boot, by whoever holds both handles; a later call replaces
+    /// it. Takes `&self` because the dispatcher is already shared behind an
+    /// `Arc` by the time a server has anything to install.
+    pub fn set_observer(&self, observer: Arc<dyn crate::TriggerObserver>) {
+        if let Ok(mut guard) = self.observer.write() {
+            *guard = Some(observer);
+        }
+    }
+
     /// Load and validate every stored trigger into the live set — at boot, and
     /// after any change to `_sc_triggers`.
+    ///
+    /// Every writer of a trigger calls this afterwards, which is what makes it
+    /// the place the [`TriggerObserver`](crate::TriggerObserver) is notified: an
+    /// admin's save, a restore, and an agent's `save_trigger` all arrive here,
+    /// and none of them has to remember to re-project anything.
     pub async fn reload(&self, catalog: &Catalog) -> Result<()> {
         let triggers = Triggers::load(catalog, &self.registry).await?;
-        self.set_triggers(triggers)
+        self.set_triggers(triggers)?;
+        self.notify(catalog);
+        Ok(())
+    }
+
+    /// Tell the observer the set moved, reporting — never returning — a failed
+    /// reaction.
+    ///
+    /// The trigger *is* saved by the time this runs, so an error here is a
+    /// mounted application that keeps its previous projection, not a save that
+    /// did not happen; failing the caller would report the opposite of what
+    /// occurred. The app names the missing or changed trigger when it is next
+    /// built or mounted.
+    fn notify(&self, catalog: &Catalog) {
+        let observer = match self.observer.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return,
+        };
+        if let Some(observer) = observer
+            && let Err(e) = observer.triggers_changed(catalog)
+        {
+            eprintln!(
+                "saltcorn: the trigger set changed, but an application could not be \
+                 re-projected and keeps its previous mount: {}",
+                sc_error::format_chain(&e)
+            );
+        }
     }
 
     /// Fire every trigger listening for `event`, in name order, and report what

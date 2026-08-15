@@ -110,6 +110,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     // has both handles: a caller that assembles the admin API gets live
     // re-projection by construction rather than by remembering to ask for it.
     catalog.set_schema_observer(Arc::clone(&apps) as Arc<dyn sc_catalog::SchemaObserver>);
+    // And the same for the trigger set, installed on the dispatcher rather than
+    // the catalog because that is what holds it: a saved, renamed or deleted
+    // trigger re-projects every app exposing one, whether the save came from
+    // these handlers or from an agent's `admin_copilot` (§11.3). The handlers'
+    // own `reproject_apps` calls are gone rather than double-firing beside it.
+    if let Ok(dispatcher) = triggers_of(&apps) {
+        dispatcher.set_observer(Arc::clone(&apps) as Arc<dyn sc_action::TriggerObserver>);
+    }
 
     let mut reg = HandlerRegistry::new();
 
@@ -1666,7 +1674,6 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let trigger = trigger_from_body(TriggerId::new(), &ctx.body)?;
                 save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
                 dispatcher.reload(&catalog).await?;
-                reproject_apps(&apps);
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)).with_status(201))
             }
         }
@@ -1689,7 +1696,6 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let trigger = trigger_from_body(id, &ctx.body)?;
                 save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
                 dispatcher.reload(&catalog).await?;
-                reproject_apps(&apps);
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)))
             }
         }
@@ -1708,7 +1714,6 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     return Err(Error::not_found(format!("no trigger with id {id}")));
                 }
                 dispatcher.reload(&catalog).await?;
-                reproject_apps(&apps);
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
             }
         }
@@ -3879,9 +3884,10 @@ pub(crate) fn triggers_of(apps: &AppMounts) -> Result<Arc<sc_action::TriggerDisp
     })
 }
 
-/// Re-project every mounted app that exposes a trigger, after the trigger set
-/// changed — so a tightened `min_role` applies to the app's endpoint now rather
-/// than at the next restart ([`AppMounts::refresh_triggers`]).
+/// Re-project every mounted app that exposes a trigger, after a **restore** —
+/// the one caller left, now that an ordinary trigger change re-projects through
+/// the dispatcher's [`TriggerObserver`](sc_action::TriggerObserver) instead
+/// ([`AppMounts::refresh_triggers`]).
 ///
 /// **Reported, not returned**, which is the one place this differs from the
 /// table-settings handlers. An app can genuinely stop projecting: deleting a

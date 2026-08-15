@@ -260,18 +260,19 @@ your application (**Applications → Todo → Edit**, tick it, **Build**) answer
 that sentence twice before you point a triggered agent at a table with an ownership formula: what
 protects a triggered run is the trigger's own `min_role`, not the caller's.
 
-## Step 7 — An agent that builds the schema
+## Step 7 — An agent that builds the app
 
-Every agent so far worked *on* tables you had already made. `manage_table_admin` makes them.
+Every agent so far worked *on* tables you had already made, and ran triggers somebody else set
+up. `admin_copilot` makes both.
 
-**Agents → New agent**, call it `architect`, and give it one trait — `manage_table_admin` — with
+**Agents → New agent**, call it `architect`, and give it one trait — `admin_copilot` — with
 its first two checkboxes on and its last two off, which is how it arrives:
 
 | Checkbox | Leave it |
 |---|---|
-| May create tables and fields | **on** |
-| May change existing tables and fields | **on** |
-| May drop tables and fields | off |
+| May create tables, fields and triggers | **on** |
+| May change existing tables, fields and triggers | **on** |
+| May drop tables and fields, and delete triggers | off |
 | May change access rules | off |
 
 Notice what the form does *not* ask for: a table. It is the only trait that names none, because
@@ -292,7 +293,7 @@ Now ask it to drop one:
 > Drop the time_entries table.
 
 It refuses, because `allow_drop` is off, and it tells you which checkbox would allow it. Tick
-**May drop tables and fields** on the trait, ask again, and it goes. Ask it to drop `clients`
+**May drop tables and fields, and delete triggers** on the trait, ask again, and it goes. Ask it to drop `clients`
 while `matters` still points at it and it refuses again — this time naming `matters.client` as
 the thing to remove first, because a foreign-key error out of the database is not something
 either of you can act on.
@@ -306,7 +307,42 @@ row-level security on and emits the policies. Two different users now read diffe
 same table — the same §7.3 mechanism [tutorial-ownership.md](tutorial-ownership.md) covers,
 reached by asking for it.
 
-## Step 8 — An agent that asks another agent
+## Step 8 — The same agent, writing a trigger
+
+`architect` has four more tools, over the triggers of
+[tutorial-triggers.md](tutorial-triggers.md). Ask it for one in the same breath as the schema:
+
+> When a matter's status becomes closed, email the client to say so.
+
+Watch what it does, because the shape is the point:
+
+1. `describe_triggers` — what is already there, and **which actions exist**, one line each.
+2. `describe_action` for `send_email`, naming `matters` as the table. That second argument
+   matters: an action's settings can depend on the table it fires on, and this is where the
+   "attach the file in this row" checkboxes would come from.
+3. `save_trigger`, with the event, the table, an `only_if` (`status === 'closed' && old.status
+   !== 'closed'` — the condition that makes it fire on the *transition* rather than on every
+   update of a closed matter), and the action's settings as `configuration`.
+
+Step 2 is the interesting one. There is no tool called `configure_send_email`, and there could
+not be: actions are an open set and each declares its own settings, so the model **asks for the
+settings it needs, when it needs them**, instead of every conversation carrying every action's
+form. If it skips the asking and guesses, the save is refused — and the refusal hands it the
+settings it should have used, so it usually gets there in the next turn anyway.
+
+Two things to try:
+
+- **Ask it to change one field of an existing trigger.** "Send that email to the fee earner too."
+  It sends only what changed; everything you did not mention stays as it was.
+- **Ask it to make the trigger runnable by staff.** It refuses: who may run a trigger is an
+  *access rule*, so it needs the same **May change access rules** checkbox a role floor does.
+  Without it, a trigger the agent creates is admin-only — which is the safe default and the same
+  one the trigger form has.
+
+Deleting is behind the drop grant, and it will tell you so — and will usually suggest switching
+the trigger off instead, which keeps its configuration.
+
+## Step 9 — An agent that asks another agent
 
 The `librarian` from Step 2 reads one table. Suppose you now want an agent that talks to people
 about the whole library *and* can go and dig through the code when somebody asks why a page looks
@@ -364,7 +400,7 @@ And the rule that has held all the way down this page still holds here: `librari
 | `run_trigger` | one trigger | runs it, with a payload it supplies |
 | `coding` | a store, a sub-directory, two grants and three bounds | browses, reads and greps the code; writes and edits it under **May create and change files**; runs one `package.json` script under **May run the project's scripts** |
 | `build_application` | an application's subdomain | builds it, and gets the diagnostics |
-| `manage_table_admin` | four grants, and **no table** | describes and edits the schema itself |
+| `admin_copilot` | four grants, and **no table** | describes and edits the schema itself, and the triggers over it |
 | `subagent` | one agent, when to use it, two bounds | hands it one task and reads back what it concluded |
 
 Each is a grant. Adding one is a decision you can read off the agent's page later.
@@ -375,6 +411,10 @@ Each is a grant. Adding one is a decision you can read off the agent's page late
   existing provider's form means "keep what is stored". Typing those characters into a *new*
   provider stores nothing, and Test connection then fails with the vendor's authentication error
   — which is the right failure, but only if you know what you are looking at.
+- **Saving a trigger under a name that already exists *edits that trigger*.** The name is the
+  identity — it is what an API path and a Run button reference — so there is no separate "create"
+  and "update". An agent that may create but not change existing triggers is refused rather than
+  overwriting one, which is the reason those are two checkboxes.
 - **A trait is bound to a name, so renaming its table breaks it — deliberately.** Rename `tasks`
   and the agent goes red in the list with ``no table named `tasks` ``, rather than quietly losing
   the tool and answering from memory. Fix it by editing the trait. The same is true of a deleted
@@ -398,14 +438,16 @@ Each is a grant. Adding one is a decision you can read off the agent's page late
 - **A triggered run cannot run a trigger.** Give an agent `run_trigger` and start it from
   `run_agent`, and that one tool answers with "this needs the trigger dispatcher, and none is
   available in this context" — which the model reports rather than dies on. Chat is where an agent runs triggers.
-- **`manage_table_admin`'s access-rules grant is the one to think hardest about.** The other
+- **`admin_copilot`'s access-rules grant is the one to think hardest about.** The other
   three change *your* schema; that one changes what **everyone else** on the deployment can
-  reach, and unlike a dropped table it looks from the outside like nothing happened. It is off by
-  default, it is a separate checkbox from dropping on purpose, and both of the trait's tools
-  refuse any conversation whose user is not an admin — so an agent you expose to a Member at
+  reach — a table's role floors, and who may run a trigger through the API — and unlike a dropped
+  table it looks from the outside like nothing happened. It is off by default, it is a separate
+  checkbox from dropping on purpose, and every one of the trait's tools
+  refuses any conversation whose user is not an admin — so an agent you expose to a Member at
   role 80 will not hand them the table editor even if you tick every box.
-- **`alter_table` leaves what you do not name.** Ask for `min_role_read` alone and the ownership
-  formula and the RLS flag stay exactly as they were. This is deliberately *unlike* the admin
+- **`alter_table` and `save_trigger` leave what you do not name.** Ask for `min_role_read` alone
+  and the ownership formula and the RLS flag stay exactly as they were; ask for a trigger's new
+  subject line and its event, table and condition are untouched. This is deliberately *unlike* the admin
   UI's own Save button, which sends the whole settings card because it is showing you the whole
   settings card. If you want a formula cleared, say so.
 - **A refused batch applies nothing.** Twelve operations, the fifth invalid, and none of the

@@ -404,6 +404,18 @@ impl SchemaObserver for AppMounts {
     }
 }
 
+/// The same arrangement for the **trigger** set, and for the same reason one
+/// sentence further on: an agent carrying `admin_copilot` (§11.3) can now save
+/// and delete triggers, so the re-projection cannot live in the admin handler
+/// that used to be the only writer. `sc-action` — where every writer's reload
+/// lands — cannot name this crate, so it carries the seam and this is what the
+/// server installs into it at boot.
+impl sc_action::TriggerObserver for AppMounts {
+    fn triggers_changed(&self, _catalog: &Catalog) -> Result<()> {
+        self.refresh_triggers()
+    }
+}
+
 /// Build an application from its stored configuration and mount it live on its
 /// subdomain, with **no process restart** (design §13.2).
 ///

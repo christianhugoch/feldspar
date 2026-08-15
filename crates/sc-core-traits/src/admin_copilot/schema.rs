@@ -1,46 +1,11 @@
-//! `manage_table_admin` — the agent that builds the schema (§11.3, TODO Phase 7).
+//! The schema half of [`admin_copilot`](super): `describe_schema` and
+//! `edit_schema`.
 //!
-//! The first **app-building** trait, and a deliberate revision of the boundary
-//! the earlier traits drew. Everything before it reaches *rows*; this one reaches
-//! the **catalog**: asked to "create the database schema for a law firm's ERP
-//! system" it creates the connected tables and their fields in one act, edits
-//! what is already there — including, under its own grant, the access rules of
-//! §7.3 — drops what it is granted to drop, and answers questions about the
-//! schema without ever seeing a row.
-//!
-//! Three things make it unlike every other built-in, each stated here because
-//! each is a rule broken on purpose:
-//!
-//! - **It names no table in its configuration.** Every other trait does, because
-//!   "which tables may this agent see?" must be answerable off the agent's
-//!   definition. This one *cannot*: the tables it makes do not exist when it is
-//!   configured. So it is scoped by **what it may do** rather than by what it may
-//!   reach — four checkboxes ([`CFG_ALLOW_CREATE`] and its siblings) — and that
-//!   difference is the phase's most load-bearing deviation.
-//! - **Its grants are configuration rather than separate traits.** `insert_row`,
-//!   `update_rows` and `delete_rows` are three traits over one table; these four
-//!   are booleans on one trait, because the operations share a **batch**:
-//!   creating `matters` with a key to an existing `clients` is a create *and* an
-//!   edit, and a batch that half-applied for want of a grant is the state the
-//!   transaction exists to avoid. A batch containing an ungranted operation is
-//!   refused **whole**, naming the operation and the checkbox that would allow it.
-//! - **The caller must be an admin.** Every other trait leans on §7.3 to decide
-//!   what a caller may see; a schema has no ownership formula to fall back on,
-//!   and the admin API guards every catalog endpoint with `admin()`. So both
-//!   tools refuse a run whose [`RunCaller`] is not role 1 — otherwise an agent
-//!   exposed to a role-80 user through a chat view would hand them the table
-//!   editor.
-//!
-//! ## Why it is two tools, and why one of them takes a list
-//!
-//! [`describe_schema`](TOOL_DESCRIBE) reads; [`edit_schema`](TOOL_EDIT) writes,
-//! taking an **ordered list of operations** rather than one operation per call. A
-//! schema is a set of *connected* tables, so a per-operation tool turns a
-//! twelve-table ERP into forty round trips, each re-sending the whole transcript
-//! and each able to fail halfway with no way back. One list is one turn, one
-//! transaction and one refusal — all of which is
-//! [`sc_api::schema_edit`](sc_api::schema_edit)'s, not this file's. What is here
-//! is the wire shape, the grants and the admin check.
+//! What is here is the **wire shape** — the tools' descriptions, their JSON
+//! schemas, and the parse from one wire item to an
+//! [`Operation`](sc_api::schema_edit::Operation). The transaction, the grant
+//! refusals and the DDL are [`sc_api::schema_edit`]'s, so the admin API's table
+//! editor and an agent's `edit_schema` cannot disagree about what a change means.
 //!
 //! Three things the tool's schema decides rather than leaving to the model, each
 //! because a guess costs a turn or a wrong column: the **type names are an enum
@@ -50,161 +15,20 @@
 //! key its fields declare** — no `id` is invented (GOALS), so a model that wants
 //! one says `primary_key: true` on a field, exactly as an admin ticks the box.
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
 use sc_api::schema_edit::{
     self, ApplyOptions, FieldSettings, FieldSpec, Grants, Operation, TableSettings,
 };
 use sc_catalog::{ATTR_OWNERSHIP_FORMULA, Catalog, DataFieldKind, FieldId, Table, TableId};
 use sc_error::{Error, Result};
-use sc_llm::ToolSpec;
-use sc_types::{Attrs, BasicType, FormField};
+use sc_types::Attrs;
 use serde_json::{Map, Value as Json, json};
 
-/// May create tables and fields.
-pub const CFG_ALLOW_CREATE: &str = schema_edit::GRANT_CREATE;
-/// May change what is already there.
-pub const CFG_ALLOW_EDIT: &str = schema_edit::GRANT_EDIT;
-/// May drop tables and fields. Off by default.
-pub const CFG_ALLOW_DROP: &str = schema_edit::GRANT_DROP;
-/// May write the access rules of §7.3. Off by default, and above `allow_drop` —
-/// a drop announces itself and a widened role floor does not.
-pub const CFG_ALLOW_ACCESS: &str = schema_edit::GRANT_ACCESS_CHANGES;
-
-/// The reading tool's name. Fixed rather than derived, because this trait is
-/// configured against no table to derive one from — which is also what makes a
-/// second `manage_table_admin` on one agent refusable on save (§11.2): the two
-/// instances offer the same two names, and the collision check refuses that where
-/// it is fixable rather than leaving the model to pick between duplicates.
-pub const TOOL_DESCRIBE: &str = "describe_schema";
-/// The writing tool's name.
-pub const TOOL_EDIT: &str = "edit_schema";
-
-/// Build and inspect the database schema.
-pub struct ManageTableAdmin;
-
-/// The tools this trait offers — both of them, under fixed names.
-pub fn tool_names() -> [&'static str; 2] {
-    [TOOL_DESCRIBE, TOOL_EDIT]
-}
-
-#[async_trait::async_trait]
-impl AgentTrait for ManageTableAdmin {
-    fn name(&self) -> &str {
-        "manage_table_admin"
-    }
-
-    fn description(&self) -> &str {
-        "Read and change the database schema: create, alter and drop tables and fields"
-    }
-
-    fn config_spec(&self) -> Vec<FormField> {
-        vec![
-            FormField::new(CFG_ALLOW_CREATE, BasicType::Bool)
-                .label("May create tables and fields")
-                .default_value(true),
-            FormField::new(CFG_ALLOW_EDIT, BasicType::Bool)
-                .label("May change existing tables and fields")
-                .default_value(true),
-            FormField::new(CFG_ALLOW_DROP, BasicType::Bool)
-                .label("May drop tables and fields")
-                .default_value(false),
-            FormField::new(CFG_ALLOW_ACCESS, BasicType::Bool)
-                .label("May change access rules (roles, ownership formula, row-level security)")
-                .default_value(false),
-        ]
-    }
-
-    /// There is no table to resolve, so there is little here the spec cannot
-    /// already say — which is itself the deviation §11.3 records. What is worth
-    /// stating is that a configuration granting nothing is *not* an error: the
-    /// grants bound `edit_schema` only, and an agent with none of them is a
-    /// read-only schema describer, which is a thing an admin may deliberately
-    /// want.
-    async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
-        for key in [
-            CFG_ALLOW_CREATE,
-            CFG_ALLOW_EDIT,
-            CFG_ALLOW_DROP,
-            CFG_ALLOW_ACCESS,
-        ] {
-            match check.config.get(key) {
-                None | Some(Json::Null) | Some(Json::Bool(_)) => {}
-                Some(other) => {
-                    return Err(Error::invalid(format!(
-                        "`{key}` should be true or false, got {other}"
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
-        let grants = grants(config);
-        let rls = catalog.primary().capabilities().row_level_security;
-        vec![
-            ToolSpec::new(
-                TOOL_DESCRIBE,
-                describe_description(catalog),
-                describe_parameters(),
-            ),
-            ToolSpec::new(TOOL_EDIT, edit_description(&grants, rls), edit_parameters()),
-        ]
-    }
-
-    async fn call(
-        &self,
-        config: &Attrs,
-        tool: &str,
-        args: &Json,
-        ctx: &mut TraitContext<'_>,
-    ) -> Result<Json> {
-        require_admin(ctx, tool)?;
-        match tool {
-            TOOL_DESCRIBE => describe(ctx.catalog, args),
-            TOOL_EDIT => edit(ctx.catalog, config, args).await,
-            other => Err(Error::invalid(format!(
-                "this trait offers `{TOOL_DESCRIBE}` and `{TOOL_EDIT}`, not `{other}`"
-            ))),
-        }
-    }
-}
-
-/// The four grants as configured; an absent checkbox reads as its default.
-fn grants(config: &Attrs) -> Grants {
-    let flag =
-        |key: &str, default: bool| config.get(key).and_then(Json::as_bool).unwrap_or(default);
-    Grants {
-        create: flag(CFG_ALLOW_CREATE, true),
-        edit: flag(CFG_ALLOW_EDIT, true),
-        drop: flag(CFG_ALLOW_DROP, false),
-        access_changes: flag(CFG_ALLOW_ACCESS, false),
-    }
-}
-
-/// Refuse a run whose caller is not an admin, in words the model can relay.
-///
-/// The check is on the **run's** caller, not on the agent's `min_role`: an agent
-/// may be reachable at role 80 for everything else it does and still must not
-/// hand that caller the schema.
-fn require_admin(ctx: &TraitContext<'_>, tool: &str) -> Result<()> {
-    if ctx.caller.role == 1 {
-        return Ok(());
-    }
-    Err(Error::invalid(format!(
-        "`{tool}` is only available to an administrator, and this conversation is \
-         with a role-{} user. Tell them the schema can only be seen or changed by \
-         an admin.",
-        ctx.caller.role
-    )))
-}
-
-// --- describe_schema ----------------------------------------------------------
+use super::{TOOL_DESCRIBE, grants, optional_bool, optional_role, optional_string};
 
 /// The optional filter: describe one table instead of all of them.
 const ARG_TABLE: &str = "table";
 
-fn describe_description(catalog: &Catalog) -> String {
+pub(super) fn describe_description(catalog: &Catalog) -> String {
     let names: Vec<String> = user_tables(catalog).into_iter().map(|t| t.name).collect();
     let listing = match names.is_empty() {
         true => "There are no tables yet.".to_owned(),
@@ -222,7 +46,7 @@ fn describe_description(catalog: &Catalog) -> String {
     )
 }
 
-fn describe_parameters() -> Json {
+pub(super) fn describe_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -237,7 +61,7 @@ fn describe_parameters() -> Json {
     })
 }
 
-fn describe(catalog: &Catalog, args: &Json) -> Result<Json> {
+pub(super) fn describe(catalog: &Catalog, args: &Json) -> Result<Json> {
     let args = crate::table::arguments(args, &[ARG_TABLE])?;
     let only = args
         .get(ARG_TABLE)
@@ -395,7 +219,7 @@ const ARG_OPERATIONS: &str = "operations";
 /// Validate the whole batch and apply none of it.
 const ARG_DRY_RUN: &str = "dry_run";
 
-fn edit_description(grants: &Grants, rls_available: bool) -> String {
+pub(super) fn edit_description(grants: &Grants, rls_available: bool) -> String {
     let mut allowed: Vec<&str> = Vec::new();
     if grants.create {
         allowed.push("create_table");
@@ -450,7 +274,7 @@ fn edit_description(grants: &Grants, rls_available: bool) -> String {
     )
 }
 
-fn edit_parameters() -> Json {
+pub(super) fn edit_parameters() -> Json {
     let types = schema_edit::field_type_names();
     // A flat object with per-`op` optional fields, documented in the
     // descriptions, rather than a `oneOf` discriminated union: providers vary in
@@ -622,7 +446,7 @@ fn edit_parameters() -> Json {
     })
 }
 
-async fn edit(catalog: &Catalog, config: &Attrs, args: &Json) -> Result<Json> {
+pub(super) async fn edit(catalog: &Catalog, config: &Attrs, args: &Json) -> Result<Json> {
     let args = crate::table::arguments(args, &[ARG_OPERATIONS, ARG_DRY_RUN])?;
     let items = match args.get(ARG_OPERATIONS) {
         Some(Json::Array(items)) if !items.is_empty() => items.clone(),
@@ -828,73 +652,9 @@ fn field_kind(obj: &Map<String, Json>) -> Result<Option<DataFieldKind>> {
     }
 }
 
-fn optional_string(obj: &Map<String, Json>, key: &str) -> Result<Option<String>> {
-    match obj.get(key) {
-        None | Some(Json::Null) => Ok(None),
-        Some(Json::String(s)) => Ok(Some(s.clone())),
-        Some(other) => Err(Error::invalid(format!(
-            "`{key}` should be a string, got {other}"
-        ))),
-    }
-}
-
-fn optional_bool(obj: &Map<String, Json>, key: &str) -> Result<Option<bool>> {
-    match obj.get(key) {
-        None | Some(Json::Null) => Ok(None),
-        Some(Json::Bool(b)) => Ok(Some(*b)),
-        Some(other) => Err(Error::invalid(format!(
-            "`{key}` should be true or false, got {other}"
-        ))),
-    }
-}
-
-fn optional_role(obj: &Map<String, Json>, key: &str) -> Result<Option<u8>> {
-    match obj.get(key) {
-        None | Some(Json::Null) => Ok(None),
-        Some(Json::Number(n)) => n
-            .as_i64()
-            .and_then(|n| u8::try_from(n).ok())
-            .filter(|r| (1..=100).contains(r))
-            .map(Some)
-            .ok_or_else(|| {
-                Error::invalid(format!(
-                    "`{key}` should be a role between 1 and 100, got {n}"
-                ))
-            }),
-        Some(other) => Err(Error::invalid(format!(
-            "`{key}` should be a number between 1 and 100, got {other}"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn config(pairs: &[(&str, bool)]) -> Attrs {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), json!(v)))
-            .collect()
-    }
-
-    #[test]
-    fn dropping_and_access_changes_are_off_unless_asked_for() {
-        // An empty configuration is the safe one: it can build, it cannot
-        // destroy, and it cannot widen anybody's access.
-        let g = grants(&Attrs::new());
-        assert!(g.create && g.edit);
-        assert!(!g.drop && !g.access_changes);
-
-        let g = grants(&config(&[(CFG_ALLOW_DROP, true), (CFG_ALLOW_ACCESS, true)]));
-        assert!(g.drop && g.access_changes);
-
-        let g = grants(&config(&[
-            (CFG_ALLOW_CREATE, false),
-            (CFG_ALLOW_EDIT, false),
-        ]));
-        assert!(!g.create && !g.edit);
-    }
 
     #[test]
     fn a_reference_needs_no_type_and_no_target_column() {
