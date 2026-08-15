@@ -306,6 +306,53 @@ row-level security on and emits the policies. Two different users now read diffe
 same table — the same §7.3 mechanism [tutorial-ownership.md](tutorial-ownership.md) covers,
 reached by asking for it.
 
+## Step 8 — An agent that asks another agent
+
+The `librarian` from Step 2 reads one table. Suppose you now want an agent that talks to people
+about the whole library *and* can go and dig through the code when somebody asks why a page looks
+wrong. You could give one agent both sets of traits. Don't: you would be handing the agent that
+answers the public a way to edit your source, and every file it reads would sit in the
+conversation for the rest of the afternoon.
+
+Give it a **sub-agent** instead. Keep `librarian` as it is, and make a second agent —
+`front_desk` — whose only trait is `subagent`:
+
+| Field | Value |
+|---|---|
+| Agent | `librarian` |
+| When to use it | *a question needs the library's own data* |
+| Step budget per delegation | leave blank — `librarian`'s own |
+| Maximum delegation depth | 3 |
+
+`front_desk` now has exactly one tool, `delegate_to_librarian`. Open its **Chat** and ask a
+question about the books. It writes a briefing — a task, the context, and what it wants back —
+`librarian` runs a conversation of its own to answer it, and `front_desk` replies with what came
+back. Two things are worth looking at afterwards.
+
+**Open the run history.** There are *two* runs: yours, and `librarian`'s underneath it, described
+as "delegated by `front_desk`". The whole of `librarian`'s working — the query it ran, the rows it
+got — is in that second transcript, and none of it is in yours. That is what delegation buys.
+
+**Notice what `librarian` was not told.** It cannot see your conversation; the briefing is the
+only thing that crossed. So the "When to use it" sentence matters more than it looks: it is what
+`front_desk` reads when deciding whether to delegate at all.
+
+Three refusals are worth provoking once, so you recognise them later:
+
+- Give `librarian` a `subagent` trait pointing back at `front_desk`, and ask for something that
+  makes it delegate. It comes back with ``` `front_desk` → `librarian` → `front_desk` ``` — a
+  loop, named, rather than a run that goes round for ever.
+- Set **Maximum delegation depth** to 1 on a three-agent chain and the second hop is refused with
+  the chain in the message. Depth is about cost, not correctness: every level multiplies the
+  tokens of the one above it.
+- Set `librarian`'s **Max steps per run** to 2 and ask something that needs more. `front_desk`
+  is told the sub-agent used its whole budget and did not reach a conclusion — not handed a blank
+  answer it would otherwise report to you as "nothing found".
+
+And the rule that has held all the way down this page still holds here: `librarian` runs as
+**you**, so it reads the rows you may read, and if its **Minimum role** is stricter than yours,
+`front_desk` is refused by name. Delegation is not a way round anything.
+
 ## The traits you have
 
 | Trait | Configured with | What the agent gets |
@@ -318,6 +365,7 @@ reached by asking for it.
 | `coding` | a store, a sub-directory, two grants and three bounds | browses, reads and greps the code; writes and edits it under **May create and change files**; runs one `package.json` script under **May run the project's scripts** |
 | `build_application` | an application's subdomain | builds it, and gets the diagnostics |
 | `manage_table_admin` | four grants, and **no table** | describes and edits the schema itself |
+| `subagent` | one agent, when to use it, two bounds | hands it one task and reads back what it concluded |
 
 Each is a grant. Adding one is a decision you can read off the agent's page later.
 

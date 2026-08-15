@@ -332,3 +332,35 @@ to send through without it. The action-facing half — how a `send_email` action
   a JavaScript expression, and `array.map(…).join("")` is how a list is rendered. A block syntax
   is a second language inside the first.
 - Everything still listed as out of scope in the nine earlier lists.
+
+---
+
+## Out of band — `subagent` (agents milestone, §11.3)
+
+Not part of this milestone's list; asked for and built alongside it, and recorded here so the
+work is findable. It closes the "subagent handoff" line item carried out of
+[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md).
+
+- [x] **`sc-agent` grows a `Delegator` seam** (`delegate.rs`): `DelegateRequest` / `Delegated`,
+      the run attributes `parent_run` and `delegated_by`, and `DEFAULT_MAX_DEPTH`. `Runner`
+      implements it, `Runner::with_subagents(connector)` enables it, and `TraitContext` carries
+      it as a third capability beside the evaluator and the dispatcher — with
+      `require_delegate` for a context that has none.
+- [x] **The child inherits the caller and nothing else**: same `RunCaller` (so §7.3 applies one
+      level down and delegation cannot escalate), the sub-agent's own `min_role` on top, and a
+      fresh context whose only content is the briefing.
+- [x] **`subagent` in `sc-core-traits`**: one tool per configured agent
+      (`delegate_to_<agent>`), configured with the agent, a "when to use it" sentence for the
+      *parent* model's tool description, a per-delegation step budget and a depth bound.
+      Validated on save and on load — the agent exists, it is not this agent, the bounds mean
+      something — and a missing agent lists the alternatives.
+- [x] **The briefing is structured** (`task` required, `context`, `output`), assembled under
+      headings with a framing line saying that only the final message travels back.
+- [x] **The bounds**: a cycle refused by name with its path, a chain refused by number, and a
+      sub-agent that reported nothing refused as a tool error rather than handed back as an
+      empty answer.
+- [x] **Wired in both places a run is created in production** — the chat socket and the
+      `run_agent` action.
+- [x] Tests: ten against a real database and scripted providers, plus the unit tests for the
+      briefing, the derived tool name and the bounds. §11.3 records what was built and the
+      repo-hygiene test holds it there; CHANGELOG entry written.

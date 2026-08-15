@@ -161,6 +161,10 @@ impl Env {
             run: RunId::new(),
             evaluator: self.evaluator.as_ref(),
             triggers: self.dispatcher.as_ref(),
+            // A tool called directly, outside a run, has no runner to delegate
+            // through — which is what a `subagent` trait tested this way gets
+            // told, and why its own test drives a whole run instead.
+            delegate: None,
         };
         trait_.call(config, tool, &args, &mut ctx).await
     }
@@ -231,6 +235,10 @@ impl Env {
             run: RunId::new(),
             evaluator: self.evaluator.as_ref(),
             triggers: self.dispatcher.as_ref(),
+            // A tool called directly, outside a run, has no runner to delegate
+            // through — which is what a `subagent` trait tested this way gets
+            // told, and why its own test drives a whole run instead.
+            delegate: None,
         };
         trait_.call(config, &tool, &args, &mut ctx).await
     }

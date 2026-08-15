@@ -34,6 +34,7 @@ use sc_llm::ToolSpec;
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
 
+use crate::delegate::Delegator;
 use crate::run::RunId;
 
 /// One elementary agent capability: configurable, contributing tools.
@@ -221,6 +222,17 @@ pub struct TraitContext<'a> {
     /// [`require_triggers`](TraitContext::require_triggers)' configuration error
     /// rather than a second way to fire an event.
     pub triggers: Option<&'a Arc<TriggerDispatcher>>,
+    /// How this run delegates to another agent, where it can.
+    ///
+    /// The machinery already running this agent (`Runner`), offered back as a
+    /// capability — because a trait that names a sub-agent has no registry, no
+    /// provider connector and no idea how deep the chain already is, and every
+    /// one of those is needed to start a run. Carried rather than reached for,
+    /// like the two above it and for the same reason: a deployment that never
+    /// assembled a provider connector cannot delegate, and
+    /// [`require_delegate`](TraitContext::require_delegate)'s configuration error
+    /// is the honest answer rather than a second, weaker way to run an agent.
+    pub delegate: Option<&'a dyn Delegator>,
 }
 
 impl TraitContext<'_> {
@@ -245,6 +257,18 @@ impl TraitContext<'_> {
             Error::config(format!(
                 "agent `{}`: this needs the trigger dispatcher, \
                  and none is available in this context",
+                self.agent
+            ))
+        })
+    }
+
+    /// How to run another agent, or the configuration error that says this
+    /// context cannot.
+    pub fn require_delegate(&self) -> Result<&dyn Delegator> {
+        self.delegate.ok_or_else(|| {
+            Error::config(format!(
+                "agent `{}`: this needs to run another agent, \
+                 and this context cannot delegate",
                 self.agent
             ))
         })

@@ -1753,6 +1753,64 @@ and one refusal.
 - **`alter_table` is read-modify-write; omitted means leave.** A deliberate divergence from
   `updateTable`'s whole-object contract, recorded in §13.1 beside the contract it diverges from.
 
+**Other agents.** `subagent` exposes **one configured agent** as one tool, so an agent is a
+thing an agent can be given, exactly as a table and a trigger are. The parent hands over one
+bounded task, the sub-agent runs a whole loop of its own — its own system prompt, its own tools,
+its own step budget, its own row in `_sc_runs` — and hands back what it concluded. Two things
+make it worth having, and they are different things: **context**, because the sub-agent's twenty
+tool calls happen in a window that is not the parent's and the parent's conversation grows by one
+paragraph rather than by a transcript; and **scope**, because "the agent that may edit the source"
+and "the agent that may answer customers" want different tool sets and different role floors, and
+composing them by delegation keeps each definition readable. It is the trait `sc-agent`'s
+`Delegator` seam exists for, and the first one configured against something that is not data,
+code or the schema.
+
+**Delegation, not handoff.** The other shape a multi-agent system can take — transfer the
+conversation, let the specialist own every message from then on — is deliberately not this. A run
+has one subject and one authority recorded on it, and a transcript that changed agent halfway
+would be two agents' work under one heading; a handoff would also have to swap the tool set
+mid-conversation, which is the one thing `Turn` refuses. Here the parent stays answerable for the
+answer, and the child is its own run.
+
+**What was built, where it deviates** (`subagent`):
+
+- **`TraitContext` carries a `Delegator`**, put there by `Runner::with_subagents(connector)` —
+  the third capability offered the way the evaluator and the dispatcher are, and for the same
+  reason. A trait that names a sub-agent cannot start a run itself: it has no trait registry, no
+  provider connector and no idea how deep the chain already is, and all three live on the runner
+  that is already driving it. A context without one answers `require_delegate`'s configuration
+  error rather than finding a second way to run an agent. The **connector** rather than a
+  connected provider, because the sub-agent names a provider and a model of its own — delegating
+  to a cheaper model is much of the point.
+- **The child inherits the caller and nothing else.** It runs as the parent run's own
+  `RunCaller`, so §7.3's ownership and RLS answer with the chatting person's rows one level down
+  and delegation cannot become an escalation; and the sub-agent's own `min_role` gates it on top
+  of that, which is `run_trigger`'s rule applied to an agent. What it does **not** inherit is the
+  conversation: the briefing is the entire channel, because a child given its parent's history
+  would spend exactly the tokens delegating it was meant to save.
+- **The briefing is a structured argument, not a sentence.** The tool asks for a `task`
+  (required), the `context` the sub-agent cannot see for itself, and the `output` wanted, and
+  assembles them under headings with a framing line naming the parent and saying that only the
+  final message travels back. Both halves are answers to observed failure modes: a model handed
+  one free-text field writes "look into that", and a sub-agent that does not know its last message
+  is the deliverable does the work and reports none of it.
+- **A cycle is refused by name, a chain by number.** The runner carries the delegation chain, so
+  `a → b → a` comes back with the path in it — the specific diagnosis, since a depth limit would
+  eventually stop it too and send the admin to a number when the fault is a loop. Depth is
+  configured per instance (default 3, ceiling 5) and bounds cost rather than termination. The one
+  cycle visible without running anything — an agent naming *itself* — is refused on save.
+- **Nothing came back means the delegation failed.** A sub-agent that ran out of steps, or that
+  called tools all turn and then said nothing, is a tool **error** naming its run and telling the
+  parent what to do differently, never a result with an empty `answer`. That failure is quiet by
+  construction: a parent reading `answer: ""` reports to the person that there was nothing to
+  find. What did come back comes back **verbatim** — a paraphrase is a second chance to lose the
+  finding — beside the child's run id, which is how the transcript is read rather than by shipping
+  it into the parent's context.
+- **The child does not stream to the parent's observer.** Its deltas are a different
+  conversation, and interleaving them would render one agent's thinking as another's (§11.4).
+  What the chat panel shows is the tool call and its result; the sub-agent's run is
+  `getRun`-able, linked by the `parent_run` and `delegated_by` attributes on its row.
+
 ### 11.4 Chat: runs, transport, UI
 
 **A chat session is a run.** `_sc_runs` (§9) is created by this milestone with the shape the

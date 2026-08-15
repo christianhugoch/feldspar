@@ -24,6 +24,7 @@ use sc_llm::{AssistantMessage, LlmDelta, LlmProvider, LlmRequest, ToolCall, Tool
 
 use crate::agent::Agent;
 use crate::agent_trait::{RunCaller, TraitContext, Turn};
+use crate::delegate::{ATTR_DELEGATED_BY, ATTR_PARENT_RUN, DelegateRequest, Delegated, Delegator};
 use crate::machine::{AgentLoop, Conclusion, Step, ToolOutcome};
 use crate::registry::AgentRegistry;
 use crate::run::Run;
@@ -70,6 +71,16 @@ pub struct Runner<'a> {
     observer: Option<&'a dyn RunObserver>,
     evaluator: Option<&'a Arc<dyn JsEvaluator>>,
     triggers: Option<&'a Arc<TriggerDispatcher>>,
+    subagents: Option<&'a Arc<dyn ProviderConnector>>,
+    /// The agents above this one in the delegation chain, root first — empty for
+    /// a run a person or a trigger started.
+    ///
+    /// Carried on the runner rather than on the run because it is a property of
+    /// *this* execution, not of the transcript: a delegated run reloaded on its
+    /// own is a run in its own right, and what its parent was is on the row
+    /// ([`ATTR_DELEGATED_BY`]) for a reader, not for a bound to be re-derived
+    /// from.
+    chain: Vec<String>,
 }
 
 impl<'a> Runner<'a> {
@@ -94,6 +105,8 @@ impl<'a> Runner<'a> {
             observer: None,
             evaluator: None,
             triggers: None,
+            subagents: None,
+            chain: Vec::new(),
         }
     }
 
@@ -124,6 +137,34 @@ impl<'a> Runner<'a> {
     /// another way to fire an event.
     pub fn with_triggers(mut self, triggers: &'a Arc<TriggerDispatcher>) -> Runner<'a> {
         self.triggers = Some(triggers);
+        self
+    }
+
+    /// Let this run **delegate to other agents**, connecting each sub-agent's
+    /// provider through `providers` (§11.3's `subagent`).
+    ///
+    /// Optional on the same terms as the evaluator and the dispatcher: an agent
+    /// with no `subagent` trait never needs it, and a tool that does need it and
+    /// has not got it says so
+    /// ([`TraitContext::require_delegate`](crate::TraitContext::require_delegate))
+    /// rather than running an agent some other way.
+    ///
+    /// The connector rather than a connected provider, because the sub-agent
+    /// names a provider and a model of its own: delegating to a cheap model is
+    /// most of the point of delegating.
+    pub fn with_subagents(mut self, providers: &'a Arc<dyn ProviderConnector>) -> Runner<'a> {
+        self.subagents = Some(providers);
+        self
+    }
+
+    /// Run as the bottom of `chain` — the agents that delegated their way here,
+    /// root first.
+    ///
+    /// Only [`Delegator::delegate`] has cause to call this: it is what makes the
+    /// depth bound and the cycle check possible one level down, and a caller who
+    /// set it by hand would be claiming a history that did not happen.
+    pub fn within(mut self, chain: Vec<String>) -> Runner<'a> {
+        self.chain = chain;
         self
     }
 
@@ -280,6 +321,11 @@ impl<'a> Runner<'a> {
                             run: run.id,
                             evaluator: self.evaluator,
                             triggers: self.triggers,
+                            // Offered only where this deployment assembled a way
+                            // to connect a sub-agent's provider, so a trait that
+                            // needs one gets `require_delegate`'s configuration
+                            // error rather than a runner that cannot finish.
+                            delegate: self.subagents.map(|_| self as &dyn Delegator),
                         };
                         match trait_
                             .call(&enabled.config, &tool_name, &call.arguments, &mut ctx)
@@ -334,6 +380,121 @@ impl<'a> Runner<'a> {
             names.push("(none)".to_owned());
         }
         names
+    }
+}
+
+/// A run delegates by starting another one — the sub-agent's own — under the
+/// same authority, bounded by depth and refused on a cycle (§11.3).
+#[async_trait::async_trait]
+impl Delegator for Runner<'_> {
+    async fn delegate(&self, request: DelegateRequest<'_>) -> Result<Delegated> {
+        let parent = self.agent.name.as_str();
+        let target = request.agent.trim();
+        let problem = |msg: String| Error::invalid(format!("agent `{parent}`: {msg}"));
+
+        // The chain as it *would* be: everyone above this run, then this agent.
+        // Both checks read it, and both read it the same way.
+        let mut chain = self.chain.clone();
+        chain.push(parent.to_owned());
+
+        // A cycle first, because it is the more specific diagnosis: `a → b → a`
+        // would also trip a depth bound eventually, and "you have exceeded three
+        // levels" sends the admin to a number when the fault is a loop they can
+        // see.
+        if let Some(at) = chain.iter().position(|name| name == target) {
+            return Err(problem(format!(
+                "delegating to `{target}` would loop: {} → `{target}`. \
+                 An agent cannot be asked to do work it is already doing.",
+                chain[at..]
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(" → ")
+            )));
+        }
+        let depth = u32::try_from(chain.len()).unwrap_or(u32::MAX);
+        if depth > request.max_depth {
+            return Err(problem(format!(
+                "delegating to `{target}` would be {depth} agents deep and this \
+                 delegation allows {}: {}. Do the work here, or ask for a \
+                 smaller task.",
+                request.max_depth,
+                chain
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(" → ")
+            )));
+        }
+
+        let providers = self.subagents.ok_or_else(|| {
+            Error::config(format!(
+                "agent `{parent}`: no way to connect a sub-agent's provider is \
+                 configured on this server"
+            ))
+        })?;
+
+        // The **live** set, so an agent whose provider vanished or whose trait
+        // was configured against a dropped table says that, in its own
+        // validation's words, rather than failing somewhere inside the child
+        // loop.
+        let agents = crate::validate::Agents::load(self.catalog, self.registry).await?;
+        let sub = agents.require(target).map_err(|e| problem(e.to_string()))?;
+
+        // The sub-agent's own floor, on top of the caller's authority — being
+        // allowed to chat with one agent does not thereby allow everything it
+        // can reach, which is the rule `run_trigger` applies to a trigger.
+        if !self.caller.meets_role(sub.min_role) {
+            return Err(Error::auth(format!(
+                "agent `{parent}`: you may not use `{target}`; \
+                 it needs role {} or better",
+                sub.min_role.unwrap_or(1)
+            )));
+        }
+
+        let provider = providers.connect(self.catalog, sub).await?;
+        let child = Runner {
+            catalog: self.catalog,
+            registry: self.registry,
+            agent: sub,
+            provider,
+            // The parent run's caller, unchanged: delegation must not be a way
+            // to reach a row the person chatting could not have been shown.
+            caller: self.caller.clone(),
+            // Deliberately not the parent's: the child's deltas are a different
+            // conversation, and interleaving them into the parent's stream would
+            // render one agent's thinking as another's (§11.4).
+            observer: None,
+            evaluator: self.evaluator,
+            triggers: self.triggers,
+            subagents: self.subagents,
+            chain: chain.clone(),
+        };
+
+        let mut state = AgentLoop::new(request.max_steps.unwrap_or_else(|| sub.max_steps()));
+        state.push_user(request.briefing)?;
+        let mut run = Run::new(&sub.name, &child.caller, &state)
+            .description(format!("delegated by `{parent}`"));
+        run.attributes
+            .insert(ATTR_DELEGATED_BY.to_owned(), parent.into());
+        // The link the chat panel reads a nested transcript through. A string,
+        // because a JSON number cannot hold a UUID.
+        run.attributes.insert(
+            ATTR_PARENT_RUN.to_owned(),
+            request.parent_run.to_string().into(),
+        );
+        save_run(self.catalog, &run).await?;
+
+        let conclusion = child
+            .drive(&mut run)
+            .await
+            .map_err(|e| problem(format!("`{target}` could not run: {e}")))?;
+        Ok(Delegated {
+            agent: sub.name.clone(),
+            run: run.id,
+            conclusion,
+            steps: run.agent_loop().map(|l| l.step()).unwrap_or_default(),
+        })
     }
 }
 

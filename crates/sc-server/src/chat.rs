@@ -316,7 +316,11 @@ async fn turn(
         provider,
         ctx.caller.clone(),
     )
-    .observing(&observer);
+    .observing(&observer)
+    // The same connector this turn's own provider came from, so an agent with a
+    // `subagent` trait can start the sub-agent's run — which needs the
+    // sub-agent's provider and model, not this one's (§11.3).
+    .with_subagents(ctx.services.providers());
     if let Some(evaluator) = &ctx.evaluator {
         runner = runner.with_evaluator(evaluator);
     }

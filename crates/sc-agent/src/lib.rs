@@ -22,6 +22,9 @@
 //!   `_sc_runs` after every step.
 //! - The **run** ([`run`], [`run_store`]): [`Run`] and `_sc_runs`, in the shape
 //!   §10.3's workflow engine will also use.
+//! - **Delegation** ([`delegate`]): [`Delegator`], the capability a run offers a
+//!   trait that names *another agent* — a child run, under the same authority,
+//!   with a context of its own and a bound on how deep the chain may go.
 //! - A **scripted provider** ([`testing`], behind the `testing` feature), because
 //!   no test in this tree may need an API key or spend a token.
 //!
@@ -37,6 +40,7 @@
 
 pub mod agent;
 pub mod agent_trait;
+pub mod delegate;
 pub mod driver;
 pub mod machine;
 pub mod registry;
@@ -54,6 +58,9 @@ pub use agent::{
     EnabledTrait,
 };
 pub use agent_trait::{AgentTrait, RunCaller, TraitCheck, TraitContext, Turn};
+pub use delegate::{
+    ATTR_DELEGATED_BY, ATTR_PARENT_RUN, DEFAULT_MAX_DEPTH, DelegateRequest, Delegated, Delegator,
+};
 pub use driver::{ProviderConnector, RunObserver, Runner, StoredProviders, connect};
 pub use machine::{AgentLoop, Conclusion, Step, ToolOutcome};
 pub use registry::AgentRegistry;

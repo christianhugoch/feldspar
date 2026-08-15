@@ -21,7 +21,7 @@
 //!
 //! ## The set
 //!
-//! Eight traits over four things an agent can be given. **Tables**:
+//! Nine traits over five things an agent can be given. **Tables**:
 //! [`QueryTable`] reads one, and [`InsertRow`], [`UpdateRows`] and
 //! [`DeleteRows`] are three separate opt-in grants over one — so a read-only
 //! agent is the default shape and each way of changing data is a deliberate act
@@ -37,7 +37,10 @@
 //! **the schema itself**: [`ManageTableAdmin`] describes and edits the catalog —
 //! the first *app-building* trait, and the first that does not name a table in
 //! its configuration, because the tables it makes do not exist when it is
-//! configured.
+//! configured. And **other agents**: [`Subagent`] hands one bounded task to one
+//! configured agent, which does it in a context of its own and reports back —
+//! the trait that makes an agent something an agent can be given, and the reason
+//! `sc-agent` grew a [`Delegator`](sc_agent::Delegator) seam.
 //!
 //! ## And one thing that is not a trait
 //!
@@ -94,6 +97,7 @@ mod manage_table_admin;
 mod query_table;
 mod run_agent;
 mod run_trigger;
+mod subagent;
 mod table;
 mod update_rows;
 mod write;
@@ -122,6 +126,13 @@ pub use manage_table_admin::{
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
 pub use run_agent::{CFG_AGENT, CFG_PROMPT, RunAgent};
 pub use run_trigger::{CFG_TRIGGER, RunTrigger};
+// `subagent`'s own agent-name key is spelled `agent` too, so [`CFG_AGENT`] above
+// is it: one string, exported once, rather than two constants a reader would have
+// to check are equal.
+pub use subagent::{
+    ARG_CONTEXT, ARG_OUTPUT, ARG_TASK, CFG_MAX_DEPTH, CFG_MAX_STEPS, CFG_WHEN_TO_USE,
+    MAX_CONFIGURABLE_DEPTH, Subagent,
+};
 pub use update_rows::{DEFAULT_MAX_WRITE_ROWS, UpdateRows};
 
 /// What each built-in trait calls the tool it derives from its configuration —
@@ -140,6 +151,7 @@ pub mod tool_names {
     pub use crate::manage_table_admin::tool_names as manage_table_admin;
     pub use crate::query_table::tool_name as query_table;
     pub use crate::run_trigger::tool_name as run_trigger;
+    pub use crate::subagent::tool_name as subagent;
     pub use crate::update_rows::tool_name as update_rows;
 }
 
@@ -186,6 +198,7 @@ pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(Coding))?;
     registry.register(Arc::new(BuildApplication))?;
     registry.register(Arc::new(ManageTableAdmin))?;
+    registry.register(Arc::new(Subagent))?;
     Ok(())
 }
 
@@ -206,6 +219,7 @@ mod tests {
                 "manage_table_admin",
                 "query_table",
                 "run_trigger",
+                "subagent",
                 "update_rows",
             ]
         );
@@ -264,6 +278,14 @@ mod tests {
         );
         assert_eq!(spec("delete_rows"), vec![CFG_TABLE, CFG_MAX_ROWS]);
         assert_eq!(spec("run_trigger"), vec![CFG_TRIGGER]);
+        // The sub-agent it delegates to, then the sentence that tells the
+        // *parent* model when to reach for it — the field that decides whether
+        // delegation happens at the right moment — then the two bounds: what one
+        // delegation may spend, and how deep a chain of them may go.
+        assert_eq!(
+            spec("subagent"),
+            vec![CFG_AGENT, CFG_WHEN_TO_USE, CFG_MAX_STEPS, CFG_MAX_DEPTH]
+        );
 
         // The whole coding loop is **one** form: the scope filled in once — one
         // store, optionally one directory in it — then what the agent may do
@@ -318,6 +340,7 @@ mod tests {
             tool_names::update_rows("books"),
             tool_names::delete_rows("books"),
             tool_names::run_trigger("reindex"),
+            tool_names::subagent("researcher"),
             tool_names::read_file(&scope),
             tool_names::write_file(&scope),
             tool_names::list_files(&scope),
@@ -334,6 +357,7 @@ mod tests {
                 "update_books",
                 "delete_from_books",
                 "run_reindex",
+                "delegate_to_researcher",
                 "read_file_app_src_web",
                 "write_file_app_src_web",
                 "list_files_app_src_web",

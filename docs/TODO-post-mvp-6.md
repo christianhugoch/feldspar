@@ -579,8 +579,10 @@ because nothing else knows what building an app of that kind consists of.
   it well means deciding what is stable across turns, which is a measurement, not a design.
 - **Parallel tool execution.** Tool calls run sequentially (Phase 2). Running independent reads
   concurrently needs a way to know which are independent.
-- **The rest of the trait catalogue** §11 names from v1: MCP client, subagent handoff, long-term
-  memory, web search, plan approval, model picker, preload data, generate-and-run code.
+- **The rest of the trait catalogue** §11 names from v1: MCP client, long-term memory, web
+  search, plan approval, model picker, preload data, generate-and-run code. (**Subagent** was on
+  this list and was built afterwards, out of band, as `subagent` — *delegation* rather than v1's
+  handoff, over a `Delegator` seam on `sc-agent`. See §11.3 and the CHANGELOG.)
 
 ## Explicitly OUT of scope for this milestone
 

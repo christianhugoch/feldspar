@@ -489,6 +489,12 @@ fn the_design_records_what_the_agents_milestone_actually_built() {
         "The socket protocol, as it settled",
         "A tool call is emitted once",
         "answered with **silence**",
+        // §11.3: delegation, added after the milestone closed.
+        "**What was built, where it deviates** (`subagent`)",
+        "Delegation, not handoff",
+        "`TraitContext` carries a `Delegator`",
+        "A cycle is refused by name, a chain by number",
+        "Nothing came back means the delegation failed",
         // §11.5: the agent as a trigger body.
         "`ProviderConnector` moved down to `sc-agent`",
         "registered apart from the built-in action set",

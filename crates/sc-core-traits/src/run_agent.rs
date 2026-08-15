@@ -155,7 +155,14 @@ impl Action for RunAgent {
             // Decision 5, at the one place a run is created: nobody is present,
             // so the run carries the trigger's authority and records no user.
             RunCaller::system(),
-        );
+        )
+        // The connector this action already holds, handed on so an agent a
+        // trigger started can delegate exactly as one a person is chatting with
+        // does. Unlike the dispatcher — which is *running* this action and
+        // cannot be handed back down without closing an uncounted cycle — a
+        // sub-agent run counts its own depth, so there is nothing here to
+        // withhold.
+        .with_subagents(&self.providers);
         // A tool that reads a table whose ownership formula does not translate
         // needs the engine; the dispatcher running this action has one wherever
         // the deployment does.
