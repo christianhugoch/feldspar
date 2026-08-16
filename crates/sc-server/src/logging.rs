@@ -12,12 +12,18 @@
 //!
 //! - **Info** — one line per finished request: method, target, status, duration.
 //!   This is the rung the Development setting's help text promises requests at.
-//! - **Verbose** — plus a line when the request *arrives*, carrying its `Host`.
-//!   A request that never finishes has no completion line, so without this a
-//!   hanging request is invisible; and the `Host` is what chose the application
-//!   (§13.2), which is the first thing to check when the wrong one answered.
-//! - **Trace** — plus the request's headers, with anything that authenticates
-//!   the caller redacted.
+//! - **Verbose and above** — plus a line when the request *arrives*, carrying
+//!   its `Host`. A request that never finishes has no completion line, so
+//!   without this a hanging request is invisible; and the `Host` is what chose
+//!   the application (§13.2), which is the first thing to check when the wrong
+//!   one answered.
+//!
+//! **`trace` adds nothing here**, deliberately. It did, briefly: every request's
+//! headers, credentials redacted. Two lines of signal per request arrived
+//! wrapped in eight of `accept-encoding` and `sec-fetch-mode`, which made the
+//! one level that carries the model transcripts — the reason to turn `trace` on
+//! at all — unreadable. A header dump is a debugging need better served by the
+//! browser's own network panel, which already has it.
 //!
 //! Below Info the middleware does nothing at all — it checks the level before
 //! it clones so much as the URI, so a server at the default verbosity pays a
@@ -31,13 +37,6 @@ use axum::middleware::Next;
 use axum::response::Response;
 use sc_log::Verbosity;
 
-/// Header values that are never printed: whoever holds one is the caller, so a
-/// log carrying them is a log that can be replayed.
-const REDACTED_HEADERS: [&str; 4] = ["cookie", "set-cookie", "authorization", "x-csrf-token"];
-
-/// What replaces a redacted header's value.
-const REDACTION: &str = "‹redacted›";
-
 /// Log every request, at whatever level the server is set to.
 pub async fn log_requests(req: Request, next: Next) -> Response {
     // The whole middleware is skipped below Info, which is what makes leaving
@@ -50,11 +49,6 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
     let target = request_target(&req);
     if sc_log::enabled(Verbosity::Verbose) {
         sc_log::log_verbose!("{}", arrival_line(&method, &target, host_of(req.headers())));
-    }
-    if sc_log::enabled(Verbosity::Trace) {
-        for line in header_lines(req.headers()) {
-            sc_log::log_trace!("{line}");
-        }
     }
 
     let started = Instant::now();
@@ -105,34 +99,9 @@ pub fn arrival_line(method: &Method, target: &str, host: Option<&str>) -> String
     }
 }
 
-/// The Trace lines for a request's headers, with credentials redacted.
-///
-/// Redaction is by header name against a fixed list rather than by guessing at
-/// values: a session cookie and a CSRF token are exactly as good as a password
-/// to whoever reads the log, and this log is a file somebody will paste into an
-/// issue.
-pub fn header_lines(headers: &HeaderMap) -> Vec<String> {
-    headers
-        .iter()
-        .map(|(name, value)| {
-            let name = name.as_str();
-            if REDACTED_HEADERS.contains(&name) {
-                return format!("  {name}: {REDACTION}");
-            }
-            match value.to_str() {
-                Ok(value) => format!("  {name}: {value}"),
-                // A header that is not UTF-8 is still a header that was sent.
-                Err(_) => format!("  {name}: ‹{} bytes›", value.len()),
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use axum::http::HeaderValue;
-
     use super::*;
 
     #[test]
@@ -160,26 +129,5 @@ mod tests {
             arrival_line(req.method(), &request_target(&req), host_of(req.headers())),
             "→ GET /api/listActions?table=books (host blog.example.com)"
         );
-    }
-
-    /// The one thing a header dump must never do.
-    #[test]
-    fn a_traced_request_does_not_print_its_credentials() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("sc_session=secret"),
-        );
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer sk-secret"),
-        );
-        headers.insert("x-csrf-token", HeaderValue::from_static("csrf-secret"));
-        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
-
-        let lines = header_lines(&headers).join("\n");
-        assert!(!lines.contains("secret"), "{lines}");
-        assert_eq!(lines.matches(REDACTION).count(), 3, "{lines}");
-        assert!(lines.contains("accept: application/json"), "{lines}");
     }
 }

@@ -54,10 +54,12 @@ pub fn development_section() -> ConfigSection {
                     .options(Verbosity::ALL.map(Verbosity::as_str))
                     .default_value(sc_log::DEFAULT_VERBOSITY.as_str()),
                 "How much is printed to stderr. error is failures only; warning adds what is \
-                 about to fail; info logs every server request, one line each with its method, \
-                 path, status and duration; verbose also logs a request as it arrives, so one \
-                 that hangs is visible before it finishes; trace adds its headers, with \
-                 cookies and authorization redacted.",
+                 about to fail; info logs every server request — one line each with its \
+                 method, path, status and duration — and every LLM call with its token cost; \
+                 verbose also logs a request and a model call as they start, so one that hangs \
+                 is visible before it finishes; trace adds the whole of what an LLM was sent \
+                 and answered and every tool call's arguments and result, which is a \
+                 transcript of what the people using an agent typed.",
             ),
         ],
     }

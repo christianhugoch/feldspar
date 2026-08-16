@@ -14,11 +14,19 @@
 //! logging handle from one to the other. An `AtomicBool` read on the statement
 //! path costs a relaxed load, which is less than the `format!` it guards.
 //!
-//! **Where it comes out.** SQL goes to **stdout**, because it is the *output*
-//! an admin turned the switch on to read — pipe it to a file, grep it. Level
-//! messages go to **stderr**, which is where every other `saltcorn:` line this
-//! server prints already goes, so a redirected stdout is the SQL and nothing
+//! **Where it comes out.** SQL goes to **stdout**, because it is the *output* an
+//! admin turned the switch on to read — pipe it to a file, grep it. Level
+//! messages go to **stderr**, so a redirected stdout is the SQL and nothing
 //! else.
+//!
+//! **A line is the message and nothing else** — no program name, no level tag.
+//! Whatever reads these logs (a terminal, `journald`, a container runtime)
+//! already knows which process wrote them and which stream it used, and a
+//! prefix on every line is width spent saying so twice. The consequence, taken
+//! knowingly: an `info` line and a `warning` line look alike, so a message that
+//! wants to be recognisable as a warning says so in its own words. It also
+//! leaves the SQL echo as *valid SQL* — the binds ride in a `--` comment — so a
+//! redirected stdout is a script, not a log that has to be unwrapped first.
 //!
 //! ```
 //! sc_log::set_verbosity(sc_log::Verbosity::Info);
@@ -50,7 +58,12 @@ pub enum Verbosity {
     /// The above, plus each request as it *arrives*, so a request that never
     /// finishes is visible while it is hanging.
     Verbose = 3,
-    /// Everything, including request headers (with credentials redacted).
+    /// Everything: the whole of what an LLM was sent and answered, and every
+    /// tool call's arguments and result.
+    ///
+    /// A server request logs the same at `trace` as at `verbose` — the
+    /// transcripts are the reason to be here, and a header dump per request is
+    /// what buries them.
     Trace = 4,
 }
 
@@ -156,6 +169,9 @@ pub fn log_sql_enabled() -> bool {
 
 /// Print a message at `level`, if the configured verbosity includes it.
 ///
+/// The message is written as it was formatted, with no prefix of any kind (see
+/// the module docs).
+///
 /// The macros ([`log_error!`], [`log_warn!`], [`log_info!`], [`log_verbose!`],
 /// [`log_trace!`]) are the way to call this: they defer formatting until the
 /// level check has passed.
@@ -163,7 +179,7 @@ pub fn log(level: Verbosity, args: fmt::Arguments<'_>) {
     if !enabled(level) {
         return;
     }
-    emit(Stream::Err, format!("saltcorn: {}: {args}", level.as_str()));
+    emit(Stream::Err, args.to_string());
 }
 
 /// Echo one statement, if the SQL log is on.
@@ -202,21 +218,23 @@ pub fn human_duration(elapsed: std::time::Duration) -> String {
 /// for a row's worth of text, short of a megabyte of `bytea` scrolling past.
 const MAX_BIND_CHARS: usize = 120;
 
-/// One line of SQL log: the statement, and the binds it goes out with.
+/// One line of SQL log: the statement, and the binds it goes out with in a
+/// trailing `--` comment.
 ///
-/// Separate from [`log_sql`] so the rendering can be tested without capturing
-/// stdout, and so a caller that has already decided to log (a batch of DDL, a
-/// transaction verb) can build the line itself.
+/// The line is the statement itself — nothing is prepended — so the echo reads
+/// as the script it is. Separate from [`log_sql`] so the rendering can be tested
+/// without capturing stdout, and so a caller that has already decided to log (a
+/// batch of DDL, a transaction verb) can build the line itself.
 pub fn sql_line<T: fmt::Debug>(sql: &str, binds: &[T]) -> String {
     let sql = collapse_whitespace(sql);
     if binds.is_empty() {
-        return format!("saltcorn: sql: {sql}");
+        return sql;
     }
     let rendered: Vec<String> = binds
         .iter()
         .map(|bind| truncate(&format!("{bind:?}"), MAX_BIND_CHARS))
         .collect();
-    format!("saltcorn: sql: {sql} -- binds: [{}]", rendered.join(", "))
+    format!("{sql} -- binds: [{}]", rendered.join(", "))
 }
 
 /// One statement on one line: a multi-line rendering (DDL, a policy batch) is
@@ -480,10 +498,7 @@ mod tests {
         log_info!("GET /health → {}", 200);
         log_verbose!("not this one");
         log_trace!("nor this");
-        assert_eq!(
-            lines(),
-            ["saltcorn: error: boom", "saltcorn: info: GET /health → 200"]
-        );
+        assert_eq!(lines(), ["boom", "GET /health → 200"]);
     }
 
     /// The default is quiet enough that a server does not log every request
@@ -521,13 +536,10 @@ mod tests {
 
     #[test]
     fn a_logged_statement_is_one_line_with_its_binds() {
-        assert_eq!(
-            sql_line("SELECT 1", &[] as &[i32]),
-            "saltcorn: sql: SELECT 1"
-        );
+        assert_eq!(sql_line("SELECT 1", &[] as &[i32]), "SELECT 1");
         assert_eq!(
             sql_line("INSERT INTO t\n  VALUES ($1, $2)", &["a", "b"]),
-            "saltcorn: sql: INSERT INTO t VALUES ($1, $2) -- binds: [\"a\", \"b\"]"
+            "INSERT INTO t VALUES ($1, $2) -- binds: [\"a\", \"b\"]"
         );
     }
 

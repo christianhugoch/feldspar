@@ -3462,8 +3462,10 @@ stored settings in the `development` section of `_sc_config` (§9).
   method, target, status and duration, emitted by a middleware wrapped outermost around the
   router so it covers the routes that never reach `dispatch` (uploads, backups, the WebSocket
   upgrades, an application's own subdomain) and reports the status the client actually got.
-  `verbose` adds a line as each request arrives, with its `Host`; `trace` adds its headers,
-  with `cookie`/`authorization`/`x-csrf-token` redacted.
+  `verbose` adds a line as each request arrives, with its `Host` — the header that chose the
+  application. `trace` adds **nothing** for a request: the level exists for the model
+  transcripts below, and a per-request header dump is what made them unreadable; a browser's
+  network panel is the better tool for headers and already has them.
 - **`log_sql`** — echo every statement sent to the database, with its bind values, to
   **stdout**. Hooked in the driver (`sc-db-postgres`), so it covers every query, DDL,
   introspection query, prepared-statement description and transaction verb, and nothing has

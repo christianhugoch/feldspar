@@ -399,13 +399,13 @@ async fn login_starts_a_session_that_unlocks_admin_routes() {
 }
 
 /// The request log wraps every route, so the thing it must not do is change any
-/// of them.
+/// of them — and, at `trace`, the thing it must not do is bury the level that
+/// carries the model transcripts under a header dump per request.
 ///
-/// Driven at `trace`, the loudest level, because that is where the middleware
-/// does the most: it reads the headers of a request it then has to hand on
-/// untouched. A body consumed or a header moved by a logger would be a bug
-/// visible only when somebody turned logging on — which is to say, only in
-/// production, only while debugging something else.
+/// Driven at `trace`, the loudest level: a request there logs its arrival and
+/// its completion and **nothing else**. A body consumed or a header moved by a
+/// logger would be a bug visible only when somebody turned logging on — which is
+/// to say, only in production, only while debugging something else.
 #[tokio::test]
 async fn logging_every_request_leaves_the_request_alone() {
     let (router, _sessions) = test_router();
@@ -435,19 +435,21 @@ async fn logging_every_request_leaves_the_request_alone() {
     let echoed: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(echoed, json!({ "hello": "world" }));
 
-    // And it was logged: the request as it arrived, its headers with the
-    // credentials redacted, and the line that says how it ended.
+    // And it was logged: the request as it arrived, and the line that says how
+    // it ended. Two lines, at the loudest level there is.
+    assert_eq!(log.len(), 2, "{log:?}");
     let logged = log.join("\n");
     assert!(logged.contains("→ POST /api/echo?logged=yes"), "{logged}");
     assert!(
         logged.contains("POST /api/echo?logged=yes → 200 in"),
         "{logged}"
     );
-    assert!(
-        logged.contains("content-type: application/json"),
-        "{logged}"
-    );
-    // Neither the session cookie nor the CSRF token is in it.
+    // The headers are not in it — not the interesting ones and not the boring
+    // ones, which is the point: `trace` is where the model transcripts are, and
+    // a dozen lines of `sec-fetch-mode` per request is what made that
+    // unreadable. Nothing that authenticates the caller can leak from a log
+    // that never prints a header.
+    assert!(!logged.contains("content-type"), "{logged}");
     assert!(!logged.contains("not-a-session"), "{logged}");
     assert!(!logged.contains("csrf-secret-value"), "{logged}");
 }

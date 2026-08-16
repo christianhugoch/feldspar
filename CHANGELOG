@@ -47,6 +47,24 @@ why the setting says so.
 Below `info` the decorator hands the call straight through: no line, no clone, no
 accumulation.
 
+**A line is the message and nothing else.** No program name, no level tag: the
+terminal, `journald` or the container runtime reading these already knows which
+process wrote the line and which stream it came out of, and a prefix on every one
+is width spent saying so twice. It also leaves the SQL echo as *valid SQL* — the
+binds ride in a trailing `--` comment — so a redirected stdout is a script rather
+than a log to be unwrapped:
+
+```
+SELECT * FROM "_sc_config" WHERE ("key" = $1) LIMIT $2 -- binds: [Text("log_sql"), Int(1)]
+UPDATE "_sc_config" SET "value" = $1 WHERE ("key" = $2) -- binds: [Json(Bool(false)), Text("log_sql")]
+```
+
+The consequence, taken knowingly: an `info` line and a `warning` line look alike,
+so a message that wants to be recognisable as a failure says so in its own words
+(`llm ✗ house (gpt-5.1): …`). The boot-time `saltcorn: …` announcements are
+untouched — they are direct `eprintln!`s from the CLI, not messages through this
+facility.
+
 **`sc-log` grew a `capture` feature** so this could be tested as behaviour rather
 than as string formatting. It installs a thread-local sink that collects lines
 instead of printing them; a crate adds it to `[dev-dependencies]` and asserts
@@ -72,8 +90,12 @@ subdomain do not go through `dispatch`, and the status a request finished with i
 the one the header and CSRF layers produced, not the one the handler returned.
 `verbose` adds a line as a request *arrives* — a request that hangs has no
 completion line, so without it the interesting case is the invisible one — and
-`trace` adds the headers, with `cookie`, `authorization` and `x-csrf-token`
-redacted, because this is a log somebody pastes into an issue.
+`trace` adds nothing at all for a request. It did, briefly: every header, with
+`cookie`, `authorization` and `x-csrf-token` redacted. Two lines of signal per
+request arrived wrapped in eight of `accept-encoding` and `sec-fetch-mode`, which
+buried the level that carries the model transcripts under the level's own
+boilerplate. Headers are a debugging need the browser's network panel already
+serves.
 
 **Log SQL** echoes every statement to stdout, with its bind values. It is hooked
 in the Postgres driver, at the two functions every statement already funnels

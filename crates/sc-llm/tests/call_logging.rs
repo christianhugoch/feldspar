@@ -138,14 +138,8 @@ async fn info_logs_one_line_with_the_token_cost_and_no_transcript() -> Result<()
 async fn verbose_logs_the_call_as_it_is_issued() -> Result<()> {
     let lines = logged_call(Verbosity::Verbose).await?;
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert!(
-        lines[0].starts_with("saltcorn: verbose: llm → house"),
-        "{lines:?}"
-    );
-    assert!(
-        lines[1].starts_with("saltcorn: info: llm ← house"),
-        "{lines:?}"
-    );
+    assert!(lines[0].starts_with("llm → house"), "{lines:?}");
+    assert!(lines[1].starts_with("llm ← house"), "{lines:?}");
     Ok(())
 }
 
