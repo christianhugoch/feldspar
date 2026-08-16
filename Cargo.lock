@@ -3687,6 +3687,7 @@ dependencies = [
  "sc-error",
  "sc-files",
  "sc-llm",
+ "sc-log",
  "sc-query",
  "sc-server",
  "sc-test-harness",
@@ -3709,6 +3710,7 @@ dependencies = [
  "sc-db",
  "sc-db-postgres",
  "sc-error",
+ "sc-log",
  "sc-query",
  "sc-test-harness",
  "sc-types",
@@ -3793,6 +3795,7 @@ dependencies = [
  "rust_decimal",
  "sc-db",
  "sc-error",
+ "sc-log",
  "sc-query",
  "sc-test-harness",
  "serde_json",
@@ -3876,6 +3879,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-log"
+version = "0.1.0"
+dependencies = [
+ "sc-error",
+]
+
+[[package]]
 name = "sc-query"
 version = "0.1.0"
 dependencies = [
@@ -3923,6 +3933,7 @@ dependencies = [
  "sc-expr",
  "sc-files",
  "sc-llm",
+ "sc-log",
  "sc-query",
  "sc-test-harness",
  "sc-types",

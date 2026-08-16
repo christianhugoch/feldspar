@@ -2,6 +2,59 @@
 
 Changes in reverse chronological order.
 
+## Settings → Development: a log verbosity, and an SQL echo
+
+A third settings tab, and the two switches an admin reaches for when they cannot
+explain what a running installation is doing.
+
+**Log verbosity** is the ladder every other daemon on the machine already uses —
+`error`, `warning`, `info`, `verbose`, `trace` — and **`info` logs every server
+request**: one line each, with its method, target, status and duration. It is a
+middleware wrapped *outermost* around the router rather than a line inside
+`dispatch`, which is what makes "every request" true: the upload route, the two
+backup routes, the language-server and chat upgrades and every application
+subdomain do not go through `dispatch`, and the status a request finished with is
+the one the header and CSRF layers produced, not the one the handler returned.
+`verbose` adds a line as a request *arrives* — a request that hangs has no
+completion line, so without it the interesting case is the invisible one — and
+`trace` adds the headers, with `cookie`, `authorization` and `x-csrf-token`
+redacted, because this is a log somebody pastes into an issue.
+
+**Log SQL** echoes every statement to stdout, with its bind values. It is hooked
+in the Postgres driver, at the two functions every statement already funnels
+through, so it covers queries, DDL, introspection, `prepare`-time description and
+the transaction verbs without anything being routed through a second path to be
+seen. The bind *values* are printed, unlike in a query error — which is returned
+to a client and so carries only their count — because a statement without its
+parameters does not tell you what ran. That includes password hashes and session
+tokens, and the setting says so.
+
+**Both are settings, not flags, and both take effect immediately.** The moment
+you want the SQL is the moment the server is already running and doing the thing
+you cannot reproduce; a flag would mean restarting it and throwing that away. So
+the switches live in a new layer-0 crate, **`sc-log`**, as two process-wide
+atomics: `sc_config::development` declares the keys, `DevelopmentSettings::apply`
+is the one place a stored value becomes process behaviour, and it is called at
+boot (from `connect_catalog`, so a CLI command run against an installation with
+the echo on prints its SQL too) and again at the end of every settings save.
+
+Globals, deliberately. The thing that wants to print a statement is the driver at
+layer 2, the thing that knows what was ticked is the config store at layer 5, and
+the six layers between them have no business carrying a logging handle from one
+to the other. What it costs is a relaxed atomic load per statement and per
+request; below `info` the middleware does nothing else at all.
+
+The default stays `warning` and no SQL: `info` is defined as "log every request",
+and a server that does that by default is a server whose logs nobody reads.
+
+**The admin UI needed no changes.** The tab is the section — the settings screen
+renders whatever sections the server declares — so a checkbox, a five-option
+dropdown and their help text are a Rust declaration and nothing else. The tests
+that landed here are the model's: an unticked checkbox travels as `false` rather
+than being dropped (dropped, it would read as "leave it as it was", and turning
+the echo *off* is the half an admin does more often), and the level round-trips
+with `warning` as its default.
+
 ## `admin_copilot`: the schema agent grows the triggers, and learns to ask
 
 `manage_table_admin` is now **`admin_copilot`**, and it configures triggers as

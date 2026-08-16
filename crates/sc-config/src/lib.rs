@@ -19,6 +19,10 @@
 //!   renewal survives a restart and a second node does not order its own.
 //! - [`email`] is the second section: the SMTP transport every message this
 //!   installation sends goes out through (§18.2).
+//! - [`development`] is the third: what this server prints while it runs — the
+//!   SQL echo and the log verbosity, both of which are switches on the
+//!   process-wide atomics in `sc-log` rather than values anybody reads from
+//!   here on a hot path.
 //!
 //! The TLS *machinery* is a layer up, in `sc-server`, which is where the
 //! listener and the rustls stack are. This crate says what was configured; it
@@ -26,6 +30,7 @@
 
 pub mod acme;
 pub mod defs;
+pub mod development;
 pub mod email;
 pub mod ssl;
 pub mod store;
@@ -34,6 +39,10 @@ pub use acme::{ACME_CACHE_TABLE, AcmeCache, bootstrap_acme_cache};
 pub use defs::{
     BACKUP_INCLUDE, ConfigDef, ConfigSection, config_sections, config_spec, definition,
     internal_defs, known_keys,
+};
+pub use development::{
+    DevelopmentSettings, LOG_SQL, LOG_VERBOSITY, apply_development_settings, development_section,
+    development_settings, development_settings_from,
 };
 pub use email::{
     DEFAULT_SMTP_PORT, EMAIL_FROM, EmailSettings, Mailbox, SECURITY_NONE, SECURITY_STARTTLS,

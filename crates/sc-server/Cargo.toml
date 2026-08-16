@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 sc-error.workspace = true
+sc-log.workspace = true
 sc-catalog.workspace = true
 # Ownership formulas (§7.3): validation, the RLS translatability check on
 # save, and — via `eval` — the V8 engine behind the runtime enforcement's

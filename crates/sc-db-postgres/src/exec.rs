@@ -48,6 +48,10 @@ pub(crate) fn db_error(e: &tokio_postgres::Error) -> String {
     }
 }
 
+/// What a statement with no bind parameters passes to
+/// [`sc_log::log_sql`] — DDL, a raw batch, a transaction verb.
+pub(crate) const NO_BINDS: &[sc_query::Value] = &[];
+
 /// Render `stmt` to Postgres SQL, run it on `client`, and materialise the rows.
 ///
 /// Any statement kind is accepted; a non-`RETURNING` mutation simply yields no
@@ -59,6 +63,9 @@ pub(crate) async fn run_query(
     stmt: &Statement,
 ) -> Result<RowStream> {
     let (sql, binds) = dialect.render(stmt)?;
+    // Every statement this backend sends passes through here, which is why the
+    // echo is here and not at each of the dozen call sites that build one.
+    sc_log::log_sql(&sql, &binds);
 
     // Bind values are wrapped so the whole ordered set can be passed as
     // `&[&(dyn ToSql + Sync)]`.
@@ -144,6 +151,10 @@ pub(crate) async fn describe(
         .iter()
         .map(|name| crate::value::pg_type(name))
         .collect::<Result<_>>()?;
+    // Preparing is not running, but it *is* traffic to the database and the
+    // statement is one an admin typed, so an SQL log that omitted it would be
+    // missing exactly the statement they are debugging.
+    sc_log::log_sql(sql, NO_BINDS);
     let prepared = client.prepare_typed(sql, &types).await.map_err(|e| {
         // As in `run_query`: the terse Display hides the server's own message,
         // which here is the only useful part.
@@ -170,6 +181,7 @@ pub(crate) async fn run_ddl(
     change: &SchemaChange,
 ) -> Result<()> {
     let sql = crate::ddl::render(dialect, change)?;
+    sc_log::log_sql(&sql, NO_BINDS);
     client.batch_execute(&sql).await.map_err(|e| {
         Error::database(format!(
             "apply_schema failed: {}\n  sql: {sql}",

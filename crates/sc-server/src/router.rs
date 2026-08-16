@@ -254,7 +254,15 @@ pub fn build_router_with_apps(
         .layer(SetResponseHeaderLayer::overriding(
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
-        ));
+        ))
+        // Request logging goes on **last**, which in axum is outermost: it
+        // therefore sees every request — including the ones that never reach
+        // `dispatch` (uploads, backups, the WebSocket upgrades, an application's
+        // own routes) — and reports the status the client actually got, after
+        // CSRF and the header layers have had their say. What it prints is the
+        // stored log verbosity (Settings → Development): nothing below Info,
+        // one line per request at Info (`sc_log::Verbosity`).
+        .layer(axum::middleware::from_fn(crate::logging::log_requests));
 
     Ok(app)
 }

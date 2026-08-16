@@ -3453,6 +3453,29 @@ this bug". This is a cross-cutting concern layered on `sc-error`; it is **not re
 MVP** but the `ErrorKind` split lands with `sc-error` from the start so classification is
 never retrofitted.
 
+**Diagnostic logging (Settings → Development).** Distinct from the error log above, which is
+a durable record in the database: this is what a *running process prints*, and it is two
+stored settings in the `development` section of `_sc_config` (§9).
+
+- **`log_verbosity`** — the Unix ladder `error < warning < info < verbose < trace`, default
+  `warning`. **`info` logs every server request**: one line per finished request with its
+  method, target, status and duration, emitted by a middleware wrapped outermost around the
+  router so it covers the routes that never reach `dispatch` (uploads, backups, the WebSocket
+  upgrades, an application's own subdomain) and reports the status the client actually got.
+  `verbose` adds a line as each request arrives, with its `Host`; `trace` adds its headers,
+  with `cookie`/`authorization`/`x-csrf-token` redacted.
+- **`log_sql`** — echo every statement sent to the database, with its bind values, to
+  **stdout**. Hooked in the driver (`sc-db-postgres`), so it covers every query, DDL,
+  introspection query, prepared-statement description and transaction verb, and nothing has
+  to be routed through a second code path to be logged.
+
+Both live in **`sc-log`** (layer 0) as process-wide atomics, read by layers far below the one
+that stores them, and both are `apply`d — at boot from `connect_catalog`, and again whenever
+an admin saves the settings — so a switch takes effect on the running server rather than at
+the next restart. Level messages go to stderr, beside every other `saltcorn:` line; the SQL
+echo goes to stdout, so a redirected stdout is the SQL and nothing else. Below `info` the
+request middleware checks one relaxed atomic and does nothing.
+
 **Message bus.** One `BusDriver` trait, several drivers: in-process (single node),
 Postgres LISTEN/NOTIFY (simple, reuses the primary DB), and redis/kafka (scale-out). The bus
 carries cache invalidation, the durable-workflow queue, real-time chat, real-time

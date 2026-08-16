@@ -29,6 +29,10 @@ pub(crate) struct PgTransaction {
 impl PgTransaction {
     /// Open a transaction on `client` by issuing `BEGIN`.
     pub(crate) async fn begin(client: Object, dialect: PgDialect) -> Result<Self> {
+        // The transaction verbs are logged like any other statement: a SQL log
+        // in which the statements appear but the `BEGIN` that groups them does
+        // not would misdescribe what ran.
+        sc_log::log_sql("BEGIN", crate::exec::NO_BINDS);
         client
             .batch_execute("BEGIN")
             .await
@@ -70,6 +74,7 @@ impl Transaction for PgTransaction {
         // *value* as a bind — so it is parameterised, never interpolated. The
         // setting *name* is a fixed constant from our own code (`sc.role`,
         // `sc.user`), not user input.
+        sc_log::log_sql("SELECT set_config($1, $2, true)", &[name, value]);
         client
             .query("SELECT set_config($1, $2, true)", &[&name, &value])
             .await
@@ -89,6 +94,7 @@ impl Transaction for PgTransaction {
 
     async fn batch(&mut self, sql: &str) -> Result<()> {
         let client = self.client()?;
+        sc_log::log_sql(sql, crate::exec::NO_BINDS);
         client.batch_execute(sql).await.map_err(|e| {
             Error::database(format!(
                 "batch failed: {}\n  sql: {sql}",
@@ -101,6 +107,7 @@ impl Transaction for PgTransaction {
     async fn commit(self: Box<Self>) -> Result<()> {
         let mut this = self;
         let client = this.take_client()?;
+        sc_log::log_sql("COMMIT", crate::exec::NO_BINDS);
         client
             .batch_execute("COMMIT")
             .await
@@ -117,6 +124,7 @@ impl Transaction for PgTransaction {
     async fn rollback(self: Box<Self>) -> Result<()> {
         let mut this = self;
         let client = this.take_client()?;
+        sc_log::log_sql("ROLLBACK", crate::exec::NO_BINDS);
         client
             .batch_execute("ROLLBACK")
             .await
@@ -134,6 +142,7 @@ impl Drop for PgTransaction {
         // Abandoned without an explicit finish: roll back so the pooled
         // connection is not returned mid-transaction. `Drop` is sync, so run the
         // rollback on the runtime if we are on one, else on a short-lived thread.
+        sc_log::log_sql("ROLLBACK -- abandoned transaction", crate::exec::NO_BINDS);
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {

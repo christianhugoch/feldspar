@@ -26,6 +26,7 @@ mod chat;
 mod config;
 mod handler;
 mod handlers;
+mod logging;
 mod lsp;
 mod reload;
 mod router;
@@ -55,6 +56,7 @@ pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
 pub use handlers::admin_handlers;
+pub use logging::log_requests;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
 pub use router::{

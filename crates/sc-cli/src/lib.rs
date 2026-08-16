@@ -75,6 +75,30 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_config::bootstrap(&catalog)
         .await
         .context("ensuring the configuration tables exist")?;
+    // The stored Development settings become this process's logging switches as
+    // soon as there is a database to read them from — here rather than in
+    // `serve_command`, so a `saltcorn` *command* run against an installation
+    // with the SQL echo on prints its SQL too. Everything before this line runs
+    // at the default verbosity, which is the price of the settings living in the
+    // database the connection is being made to.
+    let development = sc_config::apply_development_settings(&catalog)
+        .await
+        .context("reading the development settings")?;
+    // Said out loud when it is not the default, because both switches are ones
+    // somebody turns on to debug an afternoon and then forgets: a log full of
+    // every statement, six weeks later, should name the checkbox that is doing
+    // it.
+    if development.log_sql || development.verbosity != sc_log::DEFAULT_VERBOSITY {
+        eprintln!(
+            "saltcorn: log verbosity {}{} (Settings → Development)",
+            development.verbosity.as_str(),
+            if development.log_sql {
+                ", logging every SQL statement to stdout"
+            } else {
+                ""
+            }
+        );
+    }
     Ok(catalog)
 }
 

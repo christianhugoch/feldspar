@@ -397,3 +397,41 @@ async fn login_starts_a_session_that_unlocks_admin_routes() {
         json!({ "ok": true })
     );
 }
+
+/// The request log wraps every route, so the thing it must not do is change any
+/// of them.
+///
+/// Driven at `trace`, the loudest level, because that is where the middleware
+/// does the most: it reads the headers of a request it then has to hand on
+/// untouched. A body consumed or a header moved by a logger would be a bug
+/// visible only when somebody turned logging on — which is to say, only in
+/// production, only while debugging something else.
+#[tokio::test]
+async fn logging_every_request_leaves_the_request_alone() {
+    let (router, _sessions) = test_router();
+    let previous = sc_log::verbosity();
+    sc_log::set_verbosity(sc_log::Verbosity::Trace);
+
+    let (status, _, body) = call(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri("/api/echo?logged=yes")
+            .header(header::CONTENT_TYPE, "application/json")
+            // Credentials the trace must not print, and a header it has to hand
+            // on regardless.
+            .header(header::COOKIE, format!("{SESSION_COOKIE}=not-a-session"))
+            .header(CSRF_HEADER, "token")
+            .header(header::COOKIE, format!("{CSRF_COOKIE}=token"))
+            .body(Body::from(json!({ "hello": "world" }).to_string()))
+            .unwrap(),
+    )
+    .await;
+
+    sc_log::set_verbosity(previous);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The handler echoes its body, so this is the whole request arriving intact
+    // through the logging layer.
+    let echoed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(echoed, json!({ "hello": "world" }));
+}

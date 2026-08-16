@@ -18,8 +18,19 @@
 
 import { describe, expect, it } from "vitest";
 
-import { SECRET_SENTINEL, buildConfig, initialValues, readConfig } from "../settings";
-import { BACKUP_TAB, allFields, initialTab, settingsPayload, settingsTabs } from "./Settings";
+import {
+  SECRET_SENTINEL,
+  buildConfig,
+  initialValues,
+  readConfig,
+} from "../settings";
+import {
+  BACKUP_TAB,
+  allFields,
+  initialTab,
+  settingsPayload,
+  settingsTabs,
+} from "./Settings";
 import { testEmailBody } from "./TestEmail";
 
 /** The shape `getSettings` returns, trimmed to what the model reads. */
@@ -145,8 +156,11 @@ describe("the settings screen's model", () => {
       allFields(sections),
       readConfig({ ssl_private_key: SECRET_SENTINEL }),
     );
-    values.ssl_private_key = "-----BEGIN PRIVATE KEY-----\nnew\n-----END PRIVATE KEY-----";
-    expect(buildConfig(allFields(sections), values).ssl_private_key).toContain("new");
+    values.ssl_private_key =
+      "-----BEGIN PRIVATE KEY-----\nnew\n-----END PRIVATE KEY-----";
+    expect(buildConfig(allFields(sections), values).ssl_private_key).toContain(
+      "new",
+    );
   });
 });
 
@@ -171,11 +185,48 @@ const emailSection = {
   ],
 };
 
+/** The Development section: a checkbox and a level dropdown, which between them
+ * are the two control kinds a settings tab renders and nothing else does. */
+const developmentSection = {
+  name: "development",
+  label: "Development",
+  description: "What this server prints while it runs.",
+  fields: [
+    {
+      name: "log_sql",
+      label: "Log SQL",
+      type: "bool",
+      required: false,
+      default: false,
+      options: [],
+      multiline: false,
+      secret: false,
+      create_only: false,
+      help: "Print every statement this server sends to the database.",
+    },
+    {
+      name: "log_verbosity",
+      label: "Log verbosity",
+      type: "text",
+      required: false,
+      default: "warning",
+      options: ["error", "warning", "info", "verbose", "trace"],
+      multiline: false,
+      secret: false,
+      create_only: false,
+      help: "info logs every server request.",
+    },
+  ],
+};
+
 describe("the settings screen's tabs", () => {
   it("shows one tab per declared section, labelled as the section is", () => {
-    expect(settingsTabs([...sections, emailSection])).toEqual([
+    expect(
+      settingsTabs([...sections, emailSection, developmentSection]),
+    ).toEqual([
       { id: "ssl", label: "SSL / TLS certificates" },
       { id: "email", label: "Email" },
+      { id: "development", label: "Development" },
       { id: BACKUP_TAB, label: "Backup" },
     ]);
   });
@@ -186,7 +237,9 @@ describe("the settings screen's tabs", () => {
   it("has no tab without a section, and no section without a tab", () => {
     const tabs = settingsTabs([...sections, emailSection]);
     const sectionNames = [...sections, emailSection].map((s) => s.name);
-    expect(tabs.filter((t) => t.id !== BACKUP_TAB).map((t) => t.id)).toEqual(sectionNames);
+    expect(tabs.filter((t) => t.id !== BACKUP_TAB).map((t) => t.id)).toEqual(
+      sectionNames,
+    );
     // Backup is the one tab that is not a section, and it is last.
     expect(tabs[tabs.length - 1].id).toBe(BACKUP_TAB);
     expect(tabs.filter((t) => t.id === BACKUP_TAB)).toHaveLength(1);
@@ -215,6 +268,32 @@ describe("the settings screen's tabs", () => {
   });
 });
 
+describe("the Development tab", () => {
+  /** A checkbox nobody ticked has to travel as `false`. An unticked box is not
+   * an empty box: dropped, it would read as "leave it as it was", and the one
+   * thing an admin does with this switch more often than turning it on is
+   * turning it off again. */
+  it("sends an unticked Log SQL as false rather than omitting it", () => {
+    const spec = allFields([developmentSection]);
+    const values = initialValues(spec, readConfig({ log_sql: true }));
+    expect(values.log_sql).toBe("true");
+    values.log_sql = "false";
+    const payload = settingsPayload(spec, values);
+    expect(payload.log_sql).toBe(false);
+  });
+
+  /** The level is a string chosen from the declared options, and the default is
+   * what an installation nobody has touched sends back. */
+  it("sends the chosen verbosity, defaulting to warning", () => {
+    const spec = allFields([developmentSection]);
+    const untouched = initialValues(spec, readConfig({}));
+    expect(settingsPayload(spec, untouched).log_verbosity).toBe("warning");
+
+    const values = initialValues(spec, readConfig({ log_verbosity: "info" }));
+    expect(settingsPayload(spec, values).log_verbosity).toBe("info");
+  });
+});
+
 describe("the test-email form", () => {
   /** An empty box means "send it to me", which the server spells as an absent
    * `to`. Sending `""` would ask it to parse the empty string as an address. */
@@ -224,6 +303,8 @@ describe("the test-email form", () => {
   });
 
   it("sends the address that was typed, trimmed", () => {
-    expect(testEmailBody("  ada@example.com ")).toEqual({ to: "ada@example.com" });
+    expect(testEmailBody("  ada@example.com ")).toEqual({
+      to: "ada@example.com",
+    });
   });
 });

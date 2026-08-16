@@ -263,6 +263,10 @@ pub async fn introspect(client: &Client) -> Result<Vec<PhysicalTable>> {
 
 /// Run a parameterless catalog query, mapping the driver error into ours.
 async fn run(client: &Client, sql: &str) -> Result<Vec<Row>> {
+    // Introspection is SQL this process issued too, and it is a large part of
+    // what a startup does — an echo that hid it would leave an admin wondering
+    // what the connection was busy with.
+    sc_log::log_sql(sql, crate::exec::NO_BINDS);
     client.query(sql, &[]).await.map_err(|e| {
         Error::database(format!(
             "introspect query failed: {}\n  sql: {sql}",

@@ -30,10 +30,10 @@ use axum::http::{Request, StatusCode, header};
 use sc_auth::SessionStore;
 use sc_catalog::Catalog;
 use sc_config::{
-    ACME_CONTACT_EMAIL, EMAIL_FROM, HTTPS_PORT, MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF,
-    SECURITY_NONE, SECURITY_STARTTLS, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY,
-    SMTP_USERNAME, SSL_CERTIFICATE, SSL_MODE, SSL_PRIVATE_KEY, SslMode, ssl_settings,
-    stored_config,
+    ACME_CONTACT_EMAIL, EMAIL_FROM, HTTPS_PORT, LOG_SQL, LOG_VERBOSITY, MODE_CUSTOM,
+    MODE_LETSENCRYPT, MODE_OFF, SECURITY_NONE, SECURITY_STARTTLS, SMTP_HOST, SMTP_PASSWORD,
+    SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SSL_CERTIFICATE, SSL_MODE, SSL_PRIVATE_KEY, SslMode,
+    ssl_settings, stored_config,
 };
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
@@ -711,5 +711,110 @@ async fn a_null_clears_a_setting_back_to_its_default() -> sc_error::Result<()> {
     // then shows in the box the admin just emptied.
     assert_eq!(body["values"][HTTPS_PORT], json!(443));
     assert_eq!(ssl_settings(&catalog).await?.https_port, 443);
+    Ok(())
+}
+
+/// The Development section (§16): the two switches that decide what a running
+/// server prints.
+///
+/// What is worth driving through HTTP here is that saving them **moves the
+/// process**, immediately. The values in `_sc_config` are inert — the thing that
+/// decides whether the next statement is echoed is a `sc_log` atomic — so a save
+/// that stored them and did not apply them would look right in the form, and in
+/// the database, and change nothing about the server the admin is watching.
+#[tokio::test]
+async fn saving_the_development_settings_moves_the_logging_switches() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    // The screen is handed the checkbox and the five levels, and nothing here
+    // had to name them: they come from the same declaration the parser reads.
+    let (status, body) = client.send("GET", "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let development = body["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == json!("development"))
+        .expect("a Development section");
+    assert_eq!(development["label"], json!("Development"));
+    let fields = development["fields"].as_array().unwrap();
+    let log_sql = fields
+        .iter()
+        .find(|f| f["name"] == json!(LOG_SQL))
+        .expect("the Log SQL field");
+    assert_eq!(log_sql["type"], json!("bool"));
+    assert_eq!(log_sql["label"], json!("Log SQL"));
+    let verbosity = fields
+        .iter()
+        .find(|f| f["name"] == json!(LOG_VERBOSITY))
+        .expect("the verbosity field");
+    assert_eq!(
+        verbosity["options"],
+        json!(["error", "warning", "info", "verbose", "trace"])
+    );
+    assert_eq!(verbosity["default"], json!("warning"));
+    // Nothing has been saved, so the server is at its quiet default: requests
+    // are not logged.
+    assert!(!sc_log::log_sql_enabled());
+
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": { LOG_SQL: true, LOG_VERBOSITY: "info" }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["values"][LOG_SQL], json!(true));
+    assert_eq!(saved["values"][LOG_VERBOSITY], json!("info"));
+    // The process itself, not just the row: SQL is echoed, and Info is reached,
+    // which is the level at which every request is logged.
+    assert!(sc_log::log_sql_enabled());
+    assert_eq!(sc_log::verbosity(), sc_log::Verbosity::Info);
+    assert!(sc_log::enabled(sc_log::Verbosity::Info));
+    assert!(!sc_log::enabled(sc_log::Verbosity::Verbose));
+    // And a boot against this database would come up the same way.
+    let stored = sc_config::development_settings(&catalog).await?;
+    assert!(stored.log_sql);
+    assert_eq!(stored.verbosity, sc_log::Verbosity::Info);
+
+    // Unticking it is the half that has to work as well: a switch that only
+    // turns on is a server that has to be restarted to be quiet again.
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": { LOG_SQL: false, LOG_VERBOSITY: Value::Null }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert!(!sc_log::log_sql_enabled());
+    assert_eq!(sc_log::verbosity(), sc_log::DEFAULT_VERBOSITY);
+    assert!(!sc_log::enabled(sc_log::Verbosity::Info));
+    Ok(())
+}
+
+/// A level that is not a level is refused in front of the admin, and nothing is
+/// stored — the rule every other section's cross-field check follows.
+#[tokio::test]
+async fn a_verbosity_that_is_not_a_level_is_refused() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": { LOG_VERBOSITY: "extremely" }})),
+        )
+        .await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("extremely"),
+        "{body}"
+    );
+    assert_eq!(stored_config(&catalog, LOG_VERBOSITY).await?, None);
     Ok(())
 }

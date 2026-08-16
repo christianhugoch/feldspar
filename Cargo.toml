@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     # Layer 0 — foundations
     "crates/sc-error",
+    "crates/sc-log",
     # Layer 1 — query language, expression language
     "crates/sc-query",
     "crates/sc-expr",
@@ -51,6 +52,7 @@ rust-version = "1.85"
 # design (§2) is expressed directly in the dependency graph.
 [workspace.dependencies]
 sc-error = { path = "crates/sc-error" }
+sc-log = { path = "crates/sc-log" }
 sc-query = { path = "crates/sc-query" }
 # `default-features = false` at the workspace level so members choose: the
 # catalog takes the parse/validate/translate half only; the server adds

@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 sc-error.workspace = true
+sc-log.workspace = true
 # `FormField` is the one vocabulary a configurable thing declares itself in
 # (§6.2): a configuration key is a `FormField` with a section around it, so the
 # admin UI renders settings with the same code it renders a file store's config

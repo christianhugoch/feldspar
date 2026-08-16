@@ -1843,8 +1843,17 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // first message that fails to send. Reading is the check —
                 // `from_config` runs it — so the result is dropped.
                 sc_config::EmailSettings::from_config(&merged)?;
+                // The Development section's own reading, on the same footing: a
+                // verbosity that is not a level is refused here rather than
+                // stored and discovered at the next boot.
+                let development = sc_config::development_settings_from(&merged)?;
 
                 sc_config::set_config_many(&catalog, &values).await?;
+                // The two switches this process runs under move **now**, not at
+                // the next restart: an admin ticks "Log SQL" precisely because
+                // something is happening in the server they are looking at, and
+                // a switch that needed a restart would have thrown that away.
+                development.apply();
                 Ok(HandlerResponse::ok(settings_json(&catalog).await?))
             }
         }
