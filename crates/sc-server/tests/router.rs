@@ -409,8 +409,7 @@ async fn login_starts_a_session_that_unlocks_admin_routes() {
 #[tokio::test]
 async fn logging_every_request_leaves_the_request_alone() {
     let (router, _sessions) = test_router();
-    let previous = sc_log::verbosity();
-    sc_log::set_verbosity(sc_log::Verbosity::Trace);
+    let _log = sc_log::capture::guard(sc_log::Verbosity::Trace);
 
     let (status, _, body) = call(
         &router,
@@ -421,17 +420,65 @@ async fn logging_every_request_leaves_the_request_alone() {
             // Credentials the trace must not print, and a header it has to hand
             // on regardless.
             .header(header::COOKIE, format!("{SESSION_COOKIE}=not-a-session"))
-            .header(CSRF_HEADER, "token")
-            .header(header::COOKIE, format!("{CSRF_COOKIE}=token"))
+            .header(CSRF_HEADER, "csrf-secret-value")
+            .header(header::COOKIE, format!("{CSRF_COOKIE}=csrf-secret-value"))
             .body(Body::from(json!({ "hello": "world" }).to_string()))
             .unwrap(),
     )
     .await;
 
-    sc_log::set_verbosity(previous);
+    let log = sc_log::capture::take();
+
     assert_eq!(status, StatusCode::OK, "{body}");
     // The handler echoes its body, so this is the whole request arriving intact
     // through the logging layer.
     let echoed: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(echoed, json!({ "hello": "world" }));
+
+    // And it was logged: the request as it arrived, its headers with the
+    // credentials redacted, and the line that says how it ended.
+    let logged = log.join("\n");
+    assert!(logged.contains("→ POST /api/echo?logged=yes"), "{logged}");
+    assert!(
+        logged.contains("POST /api/echo?logged=yes → 200 in"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("content-type: application/json"),
+        "{logged}"
+    );
+    // Neither the session cookie nor the CSRF token is in it.
+    assert!(!logged.contains("not-a-session"), "{logged}");
+    assert!(!logged.contains("csrf-secret-value"), "{logged}");
+}
+
+/// The rung the setting promises requests at, and the one below it: `info` logs
+/// every request, `warning` logs none.
+#[tokio::test]
+async fn requests_are_logged_at_info_and_not_below_it() {
+    let (router, _sessions) = test_router();
+
+    let mut logged_at = Vec::new();
+    for level in [sc_log::Verbosity::Warning, sc_log::Verbosity::Info] {
+        let _log = sc_log::capture::guard(level);
+        let (status, _, _) = call(
+            &router,
+            Request::builder()
+                .uri("/api/ping")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let lines = sc_log::capture::take();
+        assert_eq!(status, StatusCode::OK);
+        logged_at.push(lines);
+    }
+
+    assert!(logged_at[0].is_empty(), "{:?}", logged_at[0]);
+    assert_eq!(logged_at[1].len(), 1, "{:?}", logged_at[1]);
+    assert!(
+        logged_at[1][0].ends_with("ms") && logged_at[1][0].contains("GET /api/ping → 200 in"),
+        "{:?}",
+        logged_at[1]
+    );
 }

@@ -2,6 +2,61 @@
 
 Changes in reverse chronological order.
 
+## The log learns to describe a model call
+
+Answering "what does an agent log?" — which, before this, was: nothing at all.
+`sc-llm` and `sc-agent` printed not one line between them, so an agent that
+answered the wrong question left no trace of what it had been asked.
+
+**Every configured provider is now wrapped in a `LoggedProvider`.** The wrap
+happens inside `connect_provider`, which is the one place a stored provider
+record becomes something callable, so the agent loop, the chat socket and the
+*Test connection* button are all covered by construction rather than by three
+call sites remembering to log.
+
+At **`info`**, one line per finished call: which provider and model, how big the
+request was, why the model stopped, **what it cost in tokens** and how long it
+took. This is the line an installation can leave on — it carries no message
+text, which is what makes it safe to.
+
+At **`verbose`**, a line as the call is *issued*. A model call is the longest
+wait in the system, and a run that is thinking and a run that is wedged look
+identical without it.
+
+At **`trace`**, the whole thing: the entire `LlmRequest` and the entire
+assembled response, as JSON. The system prompt with whatever the traits appended
+to it, every message of the history, every tool schema that was offered, and the
+answer with its reasoning, its tool calls and their arguments. What is logged is
+**our** request value rather than the vendor's wire body — it is the same for
+every backend, and it is the level the interesting mistakes live at: a tool
+schema that is wrong, a history that lost a tool result, a system prompt a trait
+never got to.
+
+**The loop logs its own half.** `sc_agent::driver` prints each tool call with its
+outcome and duration at `info`, its **arguments and its result in full** at
+`trace`, and one closing line per run naming the run id, how it ended and how
+many steps it took. Together with the request dump that is the whole
+conversation: what the model was told, what it decided, what the tools actually
+did, and what it said back.
+
+**What is not in it:** the API key, which lives in the adapter and is not on this
+path at any level. What *is* in it at `trace` is everything the people using an
+agent typed — a trace log is a transcript — which is why it is at `trace` and
+why the setting says so.
+
+Below `info` the decorator hands the call straight through: no line, no clone, no
+accumulation.
+
+**`sc-log` grew a `capture` feature** so this could be tested as behaviour rather
+than as string formatting. It installs a thread-local sink that collects lines
+instead of printing them; a crate adds it to `[dev-dependencies]` and asserts
+what was *logged*. Four tests now drive a real provider through `connect_provider`
+against a stub SSE server and read the log back — the trace dump contains the
+system prompt, the user's question and the tool's parameter schema; the `info`
+line contains the token counts and none of the transcript; `warning` logs
+nothing. The same sink turns the earlier request-logging and SQL-echo tests from
+assertions about formatters into assertions about output.
+
 ## Settings → Development: a log verbosity, and an SQL echo
 
 A third settings tab, and the two switches an admin reaches for when they cannot

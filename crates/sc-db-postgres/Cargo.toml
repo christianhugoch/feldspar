@@ -27,6 +27,8 @@ bytes.workspace = true
 
 [dev-dependencies]
 sc-test-harness.workspace = true
+# The SQL echo is asserted from the capture sink rather than from stdout (§16).
+sc-log = { workspace = true, features = ["capture"] }
 
 [lints]
 workspace = true

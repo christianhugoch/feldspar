@@ -385,3 +385,54 @@ async fn a_trait_speaks_before_every_turn_and_the_run_records_its_caller() -> Re
     assert_eq!(history[0].id, run.id);
     Ok(())
 }
+
+/// What a run says about itself while it happens (§16).
+///
+/// The model call's own lines come from the provider decorator, which a
+/// [`FakeProvider`] built by hand is deliberately not wrapped in — so what is
+/// under test here is exactly the loop's half: the tools it ran, and how the
+/// run ended.
+#[tokio::test]
+async fn a_run_at_trace_logs_every_tool_it_ran_and_how_it_ended() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = catalog(&db).await?;
+    let counter = Counter::new();
+    let registry = registry(counter.clone())?;
+    let agent = counting_agent();
+    save_agent(&catalog, &registry, &agent).await?;
+
+    let provider = Arc::new(FakeProvider::new([
+        Reply::calls("count_books", json!({ "since": 1999 })),
+        Reply::says("There are three."),
+    ]));
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        provider.clone(),
+        RunCaller::system(),
+    );
+
+    let _log = sc_log::capture::guard(sc_log::Verbosity::Trace);
+    let (run, conclusion) = runner.start("how many books?").await?;
+    let log = sc_log::capture::take().join("\n");
+
+    assert_eq!(conclusion.answer(), Some("There are three."));
+
+    // The tool: named on its own line with how long it took, and its arguments
+    // and its result in full — the two halves of the conversation that the
+    // model's own request dump only shows a turn later.
+    assert!(log.contains("tool `count_books` ok in"), "{log}");
+    assert!(log.contains("\"since\": 1999"), "{log}");
+    assert!(log.contains("tool `count_books` result"), "{log}");
+    // How the run ended, with the step count and the run's own id — the line
+    // that ties a transcript to a row in `_sc_runs`.
+    assert!(
+        log.contains(&format!(
+            "agent `librarian` run {}: answered after 2 steps",
+            run.id
+        )),
+        "{log}"
+    );
+    Ok(())
+}

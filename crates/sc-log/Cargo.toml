@@ -8,6 +8,11 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Collect log lines on a thread instead of printing them, so another crate's
+# tests can assert what was logged. Dev-dependencies only.
+capture = []
+
 [dependencies]
 sc-error.workspace = true
 

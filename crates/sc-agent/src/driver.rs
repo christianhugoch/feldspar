@@ -207,11 +207,30 @@ impl<'a> Runner<'a> {
     /// after a restart carries on from the step it was on.
     pub async fn drive(&self, run: &mut Run) -> Result<Conclusion> {
         let mut state = run.agent_loop()?;
+        // What a run cost, said once at the end (§16). Timed from here rather
+        // than from the row's creation because this is the part that is
+        // *running*: a run resumed after a restart is one drive, not one that
+        // took a fortnight.
+        let started = std::time::Instant::now();
+        sc_log::log_verbose!(
+            "agent `{}` run {}: driving from step {}",
+            self.agent.name,
+            run.id,
+            state.step()
+        );
         loop {
             match state.next_step() {
                 Step::Done(conclusion) => {
                     run.record(&state);
                     save_run(self.catalog, run).await?;
+                    sc_log::log_info!(
+                        "agent `{}` run {}: {} after {} steps in {}",
+                        self.agent.name,
+                        run.id,
+                        conclusion_label(&conclusion),
+                        state.step(),
+                        sc_log::human_duration(started.elapsed())
+                    );
                     return Ok(conclusion);
                 }
                 Step::CallModel { messages, step } => {
@@ -223,6 +242,11 @@ impl<'a> Runner<'a> {
                             // row; the caller gets the error too, because a chat
                             // socket has to render it as an event rather than
                             // simply stopping.
+                            sc_log::log_warn!(
+                                "agent `{}` run {}: failed at step {step} — {e}",
+                                self.agent.name,
+                                run.id
+                            );
                             run.fail(&e);
                             save_run(self.catalog, run).await?;
                             return Err(e);
@@ -300,6 +324,20 @@ impl<'a> Runner<'a> {
         if let Some(observer) = self.observer {
             observer.on_tool_call(&call);
         }
+        // The arguments in full at trace: they are the model's actual decision,
+        // and the summary line's tool *name* is exactly the part that is never
+        // in question when something went wrong.
+        if sc_log::enabled(sc_log::Verbosity::Trace) {
+            sc_log::log_trace!(
+                "agent `{}` run {} tool `{}` arguments:\n{}",
+                self.agent.name,
+                run.id,
+                call.name,
+                serde_json::to_string_pretty(&call.arguments)
+                    .unwrap_or_else(|e| format!("‹could not be serialised for the log: {e}›"))
+            );
+        }
+        let started = std::time::Instant::now();
         let outcome = match self.owner(&call.name) {
             None => ToolOutcome::failed(
                 call.clone(),
@@ -338,6 +376,23 @@ impl<'a> Runner<'a> {
                 }
             }
         };
+        sc_log::log_info!(
+            "agent `{}` run {}: tool `{}` {} in {}",
+            self.agent.name,
+            run.id,
+            call.name,
+            if outcome.is_error { "failed" } else { "ok" },
+            sc_log::human_duration(started.elapsed())
+        );
+        // What the model will actually read back, in full — the other half of
+        // the conversation the request dump shows one turn later.
+        sc_log::log_trace!(
+            "agent `{}` run {} tool `{}` result:\n{}",
+            self.agent.name,
+            run.id,
+            call.name,
+            outcome.content
+        );
         if let Some(observer) = self.observer {
             observer.on_tool_result(&outcome);
         }
@@ -380,6 +435,15 @@ impl<'a> Runner<'a> {
             names.push("(none)".to_owned());
         }
         names
+    }
+}
+
+/// How a conclusion reads in one word on the run's closing line.
+fn conclusion_label(conclusion: &Conclusion) -> &'static str {
+    match conclusion {
+        Conclusion::Answered { .. } => "answered",
+        Conclusion::MaxSteps => "ran out of steps",
+        Conclusion::Aborted => "was aborted",
     }
 }
 

@@ -3469,6 +3469,24 @@ stored settings in the `development` section of `_sc_config` (§9).
   introspection query, prepared-statement description and transaction verb, and nothing has
   to be routed through a second code path to be logged.
 
+**Model calls and agent runs** ride the same ladder, because an agent's behaviour is the one
+thing in the system that cannot be read off the code. Every provider built by
+`connect_provider` is wrapped in `sc_llm::LoggedProvider`, so the agent loop, the chat socket
+and the *Test connection* button all report the same way: at **`info`**, one line per
+finished call — provider, model, request shape, stop reason, **token usage** and duration;
+at **`verbose`**, a line as the call is issued, since a model call is the longest wait in the
+system and a hanging run is otherwise indistinguishable from a slow one; at **`trace`**, the
+**whole `LlmRequest` and the whole assembled response as JSON** — the system prompt, every
+message of the history, every tool schema offered, and the answer with its reasoning, tool
+calls and arguments. What is logged is our own request value, not the vendor's wire body: it
+is the same for every backend and it is the level at which the interesting mistakes live.
+The agent loop (`sc_agent::driver`) adds its own half at the same levels — each tool call
+with its outcome and duration at `info`, its **arguments and result in full** at `trace`, and
+one closing line per run naming the run id, how it ended and how many steps it took. An API
+key appears in none of it: it lives in the adapter, and nothing on the logging path holds one.
+A `trace` log of an agent *is* a transcript of what its users typed, which is what the
+setting's help text says.
+
 Both live in **`sc-log`** (layer 0) as process-wide atomics, read by layers far below the one
 that stores them, and both are `apply`d — at boot from `connect_catalog`, and again whenever
 an admin saves the settings — so a switch takes effect on the running server rather than at

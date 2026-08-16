@@ -85,6 +85,9 @@ rust_decimal.workspace = true
 
 [dev-dependencies]
 sc-test-harness.workspace = true
+# The request log is asserted from the capture sink rather than from stderr
+# (§16).
+sc-log = { workspace = true, features = ["capture"] }
 tokio-tungstenite.workspace = true
 # Certificates for the TLS tests, generated in-process: a test must not carry a
 # checked-in key (it would expire, and a repository is not where keys live) and

@@ -181,6 +181,23 @@ pub fn log_sql<T: fmt::Debug>(sql: &str, binds: &[T]) {
     emit(Stream::Out, sql_line(sql, binds));
 }
 
+/// A duration as an operator reads one: milliseconds up to a second, then
+/// seconds.
+///
+/// Here rather than in each caller because "how long did it take" is what every
+/// log line about a slow thing ends with — a model call, an agent run, a tool —
+/// and three spellings of 2.3 seconds in one log is three things to eyeball.
+/// (A finished HTTP request keeps its own sub-millisecond format: at that scale
+/// this one would print `0ms` for most of them.)
+pub fn human_duration(elapsed: std::time::Duration) -> String {
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    if ms < 1000.0 {
+        format!("{ms:.0}ms")
+    } else {
+        format!("{:.1}s", ms / 1000.0)
+    }
+}
+
 /// How long a single bind's rendering may get before it is cut short: enough
 /// for a row's worth of text, short of a megabyte of `bytea` scrolling past.
 const MAX_BIND_CHARS: usize = 120;
@@ -227,18 +244,13 @@ enum Stream {
     Err,
 }
 
-/// Write one finished line.
-///
-/// Under `cfg(test)` the line is captured instead of printed, which is what
-/// lets this crate's own tests assert that a switch actually silences its
-/// output — the behaviour worth testing, and not one that can be checked by
-/// inspecting a formatter.
+/// Write one finished line — to the [`capture`] buffer if this thread has one,
+/// else to the stream it belongs on.
 fn emit(stream: Stream, line: String) {
-    #[cfg(test)]
-    {
-        capture::push(stream, line);
+    #[cfg(any(test, feature = "capture"))]
+    if capture::intercept(stream, &line) {
+        return;
     }
-    #[cfg(not(test))]
     match stream {
         Stream::Out => println!("{line}"),
         Stream::Err => eprintln!("{line}"),
@@ -285,53 +297,153 @@ macro_rules! log_trace {
     };
 }
 
-/// Lines this crate's tests collected instead of printing.
-#[cfg(test)]
-mod capture {
+/// Collecting log lines instead of printing them, so a **test can assert what
+/// was logged** rather than what a formatter would have produced.
+///
+/// Behind the `capture` feature, which nothing but a `[dev-dependencies]` entry
+/// should turn on: without it this module does not exist and [`emit`] is a
+/// `println!`. A crate that wants to test its own logging adds
+/// `sc-log = { workspace = true, features = ["capture"] }` to its dev
+/// dependencies and calls [`start`] at the top of the test.
+///
+/// **Per thread, and opt-in.** The buffer is a thread-local installed by
+/// [`start`], so a test captures its own lines and not those of the tests
+/// running beside it, and a thread that never started one prints as usual. An
+/// async test on tokio's current-thread runtime (`#[tokio::test]`) runs its
+/// futures on the thread that started the capture, which is why this works for
+/// a streamed model call.
+///
+/// **The switches are not per-thread, though**, so two tests in one binary that
+/// each set a verbosity will read each other's. [`guard`] is the answer and the
+/// thing to use: it takes a process-wide lock for the duration, sets the level,
+/// starts the capture, and puts everything back when it drops.
+#[cfg(any(test, feature = "capture"))]
+pub mod capture {
     use std::cell::RefCell;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use super::Stream;
+    use super::{Stream, Verbosity};
+
+    /// Taken for the whole of a test that moves the logging switches, because
+    /// the switches are the process's and the tests are not.
+    fn lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            // A test that panicked while holding it poisoned nothing that
+            // matters: the guard restores the switches on the way out either
+            // way, and refusing to run every later test because one failed
+            // would turn one red test into a binary's worth.
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Exclusive use of the logging switches, with capture on, for as long as
+    /// this is held.
+    ///
+    /// Dropping it restores the verbosity and the SQL echo to what they were and
+    /// stops capturing — including when the test panics, which is what keeps one
+    /// failure from leaving every later test in the binary at `trace`.
+    pub struct Guard {
+        /// Held for the lifetime of the guard; never read.
+        _lock: MutexGuard<'static, ()>,
+        /// The verbosity to put back.
+        verbosity: Verbosity,
+        /// The SQL echo to put back.
+        log_sql: bool,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            super::set_verbosity(self.verbosity);
+            super::set_log_sql(self.log_sql);
+            stop();
+        }
+    }
+
+    /// Take the switches, set the verbosity to `level`, and start capturing.
+    ///
+    /// ```ignore
+    /// let _log = sc_log::capture::guard(sc_log::Verbosity::Trace);
+    /// do_the_thing();
+    /// assert!(sc_log::capture::take().iter().any(|l| l.contains("…")));
+    /// ```
+    pub fn guard(level: Verbosity) -> Guard {
+        let guard = Guard {
+            _lock: lock(),
+            verbosity: super::verbosity(),
+            log_sql: super::log_sql_enabled(),
+        };
+        super::set_verbosity(level);
+        super::set_log_sql(false);
+        start();
+        guard
+    }
 
     thread_local! {
-        /// Per-thread, because the switches are per-process: a test holds the
-        /// switch lock and reads back only what its own thread emitted.
-        static LINES: RefCell<Vec<(Stream, String)>> = const { RefCell::new(Vec::new()) };
+        /// The lines this thread is collecting, or `None` when it is printing.
+        static LINES: RefCell<Option<Vec<(bool, String)>>> = const { RefCell::new(None) };
     }
 
-    /// Record one line.
-    pub(super) fn push(stream: Stream, line: String) {
-        LINES.with(|lines| lines.borrow_mut().push((stream, line)));
+    /// Start (or restart) capturing on this thread, discarding anything held.
+    pub fn start() {
+        LINES.with(|lines| *lines.borrow_mut() = Some(Vec::new()));
     }
 
-    /// Take everything recorded on this thread so far.
-    pub(super) fn take() -> Vec<(Stream, String)> {
-        LINES.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+    /// Stop capturing on this thread; later lines print again.
+    pub fn stop() {
+        LINES.with(|lines| *lines.borrow_mut() = None);
+    }
+
+    /// Take every line captured on this thread so far, in order.
+    pub fn take() -> Vec<String> {
+        taken().into_iter().map(|(_, line)| line).collect()
+    }
+
+    /// Take only the lines that went to **stdout** — the SQL echo.
+    pub fn take_stdout() -> Vec<String> {
+        taken()
+            .into_iter()
+            .filter_map(|(is_stdout, line)| is_stdout.then_some(line))
+            .collect()
+    }
+
+    /// Every captured line with the stream it was written to (`true` = stdout).
+    pub fn taken() -> Vec<(bool, String)> {
+        LINES.with(|lines| match &mut *lines.borrow_mut() {
+            Some(held) => std::mem::take(held),
+            None => Vec::new(),
+        })
+    }
+
+    /// Record `line` if this thread is capturing, answering whether it was
+    /// taken instead of printed.
+    pub(super) fn intercept(stream: Stream, line: &str) -> bool {
+        LINES.with(|lines| match &mut *lines.borrow_mut() {
+            Some(held) => {
+                held.push((stream == Stream::Out, line.to_owned()));
+                true
+            }
+            None => false,
+        })
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::time::Duration;
 
     use super::*;
 
-    /// The switches are process-wide, so the tests that move them take turns.
-    fn switches() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        set_verbosity(DEFAULT_VERBOSITY);
-        set_log_sql(false);
-        let _ = capture::take();
-        guard
+    /// The switches are process-wide, so the tests that move them take turns —
+    /// through the same guard every other crate's tests use.
+    fn switches() -> capture::Guard {
+        capture::guard(DEFAULT_VERBOSITY)
     }
 
     /// The levels a test reads back, as plain strings.
     fn lines() -> Vec<String> {
-        capture::take().into_iter().map(|(_, line)| line).collect()
+        capture::take()
     }
 
     #[test]
@@ -393,12 +505,18 @@ mod tests {
 
         set_log_sql(true);
         log_sql("SELECT * FROM \"books\" WHERE \"id\" = $1", &["Int(3)"]);
-        let logged = capture::take();
-        assert_eq!(logged.len(), 1);
         // Stdout, because it is the output somebody redirects to a file.
-        assert_eq!(logged[0].0, Stream::Out);
-        assert!(logged[0].1.contains("SELECT * FROM \"books\""));
-        assert!(logged[0].1.contains("Int(3)"), "{}", logged[0].1);
+        let logged = capture::take_stdout();
+        assert_eq!(logged.len(), 1);
+        assert!(logged[0].contains("SELECT * FROM \"books\""));
+        assert!(logged[0].contains("Int(3)"), "{}", logged[0]);
+    }
+
+    #[test]
+    fn a_duration_reads_as_milliseconds_then_seconds() {
+        assert_eq!(human_duration(Duration::from_micros(12_340)), "12ms");
+        assert_eq!(human_duration(Duration::from_millis(999)), "999ms");
+        assert_eq!(human_duration(Duration::from_millis(2_340)), "2.3s");
     }
 
     #[test]

@@ -136,3 +136,58 @@ async fn runs_statements_and_decodes_rows() -> sc_error::Result<()> {
 
     Ok(())
 }
+
+/// The SQL echo (Settings → Development, §16): with the switch on, every
+/// statement this driver sends is printed to **stdout** with its binds; with it
+/// off, nothing is.
+///
+/// Driven through the real driver rather than the renderer, because the claim
+/// is about what a *running* server prints — a statement rendered but never
+/// echoed, or echoed but never run, would both pass a test of the formatter.
+#[tokio::test]
+async fn the_sql_echo_prints_every_statement_with_its_binds() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let driver = PgDriver::from_pool(db.pool().clone());
+    driver
+        .apply_schema(&sc_db::SchemaChange::CreateTable {
+            name: "sc_log_book".into(),
+            columns: vec![
+                sc_db::ColumnDef::new("id", "int8").not_null(),
+                sc_db::ColumnDef::new("title", "text").not_null(),
+            ],
+            primary_key: vec!["id".into()],
+            unlogged: false,
+        })
+        .await?;
+
+    let insert = Insert::row(
+        "sc_log_book",
+        vec!["id".into(), "title".into()],
+        vec![
+            Expr::lit(Value::Int(1)),
+            Expr::lit(Value::Text("The Log Book".into())),
+        ],
+    );
+
+    // Off: the statement runs and says nothing. The guard holds the switches for
+    // the duration, so a test beside this one cannot turn the echo on halfway.
+    let _log = sc_log::capture::guard(sc_log::DEFAULT_VERBOSITY);
+    driver.query(&Statement::from(insert.clone())).await?;
+    let silent = sc_log::capture::take();
+    assert!(silent.is_empty(), "{silent:?}");
+
+    // On: the SQL, its bind values, and stdout — the stream somebody redirects.
+    sc_log::set_log_sql(true);
+    let select = Select::from(Source::table("sc_log_book"))
+        .columns(vec![Projection::expr(Expr::col("title"))])
+        .filter(Expr::col("id").eq(Expr::lit(Value::Int(1))));
+    driver.query(&Statement::from(select)).await?;
+    let echoed = sc_log::capture::take_stdout().join("\n");
+
+    assert!(echoed.contains("SELECT"), "{echoed}");
+    assert!(echoed.contains("sc_log_book"), "{echoed}");
+    // The values, not just their count: a statement without its parameters does
+    // not say what ran.
+    assert!(echoed.contains("Int(1)"), "{echoed}");
+    Ok(())
+}

@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 sc-error.workspace = true
+sc-log.workspace = true
 # `FormField` for a backend's declared configuration, `Attrs` for the values,
 # and `redact_attrs`/`merge_secrets` for the API key (§11.1) — the one
 # vocabulary every configurable extension point speaks (§6.2).
@@ -45,6 +46,9 @@ reqwest.workspace = true
 # listener that stub binds; the rest of the workspace's tokio features are
 # already on.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+# The call log's own tests assert what was *printed*, which needs the capture
+# sink rather than a formatter's return value (§16).
+sc-log = { workspace = true, features = ["capture"] }
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true

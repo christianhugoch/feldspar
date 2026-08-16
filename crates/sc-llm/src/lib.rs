@@ -17,6 +17,10 @@
 //!   streaming and non-streaming shapes meet.
 //! - Two **adapters** ([`openai`], [`anthropic`]) over `rig-core`, sharing one
 //!   translation module ([`rig_bridge`]).
+//! - The **call log** ([`logging`]): every configured provider is wrapped in a
+//!   [`LoggedProvider`], so a model call reports itself — a summary line with
+//!   its token cost at `info`, and the whole request and response at `trace`
+//!   (§16).
 //! - The **configured entity** ([`def`], [`storage`]): [`LlmProviderDef`],
 //!   the backend registry, `_sc_llm_providers`, and [`connect_provider`] — a
 //!   provider is a named record an admin fills in, exactly as a file store is.
@@ -37,6 +41,7 @@
 
 pub mod anthropic;
 pub mod def;
+pub mod logging;
 pub mod message;
 pub mod openai;
 pub mod provider;
@@ -48,6 +53,7 @@ pub use def::{
     OPENAI_RESPONSES_BACKEND, anthropic_config_spec, connect_provider, openai_config_spec,
     provider_config_spec, registered_backends, validate_provider_config,
 };
+pub use logging::{LoggedProvider, request_summary, response_summary};
 pub use message::{
     AssistantMessage, LlmDelta, LlmMessage, LlmRequest, StopReason, ToolCall, ToolSpec, Usage,
 };

@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 sc-error.workspace = true
+sc-log.workspace = true
 # `FormField` for a trait's declared configuration and `Attrs` for the values —
 # the vocabulary every configurable extension point in the tree speaks (§6.2).
 sc-types.workspace = true
@@ -53,6 +54,8 @@ testing = []
 
 [dev-dependencies]
 sc-agent = { workspace = true, features = ["testing"] }
+# The loop's own log lines are asserted from the capture sink (§16).
+sc-log = { workspace = true, features = ["capture"] }
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true

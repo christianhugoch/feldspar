@@ -301,16 +301,26 @@ pub fn connect_provider(def: &LlmProviderDef, model: Option<&str>) -> Result<Arc
         })?,
     };
 
-    match def.backend.as_str() {
-        OPENAI_RESPONSES_BACKEND => Ok(Arc::new(OpenAiResponses::new(base_url, api_key, model)?)),
-        ANTHROPIC_BACKEND => Ok(Arc::new(Anthropic::new(base_url, api_key, model)?)),
+    // Every connected provider is wrapped in the call log (§16): this is the one
+    // place a stored record becomes something callable, so wrapping here is what
+    // makes "every model call this server makes" true of the log — the agent
+    // loop, the chat socket and the test-connection button all arrive through
+    // this function.
+    let connected: Arc<dyn LlmProvider> = match def.backend.as_str() {
+        OPENAI_RESPONSES_BACKEND => Arc::new(OpenAiResponses::new(base_url, api_key, model)?),
+        ANTHROPIC_BACKEND => Arc::new(Anthropic::new(base_url, api_key, model)?),
         // Unreachable while `validate_provider_config` runs first; kept so
         // adding a backend to the registry without adding it here is a clear
         // error rather than a fallthrough.
-        other => Err(Error::config(format!(
-            "LLM provider backend `{other}` declares settings but cannot be connected"
-        ))),
-    }
+        other => {
+            return Err(Error::config(format!(
+                "LLM provider backend `{other}` declares settings but cannot be connected"
+            )));
+        }
+    };
+    Ok(Arc::new(crate::logging::LoggedProvider::new(
+        connected, &def.name,
+    )))
 }
 
 #[cfg(test)]
