@@ -80,14 +80,18 @@ const OPTIONS: ts.CompilerOptions = {
  * pull `node:fs` into a suite whose only other dependency is the code under
  * test, and the compiler takes a host, so there is no reason to.
  */
-function check(body: string, tables: TableInfo[] = TABLES): string[] {
-  const files: Record<string, string> = {
+function sandboxFiles(body: string, tables: TableInfo[]): Record<string, string> {
+  return {
     "sandbox.d.ts": codeLibrary(tables, { table: "invoices", event: "insert" }),
     // A code body is the inside of a function: `return` at the top level is what
     // the action runs, so it is wrapped for the compiler exactly as the runtime
     // wraps it.
     "body.js": `function __body() {\n${body}\n}\n`,
   };
+}
+
+function check(body: string, tables: TableInfo[] = TABLES): string[] {
+  const files = sandboxFiles(body, tables);
   // The installed TypeScript's own library files, by the absolute path it
   // reports for them.
   const defaultLib = ts.getDefaultLibFilePath(OPTIONS);
@@ -112,6 +116,103 @@ function check(body: string, tables: TableInfo[] = TABLES): string[] {
     .getPreEmitDiagnostics(program)
     .map((d) => ts.flattenDiagnosticMessageText(d.messageText, " "));
 }
+
+/** The names a completion list offers immediately after `expression`.
+ *
+ * `check` above asks whether a finished body is *true*; this asks the question
+ * an admin actually asks, which is what appears when they stop typing at a dot.
+ * The two are not the same property — declarations can type-check a body written
+ * from the reference and still offer nothing useful to someone writing one — and
+ * the editor reaches the answer through this same language service, so it can be
+ * asserted here rather than only in a browser.
+ *
+ * `db.` is not valid JavaScript, which is the point: the file is mid-edit, and
+ * the service answers over a tree with an error in it exactly as it does in the
+ * editor.
+ */
+function completionsAfter(expression: string, tables: TableInfo[] = TABLES): string[] {
+  const files = sandboxFiles(expression, tables);
+  const defaultLib = ts.getDefaultLibFilePath(OPTIONS);
+  const host: ts.LanguageServiceHost = {
+    getScriptFileNames: () => Object.keys(files),
+    getScriptVersion: () => "1",
+    getScriptSnapshot: (name) => {
+      const text = files[name] ?? ts.sys.readFile(name);
+      return text === undefined ? undefined : ts.ScriptSnapshot.fromString(text);
+    },
+    getCurrentDirectory: () => "",
+    getCompilationSettings: () => OPTIONS,
+    getDefaultLibFileName: () => defaultLib,
+    fileExists: (name) => name in files || ts.sys.fileExists(name),
+    readFile: (name) => files[name] ?? ts.sys.readFile(name),
+  };
+  const service = ts.createLanguageService(host);
+  const source = files["body.js"];
+  const info = service.getCompletionsAtPosition(
+    "body.js",
+    source.indexOf(expression) + expression.length,
+    {},
+  );
+  return info === undefined ? [] : info.entries.map((entry) => entry.name);
+}
+
+describe("what the editor offers at a dot", () => {
+  it("offer this server's tables after `db.`", () => {
+    const names = completionsAfter("db.");
+    expect(names).toContain("invoices");
+    expect(names).toContain("people");
+    // The two ways in that are not a table: an escape hatch for a name this UI
+    // did not know about, and the authority the query runs under.
+    expect(names).toContain("table");
+    expect(names).toContain("asUser");
+    expect(names).toContain("asAdmin");
+    // A query's methods are a query's, not the database's.
+    expect(names).not.toContain("rows");
+  });
+
+  it("offer the trigger table's own columns after `row.`", () => {
+    const names = completionsAfter("row.");
+    expect(names).toEqual(expect.arrayContaining(["id", "amount", "paid", "due", "customer"]));
+    // `row` is the invoices row, so nothing from the table it points at.
+    expect(names).not.toContain("email");
+  });
+
+  it("offer the chain after a table, and the terminals with it", () => {
+    const names = completionsAfter("db.invoices.");
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "where",
+        "select",
+        "orderBy",
+        "limit",
+        "offset",
+        "asUser",
+        "rows",
+        "first",
+        "get",
+        "count",
+        "sum",
+        "exists",
+        "insert",
+        "update",
+        "delete",
+      ]),
+    );
+  });
+
+  it("keep offering the chain once a query has been narrowed", () => {
+    const names = completionsAfter("db.invoices.where({ paid: false }).");
+    expect(names).toEqual(expect.arrayContaining(["orderBy", "limit", "rows", "update", "delete"]));
+  });
+
+  it("offer a table's column names where a column name is being written", () => {
+    // The string-literal union is what makes `orderBy("` useful; without it the
+    // admin is typing a column name from memory.
+    const names = completionsAfter('db.invoices.orderBy("');
+    expect(names).toContain("amount");
+    expect(names).toContain("customerⱵemail");
+  });
+});
 
 describe("the types the code editor loads", () => {
   it("type-check the milestone's own example body", () => {

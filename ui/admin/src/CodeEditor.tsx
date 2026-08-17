@@ -76,6 +76,27 @@ async function loadMonaco(): Promise<Monaco> {
   return monaco;
 }
 
+/** Start the TypeScript worker and hand it the model, without waiting for a
+ * question.
+ *
+ * The worker is a 6 MB script that builds a program before it can answer
+ * anything, and nothing starts it until something asks — so the first `.` an
+ * admin types is also the request that pays for all of that, and the suggest
+ * widget shows the word-based guesses in the meantime. Asking for nothing here
+ * moves that wait to the moment the editor appears, which nobody is watching.
+ * The declarations that arrive later are pushed to the running worker by Monaco
+ * itself (`onDidExtraLibsChange`), so warming early does not mean warming it
+ * without them. */
+function warmLanguageService(monaco: Monaco, editor: Editor): void {
+  const model = editor.getModel();
+  if (!model) return;
+  void monaco.languages.typescript
+    .getJavaScriptWorker()
+    .then((worker) => worker(model.uri))
+    // A worker that will not start costs the wait, not the editor.
+    .catch(() => undefined);
+}
+
 /** Monaco, loaded once per page however many code settings a form has. */
 let monacoOnce: Promise<Monaco> | null = null;
 function monacoModule(): Promise<Monaco> {
@@ -165,6 +186,7 @@ export function CodeEditor({
           scrollbar: { alwaysConsumeMouseWheel: false },
         });
         editor.current = instance;
+        warmLanguageService(monaco, instance);
         instance.onDidChangeModelContent(() => {
           change.current(instance.getValue());
         });

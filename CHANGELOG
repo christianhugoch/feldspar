@@ -41,6 +41,18 @@ generated declarations against the milestone's own example body with `checkJs`
 on, so a chain method that returns the wrong builder is a failing test rather than
 a wrong completion.
 
+**The language service is started before anything asks it a question.** The
+TypeScript service lives in a 6 MB worker that builds a program before it can
+answer, and nothing starts it until the first request — so the first `.` an admin
+typed paid for all of it, showing the word-based guesses from the document in the
+meantime, which is indistinguishable from completions that do not work. The
+editor now hands the model to the worker as soon as it is created; the
+declarations that arrive later with the catalog are pushed to the running worker
+by Monaco itself. The suite asks what an admin asks — the names offered after
+`db.`, `row.`, `db.invoices.` and `orderBy("` — through that same language
+service, because declarations can type-check a finished body and still offer
+nothing useful to someone halfway through writing one.
+
 **One CSP relaxation, named in the policy.** Monaco writes the theme that colours
 the syntax into a `<style>` element it creates at runtime and offers no nonce hook
 to sign it with, so the admin policy is now `style-src 'self' 'unsafe-inline'`.
