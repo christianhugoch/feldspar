@@ -1,366 +1,428 @@
-# Saltcorn v2 — Email: settings, interpolation, and a button that sends one
+# Saltcorn v2 — Tables in code: `db` in `run_js_code`
 
-Ordered, checkable task list for the tenth milestone after the MVP. Earlier lists are
-archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
-[docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
-[docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
-rich types and File fields), [docs/TODO-post-mvp-3.md](./docs/TODO-post-mvp-3.md) (ownership
+Ordered, checkable task list for the eleventh milestone after the MVP. Earlier lists are
+archived in [docs/TODO-mvp.md](./TODO-mvp.md) (the MVP),
+[docs/TODO-post-mvp-1.md](./TODO-post-mvp-1.md) (file stores + the React framework),
+[docs/TODO-post-mvp-2.md](./TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
+rich types and File fields), [docs/TODO-post-mvp-3.md](./TODO-post-mvp-3.md) (ownership
 formulae, calculated fields and row-level security),
-[docs/TODO-post-mvp-4.md](./docs/TODO-post-mvp-4.md) (actions and triggers),
-[docs/TODO-post-mvp-5.md](./docs/TODO-post-mvp-5.md) (the file-store IDE),
-[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md) (agents),
-[docs/TODO-post-mvp-7.md](./docs/TODO-post-mvp-7.md) (the GraphQL provider),
-[docs/TODO-post-mvp-8.md](./docs/TODO-post-mvp-8.md) (REST queries, custom SQL and the
-generated client) and [docs/TODO-post-mvp-9.md](./docs/TODO-post-mvp-9.md) (table constraints
-and indexes); scope and rationale remain in [docs/GOALS.md](./docs/GOALS.md) and
-[docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md).
+[docs/TODO-post-mvp-4.md](./TODO-post-mvp-4.md) (actions and triggers),
+[docs/TODO-post-mvp-5.md](./TODO-post-mvp-5.md) (the file-store IDE),
+[docs/TODO-post-mvp-6.md](./TODO-post-mvp-6.md) (agents),
+[docs/TODO-post-mvp-7.md](./TODO-post-mvp-7.md) (the GraphQL provider),
+[docs/TODO-post-mvp-8.md](./TODO-post-mvp-8.md) (REST queries, custom SQL and the generated
+client) and [docs/TODO-post-mvp-9.md](./TODO-post-mvp-9.md) (table constraints and indexes);
+the tenth (email) is in [TODO.md](../TODO.md) until it is archived. Scope and rationale
+remain in [docs/GOALS.md](./GOALS.md) and
+[docs/TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md).
 
-This milestone closes **open question §18.2** ("how v2 renders and sends email") for the case
-that matters first, and builds the four facilities it needs on the way: SMTP settings, a
-central `{{ }}` interpolation facility, a `send_email` action, and a trigger a **row** can be
-run against from an application's own API.
+This milestone gives `run_js_code` **tables**. Today the action is deliberately pure: no host
+API, so a code body can compute over the event and nothing else. That bound was the right one
+to ship with and is the wrong one to keep — the escape hatch that cannot read a row is an
+escape hatch for arithmetic. What lands here is the seam §15's `sc-code` adapters were always
+going to need, arrived at from the one guest language the server already runs.
 
-**Milestone definition of done:** an admin opens **Settings → Email**, types their SMTP host,
-port, credentials and from-address, presses **Send test email** and receives one. A developer
-adds a trigger — no intrinsic event, on the `orders` table — running `send_email` configured
-with `{{ customerⱵemail }}` as the recipient, `Receipt for order {{ id }}` as the subject and
-an HTML body interpolating the row; they tick it in their application's exposed triggers. In
-the app's React UI a button does
+**Milestone definition of done:** an admin writes a trigger whose `run_js_code` body reads,
+joins, aggregates and writes —
 
-```tsx
-await api.runEmailReceipt({ id: order.id });
+```js
+const overdue = db.invoices
+  .where({ paid: false, due: { lt: payload.today } })
+  .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
+  .orderBy("due")
+  .limit(50)
+  .rows();
+
+for (const inv of overdue) {
+  db.reminders.insert({ invoice: inv.id, sent_to: inv.customerⱵemail });
+}
+return { chased: overdue.length, owed: db.invoices.where({ paid: false }).sum("amount") };
 ```
 
-and the customer gets the receipt — with the order's own values in it, sent only if the
-signed-in caller was allowed to *read* that order, and refused with the trigger's own
-`min_role` if they were not.
-
-**One interpolation facility, one formula language.** A `{{ }}` token is an
-[`sc_expr::Formula`](crates/sc-expr/src/formula.rs) — the same parser, the same
-`SchemaShape` validation, the same evaluator, the same Ⱶ-join prefetching as an ownership
-formula or a trigger's `only_if`. Templates are not a second expression language that happens
-to look like the first.
+— presses **Run**, and the rows are there. The same body written with `db.asUser()` reads
+exactly what the person who caused the event may read and no row more, refusing a write their
+ownership formula does not grant. Every `.insert()` fires the table's own triggers, is bounded
+by the cascade depth guard, and a body that forgets a `.limit()` on a million-row table gets a
+named error rather than an isolate that dies.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ---
 
-## Decisions taken up front
+## The specification
 
-1. **The template facility lives in `sc-expr`, and a token is a formula.** `Template::parse`
-   splits a string into literal runs and `{{ }}` tokens and hands each token to
-   `Formula::parse`. The consequences are the reason: a template **validates at save time**
-   against the same `SchemaShape` a trigger's `only_if` does, so a subject naming a field that
-   does not exist is refused in front of the admin rather than at 3am; its free variables come
-   out of the existing `Analysis`, so `{{ customerⱵemail }}` is prefetched by the *same*
-   `sc_catalog::prefetch_bindings` that resolves a Ⱶ-path anywhere else; and rendering is the
-   one `JsEvaluator`, so `{{ price * quantity }}` means in an email exactly what it means in a
-   calculated field. Saltcorn 1 has an interpolator and a formula evaluator with two different
-   scopes and two different failure modes; this is one thing.
-2. **v1's three sigils, kept exactly.** `{{ x }}` renders HTML-escaped, `{{! x }}` renders raw,
-   `{{= x }}` renders the value *and then interpolates it again* in the same scope — the
-   behaviours asserted in `packages/saltcorn-data/tests/calc.test.ts:1355–1384`, down to
-   `null`/`undefined` rendering as the empty string and everything else through its string
-   form. A v1 application's templates are the corpus this has to accept, and the sigils are
-   cheap to keep. Two deliberate departures: re-interpolation is **bounded** (v1's is not, and
-   a row whose field holds `{{= self }}` loops forever), and what a token may *name* is the v2
-   formula language, checked on save.
-3. **Escaping is a property of the render, not only of the sigil.** `Template::render_html`
-   escapes bare tokens; `Template::render_text` does not. A subject line put through the HTML
-   rule turns `Tea & Coffee` into `Tea &amp; Coffee`, and a `text/plain` body becomes a page of
-   entities — so the recipient list, the subject and the text body render as text and the HTML
-   body renders as HTML. `{{! }}` and `{{= }}` mean the same in both.
-4. **A missing binding is an error, not an empty string.** v1 evaluates a token in a sandbox
-   where an unknown name is `undefined` and renders it blank; here the name was already
-   classified against the schema when the trigger was saved, so the only way to reach a render
-   with an unresolvable name is a schema that changed underneath — which every other part of
-   this system reports rather than absorbs (an invalid `only_if` drops its trigger from the
-   live set with a reason). A **null column value** is still the empty string: that is data,
-   not a mistake.
-5. **SMTP settings are ordinary declared config keys**, in `sc-config` beside `ssl.rs`, so the
-   settings screen renders them with no code that knows what an SMTP port is (§6.2's "settings
-   as data"). The password is a `secret` like the TLS private key — redacted on read, and a
-   save that posts the sentinel back keeps what is stored — and, like it, is *not* encrypted at
-   rest; saying so is better than implying a protection a database dump would disprove.
-6. **The Settings screen's tabs become one per declared section**, plus Backup. The tab list is
-   the one place in that screen that knows a section by name (`ssl`, hard-coded), and adding
-   Email under a tab labelled "SSL" is the answer that arrangement gives. Saving stays **one
-   act** over the whole bag of settings — the tabs partition the display, not the transaction,
-   because the server validates settings together and a per-tab save would let half a
-   configuration be applied.
-7. **The transport is a trait with one implementation.** `sc-email` (layer 6, beside `sc-llm`)
-   holds `Mailer`, an `SmtpMailer` over [`lettre`](https://lettre.rs), and a recording mailer
-   for tests. The trait is not speculation: it is what lets the action's tests assert *what
-   would have been sent* without an SMTP server, and it is the seam OAuth2/Graph transports and
-   the system emails (verification, password reset) plug into later. Everything that sends mail
-   goes through it, so switching providers stays a configuration change.
-8. **A trigger may be run against a row.** `EventKind::None` — "no intrinsic occurrence; runs
-   when something asks" — gains an optional **channel**, a table, meaning *this trigger is run
-   against one row of it*. That is the whole shape of a row button: the action's templates read
-   `row` and its join fields exactly as they would in an `update` trigger, and nothing about
-   the action, the scope rule or the validation is special-cased for buttons.
-9. **The caller posts a key, not a row.** The run endpoint takes the **primary key** and the
-   row is read server-side, through `ownership::read_row_values_as` under the *caller's*
-   authority. A posted row would let anyone with permission to press the button choose the
-   recipient address and the contents of the email — the row is the one part of this the client
-   must not author. It also means the read is the second gate: a caller who cannot see the
-   order cannot email it, which is what makes a trigger with a low `min_role` safe to expose at
-   all.
-10. **The row is read above `sc-action`, and handed down.** `TriggerDispatcher` lives at layer
-    6 and the ownership-aware read lives at layer 8, so the dispatcher takes the row it is to
-    run against as a parameter and its two callers — the REST provider's `run_trigger` and the
-    admin API's `runTrigger` — do the read. The layering is not the only reason: it puts the
-    authority decision in the two places that *have* a caller, rather than in the one that
-    would have to be told about one.
-11. **Authorization is unchanged.** A trigger is callable from an application because that
-    application *names* it, and at the role floor the trigger itself declares, admin when it
-    declares none. This milestone adds a way to pass a row, not a way to reach a trigger nobody
-    exposed.
-12. **Sending is synchronous, and a failure is the button's answer.** No outbox, no retry
-    queue: the caller pressed a button and is waiting, an SMTP failure they can see ("connection
-    refused", "relay denied") is worth more than a silent retry, and a queue with delivery
-    guarantees is a milestone, not a paragraph. The action's error names the trigger and the
-    setting the way every other action's does.
+### 1. What is bound
+
+One binding is added to the `run_js_code` scope, beside `row`, `old`, `user` and `payload`:
+
+```js
+db.table("invoices")   // the general form — any table name
+db.invoices            // sugar: a Proxy over the same call
+```
+
+`db` exists **only** in a code body. A formula — an ownership formula, an `only_if`, a
+calculated field, a `{{ }}` token — evaluates in the pure isolate it always did, where
+`typeof db === "undefined"` and there are no ops at all.
+
+### 2. Reading
+
+Chain methods are pure and return a new builder; **terminals execute**. The chain mirrors
+[`sc_query::Select`](../crates/sc-query/src/statement.rs) field for field — `filter`,
+`columns`, `order`, `limit`, `offset`, `group`, `having` — and the terminals reuse the names
+the Ↄ-aggregation chains already have in the formula language.
+
+```js
+const rows = db.books
+  .where({ author: "Woolf", pages: { gt: 200 } })
+  .select("id", "title", "publisherⱵname")
+  .orderBy("published", "desc")
+  .limit(10)
+  .offset(20)
+  .rows();
+```
+
+| chain method | meaning |
+| --- | --- |
+| `.where(cond)` | restrict; repeated calls **AND** |
+| `.select(...cols)` | projections: field names, Ⱶ-paths, and `{ alias: "formula" }` objects |
+| `.orderBy(field, dir?)` | `"asc"` (default) or `"desc"`; repeated calls append keys |
+| `.limit(n)` / `.offset(n)` | the bound |
+| `.groupBy(...fields)` | grouping (phase 6) |
+| `.asUser()` / `.asAdmin()` | authority (§5) |
+
+| terminal | result |
+| --- | --- |
+| `.rows()` | array of row objects |
+| `.first()` | one row object or `null` (`LIMIT 1`) |
+| `.get(pk)` | the row with that primary key, or `null` |
+| `.count()` | number |
+| `.sum(f)` `.avg(f)` `.min(f)` `.max(f)` | value or `null`; `f` is a field name or a formula |
+| `.exists()` | boolean |
+| `.insert(v)` `.update(v)` `.delete()` | writes (§4) |
+
+### 3. The two spellings of a filter, and formula projections
+
+`where` takes **either** the object DSL every other surface already speaks — the REST query
+string, the GraphQL `where`, the agent tools — **or** a formula string, which is what the
+`update_rows` and `delete_rows` actions take:
+
+```js
+.where({ status: "draft", pages: { gte: 100 }, id: { in: [1, 2, 3] } })
+.where('status === "draft" && ordersↃcustomer.length > 3')
+```
+
+Both lower to one [`sc_query::Expr`](../crates/sc-query/src/expr.rs) through the one
+vocabulary in [`sc_api::filter`](../crates/sc-api/src/filter.rs), so `eq`, `is_null`,
+`like` and the rest mean in a code body exactly what they mean in a URL. The object form
+grows `and`, `or` and `not` keys **in that shared module**, so the REST, GraphQL and agent
+filters gain them at the same moment and by the same code:
+
+```js
+.where({ or: [ { status: "draft" }, { and: [ { status: "sent" }, { paid: false } ] } ] })
+```
+
+A projection may be a formula, which is where joins and child aggregations enter a select:
+
+```js
+db.customers.select(
+  "id", "name",
+  { city:  "addressⱵcity" },                       // Ⱶ  → correlated scalar subquery
+  { spend: "ordersↃcustomer.sum(o => o.total)" },  // Ↄ  → correlated aggregate subquery
+  { net:   "price * (1 - discount)" },             // an ordinary expression
+).rows();
+```
+
+Each is an [`sc_expr::Formula`](../crates/sc-expr/src/formula.rs): parsed by `Formula::parse`,
+validated against the catalog's `SchemaShape`, translated by `translate_value`, and projected
+as a `RowQuery::extra` column — the same path a GraphQL `manager { email }` and a
+non-stored calculated field already take. **There is one expression language**, and this is
+it; a formula the translator refuses (one that needs the JS evaluator) is an error naming it
+and saying to compute it in the code body instead, which costs the author nothing because the
+code body is JavaScript.
+
+`.sum("qty * price")`, `.orderBy("customerⱵname")` and a Ⱶ-path in a `where` key resolve the
+same way.
+
+### 4. Writing
+
+```js
+const created = db.books.insert({ title: "Orlando", author: "Woolf" });   // → the written row
+const many    = db.books.insert([ { … }, { … } ]);                        // → array of rows
+const upd     = db.books.where({ author: "Woolf" }).update({ shelf: 3 }); // → { updated: 2, ids: [3, 7] }
+const del     = db.books.where({ id: 7 }).delete();                       // → { deleted: 1, ids: [7] }
+```
+
+- `.update()` or `.delete()` **with no `.where()` throws**. A whole table rewritten or emptied
+  is not something an omitted call should be able to cause — §10.1 refuses exactly this on the
+  `update_rows` and `delete_rows` actions, at save time, and the reason does not change when
+  the caller is a code body.
+- `{ updated, ids }` / `{ deleted, ids }` is the shape those two actions already return.
+- Writes go through the row layer (`rows::create_row_ctx` / `update_row_ctx` /
+  `delete_row_ctx`), so they are coerced against their columns, validated, File-field-checked,
+  and **observed by triggers**. A write from a code body is an event like any other: it
+  carries this trigger's chain, so `Event::firing`'s cascade bound applies and a body that
+  writes the table that fired it is stopped where any other action would be.
+- A bulk update or delete resolves its matched rows first and then writes them **one at a
+  time through the row layer**, exactly as `update_rows` does — the events are the point.
+
+### 5. Authority: admin by default, `asUser()` to delegate
+
+**By default a code body's reads and writes are the admin's**, carrying the event's user.
+This is the rule `rows_scope.rs` already states for `insert_row`/`update_rows`/`delete_rows`:
+a trigger is server-side configuration, and an audit row the caller may not insert is the
+archetype of what a trigger exists to write. Concretely: a `CallerContext` at `ROLE_ADMIN`
+— which clears every RLS policy's role floor, as the admin API's own row editor does — with
+the event's user still attached, so a policy that reads `user` sees who caused it.
+
+**`asUser()` delegates to the caller instead**, and is available on the handle, on a table and
+on a query; it sets one field of the plan, so where it appears in the chain does not matter:
+
+```js
+db.asUser().invoices.where({ paid: false }).rows();   // the whole handle
+db.invoices.asUser().where({ paid: false }).rows();   // one table
+db.invoices.where({ paid: false }).asUser().rows();   // one query
+db.invoices.asAdmin().insert({ … });                  // the default, said out loud
+```
+
+Under `asUser()` every operation goes through
+[`sc_api::ownership`](../crates/sc-api/src/ownership.rs)'s
+`read_rows_as` / `aggregate_values_as` / `insert_row_as` / `update_row_as` / `delete_row_as`
+at the event's own role and user — §7.3's rule, the same functions the agent tools use, with
+no second implementation of "meets the floor OR the formula grants it" to be subtly wrong.
+Which means, without this milestone writing any of it:
+
+- a read is narrowed to the rows the ownership formula grants, translated into the `WHERE`
+  where it can be and evaluated row by row where it cannot;
+- an update is checked **twice** — on the row as it is and on the row as it would become — so
+  it cannot move a row out of the caller's own ownership;
+- a row the formula withholds is the same **not found** an absent row gets, so a delegated
+  read cannot become a way to probe which rows exist;
+- an RLS-enforced table is read and written inside a caller-context transaction and the
+  database's own policies decide.
+
+The event's caller is what it delegates to, and events differ: a table event or a
+directly-run trigger carries the user who caused it; a **scheduled** or **startup** trigger
+carries nobody, so `asUser()` there reads as the public role. That is the honest answer to
+"on whose behalf" rather than an error — and it is why `asAdmin()` is the default.
+
+A denial is an `Error::auth` thrown into the code body with its own message, catchable like
+any other, so a body may try a delegated write and fall back.
+
+One asymmetry to state rather than hide: a delegated **aggregate** over a table whose
+ownership formula the translator refuses is an error (`aggregate_guard` will not fall back to
+the evaluator — an aggregate over rows it cannot filter would silently count rows the caller
+may not see). The message says to read the rows and aggregate in the code body.
+
+### 6. Results, errors and bounds
+
+- **Rows are the REST wire shape** — `sc_api::convert::value_to_json` — so a row means the
+  same thing in `db.books.rows()` as it does over HTTP: a Decimal is exact, a Date is ISO.
+- **Nothing reaches SQL as text.** A chain builds a plain plan object; the host resolves every
+  table, column and join path through the catalog and lowers to a `Statement` whose literals
+  are parameterised on render. There is **no raw-SQL escape hatch** in `db` (an admin who
+  wants one has §13.4's custom SQL queries, which are governed).
+- **The API is synchronous.** Nothing in the sandbox is awaitable today and nothing here
+  changes that: `db.books.rows()` returns rows, not a Promise. A body that returns a Promise
+  is still refused rather than stringified.
+
+Three bounds, each with its own named error:
+
+| bound | default | why |
+| --- | --- | --- |
+| rows per read | 1000 | a read is materialised into the isolate; an unbounded `.rows()` on a large table is an OOM, not a slow query. The error says to add `.limit()`. |
+| host calls per run | 200 | an accidental N+1 loop must not hammer the database quietly. |
+| wall clock per run | 5 s, `timeout_ms` on the action, hard max 60 s | a trigger runs inside the request or the write that fired it, so an unbounded body is an unbounded hold on that caller — the bound `fetch` already keeps, for the same reason. |
+
+**No transactions in this milestone.** Each statement autocommits, as every action's writes do
+today; a body that fails half way leaves the writes it already made, and its events have
+already gone out. `db.transaction(fn)` is a later addition (the row layer's
+`Executor::Transaction` is the seam it will use) and is out of scope here — see the end.
+
+### 7. The host plan (the language-neutral seam)
+
+The fluent surface is JavaScript; what crosses into Rust is one plain JSON object per
+terminal, which is what makes this the seam §15's other adapters implement rather than a
+JavaScript feature:
+
+```json
+{
+  "op": "select",
+  "table": "invoices",
+  "authority": "admin",
+  "where": { "paid": false, "due": { "lt": "2026-08-17" } },
+  "select": [ "id", "amount", "customerⱵemail",
+              { "alias": "chased", "formula": "remindersↃinvoice.length" } ],
+  "order":  [ { "field": "due", "dir": "asc" } ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+`op` is `select` | `aggregate` | `insert` | `update` | `delete`; `where` is either the object
+DSL or `{ "formula": "…" }`; `aggregate` carries `[{ "alias", "fn", "arg" }]` and `group`
+carries the grouping fields (phase 6); `values` carries an insert's row(s) or an update's
+assignments. Every terminal is one plan and one round trip.
 
 ---
 
-## Phase 1 — The interpolation facility (`sc-expr`, `sc-action`)
+## Decisions taken up front
 
-- [x] **`sc-expr::template`**: `Template::parse(&str)` → literal runs and `{{ }}` tokens, each
-      token an `Escape` (`Html` for a bare token, `Raw` for `!`, `Reinterpolate` for `=`) plus a
-      `Formula`. A string with no `{{` parses to a single literal, which is the common case and
-      must cost nothing. An unclosed `{{` is an error naming the offending fragment.
-- [x] **`Template::validate(shape, table)`** → one `Analysis` per token, so the caller gets the
-      free variables (Ⱶ-paths and Ↄ-relations included) it must prefetch, and an unknown
-      identifier is an error naming the identifier *and the token it is in*.
-- [x] **`Template::render_html` / `render_text`** over a `JsEvaluator` and the bindings a
-      formula takes (bare row, `row`/`old`/`payload`, `user`): tokens evaluated in order,
-      `null`/`undefined` → `""`, everything else stringified, HTML-escaped or not per decision
-      3. `{{= }}` escapes and then re-interpolates its result, **bounded at 5 passes**, with an
-      error naming the template when the bound is hit.
-- [x] **`sc-action::check_template` and `render_event_template`**, the template twins of
-      `check_formula` and `event_formula_value` — one place where an action's template is
-      validated in the event's scope, and one where it is rendered against the event with every
-      Ⱶ-path **prefetched** (`prefetch_bindings`, as `only_if` already does in `dispatch.rs`).
-      Today's `event_formula_value` does *not* prefetch, which is why this is a new helper and
-      not a call site. A template's bare scope is the event's **row** (`template_scope`), not
-      the empty `EVENT_SCOPE` a configured formula ranges over: `{{ id }}` is how a subject
-      line is written, and one row is in view.
-- [x] **`EventBindings` binds `row` when the event *has* one**, rather than when its kind is a
-      table event — the change decision 8 needs, and the honest rule either way.
-- [x] Tests (`sc-expr`, unit): the v1 cases, transcribed — `"hello {{ x }}"` with `{x:1}`,
-      `{{ x+1 }}`, `{{ x }}` over `<script>` escaped, `{{! x }}` not, and the reinterpolation
-      case (`{{= greeter }}` where `greeter` is `"Hello {{ firstName }}!"` renders
-      `"Hello John!"`); plus what v1 does not answer: text mode leaves `&` alone, a token naming
-      a field the shape does not have is refused by `validate`, and a self-referential `{{= }}`
-      is refused by the bound rather than hanging.
+1. **A code body gets its own runtime, separate from the formula isolate.** The evaluator
+   today is one V8 isolate on one thread serving every ownership check in the process, with
+   no ops and a 250 ms watchdog. Giving *that* isolate a blocking host call would put every
+   authorization decision on the server behind whatever a trigger's code is doing — and
+   worse, it would **deadlock** the moment a delegated read's ownership formula needs the JS
+   evaluator, because the thread waiting for the host call is the thread the formula would
+   have to run on. So `CodeRuntime` is a small pool of isolates of its own (one op, its own
+   watchdog, its own longer timeout) and `DenoEvaluator`'s stays pure. This is not
+   scaffolding for this milestone: it is the runtime §15's JS adapter needs.
+2. **The host call is synchronous, and blocks a code thread.** The op blocks its own isolate
+   thread on the host's reply (`Handle::block_on`, legal because a code thread is not a
+   tokio runtime thread) rather than making the guest API awaitable. Two consequences, both
+   wanted: the guest language stays plain synchronous JavaScript, which is what an admin
+   writing five lines in a form expects; and the thread that is blocked is one of a small
+   pool nothing else depends on.
+3. **`sc-expr` does not learn what a table is.** It sits below `sc-catalog` and `sc-api`, and
+   it stays there: the runtime knows only a `CodeHost` trait taking JSON and returning JSON.
+   The table knowledge — catalog lookups, formula translation, the row layer, the §7.3 rule —
+   lives in `sc-api`, where all of it already is.
+4. **The fluent surface is written in JavaScript, not generated from Rust.** The builder, the
+   plan objects and the terminals are a prelude; Rust sees plans. Adding `.orderBy` later
+   touches no Rust, and the same plans serve Python when §15 gets there.
+5. **The prelude is built per run and cannot be poisoned.** Runs share an isolate, so a body
+   that assigns to a global is visible to the next one. `db` is therefore constructed fresh
+   inside each run's function scope, and the op handle and run wrapper are installed as
+   non-writable, non-configurable globals. (Tampering could never *escalate* — the host
+   re-validates every plan against the catalog and the authority — but a body that breaks the
+   next trigger's `db` would be a bug nobody could find.)
+6. **Admin by default, `asUser()` to delegate** — §5 above. Stated as a decision because the
+   alternative is defensible and rejected: running as the event's user by default would make a
+   trigger unable to write the audit row it exists to write, and would make the authority of a
+   trigger depend on who happened to touch a row.
 
-## Phase 2 — Email settings, and the Email tab
+---
 
-- [x] **`sc-config::email`**: `smtp_host`, `smtp_port` (default 587), `smtp_security`
-      (`starttls` | `tls` | `none`, default `starttls`), `smtp_username`, `smtp_password`
-      (**secret**), `email_from` (a mailbox — `Ada <ada@example.com>` or a bare address), each
-      declared as a `ConfigDef` with the sentence that goes under it, in an `email_section()`
-      added to `config_sections()`.
-- [x] **`EmailSettings::load(catalog)`** → `Option<EmailSettings>`, `None` when no host is
-      configured, plus the cross-field validation that belongs with the keys: a username with no
-      password, a `from` that is not a parseable mailbox, `none` security with credentials (which
-      would put a password on the wire in the clear — refused, and the message says why).
-      `parse_mailbox`/`Mailbox` live here too, since the *from* address is a setting and a
-      setting is checked where it is declared — and the transport reuses them rather than
-      parsing an address in a second grammar.
-- [x] **The Settings screen's tabs come from the sections** the server sent, plus Backup, with
-      the panel rendering only its own section's fields and Save still posting the whole bag
-      (decision 6). `SETTINGS_TABS` stops being a constant; the Backup tab keeps its place at
-      the end.
-- [x] **`sendTestEmail`** on the admin API — `POST /api/settings/email/test`, admin-only, body
-      `{ to }` defaulting to the signed-in admin's own address — which builds a transport from
-      the **stored** settings (so it tests what is saved, not what is typed) and returns the
-      transport's own error verbatim on failure. A **Send test email** button on the Email tab,
-      beside a note that the settings must be saved first.
-- [x] Tests: the section is declared and round-trips through `_sc_config` with the password
-      redacted on read and preserved when the sentinel is posted back; the cross-field rules are
-      refused by name; vitest over the tab derivation (a section with no tab, a tab with no
-      section, Backup last) and over the test-email form. Plus the button end to end, against a
-      real SMTP conversation on loopback.
+## Phase 1 — The code runtime (`sc-expr`)
 
-## Phase 3 — The transport (`sc-email`)
+- [ ] **The `CodeHost` seam**: `#[async_trait] pub trait CodeHost { async fn call(&self,
+      request: Json) -> Result<Json>; }` in `sc-expr`, and `CodeCall` gains
+      `host: Option<Arc<dyn CodeHost>>`, a wall-clock `deadline` and the call budget. A
+      `CodeCall` with no host is exactly today's pure body.
+- [ ] **`CodeRuntime`**: a pool of isolate threads (default 2, configurable), each built with
+      one op `op_sc_db` and its own watchdog, fed by a job channel with a worker checkout.
+      `JsEvaluator::run_code` dispatches here; `eval`/`eval_value` keep the existing pure
+      isolate untouched.
+- [ ] **The op**: blocks on `Handle::block_on(host.call(req))` with the handle captured when
+      the job was submitted; **disarms the watchdog for the duration of the call** so a slow
+      query is never reported as "your code timed out", and checks the run's wall-clock
+      deadline and call budget on entry, returning a named error into JS when either is spent.
+- [ ] **Non-poisonable globals**: the op handle and the run wrapper installed with
+      `writable: false, configurable: false`; the prelude emitted inside the per-run function.
+- [ ] Tests: two code bodies run concurrently on the pool; a body that spins is terminated and
+      the isolate recovers; a body that sleeps in the host does *not* count against the JS
+      watchdog but does against the deadline; the **formula** isolate still has no `Deno`, no
+      ops and no `db`.
 
-Built here rather than after Phase 2, because Phase 2's **Send test email** button has nothing
-to send through without it. The action-facing half — how a `send_email` action reaches a mailer
-— is still Phase 4's.
+## Phase 2 — The host: reads (`sc-api`)
 
-- [x] **New crate `crates/sc-email`** (layer 6): `Email { from, to, cc, bcc, subject, text,
-      html }`, the `Mailer` trait (`async fn send(&self, email: &Email) -> Result<()>`), and
-      `parse_recipients` — a rendered recipient string split on commas into mailboxes, each
-      parsed, with an error naming *which* address was rejected.
-- [x] **`SmtpMailer`** over `lettre` 0.11 (`smtp-transport`, `builder`, `tokio1`,
-      `tokio1-rustls`, `pool`, `default-features = false`, plus `aws-lc-rs` and
-      `rustls-platform-verifier` — the provider the workspace's rustls pin already compiles in
-      and the root store `reqwest` already brings, so the feature set adds no crate to the
-      tree). `starttls`/`tls`/`none` map to lettre's three builders; credentials are attached
-      only when a username is configured. A message with both bodies is `multipart/alternative`,
-      with text first, as every mail client expects.
-- [x] **`RecordingMailer`**: keeps what it was handed. This is what the action's tests assert
-      against, and it is a first-class item rather than a test fixture because two crates use it.
-- [x] Tests: mailbox parsing (a list, a display name with a comma inside quotes, a rejected
-      address named in the error); the built message's headers and MIME structure for text-only,
-      html-only and both; and **one test against a real SMTP conversation** — a tokio listener
-      on `127.0.0.1` speaking enough SMTP to accept a message — because a trait-only test proves
-      nothing about whether `lettre` was wired up correctly. That listener is
-      `sc_test_harness::TestSmtp`, beside `TestDb`, because `sc-server`'s test-email test needs
-      it too.
+- [ ] **`sc_api::code_host`**: `TableHost { catalog, authority, chain, limits }` implementing
+      `CodeHost`, plus `Authority { Admin, User }` and `HostLimits { max_rows, max_calls }`.
+- [ ] **The plan type**: `Plan` (serde) with the §7 shape, and one validation pass that
+      resolves the table via `catalog.require`, every named column against the table, every
+      Ⱶ-path through `ownership::join_guard`, and refuses anything else by name.
+- [ ] **One `where` lowering**: move the object-DSL walk out of
+      `sc-core-traits::table::{where_expr, required_where, condition_expr}` into
+      `sc_api::filter` beside the comparison vocabulary it already calls, add the `and` /
+      `or` / `not` combinators there, and have the agent traits call the moved function.
+      (Their tests come along and must still pass unchanged.)
+- [ ] **Formulas in a plan**: `where: {formula}` and `{alias, formula}` projections parsed by
+      `Formula::parse`, validated against `catalog.schema_shape()` with the table's row as the
+      bare scope, translated by `translate_value`; a `TranslateError::Untranslatable` becomes
+      the "compute it in your code body" message naming the formula.
+- [ ] **The read terminals** against the row layer at admin authority: `select` →
+      `rows::list_row_values` through a `RowQuery`; `aggregate` → `rows::aggregate_values`;
+      `.get(pk)` → the single-pk read; `.exists()` → a bounded select.
+- [ ] **The bounds enforced here**, not in JS: `max_rows` clamps and errors rather than
+      truncating silently, `max_calls` counted per run.
+- [ ] Tests (unit): plan → `Statement` for a join projection, a Ↄ-aggregate projection, each
+      filter operator, the combinators, order/limit/offset; and a named refusal for each of
+      unknown table, unknown column, unjoinable table, malformed plan, exceeded row cap.
 
-## Phase 4 — The `send_email` action (`sc-core-actions`)
+## Phase 3 — The host: writes
 
-- [x] **`send_email`**, configured as templates: `to`, `cc`, `bcc`, `subject`, `html`, `text`,
-      and an optional `from` overriding the configured one. Every one is a `Template` rendered
-      against the event (recipients and subject as text, `html` as HTML), and `validate_config`
-      checks all of them in the event's scope — so a trigger whose subject names a dropped field
-      leaves the live set with a reason, like every other invalid trigger.
-- [x] **An `mjml` flag on the HTML body**, compiled through the `mrml` crate
-      (`sc_email::render_mjml`) **after** interpolation, so a body can be written in the markup
-      an email designer already writes and the `{{ }}` values land in the MJML source rather than
-      in generated tables. Off by default and never inferred from what the body looks like; a
-      static MJML body is compiled at *save* too, so a missing `</mj-section>` is a form error.
-      Deliberately out of scope for this milestone and added anyway, because it is one
-      dependency and one function — what stays out is rendering a *view* as a body, which needs
-      a view renderer.
-- [x] **A File field of the table can be attached**: every File field the trigger's table has
-      becomes a checkbox (`Action::config_spec_for`, the first setting declaration that depends
-      on the channel), and a ticked one attaches the file the row's own path points at — read
-      from that field's store, named after the file, typed from its extension. A null path
-      attaches nothing and is not an error; an unreadable one, or a file past the 20 MB limit,
-      is. `listActions` takes an optional `?table=` so the trigger form can ask for the
-      declarations that apply, and still knows nothing about attachments.
-- [x] **At least one body is required**, and the failure modes are named at save: no bodies, no
-      recipients, an unparseable static address. What can only fail at send — the transport —
-      fails with the transport's message, prefixed with the trigger's name.
-- [x] **The mailer reaches the action the way the evaluator does**: through `ActionContext`,
-      absent in contexts that have none (client generation, unit tests), so an action asking for
-      one out of context gets a named configuration error rather than doing nothing. Registered
-      in `sc-core-actions`' registry beside `insert_row` and `fetch`. The two seams are now one
-      `ActionServices` the dispatcher holds, and the mailer a server installs is
-      `sc_email::SettingsMailer`, which reads the saved settings per message — so an admin who
-      fixes an SMTP password does not have to restart. `Mailer` gained `sender()`: the
-      from-address is the transport's, not the action's, and it is where "this installation
-      sends no mail" is discovered.
-- [x] **The `fetch` action's URL becomes a template** — the second adopter, which is what makes
-      "central" a fact rather than a claim. A URL with no `{{` is parsed and validated exactly as
-      today; one with tokens has its templates validated at save and its URL parsed at send, with
-      the same "not a valid URL" error it has now.
-- [x] Tests (real Postgres, `RecordingMailer`): a trigger on `orders` renders `to` from
-      `customerⱵemail`, the subject from `id`, the HTML body from several fields, and the
-      recording mailer holds exactly that message; a null field renders empty; a template naming
-      a missing field is refused at save; a run with **no email settings configured** fails with
-      an error pointing at Settings → Email; the `fetch` URL template resolves. Plus the MJML
-      body: compiled after interpolation, sent as-is without the flag, refused at save when it
-      does not compile. Plus attachments: the checkbox list is the table's File fields, a ticked
-      one puts the file in the message (bytes, filename and type), a null path sends the message
-      without it, a broken path fails naming the field, `?table=` changes what `listActions`
-      declares, and the file crosses a real SMTP socket base64-encoded.
+- [ ] `insert` (one row or many) → `rows::create_row_ctx`, returning the written row(s).
+- [ ] `update` / `delete` → matched rows resolved first, then `rows::update_row_ctx` /
+      `delete_row_ctx` per row, returning `{ updated | deleted, ids }`.
+- [ ] A write plan with no `where` is refused in the host as well as in the prelude — the
+      prelude is a convenience, the host is the rule.
+- [ ] The event's user and this trigger's **chain** ride on every write, so cascades are
+      bounded exactly as an action's are.
+- [ ] Tests: an insert fires the table's own trigger; a body writing its own table hits the
+      cascade bound with the chain in the message; an unfiltered update is refused; a coerced
+      value reaches the column typed (a date string binds a date).
 
-## Phase 5 — Running a trigger against a row
+## Phase 4 — `asUser()`
 
-- [ ] **Validation allows a channel on a `none` trigger** and continues to refuse one on every
-      other non-table kind, with a message that says a `none` trigger's table means "runs against
-      a row of it". The trigger form's table picker is enabled for `none`, with that sentence
-      under it.
-- [ ] **`TriggerDispatcher::run_trigger` takes the row** (decision 10): an `Option<Json>` bound
-      as the event's `row`, alongside the payload it already takes. A row-scoped trigger run
-      without one is an error naming the trigger — not a run with `row` null, which is how a
-      recipient formula silently produces an empty address.
-- [ ] **The REST provider reads the row** for a row-scoped trigger: the endpoint's input becomes
-      `{ <pk>: <pk type>, payload?: json }` instead of bare json, the key is read through
-      `ownership::read_row_values_as` as the caller, a row they cannot see is a 404 (the same
-      answer the row endpoints give, and it does not tell them the order exists), and the row is
-      handed to the dispatcher. Non-row triggers keep today's shape exactly.
-- [ ] **The generated client types it**: `runEmailReceipt({ id })` rather than
-      `runEmailReceipt(body: unknown)`, from the same `ResourceModel` machinery the typed row
-      writes came from. Regenerate `ui/admin/src/client.ts` and the IDE bundle's
-      (`cargo run -p sc-api --example emit_admin_client`), which `admin_client_sync` enforces.
-- [ ] **The admin's Run button asks for the key** when the trigger names a table, so the one
-      place an admin tests a trigger can test this one too; `runTrigger`'s body grows the
-      optional key, read under the admin's own authority like everything else in that API.
-- [ ] Tests: `none` + channel saves and validates, and the other kinds still refuse a channel;
-      the endpoint runs a trigger against a row and refuses one the caller cannot read
-      (a public-role trigger on an owned table: the owner sends, a stranger gets a 404); an
-      `only_if` over the row decides correctly on a run; the projected endpoint's input schema and
-      the emitted client method; the admin Run button's request shape (vitest).
+- [ ] **The event's caller as a `User`**: `event.user` is JSON and `ownership::*_as` wants an
+      `sc_auth::User` — one helper (`User::from_json`, beside `from_row`) reading `id` and
+      `extra`, with `event.role` as the role, and `None` for an event with no caller.
+- [ ] **Routing**: `Authority::User` sends every operation through `ownership::read_rows_as`,
+      `aggregate_values_as`, `insert_row_as`, `update_row_as`, `delete_row_as` at that role
+      and user; `Authority::Admin` keeps the phase 2/3 path.
+- [ ] **Bulk writes under delegation** resolve their ids through the *same* delegated read, so
+      a row the caller cannot see is never a row they can update by predicate.
+- [ ] **The prelude**: `.asUser()` / `.asAdmin()` on the handle, on a table and on a query,
+      all setting `authority`.
+- [ ] The delegated-aggregate refusal (untranslatable ownership formula) carries the message
+      from §5, not a bare `Err`.
+- [ ] Tests (integration, real Postgres): a sub-floor user's delegated read returns only the
+      rows their ownership formula grants while the same body at admin authority returns all
+      of them; a delegated insert outside the formula throws and writes nothing; a delegated
+      update that would move a row out of the caller's ownership is refused; a delegated read
+      of an RLS table sees what the policies allow; a scheduled trigger's `asUser()` reads as
+      public. **And the deadlock regression test**: a delegated read whose ownership formula
+      is untranslatable (so the *formula* isolate must run inside the host call) completes.
 
-## Phase 6 — The button, end to end
+## Phase 5 — Wiring, configuration and documentation
 
-- [ ] **An end-to-end integration test** (real Postgres, the recording mailer): scaffold an app
-      exposing a row-scoped `send_email` trigger, log in as a non-admin user who owns the row,
-      `POST {mount}/actions/{name}` with the key, and assert the recorded message's recipient,
-      subject and body are the row's own values — the milestone's definition of done, as a test.
-- [ ] **The React scaffold gains the pattern**: a documented example of a row button calling a
-      generated `run…` method, with the loading/error handling a real button needs, so the first
-      thing a developer copies is the one that reports failures.
+- [ ] `run_js_code` builds a `TableHost` from `ctx.catalog`, the event and `ctx.chain`, binds
+      `db`, and gains a `timeout_ms` config field (default 5000, max 60000, validated at save
+      time as `fetch`'s is).
+- [ ] The action's doc comment stops saying there is no host API, and says what there is.
+- [ ] `docs/TECHNICAL_DESIGN.md`: §10.1 gains the `db` specification above; §15 gains the
+      `CodeHost` seam as what an adapter implements.
+- [ ] `docs/tutorial-triggers.md` gains a "reading and writing tables from code" section with
+      the milestone's own example, including `asUser()`.
+- [ ] CHANGELOG entry.
+- [ ] Tests (integration): the milestone's definition-of-done body, run through the admin's
+      Run button endpoint, against a real database.
 
-## Phase 7 — Documentation
+## Phase 6 — Grouped aggregation (optional; the only part that changes `RowQuery`)
 
-- [ ] **§18.2 of the technical design is answered** — the transport seam, the template facility
-      and what is deliberately *not* here (MJML, view-rendered bodies) — and §6.2/§10.1/§13.4
-      gain the template vocabulary, the email settings and the row-scoped run.
-- [ ] **`docs/tutorial-email.md`**, joining the others (and linked from here once it exists,
-      since the hygiene test holds every documentation link to a file that is there): configure SMTP,
-      write a template, wire the trigger, press the button.
-- [ ] CHANGELOG entry in this repository's voice: what changed and why it is that way.
-- [ ] The hygiene tests still pass — every documentation link resolves, the new tutorial is
-      cross-linked from the others (`tutorials_are_cross_linked`), a
-      `the_design_records_what_the_email_milestone_actually_built` test joins its siblings, and
-      the new crate is in the workspace's layering comment.
+- [ ] `RowQuery` gains `group: Vec<Expr>` and `having: Option<Expr>`, rendered by the existing
+      `Select`; `rows::aggregate_grouped` returns one row per group.
+- [ ] `.groupBy(...).aggregate({ n: "count()", total: "sum(price * qty)" }).rows()`.
+- [ ] The ungrouped terminals (`.count()`, `.sum(f)`, …) become sugar for the same path.
+- [ ] Tests: grouped counts and sums with a filter and an ordering; a group key that is a
+      Ⱶ-path; the delegated case refuses for the same reason an ungrouped aggregate does.
 
 ---
 
 ## Explicitly OUT of scope for this milestone
 
-- **Views as email bodies.** v1's best email feature is "render one of your views as the
-  message", and v2 has no view renderer yet (§18.5 is still open). An HTML body is a template,
-  and when there is something to render there will be a body kind that renders it. (**MJML**
-  was on this list and was built anyway, in Phase 4: it is one dependency and one function, and
-  it needs no view renderer.)
-- **OAuth2 and Microsoft Graph transports.** The `Mailer` trait exists so these are a crate and
-  a config option rather than a rewrite. Password SMTP is what an admin can set up in a minute.
-- **System emails** — address verification, password reset, new-device notices. They need the
-  transport this milestone builds *and* flows nobody has designed yet (§7.1); building the
-  transport under an action first is the order that keeps each one honest.
-- **An outbox, retries or delivery tracking** (decision 12), and **rate limiting** of a trigger
-  a button can run.
-- **`{{#each}}`/`{{#if}}` blocks.** v1's interpolator has no blocks either — its `{{ }}` token is
-  a JavaScript expression, and `array.map(…).join("")` is how a list is rendered. A block syntax
-  is a second language inside the first.
-- Everything still listed as out of scope in the nine earlier lists.
-
----
-
-## Out of band — `subagent` (agents milestone, §11.3)
-
-Not part of this milestone's list; asked for and built alongside it, and recorded here so the
-work is findable. It closes the "subagent handoff" line item carried out of
-[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md).
-
-- [x] **`sc-agent` grows a `Delegator` seam** (`delegate.rs`): `DelegateRequest` / `Delegated`,
-      the run attributes `parent_run` and `delegated_by`, and `DEFAULT_MAX_DEPTH`. `Runner`
-      implements it, `Runner::with_subagents(connector)` enables it, and `TraitContext` carries
-      it as a third capability beside the evaluator and the dispatcher — with
-      `require_delegate` for a context that has none.
-- [x] **The child inherits the caller and nothing else**: same `RunCaller` (so §7.3 applies one
-      level down and delegation cannot escalate), the sub-agent's own `min_role` on top, and a
-      fresh context whose only content is the briefing.
-- [x] **`subagent` in `sc-core-traits`**: one tool per configured agent
-      (`delegate_to_<agent>`), configured with the agent, a "when to use it" sentence for the
-      *parent* model's tool description, a per-delegation step budget and a depth bound.
-      Validated on save and on load — the agent exists, it is not this agent, the bounds mean
-      something — and a missing agent lists the alternatives.
-- [x] **The briefing is structured** (`task` required, `context`, `output`), assembled under
-      headings with a framing line saying that only the final message travels back.
-- [x] **The bounds**: a cycle refused by name with its path, a chain refused by number, and a
-      sub-agent that reported nothing refused as a tool error rather than handed back as an
-      empty answer.
-- [x] **Wired in both places a run is created in production** — the chat socket and the
-      `run_agent` action.
-- [x] Tests: ten against a real database and scripted providers, plus the unit tests for the
-      briefing, the derived tool name and the bounds. §11.3 records what was built and the
-      repo-hygiene test holds it there; CHANGELOG entry written.
+- **Transactions across statements** (`db.transaction(fn)`). The row layer has the seam
+  (`Executor::Transaction`); holding one open across arbitrary guest code, with locks held
+  for the run's whole deadline, is its own decision and its own milestone.
+- **Raw SQL from a code body.** §13.4's custom SQL queries are the governed way to write SQL;
+  `db` stays closed.
+- **Schema changes from code** — create table, add field, drop anything. The catalog's schema
+  editor is an admin surface with its own rules; a code body gets rows.
+- **Streaming or cursors.** A read is materialised and bounded by `max_rows`; a body that
+  needs a million rows is a body that needs a different tool.
+- **An awaitable guest API**, and with it `fetch` or timers inside a code body. The sandbox
+  gains exactly one host surface here, and it is tables.
+- **The other guest languages** (§15's Python, Rust, Go adapters) — this milestone builds the
+  seam they will implement and nothing more.
+- **`db` in a formula.** Ownership formulas, `only_if`, calculated fields and `{{ }}` tokens
+  keep the pure isolate; a formula that could query is a formula that could be slow on every
+  row of every read.
