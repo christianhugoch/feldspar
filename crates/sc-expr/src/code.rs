@@ -142,6 +142,10 @@ impl std::fmt::Debug for CodeCall {
 /// The name the table handle binds under. Reserved when a host is present: a
 /// caller that also bound `db` would produce a redeclaration deep inside the
 /// generated wrapper, which is a bug nobody could find from the message.
+///
+/// Only the script builder reads it, and that is behind `eval` — without the
+/// feature there is no engine to build a script for.
+#[cfg(feature = "eval")]
 pub(crate) const DB: &str = "db";
 
 // ---------------------------------------------------------------------------

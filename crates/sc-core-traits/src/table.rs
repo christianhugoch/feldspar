@@ -12,11 +12,21 @@
 
 use sc_catalog::{Catalog, DataField, DataFieldKind, Table};
 use sc_error::{Error, Result};
-use sc_query::{BinOp, Expr, InSet, UnOp, Value};
 use sc_types::{Attrs, BasicType};
 use serde_json::{Map, Value as Json, json};
 
 use sc_api::rows;
+
+/// The `where` object's lowering, which lives in `sc_api::filter` beside the
+/// comparison vocabulary it calls.
+///
+/// It was written here, for these tools, and it moved when a **code body** grew
+/// the same argument (§10.1's `db.books.where({ … })`): one walk, one meaning,
+/// one place to add `and`/`or`/`not` — which is where they were added, so a
+/// model's filter and an admin's code body gained them together. The tools keep
+/// naming them through this module, because "what a table trait's `where` is" is
+/// still this module's promise to the model.
+pub use sc_api::filter::{queryable_field, required_where, where_expr};
 
 /// The table a trait is configured against. Every table trait has one, and
 /// **only** one: "which tables may this agent reach?" must be answerable off the
@@ -37,12 +47,6 @@ pub const CFG_MAX_ROWS: &str = "max_rows";
 /// The filter object every table trait takes.
 pub const ARG_WHERE: &str = "where";
 
-/// The comparisons a `where` entry may ask for, in the order the tools' own
-/// descriptions list them.
-const OPERATORS: [&str; 10] = [
-    "eq", "ne", "gt", "gte", "lt", "lte", "like", "ilike", "in", "is_null",
-];
-
 /// The paragraph every tool that takes a `where` puts in its description.
 ///
 /// One text, so the vocabulary a model picks up from one tool is the one the
@@ -50,8 +54,9 @@ const OPERATORS: [&str; 10] = [
 pub const WHERE_HELP: &str = "In `where`, each entry is a field name against \
      either a value to match exactly or an object with one operator key: `eq`, \
      `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike` (text patterns, `%` matches \
-     any run of characters), `in` (a list) or `is_null` (true or false). All the \
-     entries must hold at once.";
+     any run of characters), `in` (a list), `nin` (a list) or `is_null` (true or \
+     false). All the entries must hold at once, and `and`, `or` and `not` take \
+     filters of the same shape when that is not what you mean.";
 
 // --- the configuration ------------------------------------------------------
 
@@ -303,161 +308,6 @@ pub fn arguments(args: &Json, allowed: &[&str]) -> Result<Map<String, Json>> {
         }
     }
     Ok(obj)
-}
-
-/// A field the model may filter on or order by: named by the trait, real, and
-/// backed by a column.
-///
-/// The error names the alternatives, because a model that guessed a column name
-/// can only recover if it is told the ones that exist — and being told is
-/// cheaper than a second round trip through a failed query.
-pub fn queryable_field<'a>(
-    table: &'a Table,
-    fields: &[String],
-    name: &str,
-    what: &str,
-) -> Result<&'a DataField> {
-    if !fields.contains(&name.to_owned()) {
-        return Err(Error::invalid(format!(
-            "`{what}`: `{}` has no field `{name}` you may use; the fields are {}",
-            table.name,
-            fields.join(", ")
-        )));
-    }
-    let field = table
-        .field(name)
-        .ok_or_else(|| Error::invalid(format!("`{}` has no field `{name}`", table.name)))?;
-    if field.is_calc() {
-        return Err(Error::invalid(format!(
-            "`{what}`: `{name}` is a calculated field; it is returned with each row \
-             but cannot be filtered, ordered on or written"
-        )));
-    }
-    Ok(field)
-}
-
-/// The predicate a `where` object translates to — every entry ANDed.
-///
-/// `None` for an absent or empty object, which is "every row" rather than "no
-/// rows": a model that wants a count of everything sends `{}`, and reading that
-/// as an unsatisfiable filter would answer zero. A trait for which "every row"
-/// is not an acceptable request refuses the absence itself (see
-/// [`required_where`]) rather than making this function lie.
-pub fn where_expr(table: &Table, fields: &[String], where_: Option<&Json>) -> Result<Option<Expr>> {
-    let Some(where_) = where_.filter(|v| !v.is_null()) else {
-        return Ok(None);
-    };
-    let obj = where_.as_object().ok_or_else(|| {
-        Error::invalid(format!(
-            "`{ARG_WHERE}` should be an object of field conditions, got {where_}"
-        ))
-    })?;
-    let mut predicate: Option<Expr> = None;
-    for (name, condition) in obj {
-        let field = queryable_field(table, fields, name, ARG_WHERE)?;
-        let expr = condition_expr(table, field, condition)?;
-        predicate = Some(match predicate {
-            Some(existing) => existing.and(expr),
-            None => expr,
-        });
-    }
-    Ok(predicate)
-}
-
-/// [`where_expr`] where the filter is **not optional** — what a trait that
-/// changes rows takes.
-///
-/// An `update_rows` or a `delete_rows` whose `where` was left out is "every row
-/// in the table", and a whole table rewritten or emptied is not something an
-/// omitted argument should be able to cause (§10.1 refuses the same thing on the
-/// actions, at save time). A model that means every row says so with a condition
-/// that matches every row.
-pub fn required_where(table: &Table, fields: &[String], where_: Option<&Json>) -> Result<Expr> {
-    where_expr(table, fields, where_)?.ok_or_else(|| {
-        Error::invalid(format!(
-            "`{ARG_WHERE}` is required and must name at least one condition; \
-             this tool will not change every row of `{}` at once",
-            table.name
-        ))
-    })
-}
-
-/// One field's condition.
-///
-/// A JSON object whose single key is one of [`OPERATORS`] is that comparison;
-/// **anything else is a literal to match exactly**, including an object destined
-/// for a `Json` column. The rule is stated that way round — and in the tools'
-/// own descriptions — because the alternative (an object is always an operator)
-/// makes a `Json` column unfilterable, and a model that means equality can
-/// always say `{"eq": …}`.
-fn condition_expr(table: &Table, field: &DataField, condition: &Json) -> Result<Expr> {
-    let name = &field.base.name;
-    let col = || Expr::col(name.clone());
-    if let Json::Object(map) = condition
-        && map.len() == 1
-        && let Some((op, operand)) = map.iter().next()
-        && OPERATORS.contains(&op.as_str())
-    {
-        let literal =
-            |json: &Json| -> Result<Expr> { Ok(Expr::lit(rows::column_value(table, name, json)?)) };
-        let text = |json: &Json| -> Result<Expr> {
-            json.as_str()
-                .map(|s| Expr::lit(Value::Text(s.to_owned())))
-                .ok_or_else(|| {
-                    Error::invalid(format!("`{name}`: `{op}` takes a text pattern, got {json}"))
-                })
-        };
-        return Ok(match op.as_str() {
-            // `eq`/`ne` against null mean the null tests, because SQL's `=` is
-            // never true of one and a model writing `{"eq": null}` means "unset".
-            "eq" if operand.is_null() => Expr::unary(UnOp::IsNull, col()),
-            "ne" if operand.is_null() => Expr::unary(UnOp::IsNotNull, col()),
-            "eq" => Expr::binary(BinOp::Eq, col(), literal(operand)?),
-            "ne" => Expr::binary(BinOp::Ne, col(), literal(operand)?),
-            "gt" => Expr::binary(BinOp::Gt, col(), literal(operand)?),
-            "gte" => Expr::binary(BinOp::Ge, col(), literal(operand)?),
-            "lt" => Expr::binary(BinOp::Lt, col(), literal(operand)?),
-            "lte" => Expr::binary(BinOp::Le, col(), literal(operand)?),
-            "like" => Expr::binary(BinOp::Like, col(), text(operand)?),
-            "ilike" => Expr::binary(BinOp::ILike, col(), text(operand)?),
-            "in" => {
-                let items = operand.as_array().ok_or_else(|| {
-                    Error::invalid(format!("`{name}`: `in` takes a list, got {operand}"))
-                })?;
-                if items.is_empty() {
-                    return Err(Error::invalid(format!(
-                        "`{name}`: `in` needs at least one value"
-                    )));
-                }
-                let set: Result<Vec<Expr>> = items.iter().map(literal).collect();
-                Expr::In {
-                    e: Box::new(col()),
-                    set: InSet::List(set?),
-                }
-            }
-            "is_null" => {
-                let want = operand.as_bool().ok_or_else(|| {
-                    Error::invalid(format!(
-                        "`{name}`: `is_null` takes true or false, got {operand}"
-                    ))
-                })?;
-                Expr::unary(if want { UnOp::IsNull } else { UnOp::IsNotNull }, col())
-            }
-            other => {
-                return Err(Error::invalid(format!(
-                    "`{name}`: unknown operator `{other}`"
-                )));
-            }
-        });
-    }
-    Ok(match condition {
-        Json::Null => Expr::unary(UnOp::IsNull, col()),
-        other => Expr::binary(
-            BinOp::Eq,
-            col(),
-            Expr::lit(rows::column_value(table, name, other)?),
-        ),
-    })
 }
 
 // --- rows in, rows out ------------------------------------------------------

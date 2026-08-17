@@ -2,6 +2,63 @@
 
 Changes in reverse chronological order.
 
+## The host behind `db`: a plan in, rows out
+
+The second phase of "tables in code". `sc-expr` learned to *send* plans last
+time; `sc_api::code_host` is what answers them, for reads. Still nothing an
+admin can see — no action binds `db` until phase 5 — but a `TableHost` handed a
+plan now returns the rows.
+
+**Nothing in a plan is trusted, and nothing in it is SQL.** The table is
+resolved through the catalog, every column against that table, every Ⱶ-path by
+walking the keys (each hop through `ownership::join_guard`, the same check a
+REST embed and a GraphQL key field go through), every formula through the one
+translator, and anything else is refused naming it. What the guest sends is
+names and values; the statement is built here, and every literal is a bound
+parameter. `deny_unknown_fields` on the plan, so a guest and a host that
+disagree about the seam say so rather than answering a question nobody asked.
+
+**One `where`, in one place.** The object DSL walk moved out of
+`sc-core-traits::table` — where it was written for the agent tools — into
+`sc_api::filter`, beside the comparison vocabulary it already called. A code
+body's `.where({ … })` is an agent's `where` argument is a REST query string's
+comparisons: one meaning, one implementation. Moving it is what let `and`, `or`
+and `not` be added **once**, so the agent tools gained boolean logic at the same
+moment the code bodies did, and `nin` stopped being a comparison that existed
+in a URL but not in an object. A field wins over a combinator, so an
+application with a column called `or` keeps filtering on it — the trade the
+REST query string already makes. The agent traits' tests came along unchanged
+and still pass.
+
+**Two spellings of a filter, one predicate.** `{ status: "draft" }` and
+`'status === "draft" && ordersↃcustomer.length > 3'` lower to the same
+`sc_query::Expr`; a Ⱶ-path may be a filter *key*, and its literal is coerced
+against the column it belongs to on the **target** table rather than on the one
+being read. A projection is the same choice — a name, a path, or an
+`{ alias, formula }` — and `.orderBy(…)` and `.sum(…)` resolve a name exactly
+the way a projection does, because there is one expression language.
+
+**A formula the database cannot compute is an error that says where to put it.**
+`TranslateError::Untranslatable` becomes "compute it in your code body instead,
+which is JavaScript and can" — which costs the author nothing, and is the whole
+reason this seam is worth having. A formula naming `user`, `row`, `old` or
+`payload` is refused for the same reason from the other direction: those are the
+code body's own bindings, and the body can splice the value into the plan.
+
+**The row cap refuses; it never truncates.** A read with no `.limit()` asks the
+database for one row more than the cap, and if that row arrives the read fails
+saying so. Handing a body 1000 of 4000 rows would let it compute a wrong answer
+out of a right-looking one and never know — the one failure mode this whole
+milestone is careful not to have. A `.limit()` *above* the cap is refused before
+any statement runs, rather than quietly lowered to it. The call budget is
+counted on the host as well as in the guest: the guest's stops the loop before a
+plan is built, and the host's is the number that is true.
+
+**What is honestly not here yet** says so rather than doing something plausible:
+`asUser()` is refused rather than silently answering with the admin's rows
+(phase 4), writes are refused (phase 3), and `.groupBy()` is refused rather than
+ignored (phase 6).
+
 ## A code body gets a runtime of its own
 
 The first phase of "tables in code". Nothing an admin can see yet — no action

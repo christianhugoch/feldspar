@@ -28,8 +28,18 @@
 //! what a caller who knows Hasura or PostgREST expects, and inventing a
 //! null-safe `eq` here would make the same filter mean different things in a
 //! GraphQL `where`, in a REST query string and in an ownership formula.
+//!
+//! # The filter **object**
+//!
+//! Above the vocabulary sits the object every non-URL surface speaks —
+//! `{ status: "draft", pages: { gte: 100 }, or: [ … ] }` — and it lives here for
+//! the same reason the comparisons do. It was an agent trait's `where` argument
+//! first (§11.3); a code body's `db.books.where({ … })` (§10.1) is the same
+//! object, and a second walk over it would be a second answer to "what does this
+//! filter mean" in a place nobody is reading. [`where_expr`] is that walk, and
+//! [`required_where`] is it where the filter is not optional.
 
-use sc_catalog::Table;
+use sc_catalog::{DataField, Table};
 use sc_error::{Error, Result};
 use sc_query::{BinOp, Expr, InSet, UnOp, Value};
 use serde_json::Value as Json;
@@ -44,6 +54,16 @@ use crate::rows;
 pub const OPERATORS: [&str; 11] = [
     "eq", "ne", "gt", "gte", "lt", "lte", "in", "nin", "like", "ilike", "is_null",
 ];
+
+/// The name the filter object goes by wherever one is written — an agent tool's
+/// argument, a code body's `.where()`. Quoted in this module's messages so they
+/// read as the thing the caller typed.
+pub const WHERE: &str = "where";
+
+/// The boolean combinators a filter object may name, which are not columns.
+const AND: &str = "and";
+const OR: &str = "or";
+const NOT: &str = "not";
 
 /// One comparison operator applied to one column of `table`.
 ///
@@ -118,6 +138,233 @@ fn pattern(op: &str, operand: &Json) -> Result<Expr> {
         Json::String(s) => Ok(Expr::lit(Value::Text(s.clone()))),
         _ => Err(Error::invalid(format!("`{op}` takes a string pattern"))),
     }
+}
+
+// --- the filter object ------------------------------------------------------
+
+/// The predicate a `where` object translates to — every entry ANDed.
+///
+/// `None` for an absent or empty object, which is "every row" rather than "no
+/// rows": a caller who wants a count of everything sends `{}`, and reading that
+/// as an unsatisfiable filter would answer zero. A surface for which "every row"
+/// is not an acceptable request refuses the absence itself (see
+/// [`required_where`]) rather than making this function lie.
+///
+/// `fields` is the names the caller may filter on — an agent trait's allow-list,
+/// or every field of the table for a surface that has none. A name outside it is
+/// refused listing the ones that exist, because a caller that cannot read what
+/// it got wrong cannot fix it.
+pub fn where_expr(table: &Table, fields: &[String], where_: Option<&Json>) -> Result<Option<Expr>> {
+    where_resolved(table, fields, where_, &|_, _| Ok(None))
+}
+
+/// What a filter key that is **not** a column of the table being read may turn
+/// out to be, in a surface that has such keys.
+pub(crate) enum FilterKey {
+    /// A Ⱶ-path: the column the comparison is against, in the table it belongs
+    /// to — the *target* table, since that is the value being compared, and the
+    /// literal is coerced against it. Boxed because it carries a whole [`Table`]
+    /// and the other variant is a pointer.
+    Joined(Box<JoinedColumn>),
+    /// A whole predicate rather than a comparison: what the **formula** spelling
+    /// of a filter is (§3), which is one expression and not a column at all.
+    Predicate(Expr),
+}
+
+/// A Ⱶ-path, resolved to the correlated subquery it stands for.
+pub(crate) struct JoinedColumn {
+    /// The table the compared column belongs to.
+    pub(crate) table: Table,
+    /// Its name there.
+    pub(crate) column: String,
+    /// The expression that reads it from a row of the table being filtered.
+    pub(crate) expr: Expr,
+}
+
+/// [`where_expr`] where a key the table does not declare may still resolve — a
+/// Ⱶ-path or a formula in a code body's `.where(…)`.
+///
+/// The resolver is consulted **at every depth**, not only at the top, because a
+/// filter object nests: two `.where()` calls that mix the two spellings arrive as
+/// `{ and: [ { … }, { formula: "…" } ] }`, and a resolver that only saw the outer
+/// object would refuse the inner one as a missing column.
+///
+/// `Ok(None)` means "not a key I know", and the ordinary unknown-field refusal
+/// follows; an `Err` is a key that *was* one and was malformed, which is a better
+/// message than "no such field".
+pub(crate) fn where_resolved(
+    table: &Table,
+    fields: &[String],
+    where_: Option<&Json>,
+    resolve: &dyn Fn(&str, &Json) -> Result<Option<FilterKey>>,
+) -> Result<Option<Expr>> {
+    let Some(where_) = where_.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let obj = where_.as_object().ok_or_else(|| {
+        Error::invalid(format!(
+            "`{WHERE}` should be an object of field conditions, got {where_}"
+        ))
+    })?;
+    let mut conjuncts: Vec<Expr> = Vec::new();
+    for (name, condition) in obj {
+        // A **field wins over a combinator**: an application really may have a
+        // column called `or`, and a filter on it must keep meaning what it says.
+        // The REST query string makes the same trade for the same reason.
+        let expr = if fields.contains(name) {
+            let field = queryable_field(table, fields, name, WHERE)?;
+            let column = &field.base.name;
+            Some(condition_expr(table, column, Expr::col(column), condition)?)
+        } else {
+            match name.as_str() {
+                AND => combined(table, fields, condition, BinOp::And, name, resolve)?,
+                OR => combined(table, fields, condition, BinOp::Or, name, resolve)?,
+                NOT => where_resolved(table, fields, Some(condition), resolve)?
+                    .map(|inner| Expr::unary(UnOp::Not, inner)),
+                // Not a field this caller may use, and not a combinator: a
+                // surface with paths and formulas gets to resolve it, and
+                // otherwise `queryable_field` refuses it naming the alternatives.
+                _ => match resolve(name, condition)? {
+                    Some(FilterKey::Joined(joined)) => Some(condition_expr(
+                        &joined.table,
+                        &joined.column,
+                        joined.expr,
+                        condition,
+                    )?),
+                    Some(FilterKey::Predicate(expr)) => Some(expr),
+                    None => {
+                        let field = queryable_field(table, fields, name, WHERE)?;
+                        let column = &field.base.name;
+                        Some(condition_expr(table, column, Expr::col(column), condition)?)
+                    }
+                },
+            }
+        };
+        if let Some(expr) = expr {
+            conjuncts.push(expr);
+        }
+    }
+    Ok(conjuncts.into_iter().reduce(Expr::and))
+}
+
+/// [`where_expr`] where the filter is **not optional** — what a surface that
+/// changes rows takes.
+///
+/// An `update_rows` or a `delete_rows` whose `where` was left out is "every row
+/// in the table", and a whole table rewritten or emptied is not something an
+/// omitted argument should be able to cause (§10.1 refuses the same thing on the
+/// actions, at save time, and a code body's `.update()`/`.delete()` refuses it in
+/// the prelude *and* here). A caller that means every row says so with a
+/// condition that matches every row.
+pub fn required_where(table: &Table, fields: &[String], where_: Option<&Json>) -> Result<Expr> {
+    where_expr(table, fields, where_)?.ok_or_else(|| {
+        Error::invalid(format!(
+            "`{WHERE}` is required and must name at least one condition; \
+             this tool will not change every row of `{}` at once",
+            table.name
+        ))
+    })
+}
+
+/// `and` / `or`: a list of filter objects folded with one connective.
+///
+/// An empty list constrains nothing rather than matching nothing, for the reason
+/// an empty object does.
+fn combined(
+    table: &Table,
+    fields: &[String],
+    value: &Json,
+    op: BinOp,
+    key: &str,
+    resolve: &dyn Fn(&str, &Json) -> Result<Option<FilterKey>>,
+) -> Result<Option<Expr>> {
+    let Json::Array(items) = value else {
+        return match value {
+            Json::Null => Ok(None),
+            _ => Err(Error::invalid(format!(
+                "`{key}` on `{}` takes a list of filters, got {value}",
+                table.name
+            ))),
+        };
+    };
+    let mut parts = Vec::new();
+    for item in items {
+        if let Some(expr) = where_resolved(table, fields, Some(item), resolve)? {
+            parts.push(expr);
+        }
+    }
+    Ok(parts.into_iter().reduce(|a, b| Expr::binary(op, a, b)))
+}
+
+/// One field's condition.
+///
+/// A JSON object whose single key is one of [`OPERATORS`] is that comparison;
+/// **anything else is a literal to match exactly**, including an object destined
+/// for a `Json` column. The rule is stated that way round — and in the agent
+/// tools' own descriptions — because the alternative (an object is always an
+/// operator) makes a `Json` column unfilterable, and a caller that means equality
+/// can always say `{"eq": …}`.
+///
+/// Two readings are this function's own rather than [`comparison`]'s, and both
+/// are about a caller writing JSON rather than a URL: `eq`/`ne` against **null**
+/// mean the null tests (`{"eq": null}` is "unset", and SQL's `=` is never true of
+/// one), and an **empty** `in` list is refused rather than lowered to a
+/// membership test nothing can satisfy.
+fn condition_expr(table: &Table, name: &str, column: Expr, condition: &Json) -> Result<Expr> {
+    let col = || column.clone();
+    if let Json::Object(map) = condition
+        && map.len() == 1
+        && let Some((op, operand)) = map.iter().next()
+        && OPERATORS.contains(&op.as_str())
+    {
+        return match (op.as_str(), operand) {
+            ("eq", Json::Null) => Ok(Expr::unary(UnOp::IsNull, col())),
+            ("ne", Json::Null) => Ok(Expr::unary(UnOp::IsNotNull, col())),
+            ("in" | "nin", Json::Array(items)) if items.is_empty() => Err(Error::invalid(format!(
+                "`{name}`: `{op}` needs at least one value"
+            ))),
+            (op, operand) => comparison(table, name, col(), op, operand),
+        };
+    }
+    Ok(match condition {
+        Json::Null => Expr::unary(UnOp::IsNull, col()),
+        other => Expr::binary(
+            BinOp::Eq,
+            col(),
+            Expr::lit(rows::column_value(table, name, other)?),
+        ),
+    })
+}
+
+/// A field the caller may filter on or order by: named in `fields`, real, and
+/// backed by a column.
+///
+/// The error names the alternatives, because a caller that guessed a column name
+/// can only recover if it is told the ones that exist — and being told is
+/// cheaper than a second round trip through a failed query.
+pub fn queryable_field<'a>(
+    table: &'a Table,
+    fields: &[String],
+    name: &str,
+    what: &str,
+) -> Result<&'a DataField> {
+    if !fields.contains(&name.to_owned()) {
+        return Err(Error::invalid(format!(
+            "`{what}`: `{}` has no field `{name}` you may use; the fields are {}",
+            table.name,
+            fields.join(", ")
+        )));
+    }
+    let field = table
+        .field(name)
+        .ok_or_else(|| Error::invalid(format!("`{}` has no field `{name}`", table.name)))?;
+    if field.is_calc() {
+        return Err(Error::invalid(format!(
+            "`{what}`: `{name}` is a calculated field; it is returned with each row \
+             but cannot be filtered, ordered on or written"
+        )));
+    }
+    Ok(field)
 }
 
 #[cfg(test)]

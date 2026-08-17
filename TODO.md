@@ -333,28 +333,46 @@ assignments. Every terminal is one plan and one round trip.
 
 ## Phase 2 — The host: reads (`sc-api`)
 
-- [ ] **`sc_api::code_host`**: `TableHost { catalog, authority, chain, limits }` implementing
+- [x] **`sc_api::code_host`**: `TableHost { catalog, user, chain, limits }` implementing
       `CodeHost`, plus `Authority { Admin, User }` and `HostLimits { max_rows, max_calls }`.
-- [ ] **The plan type**: `Plan` (serde) with the §7 shape, and one validation pass that
-      resolves the table via `catalog.require`, every named column against the table, every
-      Ⱶ-path through `ownership::join_guard`, and refuses anything else by name.
-- [ ] **One `where` lowering**: move the object-DSL walk out of
+      (The authority is a field of the *plan* rather than of the host — §5's "`asUser()` sets
+      one field of the plan, so where it appears in the chain does not matter" — so what the
+      host carries instead is what a delegated run will need: the event's caller and its
+      chain. A plan naming `user` authority is refused until phase 4 rather than silently
+      answered as the admin.)
+- [x] **The plan type**: `Plan` (serde, `deny_unknown_fields`) with the §7 shape, and one
+      validation pass that resolves the table via `catalog.require`, every named column
+      against the table, every Ⱶ-path through `ownership::join_guard`, and refuses anything
+      else by name.
+- [x] **One `where` lowering**: move the object-DSL walk out of
       `sc-core-traits::table::{where_expr, required_where, condition_expr}` into
       `sc_api::filter` beside the comparison vocabulary it already calls, add the `and` /
       `or` / `not` combinators there, and have the agent traits call the moved function.
-      (Their tests come along and must still pass unchanged.)
-- [ ] **Formulas in a plan**: `where: {formula}` and `{alias, formula}` projections parsed by
+      (Their tests come along and must still pass unchanged.) The moved walk now delegates
+      each comparison to `filter::comparison`, so `nin` — which existed in a URL and not in an
+      object — is one vocabulary again; a **field wins over a combinator**, as it does in the
+      REST query string; and a Ⱶ-path may be a filter key, resolved by a hook the agent
+      surfaces pass as "no join paths here".
+- [x] **Formulas in a plan**: `where: {formula}` and `{alias, formula}` projections parsed by
       `Formula::parse`, validated against `catalog.schema_shape()` with the table's row as the
       bare scope, translated by `translate_value`; a `TranslateError::Untranslatable` becomes
-      the "compute it in your code body" message naming the formula.
-- [ ] **The read terminals** against the row layer at admin authority: `select` →
+      the "compute it in your code body" message naming the formula. A formula naming an
+      ambient object (`user`, `row`, …) is refused: those are the code body's bindings, and it
+      can splice the value into the plan itself.
+- [x] **The read terminals** against the row layer at admin authority: `select` →
       `rows::list_row_values` through a `RowQuery`; `aggregate` → `rows::aggregate_values`;
       `.get(pk)` → the single-pk read; `.exists()` → a bounded select.
-- [ ] **The bounds enforced here**, not in JS: `max_rows` clamps and errors rather than
-      truncating silently, `max_calls` counted per run.
-- [ ] Tests (unit): plan → `Statement` for a join projection, a Ↄ-aggregate projection, each
+- [x] **The bounds enforced here**, not in JS: `max_rows` **refuses** rather than truncating
+      (the read asks for one row more than the cap, and a `.limit()` above the cap is refused
+      before any statement runs), `max_calls` counted per run.
+- [x] Tests (unit): plan → `Statement` for a join projection, a Ↄ-aggregate projection, each
       filter operator, the combinators, order/limit/offset; and a named refusal for each of
       unknown table, unknown column, unjoinable table, malformed plan, exceeded row cap.
+- [x] *Not on the list, done anyway*: `crates/sc-api/tests/code_host_reads.rs` — the same
+      plans against a real database, because "the plan lowers correctly" and "the rows come
+      back" are two claims and only one of them can be made without Postgres. `catalog_of` in
+      the shared test fixtures builds a catalog by **introspection** from a driver with no
+      rows behind it, so a unit test resolves join paths through a real schema shape.
 
 ## Phase 3 — The host: writes
 

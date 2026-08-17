@@ -12,7 +12,9 @@ use sc_catalog::{
     AccessRules, Catalog, DataField, DataFieldKind, DbId, FieldId, FileStoreId, Table, TableId,
     TableSource,
 };
-use sc_db::{DatabaseDriver, DbCapabilities, PhysicalTable, RowStream, SchemaChange, Transaction};
+use sc_db::{
+    DatabaseDriver, DbCapabilities, ForeignKey, PhysicalTable, RowStream, SchemaChange, Transaction,
+};
 use sc_error::{Error, Result};
 use sc_query::{SqlDialect, Statement};
 use sc_types::{Attrs, BasicType, TypeRef};
@@ -79,16 +81,67 @@ pub fn key_field(name: &str, target_table: &str, target_field: &str) -> DataFiel
 /// missing and says so — which is itself worth asserting: it proves the read
 /// goes to the live catalog rather than to something captured at mount.
 pub async fn empty_catalog() -> Arc<Catalog> {
+    catalog_of(Vec::new()).await
+}
+
+/// A catalog over a database that has exactly these tables in it, and no rows.
+///
+/// The tables are **introspected** rather than assembled, so what a test asks
+/// about is a `Table` built the way a real one is: the keys come from the foreign
+/// keys, the types from the column types, and the schema shape a formula is
+/// validated against is the catalog's own. Everything a plan or a query string
+/// resolves happens before a row is read, and this is what lets that be tested
+/// here rather than only against Postgres.
+pub async fn catalog_of(tables: Vec<PhysicalTable>) -> Arc<Catalog> {
     Arc::new(
-        Catalog::init(Arc::new(EmptyDriver) as Arc<dyn DatabaseDriver>)
+        Catalog::init(Arc::new(EmptyDriver { tables }) as Arc<dyn DatabaseDriver>)
             .await
-            .expect("an empty catalog"),
+            .expect("a catalog"),
     )
 }
 
-/// A driver over nothing: it introspects to no tables and refuses to run
-/// anything, so a test that accidentally depended on a query fails loudly.
-struct EmptyDriver;
+/// One introspected table: `columns` as `(name, sql type, nullable)`, `keys` as
+/// `(column, target table, target column)`, and `id` as the primary key when
+/// there is such a column.
+pub fn physical(
+    name: &str,
+    columns: &[(&str, &str, bool)],
+    keys: &[(&str, &str, &str)],
+) -> PhysicalTable {
+    PhysicalTable {
+        name: name.to_owned(),
+        schema: None,
+        columns: columns
+            .iter()
+            .map(|(name, sql_type, nullable)| sc_db::Column {
+                name: (*name).to_owned(),
+                sql_type: (*sql_type).to_owned(),
+                nullable: *nullable,
+                generated: None,
+            })
+            .collect(),
+        primary_key: columns
+            .iter()
+            .filter(|(name, _, _)| *name == "id")
+            .map(|(name, _, _)| (*name).to_owned())
+            .collect(),
+        foreign_keys: keys
+            .iter()
+            .map(|(column, table, target)| ForeignKey {
+                columns: vec![(*column).to_owned()],
+                referenced_table: (*table).to_owned(),
+                referenced_columns: vec![(*target).to_owned()],
+            })
+            .collect(),
+        constraints: Vec::new(),
+    }
+}
+
+/// A driver over a fixed set of tables: it introspects to them and refuses to
+/// run anything, so a test that accidentally depended on a query fails loudly.
+struct EmptyDriver {
+    tables: Vec<PhysicalTable>,
+}
 
 /// The dialect the empty driver reports; no statement ever reaches it.
 struct EmptyDialect;
@@ -105,7 +158,7 @@ impl SqlDialect for EmptyDialect {
 #[async_trait]
 impl DatabaseDriver for EmptyDriver {
     async fn introspect(&self) -> Result<Vec<PhysicalTable>> {
-        Ok(Vec::new())
+        Ok(self.tables.clone())
     }
 
     async fn query(&self, _stmt: &Statement) -> Result<RowStream> {

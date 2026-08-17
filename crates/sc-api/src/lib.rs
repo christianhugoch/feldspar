@@ -25,6 +25,8 @@
 //! surface, so there is one implementation rather than one per protocol.
 
 pub mod auth;
+// The host behind a code body's `db` (§10.1): plans in, rows out.
+pub mod code_host;
 pub mod convert;
 // `csv`, not `bulk`: the module is named for the format it speaks. Inside it
 // the crate of the same name is reached as `::csv`.

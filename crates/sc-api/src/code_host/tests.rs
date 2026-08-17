@@ -1,0 +1,488 @@
+//! What a plan becomes, and what it is refused for.
+//!
+//! Every assertion here is about the step between the guest and the database:
+//! the plan arrives as JSON, and what leaves is a statement whose every
+//! identifier came from the catalog and whose every literal is a bound
+//! parameter. The catalog is real (introspected from a driver with no rows
+//! behind it), so a join path is resolved through the same schema shape a
+//! formula is validated against — and no statement is ever run, which is
+//! precisely the point: a plan that reaches SQL wrongly is a bug that must be
+//! visible before a database is involved.
+
+use std::sync::Arc;
+
+use sc_catalog::Catalog;
+use sc_db::PhysicalTable;
+use sc_error::Result;
+use sc_query::{OrderDir, Projection, Select, Source, SqlDialect, Statement, Value};
+use serde_json::{Value as Json, json};
+
+use super::plan::{self, Read};
+use super::{HostLimits, Plan};
+use crate::graphql::testing::{catalog_of, physical};
+
+/// Postgres-flavoured rendering, as in `sc-query`'s own tests.
+struct Pg;
+
+impl SqlDialect for Pg {
+    fn quote_ident(&self, ident: &str) -> String {
+        format!("\"{}\"", ident.replace('"', "\"\""))
+    }
+    fn placeholder(&self, position: usize) -> String {
+        format!("${position}")
+    }
+}
+
+/// `books` with an author key, `authors` behind it, and `reviews` in front of it
+/// — the smallest schema that has a Ⱶ-path and a Ↄ-aggregation in it.
+async fn library() -> Arc<Catalog> {
+    let tables: Vec<PhysicalTable> = vec![
+        physical(
+            "books",
+            &[
+                ("id", "int8", false),
+                ("title", "text", true),
+                ("pages", "int8", true),
+                ("published", "date", true),
+                ("price", "numeric", true),
+                ("author", "int8", true),
+            ],
+            &[("author", "authors", "id")],
+        ),
+        physical(
+            "authors",
+            &[
+                ("id", "int8", false),
+                ("name", "text", true),
+                ("country", "text", true),
+            ],
+            &[],
+        ),
+        physical(
+            "reviews",
+            &[
+                ("id", "int8", false),
+                ("book", "int8", true),
+                ("stars", "int8", true),
+            ],
+            &[("book", "books", "id")],
+        ),
+    ];
+    catalog_of(tables).await
+}
+
+/// Resolve one plan (as the guest would send it) into a read.
+async fn read_of(plan: Json) -> Result<Read> {
+    let cat = library().await;
+    let plan: Plan = serde_json::from_value(plan).expect("a well-formed plan");
+    plan::read(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN)
+}
+
+/// The message a plan is refused with.
+async fn refusal(plan: Json) -> String {
+    let cat = library().await;
+    let parsed: std::result::Result<Plan, _> = serde_json::from_value(plan);
+    match parsed {
+        // A plan the seam does not describe is refused where every other malformed
+        // request is: at the boundary, by serde, naming the field.
+        Err(e) => format!("{e}"),
+        Ok(plan) => match plan.op {
+            super::Op::Aggregate => plan::aggregate(&cat, &plan, sc_auth::ROLE_ADMIN)
+                .err()
+                .expect("this plan is refused")
+                .to_string(),
+            _ => plan::read(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN)
+                .err()
+                .expect("this plan is refused")
+                .to_string(),
+        },
+    }
+}
+
+/// The `SELECT` a read lowers to, rendered — the row's own columns plus whatever
+/// the plan projected, filtered, ordered and bounded.
+fn rendered(read: &Read) -> (String, Vec<Value>) {
+    let mut columns = vec![Projection::all()];
+    columns.extend(read.query.extra.iter().cloned());
+    let mut select = Select::from(Source::table(read.table.name.clone())).columns(columns);
+    if let Some(filter) = read.query.filter.clone() {
+        select = select.filter(filter);
+    }
+    select.order = read.query.order.clone();
+    select.limit = read.query.limit;
+    select.offset = read.query.offset;
+    Pg.render(&Statement::Select(Box::new(select)))
+        .expect("renders")
+}
+
+/// The `WHERE` clause of a plan's filter, and its bound parameters — rendered
+/// on its own, so the read's bound does not appear among them.
+async fn where_of(filter: Json) -> Result<(String, Vec<Value>)> {
+    let read = read_of(json!({ "op": "select", "table": "books", "where": filter })).await?;
+    let select =
+        Select::from(Source::table("books")).filter(read.query.filter.clone().expect("a filter"));
+    let (sql, binds) = Pg
+        .render(&Statement::Select(Box::new(select)))
+        .expect("renders");
+    Ok((
+        sql.split_once(" WHERE ")
+            .map(|(_, w)| w.to_owned())
+            .unwrap_or_else(|| panic!("no WHERE in {sql}")),
+        binds,
+    ))
+}
+
+#[tokio::test]
+async fn a_join_projection_is_a_correlated_subquery_aliased_by_the_path() {
+    // `db.books.select("id", "authorⱵname")` — the Ⱶ-path is not a column of
+    // `books`, so it becomes a subquery projected beside the row, under the path
+    // itself as its key. Which is exactly how the guest reads it back:
+    // `row.authorⱵname`, one identifier.
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "select": ["id", "title", "authorⱵname"],
+    }))
+    .await
+    .expect("resolves");
+    let (sql, _) = rendered(&read);
+    assert!(
+        sql.contains(
+            "(SELECT \"_sc_j1\".\"name\" FROM \"authors\" AS \"_sc_j1\" \
+             WHERE (\"_sc_j1\".\"id\" = \"books\".\"author\")) AS \"authorⱵname\""
+        ),
+        "{sql}"
+    );
+    // A column of the table is *not* projected twice: it is already in the row.
+    assert_eq!(read.query.extra.len(), 1, "only the path is a projection");
+
+    // And the answer carries exactly the keys the plan asked for, in its own
+    // order, as the REST wire shape.
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("id".to_owned(), Value::Int(3));
+    values.insert("title".to_owned(), Value::Text("Orlando".into()));
+    values.insert("authorⱵname".to_owned(), Value::Text("Woolf".into()));
+    values.insert("pages".to_owned(), Value::Int(200));
+    assert_eq!(
+        read.row(&values),
+        json!({ "id": 3, "title": "Orlando", "authorⱵname": "Woolf" }),
+        "a projected read answers what it selected and not the whole row"
+    );
+}
+
+#[tokio::test]
+async fn a_formula_projection_carries_a_child_aggregation_into_the_same_statement() {
+    // The milestone's own example, in miniature: `{ chased: "reviewsↃbook.length" }`
+    // is one correlated aggregate, projected under the alias the body named.
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "select": [
+            "id",
+            { "alias": "reviews", "formula": "reviewsↃbook.length" },
+            { "alias": "net", "formula": "price * 2" },
+        ],
+    }))
+    .await
+    .expect("resolves");
+    let (sql, _) = rendered(&read);
+    assert!(
+        sql.contains("count(*) FROM \"reviews\"") && sql.contains("AS \"reviews\""),
+        "{sql}"
+    );
+    assert!(sql.contains("(\"books\".\"price\" * $"), "{sql}");
+}
+
+#[tokio::test]
+async fn every_comparison_and_the_combinators_lower_through_the_shared_vocabulary() {
+    for (op, sql_op) in [
+        ("eq", "="),
+        ("ne", "<>"),
+        ("gt", ">"),
+        ("gte", ">="),
+        ("lt", "<"),
+        ("lte", "<="),
+    ] {
+        let (sql, binds) = where_of(json!({ "pages": { op: 300 } })).await.expect("ok");
+        assert_eq!(sql, format!("(\"pages\" {sql_op} $1)"));
+        assert_eq!(binds, vec![Value::Int(300)]);
+    }
+    let (sql, binds) = where_of(json!({ "pages": { "in": [1, 2] } }))
+        .await
+        .expect("ok");
+    assert_eq!(sql, "(\"pages\" IN ($1, $2))");
+    assert_eq!(binds, vec![Value::Int(1), Value::Int(2)]);
+    let (sql, _) = where_of(json!({ "pages": { "nin": [1] } }))
+        .await
+        .expect("ok");
+    assert_eq!(sql, "(NOT (\"pages\" IN ($1)))");
+    let (sql, _) = where_of(json!({ "title": { "is_null": true } }))
+        .await
+        .expect("ok");
+    assert_eq!(sql, "(\"title\" IS NULL)");
+    let (sql, binds) = where_of(json!({ "title": { "ilike": "%woolf%" } }))
+        .await
+        .expect("ok");
+    assert_eq!(sql, "(\"title\" ILIKE $1)");
+    assert_eq!(binds, vec![Value::Text("%woolf%".into())]);
+
+    // A date binds as a *date*, because the coercion goes through the column —
+    // the same reason a REST query string's `gte.2020-01-01` does.
+    let (_, binds) = where_of(json!({ "published": { "lt": "2026-08-17" } }))
+        .await
+        .expect("ok");
+    assert!(
+        matches!(binds.as_slice(), [Value::Date(_)]),
+        "expected a bound date, got {binds:?}"
+    );
+
+    // The combinators, which this milestone added to the shared walk — so an
+    // agent's `where` gained them at the same moment.
+    let (sql, _) = where_of(json!({
+        "or": [
+            { "title": "Orlando" },
+            { "and": [ { "pages": { "gt": 100 } }, { "not": { "title": { "is_null": true } } } ] },
+        ]
+    }))
+    .await
+    .expect("ok");
+    assert_eq!(
+        sql,
+        "((\"title\" = $1) OR ((\"pages\" > $2) AND (NOT (\"title\" IS NULL))))"
+    );
+}
+
+#[tokio::test]
+async fn the_formula_spelling_of_a_filter_reaches_the_same_where() {
+    // §3's two spellings. This one is what `update_rows`/`delete_rows` already
+    // take, and it lowers through the same translator a calculated field does.
+    let (sql, binds) = where_of(json!({ "formula": "pages > 100 && title !== null" }))
+        .await
+        .expect("ok");
+    assert_eq!(
+        sql,
+        "((\"books\".\"pages\" > $1) AND (\"books\".\"title\" IS NOT NULL))"
+    );
+    assert_eq!(binds, vec![Value::Int(100)]);
+
+    // A Ⱶ-path as a filter *key* compares the joined column, and the literal is
+    // coerced against the column it belongs to — on `authors`, not on `books`.
+    let (sql, binds) = where_of(json!({ "authorⱵcountry": "GB" }))
+        .await
+        .expect("ok");
+    assert!(sql.contains("FROM \"authors\" AS \"_sc_j1\""), "{sql}");
+    assert_eq!(binds, vec![Value::Text("GB".into())]);
+
+    // The two spellings **mix**, which is what two `.where()` calls produce:
+    // the prelude ANDs them, so the formula arrives nested inside a combinator
+    // and has to be recognised there rather than only at the top.
+    let (sql, binds) = where_of(json!({
+        "and": [ { "title": "Orlando" }, { "formula": "pages > 100" } ]
+    }))
+    .await
+    .expect("ok");
+    assert_eq!(sql, "((\"title\" = $1) AND (\"books\".\"pages\" > $2))");
+    assert_eq!(binds, vec![Value::Text("Orlando".into()), Value::Int(100)]);
+}
+
+#[tokio::test]
+async fn order_limit_and_offset_are_the_plans_own() {
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "order": [ { "field": "published", "dir": "desc" }, { "field": "authorⱵname" } ],
+        "limit": 10,
+        "offset": 20,
+    }))
+    .await
+    .expect("resolves");
+    assert_eq!(read.query.order.len(), 2);
+    assert_eq!(read.query.order[0].dir, OrderDir::Desc);
+    assert_eq!(read.query.order[1].dir, OrderDir::Asc);
+    assert_eq!(read.query.limit, Some(10));
+    assert_eq!(read.query.offset, Some(20));
+    // An ordering by a Ⱶ-path is the same correlated subquery a projection is.
+    let (sql, _) = rendered(&read);
+    assert!(
+        sql.contains("ORDER BY \"published\" DESC, (SELECT \"_sc_j1\".\"name\""),
+        "{sql}"
+    );
+    assert!(sql.contains("LIMIT $1 OFFSET $2"), "{sql}");
+}
+
+#[tokio::test]
+async fn a_read_with_no_limit_asks_for_one_row_more_than_the_cap() {
+    // How "more than you may hold" is told apart from "exactly the cap": the
+    // statement asks for one more, and the host refuses when it arrives.
+    let read = read_of(json!({ "op": "select", "table": "books" }))
+        .await
+        .expect("resolves");
+    assert_eq!(read.query.limit, Some(super::DEFAULT_MAX_ROWS + 1));
+    // With no `select`, the answer is the whole row — the table's own fields.
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("id".to_owned(), Value::Int(1));
+    values.insert("title".to_owned(), Value::Text("Emma".into()));
+    let row = read.row(&values);
+    assert_eq!(row["id"], json!(1));
+    assert_eq!(row["title"], json!("Emma"));
+}
+
+#[tokio::test]
+async fn an_aggregate_plan_is_one_projection_per_value_over_the_filtered_rows() {
+    let cat = library().await;
+    let plan: Plan = serde_json::from_value(json!({
+        "op": "aggregate",
+        "table": "books",
+        "where": { "author": 3 },
+        "aggregate": [
+            { "alias": "value", "fn": "sum", "arg": "pages" },
+            { "alias": "n", "fn": "count", "arg": Json::Null },
+            { "alias": "worth", "fn": "max", "arg": "price * 2" },
+        ],
+    }))
+    .expect("a plan");
+    let agg = plan::aggregate(&cat, &plan, sc_auth::ROLE_ADMIN).expect("resolves");
+    let mut select = Select::from(Source::table("books")).columns(agg.projections);
+    if let Some(filter) = agg.filter {
+        select = select.filter(filter);
+    }
+    let (sql, _) = Pg
+        .render(&Statement::Select(Box::new(select)))
+        .expect("renders");
+    assert!(
+        sql.contains("COALESCE(sum(\"pages\"), $1) AS \"value\""),
+        "{sql}"
+    );
+    assert!(sql.contains("count(*) AS \"n\""), "{sql}");
+    assert!(sql.contains("max((\"books\".\"price\" * $"), "{sql}");
+    assert!(sql.contains("WHERE (\"author\" = $"), "{sql}");
+}
+
+#[tokio::test]
+async fn every_refusal_names_what_was_wrong_with_the_plan() {
+    // An unknown table.
+    let unknown_table = refusal(json!({ "op": "select", "table": "nope" })).await;
+    assert!(
+        unknown_table.contains("`nope` is not in the catalog"),
+        "{unknown_table}"
+    );
+
+    // An unknown column, in each of the places a name can appear.
+    for plan in [
+        json!({ "op": "select", "table": "books", "select": ["nope"] }),
+        json!({ "op": "select", "table": "books", "order": [ { "field": "nope" } ] }),
+        json!({ "op": "select", "table": "books", "where": { "nope": 1 } }),
+    ] {
+        let message = refusal(plan).await;
+        assert!(message.contains("nope"), "{message}");
+    }
+
+    // A path through something that is not a key: named as what it is, because
+    // "no such field `titleⱵname`" would send the author looking for a typo.
+    // As a projection the formula language says it first…
+    let unjoinable = refusal(json!({
+        "op": "select", "table": "books", "select": ["titleⱵname"],
+    }))
+    .await;
+    assert!(
+        unjoinable.contains("titleⱵname") && unjoinable.contains("not a Key field"),
+        "{unjoinable}"
+    );
+    // …and as a filter key, where the host walks the path itself to find the
+    // table a literal is coerced against, the host says it.
+    let unjoinable = refusal(json!({
+        "op": "select", "table": "books", "where": { "titleⱵname": "x" },
+    }))
+    .await;
+    assert!(
+        unjoinable.contains("is not a key to another table"),
+        "{unjoinable}"
+    );
+
+    // A plan carrying something the seam does not describe.
+    let malformed = refusal(json!({
+        "op": "select", "table": "books", "sql": "drop table books",
+    }))
+    .await;
+    assert!(malformed.contains("sql"), "{malformed}");
+
+    // A bound above the row cap: refused, never silently lowered to it.
+    let too_many = refusal(json!({ "op": "select", "table": "books", "limit": 5000 })).await;
+    assert!(
+        too_many.contains("1000 rows") && too_many.contains("5000"),
+        "{too_many}"
+    );
+
+    // A formula the translator cannot lower says where to compute it instead.
+    let untranslatable = refusal(json!({
+        "op": "select", "table": "books",
+        "select": [ { "alias": "x", "formula": "title.padStart(3)" } ],
+    }))
+    .await;
+    assert!(
+        untranslatable.contains("compute it in your code body"),
+        "{untranslatable}"
+    );
+
+    // A formula reaching for the event's bindings: they are the code body's, and
+    // the body can splice a value into the plan itself.
+    let ambient = refusal(json!({
+        "op": "select", "table": "books", "where": { "formula": "pages > user.id" },
+    }))
+    .await;
+    assert!(ambient.contains("`user`"), "{ambient}");
+
+    // Phase 6 and phase 3/4, refused rather than quietly ignored.
+    let grouped = refusal(json!({ "op": "select", "table": "books", "group": ["author"] })).await;
+    assert!(grouped.contains("groupBy"), "{grouped}");
+}
+
+#[tokio::test]
+async fn a_delegated_or_writing_plan_is_refused_rather_than_answered_as_the_admin() {
+    let host = super::TableHost::new(library().await);
+    let delegated = host
+        .run(
+            &serde_json::from_value(json!({
+                "op": "select", "table": "books", "authority": "user",
+            }))
+            .expect("a plan"),
+        )
+        .await
+        .expect_err("refused");
+    assert!(delegated.to_string().contains("asUser()"), "{delegated}");
+
+    let write = host
+        .run(
+            &serde_json::from_value(json!({
+                "op": "insert", "table": "books", "values": { "title": "Orlando" },
+            }))
+            .expect("a plan"),
+        )
+        .await
+        .expect_err("refused");
+    assert!(write.to_string().contains("not available yet"), "{write}");
+}
+
+#[tokio::test]
+async fn the_call_budget_is_spent_once_per_plan_and_then_refused() {
+    let host = super::TableHost::new(library().await).with_limits(HostLimits {
+        max_rows: 10,
+        max_calls: 2,
+    });
+    // The plans themselves reach a driver that refuses to run anything, so what
+    // is asserted is the budget: two calls get past it, the third does not.
+    let plan = json!({ "op": "select", "table": "books" });
+    for _ in 0..2 {
+        let e = sc_expr::CodeHost::call(&host, plan.clone())
+            .await
+            .expect_err("no database behind this catalog");
+        assert!(!e.to_string().contains("database calls"), "{e}");
+    }
+    let spent = sc_expr::CodeHost::call(&host, plan)
+        .await
+        .expect_err("the budget is spent");
+    assert!(
+        spent.to_string().contains("more than 2 database calls"),
+        "{spent}"
+    );
+}
