@@ -2,6 +2,63 @@
 
 Changes in reverse chronological order.
 
+## A code body gets a runtime of its own
+
+The first phase of "tables in code". Nothing an admin can see yet — no action
+binds `db` — but the machinery underneath it is here, and it is a *second*
+JavaScript engine rather than a new power granted to the first.
+
+**Why two.** The formula evaluator is one V8 isolate on one thread serving every
+ownership check in the process. A code body is different in kind: it calls the
+host, and the host call blocks the thread until the database answers. Giving
+*that* isolate a blocking call would put every authorization decision on the
+server behind whatever some trigger's code is doing — and it would **deadlock**
+the first time a delegated read's ownership formula needed the JS evaluator,
+because the thread waiting on the host is the thread the formula would have to
+run on. So `sc_expr::CodeRuntime` is a small pool of isolates of its own (two by
+default), and `DenoEvaluator`'s stays exactly as pure as it was: a test asserts
+the formula isolate has no `Deno`, no op handle, no run wrapper and no `db`.
+
+**The seam is JSON, both ways.** `CodeHost` is one method — a JSON request in, a
+JSON value out — and that is deliberately the whole interface. `sc-expr` sits
+below `sc-catalog` and `sc-api` and does not learn what a table is; the catalog
+lookups, the formula translation and the row layer stay where they already are.
+It is also what makes this the seam §15's other guest languages implement rather
+than a JavaScript feature: a Python adapter answers the same plans.
+
+**The fluent surface is JavaScript.** `db.books.where({…}).select(…).rows()` is
+a prelude, not generated code. Chain methods are pure and return a new builder;
+a terminal builds one plain plan object and makes one round trip. `db.table(n)`
+is the general form and `db.n` is a Proxy over it; `.asUser()` / `.asAdmin()`
+set one field of the plan, so it does not matter where in the chain they are
+said; `.update()` or `.delete()` with no `.where()` throws before anything is
+sent. Adding a chain method from here touches no Rust.
+
+**Three bounds, three messages.** Wall clock for the run (checked when the guest
+asks for a host call, default 5 s, hard max 60 s), a call budget (200, so an
+accidental N+1 cannot hammer the database quietly), and the JS watchdog — which
+is **paused for the duration of every host call**. A slow query is the
+database's time, not the guest's, and reporting it as "your code timed out"
+sends an admin to rewrite code that was never the problem. A test holds the host
+for longer than the whole run's budget and asserts the error names the time
+limit rather than the watchdog.
+
+**The globals cannot be poisoned.** Runs share an isolate, so `__scDbCall` and
+`__scRun` are installed non-writable and non-configurable, and `db` is built
+fresh inside each run's own function scope. Tampering could never *escalate* —
+the host re-validates every plan — but a body that broke the next trigger's `db`
+would be a bug nobody could find.
+
+**One latent process abort, fixed on the way past.** `deno_core` registers each
+isolate against the tokio runtime that was current when it was built, and
+**aborts the process** if V8 later posts a delayed foreground task (its GC
+memory reducer does, under load) against an isolate that has none. Both engines
+now build their isolates inside a runtime context and drop the guard
+immediately, which is also what leaves a code thread free to block on a host
+call. The formula evaluator had been constructing its isolate outside any
+runtime since it was written; under the extra heap pressure of a second engine
+it started aborting the test binary roughly one run in three.
+
 ## The log learns to describe a model call
 
 Answering "what does an agent log?" — which, before this, was: nothing at all.

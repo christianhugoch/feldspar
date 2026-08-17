@@ -28,10 +28,18 @@
 //!   matching semantics is a [`TranslateError::Untranslatable`] naming the
 //!   construct, which the runtime path answers by falling back to the reified
 //!   evaluator — Phase 3, on `deno_core`, consuming this same [`Ast`].
+//!
+//! - [`CodeRuntime`] is the other engine: opaque JavaScript **code bodies**
+//!   (`run_js_code`), on their own pool of isolates, with one op reaching one
+//!   [`CodeHost`]. A code body may query and write tables; a formula never can,
+//!   and the two isolates are separate so that a blocking host call can never sit
+//!   in front of an authorization decision. This crate does not learn what a
+//!   table is — the host takes JSON plans and answers JSON.
 
 mod agg;
 mod analyze;
 mod ast;
+mod code;
 mod eval;
 mod formula;
 #[cfg(feature = "eval")]
@@ -45,8 +53,14 @@ pub use agg::{AggUse, INVERSE};
 pub use analyze::{Ambient, AmbientUse, Analysis, FreeVars, JOIN, JoinPath, OpFlag};
 pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]
+pub use code::CodeRuntime;
+pub use code::{
+    CodeCall, CodeHost, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS, DEFAULT_MAX_HOST_CALLS,
+    MAX_CODE_TIMEOUT,
+};
+#[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;
-pub use eval::{CodeCall, FormulaCall, JsEvaluator, value_from_json, value_to_json};
+pub use eval::{FormulaCall, JsEvaluator, value_from_json, value_to_json};
 pub use formula::Formula;
 pub use shape::{FieldShape, KeyShape, SchemaShape, TableShape};
 pub use subquery::{AggFunc, AggregateSpec, aggregate_expr, correlated_aggregate, correlation};

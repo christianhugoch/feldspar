@@ -36,6 +36,8 @@ use std::collections::BTreeMap;
 #[cfg(feature = "eval")]
 use std::sync::Arc;
 #[cfg(feature = "eval")]
+use std::sync::OnceLock;
+#[cfg(feature = "eval")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "eval")]
 use std::sync::mpsc;
@@ -50,6 +52,9 @@ use sc_query::Value;
 
 #[cfg(feature = "eval")]
 use crate::analyze::{Ambient, OpFlag};
+use crate::code::CodeCall;
+#[cfg(feature = "eval")]
+use crate::code::{CodeRuntime, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS};
 use crate::formula::Formula;
 #[cfg(feature = "eval")]
 use crate::normalise::{is_join_ident, render_js};
@@ -84,26 +89,6 @@ pub struct FormulaCall {
     pub ambient: AmbientValues,
 }
 
-/// One run of a JavaScript **code body**: the source, and the values in scope.
-///
-/// Not a [`FormulaCall`]: a formula is one expression in the language this crate
-/// defines — parsed, validated against a schema shape, normalised, and evaluable
-/// two ways — while this is opaque JavaScript statements the host hands over
-/// verbatim. They share the thread, the isolate, the watchdog and the sandbox;
-/// they share nothing else, and collapsing them into one type would have meant a
-/// `FormulaCall` whose `formula` was sometimes not a formula.
-#[derive(Debug, Clone, Default)]
-pub struct CodeCall {
-    /// The code body: statements, with `return` for the result. Run as the body
-    /// of a function, so `return` at the top level is legal and everything it
-    /// declares is local to the run.
-    pub code: String,
-    /// The values bound by name in the code's scope, as JSON — `row`, `user`,
-    /// … Each name must be a plain JavaScript identifier; anything else is an
-    /// error rather than something spliced into the script.
-    pub bindings: BTreeMap<String, serde_json::Value>,
-}
-
 /// The evaluator seam. `DenoEvaluator` is the implementation; the trait exists
 /// so the formula machinery never names the engine — a lighter engine
 /// (boa/quickjs) could sit behind it if V8's build weight ever matters.
@@ -126,10 +111,11 @@ pub trait JsEvaluator: Send + Sync {
     /// Run a JavaScript **code body** to its JSON result — the `run_js_code`
     /// action (§10.1).
     ///
-    /// Same isolate, thread, watchdog and sandbox as the two above, and the same
-    /// bounds: no host API, so the code cannot read or write the catalog (that is
-    /// `sc-code`'s milestone, §15), and the shared per-run timeout applies. A
-    /// throw, a timeout, or a result JSON cannot express is an `Err`.
+    /// **Not** the two above's isolate: a code body may carry a
+    /// [`CodeHost`](crate::CodeHost), and a host call blocks the thread it runs
+    /// on, so it goes to the [`CodeRuntime`](crate::CodeRuntime) pool instead —
+    /// see that module for why the formula isolate must stay pure. A throw, a
+    /// timeout, or a result JSON cannot express is an `Err`.
     async fn run_code(&self, call: CodeCall) -> Result<serde_json::Value>;
 }
 
@@ -150,7 +136,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(250);
 /// key under its own name, and the symbolic side's `ORDER BY key, pk` matches
 /// (both are the production path for these; reified is the parity reference).
 #[cfg(feature = "eval")]
-const AGG_PRELUDE: &str = r#"
+pub(crate) const AGG_PRELUDE: &str = r#"
 (() => {
   const A = Array.prototype;
   const def = (name, fn) =>
@@ -240,13 +226,6 @@ enum Job {
         FormulaCall,
         tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     ),
-    /// Run a code body to its JSON result (the `run_js_code` action). Replies
-    /// like `EvalValue` — the difference is what is compiled, not what comes
-    /// back.
-    RunCode(
-        CodeCall,
-        tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
-    ),
     /// Raw script escape hatch for the watchdog test only: the formula
     /// language cannot express an infinite loop (no statements, no named
     /// recursion), which is a feature — but it leaves the timeout otherwise
@@ -268,6 +247,12 @@ enum Pending {
 /// last handle shuts the thread down.
 pub struct DenoEvaluator {
     tx: mpsc::Sender<Job>,
+    /// The **code** pool (decision 1), built on first use. A process that never
+    /// runs a `run_js_code` trigger — most of the test suite, and a great many
+    /// installations — should not pay for two more V8 isolates to find that out.
+    code: OnceLock<CodeRuntime>,
+    code_workers: usize,
+    code_timeout: Duration,
 }
 
 #[cfg(feature = "eval")]
@@ -278,16 +263,43 @@ impl DenoEvaluator {
     }
 
     /// Start the evaluator thread with an explicit per-evaluation timeout.
+    ///
+    /// The timeout is the **formula** watchdog's; a code body carries its own
+    /// (`CodeCall::timeout`, defaulting to [`DEFAULT_CODE_TIMEOUT`]), because the
+    /// two run on different isolates and want bounds an order of magnitude apart.
+    ///
+    /// [`DEFAULT_CODE_TIMEOUT`]: crate::DEFAULT_CODE_TIMEOUT
     pub fn with_timeout(timeout: Duration) -> DenoEvaluator {
         let (tx, rx) = mpsc::channel::<Job>();
+        let anchor = tokio::runtime::Handle::try_current().ok();
         std::thread::Builder::new()
             .name("sc-expr-js-eval".into())
-            .spawn(move || runtime_thread(rx, timeout))
+            .spawn(move || runtime_thread(rx, timeout, anchor.as_ref()))
             // Thread spawning fails only on resource exhaustion at process
             // level; there is no useful recovery, and every later eval would
             // error on a closed channel anyway.
             .ok();
-        DenoEvaluator { tx }
+        DenoEvaluator {
+            tx,
+            code: OnceLock::new(),
+            code_workers: DEFAULT_CODE_WORKERS,
+            code_timeout: DEFAULT_CODE_TIMEOUT,
+        }
+    }
+
+    /// How many isolates the code pool gets when it is first needed.
+    #[must_use]
+    pub fn with_code_workers(mut self, workers: usize) -> DenoEvaluator {
+        self.code_workers = workers;
+        self
+    }
+
+    /// What a code body with no `timeout` of its own gets, in place of
+    /// [`DEFAULT_CODE_TIMEOUT`].
+    #[must_use]
+    pub fn with_code_timeout(mut self, timeout: Duration) -> DenoEvaluator {
+        self.code_timeout = timeout;
+        self
     }
 
     #[cfg(test)]
@@ -333,20 +345,27 @@ impl JsEvaluator for DenoEvaluator {
     }
 
     async fn run_code(&self, call: CodeCall) -> Result<serde_json::Value> {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Job::RunCode(call, reply_tx))
-            .map_err(|_| Error::msg("formula evaluator thread is gone"))?;
-        reply_rx
+        self.code
+            .get_or_init(|| {
+                CodeRuntime::with_workers(self.code_workers).with_default_timeout(self.code_timeout)
+            })
+            .run(call)
             .await
-            .map_err(|_| Error::msg("formula evaluator dropped the reply"))?
     }
 }
 
 #[cfg(feature = "eval")]
 /// The dedicated thread: owns the `JsRuntime`, its watchdog, and the job loop.
-fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
-    let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions::default());
+fn runtime_thread(
+    rx: mpsc::Receiver<Job>,
+    timeout: Duration,
+    anchor: Option<&tokio::runtime::Handle>,
+) {
+    // `_anchor` is the isolate's tokio anchor and must outlive it — `deno_core`
+    // aborts the process if V8 posts a delayed task against an isolate that was
+    // built outside a runtime. See `code::build_isolate`.
+    let (mut runtime, _anchor) =
+        crate::code::build_isolate(anchor, deno_core::RuntimeOptions::default());
 
     // A default runtime still carries `Deno.core` (deno_core's own plumbing —
     // not I/O, but not formula business either). Remove the global outright:
@@ -398,13 +417,6 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
             },
             Job::EvalValue(call, reply) => match build_script(&call, true) {
                 Ok(script) => (script, Pending::Value(reply), FORMULA),
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                    continue;
-                }
-            },
-            Job::RunCode(call, reply) => match build_code_script(&call) {
-                Ok(script) => (script, Pending::Value(reply), CODE),
                 Err(e) => {
                     let _ = reply.send(Err(e));
                     continue;
@@ -465,13 +477,11 @@ fn runtime_thread(rx: mpsc::Receiver<Job>, timeout: Duration) {
     // which ends the watchdog thread's loop too.
 }
 
-/// What a failing job is called in its error message. Two words rather than one
-/// generic "evaluation", because "your formula threw" and "your code threw" send
-/// an admin to two different places.
+/// What a failing job is called in its error message. Named rather than
+/// generic, because "your formula threw" and "your code threw" (the
+/// [`CodeRuntime`]'s own wording) send an admin to two different places.
 #[cfg(feature = "eval")]
 const FORMULA: &str = "formula evaluation";
-#[cfg(feature = "eval")]
-const CODE: &str = "JavaScript code";
 
 #[cfg(feature = "eval")]
 enum WatchdogMsg {
@@ -543,63 +553,6 @@ fn build_script(call: &FormulaCall, value_mode: bool) -> Result<String> {
     Ok(format!(
         "(function(__b) {{ \"use strict\";\n{consts}return {ret};\n}})({args})"
     ))
-}
-
-#[cfg(feature = "eval")]
-/// Assemble the script for one code body: the bindings as `const`s, the code as
-/// the body of a nested function (so a top-level `return` is legal and nothing it
-/// declares outlives the run), and `JSON.stringify` of what it returned.
-///
-/// The code itself is **not** escaped, and cannot be: it is the admin's own
-/// JavaScript, spliced in as source. That is not a hole — the wrapper is no
-/// privilege boundary, and there is nothing on the other side of it to reach
-/// (the isolate has no ops, no extensions and no host API). What *is* escaped is
-/// every value, which rides in as JSON exactly as a formula's bindings do.
-fn build_code_script(call: &CodeCall) -> Result<String> {
-    let mut bindings = serde_json::Map::new();
-    let mut consts = String::new();
-    for (name, value) in &call.bindings {
-        if !is_plain_ident(name) {
-            return Err(Error::msg(format!(
-                "code binding `{name}` is not a JavaScript identifier"
-            )));
-        }
-        let key =
-            serde_json::to_string(name).map_err(|e| Error::msg(format!("encode binding: {e}")))?;
-        consts.push_str(&format!("const {name} = __b[{key}];\n"));
-        bindings.insert(name.clone(), value.clone());
-    }
-    let args = serde_json::to_string(&serde_json::Value::Object(bindings))
-        .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
-    let code = &call.code;
-    // The Promise check is principle 5 in one line: an `async` body would
-    // otherwise stringify to `{}` and look like a result. There is no host API to
-    // await, so a Promise here is a mistake worth naming.
-    Ok(format!(
-        "(function(__b) {{ \"use strict\";\n\
-         {consts}\
-         const __result = (function() {{\n{code}\n}})();\n\
-         if (__result && typeof __result.then === \"function\") {{\n\
-         throw new Error(\"the code returned a Promise: run_js_code is synchronous, \
-         and the sandbox has nothing to await\");\n\
-         }}\n\
-         return JSON.stringify(__result);\n\
-         }})({args})"
-    ))
-}
-
-/// Whether a binding name is a plain JavaScript identifier — what can be spliced
-/// into `const <name> = …` without a thought. Deliberately stricter than JS
-/// itself (no `Ⱶ`, no escapes): every caller of [`CodeCall`] binds names it wrote
-/// itself, so anything else is a bug to report rather than a shape to support.
-#[cfg(feature = "eval")]
-fn is_plain_ident(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_' || first == '$')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 #[cfg(feature = "eval")]
@@ -1038,7 +991,8 @@ mod tests {
         assert_eq!(ev.eval_value(c).await.unwrap(), serde_json::Value::Null);
     }
 
-    /// A code run with the given bindings.
+    /// A code run with the given bindings. No host: `run_js_code` without one is
+    /// the pure body it has always been, and these are its tests.
     fn code(source: &str, bindings: &[(&str, serde_json::Value)]) -> CodeCall {
         CodeCall {
             code: source.to_owned(),
@@ -1046,6 +1000,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), v.clone()))
                 .collect(),
+            ..CodeCall::default()
         }
     }
 
@@ -1144,13 +1099,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn code_runs_in_the_same_sandbox_as_a_formula() {
-        // The point of the `run_js_code` bound: no host API, so the code cannot
-        // read or write the catalog, the network or the disk (§15 is where that
-        // changes). Probed from *inside* a code body, which — unlike a formula —
-        // can name anything JavaScript can.
+    async fn a_code_body_without_a_host_reaches_nothing() {
+        // A `CodeCall` with no host is exactly the bound `run_js_code` shipped
+        // with: no catalog, no network, no disk — and no `db` either. Probed from
+        // *inside* a code body, which unlike a formula can name anything
+        // JavaScript can.
         let ev = DenoEvaluator::new();
-        for probe in ["Deno", "fetch", "require", "process", "globalThis.sc"] {
+        for probe in ["Deno", "fetch", "require", "process", "globalThis.sc", "db"] {
             let call = code(&format!("return typeof {probe} === 'undefined';"), &[]);
             assert!(
                 ev.run_code(call).await.unwrap() == serde_json::json!(true),
@@ -1160,20 +1115,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_runaway_code_body_is_terminated_and_the_isolate_recovers() {
-        let ev = DenoEvaluator::with_timeout(Duration::from_millis(50));
-        let err = ev
-            .run_code(code("while (true) {}", &[]))
-            .await
-            .unwrap_err()
-            .to_string();
+    async fn a_runaway_code_body_is_terminated_and_neither_isolate_is_harmed() {
+        let ev = DenoEvaluator::new();
+        let mut runaway = code("while (true) {}", &[]);
+        runaway.timeout = Some(Duration::from_millis(100));
+        let err = ev.run_code(runaway).await.unwrap_err().to_string();
         assert!(err.contains("JavaScript code timed out"), "{err}");
-        // The isolate serves the next run — and the next formula — normally.
+        // The code pool serves the next run normally...
         assert_eq!(
             ev.run_code(code("return 1 + 1;", &[])).await.unwrap(),
             serde_json::json!(2)
         );
+        // ...and the formula isolate — a different thread entirely (decision 1) —
+        // never saw any of it.
         assert!(ev.eval(call("_read", Operation::Read)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_formula_isolate_gained_no_op_and_no_handle() {
+        // Decision 1's other half: the code runtime's one op, its run wrapper and
+        // its `db` exist only there. Raw script, so nothing is refused by the
+        // binder before V8 sees it.
+        let ev = DenoEvaluator::new();
+        for probe in ["Deno", "__scDbCall", "__scRun", "db"] {
+            assert!(
+                ev.eval_raw(format!("!!(typeof {probe} === 'undefined')"))
+                    .await
+                    .unwrap(),
+                "the formula isolate has `{probe}`"
+            );
+        }
     }
 
     #[tokio::test]

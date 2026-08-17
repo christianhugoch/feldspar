@@ -1,19 +1,19 @@
 # Saltcorn v2 — Email: settings, interpolation, and a button that sends one
 
 Ordered, checkable task list for the tenth milestone after the MVP. Earlier lists are
-archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
-[docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
-[docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
-rich types and File fields), [docs/TODO-post-mvp-3.md](./docs/TODO-post-mvp-3.md) (ownership
+archived in [docs/TODO-mvp.md](./TODO-mvp.md) (the MVP),
+[docs/TODO-post-mvp-1.md](./TODO-post-mvp-1.md) (file stores + the React framework),
+[docs/TODO-post-mvp-2.md](./TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
+rich types and File fields), [docs/TODO-post-mvp-3.md](./TODO-post-mvp-3.md) (ownership
 formulae, calculated fields and row-level security),
-[docs/TODO-post-mvp-4.md](./docs/TODO-post-mvp-4.md) (actions and triggers),
-[docs/TODO-post-mvp-5.md](./docs/TODO-post-mvp-5.md) (the file-store IDE),
-[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md) (agents),
-[docs/TODO-post-mvp-7.md](./docs/TODO-post-mvp-7.md) (the GraphQL provider),
-[docs/TODO-post-mvp-8.md](./docs/TODO-post-mvp-8.md) (REST queries, custom SQL and the
-generated client) and [docs/TODO-post-mvp-9.md](./docs/TODO-post-mvp-9.md) (table constraints
-and indexes); scope and rationale remain in [docs/GOALS.md](./docs/GOALS.md) and
-[docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md).
+[docs/TODO-post-mvp-4.md](./TODO-post-mvp-4.md) (actions and triggers),
+[docs/TODO-post-mvp-5.md](./TODO-post-mvp-5.md) (the file-store IDE),
+[docs/TODO-post-mvp-6.md](./TODO-post-mvp-6.md) (agents),
+[docs/TODO-post-mvp-7.md](./TODO-post-mvp-7.md) (the GraphQL provider),
+[docs/TODO-post-mvp-8.md](./TODO-post-mvp-8.md) (REST queries, custom SQL and the
+generated client) and [docs/TODO-post-mvp-9.md](./TODO-post-mvp-9.md) (table constraints
+and indexes); scope and rationale remain in [docs/GOALS.md](./GOALS.md) and
+[docs/TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md).
 
 This milestone closes **open question §18.2** ("how v2 renders and sends email") for the case
 that matters first, and builds the four facilities it needs on the way: SMTP settings, a
@@ -339,7 +339,7 @@ to send through without it. The action-facing half — how a `send_email` action
 
 Not part of this milestone's list; asked for and built alongside it, and recorded here so the
 work is findable. It closes the "subagent handoff" line item carried out of
-[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md).
+[docs/TODO-post-mvp-6.md](./TODO-post-mvp-6.md).
 
 - [x] **`sc-agent` grows a `Delegator` seam** (`delegate.rs`): `DelegateRequest` / `Delegated`,
       the run attributes `parent_run` and `delegated_by`, and `DEFAULT_MAX_DEPTH`. `Runner`

@@ -79,6 +79,9 @@ impl Action for RunJsCode {
         let call = CodeCall {
             code,
             bindings: bindings(ctx.event),
+            // The table handle arrives in phase 5 of this milestone; until then a
+            // body is the pure one this action shipped with.
+            ..CodeCall::default()
         };
         // The result is the action's result: a directly-run trigger returns it to
         // its caller, and a workflow step will put it in the run context.

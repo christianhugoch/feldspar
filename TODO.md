@@ -1,20 +1,20 @@
 # Saltcorn v2 — Tables in code: `db` in `run_js_code`
 
 Ordered, checkable task list for the eleventh milestone after the MVP. Earlier lists are
-archived in [docs/TODO-mvp.md](./TODO-mvp.md) (the MVP),
-[docs/TODO-post-mvp-1.md](./TODO-post-mvp-1.md) (file stores + the React framework),
-[docs/TODO-post-mvp-2.md](./TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
-rich types and File fields), [docs/TODO-post-mvp-3.md](./TODO-post-mvp-3.md) (ownership
+archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
+[docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
+[docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
+rich types and File fields), [docs/TODO-post-mvp-3.md](./docs/TODO-post-mvp-3.md) (ownership
 formulae, calculated fields and row-level security),
-[docs/TODO-post-mvp-4.md](./TODO-post-mvp-4.md) (actions and triggers),
-[docs/TODO-post-mvp-5.md](./TODO-post-mvp-5.md) (the file-store IDE),
-[docs/TODO-post-mvp-6.md](./TODO-post-mvp-6.md) (agents),
-[docs/TODO-post-mvp-7.md](./TODO-post-mvp-7.md) (the GraphQL provider),
-[docs/TODO-post-mvp-8.md](./TODO-post-mvp-8.md) (REST queries, custom SQL and the generated
-client) and [docs/TODO-post-mvp-9.md](./TODO-post-mvp-9.md) (table constraints and indexes);
-the tenth (email) is in [TODO.md](../TODO.md) until it is archived. Scope and rationale
-remain in [docs/GOALS.md](./GOALS.md) and
-[docs/TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md).
+[docs/TODO-post-mvp-4.md](./docs/TODO-post-mvp-4.md) (actions and triggers),
+[docs/TODO-post-mvp-5.md](./docs/TODO-post-mvp-5.md) (the file-store IDE),
+[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md) (agents),
+[docs/TODO-post-mvp-7.md](./docs/TODO-post-mvp-7.md) (the GraphQL provider),
+[docs/TODO-post-mvp-8.md](./docs/TODO-post-mvp-8.md) (REST queries, custom SQL and the
+generated client), [docs/TODO-post-mvp-9.md](./docs/TODO-post-mvp-9.md) (table constraints
+and indexes) and [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email). Scope and
+rationale remain in [docs/GOALS.md](./docs/GOALS.md) and
+[docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md).
 
 This milestone gives `run_js_code` **tables**. Today the action is deliberately pure: no host
 API, so a code body can compute over the event and nothing else. That bound was the right one
@@ -67,7 +67,7 @@ calculated field, a `{{ }}` token — evaluates in the pure isolate it always di
 ### 2. Reading
 
 Chain methods are pure and return a new builder; **terminals execute**. The chain mirrors
-[`sc_query::Select`](../crates/sc-query/src/statement.rs) field for field — `filter`,
+[`sc_query::Select`](./crates/sc-query/src/statement.rs) field for field — `filter`,
 `columns`, `order`, `limit`, `offset`, `group`, `having` — and the terminals reuse the names
 the Ↄ-aggregation chains already have in the formula language.
 
@@ -111,8 +111,8 @@ string, the GraphQL `where`, the agent tools — **or** a formula string, which 
 .where('status === "draft" && ordersↃcustomer.length > 3')
 ```
 
-Both lower to one [`sc_query::Expr`](../crates/sc-query/src/expr.rs) through the one
-vocabulary in [`sc_api::filter`](../crates/sc-api/src/filter.rs), so `eq`, `is_null`,
+Both lower to one [`sc_query::Expr`](./crates/sc-query/src/expr.rs) through the one
+vocabulary in [`sc_api::filter`](./crates/sc-api/src/filter.rs), so `eq`, `is_null`,
 `like` and the rest mean in a code body exactly what they mean in a URL. The object form
 grows `and`, `or` and `not` keys **in that shared module**, so the REST, GraphQL and agent
 filters gain them at the same moment and by the same code:
@@ -132,7 +132,7 @@ db.customers.select(
 ).rows();
 ```
 
-Each is an [`sc_expr::Formula`](../crates/sc-expr/src/formula.rs): parsed by `Formula::parse`,
+Each is an [`sc_expr::Formula`](./crates/sc-expr/src/formula.rs): parsed by `Formula::parse`,
 validated against the catalog's `SchemaShape`, translated by `translate_value`, and projected
 as a `RowQuery::extra` column — the same path a GraphQL `manager { email }` and a
 non-stored calculated field already take. **There is one expression language**, and this is
@@ -185,7 +185,7 @@ db.invoices.asAdmin().insert({ … });                  // the default, said out
 ```
 
 Under `asUser()` every operation goes through
-[`sc_api::ownership`](../crates/sc-api/src/ownership.rs)'s
+[`sc_api::ownership`](./crates/sc-api/src/ownership.rs)'s
 `read_rows_as` / `aggregate_values_as` / `insert_row_as` / `update_row_as` / `delete_row_as`
 at the event's own role and user — §7.3's rule, the same functions the agent tools use, with
 no second implementation of "meets the floor OR the formula grants it" to be subtly wrong.
@@ -304,24 +304,32 @@ assignments. Every terminal is one plan and one round trip.
 
 ## Phase 1 — The code runtime (`sc-expr`)
 
-- [ ] **The `CodeHost` seam**: `#[async_trait] pub trait CodeHost { async fn call(&self,
+- [x] **The `CodeHost` seam**: `#[async_trait] pub trait CodeHost { async fn call(&self,
       request: Json) -> Result<Json>; }` in `sc-expr`, and `CodeCall` gains
       `host: Option<Arc<dyn CodeHost>>`, a wall-clock `deadline` and the call budget. A
       `CodeCall` with no host is exactly today's pure body.
-- [ ] **`CodeRuntime`**: a pool of isolate threads (default 2, configurable), each built with
+- [x] **`CodeRuntime`**: a pool of isolate threads (default 2, configurable), each built with
       one op `op_sc_db` and its own watchdog, fed by a job channel with a worker checkout.
       `JsEvaluator::run_code` dispatches here; `eval`/`eval_value` keep the existing pure
-      isolate untouched.
-- [ ] **The op**: blocks on `Handle::block_on(host.call(req))` with the handle captured when
+      isolate untouched. (Built lazily on the first code body: a process that never runs one
+      should not pay for two more isolates to find that out.)
+- [x] **The op**: blocks on `Handle::block_on(host.call(req))` with the handle captured when
       the job was submitted; **disarms the watchdog for the duration of the call** so a slow
       query is never reported as "your code timed out", and checks the run's wall-clock
       deadline and call budget on entry, returning a named error into JS when either is spent.
-- [ ] **Non-poisonable globals**: the op handle and the run wrapper installed with
+- [x] **Non-poisonable globals**: the op handle and the run wrapper installed with
       `writable: false, configurable: false`; the prelude emitted inside the per-run function.
-- [ ] Tests: two code bodies run concurrently on the pool; a body that spins is terminated and
+      The fluent `db` builder itself (§2–§5's chain, terminals and `asUser()`) is that
+      prelude, written in JavaScript and lowering to §7's plans — the host validates them
+      from phase 2.
+- [x] Tests: two code bodies run concurrently on the pool; a body that spins is terminated and
       the isolate recovers; a body that sleeps in the host does *not* count against the JS
       watchdog but does against the deadline; the **formula** isolate still has no `Deno`, no
       ops and no `db`.
+- [x] *Not on the list, found on the way*: `deno_core` **aborts the process** if V8 posts a
+      delayed task against an isolate built outside a tokio runtime context. Both engines now
+      build theirs inside one and drop the guard immediately (which is also what leaves a code
+      thread free to `block_on`); the formula evaluator had this latent since it was written.
 
 ## Phase 2 — The host: reads (`sc-api`)
 

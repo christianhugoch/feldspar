@@ -1,0 +1,1240 @@
+//! The **code runtime**: JavaScript code bodies, and the one host surface they
+//! can reach (§10.1's `db`, the milestone "Tables in code").
+//!
+//! # Why this is not [`crate::eval`]
+//!
+//! A formula is a pure expression: one V8 isolate on one thread serves every
+//! ownership check in the process, with no ops and a 250 ms watchdog. A code body
+//! is different in kind — it calls out to the host, and the host call **blocks**
+//! the isolate thread until the database answers. Giving the *formula* isolate a
+//! blocking host call would put every authorization decision on the server behind
+//! whatever a trigger's code is doing; worse, it would **deadlock** the moment a
+//! delegated read's ownership formula needed the JS evaluator, because the thread
+//! waiting for the host call is the thread the formula would have to run on.
+//!
+//! So a code body runs on [`CodeRuntime`]: a small pool of isolates of its own,
+//! each with one op, its own watchdog and its own (longer) timeout. The formula
+//! isolate stays exactly as pure as it was.
+//!
+//! # The seam
+//!
+//! What crosses into Rust is one plain JSON object per terminal — a *plan* — and
+//! one JSON value back. That is [`CodeHost`], and it is deliberately the whole
+//! interface: this crate sits below `sc-catalog` and `sc-api` and does not learn
+//! what a table is. The fluent surface (`db.books.where(…).rows()`) is written in
+//! JavaScript, in [`DB_PRELUDE`], and lowers to those plans; the table knowledge
+//! lives in `sc-api`, where all of it already is.
+//!
+//! # Bounds
+//!
+//! Three, each with its own named error: the **wall clock** for the run (checked
+//! when the guest asks for a host call), the **call budget** (an accidental N+1
+//! loop must not hammer the database quietly), and the **JS watchdog** — which is
+//! *paused for the duration of a host call*, so a slow query is never reported as
+//! "your code timed out". The row cap is the host's business, not this crate's.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use sc_error::Result;
+use serde_json::Value as Json;
+
+#[cfg(feature = "eval")]
+use std::cell::RefCell;
+#[cfg(feature = "eval")]
+use std::rc::Rc;
+#[cfg(feature = "eval")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "eval")]
+use std::sync::{Condvar, Mutex, mpsc};
+#[cfg(feature = "eval")]
+use std::time::Instant;
+
+#[cfg(feature = "eval")]
+use deno_core::OpState;
+#[cfg(feature = "eval")]
+use sc_error::Error;
+
+/// How long a code body may run before it is stopped, when the caller names no
+/// timeout of its own. Generous next to a formula's 250 ms: a body that reads,
+/// loops and writes is doing real work.
+pub const DEFAULT_CODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The hard ceiling on a code body's timeout, whatever an action is configured
+/// with. A trigger runs inside the request or the write that fired it, so an
+/// unbounded body is an unbounded hold on that caller.
+pub const MAX_CODE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many host calls one run may make. A loop that reads a row per iteration
+/// is the failure this bounds — not malice, an N+1 nobody noticed.
+pub const DEFAULT_MAX_HOST_CALLS: u32 = 200;
+
+/// The host surface a code body can reach: one JSON request in, one JSON value
+/// out. **The** seam of §15 — a Python or Rust adapter implements the same trait
+/// against the same plans, which is why this takes JSON rather than anything
+/// shaped like a query.
+///
+/// `Err` is thrown into the guest as an ordinary `Error` at the call site, so a
+/// body may catch it (a delegated write that is refused, say, and a fallback).
+#[async_trait]
+pub trait CodeHost: Send + Sync {
+    /// Answer one plan. Called from an isolate thread, blocking it; the
+    /// implementation must therefore not depend on that thread making progress.
+    async fn call(&self, request: Json) -> Result<Json>;
+}
+
+/// One run of a JavaScript **code body**: the source, the values in scope, and
+/// what it is allowed to reach and for how long.
+///
+/// Not a [`FormulaCall`](crate::FormulaCall): a formula is one expression in the
+/// language this crate defines — parsed, validated against a schema shape,
+/// normalised, and evaluable two ways — while this is opaque JavaScript
+/// statements the host hands over verbatim. They share the sandbox and the
+/// JSON boundary; they share nothing else, and collapsing them into one type
+/// would have meant a `FormulaCall` whose `formula` was sometimes not a formula.
+#[derive(Clone)]
+pub struct CodeCall {
+    /// The code body: statements, with `return` for the result. Run as the body
+    /// of a function, so `return` at the top level is legal and everything it
+    /// declares is local to the run.
+    pub code: String,
+    /// The values bound by name in the code's scope, as JSON — `row`, `user`,
+    /// … Each name must be a plain JavaScript identifier; anything else is an
+    /// error rather than something spliced into the script.
+    pub bindings: BTreeMap<String, Json>,
+    /// The table handle, or `None` for a **pure** body — exactly what
+    /// `run_js_code` was before this milestone: `db` is not bound at all, so
+    /// naming it is a `ReferenceError` rather than a silent `undefined`.
+    pub host: Option<Arc<dyn CodeHost>>,
+    /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
+    /// `None` is [`DEFAULT_CODE_TIMEOUT`].
+    pub timeout: Option<Duration>,
+    /// How many host calls this run may make.
+    pub max_calls: u32,
+}
+
+impl Default for CodeCall {
+    fn default() -> Self {
+        CodeCall {
+            code: String::new(),
+            bindings: BTreeMap::new(),
+            host: None,
+            timeout: None,
+            max_calls: DEFAULT_MAX_HOST_CALLS,
+        }
+    }
+}
+
+impl std::fmt::Debug for CodeCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeCall")
+            .field("code", &self.code)
+            .field("bindings", &self.bindings)
+            .field("host", &self.host.is_some())
+            .field("timeout", &self.timeout)
+            .field("max_calls", &self.max_calls)
+            .finish()
+    }
+}
+
+/// The name the table handle binds under. Reserved when a host is present: a
+/// caller that also bound `db` would produce a redeclaration deep inside the
+/// generated wrapper, which is a bug nobody could find from the message.
+pub(crate) const DB: &str = "db";
+
+// ---------------------------------------------------------------------------
+// The prelude (the fluent surface, in JavaScript)
+// ---------------------------------------------------------------------------
+
+/// The `db` builder: chain methods are pure and return a new builder, terminals
+/// send one plan and return its result.
+///
+/// This is JavaScript rather than something generated from Rust on purpose
+/// (decision 4): Rust sees plans, so adding a chain method touches no Rust, and
+/// the same plans will serve the other guest languages. It is emitted **inside**
+/// each run's function scope (decision 5) — a body that assigns to `db` poisons
+/// nothing, because the next run builds its own.
+#[cfg(feature = "eval")]
+pub(crate) const DB_PRELUDE: &str = r#"
+const db = (function () {
+  const send = __scDbCall;
+  // A condition is the object DSL every other surface speaks, or a formula
+  // string — the two spellings §3 gives, lowered to one plan field.
+  const condition = (c) => {
+    if (typeof c === "string") return { formula: c };
+    if (c && typeof c === "object") return c;
+    throw new Error("where() takes a condition object or a formula string");
+  };
+  // A projection is a field name (or Ⱶ-path), or an { alias: formula } object.
+  const projections = (c) => {
+    if (typeof c === "string") return [c];
+    if (c && typeof c === "object") {
+      return Object.keys(c).map((alias) => ({ alias: alias, formula: c[alias] }));
+    }
+    throw new Error("select() takes field names and { alias: formula } objects");
+  };
+  const query = (state) => {
+    const derive = (patch) => query(Object.assign({}, state, patch));
+    const plan = (op, extra) => {
+      const p = { op: op, table: state.table, authority: state.authority };
+      // Repeated .where() calls AND; one is itself, so the common plan is flat.
+      if (state.where.length === 1) p.where = state.where[0];
+      else if (state.where.length > 1) p.where = { and: state.where };
+      if (state.select.length) p.select = state.select;
+      if (state.order.length) p.order = state.order;
+      if (state.group.length) p.group = state.group;
+      if (state.limit !== null) p.limit = state.limit;
+      if (state.offset !== null) p.offset = state.offset;
+      return Object.assign(p, extra || {});
+    };
+    // A whole table rewritten or emptied is not something an omitted call
+    // should be able to cause. The host refuses this too; here it is named at
+    // the place the author can see.
+    const bounded = (op) => {
+      if (state.where.length === 0) {
+        throw new Error(
+          "db." + state.table + "." + op +
+          "() without a .where() would touch every row; add a .where()"
+        );
+      }
+    };
+    const aggregate = (fn, arg) => {
+      const r = send(plan("aggregate", {
+        aggregate: [{ alias: "value", fn: fn, arg: arg === undefined ? null : arg }],
+      }));
+      return r === null || r === undefined || r.value === undefined ? null : r.value;
+    };
+    return {
+      where: (c) => derive({ where: state.where.concat([condition(c)]) }),
+      select: (...cols) =>
+        derive({ select: cols.reduce((acc, c) => acc.concat(projections(c)), state.select) }),
+      orderBy: (field, dir) =>
+        derive({ order: state.order.concat([{ field: field, dir: dir === undefined ? "asc" : dir }]) }),
+      groupBy: (...fields) => derive({ group: state.group.concat(fields) }),
+      limit: (n) => derive({ limit: n }),
+      offset: (n) => derive({ offset: n }),
+      asUser: () => derive({ authority: "user" }),
+      asAdmin: () => derive({ authority: "admin" }),
+
+      rows: () => send(plan("select")),
+      first: () => { const r = send(plan("select", { limit: 1 })); return r.length ? r[0] : null; },
+      get: (pk) => { const r = send(plan("select", { pk: pk, limit: 1 })); return r.length ? r[0] : null; },
+      exists: () => send(plan("select", { limit: 1 })).length > 0,
+      count: () => aggregate("count"),
+      sum: (f) => aggregate("sum", f),
+      avg: (f) => aggregate("avg", f),
+      min: (f) => aggregate("min", f),
+      max: (f) => aggregate("max", f),
+
+      insert: (values) => send(plan("insert", { values: values })),
+      update: (values) => { bounded("update"); return send(plan("update", { values: values })); },
+      delete: () => { bounded("delete"); return send(plan("delete")); },
+    };
+  };
+  const table = (authority, name) =>
+    query({
+      table: name, authority: authority,
+      where: [], select: [], order: [], group: [], limit: null, offset: null,
+    });
+  // `db.table("x")` is the general form; `db.x` is a Proxy over the same call.
+  const handle = (authority) => {
+    const base = {
+      table: (name) => table(authority, name),
+      asUser: () => handle("user"),
+      asAdmin: () => handle("admin"),
+    };
+    return new Proxy(base, {
+      get: (target, prop) => {
+        if (typeof prop !== "string") return undefined;
+        if (Object.prototype.hasOwnProperty.call(target, prop)) return target[prop];
+        return table(authority, prop);
+      },
+    });
+  };
+  return handle("admin");
+})();
+"#;
+
+/// Installed once per isolate: the op handle and the run wrapper, as globals
+/// that a code body **cannot replace**.
+///
+/// Tampering could never *escalate* — the host re-validates every plan against
+/// the catalog and the authority, and a guest that deleted `__scDbCall` would
+/// only lose its own database access. What it could do is break the *next*
+/// trigger's `db`, since runs share an isolate. Hence `writable: false,
+/// configurable: false`, and hence `Deno` going away afterwards: the op is
+/// captured in a closure, so removing the global removes the only other way to
+/// reach `Deno.core`.
+#[cfg(feature = "eval")]
+const SETUP: &str = r#"
+(() => {
+  const op = Deno.core.ops.op_sc_db;
+  const fixed = (name, value) =>
+    Object.defineProperty(globalThis, name, {
+      value: value, writable: false, configurable: false, enumerable: false,
+    });
+  // One round trip: a plan in, a reply envelope out. A host error becomes an
+  // ordinary JS Error at the call site, catchable like any other.
+  fixed("__scDbCall", (plan) => {
+    const reply = JSON.parse(op(JSON.stringify(plan)));
+    if (reply.error !== undefined) throw new Error(reply.error);
+    return reply.ok;
+  });
+  // The run wrapper: call the body, refuse a Promise (nothing in the sandbox is
+  // awaitable, and JSON.stringify(promise) is `{}`, which would look exactly
+  // like a result), and hand back the JSON text of what it returned.
+  fixed("__scRun", (body, bindings) => {
+    const result = body(bindings);
+    if (result && typeof result.then === "function") {
+      throw new Error("the code returned a Promise: run_js_code is synchronous, " +
+                      "and the sandbox has nothing to await");
+    }
+    return JSON.stringify(result);
+  });
+})();
+delete globalThis.Deno;
+"#;
+
+// ---------------------------------------------------------------------------
+// The op
+// ---------------------------------------------------------------------------
+
+/// What one run may still spend, and what it may reach. Lives in the isolate's
+/// `OpState` for the duration of the run and is taken out again afterwards, so a
+/// finished run holds no host alive.
+#[cfg(feature = "eval")]
+struct RunState {
+    host: Option<Arc<dyn CodeHost>>,
+    /// The tokio handle captured **when the job was submitted** — the op has no
+    /// runtime of its own to block on.
+    handle: Option<tokio::runtime::Handle>,
+    /// Wall clock: when this run may make no further host calls.
+    deadline: Instant,
+    /// What the deadline was, for the message.
+    timeout: Duration,
+    calls_left: u32,
+    max_calls: u32,
+    /// JS execution time still allowed. Host calls do not consume it.
+    js_budget: Duration,
+    /// When the current JS window was armed.
+    armed_at: Instant,
+    watchdog: Arc<Watchdog>,
+}
+
+#[cfg(feature = "eval")]
+impl RunState {
+    /// Stop the clock on JS execution: a host call is the database's time, not
+    /// the guest's, and reporting a slow query as "your code timed out" sends an
+    /// admin to rewrite code that was never the problem.
+    fn pause_watchdog(&mut self) {
+        self.js_budget = self.js_budget.saturating_sub(self.armed_at.elapsed());
+        self.watchdog.disarm();
+    }
+
+    /// Start it again, with whatever JS time was left.
+    fn resume_watchdog(&mut self) {
+        self.armed_at = Instant::now();
+        self.watchdog.arm(self.armed_at + self.js_budget);
+    }
+}
+
+/// The reply envelope: `{"ok": …}` or `{"error": "…"}`. An envelope rather than
+/// an op-level `Result` so the message reaches the guest as a plain `Error` it
+/// can catch, and so this crate needs no error type from `deno_core`.
+#[cfg(feature = "eval")]
+fn refuse(message: impl Into<String>) -> Json {
+    serde_json::json!({ "error": message.into() })
+}
+
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+fn op_sc_db(state: Rc<RefCell<OpState>>, #[string] request: String) -> String {
+    let reply = host_call(&state, &request);
+    serde_json::to_string(&reply).unwrap_or_else(|_| {
+        r#"{"error":"the database reply could not be encoded as JSON"}"#.to_owned()
+    })
+}
+
+/// One host call, from the isolate thread. Everything the call needs is read out
+/// of `OpState` and the borrow released **before** blocking, so the state is not
+/// held across the wait.
+#[cfg(feature = "eval")]
+fn host_call(state: &Rc<RefCell<OpState>>, request: &str) -> Json {
+    let plan: Json = match serde_json::from_str(request) {
+        Ok(plan) => plan,
+        Err(e) => return refuse(format!("the database plan is not JSON: {e}")),
+    };
+
+    let (host, handle) = {
+        let mut state = state.borrow_mut();
+        let Some(run) = state.try_borrow_mut::<RunState>() else {
+            return refuse("this code body has no database access");
+        };
+        // The bounds, checked before the watchdog is touched so that an early
+        // return can never leave the guest unwatched.
+        if run.calls_left == 0 {
+            return refuse(format!(
+                "this code made more than {} database calls in one run; \
+                 the bound exists so an accidental loop cannot hammer the database",
+                run.max_calls
+            ));
+        }
+        if Instant::now() >= run.deadline {
+            return refuse(format!(
+                "this code exceeded its {} ms time limit",
+                run.timeout.as_millis()
+            ));
+        }
+        let (Some(host), Some(handle)) = (run.host.clone(), run.handle.clone()) else {
+            return refuse("this code body has no database access");
+        };
+        run.calls_left -= 1;
+        run.pause_watchdog();
+        (host, handle)
+    };
+
+    // Legal because a code thread is not a tokio runtime thread: the pool exists
+    // so that the thread blocked here is one nothing else depends on.
+    let outcome = handle.block_on(host.call(plan));
+
+    if let Some(run) = state.borrow_mut().try_borrow_mut::<RunState>() {
+        run.resume_watchdog();
+    }
+    match outcome {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(e) => refuse(e.to_string()),
+    }
+}
+
+#[cfg(feature = "eval")]
+deno_core::extension!(sc_db_ext, ops = [op_sc_db]);
+
+// ---------------------------------------------------------------------------
+// The watchdog
+// ---------------------------------------------------------------------------
+
+/// Terminates a runaway body through the isolate's thread-safe handle — the only
+/// safe cross-thread operation on an isolate.
+///
+/// Armed and disarmed by absolute deadline rather than by message, because a code
+/// run does both several times (once per host call) and a message protocol has to
+/// get the acknowledgement right in the middle of a race it can lose. Waiting on
+/// a condvar means an idle worker costs nothing.
+#[cfg(feature = "eval")]
+struct Watchdog {
+    /// The armed deadline, or `None` for disarmed.
+    deadline: Mutex<Option<Instant>>,
+    wake: Condvar,
+    fired: AtomicBool,
+    stop: AtomicBool,
+}
+
+#[cfg(feature = "eval")]
+impl Watchdog {
+    fn start(isolate: deno_core::v8::IsolateHandle) -> Arc<Watchdog> {
+        let dog = Arc::new(Watchdog {
+            deadline: Mutex::new(None),
+            wake: Condvar::new(),
+            fired: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+        });
+        let watched = Arc::clone(&dog);
+        std::thread::Builder::new()
+            .name("sc-code-watchdog".into())
+            .spawn(move || watched.watch(&isolate))
+            .ok();
+        dog
+    }
+
+    fn watch(&self, isolate: &deno_core::v8::IsolateHandle) {
+        let mut armed = self.deadline.lock().unwrap_or_else(|e| e.into_inner());
+        while !self.stop.load(Ordering::SeqCst) {
+            match *armed {
+                None => {
+                    armed = self.wake.wait(armed).unwrap_or_else(|e| e.into_inner());
+                }
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        self.fired.store(true, Ordering::SeqCst);
+                        isolate.terminate_execution();
+                        *armed = None;
+                    } else {
+                        let (next, _) = self
+                            .wake
+                            .wait_timeout(armed, deadline - now)
+                            .unwrap_or_else(|e| e.into_inner());
+                        armed = next;
+                    }
+                }
+            }
+        }
+    }
+
+    fn set(&self, deadline: Option<Instant>) {
+        *self.deadline.lock().unwrap_or_else(|e| e.into_inner()) = deadline;
+        self.wake.notify_all();
+    }
+
+    fn arm(&self, deadline: Instant) {
+        self.set(Some(deadline));
+    }
+
+    fn disarm(&self) {
+        self.set(None);
+    }
+
+    fn rearm_run(&self, deadline: Instant) {
+        self.fired.store(false, Ordering::SeqCst);
+        self.arm(deadline);
+    }
+
+    fn fired(&self) -> bool {
+        self.fired.load(Ordering::SeqCst)
+    }
+
+    fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.set(None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The pool
+// ---------------------------------------------------------------------------
+
+/// How many isolate threads a [`CodeRuntime`] runs by default. Two, not one: a
+/// code body blocks its thread for the length of a host call, so a single worker
+/// would serialise every trigger in the process behind the slowest query.
+pub const DEFAULT_CODE_WORKERS: usize = 2;
+
+#[cfg(feature = "eval")]
+struct CodeJob {
+    call: CodeCall,
+    /// Captured at submission: the op has to block on *some* runtime, and the
+    /// caller's is the one the host's futures belong to.
+    handle: Option<tokio::runtime::Handle>,
+    reply: tokio::sync::oneshot::Sender<Result<Json>>,
+}
+
+/// A pool of isolates for **code bodies**, separate from the formula evaluator's
+/// single pure isolate (decision 1). Cheap to share; dropping it shuts the
+/// workers and their watchdogs down.
+#[cfg(feature = "eval")]
+pub struct CodeRuntime {
+    tx: mpsc::Sender<CodeJob>,
+    /// What a [`CodeCall`] with no `timeout` of its own gets.
+    default_timeout: Duration,
+}
+
+/// Build a `JsRuntime` **inside a tokio context**, which `deno_core` requires:
+/// it registers each isolate against the runtime that was current when the
+/// isolate was created, and if V8 later posts a delayed foreground task (its GC
+/// memory reducer does, under load) against an isolate with no runtime it
+/// **aborts the process**. Entering for the length of the constructor is enough;
+/// the guard is dropped straight afterwards so that the thread is free to
+/// [`Handle::block_on`](tokio::runtime::Handle::block_on) a host call, which
+/// would panic inside a runtime context.
+///
+/// The returned runtime, when there is one, is the isolate's anchor and must be
+/// kept alive for as long as the isolate is — it is the fallback for a pool built
+/// outside any runtime at all.
+#[cfg(feature = "eval")]
+pub(crate) fn build_isolate(
+    anchor: Option<&tokio::runtime::Handle>,
+    options: deno_core::RuntimeOptions,
+) -> (deno_core::JsRuntime, Option<tokio::runtime::Runtime>) {
+    let owned = match anchor {
+        Some(_) => None,
+        None => tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .ok(),
+    };
+    let runtime = {
+        let _entered = anchor
+            .map(tokio::runtime::Handle::enter)
+            .or_else(|| owned.as_ref().map(tokio::runtime::Runtime::enter));
+        deno_core::JsRuntime::new(options)
+    };
+    (runtime, owned)
+}
+
+#[cfg(feature = "eval")]
+impl CodeRuntime {
+    /// Start a pool of [`DEFAULT_CODE_WORKERS`] isolate threads.
+    pub fn new() -> CodeRuntime {
+        CodeRuntime::with_workers(DEFAULT_CODE_WORKERS)
+    }
+
+    /// Start a pool of `workers` isolate threads (at least one).
+    pub fn with_workers(workers: usize) -> CodeRuntime {
+        let (tx, rx) = mpsc::channel::<CodeJob>();
+        let rx = Arc::new(Mutex::new(rx));
+        let anchor = tokio::runtime::Handle::try_current().ok();
+        for n in 0..workers.max(1) {
+            let rx = Arc::clone(&rx);
+            let anchor = anchor.clone();
+            std::thread::Builder::new()
+                .name(format!("sc-code-{n}"))
+                .spawn(move || worker_thread(&rx, anchor.as_ref()))
+                // Thread spawning fails only on resource exhaustion at process
+                // level; there is no useful recovery, and a run would error on a
+                // closed channel anyway.
+                .ok();
+        }
+        CodeRuntime {
+            tx,
+            default_timeout: DEFAULT_CODE_TIMEOUT,
+        }
+    }
+
+    /// Set what a call with no `timeout` of its own gets, in place of
+    /// [`DEFAULT_CODE_TIMEOUT`]. Still clamped to [`MAX_CODE_TIMEOUT`].
+    #[must_use]
+    pub fn with_default_timeout(mut self, timeout: Duration) -> CodeRuntime {
+        self.default_timeout = timeout;
+        self
+    }
+
+    /// Run one code body to its JSON result.
+    pub async fn run(&self, mut call: CodeCall) -> Result<Json> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        call.timeout = Some(call.timeout.unwrap_or(self.default_timeout));
+        self.tx
+            .send(CodeJob {
+                call,
+                handle: tokio::runtime::Handle::try_current().ok(),
+                reply,
+            })
+            .map_err(|_| Error::msg("the code runtime has no workers left"))?;
+        answer
+            .await
+            .map_err(|_| Error::msg("the code runtime dropped the reply"))?
+    }
+}
+
+#[cfg(feature = "eval")]
+impl Default for CodeRuntime {
+    fn default() -> Self {
+        CodeRuntime::new()
+    }
+}
+
+/// One worker: its own isolate, its own watchdog, jobs checked out of the shared
+/// queue one at a time.
+#[cfg(feature = "eval")]
+fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::runtime::Handle>) {
+    // `_anchor` is the isolate's tokio anchor and must outlive it — see
+    // `build_isolate`.
+    let (mut runtime, _anchor) = build_isolate(
+        anchor,
+        deno_core::RuntimeOptions {
+            extensions: vec![sc_db_ext::init()],
+            ..Default::default()
+        },
+    );
+
+    // The op handle and the run wrapper, then `Deno` goes away — see SETUP. A
+    // failure here would leave every run unable to reach the host, so say so
+    // rather than serving bodies that fail one by one for no visible reason.
+    if let Err(e) = runtime.execute_script("sc_code_setup.js", SETUP) {
+        // Nothing to reply to yet; the first run's `__scRun is not defined` is
+        // the symptom, and this is the cause it will be diagnosed from.
+        debug_assert!(false, "code runtime setup failed: {e}");
+    }
+    // Code bodies get the aggregation prelude too, so `rows().sum("qty")` means
+    // in a body what it means in a formula.
+    let _ = runtime.execute_script("sc_agg.js", crate::eval::AGG_PRELUDE);
+
+    let watchdog = Watchdog::start(runtime.v8_isolate().thread_safe_handle());
+    let op_state = runtime.op_state();
+
+    loop {
+        // Check one job out; the guard is released before it runs, so the other
+        // workers keep serving while this one blocks on a query.
+        let job = {
+            let queue = rx.lock().unwrap_or_else(|e| e.into_inner());
+            queue.recv()
+        };
+        let Ok(CodeJob {
+            call,
+            handle,
+            reply,
+        }) = job
+        else {
+            break; // The last CodeRuntime handle was dropped.
+        };
+
+        let script = match build_code_script(&call) {
+            Ok(script) => script,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                continue;
+            }
+        };
+        let timeout = call
+            .timeout
+            .unwrap_or(DEFAULT_CODE_TIMEOUT)
+            .min(MAX_CODE_TIMEOUT);
+
+        let started = Instant::now();
+        op_state.borrow_mut().put(RunState {
+            host: call.host.clone(),
+            handle,
+            deadline: started + timeout,
+            timeout,
+            calls_left: call.max_calls,
+            max_calls: call.max_calls,
+            js_budget: timeout,
+            armed_at: started,
+            watchdog: Arc::clone(&watchdog),
+        });
+        watchdog.rearm_run(started + timeout);
+        let outcome = runtime.execute_script("sc_code.js", script);
+        watchdog.disarm();
+        let terminated = watchdog.fired();
+        // Drop the run's host: a pool worker outlives the run by a long way.
+        op_state.borrow_mut().try_take::<RunState>();
+
+        let answer = match outcome {
+            Ok(global) => {
+                deno_core::scope!(scope, &mut runtime);
+                let local = deno_core::v8::Local::new(scope, global);
+                // `__scRun` returns the JSON text of the result;
+                // `JSON.stringify(undefined)` is `undefined`, which reads as null.
+                Ok(if local.is_string() {
+                    let text = local.to_rust_string_lossy(scope);
+                    serde_json::from_str(&text).unwrap_or(Json::Null)
+                } else {
+                    Json::Null
+                })
+            }
+            Err(e) => {
+                if terminated {
+                    // Termination poisons the isolate until cancelled; restore
+                    // it so the next run starts clean.
+                    runtime.v8_isolate().cancel_terminate_execution();
+                    Err(Error::invalid(format!(
+                        "JavaScript code timed out after {timeout:?}"
+                    )))
+                } else {
+                    Err(Error::invalid(format!("JavaScript code failed: {e}")))
+                }
+            }
+        };
+        let _ = reply.send(answer);
+    }
+    watchdog.stop();
+}
+
+// ---------------------------------------------------------------------------
+// The script
+// ---------------------------------------------------------------------------
+
+/// Assemble the script for one code body: the bindings as `const`s, the prelude
+/// (when there is a host) in the same scope, the code as the body of a nested
+/// function — so a top-level `return` is legal and nothing it declares outlives
+/// the run — and the whole thing handed to the fixed `__scRun` wrapper.
+///
+/// The code itself is **not** escaped, and cannot be: it is the admin's own
+/// JavaScript, spliced in as source. That is not a hole — the wrapper is no
+/// privilege boundary, and the host re-validates every plan that comes back out
+/// of it. What *is* escaped is every value, which rides in as JSON exactly as a
+/// formula's bindings do.
+#[cfg(feature = "eval")]
+pub(crate) fn build_code_script(call: &CodeCall) -> Result<String> {
+    let mut bindings = serde_json::Map::new();
+    let mut consts = String::new();
+    for (name, value) in &call.bindings {
+        if !is_plain_ident(name) {
+            return Err(Error::msg(format!(
+                "code binding `{name}` is not a JavaScript identifier"
+            )));
+        }
+        if call.host.is_some() && name == DB {
+            return Err(Error::msg(
+                "code binding `db` collides with the table handle bound in a code body",
+            ));
+        }
+        // `const x = __b["x"];` — the name was checked as an identifier; the key
+        // lookup quotes via JSON escaping.
+        let key =
+            serde_json::to_string(name).map_err(|e| Error::msg(format!("encode binding: {e}")))?;
+        consts.push_str(&format!("const {name} = __b[{key}];\n"));
+        bindings.insert(name.clone(), value.clone());
+    }
+    let args = serde_json::to_string(&Json::Object(bindings))
+        .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
+    // A pure body gets no `db` at all: naming it is a ReferenceError, not a
+    // handle that fails on use.
+    let prelude = if call.host.is_some() { DB_PRELUDE } else { "" };
+    let code = &call.code;
+    Ok(format!(
+        "__scRun(function (__b) {{ \"use strict\";\n\
+         {consts}{prelude}\n\
+         const __result = (function () {{\n{code}\n}})();\n\
+         return __result;\n\
+         }}, {args})"
+    ))
+}
+
+/// Whether a binding name is a plain JavaScript identifier — what can be spliced
+/// into `const <name> = …` without a thought. Deliberately stricter than JS
+/// itself (no `Ⱶ`, no escapes): every caller of [`CodeCall`] binds names it wrote
+/// itself, so anything else is a bug to report rather than a shape to support.
+#[cfg(feature = "eval")]
+fn is_plain_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+#[cfg(feature = "eval")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::AtomicU32;
+
+    /// How a [`FakeHost`] answers one plan.
+    type Answer = Box<dyn Fn(&Json) -> Result<Json> + Send + Sync>;
+
+    /// A host that records every plan it was asked for and answers from a
+    /// closure. The point of the seam: this crate can be tested end to end
+    /// without a catalog, a database or `sc-api`.
+    struct FakeHost {
+        plans: Mutex<Vec<Json>>,
+        answer: Answer,
+        delay: Option<Duration>,
+        calls: AtomicU32,
+    }
+
+    impl FakeHost {
+        fn new(answer: impl Fn(&Json) -> Result<Json> + Send + Sync + 'static) -> Arc<FakeHost> {
+            Arc::new(FakeHost {
+                plans: Mutex::new(Vec::new()),
+                answer: Box::new(answer),
+                delay: None,
+                calls: AtomicU32::new(0),
+            })
+        }
+
+        fn rows(rows: Json) -> Arc<FakeHost> {
+            FakeHost::new(move |_| Ok(rows.clone()))
+        }
+
+        fn plans(&self) -> Vec<Json> {
+            self.plans.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl CodeHost for FakeHost {
+        async fn call(&self, request: Json) -> Result<Json> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.plans.lock().unwrap().push(request.clone());
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            (self.answer)(&request)
+        }
+    }
+
+    fn call(code: &str) -> CodeCall {
+        CodeCall {
+            code: code.to_owned(),
+            ..CodeCall::default()
+        }
+    }
+
+    fn with_host(code: &str, host: Arc<dyn CodeHost>) -> CodeCall {
+        CodeCall {
+            code: code.to_owned(),
+            host: Some(host),
+            ..CodeCall::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_with_no_host_is_the_pure_body_it_always_was() {
+        let rt = CodeRuntime::new();
+        // Statements, a local declaration and a `return` — the thing a formula
+        // (one expression) cannot be.
+        let mut c = call("let t = 0; for (const n of payload.ns) t += n; return t;");
+        c.bindings.insert("payload".into(), json!({ "ns": [2, 5] }));
+        assert_eq!(rt.run(c).await.unwrap(), json!(7));
+        // And `db` is not merely inert, it is absent: naming it is a
+        // ReferenceError naming it, not a handle that fails on use.
+        let err = rt
+            .run(call("return db.books.rows();"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("JavaScript code failed") && err.contains("db"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chain_lowers_to_one_plan_and_one_round_trip() {
+        let host = FakeHost::rows(json!([{ "id": 1, "amount": 3 }]));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_host(
+                r#"return db.invoices
+                     .where({ paid: false, due: { lt: "2026-08-17" } })
+                     .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
+                     .orderBy("due")
+                     .limit(50)
+                     .offset(0)
+                     .rows();"#,
+                host.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!([{ "id": 1, "amount": 3 }]));
+        let plans = host.plans();
+        assert_eq!(plans.len(), 1, "one terminal is one round trip");
+        assert_eq!(
+            plans[0],
+            json!({
+                "op": "select",
+                "table": "invoices",
+                "authority": "admin",
+                "where": { "paid": false, "due": { "lt": "2026-08-17" } },
+                "select": [ "id", "amount", "customerⱵemail",
+                            { "alias": "chased", "formula": "remindersↃinvoice.length" } ],
+                "order": [ { "field": "due", "dir": "asc" } ],
+                "limit": 50,
+                "offset": 0
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_two_spellings_of_a_filter_and_repeated_wheres_and() {
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::new();
+        rt.run(with_host(
+            r#"db.books.where({ status: "draft" }).where('pages > 3').rows();
+               db.table("books").where('status === "draft"').rows();
+               return null;"#,
+            host.clone(),
+        ))
+        .await
+        .unwrap();
+        let plans = host.plans();
+        assert_eq!(
+            plans[0]["where"],
+            json!({ "and": [ { "status": "draft" }, { "formula": "pages > 3" } ] })
+        );
+        // `db.table(name)` is the general form of the `db.name` sugar.
+        assert_eq!(plans[1]["table"], json!("books"));
+        assert_eq!(
+            plans[1]["where"],
+            json!({ "formula": "status === \"draft\"" })
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_is_admin_until_delegated_and_where_it_is_said_does_not_matter() {
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::new();
+        rt.run(with_host(
+            r#"db.invoices.rows();
+               db.asUser().invoices.rows();
+               db.invoices.asUser().where({ paid: false }).rows();
+               db.invoices.where({ paid: false }).asUser().rows();
+               db.asUser().invoices.asAdmin().rows();
+               return null;"#,
+            host.clone(),
+        ))
+        .await
+        .unwrap();
+        let plans = host.plans();
+        let authority: Vec<&str> = plans
+            .iter()
+            .filter_map(|p| p["authority"].as_str())
+            .collect();
+        assert_eq!(
+            authority,
+            vec!["admin", "user", "user", "user", "admin"],
+            "asUser() sets one field of the plan, wherever it is said"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_terminals_carry_their_own_op_and_unwrap_their_own_result() {
+        let host = FakeHost::new(|plan| {
+            Ok(match plan["op"].as_str() {
+                Some("aggregate") => json!({ "value": 12 }),
+                Some("insert") => json!({ "id": 9 }),
+                Some("update") => json!({ "updated": 2, "ids": [3, 7] }),
+                Some("delete") => json!({ "deleted": 1, "ids": [7] }),
+                _ => json!([{ "id": 4 }]),
+            })
+        });
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_host(
+                r#"return {
+                     first:  db.books.first(),
+                     get:    db.books.get(4),
+                     exists: db.books.where({ id: 4 }).exists(),
+                     count:  db.books.count(),
+                     sum:    db.books.sum("qty * price"),
+                     insert: db.books.insert({ title: "Orlando" }),
+                     update: db.books.where({ id: 3 }).update({ shelf: 3 }),
+                     del:    db.books.where({ id: 7 }).delete(),
+                   };"#,
+                host.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["first"], json!({ "id": 4 }));
+        assert_eq!(out["get"], json!({ "id": 4 }));
+        assert_eq!(out["exists"], json!(true));
+        assert_eq!(out["count"], json!(12));
+        assert_eq!(out["sum"], json!(12));
+        assert_eq!(out["update"], json!({ "updated": 2, "ids": [3, 7] }));
+        assert_eq!(out["del"], json!({ "deleted": 1, "ids": [7] }));
+
+        let plans = host.plans();
+        let ops: Vec<&str> = plans.iter().filter_map(|p| p["op"].as_str()).collect();
+        assert_eq!(
+            ops,
+            vec![
+                "select",
+                "select",
+                "select",
+                "aggregate",
+                "aggregate",
+                "insert",
+                "update",
+                "delete"
+            ]
+        );
+        assert_eq!(plans[0]["limit"], json!(1), ".first() is LIMIT 1");
+        assert_eq!(plans[1]["pk"], json!(4), ".get(pk) names the key");
+        assert_eq!(
+            plans[3]["aggregate"],
+            json!([{ "alias": "value", "fn": "count", "arg": null }])
+        );
+        assert_eq!(
+            plans[4]["aggregate"],
+            json!([{ "alias": "value", "fn": "sum", "arg": "qty * price" }])
+        );
+        assert_eq!(plans[5]["values"], json!({ "title": "Orlando" }));
+    }
+
+    #[tokio::test]
+    async fn an_unfiltered_update_or_delete_is_refused_before_it_is_sent() {
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::new();
+        for body in [
+            "return db.books.update({ shelf: 3 });",
+            "return db.books.delete();",
+        ] {
+            let err = rt
+                .run(with_host(body, host.clone()))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("without a .where()"), "{err}");
+        }
+        assert!(host.plans().is_empty(), "nothing reached the host");
+    }
+
+    #[tokio::test]
+    async fn a_host_error_is_thrown_into_the_body_and_is_catchable() {
+        let host = FakeHost::new(|_| Err(Error::auth("the ownership formula does not grant this")));
+        let rt = CodeRuntime::new();
+        // Uncaught, it fails the run with the host's own message.
+        let err = rt
+            .run(with_host("return db.books.rows();", host.clone()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ownership formula does not grant"), "{err}");
+        // Caught, the body carries on — §5's "try a delegated write and fall back".
+        let out = rt
+            .run(with_host(
+                "try { db.books.asUser().rows(); } catch (e) { return e.message; } return null;",
+                host,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            out.as_str()
+                .is_some_and(|m| m.contains("the ownership formula does not grant this")),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_call_budget_is_a_named_error() {
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::new();
+        let mut c = with_host(
+            "for (let i = 0; i < 100; i++) db.books.rows(); return true;",
+            host.clone(),
+        );
+        c.max_calls = 3;
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("more than 3 database calls"), "{err}");
+        assert_eq!(host.plans().len(), 3, "the budget is spent, not exceeded");
+    }
+
+    #[tokio::test]
+    async fn the_pool_serves_two_bodies_at_once() {
+        // Two workers, two bodies each blocking its thread on a slow host: if
+        // they were serialised the pair would take twice one call.
+        let slow = Arc::new(FakeHost {
+            plans: Mutex::new(Vec::new()),
+            answer: Box::new(|_| Ok(json!([]))),
+            delay: Some(Duration::from_millis(300)),
+            calls: AtomicU32::new(0),
+        });
+        let rt = Arc::new(CodeRuntime::with_workers(2));
+        let started = Instant::now();
+        let one = {
+            let (rt, host) = (Arc::clone(&rt), slow.clone());
+            tokio::spawn(async move { rt.run(with_host("return db.a.rows();", host)).await })
+        };
+        let two = {
+            let (rt, host) = (Arc::clone(&rt), slow.clone());
+            tokio::spawn(async move { rt.run(with_host("return db.b.rows();", host)).await })
+        };
+        one.await.unwrap().unwrap();
+        two.await.unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(550),
+            "the two runs serialised: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_body_that_spins_is_terminated_and_its_isolate_recovers() {
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = call("while (true) {}");
+        c.timeout = Some(Duration::from_millis(100));
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("JavaScript code timed out"), "{err}");
+        // The same worker serves the next run normally.
+        assert_eq!(rt.run(call("return 1 + 1;")).await.unwrap(), json!(2));
+    }
+
+    #[tokio::test]
+    async fn time_in_the_host_does_not_count_against_the_js_watchdog_but_does_against_the_deadline()
+    {
+        // Each call sleeps for a third of the run's whole budget. Three of them
+        // outlast the deadline — but the *watchdog* must not fire, because the
+        // guest's own JavaScript has run for microseconds.
+        let slow = Arc::new(FakeHost {
+            plans: Mutex::new(Vec::new()),
+            answer: Box::new(|_| Ok(json!([]))),
+            delay: Some(Duration::from_millis(120)),
+            calls: AtomicU32::new(0),
+        });
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = with_host(
+            "for (let i = 0; i < 10; i++) db.books.rows(); return true;",
+            slow.clone(),
+        );
+        c.timeout = Some(Duration::from_millis(300));
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(
+            err.contains("time limit") && !err.contains("timed out"),
+            "the host's time was charged to the guest's watchdog: {err}"
+        );
+        // A body that only sleeps in the host, well inside the deadline, is fine
+        // even though one host call alone exceeds a formula's whole timeout.
+        let mut c = with_host("db.books.rows(); return true;", slow);
+        c.timeout = Some(Duration::from_millis(1000));
+        assert_eq!(rt.run(c).await.unwrap(), json!(true));
+    }
+
+    #[tokio::test]
+    async fn the_globals_cannot_be_poisoned_for_the_next_run() {
+        let host = FakeHost::rows(json!([{ "id": 1 }]));
+        let rt = CodeRuntime::with_workers(1);
+        // A body that tries to replace the op handle, the run wrapper and `db`.
+        let out = rt
+            .run(with_host(
+                r#"let broke = [];
+                   try { globalThis.__scDbCall = () => []; } catch (e) { broke.push("call"); }
+                   try { delete globalThis.__scRun; } catch (e) { broke.push("run"); }
+                   try { Object.defineProperty(globalThis, "__scDbCall", { value: 1 }); }
+                     catch (e) { broke.push("define"); }
+                   globalThis.db = "poisoned";
+                   return broke;"#,
+                host.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!(["call", "run", "define"]), "strict mode throws");
+        // The next run on the same isolate gets its own `db` and a working op.
+        let out = rt
+            .run(with_host("return db.books.rows();", host))
+            .await
+            .unwrap();
+        assert_eq!(out, json!([{ "id": 1 }]));
+    }
+
+    #[tokio::test]
+    async fn the_code_isolate_has_no_io_surface_of_its_own() {
+        let rt = CodeRuntime::new();
+        for probe in ["Deno", "fetch", "require", "process", "setTimeout"] {
+            let out = rt
+                .run(call(&format!("return typeof {probe} === 'undefined';")))
+                .await
+                .unwrap();
+            assert_eq!(out, json!(true), "sandbox leak: {probe}");
+        }
+        // The op handle exists — that is the one surface — but it refuses a body
+        // with no host rather than reaching anything.
+        let err = rt
+            .run(call(
+                r#"return __scDbCall({ op: "select", table: "books" });"#,
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no database access"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_async_body_is_refused_rather_than_returning_an_empty_object() {
+        let rt = CodeRuntime::new();
+        let err = rt
+            .run(call("return (async () => 1)();"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Promise"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_binding_that_collides_with_the_handle_is_refused() {
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::new();
+        let mut c = with_host("return 1;", host);
+        c.bindings.insert("db".into(), json!(1));
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("collides with the table handle"), "{err}");
+        // With no host there is no handle, so the name is the caller's to use.
+        let mut c = call("return db;");
+        c.bindings.insert("db".into(), json!(1));
+        assert_eq!(rt.run(c).await.unwrap(), json!(1));
+    }
+}

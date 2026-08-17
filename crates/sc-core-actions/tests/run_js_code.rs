@@ -213,9 +213,12 @@ async fn a_failing_body_is_an_application_error_naming_the_trigger() -> Result<(
 async fn a_runaway_body_is_terminated_and_the_engine_survives() -> Result<()> {
     let db = TestDb::new().await?;
     let catalog = setup(&db).await?;
-    // The engine's own per-run timeout — the same watchdog every ownership
-    // formula runs under, which is why this action does not get to configure it.
-    let engine = Arc::new(DenoEvaluator::with_timeout(Duration::from_millis(100)));
+    // The code runtime's per-run timeout, which is the code pool's own and not
+    // the formula watchdog's: a code body runs on its own isolates (decision 1),
+    // so bounding it does not bound every ownership check in the process. The
+    // production default is `DEFAULT_CODE_TIMEOUT`; the test wants it in
+    // milliseconds so the assertion below is quick.
+    let engine = Arc::new(DenoEvaluator::new().with_code_timeout(Duration::from_millis(100)));
 
     let started = Instant::now();
     let err = run_with(&catalog, &book_insert(), "while (true) {}", &engine)
