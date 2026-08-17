@@ -215,6 +215,30 @@ impl Read {
     }
 }
 
+/// An `insert` plan, resolved: the table, and the row(s) the row layer will
+/// coerce, validate and raise events for.
+pub(crate) struct Insertion {
+    /// The table being written.
+    pub(crate) table: Table,
+    /// The rows, each a JSON object, in the order the body gave them.
+    pub(crate) rows: Vec<Json>,
+    /// Whether the body passed an **array**. The answer's shape follows the
+    /// call's — one row in, one row out — so `.insert(v)` never has to be unwrapped.
+    pub(crate) many: bool,
+}
+
+/// An `update` or `delete` plan, resolved: the read that finds the rows it
+/// touches, the key it addresses each one by, and what an update assigns.
+pub(crate) struct Write {
+    /// The read whose rows are then written **one at a time** — which is what
+    /// makes each one its own event (§4).
+    pub(crate) matched: Read,
+    /// The primary key each matched row is addressed by.
+    pub(crate) pk: String,
+    /// An update's assignments; `None` for a delete.
+    pub(crate) values: Option<Json>,
+}
+
 /// An `aggregate` plan, resolved.
 pub(crate) struct Aggregate {
     /// The table being aggregated.
@@ -335,6 +359,163 @@ pub(crate) fn aggregate(cat: &Catalog, plan: &Plan, role: u8) -> Result<Aggregat
         projections,
         filter,
     })
+}
+
+/// Resolve an `insert` plan against the catalog.
+///
+/// The rows are checked here — every key a field of the table, not a calculated
+/// one, and every value coercible to its column — **before any of them is
+/// written**. The row layer would refuse the same things one row at a time, but
+/// this milestone has no transactions (§6): a bad third row found on the third
+/// `INSERT` would leave the first two written and their events already out.
+pub(crate) fn insert(cat: &Catalog, plan: &Plan, limits: &HostLimits) -> Result<Insertion> {
+    let table = cat.require(&plan.table)?;
+    refuse_read_shaping(plan, "insert", false)?;
+    let values = plan.values.as_ref().ok_or_else(|| {
+        Error::invalid(format!(
+            "`db.{}.insert()` was given no row to write",
+            table.name
+        ))
+    })?;
+    let (rows, many) = match values {
+        Json::Array(items) => (items.clone(), true),
+        one => (vec![one.clone()], false),
+    };
+    if rows.is_empty() {
+        return Err(Error::invalid(format!(
+            "`db.{}.insert([])` was given no rows to write",
+            table.name
+        )));
+    }
+    if rows.len() as u64 > limits.max_rows {
+        return Err(Error::invalid(format!(
+            "this insert carries {} rows into `{}`, more than the {} a code body may write \
+             in one call",
+            rows.len(),
+            table.name,
+            limits.max_rows
+        )));
+    }
+    for row in &rows {
+        writable_values(&table, row, "insert")?;
+    }
+    Ok(Insertion { table, rows, many })
+}
+
+/// Resolve an `update` or `delete` plan against the catalog.
+pub(crate) fn write(cat: &Catalog, plan: &Plan, limits: &HostLimits, role: u8) -> Result<Write> {
+    let op = match plan.op {
+        Op::Update => "update",
+        _ => "delete",
+    };
+    refuse_read_shaping(plan, op, true)?;
+    // §4: a whole table rewritten or emptied is not something an *omitted* call
+    // should be able to cause. The prelude refuses this too, in front of the
+    // author — but the prelude is a convenience and this is the rule, so it is
+    // checked again where a guest cannot reach it.
+    if plan.filter.is_none() {
+        return Err(Error::invalid(format!(
+            "`db.{table}.{op}()` with no `.where()` would touch every row of `{table}`; \
+             add a `.where()`, or filter on the primary key to name one row",
+            table = plan.table
+        )));
+    }
+    let matched = read(cat, plan, limits, role)?;
+    let pk = rows::single_pk(&matched.table)?;
+    let values = match plan.op {
+        Op::Update => Some(assignments(&matched.table, plan)?),
+        _ => None,
+    };
+    Ok(Write {
+        matched,
+        pk,
+        values,
+    })
+}
+
+/// An update's assignments: an object of writable fields, checked the way an
+/// insert's row is.
+fn assignments(table: &Table, plan: &Plan) -> Result<Json> {
+    let values = plan.values.as_ref().ok_or_else(|| {
+        Error::invalid(format!(
+            "`db.{}.update()` was given no values to assign",
+            table.name
+        ))
+    })?;
+    writable_values(table, values, "update")?;
+    Ok(values.clone())
+}
+
+/// One row-shaped argument to a write: an object of the table's own writable
+/// fields, each value coercible to its column.
+fn writable_values(table: &Table, row: &Json, op: &str) -> Result<()> {
+    let Json::Object(obj) = row else {
+        return Err(Error::invalid(format!(
+            "`db.{}.{op}()` takes an object of field values{}",
+            table.name,
+            match op {
+                "insert" => ", or an array of them",
+                _ => "",
+            }
+        )));
+    };
+    if obj.is_empty() {
+        return Err(Error::invalid(format!(
+            "this {op} of `{}` names no field to write",
+            table.name
+        )));
+    }
+    for (key, json) in obj {
+        match table.field(key) {
+            None => {
+                return Err(Error::invalid(format!(
+                    "`{}` has no field `{key}` to {op}",
+                    table.name
+                )));
+            }
+            // A calculated field has no column: it is computed from the ones
+            // being written, so writing it is a contradiction rather than a
+            // permission question.
+            Some(field) if field.is_calc() => {
+                return Err(Error::invalid(format!(
+                    "`{key}` of `{}` is a calculated field and cannot be written",
+                    table.name
+                )));
+            }
+            Some(_) => {}
+        }
+        // The same coercion the row layer will do, done early so a bad value in
+        // the last row of a bulk insert is found before the first one is written.
+        rows::column_value(table, key, json)?;
+    }
+    Ok(())
+}
+
+/// The chain methods that only shape a **read**, refused on a write rather than
+/// ignored.
+///
+/// A body that wrote `db.books.select("id").update({ … })` meant something an
+/// update cannot do, and answering it as though the call were not there is how a
+/// write nobody intended gets made quietly. `matches_rows` is true for the two
+/// operations that resolve their rows first — an `.orderBy()` and a `.limit()`
+/// are meaningful there ("the oldest ten") and meaningless on an insert.
+fn refuse_read_shaping(plan: &Plan, op: &str, matches_rows: bool) -> Result<()> {
+    let unwanted = [
+        (!plan.select.is_empty(), ".select()"),
+        (!plan.aggregate.is_empty(), "an aggregate"),
+        (plan.pk.is_some(), ".get()"),
+        (!matches_rows && plan.filter.is_some(), ".where()"),
+        (!matches_rows && !plan.order.is_empty(), ".orderBy()"),
+        (!matches_rows && plan.limit.is_some(), ".limit()"),
+        (!matches_rows && plan.offset.is_some(), ".offset()"),
+    ];
+    if let Some((_, what)) = unwanted.into_iter().find(|(present, _)| *present) {
+        return Err(Error::invalid(format!(
+            "`{what}` has no meaning in an `{op}` of `{}` — remove it",
+            plan.table
+        )));
+    }
+    refuse_grouping(plan)
 }
 
 /// The row cap, applied to the plan's own bound.

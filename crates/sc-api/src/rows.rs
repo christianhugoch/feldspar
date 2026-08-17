@@ -988,6 +988,35 @@ pub fn single_pk(table: &Table) -> Result<String> {
     }
 }
 
+/// The primary key of a **read** row, in the two forms a caller writing that row
+/// back needs: the string [`update_row_ctx`] and [`delete_row_ctx`] address it by,
+/// and the JSON an answer reports it as.
+///
+/// One function because there is one rule and it is easy to get subtly wrong: the
+/// value goes out through the same rendering an API response uses, and the
+/// *string* form is that rendering unquoted — a uuid key is its own text, an
+/// integer key is its digits — which is exactly what [`pk_filter`] coerces back.
+/// Both callers that resolve rows by predicate and then write them one at a time
+/// (a row action's `update_rows`, a code body's `db.…update()`) share it.
+pub fn row_key(
+    table: &Table,
+    pk: &str,
+    values: &std::collections::BTreeMap<String, Value>,
+) -> Result<(String, Json)> {
+    let value = values.get(pk).filter(|v| !v.is_null()).ok_or_else(|| {
+        Error::msg(format!(
+            "a row selected from `{}` carries no `{pk}` to address it by",
+            table.name
+        ))
+    })?;
+    let json = value_to_json(value);
+    let id = match &json {
+        Json::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    Ok((id, json))
+}
+
 /// `pk = <id>`, coercing the path-parameter string to the key column's type.
 pub(crate) fn pk_filter(table: &Table, pk: &str, id: &str) -> Result<Expr> {
     let value = column_value(table, pk, &Json::String(id.to_owned()))?;

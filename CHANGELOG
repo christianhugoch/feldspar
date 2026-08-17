@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## A code body's writes are events
+
+The third phase of "tables in code": `insert`, `update` and `delete` plans are
+answered. Still nothing an admin can see — no action binds `db` until phase 5 —
+but a `TableHost` handed a write plan now writes, and what it writes is an
+event.
+
+**Through the row layer, one row at a time.** `insert` goes to
+`rows::create_row_ctx`, and a bulk `update`/`delete` resolves its matched rows
+first and then writes each one by primary key through `rows::update_row_ctx` /
+`delete_row_ctx` — exactly as the `update_rows` and `delete_rows` actions do,
+because the events are the point. So a code body's write is coerced against its
+columns, validated, File-field-checked and **observed by the table's own
+triggers**, and it carries this run's caller and trigger chain: an audit trigger
+on it can say who caused it, and `Event::firing`'s cascade bound stops a body
+that writes the table that fired it exactly where it stops an action that does.
+`.insert(v)` answers the written row and `.insert([…])` an array of them — the
+answer's shape follows the call's — while `update` and `delete` answer
+`{ updated | deleted, ids }`, the shape those two actions already return.
+
+**An omitted `.where()` cannot empty a table.** The prelude refuses an
+unfiltered `update`/`delete` in front of the author; the host refuses it again,
+because the prelude is a convenience and the host is the rule. A chain method
+that only shapes a read (`.select()`, an aggregate, `.get()`) is refused on a
+write rather than ignored — a body that wrote one meant something the write
+cannot do — while `.orderBy()` and `.limit()` are kept, so "update the oldest
+ten" says what it means.
+
+**A bulk insert's rows are all checked before any of them is written.** There
+are no transactions in this milestone, so a bad third row discovered on the
+third `INSERT` would leave the first two written and their events already out.
+Every key is checked as a writable field (a calculated one is refused by name)
+and every value coerced against its column up front. `rows::row_key` is now the
+one implementation of "which row is this" shared by the row actions and the code
+host, rather than two spellings of the same coercion.
+
 ## The host behind `db`: a plan in, rows out
 
 The second phase of "tables in code". `sc-expr` learned to *send* plans last

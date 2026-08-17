@@ -94,7 +94,7 @@ pub struct TableHost {
     user: Option<Json>,
     /// The triggers that led here, including the one running. A write this host
     /// makes carries it, so `Event::firing`'s cascade bound applies to a code
-    /// body exactly as it does to an action (phase 3).
+    /// body exactly as it does to an action.
     chain: Vec<String>,
     /// The bounds.
     limits: HostLimits,
@@ -152,10 +152,8 @@ impl TableHost {
         match plan.op {
             Op::Select => self.select(plan).await,
             Op::Aggregate => self.aggregate(plan).await,
-            Op::Insert | Op::Update | Op::Delete => Err(Error::invalid(
-                "writing tables from a code body is not available yet — this code body may \
-                 read",
-            )),
+            Op::Insert => self.insert(plan).await,
+            Op::Update | Op::Delete => self.write(plan).await,
         }
     }
 
@@ -168,13 +166,10 @@ impl TableHost {
         // The cap is enforced on what came back rather than by trimming it: a
         // body handed 1000 of 4000 rows would go on to compute a wrong answer out
         // of a right-looking one, and never know.
-        if values.len() as u64 > self.limits.max_rows {
-            return Err(Error::invalid(format!(
-                "reading `{}` returned more than the {} rows a code body may hold at once; \
-                 add a `.limit()` or narrow the `.where()`",
-                read.table.name, self.limits.max_rows
-            )));
-        }
+        self.within_cap(
+            values.len(),
+            &format!("reading `{}` returned", read.table.name),
+        )?;
         Ok(Json::Array(values.iter().map(|v| read.row(v)).collect()))
     }
 
@@ -198,6 +193,96 @@ impl TableHost {
             );
         }
         Ok(Json::Object(out))
+    }
+
+    /// An `insert`: the written row, or an array of them for an array in.
+    ///
+    /// Through [`rows::create_row_ctx`], which is the whole point — a code body's
+    /// write is coerced against its columns, validated, File-field-checked and
+    /// **observed by triggers** exactly as a write through the API is. It carries
+    /// this run's caller, so the event it raises says who caused it and how deep
+    /// in a cascade it already is.
+    async fn insert(&self, plan: &Plan) -> Result<Json> {
+        let insertion = plan::insert(&self.catalog, plan, &self.limits)?;
+        let context = self.caller();
+        let mut written = Vec::with_capacity(insertion.rows.len());
+        for row in &insertion.rows {
+            written.push(
+                rows::create_row_ctx(&self.catalog, &insertion.table, row, Some(&context)).await?,
+            );
+        }
+        Ok(match insertion.many {
+            true => Json::Array(written),
+            false => written.into_iter().next().unwrap_or(Json::Null),
+        })
+    }
+
+    /// An `update` or a `delete`: `{ updated | deleted, ids }`, the shape the
+    /// `update_rows` and `delete_rows` actions already answer.
+    ///
+    /// The matched rows are resolved **first** and then written one at a time
+    /// through the row layer, exactly as those actions do — the events are the
+    /// point (§4). No transaction spans the two (§6): a body that fails half way
+    /// leaves the rows it already wrote, and their events have already gone out.
+    async fn write(&self, plan: &Plan) -> Result<Json> {
+        let write = plan::write(&self.catalog, plan, &self.limits, ROLE_ADMIN)?;
+        let table = &write.matched.table;
+        let context = self.caller();
+        let values =
+            rows::list_row_values(&self.catalog, table, &write.matched.query, Some(&context))
+                .await?;
+        let verb = match plan.op {
+            Op::Update => "update",
+            _ => "delete",
+        };
+        self.within_cap(
+            values.len(),
+            &format!("this {verb} of `{}` matched", table.name),
+        )?;
+
+        let mut ids = Vec::with_capacity(values.len());
+        for row in &values {
+            let (id, key) = rows::row_key(table, &write.pk, row)?;
+            match &write.values {
+                Some(assignments) => {
+                    rows::update_row_ctx(&self.catalog, table, &id, assignments, Some(&context))
+                        .await?;
+                }
+                None => {
+                    rows::delete_row_ctx(&self.catalog, table, &id, Some(&context)).await?;
+                }
+            }
+            ids.push(key);
+        }
+        let count = Json::from(ids.len());
+        let mut out = serde_json::Map::with_capacity(2);
+        out.insert(
+            match plan.op {
+                Op::Update => "updated".to_owned(),
+                _ => "deleted".to_owned(),
+            },
+            count,
+        );
+        out.insert("ids".to_owned(), Json::Array(ids));
+        Ok(Json::Object(out))
+    }
+
+    /// The row cap, asserted on rows that are already in hand — a read's answer,
+    /// or the rows a bulk write matched.
+    ///
+    /// Both are refusals rather than truncations, and for the same reason: a body
+    /// handed 1000 of 4000 rows computes a wrong answer out of a right-looking
+    /// one, and a body that updated 1000 of 4000 rows would report having done
+    /// what it was asked.
+    fn within_cap(&self, rows: usize, clause: &str) -> Result<()> {
+        if rows as u64 > self.limits.max_rows {
+            return Err(Error::invalid(format!(
+                "{clause} more than the {} rows a code body may take at once; add a \
+                 `.limit()` or narrow the `.where()`",
+                self.limits.max_rows
+            )));
+        }
+        Ok(())
     }
 
     /// The caller every statement of this run carries: **admin, in the event's

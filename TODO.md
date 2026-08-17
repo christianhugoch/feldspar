@@ -376,16 +376,25 @@ assignments. Every terminal is one plan and one round trip.
 
 ## Phase 3 — The host: writes
 
-- [ ] `insert` (one row or many) → `rows::create_row_ctx`, returning the written row(s).
-- [ ] `update` / `delete` → matched rows resolved first, then `rows::update_row_ctx` /
+- [x] `insert` (one row or many) → `rows::create_row_ctx`, returning the written row(s). The
+      answer's shape follows the call's: one row in, one row out; an array in, an array out.
+- [x] `update` / `delete` → matched rows resolved first, then `rows::update_row_ctx` /
       `delete_row_ctx` per row, returning `{ updated | deleted, ids }`.
-- [ ] A write plan with no `where` is refused in the host as well as in the prelude — the
+- [x] A write plan with no `where` is refused in the host as well as in the prelude — the
       prelude is a convenience, the host is the rule.
-- [ ] The event's user and this trigger's **chain** ride on every write, so cascades are
+- [x] The event's user and this trigger's **chain** ride on every write, so cascades are
       bounded exactly as an action's are.
-- [ ] Tests: an insert fires the table's own trigger; a body writing its own table hits the
+- [x] Tests: an insert fires the table's own trigger; a body writing its own table hits the
       cascade bound with the chain in the message; an unfiltered update is refused; a coerced
       value reaches the column typed (a date string binds a date).
+- [x] *Not on the list, done anyway*: the read-shaping chain methods (`.select()`, an
+      aggregate, `.get()`) are **refused** on a write rather than ignored — a body that wrote
+      one meant something the write cannot do — while `.orderBy()`/`.limit()` are kept, so
+      "update the oldest ten" says what it means. A bulk insert's rows are all checked against
+      their columns **before the first one is written**, because with no transaction (§6) a bad
+      third row found on the third `INSERT` leaves two rows written and their events out. And
+      `rows::row_key` is now the one implementation of "which row is this", shared with the row
+      actions instead of spelled twice.
 
 ## Phase 4 — `asUser()`
 

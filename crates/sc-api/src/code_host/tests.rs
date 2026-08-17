@@ -91,6 +91,16 @@ async fn refusal(plan: Json) -> String {
                 .err()
                 .expect("this plan is refused")
                 .to_string(),
+            super::Op::Insert => plan::insert(&cat, &plan, &HostLimits::default())
+                .err()
+                .expect("this plan is refused")
+                .to_string(),
+            super::Op::Update | super::Op::Delete => {
+                plan::write(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN)
+                    .err()
+                    .expect("this plan is refused")
+                    .to_string()
+            }
             _ => plan::read(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN)
                 .err()
                 .expect("this plan is refused")
@@ -438,7 +448,113 @@ async fn every_refusal_names_what_was_wrong_with_the_plan() {
 }
 
 #[tokio::test]
-async fn a_delegated_or_writing_plan_is_refused_rather_than_answered_as_the_admin() {
+async fn an_update_resolves_its_rows_by_key_before_it_writes_any_of_them() {
+    // `db.books.where({ author: 1 }).update({ shelf: 3 })` — the plan becomes a
+    // *read*, because §4's rule is that the matched rows are written one at a
+    // time through the row layer, which is what gives each one its own event.
+    let cat = library().await;
+    let plan: Plan = serde_json::from_value(json!({
+        "op": "update", "table": "books",
+        "where": { "author": 1 },
+        "values": { "title": "Orlando" },
+    }))
+    .expect("a plan");
+    let write =
+        plan::write(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN).expect("resolves");
+    assert_eq!(write.pk, "id", "each matched row is addressed by its key");
+    assert_eq!(write.values, Some(json!({ "title": "Orlando" })));
+    // The matched read is the whole row (no `select` to narrow it) under the
+    // plan's own filter, bounded by the row cap like any other read.
+    let (sql, binds) = rendered(&write.matched);
+    assert!(sql.contains("WHERE (\"author\" = $1)"), "{sql}");
+    assert_eq!(binds[0], Value::Int(1));
+    assert_eq!(write.matched.query.limit, Some(super::DEFAULT_MAX_ROWS + 1));
+}
+
+#[tokio::test]
+async fn a_write_plan_is_refused_for_what_a_write_cannot_mean() {
+    // §4: an omitted `.where()` must not be able to rewrite or empty a table.
+    // The prelude refuses this in front of the author; the host is the rule, so
+    // a plan that arrives without one — from a tampered prelude, or from §15's
+    // next guest language — is refused here too.
+    for op in ["update", "delete"] {
+        let message = refusal(json!({
+            "op": op, "table": "books", "values": { "title": "x" },
+        }))
+        .await;
+        assert!(
+            message.contains("every row of `books`") && message.contains(".where()"),
+            "{message}"
+        );
+    }
+
+    // A chain method that only shapes a read is refused rather than ignored: a
+    // body that wrote one meant something the write cannot do.
+    let shaped = refusal(json!({
+        "op": "update", "table": "books",
+        "where": { "id": 1 }, "select": ["title"], "values": { "title": "x" },
+    }))
+    .await;
+    assert!(
+        shaped.contains(".select()") && shaped.contains("update"),
+        "{shaped}"
+    );
+    let filtered_insert = refusal(json!({
+        "op": "insert", "table": "books", "where": { "id": 1 }, "values": { "title": "x" },
+    }))
+    .await;
+    assert!(filtered_insert.contains(".where()"), "{filtered_insert}");
+
+    // The values, checked against the columns **before any row is written** —
+    // there is no transaction here (§6), so a bad third row found on the third
+    // INSERT would leave the first two written and their events already out.
+    let unknown = refusal(json!({
+        "op": "insert", "table": "books",
+        "values": [ { "title": "Orlando" }, { "shelf": 3 } ],
+    }))
+    .await;
+    assert!(
+        unknown.contains("no field `shelf`") && unknown.contains("insert"),
+        "{unknown}"
+    );
+    let ill_typed = refusal(json!({
+        "op": "update", "table": "books", "where": { "id": 1 }, "values": { "pages": "lots" },
+    }))
+    .await;
+    assert!(ill_typed.contains("`pages`"), "{ill_typed}");
+    let nothing = refusal(json!({
+        "op": "update", "table": "books", "where": { "id": 1 }, "values": {},
+    }))
+    .await;
+    assert!(nothing.contains("names no field"), "{nothing}");
+
+    // A bulk insert is bounded too: the rows are written one statement each.
+    let cat = library().await;
+    let many: Vec<Json> = (0..3)
+        .map(|i| json!({ "title": format!("b{i}") }))
+        .collect();
+    let plan: Plan =
+        serde_json::from_value(json!({ "op": "insert", "table": "books", "values": many }))
+            .expect("a plan");
+    let message = plan::insert(
+        &cat,
+        &plan,
+        &HostLimits {
+            max_rows: 2,
+            max_calls: 10,
+        },
+    )
+    .err()
+    .expect("refused")
+    .to_string();
+    assert!(
+        message.contains("3 rows into `books`") && message.contains("more than the 2"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_delegated_plan_is_refused_rather_than_answered_as_the_admin() {
     let host = super::TableHost::new(library().await);
     let delegated = host
         .run(
@@ -450,17 +566,6 @@ async fn a_delegated_or_writing_plan_is_refused_rather_than_answered_as_the_admi
         .await
         .expect_err("refused");
     assert!(delegated.to_string().contains("asUser()"), "{delegated}");
-
-    let write = host
-        .run(
-            &serde_json::from_value(json!({
-                "op": "insert", "table": "books", "values": { "title": "Orlando" },
-            }))
-            .expect("a plan"),
-        )
-        .await
-        .expect_err("refused");
-    assert!(write.to_string().contains("not available yet"), "{write}");
 }
 
 #[tokio::test]

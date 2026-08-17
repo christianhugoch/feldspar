@@ -46,7 +46,6 @@ use sc_query::{Expr, Value};
 use sc_types::Attrs;
 use serde_json::Value as Json;
 
-use sc_api::convert::value_to_json;
 use sc_api::rows;
 
 /// The `table` setting every row-writing action takes.
@@ -297,23 +296,17 @@ fn typed_value(table: Option<&Table>, field: &str, json: &Json) -> Value {
 
 /// The primary key of a selected row as the string the `rows` layer addresses a
 /// row by, coercing back through the same JSON rendering an API response uses.
+///
+/// The row layer's own [`rows::row_key`], because a code body's `db.…update()`
+/// resolves its rows and writes them one at a time exactly as these actions do,
+/// and one subtly different spelling of "which row is this" between the two would
+/// be a bug in whichever of them was written second.
 pub(crate) fn row_id(
     table: &Table,
     pk: &str,
     values: &BTreeMap<String, Value>,
 ) -> Result<(String, Json)> {
-    let value = values.get(pk).filter(|v| !v.is_null()).ok_or_else(|| {
-        Error::msg(format!(
-            "a row selected from `{}` carries no `{pk}` to address it by",
-            table.name
-        ))
-    })?;
-    let json = value_to_json(value);
-    let id = match &json {
-        Json::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    Ok((id, json))
+    rows::row_key(table, pk, values)
 }
 
 #[cfg(test)]
