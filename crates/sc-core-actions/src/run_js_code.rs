@@ -107,6 +107,11 @@ impl Action for RunJsCode {
         vec![
             FormField::new(CFG_CODE, BasicType::Text)
                 .label("Code")
+                // Declared as JavaScript so the admin UI gives it an editor with
+                // highlighting and completions over the scope below, rather than
+                // a text area. The declaration is the whole coupling: no screen
+                // knows this setting by name.
+                .code("javascript")
                 .required(),
             FormField::new(CFG_TIMEOUT, BasicType::Int)
                 .label("Timeout (ms)")

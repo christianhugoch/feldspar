@@ -14,6 +14,9 @@
 
 import Form from "react-bootstrap/Form";
 
+import { CodeEditor } from "./CodeEditor";
+import type { CodeScope } from "./codeTypes";
+
 /** One settings field, structurally matching the API's `form_field_schema`.
  *
  * Declared here rather than imported from a specific endpoint's response type,
@@ -43,6 +46,11 @@ export type FieldSpec = {
    * that: it puts the stored value back over whatever a save submits. This is
    * the courtesy of not offering a control that does nothing, not the rule. */
   create_only?: boolean;
+  /** The value is source code in this language (`"javascript"`), so it is edited
+   * in a code editor rather than a text area (§12.2). A hint on the declaration
+   * for the same reason `multiline` is one: no screen should know that a
+   * particular action's particular setting happens to hold a program. */
+  code_language?: string | null;
 };
 
 /** What the server substitutes for a secret setting's value on read, and what it
@@ -146,12 +154,17 @@ export function SettingField({
   onChange,
   idPrefix = "cfg",
   locked = false,
+  codeScope,
 }: {
   field: FieldSpec;
   value: string;
   onChange: (value: string) => void;
   idPrefix?: string;
   locked?: boolean;
+  /** What a *code* setting's editor should declare in scope — the event a
+   * trigger's body will run in. Passed in because the screen knows the event and
+   * the field knows it is code, and neither knows both. */
+  codeScope?: CodeScope;
 }) {
   const controlId = `${idPrefix}-${field.name}`;
   const fixed = locked && Boolean(field.create_only);
@@ -194,6 +207,29 @@ export function SettingField({
           checked={value === "true"}
           disabled={fixed}
           onChange={(e) => onChange(e.target.checked ? "true" : "false")}
+        />
+        {fixedHint}
+      </Form.Group>
+    );
+  }
+  if (field.code_language) {
+    // Source code: an editor, with the sandbox's types loaded (see
+    // `CodeEditor.tsx`). A required code setting carries no `required`
+    // attribute — there is no form control to hang one on — and it does not need
+    // one: the action refuses a blank body on save, with a message naming it.
+    return (
+      <Form.Group className="mb-3">
+        <Form.Label htmlFor={controlId}>
+          {field.label}
+          {field.required && <span className="text-danger"> *</span>}
+        </Form.Label>
+        <CodeEditor
+          id={controlId}
+          value={value}
+          language={field.code_language}
+          scope={codeScope}
+          readOnly={fixed}
+          onChange={onChange}
         />
         {fixedHint}
       </Form.Group>
@@ -273,6 +309,7 @@ export function SettingsFields({
   onChange,
   idPrefix,
   locked = false,
+  codeScope,
 }: {
   spec: FieldSpec[];
   values: Record<string, string>;
@@ -281,6 +318,9 @@ export function SettingsFields({
   /** The thing being configured already exists, so its `create_only` settings
    * are shown but not editable. */
   locked?: boolean;
+  /** What a code setting's editor declares in scope (see [`SettingField`]).
+   * Ignored by every spec that declares no code setting. */
+  codeScope?: CodeScope;
 }) {
   return (
     <>
@@ -292,6 +332,7 @@ export function SettingsFields({
           onChange={(v) => onChange(field.name, v)}
           idPrefix={idPrefix}
           locked={locked}
+          codeScope={codeScope}
         />
       ))}
     </>

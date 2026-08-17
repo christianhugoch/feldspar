@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## A code body is edited in a code editor, with the sandbox's own types
+
+`run_js_code` is now a program worth writing — it reads and writes tables — and it
+was being written in a one-line text input. It is now written in **Monaco**, with
+JavaScript highlighting and completions over `db`, this server's tables and their
+columns, and the event's own `row`, `old`, `user` and `payload`.
+
+**The coupling is a declaration, not a screen.** `FormField` gains
+`code_language`, set with `.code("javascript")`, beside the `multiline`/`secret`/
+`create_only` hints it already carries; `run_js_code` declares it on its `code`
+setting, the API reports it in every `config_spec`, and the admin UI renders any
+field that has it as an editor. No screen knows that a particular action's
+particular setting holds a program — which is the property the whole
+settings-as-data vocabulary exists for, and the reason the next code setting
+needs no UI change at all.
+
+**The types are generated in the browser, from the catalog.** `ui/admin`'s
+`codeTypes.ts` builds an ambient `.d.ts`: a row interface and a column union per
+table (including one `keyⱵcolumn` name per column of each table a key field
+points at, so `.select("customerⱵemail")` completes), the fluent chain
+transcribed from `sc-expr`'s `DB_PRELUDE`, the comparison operators from
+`sc_api::filter`, and the `{ updated, ids }` shape a bulk write answers with.
+`row` and `old` are declared exactly where the event has them — a `login` body
+gets no `row`, because naming it there is a `ReferenceError` in the sandbox.
+Building it here rather than on the server costs no endpoint and no schema, and
+`listTables`/`listFields` are already what the screen reads; a server-side emitter
+is the right move the moment a second consumer wants the same text (§15's
+adapters).
+
+**No diagnostics, deliberately.** A body is the inside of a function, so
+top-level `return` — what the action's own documentation tells an admin to write
+— is a syntax error to a parser that does not know that, and the sandbox is not a
+browser, so half of what a checker would say is not knowable. Completions, hovers
+and signature help are what the declarations are for; errors come from **Run**,
+which really runs it. The test suite takes the opposite setting: it compiles the
+generated declarations against the milestone's own example body with `checkJs`
+on, so a chain method that returns the wrong builder is a failing test rather than
+a wrong completion.
+
+**One CSP relaxation, named in the policy.** Monaco writes the theme that colours
+the syntax into a `<style>` element it creates at runtime and offers no nonce hook
+to sign it with, so the admin policy is now `style-src 'self' 'unsafe-inline'`.
+Nothing about where *code* may come from moves: `script-src 'self'`, no `eval`, no
+`blob:`, and `default-src 'self'` leaves injected CSS nowhere to send anything.
+Monaco is loaded as a dynamic import — a chunk fetched when a code setting is
+opened and never on the way to another screen — its workers are same-origin
+scripts Vite emits, and a fetch that fails falls back to a text area, because an
+admin who cannot load an editor must still be able to fix a trigger.
+
 ## `db` in `run_js_code`: a trigger's code body reads and writes tables
 
 The fifth phase of "tables in code", and the one an admin can see. `run_js_code`

@@ -497,6 +497,11 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                 spec={spec}
                 values={config}
                 idPrefix="trigger-cfg"
+                // What a *code* setting's editor declares: `row` and `old` exist
+                // exactly where this event has them, which is the same rule the
+                // sandbox binds by. The screen knows the event; the setting knows
+                // it is code; neither knows both, so this is where they meet.
+                codeScope={{ table: specTable, event: when }}
                 onChange={(field, value) =>
                   setConfig((prev) => ({ ...prev, [field]: value }))
                 }

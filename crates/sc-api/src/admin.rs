@@ -2444,5 +2444,8 @@ fn form_field_schema() -> TypeSchema {
         // control read-only on an edit, and a save that changes it anyway is
         // overwritten with what is stored.
         StructField::new("create_only", TypeSchema::bool()),
+        // The language this value is source code in (`"javascript"`), or null for
+        // a setting that is not code: the form renders a code editor for it.
+        StructField::new("code_language", TypeSchema::optional(TypeSchema::text())),
     ])
 }

@@ -2214,7 +2214,12 @@ The admin UI and applications enforce a **strict Content-Security-Policy** (no i
 scripts, no inline event handlers). v2 satisfies this **structurally through React** rather
 than through a server-side HTML model: the admin UI is a **React + TypeScript SPA**
 (`ui/admin`) that talks to the server exclusively over a **typed JSON API** (§13), and every
-UI bundle is self-hosted with no inline handlers, so the CSP needs no `unsafe-inline`.
+UI bundle is self-hosted with no inline handlers, so the CSP needs no `unsafe-inline` **script**
+source. Inline *styles* are allowed, for one reason named in the policy itself: a code setting
+(a `run_js_code` body) is edited in an embedded **Monaco** editor (§12.2), and Monaco writes
+the theme that colours the syntax into a `<style>` element it creates at runtime, with no nonce
+hook to sign it with. Nothing about *where code may come from* moves: `script-src 'self'`, no
+`eval`, no `blob:`, and `default-src 'self'` leaves injected CSS nowhere to send anything.
 
 This replaces v1's server-string HTML **and the previously-planned `sc-markup` symbolic
 tree + JS-extraction crate — both dropped.** The server renders no admin HTML beyond a
@@ -2299,8 +2304,8 @@ store's open tabs and layout. It is admin-only through the same session cookie a
 admin surface, and it reuses the **generated typed client** (§13.1) rather than hand-written
 `fetch` calls, so it cannot drift from the API either.
 
-**It needs its own CSP.** The strict admin policy (`script-src 'self'; style-src 'self'`) is
-satisfied structurally by React (above); the workbench computes and injects styles, runs its
+**It needs its own CSP.** The strict admin policy (`script-src 'self'`, no `eval`, no `blob:`)
+is satisfied structurally by React (above); the workbench computes and injects styles, runs its
 editor, textmate, search and extension-host code as workers built from blobs, and hosts the
 worker extension host in a sandboxed iframe. So `/ide/*` is served with its own
 `IDE_CONTENT_SECURITY_POLICY`, which relaxes exactly those four things — inline styles,
@@ -2483,6 +2488,40 @@ the *viewlet* out too: the Source Control view and its activity-bar icon belong 
 itself, not to the SCM service, and omitting the service changes nothing except whether the view
 can work. So the service is always registered, and a plain directory shows VS Code's own "No
 source control providers registered."
+
+### 12.2 Code settings: the editor inside a settings form
+
+Some settings are **programs**. A `run_js_code` trigger body reads and writes tables (§10.1's
+`db`), and a text area is the wrong instrument for one: the admin needs highlighting, bracket
+matching, and — because `db` is a fluent chain over *this* application's tables — completions.
+
+**A setting says it is code; no screen knows which setting.** `FormField` carries
+`code_language` (`FormField::code("javascript")`) beside `multiline`, `secret` and
+`create_only`, it travels in `config_spec` like every other hint, and `ui/admin`'s settings
+renderer gives any field that has one an editor. That keeps the property §6.2 is for: an
+action added by a plugin gets the editor by declaring it, with no change to the admin UI.
+
+**Plain `monaco-editor`, not the workbench.** §12.1 embeds VS Code itself because a project
+needs a tree, tabs, a palette and a language server; a settings field needs an editor, which
+is the small half of that package and a different bundle. The import is dynamic, so Monaco is
+a chunk fetched when a code setting is opened; a fetch that fails degrades to the text area
+the setting would otherwise have had.
+
+**The types come from the catalog, and are built in the browser.** The editor is handed an
+ambient `.d.ts` describing what a body can reach: a row interface and a column union per table
+(one `keyⱵcolumn` name per column of each table a key field points at), the chain transcribed
+from `sc-expr`'s `DB_PRELUDE`, the comparison operators from `sc_api::filter`, and `row`,
+`old`, `user`, `payload` declared **exactly where the event has them** — the same rule the
+sandbox binds by, so an editor never completes a name that would be a `ReferenceError`. It is
+generated from `listTables`/`listFields`, which the screen already reads; a server-side emitter
+becomes the right home for it when a second consumer (a §15 adapter for another guest
+language) wants the same declarations.
+
+**No diagnostics.** A body is the inside of a function — top-level `return` is what it is
+supposed to write — and the sandbox is not a browser, so a type-checker would report things
+that are not true. Completions, hovers and signature help are the point; errors come from
+running it. The declarations are compiled against real bodies in the admin UI's own tests,
+which is where a chain that drifts from the Rust it transcribes gets caught.
 
 ---
 

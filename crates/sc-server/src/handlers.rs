@@ -4171,6 +4171,7 @@ fn form_field_json(field: &FormField) -> Json {
         "multiline": field.multiline,
         "secret": field.secret,
         "create_only": field.create_only,
+        "code_language": field.code_language,
     })
 }
 

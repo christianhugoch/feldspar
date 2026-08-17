@@ -165,6 +165,20 @@ pub struct FormField {
     /// it: a git store's checkout directory names where its working tree was put,
     /// and editing that afterwards would not move the tree, it would abandon it.
     pub create_only: bool,
+    /// The value is **source code**, in the language named here (`"javascript"`),
+    /// so the admin UI gives it a code editor rather than a text area.
+    ///
+    /// The same kind of declaration [`multiline`](FormField::multiline) is, one
+    /// step further: a `run_js_code` body and a block of notes are both `Text`
+    /// and validate identically, but only one of them is worth syntax
+    /// highlighting, bracket matching and completions. It carries the *language*
+    /// rather than a bare flag because that is what an editor has to be told, and
+    /// because the next code setting will not be JavaScript.
+    ///
+    /// It is on the declaration for the reason every other hint here is: the
+    /// alternative is an admin screen that knows `run_js_code`'s `code` setting
+    /// by name, which is the coupling this vocabulary exists to remove.
+    pub code_language: Option<String>,
     // Post-MVP (§6.2, §6.3, §12): `fieldview: FieldViewRef` and
     // `visibility: Option<Formula>`. Both name types that do not exist yet —
     // fieldviews and formulas are out of MVP scope — so they are left out rather
@@ -183,6 +197,7 @@ impl FormField {
             multiline: false,
             secret: false,
             create_only: false,
+            code_language: None,
         }
     }
 
@@ -193,6 +208,18 @@ impl FormField {
 
     /// Render this setting as a text area: its value is many lines, not one.
     pub fn multiline(mut self) -> FormField {
+        self.multiline = true;
+        self
+    }
+
+    /// Render this setting as a **code editor** for the named language: its value
+    /// is source, not prose.
+    ///
+    /// Implies [`multiline`](FormField::multiline), so a consumer that has no
+    /// editor — a plain form, a terminal — still gives the value the room it
+    /// needs instead of a one-line input.
+    pub fn code(mut self, language: impl Into<String>) -> FormField {
+        self.code_language = Some(language.into());
         self.multiline = true;
         self
     }

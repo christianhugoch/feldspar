@@ -1,10 +1,12 @@
 //! Security posture for the SPA: strict CSP, CSRF, and cookie conventions
 //! (technical design §16 "Security posture").
 //!
-//! - **CSP.** A strict Content-Security-Policy with **no `unsafe-inline`** — the
-//!   React bundle carries no inline scripts or handlers, so `'self'` is enough.
-//!   It is applied as a response header via `tower-http`'s `set-header` layer
-//!   (see [`crate::router`]).
+//! - **CSP.** A strict Content-Security-Policy with **no `unsafe-inline` script**
+//!   — the React bundle carries no inline scripts or handlers, so `'self'` is
+//!   enough for the directive that matters. Inline *styles* are allowed, for the
+//!   one thing that needs them (the embedded Monaco editor's theme); see
+//!   [`CONTENT_SECURITY_POLICY`]. It is applied as a response header via
+//!   `tower-http`'s `set-header` layer (see [`crate::router`]).
 //! - **CSRF.** The session cookie authenticates the SPA, so state-changing
 //!   requests are protected with the **double-submit-cookie** pattern: the server
 //!   hands the SPA a non-`HttpOnly` `sc_csrf` cookie, and every mutating request
@@ -33,11 +35,26 @@ pub const SESSION_COOKIE: &str = "sc_session";
 pub use sc_api::auth::{CSRF_COOKIE, CSRF_HEADER};
 
 /// The strict Content-Security-Policy served with every response. No
-/// `unsafe-inline`: scripts and styles load only from the app's own origin, so
-/// the React bundle is the sole executable source.
+/// `unsafe-inline` **script**: executable code loads only from the app's own
+/// origin, so the React bundle is the sole executable source.
+///
+/// One relaxation, and it is about styles only: **`style-src 'unsafe-inline'`**,
+/// because the admin UI embeds the Monaco editor for code settings (a
+/// `run_js_code` body) and Monaco writes its theme — the token colours that *are*
+/// the syntax highlighting — into a `<style>` element it creates at runtime. It
+/// offers no nonce hook to sign that with, so under `style-src 'self'` the
+/// element is blocked and the editor renders in one colour. The IDE's policy
+/// below already makes the same allowance for the same reason.
+///
+/// What it costs is bounded by the directives that did not move: script sources
+/// are still `'self'` with no `eval` and no `blob:`, and `default-src 'self'`
+/// with `img-src 'self' data:` leaves injected CSS nowhere to send anything —
+/// the classic CSS exfiltration channel is a remote `url()`, which is still
+/// refused. It buys back an editor that highlights, completes and type-checks
+/// what an admin is writing.
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 script-src 'self'; \
-style-src 'self'; \
+style-src 'self' 'unsafe-inline'; \
 img-src 'self' data:; \
 font-src 'self'; \
 connect-src 'self'; \
