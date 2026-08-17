@@ -2,6 +2,64 @@
 
 Changes in reverse chronological order.
 
+## `asUser()`: a code body's access delegated to the event's caller
+
+The fourth phase of "tables in code". A plan carrying `authority: "user"` was
+refused; now it is answered — as the person who caused the event, and no row
+more. Still nothing an admin can see (no action binds `db` until phase 5), but
+both authorities the milestone specifies now work.
+
+**One rule, not a second copy of it.** Every delegated operation goes through
+`sc_api::ownership`'s `*_as` functions at the event's own role and user — the
+same functions the agent tools call, where "meets the floor OR the ownership
+formula grants it" already lives. So without this phase implementing any of it: a
+read is narrowed in the `WHERE` where the formula translates and row by row where
+it does not (with the bound applied after the evaluator has spoken, never
+before); an update is checked twice, on the row as it is and on the row as it
+would become, so it cannot move a row out of the caller's own ownership; a row
+the formula withholds is the same **not found** an absent row gets, so a
+delegated `.get(pk)` cannot become a way to probe which rows exist; and an
+RLS-enforced table is read and written inside a caller-context transaction where
+the database's own policies decide. A bulk update or delete resolves its rows
+through the *delegated* read, so a row the caller cannot see is never a row they
+can reach by predicate.
+
+**The authority also decides how names resolve.** It is settled once per plan
+into an `Actor`, which is the role the plan's own Ⱶ-paths and Ↄ-aggregations are
+resolved at — a delegated read through a key goes through `ownership::join_guard`
+as the caller, exactly as a REST embed does, rather than as the admin.
+
+**Who to delegate to, said honestly.** `User::from_json` reads the caller back out
+of the JSON an event carries (beside `from_row`, and the inverse of the rendering
+`caller_context` produces), with the event's role as the role. An event with no
+caller — scheduled, startup — has nobody to act as, so `asUser()` there reads as
+**public**: the honest answer to "on whose behalf", and the reason `asAdmin()` is
+the default. A caller object with no usable `id` is an error rather than an
+anonymous fallback.
+
+**§5's one asymmetry keeps its message.** A delegated aggregate over a table
+whose ownership formula only the evaluator can decide is refused — a count over
+rows it cannot filter would be a number nobody can check — and the refusal now
+names the way out: read the rows and aggregate them in the code body, which can
+decide row by row.
+
+**A delegated write is still an event at the depth it belongs to.**
+`ownership::insert_row_as` / `update_row_as` / `delete_row_as` build their own
+`CallerContext` and therefore used to drop the trigger chain; they now carry it.
+Without that a delegated write would restart the cascade at zero, and
+`db.asUser().t.insert(…)` from a trigger on `t` would never stop — the bound
+phase 3 established for the admin path. A request is not a firing and passes an
+empty chain (REST, GraphQL, agent tools); a code body passes the chain that led
+to it.
+
+**Tested against a real database, real policies and the real engine**, because
+every claim above is a claim about code this phase calls rather than code it
+contains. Including the deadlock regression decision 1 exists for: a body running
+on a *code* isolate, whose thread blocks on a host call, whose delegated read
+needs the *formula* isolate to decide its ownership formula — two runtimes, so
+the blocked thread is never the one the formula needs. One isolate serving both
+would hang, so that test has a timeout around it rather than a comment.
+
 ## A code body's writes are events
 
 The third phase of "tables in code": `insert`, `update` and `delete` plans are

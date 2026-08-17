@@ -117,6 +117,9 @@ impl AgentTrait for InsertRow {
             ctx.caller.role,
             ctx.caller.user.as_ref(),
             ctx.evaluator,
+            // A tool call is not a trigger firing (see `run_agent`): nothing led
+            // here, so the write this raises is at depth 0.
+            &[],
         )
         .await?;
         // The whole stored row, not the fields that were sent: the model needs

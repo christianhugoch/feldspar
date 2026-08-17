@@ -124,6 +124,9 @@ async fn insert(
         rc.role(),
         rc.user(),
         rc.evaluator(),
+        // A GraphQL mutation is a request, not a trigger firing: nothing led
+        // here, so the event this write raises is at depth 0.
+        &[],
     )
     .await?;
     read_back(rc, table, &written, ctx).await
@@ -149,6 +152,7 @@ async fn update(
         rc.role(),
         rc.user(),
         rc.evaluator(),
+        &[],
     )
     .await?;
     read_back(rc, table, &written, ctx).await
@@ -174,6 +178,7 @@ async fn delete(
         rc.role(),
         rc.user(),
         rc.evaluator(),
+        &[],
     )
     .await?;
     Ok(Some(FieldValue::owned_any(RowValue::written(

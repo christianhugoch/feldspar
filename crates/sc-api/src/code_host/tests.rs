@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use sc_auth::ROLE_ADMIN;
 use sc_catalog::Catalog;
 use sc_db::PhysicalTable;
 use sc_error::Result;
@@ -71,11 +72,16 @@ async fn library() -> Arc<Catalog> {
     catalog_of(tables).await
 }
 
+/// A role-40 reader, as the JSON object an event carries its caller as.
+fn caller() -> Json {
+    json!({ "id": uuid::Uuid::nil().to_string(), "email": "ada@example.com" })
+}
+
 /// Resolve one plan (as the guest would send it) into a read.
 async fn read_of(plan: Json) -> Result<Read> {
     let cat = library().await;
     let plan: Plan = serde_json::from_value(plan).expect("a well-formed plan");
-    plan::read(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN)
+    plan::read(&cat, &plan, &HostLimits::default(), ROLE_ADMIN)
 }
 
 /// The message a plan is refused with.
@@ -87,7 +93,7 @@ async fn refusal(plan: Json) -> String {
         // request is: at the boundary, by serde, naming the field.
         Err(e) => format!("{e}"),
         Ok(plan) => match plan.op {
-            super::Op::Aggregate => plan::aggregate(&cat, &plan, sc_auth::ROLE_ADMIN)
+            super::Op::Aggregate => plan::aggregate(&cat, &plan, ROLE_ADMIN)
                 .err()
                 .expect("this plan is refused")
                 .to_string(),
@@ -96,12 +102,12 @@ async fn refusal(plan: Json) -> String {
                 .expect("this plan is refused")
                 .to_string(),
             super::Op::Update | super::Op::Delete => {
-                plan::write(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN)
+                plan::write(&cat, &plan, &HostLimits::default(), ROLE_ADMIN)
                     .err()
                     .expect("this plan is refused")
                     .to_string()
             }
-            _ => plan::read(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN)
+            _ => plan::read(&cat, &plan, &HostLimits::default(), ROLE_ADMIN)
                 .err()
                 .expect("this plan is refused")
                 .to_string(),
@@ -351,7 +357,7 @@ async fn an_aggregate_plan_is_one_projection_per_value_over_the_filtered_rows() 
         ],
     }))
     .expect("a plan");
-    let agg = plan::aggregate(&cat, &plan, sc_auth::ROLE_ADMIN).expect("resolves");
+    let agg = plan::aggregate(&cat, &plan, ROLE_ADMIN).expect("resolves");
     let mut select = Select::from(Source::table("books")).columns(agg.projections);
     if let Some(filter) = agg.filter {
         select = select.filter(filter);
@@ -459,8 +465,7 @@ async fn an_update_resolves_its_rows_by_key_before_it_writes_any_of_them() {
         "values": { "title": "Orlando" },
     }))
     .expect("a plan");
-    let write =
-        plan::write(&cat, &plan, &HostLimits::default(), sc_auth::ROLE_ADMIN).expect("resolves");
+    let write = plan::write(&cat, &plan, &HostLimits::default(), ROLE_ADMIN).expect("resolves");
     assert_eq!(write.pk, "id", "each matched row is addressed by its key");
     assert_eq!(write.values, Some(json!({ "title": "Orlando" })));
     // The matched read is the whole row (no `select` to narrow it) under the
@@ -554,18 +559,57 @@ async fn a_write_plan_is_refused_for_what_a_write_cannot_mean() {
 }
 
 #[tokio::test]
-async fn a_delegated_plan_is_refused_rather_than_answered_as_the_admin() {
-    let host = super::TableHost::new(library().await);
-    let delegated = host
-        .run(
-            &serde_json::from_value(json!({
-                "op": "select", "table": "books", "authority": "user",
-            }))
-            .expect("a plan"),
-        )
+async fn a_delegated_plan_resolves_its_names_at_the_callers_own_role() {
+    let plan: Json = json!({
+        "op": "select", "table": "books", "authority": "user",
+        "select": ["title", "authorⱵname"],
+    });
+    let parsed = |plan: &Json| -> Plan { serde_json::from_value(plan.clone()).expect("a plan") };
+
+    // The admin resolves the Ⱶ-path, because they may read `authors`.
+    let cat = library().await;
+    let mut admin = plan.clone();
+    admin["authority"] = json!("admin");
+    plan::read(&cat, &parsed(&admin), &HostLimits::default(), ROLE_ADMIN)
+        .expect("the admin reads through a key");
+
+    // Delegated, the same plan is resolved at the *event's* role — so the join
+    // goes through `ownership::join_guard` as a caller, and a role-40 reader who
+    // may not read `authors` is refused by name rather than handed its columns
+    // one at a time through a key.
+    let host = super::TableHost::new(Arc::clone(&cat)).caused_by(40, Some(caller()));
+    let refused = host
+        .run(&parsed(&plan))
         .await
-        .expect_err("refused");
-    assert!(delegated.to_string().contains("asUser()"), "{delegated}");
+        .expect_err("the caller may not read `authors`");
+    assert!(refused.to_string().contains("authors"), "{refused}");
+}
+
+#[tokio::test]
+async fn delegation_needs_a_caller_it_can_name_and_public_is_a_valid_answer() {
+    let cat = library().await;
+    let plan: Plan = serde_json::from_value(json!({
+        "op": "select", "table": "books", "authority": "user",
+    }))
+    .expect("a plan");
+
+    // An event whose caller object is not a user is refused **before** any
+    // statement: acting as somebody requires knowing who, and the admin's rows
+    // are the one answer that must never be the fallback.
+    let host = super::TableHost::new(Arc::clone(&cat)).caused_by(40, Some(json!({ "id": 7 })));
+    let refused = host.run(&plan).await.expect_err("not a caller");
+    assert!(refused.to_string().contains("uuid"), "{refused}");
+
+    // An event with no caller at all — a scheduled or startup trigger — is not an
+    // error: it delegates to the public role, which on an admin-only table with
+    // no ownership formula may read nothing. (The refusal is the *table's*, which
+    // is the point: `asUser()` there is honest rather than broken.)
+    let host = super::TableHost::new(cat);
+    let public = host
+        .run(&plan)
+        .await
+        .expect_err("public may not read books");
+    assert!(public.to_string().contains("may not read"), "{public}");
 }
 
 #[tokio::test]

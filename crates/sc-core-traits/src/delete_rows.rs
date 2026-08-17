@@ -108,6 +108,8 @@ impl AgentTrait for DeleteRows {
                 ctx.caller.role,
                 ctx.caller.user.as_ref(),
                 ctx.evaluator,
+                // A tool call is not a trigger firing: nothing led here.
+                &[],
             )
             .await?;
             ids.push(id_json.clone());

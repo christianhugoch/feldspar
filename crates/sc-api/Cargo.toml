@@ -58,7 +58,12 @@ uuid.workspace = true
 [dev-dependencies]
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+# The real engines, for the two things a mock would hide: an ownership formula
+# the translator refuses is decided by V8 (`DenoEvaluator`), and a delegated read
+# from a code body must not deadlock against it (`CodeRuntime`) — see
+# `tests/code_host_as_user.rs`.
+sc-expr = { workspace = true, features = ["eval"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true

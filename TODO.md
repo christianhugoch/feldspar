@@ -398,25 +398,44 @@ assignments. Every terminal is one plan and one round trip.
 
 ## Phase 4 — `asUser()`
 
-- [ ] **The event's caller as a `User`**: `event.user` is JSON and `ownership::*_as` wants an
+- [x] **The event's caller as a `User`**: `event.user` is JSON and `ownership::*_as` wants an
       `sc_auth::User` — one helper (`User::from_json`, beside `from_row`) reading `id` and
-      `extra`, with `event.role` as the role, and `None` for an event with no caller.
-- [ ] **Routing**: `Authority::User` sends every operation through `ownership::read_rows_as`,
-      `aggregate_values_as`, `insert_row_as`, `update_row_as`, `delete_row_as` at that role
-      and user; `Authority::Admin` keeps the phase 2/3 path.
-- [ ] **Bulk writes under delegation** resolve their ids through the *same* delegated read, so
+      `extra`, with `event.role` as the role, and `None` for an event with no caller. (A
+      caller object with no usable `id` is an error rather than an anonymous fallback: acting
+      as somebody requires knowing who. `extra` is typed by `sc_expr::value_from_json`, the
+      reading a trigger's own bindings get, since no column stands behind those values.)
+- [x] **Routing**: `Authority::User` sends every operation through
+      `ownership::read_row_values_as`, `aggregate_values_as`, `insert_row_as`,
+      `update_row_as`, `delete_row_as` at that role and user; `Authority::Admin` keeps the
+      phase 2/3 path. The authority is resolved once per plan into an `Actor`, which is also
+      the **role every name in the plan is resolved at** — so a delegated read's Ⱶ-path goes
+      through `ownership::join_guard` as the caller, not as the admin.
+- [x] **Bulk writes under delegation** resolve their ids through the *same* delegated read, so
       a row the caller cannot see is never a row they can update by predicate.
-- [ ] **The prelude**: `.asUser()` / `.asAdmin()` on the handle, on a table and on a query,
-      all setting `authority`.
-- [ ] The delegated-aggregate refusal (untranslatable ownership formula) carries the message
-      from §5, not a bare `Err`.
-- [ ] Tests (integration, real Postgres): a sub-floor user's delegated read returns only the
+- [x] **The prelude**: `.asUser()` / `.asAdmin()` on the handle, on a table and on a query,
+      all setting `authority` — built in phase 1 and now answered rather than refused.
+- [x] The delegated-aggregate refusal (untranslatable ownership formula) carries the message
+      from §5, not a bare `Err`. (`aggregate_guard` is asked ahead of `aggregate_values_as`,
+      which asks it again: from here the refusal can name the way out, and only the `invalid`
+      one is rephrased — an `auth` denial is the same "you may not read this" a read gets, and
+      reading the rows instead would not help.)
+- [x] Tests (integration, real Postgres): a sub-floor user's delegated read returns only the
       rows their ownership formula grants while the same body at admin authority returns all
       of them; a delegated insert outside the formula throws and writes nothing; a delegated
       update that would move a row out of the caller's ownership is refused; a delegated read
       of an RLS table sees what the policies allow; a scheduled trigger's `asUser()` reads as
       public. **And the deadlock regression test**: a delegated read whose ownership formula
       is untranslatable (so the *formula* isolate must run inside the host call) completes.
+- [x] *Not on the list, and load-bearing*: `ownership::insert_row_as` / `update_row_as` /
+      `delete_row_as` now take the **trigger chain**, because they built their `CallerContext`
+      themselves and so dropped it. Without that, a delegated write restarts the cascade at
+      depth 0 and `db.asUser().t.insert(…)` from a trigger on `t` never stops — the one bound
+      phase 3 proved for the admin path. A request is not a firing and passes `&[]` (the REST,
+      GraphQL and agent-tool call sites); a code body passes the chain that led to it, and a
+      test asserts the event it raises is one deeper.
+- [x] *Found on the way*: a delegated **write** needs the evaluator even when the ownership
+      formula translates — the single-row check (`row_allowed`) is always the reified one — so
+      phase 5 must hand `run_js_code`'s host the engine, not only its catalog.
 
 ## Phase 5 — Wiring, configuration and documentation
 

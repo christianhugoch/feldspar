@@ -403,6 +403,13 @@ pub async fn aggregate_values_as(
 /// A caller the floor does not admit and no formula extends gets an
 /// [`Error::auth`] naming the table, rather than an HTTP status: the reader is a
 /// tool result a model has to be able to act on.
+///
+/// `chain` is what led here — the trigger names whose actions caused this write,
+/// so the event it raises knows how deep in a cascade it is. A request is not a
+/// firing and passes `&[]`; a delegated write from a code body passes the chain
+/// of the trigger running it, which is what keeps `Event::firing`'s cascade
+/// bound applying to `db.asUser().t.insert(…)` exactly as it does to
+/// `db.t.insert(…)`.
 pub async fn insert_row_as(
     cat: &Catalog,
     table: &Table,
@@ -410,8 +417,9 @@ pub async fn insert_row_as(
     role: u8,
     user: Option<&User>,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
+    chain: &[String],
 ) -> Result<Json> {
-    let caller = caller_context_at(role, user);
+    let caller = caller_context_at(role, user).chained(chain.to_vec());
     // The database enforces this table's ownership: the policies decide, and a
     // `WITH CHECK` they refuse surfaces from `run_in_context`.
     if table.rls_enabled {
@@ -447,6 +455,9 @@ pub async fn insert_row_as(
 /// an update cannot move a row out of the caller's own ownership. A row the
 /// formula withholds is the **same** not-found an absent row gets — a tool must
 /// not become a way to probe which rows exist.
+///
+/// `chain` is what led here, as in [`insert_row_as`].
+#[allow(clippy::too_many_arguments)]
 pub async fn update_row_as(
     cat: &Catalog,
     table: &Table,
@@ -455,8 +466,9 @@ pub async fn update_row_as(
     role: u8,
     user: Option<&User>,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
+    chain: &[String],
 ) -> Result<Json> {
-    let caller = caller_context_at(role, user);
+    let caller = caller_context_at(role, user).chained(chain.to_vec());
     if table.rls_enabled {
         return rows::update_row_ctx(cat, table, id, body, Some(&caller)).await;
     }
@@ -490,6 +502,8 @@ pub async fn update_row_as(
 
 /// Delete the row of `table` addressed by `id`, as a caller who is not an API
 /// surface (§11.3). [`insert_row_as`]'s sibling, and the same not-found rule.
+///
+/// `chain` is what led here, as in [`insert_row_as`].
 pub async fn delete_row_as(
     cat: &Catalog,
     table: &Table,
@@ -497,8 +511,9 @@ pub async fn delete_row_as(
     role: u8,
     user: Option<&User>,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
+    chain: &[String],
 ) -> Result<Json> {
-    let caller = caller_context_at(role, user);
+    let caller = caller_context_at(role, user).chained(chain.to_vec());
     if table.rls_enabled {
         return rows::delete_row_ctx(cat, table, id, Some(&caller)).await;
     }

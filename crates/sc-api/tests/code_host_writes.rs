@@ -324,7 +324,7 @@ impl Action for Feed {
         // and *this trigger's chain*, so the event this write raises knows how
         // deep it is.
         let host = TableHost::new(Arc::clone(&self.catalog))
-            .caused_by(ctx.event.user.clone())
+            .caused_by(ctx.event.role, ctx.event.user.clone())
             .chained(ctx.chain.clone());
         host.call(json!({
             "op": "insert", "table": "links", "values": { "depth": depth + 1 },
@@ -373,7 +373,7 @@ async fn an_insert_from_a_code_body_fires_the_tables_own_trigger() -> Result<()>
     // The host carries the event's caller, as phase 5 will build it from the
     // event that ran the trigger.
     let host = TableHost::new(Arc::clone(&catalog))
-        .caused_by(Some(json!({ "id": 7, "email": "who@example.com" })));
+        .caused_by(40, Some(json!({ "id": 7, "email": "who@example.com" })));
 
     ask(
         &host,

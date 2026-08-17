@@ -184,6 +184,7 @@ async fn an_insert_starts_an_agent_with_a_prompt_built_from_the_row() -> Result<
         sc_auth::ROLE_ADMIN,
         None,
         None,
+        &[],
     )
     .await?;
 
@@ -371,6 +372,7 @@ async fn deleting_the_agent_leaves_the_trigger_out_of_the_live_set_with_a_reason
         sc_auth::ROLE_ADMIN,
         None,
         None,
+        &[],
     )
     .await?;
     assert_eq!(providers.runs(), 0);

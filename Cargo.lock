@@ -3642,6 +3642,7 @@ dependencies = [
  "sc-db",
  "sc-db-postgres",
  "sc-error",
+ "sc-expr",
  "sc-query",
  "sc-test-harness",
  "sc-types",
