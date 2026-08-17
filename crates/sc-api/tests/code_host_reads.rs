@@ -51,14 +51,15 @@ async fn setup(db: &TestDb) -> Result<Arc<Catalog>> {
 }
 
 /// One plan, answered — what `__scDbCall(plan)` gets back.
-async fn ask(host: &TableHost, plan: Json) -> Result<Json> {
+async fn ask(host: &TableHost<'_>, plan: Json) -> Result<Json> {
     host.call(plan).await
 }
 
 #[tokio::test]
 async fn a_read_joins_aggregates_orders_and_bounds_in_one_statement() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?);
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
 
     // `db.books.where({ pages: { gt: 300 } })
     //     .select("id", "title", "authorⱵname", { reviews: "reviewsↃbook.length" })
@@ -92,7 +93,8 @@ async fn a_read_joins_aggregates_orders_and_bounds_in_one_statement() -> Result<
 #[tokio::test]
 async fn the_two_spellings_of_a_filter_select_the_same_rows() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?);
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
 
     let titles = |rows: &Json| -> Vec<String> {
         rows.as_array()
@@ -158,7 +160,8 @@ async fn the_two_spellings_of_a_filter_select_the_same_rows() -> Result<()> {
 #[tokio::test]
 async fn the_scalar_terminals_answer_one_value_each() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?);
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
 
     // `.count()`, `.sum(f)` and `.max(formula)` are one plan each, and the alias
     // the prelude uses for a scalar terminal is `value`.
@@ -220,7 +223,8 @@ async fn the_scalar_terminals_answer_one_value_each() -> Result<()> {
 #[tokio::test]
 async fn the_row_cap_refuses_rather_than_truncating() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?).with_limits(HostLimits {
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog).with_limits(HostLimits {
         max_rows: 2,
         max_calls: 10,
     });
@@ -259,7 +263,8 @@ async fn the_row_cap_refuses_rather_than_truncating() -> Result<()> {
 #[tokio::test]
 async fn a_get_by_key_is_one_row_or_none_and_an_unknown_name_is_refused() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?);
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
 
     let found = ask(
         &host,

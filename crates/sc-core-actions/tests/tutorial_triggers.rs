@@ -15,7 +15,10 @@
 //!   why the tutorial's `at` column is a `bigint` and not a `timestamptz`;
 //! - the `none` trigger the app exposes: a `where` over the target table naming
 //!   `user`, deleting the caller's rows and nobody else's;
-//! - the daily one: the same action with a periodic event and its timing.
+//! - the daily one: the same action with a periodic event and its timing;
+//! - step 5's code body: the `db` chain the document prints, reading `tasks` and
+//!   writing an audit row per finished one — which is the step whose text is
+//!   least like a setting and so the easiest to let drift.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -80,6 +83,32 @@ fn nightly_sweep() -> Trigger {
         .config("where", "at < Date.now() - 30*24*3600*1000")
 }
 
+/// Step 5's trigger, verbatim — the body included, because the point of the step
+/// is the body.
+fn sweep_report() -> Trigger {
+    Trigger::new("sweep_report", EventKind::None, "run_js_code").config(
+        "code",
+        r#"
+const stale = db.tasks
+  .where({ done: true })
+  .select("id", "title", "owner")
+  .orderBy("id")
+  .limit(50)
+  .rows();
+
+for (const task of stale) {
+  db.task_audit.insert({
+    task: task.id,
+    what: "swept: " + task.title,
+    who: task.owner,
+    at: Date.now(),
+  });
+}
+return { swept: stale.length, left: db.tasks.where({ done: false }).count() };
+"#,
+    )
+}
+
 struct Tutorial {
     catalog: Arc<Catalog>,
     dispatcher: Arc<TriggerDispatcher>,
@@ -139,7 +168,12 @@ async fn setup() -> Result<Tutorial> {
 
     // Saving validates — this is the admin's Save button — and every formula in
     // the tutorial goes through it.
-    for trigger in [audit_completed(), archive_done(), nightly_sweep()] {
+    for trigger in [
+        audit_completed(),
+        archive_done(),
+        nightly_sweep(),
+        sweep_report(),
+    ] {
         save_trigger(&catalog, &registry, &trigger).await?;
     }
     dispatcher.reload(&catalog).await?;
@@ -256,6 +290,51 @@ async fn the_nightly_trigger_is_saved_with_the_timing_the_tutorial_states() -> R
     assert_eq!(
         Schedule::of(&stored)?.expect("a schedule").to_string(),
         "daily at 03:30 UTC"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_code_body_reads_the_tasks_and_writes_an_audit_row_for_each() -> Result<()> {
+    let t = setup().await?;
+    let tasks = t.catalog.require("tasks")?;
+    let member = "member@example.com";
+    for (title, done) in [
+        ("Draft the report", true),
+        ("Book the venue", false),
+        ("Renew the domain", true),
+    ] {
+        rows::create_row(
+            &t.catalog,
+            &tasks,
+            &json!({ "title": title, "done": done, "owner": member }),
+        )
+        .await?;
+    }
+
+    // Pressing Run, as the document says to.
+    let caller = CallerContext::new(40, Some(json!({ "email": member })));
+    let result = t
+        .dispatcher
+        .run_trigger(&t.catalog, "sweep_report", json!({}), Some(&caller))
+        .await?;
+    assert_eq!(
+        result,
+        json!({ "swept": 2, "left": 1 }),
+        "the body's own answer: {result}"
+    );
+
+    // …and the rows the reader is told to go and look at are there, one per
+    // finished task, in the order the `.orderBy("id")` asked for.
+    let audit = t.audit().await?;
+    let what: Vec<&str> = audit.iter().map(|(_, what, _)| what.as_str()).collect();
+    assert_eq!(
+        what,
+        vec!["swept: Draft the report", "swept: Renew the domain"]
+    );
+    assert!(
+        audit.iter().all(|(_, _, who)| who == member),
+        "the owner rode along: {audit:?}"
     );
     Ok(())
 }

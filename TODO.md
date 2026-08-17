@@ -439,17 +439,45 @@ assignments. Every terminal is one plan and one round trip.
 
 ## Phase 5 — Wiring, configuration and documentation
 
-- [ ] `run_js_code` builds a `TableHost` from `ctx.catalog`, the event and `ctx.chain`, binds
-      `db`, and gains a `timeout_ms` config field (default 5000, max 60000, validated at save
-      time as `fetch`'s is).
-- [ ] The action's doc comment stops saying there is no host API, and says what there is.
-- [ ] `docs/TECHNICAL_DESIGN.md`: §10.1 gains the `db` specification above; §15 gains the
+- [x] `run_js_code` builds a `TableHost` from `ctx.catalog`, the event and `ctx.chain`, binds
+      `db`, and gains a `timeout_ms` config field (max 60000, validated at save time as
+      `fetch`'s is). Unset means **the engine's default** (5000) rather than a resolved 5000:
+      the pool has that default already, and a process started with another one should not be
+      overruled by a field the admin left alone.
+- [x] The action's doc comment stops saying there is no host API, and says what there is.
+- [x] `docs/TECHNICAL_DESIGN.md`: §10.1 gains the `db` specification above; §15 gains the
       `CodeHost` seam as what an adapter implements.
-- [ ] `docs/tutorial-triggers.md` gains a "reading and writing tables from code" section with
-      the milestone's own example, including `asUser()`.
-- [ ] CHANGELOG entry.
-- [ ] Tests (integration): the milestone's definition-of-done body, run through the admin's
-      Run button endpoint, against a real database.
+- [x] `docs/tutorial-triggers.md` gains a "reading and writing tables from code" section with
+      the milestone's own example, including `asUser()`. Its body is executed by
+      `tutorial_triggers.rs`, like every other formula the tutorial prints.
+- [x] CHANGELOG entry.
+- [x] Tests (integration): the milestone's definition-of-done body, run through the admin's
+      Run button endpoint, against a real database
+      (`crates/sc-server/tests/code_body_tables.rs`), plus the three mistakes an admin makes
+      while writing one — unknown table, unknown column, unfiltered update — coming back from
+      the button as sentences rather than as a 500.
+- [x] *Not on the list, and what the wiring actually needed*: **a host borrows the catalog.**
+      `TableHost` took an `Arc<Catalog>`, which no firing trigger has — the row layer, an
+      `ActionContext` and every request handler hold a `&Catalog`, and threading an `Arc` down
+      to a trigger would mean threading one through the write that fired it. So `TableHost<'a>`
+      borrows, `CodeCall::host` borrows with it, and `CodeRuntime::run` **bridges** the borrow
+      to the pool: the job carries a `'static` proxy, plans come back over a channel, and the
+      future that holds the borrow is the one serving them. The guest API and the blocking op
+      are unchanged.
+- [x] *Found on the way*: **a run could hold its caller without running at all.** The wall
+      clock lived in the isolate — the watchdog, and the deadline checked when the guest asks
+      for a host call — and neither can see a run that is not executing: one waiting for a free
+      isolate while every isolate is blocked in a host call of its own (a code body whose write
+      fires another code body, on a two-worker pool), or one host call that never comes back.
+      Both waited for ever, which is the unbounded hold `timeout_ms` exists to prevent.
+      `CodeRuntime::run` now gives up shortly after the run's own deadline (a 250 ms grace, so
+      the isolate's two bounds keep their more specific messages) and dropping the serving loop
+      fails the abandoned run at its next host call, so its worker comes back too.
+- [x] *Also not on the list*: the action's own tests now pin what only the action can be wrong
+      about — that a body reads and writes its tables at all, that `asUser()` obeys an
+      ownership formula over **this** event's caller while the trigger's own authority does
+      not, that the configured timeout is the bound on a run, and that `db` is still the only
+      host surface (no `fetch`, no timers, no `Deno`).
 
 ## Phase 6 — Grouped aggregation (optional; the only part that changes `RowQuery`)
 

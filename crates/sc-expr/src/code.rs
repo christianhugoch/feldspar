@@ -27,14 +27,20 @@
 //!
 //! # Bounds
 //!
-//! Three, each with its own named error: the **wall clock** for the run (checked
-//! when the guest asks for a host call), the **call budget** (an accidental N+1
-//! loop must not hammer the database quietly), and the **JS watchdog** — which is
-//! *paused for the duration of a host call*, so a slow query is never reported as
-//! "your code timed out". The row cap is the host's business, not this crate's.
+//! Three, each with its own named error: the **wall clock** for the run, the
+//! **call budget** (an accidental N+1 loop must not hammer the database quietly),
+//! and the **JS watchdog** — which is *paused for the duration of a host call*, so
+//! a slow query is never reported as "your code timed out". The row cap is the
+//! host's business, not this crate's.
+//!
+//! The wall clock is enforced in two places, because one is not enough: the guest
+//! is refused a host call once it is spent, *and* the caller stops waiting shortly
+//! after it (see `CALLER_GRACE`). Only the second covers a run that holds its
+//! caller without executing — one waiting for a worker while every worker is
+//! blocked in a host call, or one whose single query never comes back. A watchdog
+//! on an isolate that is not running cannot see either.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -45,6 +51,8 @@ use serde_json::Value as Json;
 use std::cell::RefCell;
 #[cfg(feature = "eval")]
 use std::rc::Rc;
+#[cfg(feature = "eval")]
+use std::sync::Arc;
 #[cfg(feature = "eval")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "eval")]
@@ -71,6 +79,14 @@ pub const MAX_CODE_TIMEOUT: Duration = Duration::from_secs(60);
 /// is the failure this bounds — not malice, an N+1 nobody noticed.
 pub const DEFAULT_MAX_HOST_CALLS: u32 = 200;
 
+/// How long past its own deadline the **caller** waits before giving up on a run.
+///
+/// The isolate has two bounds of its own — the watchdog and the deadline checked
+/// on entry to a host call — and both name which one it was, so the caller's
+/// timeout wants to lose that race: it exists for the runs those two cannot see.
+#[cfg(feature = "eval")]
+const CALLER_GRACE: Duration = Duration::from_millis(250);
+
 /// The host surface a code body can reach: one JSON request in, one JSON value
 /// out. **The** seam of §15 — a Python or Rust adapter implements the same trait
 /// against the same plans, which is why this takes JSON rather than anything
@@ -95,7 +111,7 @@ pub trait CodeHost: Send + Sync {
 /// JSON boundary; they share nothing else, and collapsing them into one type
 /// would have meant a `FormulaCall` whose `formula` was sometimes not a formula.
 #[derive(Clone)]
-pub struct CodeCall {
+pub struct CodeCall<'a> {
     /// The code body: statements, with `return` for the result. Run as the body
     /// of a function, so `return` at the top level is legal and everything it
     /// declares is local to the run.
@@ -107,7 +123,15 @@ pub struct CodeCall {
     /// The table handle, or `None` for a **pure** body — exactly what
     /// `run_js_code` was before this milestone: `db` is not bound at all, so
     /// naming it is a `ReferenceError` rather than a silent `undefined`.
-    pub host: Option<Arc<dyn CodeHost>>,
+    ///
+    /// **Borrowed**, not owned, because a real host holds the catalog: the one
+    /// this server has (`sc_api::code_host::TableHost`) resolves every name in
+    /// every plan through it, and the catalog is what the row layer and every
+    /// action already have a reference to. The isolate a run happens on is a
+    /// pool thread and what crosses to it must be `'static`, so the runtime
+    /// bridges the two itself (see [`CodeRuntime::run`]) rather than making
+    /// every caller find an `Arc<Catalog>` it does not have.
+    pub host: Option<&'a dyn CodeHost>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
@@ -115,7 +139,7 @@ pub struct CodeCall {
     pub max_calls: u32,
 }
 
-impl Default for CodeCall {
+impl Default for CodeCall<'_> {
     fn default() -> Self {
         CodeCall {
             code: String::new(),
@@ -127,7 +151,7 @@ impl Default for CodeCall {
     }
 }
 
-impl std::fmt::Debug for CodeCall {
+impl std::fmt::Debug for CodeCall<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CodeCall")
             .field("code", &self.code)
@@ -515,13 +539,70 @@ impl Watchdog {
 /// would serialise every trigger in the process behind the slowest query.
 pub const DEFAULT_CODE_WORKERS: usize = 2;
 
+/// One run, as it crosses to a worker: a [`CodeCall`] with its borrows resolved.
+///
+/// Everything here is owned, because the isolate is on another thread and the
+/// job travels down a channel to reach it. The borrowed host is what makes this
+/// a separate type from `CodeCall` rather than the same one: it becomes a
+/// [`BridgeHost`], and the borrow stays behind with the caller's future.
+#[cfg(feature = "eval")]
+struct CodeRun {
+    code: String,
+    bindings: BTreeMap<String, Json>,
+    host: Option<Arc<dyn CodeHost>>,
+    /// Already defaulted and clamped, so the worker has no policy left to apply.
+    timeout: Duration,
+    max_calls: u32,
+}
+
 #[cfg(feature = "eval")]
 struct CodeJob {
-    call: CodeCall,
+    run: CodeRun,
     /// Captured at submission: the op has to block on *some* runtime, and the
     /// caller's is the one the host's futures belong to.
     handle: Option<tokio::runtime::Handle>,
     reply: tokio::sync::oneshot::Sender<Result<Json>>,
+}
+
+/// One host call in flight over a [`BridgeHost`]: the plan, and where the answer
+/// goes back to.
+#[cfg(feature = "eval")]
+struct HostRequest {
+    plan: Json,
+    reply: tokio::sync::oneshot::Sender<Result<Json>>,
+}
+
+/// The `'static` stand-in a **borrowed** host crosses to the isolate thread as.
+///
+/// A [`CodeCall`]'s host borrows (the real one holds this server's catalog), and
+/// a job travelling down a channel to a pool thread cannot. So the job carries
+/// this instead: the op's blocking call sends its plan down a channel, and the
+/// other end is served — by the real host — inside [`CodeRuntime::run`], which is
+/// the future that holds the borrow and is awaiting the run anyway.
+///
+/// It is also where the borrow *ends*: drop that future and the receiver goes
+/// with it, so a further host call from a body whose caller has gone away is a
+/// named error rather than a wait.
+#[cfg(feature = "eval")]
+struct BridgeHost {
+    requests: tokio::sync::mpsc::UnboundedSender<HostRequest>,
+}
+
+#[cfg(feature = "eval")]
+#[async_trait]
+impl CodeHost for BridgeHost {
+    async fn call(&self, request: Json) -> Result<Json> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.requests
+            .send(HostRequest {
+                plan: request,
+                reply,
+            })
+            .map_err(|_| Error::msg("this code body's database connection has gone away"))?;
+        answer
+            .await
+            .map_err(|_| Error::msg("this database request was dropped without an answer"))?
+    }
 }
 
 /// A pool of isolates for **code bodies**, separate from the formula evaluator's
@@ -605,19 +686,93 @@ impl CodeRuntime {
     }
 
     /// Run one code body to its JSON result.
-    pub async fn run(&self, mut call: CodeCall) -> Result<Json> {
+    ///
+    /// Two things happen here rather than one, when the call carries a host: the
+    /// run is submitted to a worker, and this future then **serves that run's
+    /// host calls** until it answers. The isolate thread blocks on each call
+    /// (decision 2) and the plan travels back here over a [`BridgeHost`], which
+    /// is what lets a host borrow — the future holding the borrow is the future
+    /// awaiting the run, so the borrow lives exactly as long as it must.
+    pub async fn run(&self, call: CodeCall<'_>) -> Result<Json> {
         let (reply, answer) = tokio::sync::oneshot::channel();
-        call.timeout = Some(call.timeout.unwrap_or(self.default_timeout));
+        // The proxy goes to the worker and the borrowed host stays here, with
+        // the receiving end of the channel between them. Only the run holds a
+        // sender, so the run ending is the receiver closing.
+        let mut bridged = None;
+        let proxy: Option<Arc<dyn CodeHost>> = call.host.map(|host| {
+            let (requests, incoming) = tokio::sync::mpsc::unbounded_channel();
+            bridged = Some((host, incoming));
+            Arc::new(BridgeHost { requests }) as Arc<dyn CodeHost>
+        });
+        let timeout = call
+            .timeout
+            .unwrap_or(self.default_timeout)
+            .min(MAX_CODE_TIMEOUT);
         self.tx
             .send(CodeJob {
-                call,
+                run: CodeRun {
+                    code: call.code,
+                    bindings: call.bindings,
+                    host: proxy,
+                    timeout,
+                    max_calls: call.max_calls,
+                },
                 handle: tokio::runtime::Handle::try_current().ok(),
                 reply,
             })
             .map_err(|_| Error::msg("the code runtime has no workers left"))?;
-        answer
-            .await
-            .map_err(|_| Error::msg("the code runtime dropped the reply"))?
+
+        let dropped = || Error::msg("the code runtime dropped the reply");
+        // The wall clock covers the **whole** call, queue time included, because
+        // the two bounds inside the isolate cannot see either of the ways a run
+        // holds its caller without running: waiting for a worker (every worker
+        // blocked in a host call of its own — which is what a code body whose
+        // write fires another code body does), and one host call that never comes
+        // back. Neither is reachable from a watchdog on an isolate that is not
+        // executing, and an unbounded hold on the request that fired the trigger
+        // is exactly what `timeout` exists to prevent. Giving up here drops the
+        // serving loop, so a run left behind fails at its next host call instead
+        // of holding a worker for as long as the database takes.
+        let expired =
+            tokio::time::sleep_until(tokio::time::Instant::now() + timeout + CALLER_GRACE);
+        tokio::pin!(expired);
+        let overdue = || {
+            Error::invalid(format!(
+                "this code exceeded its {} ms time limit",
+                timeout.as_millis()
+            ))
+        };
+
+        let Some((host, mut incoming)) = bridged else {
+            // A pure body asks for nothing; there is nothing to serve.
+            return tokio::select! {
+                outcome = answer => outcome.map_err(|_| dropped())?,
+                () = &mut expired => Err(overdue()),
+            };
+        };
+        tokio::pin!(answer);
+        loop {
+            tokio::select! {
+                outcome = &mut answer => return outcome.map_err(|_| dropped())?,
+                () = &mut expired => return Err(overdue()),
+                // Disabled once the run's proxy is gone, which is the run being
+                // over — the first branch is what then answers.
+                Some(HostRequest { plan, reply }) = incoming.recv() => {
+                    tokio::select! {
+                        // A dropped receiver means the isolate stopped waiting
+                        // (its watchdog fired): the answer is not wanted.
+                        answered = host.call(plan) => { let _ = reply.send(answered); }
+                        // The deadline has to be able to interrupt the call
+                        // itself, not only the wait for the next one: one query
+                        // that never comes back is the case this whole bound is
+                        // for. Dropping `reply` fails the guest's blocked call at
+                        // once, so the worker is not held for the query's own
+                        // length either.
+                        () = &mut expired => return Err(overdue()),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -664,35 +819,27 @@ fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::run
             let queue = rx.lock().unwrap_or_else(|e| e.into_inner());
             queue.recv()
         };
-        let Ok(CodeJob {
-            call,
-            handle,
-            reply,
-        }) = job
-        else {
+        let Ok(CodeJob { run, handle, reply }) = job else {
             break; // The last CodeRuntime handle was dropped.
         };
 
-        let script = match build_code_script(&call) {
+        let script = match build_code_script(&run) {
             Ok(script) => script,
             Err(e) => {
                 let _ = reply.send(Err(e));
                 continue;
             }
         };
-        let timeout = call
-            .timeout
-            .unwrap_or(DEFAULT_CODE_TIMEOUT)
-            .min(MAX_CODE_TIMEOUT);
+        let timeout = run.timeout;
 
         let started = Instant::now();
         op_state.borrow_mut().put(RunState {
-            host: call.host.clone(),
+            host: run.host.clone(),
             handle,
             deadline: started + timeout,
             timeout,
-            calls_left: call.max_calls,
-            max_calls: call.max_calls,
+            calls_left: run.max_calls,
+            max_calls: run.max_calls,
             js_budget: timeout,
             armed_at: started,
             watchdog: Arc::clone(&watchdog),
@@ -750,7 +897,7 @@ fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::run
 /// of it. What *is* escaped is every value, which rides in as JSON exactly as a
 /// formula's bindings do.
 #[cfg(feature = "eval")]
-pub(crate) fn build_code_script(call: &CodeCall) -> Result<String> {
+fn build_code_script(call: &CodeRun) -> Result<String> {
     let mut bindings = serde_json::Map::new();
     let mut consts = String::new();
     for (name, value) in &call.bindings {
@@ -851,14 +998,16 @@ mod tests {
         }
     }
 
-    fn call(code: &str) -> CodeCall {
+    fn call(code: &str) -> CodeCall<'static> {
         CodeCall {
             code: code.to_owned(),
             ..CodeCall::default()
         }
     }
 
-    fn with_host(code: &str, host: Arc<dyn CodeHost>) -> CodeCall {
+    /// A call against a host the caller keeps: the host is borrowed (§the
+    /// bridge), so the `Arc` these tests hold is what owns it.
+    fn with_host<'a>(code: &str, host: &'a dyn CodeHost) -> CodeCall<'a> {
         CodeCall {
             code: code.to_owned(),
             host: Some(host),
@@ -900,7 +1049,7 @@ mod tests {
                      .limit(50)
                      .offset(0)
                      .rows();"#,
-                host.clone(),
+                &*host,
             ))
             .await
             .unwrap();
@@ -931,7 +1080,7 @@ mod tests {
             r#"db.books.where({ status: "draft" }).where('pages > 3').rows();
                db.table("books").where('status === "draft"').rows();
                return null;"#,
-            host.clone(),
+            &*host,
         ))
         .await
         .unwrap();
@@ -959,7 +1108,7 @@ mod tests {
                db.invoices.where({ paid: false }).asUser().rows();
                db.asUser().invoices.asAdmin().rows();
                return null;"#,
-            host.clone(),
+            &*host,
         ))
         .await
         .unwrap();
@@ -999,7 +1148,7 @@ mod tests {
                      update: db.books.where({ id: 3 }).update({ shelf: 3 }),
                      del:    db.books.where({ id: 7 }).delete(),
                    };"#,
-                host.clone(),
+                &*host,
             ))
             .await
             .unwrap();
@@ -1048,7 +1197,7 @@ mod tests {
             "return db.books.delete();",
         ] {
             let err = rt
-                .run(with_host(body, host.clone()))
+                .run(with_host(body, &*host))
                 .await
                 .unwrap_err()
                 .to_string();
@@ -1063,7 +1212,7 @@ mod tests {
         let rt = CodeRuntime::new();
         // Uncaught, it fails the run with the host's own message.
         let err = rt
-            .run(with_host("return db.books.rows();", host.clone()))
+            .run(with_host("return db.books.rows();", &*host))
             .await
             .unwrap_err()
             .to_string();
@@ -1072,7 +1221,7 @@ mod tests {
         let out = rt
             .run(with_host(
                 "try { db.books.asUser().rows(); } catch (e) { return e.message; } return null;",
-                host,
+                &*host,
             ))
             .await
             .unwrap();
@@ -1089,7 +1238,7 @@ mod tests {
         let rt = CodeRuntime::new();
         let mut c = with_host(
             "for (let i = 0; i < 100; i++) db.books.rows(); return true;",
-            host.clone(),
+            &*host,
         );
         c.max_calls = 3;
         let err = rt.run(c).await.unwrap_err().to_string();
@@ -1109,13 +1258,14 @@ mod tests {
         });
         let rt = Arc::new(CodeRuntime::with_workers(2));
         let started = Instant::now();
+        // The host is borrowed, so each task owns its own `Arc` and lends it.
         let one = {
-            let (rt, host) = (Arc::clone(&rt), slow.clone());
-            tokio::spawn(async move { rt.run(with_host("return db.a.rows();", host)).await })
+            let (rt, host) = (Arc::clone(&rt), Arc::clone(&slow));
+            tokio::spawn(async move { rt.run(with_host("return db.a.rows();", &*host)).await })
         };
         let two = {
-            let (rt, host) = (Arc::clone(&rt), slow.clone());
-            tokio::spawn(async move { rt.run(with_host("return db.b.rows();", host)).await })
+            let (rt, host) = (Arc::clone(&rt), Arc::clone(&slow));
+            tokio::spawn(async move { rt.run(with_host("return db.b.rows();", &*host)).await })
         };
         one.await.unwrap().unwrap();
         two.await.unwrap().unwrap();
@@ -1153,7 +1303,7 @@ mod tests {
         let rt = CodeRuntime::with_workers(1);
         let mut c = with_host(
             "for (let i = 0; i < 10; i++) db.books.rows(); return true;",
-            slow.clone(),
+            &*slow,
         );
         c.timeout = Some(Duration::from_millis(300));
         let err = rt.run(c).await.unwrap_err().to_string();
@@ -1163,7 +1313,7 @@ mod tests {
         );
         // A body that only sleeps in the host, well inside the deadline, is fine
         // even though one host call alone exceeds a formula's whole timeout.
-        let mut c = with_host("db.books.rows(); return true;", slow);
+        let mut c = with_host("db.books.rows(); return true;", &*slow);
         c.timeout = Some(Duration::from_millis(1000));
         assert_eq!(rt.run(c).await.unwrap(), json!(true));
     }
@@ -1182,14 +1332,14 @@ mod tests {
                      catch (e) { broke.push("define"); }
                    globalThis.db = "poisoned";
                    return broke;"#,
-                host.clone(),
+                &*host,
             ))
             .await
             .unwrap();
         assert_eq!(out, json!(["call", "run", "define"]), "strict mode throws");
         // The next run on the same isolate gets its own `db` and a working op.
         let out = rt
-            .run(with_host("return db.books.rows();", host))
+            .run(with_host("return db.books.rows();", &*host))
             .await
             .unwrap();
         assert_eq!(out, json!([{ "id": 1 }]));
@@ -1232,7 +1382,7 @@ mod tests {
     async fn a_binding_that_collides_with_the_handle_is_refused() {
         let host = FakeHost::rows(json!([]));
         let rt = CodeRuntime::new();
-        let mut c = with_host("return 1;", host);
+        let mut c = with_host("return 1;", &*host);
         c.bindings.insert("db".into(), json!(1));
         let err = rt.run(c).await.unwrap_err().to_string();
         assert!(err.contains("collides with the table handle"), "{err}");
@@ -1240,5 +1390,52 @@ mod tests {
         let mut c = call("return db;");
         c.bindings.insert("db".into(), json!(1));
         assert_eq!(rt.run(c).await.unwrap(), json!(1));
+    }
+
+    #[tokio::test]
+    async fn a_run_that_never_gets_a_worker_still_ends_at_its_own_deadline() {
+        // One worker, blocked in a host call for far longer than either run's
+        // timeout — which is what a code body whose write fires another code body
+        // looks like from the pool's point of view. The second run is not
+        // executing, so neither the watchdog nor the op's deadline check can see
+        // it: without the caller's own bound it would wait for ever, and an
+        // unbounded wait is an unbounded hold on the request that fired it.
+        let slow = Arc::new(FakeHost {
+            plans: Mutex::new(Vec::new()),
+            answer: Box::new(|_| Ok(json!([]))),
+            delay: Some(Duration::from_secs(30)),
+            calls: AtomicU32::new(0),
+        });
+        let rt = Arc::new(CodeRuntime::with_workers(1));
+        let blocked = {
+            let (rt, host) = (Arc::clone(&rt), Arc::clone(&slow));
+            tokio::spawn(async move {
+                let mut c = with_host("return db.a.rows();", &*host);
+                c.timeout = Some(Duration::from_secs(2));
+                rt.run(c).await
+            })
+        };
+        // Let the first run take the only worker.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut queued = call("return 1;");
+        queued.timeout = Some(Duration::from_millis(200));
+        let started = Instant::now();
+        let err = rt.run(queued).await.unwrap_err().to_string();
+        assert!(err.contains("200 ms time limit"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+
+        // And the run that *is* executing is bounded the same way, rather than
+        // holding its caller for as long as the database takes.
+        let err = blocked
+            .await
+            .unwrap()
+            .expect_err("a host call that never returns is not a run without a bound")
+            .to_string();
+        assert!(err.contains("time limit"), "{err}");
     }
 }

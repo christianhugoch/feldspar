@@ -57,7 +57,7 @@ async fn setup(db: &TestDb) -> Result<Arc<Catalog>> {
 }
 
 /// One plan, answered — what `__scDbCall(plan)` gets back.
-async fn ask(host: &TableHost, plan: Json) -> Result<Json> {
+async fn ask(host: &TableHost<'_>, plan: Json) -> Result<Json> {
     host.call(plan).await
 }
 
@@ -83,7 +83,8 @@ async fn rows_of(db: &TestDb, sql: &str) -> Vec<Vec<Option<String>>> {
 #[tokio::test]
 async fn an_insert_returns_the_written_row_with_its_values_typed_by_their_columns() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?);
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
 
     // `db.books.insert({ … })` — one row in, one row out (not an array of one),
     // with the database-generated key filled in.
@@ -145,7 +146,8 @@ async fn an_insert_returns_the_written_row_with_its_values_typed_by_their_column
 #[tokio::test]
 async fn a_bulk_update_and_delete_answer_what_they_touched() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?);
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
     ask(
         &host,
         json!({
@@ -215,7 +217,8 @@ async fn a_bulk_update_and_delete_answer_what_they_touched() -> Result<()> {
 #[tokio::test]
 async fn a_write_with_no_filter_or_a_bad_value_touches_nothing() -> Result<()> {
     let db = TestDb::new().await?;
-    let host = TableHost::new(setup(&db).await?);
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
     ask(
         &host,
         json!({
@@ -323,7 +326,7 @@ impl Action for Feed {
         // Exactly what phase 5 will build for `run_js_code`: the event's caller
         // and *this trigger's chain*, so the event this write raises knows how
         // deep it is.
-        let host = TableHost::new(Arc::clone(&self.catalog))
+        let host = TableHost::new(&self.catalog)
             .caused_by(ctx.event.role, ctx.event.user.clone())
             .chained(ctx.chain.clone());
         host.call(json!({
@@ -372,7 +375,7 @@ async fn an_insert_from_a_code_body_fires_the_tables_own_trigger() -> Result<()>
 
     // The host carries the event's caller, as phase 5 will build it from the
     // event that ran the trigger.
-    let host = TableHost::new(Arc::clone(&catalog))
+    let host = TableHost::new(&catalog)
         .caused_by(40, Some(json!({ "id": 7, "email": "who@example.com" })));
 
     ask(
@@ -437,7 +440,7 @@ async fn a_code_body_writing_its_own_table_is_stopped_by_the_cascade_bound() -> 
 
     // The first write is a code body's, at depth 0 — and every write it causes is
     // one too, so nothing but the bound stops this.
-    let host = TableHost::new(Arc::clone(&catalog));
+    let host = TableHost::new(&catalog);
     ask(
         &host,
         json!({ "op": "insert", "table": "links", "values": { "depth": 0 } }),

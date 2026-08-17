@@ -1,7 +1,8 @@
 # Tutorial: Triggers — make the server do things by itself
 
 Write an audit trail that no client can forget to write. Expose one server-side job to your app
-as a typed API call. Then have the server run something every night while nobody is watching.
+as a typed API call. Have the server run something every night while nobody is watching. And
+when a setting is not enough, write the body that reads and writes your tables itself.
 **All of it happens in a browser**, and none of it is code you deploy.
 
 This continues from [tutorial-ownership.md](tutorial-ownership.md): you have a server started
@@ -210,6 +211,126 @@ that switch.
   for a week and back on runs it *tonight* rather than immediately. Downtime is not a decision;
   disabling is.
 
+## Step 5 — Reading and writing tables from code
+
+Everything so far configured an action with formulas. Sometimes the thing you want is not a
+setting but a *program*: read some rows, decide something about them, write several others.
+That is `run_js_code`, and the one thing it has that a formula does not is **`db`** — your
+tables, readable and writable from the body.
+
+**Triggers → New trigger**:
+
+| Field | Value |
+|---|---|
+| Name | `sweep_report` |
+| Event | `Only when something asks (no event)` |
+| Action | `run_js_code` |
+| Timeout (ms) | leave it |
+| Code | see below |
+
+```js
+const stale = db.tasks
+  .where({ done: true })
+  .select("id", "title", "owner")
+  .orderBy("id")
+  .limit(50)
+  .rows();
+
+for (const task of stale) {
+  db.task_audit.insert({
+    task: task.id,
+    what: "swept: " + task.title,
+    who: task.owner,
+    at: Date.now(),
+  });
+}
+return { swept: stale.length, left: db.tasks.where({ done: false }).count() };
+```
+
+Press **Run**. The result is the object the body returned, and **Tables → task_audit** has one
+new row per finished task. That is the whole feature; the rest of this section is what the
+pieces mean.
+
+**A chain is pure; a terminal executes.** `.where()`, `.select()`, `.orderBy()`, `.limit()` and
+`.offset()` build a query and send nothing. `.rows()`, `.first()`, `.get(id)`, `.count()`,
+`.sum(f)`, `.avg(f)`, `.min(f)`, `.max(f)` and `.exists()` are where a round trip happens — one
+per terminal, so `db.tasks.count()` inside a loop over a thousand rows is a thousand queries and
+will hit the call budget below.
+
+**`where` takes what the rest of Saltcorn takes.** Either the object form the REST query string
+and the GraphQL API use, or a formula string like the one you typed into `delete_rows`:
+
+```js
+db.tasks.where({ done: false, title: { like: "report" } })
+db.tasks.where({ or: [ { done: false }, { owner: "member@example.com" } ] })
+db.tasks.where('!done && owner === "member@example.com"')
+```
+
+The operators are the ones you already know from a URL — `eq`, `ne`, `gt`, `gte`, `lt`, `lte`,
+`in`, `nin`, `like`, `ilike`, `is_null` — and repeated `.where()` calls AND together.
+
+**A projection can be a formula**, which is how a join or a child count rides in the same read:
+
+```js
+db.task_audit.select("id", { title: "taskⱵtitle" }, { by: "who" }).rows();
+db.tasks.select("id", "title", { audits: "task_auditↃtask.length" }).rows();
+```
+
+Those are the same `Ⱶ` and `Ↄ` paths [tutorial-ownership.md](tutorial-ownership.md) uses, and
+they mean the same thing: one read, with the joined value and the child aggregate in the row.
+If you write a formula the server cannot turn into SQL, the error says so and tells you to
+compute it in the body instead — which costs you nothing, because the body is JavaScript.
+
+**Writes are writes.** `db.task_audit.insert({…})` goes through the same path the API uses, so
+the values are coerced and validated against their columns, and *the target table's own
+triggers fire*. `.update()` and `.delete()` answer `{ updated | deleted, ids }` and **require a
+`.where()`** — an omitted one would mean "every row", which is not something a forgotten call
+should be able to do:
+
+```js
+db.tasks.where({ id: 7 }).update({ done: true });   // { updated: 1, ids: [7] }
+db.tasks.update({ done: true });                    // throws: add a .where()
+```
+
+**By default the body writes as the admin, like every other action.** That is what lets it
+write the audit row the caller may not. When you want the *caller's* authority instead — "show
+this person their own rows, whatever they ask for" — say so:
+
+```js
+db.asUser().tasks.rows()          // the whole handle delegates
+db.tasks.asUser().count()         // one table
+db.tasks.where({ done: true }).asUser().rows()   // one query
+```
+
+Under `asUser()` every read is narrowed by the table's ownership formula and every write is
+checked against it, exactly as if that person had called the API — a row they may not see is
+"not found", and a write they may not make throws an error you can catch:
+
+```js
+try {
+  db.asUser().tasks.insert({ title: payload.title, owner: "someone@else.com" });
+} catch (e) {
+  return { refused: e.message };
+}
+```
+
+Who "the user" is, is **whoever caused the event**: the signed-in person for a table event or a
+`none` trigger called from your app, and *nobody* for a `daily` or `startup` trigger — which
+reads as the public role, because a nightly job has no user to act as. That is why admin is the
+default.
+
+**Three bounds, and each one tells you what to do about it.** A read of more than **1000 rows**
+is refused rather than trimmed (add a `.limit()` or narrow the `.where()` — half a table
+silently would make every total you compute wrong); more than **200 database calls** in one run
+is refused (that is an accidental loop, not a workload); and the run has a wall clock, the
+**Timeout (ms)** setting, default 5000 and at most 60000. There are no transactions across
+statements: a body that fails half way leaves the rows it already wrote, and their triggers have
+already fired.
+
+What `db` deliberately does *not* have: raw SQL, schema changes, and anything awaitable. The API
+is synchronous — `db.tasks.rows()` returns rows, not a promise — and a body that returns a
+promise is refused rather than quietly turning into `{}`.
+
 ## The actions you have
 
 Every action declares its own settings, and the form is rendered from that declaration — so an
@@ -229,9 +350,9 @@ comes back as the trigger's result — so a `none` trigger exposed on your app c
 front end to somebody else's API.
 
 `run_js_code` is the escape hatch for a computation no combination of the others expresses. It
-sees `row`, `old`, `user` and `payload`, and **nothing else**: no catalog, no network, no disk.
-That is deliberate. Reaching the database from guest code is a separate milestone, not a corner
-of this one.
+sees `row`, `old`, `user` and `payload` — and `db`, your tables (Step 5). That is the whole host
+surface: no network, no disk, no subprocess, no schema changes. If you want an HTTP call, that
+is `fetch`, which is a separate action for a reason.
 
 ## Things that trip people up
 
@@ -259,6 +380,10 @@ of this one.
 - **A formula is one pure expression.** No `new`, no assignment, no statements — so "now" is
   `Date.now()` (a number), not `new Date()`. `Math`, `JSON`, `String`, `Number` and `Date` are
   reachable as globals; a field of the same name shadows them.
+- **`db` exists only in code, not in formulas.** An `only_if`, a field value, a `where` and a
+  `{{ }}` template are evaluated in a sandbox with no database access at all, on purpose: a
+  formula that could query is a formula that could be slow on every row of every read. If a
+  condition needs a lookup, put the lookup in a `run_js_code` body.
 - **Errors are events, but rejections are not.** The `error` event fires when a request fails,
   not when one is refused: a 404 for a bad URL or a 401 from the auth gate is a rejection, and an
   alerting trigger that fired on every probe of a wrong path would be useless for what it is for.

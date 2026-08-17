@@ -85,8 +85,8 @@ async fn own_books(cat: &Catalog, formula: &str, rls: bool) -> Result<()> {
 /// floors, so this caller's access is whatever the ownership formula grants and
 /// nothing else. The caller object is the shape an event carries: the id as a
 /// uuid string, the role, and the fields a formula reads.
-fn as_reader(cat: &Arc<Catalog>, email: &str) -> TableHost {
-    TableHost::new(Arc::clone(cat)).caused_by(
+fn as_reader<'a>(cat: &'a Catalog, email: &str) -> TableHost<'a> {
+    TableHost::new(cat).caused_by(
         40,
         Some(json!({
             "id": uuid::Uuid::new_v4().to_string(),
@@ -98,12 +98,12 @@ fn as_reader(cat: &Arc<Catalog>, email: &str) -> TableHost {
 
 /// That host with the real formula engine behind it, for a formula the translator
 /// refuses.
-fn with_engine(host: TableHost) -> TableHost {
+fn with_engine(host: TableHost<'_>) -> TableHost<'_> {
     host.with_evaluator(Some(Arc::new(DenoEvaluator::new()) as Arc<dyn JsEvaluator>))
 }
 
 /// One plan, answered — what `__scDbCall(plan)` gets back.
-async fn ask(host: &TableHost, plan: Json) -> Result<Json> {
+async fn ask(host: &TableHost<'_>, plan: Json) -> Result<Json> {
     host.call(plan).await
 }
 
@@ -238,7 +238,7 @@ async fn a_scheduled_triggers_delegation_reads_as_the_public_role() -> Result<()
     // §5's answer is the honest one rather than an error: the read is public's,
     // and public owns no rows. (Which is why `asAdmin()` is the default — this is
     // what a body that delegated by habit would get.)
-    let scheduled = with_engine(TableHost::new(Arc::clone(&cat)));
+    let scheduled = with_engine(TableHost::new(&cat));
     let plan = json!({
         "op": "select", "table": "books", "authority": "user", "select": ["title"],
     });
@@ -535,7 +535,7 @@ async fn a_delegated_read_that_needs_the_formula_engine_completes_from_a_code_bo
                 return { mine: mine.map((b) => b.title), all: all };
             "#
             .to_owned(),
-            host: Some(Arc::new(host) as Arc<dyn CodeHost>),
+            host: Some(&host),
             ..CodeCall::default()
         }),
     )

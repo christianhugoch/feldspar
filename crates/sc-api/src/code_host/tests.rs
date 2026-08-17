@@ -577,7 +577,7 @@ async fn a_delegated_plan_resolves_its_names_at_the_callers_own_role() {
     // goes through `ownership::join_guard` as a caller, and a role-40 reader who
     // may not read `authors` is refused by name rather than handed its columns
     // one at a time through a key.
-    let host = super::TableHost::new(Arc::clone(&cat)).caused_by(40, Some(caller()));
+    let host = super::TableHost::new(&cat).caused_by(40, Some(caller()));
     let refused = host
         .run(&parsed(&plan))
         .await
@@ -596,7 +596,7 @@ async fn delegation_needs_a_caller_it_can_name_and_public_is_a_valid_answer() {
     // An event whose caller object is not a user is refused **before** any
     // statement: acting as somebody requires knowing who, and the admin's rows
     // are the one answer that must never be the fallback.
-    let host = super::TableHost::new(Arc::clone(&cat)).caused_by(40, Some(json!({ "id": 7 })));
+    let host = super::TableHost::new(&cat).caused_by(40, Some(json!({ "id": 7 })));
     let refused = host.run(&plan).await.expect_err("not a caller");
     assert!(refused.to_string().contains("uuid"), "{refused}");
 
@@ -604,7 +604,7 @@ async fn delegation_needs_a_caller_it_can_name_and_public_is_a_valid_answer() {
     // error: it delegates to the public role, which on an admin-only table with
     // no ownership formula may read nothing. (The refusal is the *table's*, which
     // is the point: `asUser()` there is honest rather than broken.)
-    let host = super::TableHost::new(cat);
+    let host = super::TableHost::new(&cat);
     let public = host
         .run(&plan)
         .await
@@ -614,7 +614,8 @@ async fn delegation_needs_a_caller_it_can_name_and_public_is_a_valid_answer() {
 
 #[tokio::test]
 async fn the_call_budget_is_spent_once_per_plan_and_then_refused() {
-    let host = super::TableHost::new(library().await).with_limits(HostLimits {
+    let cat = library().await;
+    let host = super::TableHost::new(&cat).with_limits(HostLimits {
         max_rows: 10,
         max_calls: 2,
     });

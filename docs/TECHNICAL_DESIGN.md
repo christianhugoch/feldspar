@@ -1019,14 +1019,166 @@ exactly like an API caller's write. A second write path would quietly skip all o
   configuration is validated against. The transport is handed in through `ActionContext`,
   exactly as the JavaScript engine is, which is what lets its tests assert *what would have
   been sent*.
-- `run_js_code` runs a JavaScript body on the server's isolate with `row`/`old`/`user`/
-  `payload` in scope. Deliberately **bounded**: no host API, so the code cannot reach the
-  catalog, the network or the disk. Catalog access from a guest language is `sc-code`'s
-  milestone (§15); this is its seed, not a preview of it.
+- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and `db`,
+  the tables (below). Its host surface is exactly that one: no network, no disk, no
+  subprocess, no schema changes. It runs on its **own pool of isolates**, not the single pure
+  isolate every ownership formula shares, which is what lets it have a blocking host call and
+  a configurable `timeout_ms` (default 5s, max 60s) without either becoming a property of
+  every authorization decision in the process.
 
 An action's writes carry **admin authority** on an RLS table (`ROLE_ADMIN` plus the event's
 user): a trigger is the admin's configuration, and the audit row a user may not insert is
 precisely the one the audit trigger exists to write.
+
+#### `db`: tables in a code body
+
+The escape hatch that cannot read a row is an escape hatch for arithmetic. `run_js_code`
+therefore binds one thing beside the event's values:
+
+```js
+db.table("invoices")   // the general form — any table name
+db.invoices            // sugar: a Proxy over the same call
+```
+
+`db` exists **only in a code body**. A formula — an ownership formula, an `only_if`, a
+calculated field, a `{{ }}` token — evaluates in the pure isolate it always did, where
+`typeof db === "undefined"`: a formula that could query is a formula that could be slow on
+every row of every read.
+
+**Reading.** Chain methods are pure and return a new builder; **terminals execute**. The chain
+mirrors `sc_query::Select` field for field, and the terminals reuse the names the
+Ↄ-aggregation chains already have in the formula language.
+
+```js
+const rows = db.books
+  .where({ author: "Woolf", pages: { gt: 200 } })
+  .select("id", "title", "publisherⱵname")
+  .orderBy("published", "desc")
+  .limit(10)
+  .offset(20)
+  .rows();
+```
+
+| chain method | meaning |
+| --- | --- |
+| `.where(cond)` | restrict; repeated calls **AND** |
+| `.select(...cols)` | projections: field names, Ⱶ-paths, and `{ alias: "formula" }` objects |
+| `.orderBy(field, dir?)` | `"asc"` (default) or `"desc"`; repeated calls append keys |
+| `.limit(n)` / `.offset(n)` | the bound |
+| `.asUser()` / `.asAdmin()` | authority (below) |
+
+The terminals are `.rows()`, `.first()`, `.get(pk)`, `.count()`, `.sum(f)`/`.avg(f)`/
+`.min(f)`/`.max(f)`, `.exists()`, and the three writes `.insert(v)`, `.update(v)`, `.delete()`.
+
+**One filter vocabulary, two spellings.** `where` takes either the object DSL every other
+surface already speaks — the REST query string, the GraphQL `where`, the agent tools — or a
+formula string, which is what the `update_rows` and `delete_rows` actions take:
+
+```js
+.where({ status: "draft", pages: { gte: 100 }, id: { in: [1, 2, 3] } })
+.where({ or: [ { status: "draft" }, { and: [ { status: "sent" }, { paid: false } ] } ] })
+.where('status === "draft" && ordersↃcustomer.length > 3')
+```
+
+Both lower to one `sc_query::Expr` through the one vocabulary in `sc_api::filter`, so `eq`,
+`is_null`, `like` and the rest mean in a code body exactly what they mean in a URL — and
+`and`/`or`/`not` live in that shared module, so REST, GraphQL and the agent filters have them
+by the same code. A projection may be a formula, which is where joins and child aggregations
+enter a select:
+
+```js
+db.customers.select(
+  "id", "name",
+  { city:  "addressⱵcity" },                       // Ⱶ  → correlated scalar subquery
+  { spend: "ordersↃcustomer.sum(o => o.total)" },  // Ↄ  → correlated aggregate subquery
+  { net:   "price * (1 - discount)" },             // an ordinary expression
+).rows();
+```
+
+Each is an `sc_expr::Formula`: parsed, validated against the catalog's `SchemaShape`,
+translated by `translate_value`, and projected as an extra column — the same path a GraphQL
+`manager { email }` and a non-stored calculated field take. **There is one expression
+language**; a formula the translator refuses (one that needs the JS evaluator) is an error
+naming it and saying to compute it in the code body instead, which costs the author nothing
+because the code body is JavaScript.
+
+**Writing.** `.insert()` answers the written row (an array in, an array out); `.update()` and
+`.delete()` answer `{ updated | deleted, ids }`, the shape those two actions already return.
+Either **without a `.where()` throws**, in the guest and again in the host: a whole table
+rewritten or emptied is not something an omitted call should be able to cause. Writes go
+through the row layer (`rows::create_row_ctx` / `update_row_ctx` / `delete_row_ctx`), so they
+are coerced, validated, File-field-checked and **observed by triggers** — a write from a code
+body is an event like any other, carrying this trigger's chain, so the cascade bound applies to
+it exactly as it does to `insert_row`. A bulk update or delete resolves its matched rows first
+and then writes them one at a time, as `update_rows` does; the events are the point.
+
+**Authority: admin by default, `asUser()` to delegate.** A code body's reads and writes are the
+admin's, carrying the event's user (so an RLS policy that reads `user` still sees who caused
+it). `asUser()` is available on the handle, on a table and on a query, and sets one field of
+the plan — so where it appears in the chain does not matter:
+
+```js
+db.asUser().invoices.where({ paid: false }).rows();   // the whole handle
+db.invoices.asUser().where({ paid: false }).rows();   // one table
+db.invoices.where({ paid: false }).asUser().rows();   // one query
+db.invoices.asAdmin().insert({ … });                  // the default, said out loud
+```
+
+Delegated, every operation goes through `sc_api::ownership`'s `read_rows_as` /
+`aggregate_values_as` / `insert_row_as` / `update_row_as` / `delete_row_as` at the event's own
+role and user — §7.3's rule, the same functions the agent tools use, so there is no second
+implementation of "meets the floor OR the formula grants it" to be subtly wrong. A denial is a
+catchable `Error`, so a body may try a delegated write and fall back. Events differ in whom
+they have to delegate to and that is honoured rather than hidden: a table event or a
+directly-run trigger carries the user who caused it, while a **scheduled** or **startup**
+trigger carries nobody and therefore reads as the public role — which is why `asAdmin()` is the
+default. One asymmetry: a delegated **aggregate** over a table whose ownership formula the
+translator refuses is an error (an aggregate over rows it cannot filter would silently count
+rows the caller may not see), and the message says to read the rows and aggregate in the code
+body.
+
+**Results, errors and bounds.** Rows are the REST wire shape (`sc_api::convert::value_to_json`),
+so a row means the same thing in `db.books.rows()` as it does over HTTP: a Decimal is exact, a
+Date is ISO. **Nothing reaches SQL as text** — a chain builds a plain plan object and the host
+resolves every table, column and join path through the catalog before lowering to a `Statement`
+whose literals are parameterised; there is no raw-SQL escape hatch in `db` (§13.4's custom SQL
+queries are the governed way to write SQL). The API is **synchronous**: `db.books.rows()`
+returns rows, not a Promise. Three bounds, each with its own named error: **1000 rows per
+read** (a read is materialised into the isolate, so the error says to add a `.limit()`, and the
+cap **refuses** rather than truncating — a body handed 1000 of 4000 rows would compute a wrong
+answer out of a right-looking one), **200 host calls per run** (an accidental N+1 must not
+hammer the database quietly), and the **wall clock** (`timeout_ms`) — which covers the whole
+call rather than the executing part of it: a body is refused a host call once it is spent, and
+the *caller* stops waiting shortly after it, which is the only bound that covers a run holding
+its caller **without executing** (waiting for a free isolate while every one of them is blocked
+in a host call, or one query that never comes back). There are **no transactions across
+statements**: each autocommits, as every action's writes do, and
+`db.transaction(fn)` is a later addition whose seam is the row layer's `Executor::Transaction`.
+
+**The plan is the seam.** The fluent surface is JavaScript; what crosses into Rust is one plain
+JSON object per terminal, which is what makes this the seam §15's other adapters implement
+rather than a JavaScript feature:
+
+```json
+{
+  "op": "select",
+  "table": "invoices",
+  "authority": "admin",
+  "where": { "paid": false, "due": { "lt": "2026-08-17" } },
+  "select": [ "id", "amount", "customerⱵemail",
+              { "alias": "chased", "formula": "remindersↃinvoice.length" } ],
+  "order":  [ { "field": "due", "dir": "asc" } ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+`op` is `select` | `aggregate` | `insert` | `update` | `delete`; `where` is either the object
+DSL or `{ "formula": "…" }`; `aggregate` carries `[{ "alias", "fn", "arg" }]`; `values` carries
+an insert's row(s) or an update's assignments. Every terminal is one plan and one round trip,
+built by `sc_expr`'s JavaScript prelude and answered by `sc_api::code_host::TableHost`, which
+is where all the table knowledge is — `sc-expr` sits below `sc-catalog` and does not learn what
+a table is.
 
 ### 10.2 Triggers
 
@@ -3407,6 +3559,38 @@ pub trait CodeAdapter: Send + Sync {
 - Guest extensions appear in the catalog as ordinary `Box<dyn Trait>` implementations backed
   by a single Rust shim per adapter, so higher layers never know or care what language an
   extension is written in.
+
+**What an adapter implements to reach the catalog: `CodeHost`.** Guest code that can compute
+but not read a row is guest code for arithmetic, so the *first* thing an adapter needs is
+tables — and that surface already exists, arrived at from the one guest language the server
+already runs (§10.1's `db`):
+
+```rust
+#[async_trait]
+pub trait CodeHost: Send + Sync {          // sc-expr
+    /// Answer one plan. Called from an interpreter thread, blocking it.
+    async fn call(&self, request: Value) -> Result<Value>;
+}
+```
+
+One JSON *plan* in, one JSON value out, and nothing in the signature is shaped like a query —
+which is the point. The three halves are deliberately separable:
+
+- the **fluent surface** is written in the guest language (for JavaScript, a prelude in
+  `sc_expr::code`), so adding `.orderBy` touches no Rust and Python's `db` can read like
+  Python;
+- the **plan** is the contract (§10.1's JSON), and it is language-neutral;
+- the **host** is `sc_api::code_host::TableHost` — the catalog lookups, the formula
+  translation, §7.3's ownership rule and the row layer — and every adapter shares that one
+  implementation rather than growing its own idea of what a table is.
+
+An adapter therefore needs a *runtime*, not a data layer: something that runs guest code with
+a `CodeHost` in reach and a wall clock over it. `CodeRuntime` (a small pool of isolates, one
+op, a watchdog paused for the duration of each host call) is that for JavaScript, kept strictly
+separate from the pure formula isolate — a blocking host call on the isolate that decides
+ownership formulas would put every authorization decision in the process behind whatever a
+guest is doing, and would deadlock the moment a delegated read's own formula needed the
+evaluator. Any adapter that blocks a thread on a host call inherits that constraint.
 
 ---
 

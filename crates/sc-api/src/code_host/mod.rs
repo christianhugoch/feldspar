@@ -102,9 +102,15 @@ impl Default for HostLimits {
 /// trigger chain ride on every statement it makes — so sharing one between runs
 /// would share a budget between them and attribute one run's writes to another's
 /// cascade.
-pub struct TableHost {
+pub struct TableHost<'a> {
     /// The catalog every name is resolved through.
-    catalog: Arc<Catalog>,
+    ///
+    /// **Borrowed**: the catalog is what the row layer, an action's context and
+    /// every request handler already hold a reference to, and threading an `Arc`
+    /// down to a firing trigger would mean threading one through the write that
+    /// fired it. `sc_expr::CodeCall` therefore borrows its host too, and the code
+    /// runtime bridges the borrow across to its isolate thread.
+    catalog: &'a Catalog,
     /// The role the event was served at — what a delegated operation is checked
     /// against, and public for an event with no caller at all.
     role: u8,
@@ -130,9 +136,9 @@ pub struct TableHost {
     calls: AtomicU32,
 }
 
-impl TableHost {
+impl<'a> TableHost<'a> {
     /// A handle over `catalog`, with the default bounds and no caller.
-    pub fn new(catalog: Arc<Catalog>) -> TableHost {
+    pub fn new(catalog: &'a Catalog) -> TableHost<'a> {
         TableHost {
             catalog,
             role: ROLE_PUBLIC,
@@ -153,7 +159,7 @@ impl TableHost {
     /// read. An event with no caller keeps the public role, which is what
     /// `asUser()` in a scheduled trigger honestly means.
     #[must_use]
-    pub fn caused_by(mut self, role: u8, user: Option<Json>) -> TableHost {
+    pub fn caused_by(mut self, role: u8, user: Option<Json>) -> TableHost<'a> {
         self.role = role;
         self.user = user;
         self
@@ -162,21 +168,21 @@ impl TableHost {
     /// Give delegated operations the formula engine, for an ownership formula the
     /// translator cannot lower.
     #[must_use]
-    pub fn with_evaluator(mut self, evaluator: Option<Arc<dyn JsEvaluator>>) -> TableHost {
+    pub fn with_evaluator(mut self, evaluator: Option<Arc<dyn JsEvaluator>>) -> TableHost<'a> {
         self.evaluator = evaluator;
         self
     }
 
     /// Attach the trigger chain that led here.
     #[must_use]
-    pub fn chained(mut self, chain: Vec<String>) -> TableHost {
+    pub fn chained(mut self, chain: Vec<String>) -> TableHost<'a> {
         self.chain = chain;
         self
     }
 
     /// Set the bounds, in place of [`HostLimits::default`].
     #[must_use]
-    pub fn with_limits(mut self, limits: HostLimits) -> TableHost {
+    pub fn with_limits(mut self, limits: HostLimits) -> TableHost<'a> {
         self.limits = limits;
         self
     }
@@ -211,18 +217,17 @@ impl TableHost {
 
     /// A `select`: the rows, as the REST wire shape.
     async fn select(&self, plan: &Plan, actor: &Actor) -> Result<Json> {
-        let read = plan::read(&self.catalog, plan, &self.limits, actor.role())?;
+        let read = plan::read(self.catalog, plan, &self.limits, actor.role())?;
         let values = match actor {
             Actor::Admin(context) => {
-                rows::list_row_values(&self.catalog, &read.table, &read.query, Some(context))
-                    .await?
+                rows::list_row_values(self.catalog, &read.table, &read.query, Some(context)).await?
             }
             // §7.3's rule, in the one place it lives: the formula narrows the
             // rows in the `WHERE` where it can and row by row where it cannot,
             // and the bound is applied after it either way.
             Actor::Caller { role, user } => {
                 ownership::read_row_values_as(
-                    &self.catalog,
+                    self.catalog,
                     &read.table,
                     &read.query,
                     *role,
@@ -244,11 +249,11 @@ impl TableHost {
 
     /// An `aggregate`: one object, keyed by the aliases the plan asked for.
     async fn aggregate(&self, plan: &Plan, actor: &Actor) -> Result<Json> {
-        let agg = plan::aggregate(&self.catalog, plan, actor.role())?;
+        let agg = plan::aggregate(self.catalog, plan, actor.role())?;
         let values = match actor {
             Actor::Admin(context) => {
                 rows::aggregate_values(
-                    &self.catalog,
+                    self.catalog,
                     &agg.table,
                     agg.projections,
                     agg.filter,
@@ -259,7 +264,7 @@ impl TableHost {
             Actor::Caller { role, user } => {
                 self.delegable_aggregate(&agg.table, *role, user.as_ref())?;
                 ownership::aggregate_values_as(
-                    &self.catalog,
+                    self.catalog,
                     &agg.table,
                     agg.projections,
                     agg.filter,
@@ -292,17 +297,16 @@ impl TableHost {
     /// with `_insert` folded true — and then through the very same row layer, so a
     /// delegated write is an event exactly as an admin's is.
     async fn insert(&self, plan: &Plan, actor: &Actor) -> Result<Json> {
-        let insertion = plan::insert(&self.catalog, plan, &self.limits)?;
+        let insertion = plan::insert(self.catalog, plan, &self.limits)?;
         let mut written = Vec::with_capacity(insertion.rows.len());
         for row in &insertion.rows {
             written.push(match actor {
                 Actor::Admin(context) => {
-                    rows::create_row_ctx(&self.catalog, &insertion.table, row, Some(context))
-                        .await?
+                    rows::create_row_ctx(self.catalog, &insertion.table, row, Some(context)).await?
                 }
                 Actor::Caller { role, user } => {
                     ownership::insert_row_as(
-                        &self.catalog,
+                        self.catalog,
                         &insertion.table,
                         row,
                         *role,
@@ -334,16 +338,16 @@ impl TableHost {
     /// see must never be a row they can reach by predicate, and an update must be
     /// granted on the row as it is *and* on the row as it would become.
     async fn write(&self, plan: &Plan, actor: &Actor) -> Result<Json> {
-        let write = plan::write(&self.catalog, plan, &self.limits, actor.role())?;
+        let write = plan::write(self.catalog, plan, &self.limits, actor.role())?;
         let table = &write.matched.table;
         let values = match actor {
             Actor::Admin(context) => {
-                rows::list_row_values(&self.catalog, table, &write.matched.query, Some(context))
+                rows::list_row_values(self.catalog, table, &write.matched.query, Some(context))
                     .await?
             }
             Actor::Caller { role, user } => {
                 ownership::read_row_values_as(
-                    &self.catalog,
+                    self.catalog,
                     table,
                     &write.matched.query,
                     *role,
@@ -367,15 +371,15 @@ impl TableHost {
             let (id, key) = rows::row_key(table, &write.pk, row)?;
             match (actor, &write.values) {
                 (Actor::Admin(context), Some(assignments)) => {
-                    rows::update_row_ctx(&self.catalog, table, &id, assignments, Some(context))
+                    rows::update_row_ctx(self.catalog, table, &id, assignments, Some(context))
                         .await?;
                 }
                 (Actor::Admin(context), None) => {
-                    rows::delete_row_ctx(&self.catalog, table, &id, Some(context)).await?;
+                    rows::delete_row_ctx(self.catalog, table, &id, Some(context)).await?;
                 }
                 (Actor::Caller { role, user }, Some(assignments)) => {
                     ownership::update_row_as(
-                        &self.catalog,
+                        self.catalog,
                         table,
                         &id,
                         assignments,
@@ -388,7 +392,7 @@ impl TableHost {
                 }
                 (Actor::Caller { role, user }, None) => {
                     ownership::delete_row_as(
-                        &self.catalog,
+                        self.catalog,
                         table,
                         &id,
                         *role,
@@ -453,7 +457,7 @@ impl TableHost {
     /// is an `auth` refusal, the same one a read gets, and reading the rows
     /// instead would not help them.
     fn delegable_aggregate(&self, table: &Table, role: u8, user: Option<&User>) -> Result<()> {
-        match ownership::aggregate_guard(&self.catalog, table, &table.name, role, user) {
+        match ownership::aggregate_guard(self.catalog, table, &table.name, role, user) {
             Ok(_) => Ok(()),
             Err(e) => Err(match e.repr() {
                 Repr::Invalid(message) => Error::invalid(format!(
@@ -514,7 +518,7 @@ impl Actor {
 }
 
 #[async_trait]
-impl CodeHost for TableHost {
+impl CodeHost for TableHost<'_> {
     async fn call(&self, request: Json) -> Result<Json> {
         self.spend_call()?;
         let plan: Plan = serde_json::from_value(request).map_err(|e| {

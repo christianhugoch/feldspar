@@ -2,6 +2,79 @@
 
 Changes in reverse chronological order.
 
+## `db` in `run_js_code`: a trigger's code body reads and writes tables
+
+The fifth phase of "tables in code", and the one an admin can see. `run_js_code`
+builds a `TableHost` from its context and binds `db`, so the milestone's own
+example — read the overdue invoices with a joined column and a child count, write
+a reminder per row, return a total — is a trigger you can paste into the form and
+press **Run** on. Everything the four phases below built was unreachable until
+this one; nothing about them changed to make it reachable.
+
+**A host borrows the catalog, because everything that has one has a reference to
+it.** `TableHost` took an `Arc<Catalog>`, which no firing trigger has: the row
+layer, an `ActionContext` and every request handler hold a `&Catalog`, and
+threading an `Arc` down to a trigger would mean threading one through the write
+that fired it. So `TableHost<'a>` borrows, and `CodeCall::host` borrows with it —
+which the pool cannot carry, since a job crosses a channel to an isolate thread
+and must be `'static`. `CodeRuntime::run` therefore **bridges**: the job takes a
+`'static` proxy, the plans come back over a channel, and the future that holds the
+borrow is the future serving them, which is the same future awaiting the run. The
+guest API is unchanged and the isolate thread still blocks on each call; what
+changed is that the thing it blocks on is a channel rather than the catalog, and
+the borrow can therefore end when the run does.
+
+**One new setting: `timeout_ms`** (max 60000), validated at save time as `fetch`'s
+is — refused when out of range rather than clamped, because an admin who typed
+five minutes should be told, not quietly given a minute. Left blank it means
+*whatever this server's default is* (5 s) rather than a resolved 5000: the pool
+has that default already, and turning "unset" into a number here would overrule a
+process started with another one. A configurable timeout is only possible at all
+because a code body runs on its own isolates — the same knob on the formula
+evaluator would have been a configurable hold on every authorization decision in
+the process.
+
+**Authority is the event's, as specified.** The host carries the event's role and
+user, so `db.asUser()` in a body delegates to whoever caused *that* event: the
+signed-in person for a table event or a `none` trigger called from an app, and
+nobody — the public role — for a scheduled or startup one. The trigger's chain
+rides along too, so a write from a body is an event at the depth it belongs to and
+the cascade bound applies to it exactly as it does to `insert_row`.
+
+**Documented where it will be looked for.** §10.1 of the technical design gains
+the whole `db` specification (the chain and its terminals, the two spellings of a
+filter, formula projections, the write rules, the authority rule, the three bounds
+and the plan JSON), and §15 gains `CodeHost` as *what an adapter implements* —
+with the reason a Python adapter will need its own runtime and not its own data
+layer. `docs/tutorial-triggers.md` gains step 5, "reading and writing tables from
+code", whose body is executed by `tutorial_triggers.rs` like every other formula
+the tutorial prints.
+
+**Found on the way: a run could hold its caller without running at all.** The
+wall clock was enforced in the isolate — the watchdog while JavaScript executes,
+the deadline checked when the guest asks for a host call — and neither can see a
+run that is not executing. Two now-reachable shapes are exactly that: a run
+waiting for a free isolate while every isolate is blocked in a host call of its
+own (which is what a code body whose write fires *another* code body looks like to
+a two-worker pool), and one host call that never comes back. Both used to wait for
+ever, which is precisely the unbounded hold on the firing request that `timeout_ms`
+exists to prevent. `CodeRuntime::run` now stops waiting shortly after the run's own
+deadline (a 250 ms grace, so the isolate's two bounds keep reporting their more
+specific messages), and giving up drops the serving loop — so the abandoned run
+fails at its next host call and its worker comes back rather than being held for
+as long as the database takes.
+
+**Tested through the button.** `sc-server`'s `code_body_tables.rs` creates the
+trigger over HTTP, runs it over HTTP and reads the written rows back over HTTP:
+the definition-of-done body against a real database, plus the three mistakes an
+admin makes while writing one (an unknown table, an unknown column, an unfiltered
+update) coming back as sentences rather than as a 500. The action's own tests add
+what only the action can be wrong about: that a body reads and writes its tables,
+that `asUser()` obeys an ownership formula over *this* event's caller while the
+trigger's own authority does not, that the configured timeout is the bound on a
+run, and that `db` is still the only host surface — no `fetch`, no timers, no
+`Deno`.
+
 ## `asUser()`: a code body's access delegated to the event's caller
 
 The fourth phase of "tables in code". A plan carrying `authority: "user"` was

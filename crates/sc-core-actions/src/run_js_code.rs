@@ -1,16 +1,33 @@
 //! `run_js_code` — run a JavaScript code body against the event.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
+use sc_api::code_host::TableHost;
 use sc_error::{Error, Result};
-use sc_expr::CodeCall;
-use sc_types::{BasicType, FormField};
+use sc_expr::{CodeCall, DEFAULT_CODE_TIMEOUT, MAX_CODE_TIMEOUT};
+use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
 
 use sc_action::{Action, ActionContext, ConfigCheck, Event, config_str};
 
 /// The code body.
 const CFG_CODE: &str = "code";
+/// How long one run may take.
+const CFG_TIMEOUT: &str = "timeout_ms";
+
+/// What a trigger that names no timeout gets — the engine's own default, said in
+/// the unit the form takes.
+const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_CODE_TIMEOUT.as_millis() as u64;
+
+/// The ceiling on a configured timeout.
+///
+/// Bounded for the reason `fetch`'s is: a trigger runs inside the request or the
+/// write that fired it, so an unbounded body is an unbounded hold on that caller.
+/// A body now reads and writes tables, so it can genuinely need more than the
+/// default — and still not a minute.
+const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 
 /// Run a configured JavaScript body in the server's sandboxed engine, and return
 /// what it returns.
@@ -26,21 +43,51 @@ const CFG_CODE: &str = "code";
 /// called with, the formula language has no way to reach it, and a `none`
 /// trigger's code is exactly what wants it.
 ///
+/// And `db`: the **tables**, read and written from the body (§10.1's `db`).
+///
+/// ```js
+/// const overdue = db.invoices
+///   .where({ paid: false, due: { lt: payload.today } })
+///   .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
+///   .orderBy("due")
+///   .limit(50)
+///   .rows();
+/// for (const inv of overdue) db.reminders.insert({ invoice: inv.id, sent_to: inv.customerⱵemail });
+/// return { chased: overdue.length, owed: db.invoices.where({ paid: false }).sum("amount") };
+/// ```
+///
+/// A chain is pure and a terminal executes, sending one plan to
+/// [`sc_api::code_host::TableHost`] — which resolves every table, column, Ⱶ-path
+/// and formula through the catalog, so nothing reaches SQL as text and there is
+/// no raw-SQL escape hatch here (§13.4's custom SQL queries are the governed
+/// way). Writes go through the row layer, which means they are coerced against
+/// their columns, validated, and **observed by triggers**: a write from a code
+/// body is an event like any other, carrying this trigger's chain, so the cascade
+/// bound applies to it exactly as it does to `insert_row`.
+///
+/// Reads and writes are the **admin's** by default, carrying the event's user —
+/// a trigger is server-side configuration, and an audit row the caller may not
+/// insert is the archetype of what a trigger exists to write. `db.asUser()`
+/// delegates to the event's caller instead, and then §7.3's ownership rule
+/// decides every row; a refusal is a catchable error, so a body may try a
+/// delegated write and fall back.
+///
 /// The escape hatch for the thing an elementary action cannot anticipate: a
-/// computation over the event that no combination of `insert_row`/`fetch` and
-/// formulas expresses. It is **bounded on purpose** — there is no host API, so
-/// the code cannot read or write the catalog, reach the network, or touch the
-/// disk. Catalog access from a guest language is `sc-code`'s milestone (§15) and
-/// this is its seed, not a preview of it.
+/// computation over the event and its tables that no combination of
+/// `insert_row`/`fetch` and formulas expresses. It is still bounded — no network,
+/// no disk, no schema changes, no transactions across statements, and three
+/// named bounds (1000 rows per read, 200 database calls per run, and the
+/// `timeout_ms` wall clock).
 ///
-/// Three consequences of running on the *same* isolate as every ownership formula
-/// (§7.3), all deliberate:
+/// Three consequences of the runtime, all deliberate:
 ///
-/// - the per-run **timeout is the engine's**, not this action's. A configurable
-///   one would be a configurable hold on every formula evaluation in the process,
-///   since the isolate serves them serially;
-/// - the code is **synchronous**. Nothing in the sandbox is awaitable, so a body
-///   that returns a Promise is refused rather than stringified to `{}`;
+/// - a code body runs on the **code** isolate pool, not the formula isolate a
+///   `only_if` or an ownership formula uses. Which is why the timeout here is
+///   configurable at all: a bound on a pool nothing else depends on is not a
+///   bound on every authorization decision in the process;
+/// - the code is **synchronous** — `db.books.rows()` returns rows, not a Promise.
+///   Nothing in the sandbox is awaitable, so a body that returns a Promise is
+///   refused rather than stringified to `{}`;
 /// - a **syntax error surfaces at fire time**, not on save. Checking it would
 ///   mean compiling in the engine, which the save path has no access to — an
 ///   admin tests a body with the Run button, as they would with any code.
@@ -61,35 +108,87 @@ impl Action for RunJsCode {
             FormField::new(CFG_CODE, BasicType::Text)
                 .label("Code")
                 .required(),
+            FormField::new(CFG_TIMEOUT, BasicType::Int)
+                .label("Timeout (ms)")
+                .default_value(DEFAULT_TIMEOUT_MS),
         ]
     }
 
     async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
-        // The same reader `run` uses, for the one thing that *can* be checked
-        // without an engine: that there is a body at all. A blank one passes the
+        // The same readers `run` uses, for the two things that *can* be checked
+        // without an engine: that there is a body at all — a blank one passes the
         // generic spec check (it is a string) and would then fire doing nothing,
-        // which is the silent failure principle 5 refuses.
+        // which is the silent failure principle 5 refuses — and that the timeout
+        // is a number in range, which is a message on the form rather than a
+        // firing that will not start.
         config_str(check.config, CFG_CODE)?;
+        timeout(check.config)?;
         Ok(())
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
         let code = config_str(ctx.config, CFG_CODE)
             .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
+        let timeout = timeout(ctx.config)
+            .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
+        let evaluator = ctx.evaluator()?;
+        // The `db` handle, for this run only: the call budget is counted on it,
+        // and the event's caller and this trigger's chain ride on every statement
+        // it makes — so a write from the body is an event that says who caused it
+        // and how deep in a cascade it already is. The engine goes along because a
+        // delegated row check is a formula (§7.3), evaluated on the *formula*
+        // isolate while this body's own thread waits — which is why the two
+        // runtimes are separate.
+        let host = TableHost::new(ctx.catalog)
+            .caused_by(ctx.event.role, ctx.event.user.clone())
+            .chained(ctx.chain.clone())
+            .with_evaluator(Some(Arc::clone(evaluator)));
         let call = CodeCall {
             code,
             bindings: bindings(ctx.event),
-            // The table handle arrives in phase 5 of this milestone; until then a
-            // body is the pure one this action shipped with.
+            host: Some(&host),
+            timeout,
             ..CodeCall::default()
         };
         // The result is the action's result: a directly-run trigger returns it to
         // its caller, and a workflow step will put it in the run context.
-        ctx.evaluator()?
+        evaluator
             .run_code(call)
             .await
             .map_err(|e| Error::invalid(format!("trigger `{}`: `{CFG_CODE}`: {e}", ctx.trigger)))
     }
+}
+
+/// The configured wall clock for one run, **bounded** ([`MAX_TIMEOUT_MS`]), or
+/// `None` when the trigger names none.
+///
+/// `None` rather than [`DEFAULT_TIMEOUT_MS`] resolved here, because the engine
+/// has that default already and a process may have been started with another one:
+/// an admin who left the field alone said "whatever this server's default is",
+/// and turning that into a number would overrule it.
+///
+/// Out of range is refused rather than clamped, exactly as `fetch`'s is: an admin
+/// who typed five minutes should be told it is not allowed, not quietly given one.
+fn timeout(config: &Attrs) -> Result<Option<Duration>> {
+    let ms = match config.get(CFG_TIMEOUT) {
+        None | Some(Json::Null) => return Ok(None),
+        Some(Json::Number(n)) => n.as_i64().ok_or_else(|| {
+            Error::invalid(format!(
+                "`{CFG_TIMEOUT}` must be a whole number of milliseconds"
+            ))
+        })?,
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "`{CFG_TIMEOUT}` must be a whole number of milliseconds, got {other}"
+            )));
+        }
+    };
+    if !(1..=MAX_TIMEOUT_MS as i64).contains(&ms) {
+        return Err(Error::invalid(format!(
+            "`{CFG_TIMEOUT}` must be between 1 and {MAX_TIMEOUT_MS} milliseconds, got {ms}"
+        )));
+    }
+    Ok(Some(Duration::from_millis(ms.unsigned_abs())))
 }
 
 /// What the event binds in the code's scope (`row`, `old`, `user`, `payload`).
@@ -122,15 +221,46 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn the_code_is_the_only_setting_and_it_is_required() {
+    fn the_code_is_required_and_the_timeout_is_the_other_setting() {
         let spec = RunJsCode.config_spec();
         let names: Vec<&str> = spec.iter().map(|f| f.name()).collect();
-        assert_eq!(names, vec![CFG_CODE]);
+        assert_eq!(names, vec![CFG_CODE, CFG_TIMEOUT]);
         assert!(spec[0].required);
+        assert!(!spec[1].required, "a body may take the server's default");
+        assert_eq!(spec[1].default, Some(json!(DEFAULT_TIMEOUT_MS)));
         // A configuration with nothing in it is a named error rather than an
         // empty body that silently returns null.
         let msg = config_str(&Attrs::new(), CFG_CODE).unwrap_err().to_string();
         assert!(msg.contains(CFG_CODE) && msg.contains("required"), "{msg}");
+    }
+
+    #[test]
+    fn the_timeout_defers_to_the_engine_when_unset_and_is_bounded_when_set() {
+        let config =
+            |value: Json| -> Attrs { [(CFG_TIMEOUT.to_owned(), value)].into_iter().collect() };
+        // Unset is not "5000" but "whatever this server's default is": resolving
+        // it here would overrule a process started with another one.
+        assert_eq!(timeout(&Attrs::new()).unwrap(), None);
+        assert_eq!(timeout(&config(Json::Null)).unwrap(), None);
+        assert_eq!(
+            timeout(&config(json!(250))).unwrap(),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            timeout(&config(json!(MAX_TIMEOUT_MS))).unwrap(),
+            Some(MAX_CODE_TIMEOUT),
+            "the ceiling itself is allowed"
+        );
+        // Refused rather than clamped, and each refusal names the setting.
+        for bad in [
+            json!(MAX_TIMEOUT_MS + 1),
+            json!(0),
+            json!(-5),
+            json!("soon"),
+        ] {
+            let msg = timeout(&config(bad.clone())).unwrap_err().to_string();
+            assert!(msg.contains(CFG_TIMEOUT), "{bad}: {msg}");
+        }
     }
 
     #[test]

@@ -116,7 +116,7 @@ pub trait JsEvaluator: Send + Sync {
     /// on, so it goes to the [`CodeRuntime`](crate::CodeRuntime) pool instead —
     /// see that module for why the formula isolate must stay pure. A throw, a
     /// timeout, or a result JSON cannot express is an `Err`.
-    async fn run_code(&self, call: CodeCall) -> Result<serde_json::Value>;
+    async fn run_code(&self, call: CodeCall<'_>) -> Result<serde_json::Value>;
 }
 
 /// How long a single evaluation may run before the watchdog terminates it. A
@@ -344,7 +344,7 @@ impl JsEvaluator for DenoEvaluator {
             .map_err(|_| Error::msg("formula evaluator dropped the reply"))?
     }
 
-    async fn run_code(&self, call: CodeCall) -> Result<serde_json::Value> {
+    async fn run_code(&self, call: CodeCall<'_>) -> Result<serde_json::Value> {
         self.code
             .get_or_init(|| {
                 CodeRuntime::with_workers(self.code_workers).with_default_timeout(self.code_timeout)
@@ -993,7 +993,7 @@ mod tests {
 
     /// A code run with the given bindings. No host: `run_js_code` without one is
     /// the pure body it has always been, and these are its tests.
-    fn code(source: &str, bindings: &[(&str, serde_json::Value)]) -> CodeCall {
+    fn code(source: &str, bindings: &[(&str, serde_json::Value)]) -> CodeCall<'static> {
         CodeCall {
             code: source.to_owned(),
             bindings: bindings

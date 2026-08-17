@@ -439,7 +439,7 @@ impl JsEvaluator for WellPaidOnly {
         Err(sc_error::Error::invalid("not part of this test"))
     }
 
-    async fn run_code(&self, _call: sc_expr::CodeCall) -> Result<Json> {
+    async fn run_code(&self, _call: sc_expr::CodeCall<'_>) -> Result<Json> {
         Err(sc_error::Error::invalid("not part of this test"))
     }
 }

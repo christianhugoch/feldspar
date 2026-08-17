@@ -141,7 +141,7 @@ mod tests {
             names("fetch"),
             vec!["url", "method", "headers", "body", "timeout_ms"]
         );
-        assert_eq!(names("run_js_code"), vec!["code"]);
+        assert_eq!(names("run_js_code"), vec!["code", "timeout_ms"]);
         assert_eq!(
             names("send_email"),
             vec!["to", "cc", "bcc", "from", "subject", "html", "mjml", "text"]
