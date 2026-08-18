@@ -1050,7 +1050,7 @@ mirrors `sc_query::Select` field for field, and the terminals reuse the names th
 Ↄ-aggregation chains already have in the formula language.
 
 ```js
-const rows = db.books
+const rows = await db.books
   .where({ author: "Woolf", pages: { gt: 200 } })
   .select("id", "title", "publisherⱵname")
   .orderBy("published", "desc")
@@ -1076,8 +1076,8 @@ same rows in the same order, one batch per database call, so the isolate holds a
 than the result.
 
 ```js
-for (const invoice of db.invoices.where({ paid: false }).orderBy("due").iter()) {
-  db.reminders.insert({ invoice: invoice.id });
+for await (const invoice of db.invoices.where({ paid: false }).orderBy("due").iter()) {
+  await db.reminders.insert({ invoice: invoice.id });
 }
 ```
 
@@ -1107,7 +1107,7 @@ formula language writes an aggregate, and `.rows()` answers **one row per group*
 keys beside them:
 
 ```js
-db.invoices
+await db.invoices
   .where({ paid: false })
   .groupBy("customerⱵemail")                        // a field, a Ⱶ-path or a formula
   .aggregate({ n: "count()", owed: "sum(amount)" })
@@ -1141,7 +1141,7 @@ by the same code. A projection may be a formula, which is where joins and child 
 enter a select:
 
 ```js
-db.customers.select(
+await db.customers.select(
   "id", "name",
   { city:  "addressⱵcity" },                       // Ⱶ  → correlated scalar subquery
   { spend: "ordersↃcustomer.sum(o => o.total)" },  // Ↄ  → correlated aggregate subquery
@@ -1172,10 +1172,10 @@ it). `asUser()` is available on the handle, on a table and on a query, and sets 
 the plan — so where it appears in the chain does not matter:
 
 ```js
-db.asUser().invoices.where({ paid: false }).rows();   // the whole handle
-db.invoices.asUser().where({ paid: false }).rows();   // one table
-db.invoices.where({ paid: false }).asUser().rows();   // one query
-db.invoices.asAdmin().insert({ … });                  // the default, said out loud
+await db.asUser().invoices.where({ paid: false }).rows();   // the whole handle
+await db.invoices.asUser().where({ paid: false }).rows();   // one table
+await db.invoices.where({ paid: false }).asUser().rows();   // one query
+await db.invoices.asAdmin().insert({ … });                  // the default, said out loud
 ```
 
 Delegated, every operation goes through `sc_api::ownership`'s `read_rows_as` /
@@ -1204,8 +1204,15 @@ holds by construction, and the body's values are **binds**. It carries the same 
 no ownership formula filters it, no rich type coerces what it returns, and a write inside one
 raises **no table event**; what still holds is the caller-context transaction (an RLS table's
 policies decide), the row cap and the call budget. `asUser()` there means the statement runs at
-the caller's role and user — which is what RLS reads, and nothing more. The API is **synchronous**: `db.books.rows()`
-returns rows, not a Promise. Three bounds, each with its own named error: **1000 rows per
+the caller's role and user — which is what RLS reads, and nothing more. The API is
+**asynchronous**: every terminal answers a promise, `.iter()` is walked with `for await`, and a
+body is the inside of an `async function`, so `await` is legal at its top level. The chain
+itself stays synchronous — it builds a plan and touches nothing — so `await` goes at the front
+of a whole chain and never inside one, and a `Promise.all([…])` of two chains issues both
+queries at once. The forgotten `await` is not silent: a terminal answers a `DbPromise` whose
+`toJSON`, `Symbol.toPrimitive` and `Symbol.iterator` throw one named error, so a body that
+treats an un-awaited call as a value is told so rather than answering `{}`. Three bounds, each
+with its own named error: **1000 rows per
 read** (a read is materialised into the isolate, so the error says to add a `.limit()` or to
 stream it with `.iter()`, and the cap **refuses** rather than truncating — a body handed 1000 of
 4000 rows would compute a wrong answer out of a right-looking one), **200 host calls per run** (an accidental N+1 must not

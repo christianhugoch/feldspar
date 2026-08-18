@@ -2,6 +2,77 @@
 
 Changes in reverse chronological order.
 
+## `db` is awaitable
+
+`run_js_code`'s `db` was synchronous, and that bought correctness with the one currency a server
+cannot spend: a host call blocked its isolate thread for the whole round trip to the database, so
+the number of code bodies this server could serve **at once** was the size of the isolate pool.
+Two. Worse than a throughput ceiling, it was a deadlock: a body whose `.insert()` fires a second
+`run_js_code` trigger needs a second worker while still holding its own, and the pool size that
+avoids that is `1 + max nesting depth × concurrency`, which is not a number anyone can pick.
+
+The guest surface is now asynchronous. Every terminal answers a promise, `.iter()` is an async
+generator, and a body is the inside of an `async function` — so `await` is legal at its top level
+and a returned promise is the answer rather than something refused:
+
+```js
+const overdue = await db.invoices
+  .where({ paid: false, due: { lt: payload.today } })
+  .orderBy("due")
+  .limit(50)
+  .rows();
+
+for await (const inv of db.customers.where({ active: true }).iter()) { … }
+
+const [chased, owed] = await Promise.all([
+  db.reminders.insert(overdue.map((i) => ({ invoice: i.id }))),
+  db.invoices.where({ paid: false }).sum("amount"),
+]);
+```
+
+That last one is real parallelism, not a formality: `op_sc_db` is an ordinary async op awaiting
+the host, so a run in a host call costs a pending promise rather than a thread and the isolate is
+free while the database works. **The chain is untouched** — `db.invoices.where(…).orderBy(…)`
+still builds a plan and touches nothing — so `await` goes at the front of a whole chain and never
+inside one, which is what keeps the surface recognisable.
+
+**A forgotten `await` is not silent.** This is the tax the change levies, and it is paid in the
+runtime rather than by every trigger author: `JSON.stringify(promise)` is `{}`, `` `${promise}` ``
+is `[object Promise]`, and `for (const r of promise)` is a bare `TypeError` — three ways for a
+missing `await` to look like a wrong answer instead of a mistake. So a terminal answers a
+`DbPromise`, a `Promise` subclass whose `toJSON`, `Symbol.toPrimitive` and `Symbol.iterator` all
+throw *"this database call was not awaited — write `await db.invoices.rows()`"*. It costs nothing
+when the body is right, because `await` reaches none of them. The editor catches it earlier still:
+the `.d.ts` Monaco loads now declares `rows(): Promise<Row[]>` and
+`iter(): AsyncIterableIterator<Row>`.
+
+**Nothing about the seam changed** (and deliberately: §15's other guest languages inherit this).
+`CodeHost` still takes one JSON plan and answers one JSON value; the plan language, authority, the
+row cap and the cascade guard are all as they were. What changed inside the crate is that
+`handle.block_on` and `RunState::handle` are gone, and each worker now owns a current-thread tokio
+runtime that drives the isolate's own event loop after `execute_script` — because with an async
+body, what the script evaluates to is a pending promise and the event loop, not the call, is what
+finishes a run. A syntax error still surfaces synchronously from the call, and still should.
+
+The run's wall clock now bounds that event-loop wait too. Both bounds inside the isolate — the
+watchdog, and the deadline checked on entry to a host call — need the guest to be *doing*
+something to see it, and a body suspended is doing nothing; without the outer bound the worker
+would be lost rather than the run. Time in the host still does not count against the JS watchdog,
+so a slow query is never reported as "your code timed out". Two failures the event loop makes
+newly visible get their own messages rather than the wall clock's: a body awaiting something
+nothing will ever settle (`await new Promise(() => {})`) is told that `db` is the only awaitable
+thing in the sandbox, at once rather than at its deadline; and a run abandoned at its wall clock
+is **unwound before the worker takes another job**, because a continuation left resident would
+resume during the next run's event loop and reach that run's host and call budget.
+
+**No backwards compatibility for the synchronous spelling** (prototype status): every existing
+body, test, doc example and `.d.ts` declaration is updated to `await`, and the sync form is gone
+rather than deprecated.
+
+This is the first phase of the milestone. One isolate still serves one run at a time — making
+runs resident, splitting the wall clock from a JS slice, and the admission bound are the phases
+that follow, and they are what turn "a run costs a promise" into "one isolate serves hundreds".
+
 ## `.iter()` — reads a code body can walk
 
 `db`'s reads answer at most 1000 rows, and the cap refuses rather than truncates, which is right:

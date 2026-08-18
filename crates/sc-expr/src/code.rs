@@ -5,16 +5,26 @@
 //!
 //! A formula is a pure expression: one V8 isolate on one thread serves every
 //! ownership check in the process, with no ops and a 250 ms watchdog. A code body
-//! is different in kind — it calls out to the host, and the host call **blocks**
-//! the isolate thread until the database answers. Giving the *formula* isolate a
-//! blocking host call would put every authorization decision on the server behind
-//! whatever a trigger's code is doing; worse, it would **deadlock** the moment a
-//! delegated read's ownership formula needed the JS evaluator, because the thread
-//! waiting for the host call is the thread the formula would have to run on.
+//! is different in kind — it calls out to the host, and it **suspends** until the
+//! database answers. Giving the *formula* isolate a host call would put every
+//! authorization decision on the server behind whatever a trigger's code is
+//! doing; worse, it would **deadlock** the moment a delegated read's ownership
+//! formula needed the JS evaluator, because the isolate awaiting the host call is
+//! the isolate the formula would have to run on.
 //!
 //! So a code body runs on [`CodeRuntime`]: a small pool of isolates of its own,
-//! each with one op, its own watchdog and its own (longer) timeout. The formula
-//! isolate stays exactly as pure as it was.
+//! each with one op, its own event loop, its own watchdog and its own (longer)
+//! timeout. The formula isolate stays exactly as pure as it was.
+//!
+//! # Asynchrony
+//!
+//! The guest surface is **awaitable**: every terminal answers a promise, the body
+//! is wrapped in an `async function`, and `op_sc_db` is an ordinary async op. A
+//! run in a host call therefore costs a pending promise rather than a thread —
+//! which is what lets one isolate serve many runs at once, and what keeps a body
+//! whose write fires a second code body from needing a second worker to finish.
+//! The tax is the forgotten `await`, and [`SETUP`]'s `DbPromise` is where it is
+//! paid.
 //!
 //! # The seam
 //!
@@ -96,8 +106,9 @@ const CALLER_GRACE: Duration = Duration::from_millis(250);
 /// body may catch it (a delegated write that is refused, say, and a fallback).
 #[async_trait]
 pub trait CodeHost: Send + Sync {
-    /// Answer one plan. Called from an isolate thread, blocking it; the
-    /// implementation must therefore not depend on that thread making progress.
+    /// Answer one plan. Awaited by the guest rather than blocking it: the
+    /// isolate is free while this future is pending, so a slow answer costs a
+    /// pending promise and not a thread.
     async fn call(&self, request: Json) -> Result<Json>;
 }
 
@@ -177,13 +188,20 @@ pub(crate) const DB: &str = "db";
 // ---------------------------------------------------------------------------
 
 /// The `db` builder: chain methods are pure and return a new builder, terminals
-/// send one plan and return its result.
+/// send one plan and return a **promise** of its result.
 ///
 /// This is JavaScript rather than something generated from Rust on purpose
 /// (decision 4): Rust sees plans, so adding a chain method touches no Rust, and
 /// the same plans will serve the other guest languages. It is emitted **inside**
 /// each run's function scope (decision 5) — a body that assigns to `db` poisons
 /// nothing, because the next run builds its own.
+///
+/// Only the terminals are asynchronous. The chain itself
+/// (`db.invoices.where(…).orderBy(…)`) is pure and synchronous: it builds a plan
+/// and touches nothing, so `await` belongs at the end of a chain and nowhere
+/// inside it. Each terminal answers a `DbPromise` — see [`SETUP`] — and the
+/// `.then()` that unwraps a reply preserves that class through species, so a
+/// forgotten `await` is a named error wherever the chain ended.
 #[cfg(feature = "eval")]
 pub(crate) const DB_PRELUDE: &str = r#"
 const db = (function () {
@@ -261,10 +279,11 @@ const db = (function () {
           '.aggregate({ ' + fn + ': "' + fn + "(" + (arg === undefined ? "" : arg) + ')" }).rows()'
         );
       }
-      const r = send(plan("aggregate", {
+      return send(plan("aggregate", {
         aggregate: [{ alias: "value", fn: fn, arg: arg === undefined ? null : arg }],
-      }));
-      return r === null || r === undefined || r.value === undefined ? null : r.value;
+      })).then((r) =>
+        r === null || r === undefined || r.value === undefined ? null : r.value
+      );
     };
     // What a terminal reads: the rows of a select, or the groups of an
     // aggregate — which is one object when there is nothing to group by.
@@ -278,8 +297,7 @@ const db = (function () {
         }
         return send(plan("select", extra));
       }
-      const r = send(plan("aggregate", extra));
-      return Array.isArray(r) ? r : [r];
+      return send(plan("aggregate", extra)).then((r) => (Array.isArray(r) ? r : [r]));
     };
     // `.iter()`: the rows, one batch per host call, resuming each time from the
     // cursor the last batch answered with. The isolate holds one batch rather
@@ -290,7 +308,12 @@ const db = (function () {
     // The order is the host's business: it appends the primary key to whatever
     // this query sorts by, so that no two rows tie and no batch boundary can
     // skip or repeat one.
-    function* iterate(batchSize) {
+    //
+    // An **async** generator, walked with `for await`: a batch is a host call,
+    // and a host call is a promise. Its argument checks still throw, but at the
+    // first `.next()` rather than at the call — which is where the loop is, so
+    // the author sees them in the same place either way.
+    async function* iterate(batchSize) {
       if (state.aggregate.length || state.group.length) {
         throw new Error(
           "db." + state.table + ".iter() streams rows, and this query aggregates them; " +
@@ -325,7 +348,7 @@ const db = (function () {
           // rule said where a guest cannot reach it.
           delete p.offset;
         }
-        const reply = send(p);
+        const reply = await send(p);
         const batch = reply.rows;
         for (let i = 0; i < batch.length; i++) {
           yield batch[i];
@@ -352,9 +375,10 @@ const db = (function () {
 
       rows: () => read(),
       iter: (batchSize) => iterate(batchSize),
-      first: () => { const r = read({ limit: 1 }); return r.length ? r[0] : null; },
-      get: (pk) => { const r = send(plan("select", { pk: pk, limit: 1 })); return r.length ? r[0] : null; },
-      exists: () => send(plan("select", { limit: 1 })).length > 0,
+      first: () => read({ limit: 1 }).then((r) => (r.length ? r[0] : null)),
+      get: (pk) =>
+        send(plan("select", { pk: pk, limit: 1 })).then((r) => (r.length ? r[0] : null)),
+      exists: () => send(plan("select", { limit: 1 })).then((r) => r.length > 0),
       count: () => scalar("count"),
       sum: (f) => scalar("sum", f),
       avg: (f) => scalar("avg", f),
@@ -426,8 +450,9 @@ const db = (function () {
 })();
 "#;
 
-/// Installed once per isolate: the op handle and the run wrapper, as globals
-/// that a code body **cannot replace**.
+/// Installed once per isolate: the op handle, the promise a database call
+/// answers, and the run wrapper — as globals that a code body **cannot
+/// replace**.
 ///
 /// Tampering could never *escalate* — the host re-validates every plan against
 /// the catalog and the authority, and a guest that deleted `__scDbCall` would
@@ -436,6 +461,22 @@ const db = (function () {
 /// configurable: false`, and hence `Deno` going away afterwards: the op is
 /// captured in a closure, so removing the global removes the only other way to
 /// reach `Deno.core`.
+///
+/// # `DbPromise`, and the forgotten `await`
+///
+/// Asynchrony levies one tax, and it is paid here rather than by every trigger
+/// author. A plain promise that was meant to be awaited fails *quietly*:
+/// `JSON.stringify(promise)` is `{}`, `` `${promise}` `` is
+/// `[object Promise]`, and `for (const r of promise)` is a bare `TypeError`
+/// about something not being iterable — three ways for a missing `await` to
+/// look like a wrong answer rather than a mistake.
+///
+/// So a terminal answers a `DbPromise`: a `Promise` subclass whose `toJSON`,
+/// `Symbol.toPrimitive` and `Symbol.iterator` all throw the same named error.
+/// It costs nothing when the body is right, because `await` reaches none of
+/// them — and `Promise.prototype.then` builds the derived promise through
+/// `Symbol.species`, so an unwrapping `.then()` inside the prelude keeps the
+/// class rather than losing it.
 #[cfg(feature = "eval")]
 const SETUP: &str = r#"
 (() => {
@@ -444,24 +485,39 @@ const SETUP: &str = r#"
     Object.defineProperty(globalThis, name, {
       value: value, writable: false, configurable: false, enumerable: false,
     });
+  const notAwaited = () =>
+    new Error(
+      "this database call was not awaited — write `await db.invoices.rows()`"
+    );
+  // The promise a terminal answers: everything a body might do to it *instead*
+  // of awaiting it says so by name.
+  class DbPromise extends Promise {
+    toJSON() { throw notAwaited(); }
+    [Symbol.toPrimitive]() { throw notAwaited(); }
+    [Symbol.iterator]() { throw notAwaited(); }
+  }
   // One round trip: a plan in, a reply envelope out. A host error becomes an
-  // ordinary JS Error at the call site, catchable like any other.
-  fixed("__scDbCall", (plan) => {
-    const reply = JSON.parse(op(JSON.stringify(plan)));
-    if (reply.error !== undefined) throw new Error(reply.error);
-    return reply.ok;
-  });
-  // The run wrapper: call the body, refuse a Promise (nothing in the sandbox is
-  // awaitable, and JSON.stringify(promise) is `{}`, which would look exactly
-  // like a result), and hand back the JSON text of what it returned.
-  fixed("__scRun", (body, bindings) => {
-    const result = body(bindings);
-    if (result && typeof result.then === "function") {
-      throw new Error("the code returned a Promise: run_js_code is synchronous, " +
-                      "and the sandbox has nothing to await");
+  // ordinary JS Error at the await point, catchable like any other.
+  fixed("__scDbCall", (plan) => new DbPromise((resolve, reject) => {
+    let request;
+    try {
+      request = JSON.stringify(plan);
+    } catch (e) {
+      reject(e);
+      return;
     }
-    return JSON.stringify(result);
-  });
+    op(request).then((answer) => {
+      const reply = JSON.parse(answer);
+      if (reply.error !== undefined) reject(new Error(reply.error));
+      else resolve(reply.ok);
+    }, reject);
+  }));
+  // The run wrapper: call the body — which is an async function, so what comes
+  // back is a promise — and answer the JSON text of what it resolved to. The
+  // refusal of a returned Promise this used to carry has inverted: a promise is
+  // what a body now answers with, and awaiting it is the point.
+  fixed("__scRun", (body, bindings) =>
+    Promise.resolve(body(bindings)).then((result) => JSON.stringify(result)));
 })();
 delete globalThis.Deno;
 "#;
@@ -476,9 +532,6 @@ delete globalThis.Deno;
 #[cfg(feature = "eval")]
 struct RunState {
     host: Option<Arc<dyn CodeHost>>,
-    /// The tokio handle captured **when the job was submitted** — the op has no
-    /// runtime of its own to block on.
-    handle: Option<tokio::runtime::Handle>,
     /// Wall clock: when this run may make no further host calls.
     deadline: Instant,
     /// What the deadline was, for the message.
@@ -520,24 +573,30 @@ fn refuse(message: impl Into<String>) -> Json {
 #[cfg(feature = "eval")]
 #[deno_core::op2]
 #[string]
-fn op_sc_db(state: Rc<RefCell<OpState>>, #[string] request: String) -> String {
-    let reply = host_call(&state, &request);
+async fn op_sc_db(state: Rc<RefCell<OpState>>, #[string] request: String) -> String {
+    let reply = host_call(&state, &request).await;
     serde_json::to_string(&reply).unwrap_or_else(|_| {
         r#"{"error":"the database reply could not be encoded as JSON"}"#.to_owned()
     })
 }
 
-/// One host call, from the isolate thread. Everything the call needs is read out
-/// of `OpState` and the borrow released **before** blocking, so the state is not
-/// held across the wait.
+/// One host call. An **ordinary async op**: it awaits the host rather than
+/// blocking the isolate thread on it, so the run costs a pending promise and the
+/// isolate is free while the database works. The future needs no reactor of its
+/// own — a [`BridgeHost`] only sends on a channel and awaits a oneshot — so the
+/// isolate's own event loop is what drives it.
+///
+/// Everything the call needs is read out of `OpState` and the borrow released
+/// **before** the await, because an `OpState` borrow held across a suspension
+/// point is a `RefCell` panic waiting for the next op.
 #[cfg(feature = "eval")]
-fn host_call(state: &Rc<RefCell<OpState>>, request: &str) -> Json {
+async fn host_call(state: &Rc<RefCell<OpState>>, request: &str) -> Json {
     let plan: Json = match serde_json::from_str(request) {
         Ok(plan) => plan,
         Err(e) => return refuse(format!("the database plan is not JSON: {e}")),
     };
 
-    let (host, handle) = {
+    let host = {
         let mut state = state.borrow_mut();
         let Some(run) = state.try_borrow_mut::<RunState>() else {
             return refuse("this code body has no database access");
@@ -557,17 +616,15 @@ fn host_call(state: &Rc<RefCell<OpState>>, request: &str) -> Json {
                 run.timeout.as_millis()
             ));
         }
-        let (Some(host), Some(handle)) = (run.host.clone(), run.handle.clone()) else {
+        let Some(host) = run.host.clone() else {
             return refuse("this code body has no database access");
         };
         run.calls_left -= 1;
         run.pause_watchdog();
-        (host, handle)
+        host
     };
 
-    // Legal because a code thread is not a tokio runtime thread: the pool exists
-    // so that the thread blocked here is one nothing else depends on.
-    let outcome = handle.block_on(host.call(plan));
+    let outcome = host.call(plan).await;
 
     if let Some(run) = state.borrow_mut().try_borrow_mut::<RunState>() {
         run.resume_watchdog();
@@ -699,9 +756,6 @@ struct CodeRun {
 #[cfg(feature = "eval")]
 struct CodeJob {
     run: CodeRun,
-    /// Captured at submission: the op has to block on *some* runtime, and the
-    /// caller's is the one the host's futures belong to.
-    handle: Option<tokio::runtime::Handle>,
     reply: tokio::sync::oneshot::Sender<Result<Json>>,
 }
 
@@ -800,13 +854,11 @@ impl CodeRuntime {
     pub fn with_workers(workers: usize) -> CodeRuntime {
         let (tx, rx) = mpsc::channel::<CodeJob>();
         let rx = Arc::new(Mutex::new(rx));
-        let anchor = tokio::runtime::Handle::try_current().ok();
         for n in 0..workers.max(1) {
             let rx = Arc::clone(&rx);
-            let anchor = anchor.clone();
             std::thread::Builder::new()
                 .name(format!("sc-code-{n}"))
-                .spawn(move || worker_thread(&rx, anchor.as_ref()))
+                .spawn(move || worker_thread(&rx))
                 // Thread spawning fails only on resource exhaustion at process
                 // level; there is no useful recovery, and a run would error on a
                 // closed channel anyway.
@@ -830,10 +882,10 @@ impl CodeRuntime {
     ///
     /// Two things happen here rather than one, when the call carries a host: the
     /// run is submitted to a worker, and this future then **serves that run's
-    /// host calls** until it answers. The isolate thread blocks on each call
-    /// (decision 2) and the plan travels back here over a [`BridgeHost`], which
-    /// is what lets a host borrow — the future holding the borrow is the future
-    /// awaiting the run, so the borrow lives exactly as long as it must.
+    /// host calls** until it answers. The plan travels back here over a
+    /// [`BridgeHost`], which is what lets a host borrow — the future holding the
+    /// borrow is the future awaiting the run, so the borrow lives exactly as
+    /// long as it must.
     pub async fn run(&self, call: CodeCall<'_>) -> Result<Json> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         // The proxy goes to the worker and the borrowed host stays here, with
@@ -858,7 +910,6 @@ impl CodeRuntime {
                     timeout,
                     max_calls: call.max_calls,
                 },
-                handle: tokio::runtime::Handle::try_current().ok(),
                 reply,
             })
             .map_err(|_| Error::msg("the code runtime has no workers left"))?;
@@ -927,11 +978,23 @@ impl Default for CodeRuntime {
 /// One worker: its own isolate, its own watchdog, jobs checked out of the shared
 /// queue one at a time.
 #[cfg(feature = "eval")]
-fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::runtime::Handle>) {
-    // `_anchor` is the isolate's tokio anchor and must outlive it — see
-    // `build_isolate`.
+fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>) {
+    // The worker owns a **current-thread** runtime, and it is both the isolate's
+    // tokio anchor (see `build_isolate`) and what drives the isolate's event
+    // loop. Its own, rather than the caller's: with the op no longer blocking,
+    // nothing about a run needs the submitter's runtime, and an isolate whose
+    // delayed foreground tasks belong to a runtime it does not control is the
+    // failure `build_isolate` exists to document.
+    let Ok(local) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        // Runtime construction fails only on resource exhaustion; a run would
+        // then error on a closed channel, which is the honest symptom.
+        return;
+    };
     let (mut runtime, _anchor) = build_isolate(
-        anchor,
+        Some(local.handle()),
         deno_core::RuntimeOptions {
             extensions: vec![sc_db_ext::init()],
             ..Default::default()
@@ -955,12 +1018,12 @@ fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::run
 
     loop {
         // Check one job out; the guard is released before it runs, so the other
-        // workers keep serving while this one blocks on a query.
+        // workers keep serving while this one waits on a query.
         let job = {
             let queue = rx.lock().unwrap_or_else(|e| e.into_inner());
             queue.recv()
         };
-        let Ok(CodeJob { run, handle, reply }) = job else {
+        let Ok(CodeJob { run, reply }) = job else {
             break; // The last CodeRuntime handle was dropped.
         };
 
@@ -974,10 +1037,10 @@ fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::run
         let timeout = run.timeout;
 
         let started = Instant::now();
+        let deadline = started + timeout;
         op_state.borrow_mut().put(RunState {
             host: run.host.clone(),
-            handle,
-            deadline: started + timeout,
+            deadline,
             timeout,
             calls_left: run.max_calls,
             max_calls: run.max_calls,
@@ -985,18 +1048,28 @@ fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::run
             armed_at: started,
             watchdog: Arc::clone(&watchdog),
         });
-        watchdog.rearm_run(started + timeout);
-        let outcome = runtime.execute_script("sc_code.js", script);
+        watchdog.rearm_run(deadline);
+        let outcome = local.block_on(run_one(&mut runtime, script, deadline));
         watchdog.disarm();
         let terminated = watchdog.fired();
-        // Drop the run's host: a pool worker outlives the run by a long way.
+        // Drop the run's host: a pool worker outlives the run by a long way, and
+        // what is left of an expired run must not find one.
         op_state.borrow_mut().try_take::<RunState>();
+        if terminated {
+            // Termination poisons the isolate until it is cancelled, whichever
+            // of the two bounds noticed first — so this is unconditional rather
+            // than an arm of the match below.
+            runtime.v8_isolate().cancel_terminate_execution();
+        }
+        if matches!(outcome, Err(RunFailure::Expired)) {
+            unwind_expired(&local, &mut runtime, &watchdog);
+        }
 
         let answer = match outcome {
             Ok(global) => {
                 deno_core::scope!(scope, &mut runtime);
                 let local = deno_core::v8::Local::new(scope, global);
-                // `__scRun` returns the JSON text of the result;
+                // `__scRun` resolves to the JSON text of the result;
                 // `JSON.stringify(undefined)` is `undefined`, which reads as null.
                 Ok(if local.is_string() {
                     let text = local.to_rust_string_lossy(scope);
@@ -1005,11 +1078,16 @@ fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::run
                     Json::Null
                 })
             }
-            Err(e) => {
+            Err(RunFailure::Expired) => Err(Error::invalid(format!(
+                "this code exceeded its {} ms time limit",
+                timeout.as_millis()
+            ))),
+            Err(RunFailure::Stuck) => Err(Error::invalid(
+                "this code awaited something that never happens; `db` is the only \
+                 awaitable thing in the sandbox, and there are no timers",
+            )),
+            Err(RunFailure::Js(e)) => {
                 if terminated {
-                    // Termination poisons the isolate until cancelled; restore
-                    // it so the next run starts clean.
-                    runtime.v8_isolate().cancel_terminate_execution();
                     Err(Error::invalid(format!(
                         "JavaScript code timed out after {timeout:?}"
                     )))
@@ -1023,14 +1101,110 @@ fn worker_thread(rx: &Mutex<mpsc::Receiver<CodeJob>>, anchor: Option<&tokio::run
     watchdog.stop();
 }
 
+/// Why a run did not answer: its own JavaScript threw (or was terminated), it
+/// awaited something nothing will ever settle, or its wall clock ran out while
+/// it was suspended.
+#[cfg(feature = "eval")]
+enum RunFailure {
+    Js(String),
+    Stuck,
+    Expired,
+}
+
+/// One run: start it, then **drive the isolate's event loop** until the promise
+/// it answered with settles.
+///
+/// `execute_script` no longer finishes a run. The body is an `async function`,
+/// so what the script evaluates to is a pending promise, and the run's real
+/// result arrives when the event loop has delivered every host call it awaited.
+/// A syntax error still surfaces synchronously from the call, and still should.
+///
+/// Two things can end the wait besides an answer, and each says what it was.
+///
+/// The **wall clock** bounds the whole wait, because both bounds inside the
+/// isolate — the watchdog and the deadline checked on entry to a host call — need
+/// the guest to be *doing* something to see it, and a suspended body is doing
+/// nothing. Without it a run that keeps suspending would hold the worker rather
+/// than fail.
+///
+/// The **event loop emptying** with the promise still pending is the other, and
+/// it needs no clock at all: nothing is running and nothing is in flight, so
+/// nothing will ever resolve it. `await new Promise(() => {})` is the whole
+/// shape, and answering it at once is better than answering it at the deadline.
+#[cfg(feature = "eval")]
+async fn run_one(
+    runtime: &mut deno_core::JsRuntime,
+    script: String,
+    deadline: Instant,
+) -> std::result::Result<deno_core::v8::Global<deno_core::v8::Value>, RunFailure> {
+    let started = runtime
+        .execute_script("sc_code.js", script)
+        .map_err(|e| RunFailure::Js(e.to_string()))?;
+    let settled = runtime.resolve(started);
+    let event_loop =
+        runtime.with_event_loop_promise(settled, deno_core::PollEventLoopOptions::default());
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), event_loop).await {
+        Ok(Ok(value)) => Ok(value),
+        // The event loop emptied with the run's promise still pending: the body
+        // is waiting for something that will never happen, and no clock would
+        // ever notice because nothing is running and nothing is in flight. Told
+        // apart here so the message can say what actually went wrong.
+        Ok(Err(e)) => Err(match *e.0 {
+            deno_core::error::CoreErrorKind::PendingPromiseResolution => RunFailure::Stuck,
+            other => RunFailure::Js(other.to_string()),
+        }),
+        Err(_) => Err(RunFailure::Expired),
+    }
+}
+
+/// How long an **expired** run is given to unwind before the worker takes the
+/// next job.
+#[cfg(feature = "eval")]
+const UNWIND_GRACE: Duration = Duration::from_millis(100);
+
+/// Let what is left of an expired run finish, so that nothing of it is still
+/// resident when the next run starts.
+///
+/// A run that ran out of wall clock is suspended somewhere — almost always on a
+/// host call — and its continuation is still in the isolate. Left there, it would
+/// resume during the *next* run's event loop and reach that run's `RunState`,
+/// which is a body issuing queries in a stranger's name. So the state is taken
+/// out first (making every further host call from it "no database access") and
+/// the loop is pumped briefly to let it unwind: the caller's bridge is gone by
+/// now, so the pending call fails at once and the body throws where it awaited.
+///
+/// Bounded twice, because neither bound alone covers it: the timeout stops a
+/// continuation that suspends again, and the watchdog stops one that unwinds into
+/// a loop. Phase 2's per-run token is what makes the whole question moot.
+#[cfg(feature = "eval")]
+fn unwind_expired(
+    local: &tokio::runtime::Runtime,
+    runtime: &mut deno_core::JsRuntime,
+    watchdog: &Watchdog,
+) {
+    watchdog.rearm_run(Instant::now() + UNWIND_GRACE);
+    let _ = local.block_on(async {
+        tokio::time::timeout(
+            UNWIND_GRACE,
+            runtime.run_event_loop(deno_core::PollEventLoopOptions::default()),
+        )
+        .await
+    });
+    watchdog.disarm();
+    if watchdog.fired() {
+        runtime.v8_isolate().cancel_terminate_execution();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The script
 // ---------------------------------------------------------------------------
 
 /// Assemble the script for one code body: the bindings as `const`s, the prelude
 /// (when there is a host) in the same scope, the code as the body of a nested
-/// function — so a top-level `return` is legal and nothing it declares outlives
-/// the run — and the whole thing handed to the fixed `__scRun` wrapper.
+/// **async** function — so a top-level `return` is legal, a top-level `await` is
+/// legal, and nothing it declares outlives the run — and the whole thing handed
+/// to the fixed `__scRun` wrapper.
 ///
 /// The code itself is **not** escaped, and cannot be: it is the admin's own
 /// JavaScript, spliced in as source. That is not a hole — the wrapper is no
@@ -1066,9 +1240,9 @@ fn build_code_script(call: &CodeRun) -> Result<String> {
     let prelude = if call.host.is_some() { DB_PRELUDE } else { "" };
     let code = &call.code;
     Ok(format!(
-        "__scRun(function (__b) {{ \"use strict\";\n\
+        "__scRun(async function (__b) {{ \"use strict\";\n\
          {consts}{prelude}\n\
-         const __result = (function () {{\n{code}\n}})();\n\
+         const __result = await (async function () {{\n{code}\n}})();\n\
          return __result;\n\
          }}, {args})"
     ))
@@ -1167,7 +1341,7 @@ mod tests {
         // And `db` is not merely inert, it is absent: naming it is a
         // ReferenceError naming it, not a handle that fails on use.
         let err = rt
-            .run(call("return db.books.rows();"))
+            .run(call("return await db.books.rows();"))
             .await
             .unwrap_err()
             .to_string();
@@ -1183,7 +1357,7 @@ mod tests {
         let rt = CodeRuntime::new();
         let out = rt
             .run(with_host(
-                r#"return db.invoices
+                r#"return await db.invoices
                      .where({ paid: false, due: { lt: "2026-08-17" } })
                      .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
                      .orderBy("due")
@@ -1244,7 +1418,7 @@ mod tests {
         let out = rt
             .run(with_host(
                 r#"const seen = [];
-                   for (const row of db.invoices.where({ paid: false }).iter(2)) {
+                   for await (const row of db.invoices.where({ paid: false }).iter(2)) {
                      seen.push(row.id);
                    }
                    return seen;"#,
@@ -1286,9 +1460,9 @@ mod tests {
         let out = rt
             .run(with_host(
                 r#"const it = db.invoices.iter(10);
-                   const before = db.invoices.count();
+                   const before = await db.invoices.count();
                    let first = null;
-                   for (const row of it) { first = row.id; break; }
+                   for await (const row of it) { first = row.id; break; }
                    return { first: first, before: before };"#,
                 &*host,
             ))
@@ -1318,7 +1492,7 @@ mod tests {
         let out = rt
             .run(with_host(
                 r#"const seen = [];
-                   for (const row of db.invoices.limit(3).iter(2)) seen.push(row.id);
+                   for await (const row of db.invoices.limit(3).iter(2)) seen.push(row.id);
                    return seen;"#,
                 &*host,
             ))
@@ -1347,13 +1521,13 @@ mod tests {
         }
         let refused = |code: &'static str| refused(&rt, &*host, code);
         let e = refused(
-            "for (const g of db.invoices.groupBy('paid').aggregate({ n: 'count()' }).iter()) {}",
+            "for await (const g of db.invoices.groupBy('paid').aggregate({ n: 'count()' }).iter()) {}",
         )
         .await;
         assert!(e.contains("aggregates"), "{e}");
-        let e = refused("for (const r of db.invoices.iter(0)) {}").await;
+        let e = refused("for await (const r of db.invoices.iter(0)) {}").await;
         assert!(e.contains("how many rows to read at a time"), "{e}");
-        let e = refused("for (const r of db.invoices.iter('lots')) {}").await;
+        let e = refused("for await (const r of db.invoices.iter('lots')) {}").await;
         assert!(e.contains("how many rows to read at a time"), "{e}");
     }
 
@@ -1362,8 +1536,8 @@ mod tests {
         let host = FakeHost::rows(json!([]));
         let rt = CodeRuntime::new();
         rt.run(with_host(
-            r#"db.books.where({ status: "draft" }).where('pages > 3').rows();
-               db.table("books").where('status === "draft"').rows();
+            r#"await db.books.where({ status: "draft" }).where('pages > 3').rows();
+               await db.table("books").where('status === "draft"').rows();
                return null;"#,
             &*host,
         ))
@@ -1387,11 +1561,11 @@ mod tests {
         let host = FakeHost::rows(json!([]));
         let rt = CodeRuntime::new();
         rt.run(with_host(
-            r#"db.invoices.rows();
-               db.asUser().invoices.rows();
-               db.invoices.asUser().where({ paid: false }).rows();
-               db.invoices.where({ paid: false }).asUser().rows();
-               db.asUser().invoices.asAdmin().rows();
+            r#"await db.invoices.rows();
+               await db.asUser().invoices.rows();
+               await db.invoices.asUser().where({ paid: false }).rows();
+               await db.invoices.where({ paid: false }).asUser().rows();
+               await db.asUser().invoices.asAdmin().rows();
                return null;"#,
             &*host,
         ))
@@ -1415,10 +1589,10 @@ mod tests {
         let rt = CodeRuntime::new();
         let out = rt
             .run(with_host(
-                r#"const a = db.sql("select count(*) as n from books where pages > $1", [200]);
-                   db.sql("select 1", [], { asUser: true });
-                   db.asUser().sql("select 1");
-                   db.asUser().sql("select 1", null, { asUser: false });
+                r#"const a = await db.sql("select count(*) as n from books where pages > $1", [200]);
+                   await db.sql("select 1", [], { asUser: true });
+                   await db.asUser().sql("select 1");
+                   await db.asUser().sql("select 1", null, { asUser: false });
                    return a[0].n;"#,
                 &*host,
             ))
@@ -1466,13 +1640,13 @@ mod tests {
         // guess at, so the prelude says what it takes instead — and says it
         // without a round trip.
         for (code, expected) in [
-            (r#"return db.sql({ from: "books" });"#, "SQL text"),
+            (r#"return await db.sql({ from: "books" });"#, "SQL text"),
             (
-                r#"return db.sql("select 1", { id: 1 });"#,
+                r#"return await db.sql("select 1", { id: 1 });"#,
                 "array of values",
             ),
             (
-                r#"return db.sql("select 1", [], { asuser: true });"#,
+                r#"return await db.sql("select 1", [], { asuser: true });"#,
                 "asuser",
             ),
         ] {
@@ -1504,14 +1678,14 @@ mod tests {
         let out = rt
             .run(with_host(
                 r#"return {
-                     first:  db.books.first(),
-                     get:    db.books.get(4),
-                     exists: db.books.where({ id: 4 }).exists(),
-                     count:  db.books.count(),
-                     sum:    db.books.sum("qty * price"),
-                     insert: db.books.insert({ title: "Orlando" }),
-                     update: db.books.where({ id: 3 }).update({ shelf: 3 }),
-                     del:    db.books.where({ id: 7 }).delete(),
+                     first:  await db.books.first(),
+                     get:    await db.books.get(4),
+                     exists: await db.books.where({ id: 4 }).exists(),
+                     count:  await db.books.count(),
+                     sum:    await db.books.sum("qty * price"),
+                     insert: await db.books.insert({ title: "Orlando" }),
+                     update: await db.books.where({ id: 3 }).update({ shelf: 3 }),
+                     del:    await db.books.where({ id: 7 }).delete(),
                    };"#,
                 &*host,
             ))
@@ -1562,7 +1736,7 @@ mod tests {
         let rt = CodeRuntime::new();
         let out = rt
             .run(with_host(
-                r#"return db.books
+                r#"return await db.books
                      .where({ shelf: 2 })
                      .groupBy("author")
                      .aggregate({ n: "count()", total: "sum(price * qty)" })
@@ -1600,7 +1774,7 @@ mod tests {
         let host = FakeHost::new(|_| Ok(json!({ "n": 7 })));
         let out = rt
             .run(with_host(
-                r#"return db.books.aggregate({ n: "count()" }).rows();"#,
+                r#"return await db.books.aggregate({ n: "count()" }).rows();"#,
                 &*host,
             ))
             .await
@@ -1617,15 +1791,15 @@ mod tests {
         let rt = CodeRuntime::new();
         for (body, wanted) in [
             (
-                r#"return db.books.groupBy("author").rows();"#,
+                r#"return await db.books.groupBy("author").rows();"#,
                 "needs an .aggregate(",
             ),
             (
-                r#"return db.books.groupBy("author").count();"#,
+                r#"return await db.books.groupBy("author").count();"#,
                 "answers one value",
             ),
             (
-                r#"return db.books.aggregate({ n: "count" }).rows();"#,
+                r#"return await db.books.aggregate({ n: "count" }).rows();"#,
                 "is not an aggregate",
             ),
         ] {
@@ -1644,8 +1818,8 @@ mod tests {
         let host = FakeHost::rows(json!([]));
         let rt = CodeRuntime::new();
         for body in [
-            "return db.books.update({ shelf: 3 });",
-            "return db.books.delete();",
+            "return await db.books.update({ shelf: 3 });",
+            "return await db.books.delete();",
         ] {
             let err = rt
                 .run(with_host(body, &*host))
@@ -1663,7 +1837,7 @@ mod tests {
         let rt = CodeRuntime::new();
         // Uncaught, it fails the run with the host's own message.
         let err = rt
-            .run(with_host("return db.books.rows();", &*host))
+            .run(with_host("return await db.books.rows();", &*host))
             .await
             .unwrap_err()
             .to_string();
@@ -1671,7 +1845,7 @@ mod tests {
         // Caught, the body carries on — §5's "try a delegated write and fall back".
         let out = rt
             .run(with_host(
-                "try { db.books.asUser().rows(); } catch (e) { return e.message; } return null;",
+                "try { await db.books.asUser().rows(); } catch (e) { return e.message; } return null;",
                 &*host,
             ))
             .await
@@ -1688,7 +1862,7 @@ mod tests {
         let host = FakeHost::rows(json!([]));
         let rt = CodeRuntime::new();
         let mut c = with_host(
-            "for (let i = 0; i < 100; i++) db.books.rows(); return true;",
+            "for (let i = 0; i < 100; i++) await db.books.rows(); return true;",
             &*host,
         );
         c.max_calls = 3;
@@ -1712,11 +1886,15 @@ mod tests {
         // The host is borrowed, so each task owns its own `Arc` and lends it.
         let one = {
             let (rt, host) = (Arc::clone(&rt), Arc::clone(&slow));
-            tokio::spawn(async move { rt.run(with_host("return db.a.rows();", &*host)).await })
+            tokio::spawn(
+                async move { rt.run(with_host("return await db.a.rows();", &*host)).await },
+            )
         };
         let two = {
             let (rt, host) = (Arc::clone(&rt), Arc::clone(&slow));
-            tokio::spawn(async move { rt.run(with_host("return db.b.rows();", &*host)).await })
+            tokio::spawn(
+                async move { rt.run(with_host("return await db.b.rows();", &*host)).await },
+            )
         };
         one.await.unwrap().unwrap();
         two.await.unwrap().unwrap();
@@ -1753,7 +1931,7 @@ mod tests {
         });
         let rt = CodeRuntime::with_workers(1);
         let mut c = with_host(
-            "for (let i = 0; i < 10; i++) db.books.rows(); return true;",
+            "for (let i = 0; i < 10; i++) await db.books.rows(); return true;",
             &*slow,
         );
         c.timeout = Some(Duration::from_millis(300));
@@ -1764,7 +1942,7 @@ mod tests {
         );
         // A body that only sleeps in the host, well inside the deadline, is fine
         // even though one host call alone exceeds a formula's whole timeout.
-        let mut c = with_host("db.books.rows(); return true;", &*slow);
+        let mut c = with_host("await db.books.rows(); return true;", &*slow);
         c.timeout = Some(Duration::from_millis(1000));
         assert_eq!(rt.run(c).await.unwrap(), json!(true));
     }
@@ -1790,7 +1968,7 @@ mod tests {
         assert_eq!(out, json!(["call", "run", "define"]), "strict mode throws");
         // The next run on the same isolate gets its own `db` and a working op.
         let out = rt
-            .run(with_host("return db.books.rows();", &*host))
+            .run(with_host("return await db.books.rows();", &*host))
             .await
             .unwrap();
         assert_eq!(out, json!([{ "id": 1 }]));
@@ -1810,7 +1988,7 @@ mod tests {
         // with no host rather than reaching anything.
         let err = rt
             .run(call(
-                r#"return __scDbCall({ op: "select", table: "books" });"#,
+                r#"return await __scDbCall({ op: "select", table: "books" });"#,
             ))
             .await
             .unwrap_err()
@@ -1819,14 +1997,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_async_body_is_refused_rather_than_returning_an_empty_object() {
+    async fn a_returned_promise_is_awaited_rather_than_refused() {
+        // The inversion this milestone turns on: `__scRun` used to refuse a
+        // Promise because there was nothing in the sandbox to await it with.
         let rt = CodeRuntime::new();
+        assert_eq!(
+            rt.run(call("return (async () => 1)();")).await.unwrap(),
+            json!(1)
+        );
+        // And `await` is legal at the top level of a body, because the body is
+        // the inside of an async function.
+        assert_eq!(
+            rt.run(call("const n = await Promise.resolve(2); return n + 1;"))
+                .await
+                .unwrap(),
+            json!(3)
+        );
+        // A rejection is the run's failure, with the thrown message.
         let err = rt
-            .run(call("return (async () => 1)();"))
+            .run(call("await Promise.reject(new Error('nope'));"))
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("Promise"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_await_is_one_named_error_rather_than_a_wrong_answer() {
+        // Each of these is what a missing `await` used to look like: `{}` out of
+        // JSON.stringify, `[object Promise]` out of a template string, and a bare
+        // "is not iterable" TypeError out of a `for … of`. All three now name the
+        // mistake, and name it at the point the body made it.
+        let host = FakeHost::rows(json!([{ "id": 1 }]));
+        let rt = CodeRuntime::new();
+        for body in [
+            "return JSON.stringify(db.books.rows());",
+            "return `${db.books.count()}`;",
+            "for (const r of db.books.rows()) {} return null;",
+            "return db.books.count() + 1;",
+        ] {
+            let err = rt
+                .run(with_host(body, &*host))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("was not awaited"), "{body}: {err}");
+        }
+        // Returning one *is* awaiting it, though — `return db.books.rows()` from
+        // an async body resolves to the rows, which is what its author meant.
+        // The error is for the uses that would otherwise answer something else.
+        assert_eq!(
+            rt.run(with_host("return db.books.rows();", &*host))
+                .await
+                .unwrap(),
+            json!([{ "id": 1 }])
+        );
+        // The chain itself is untouched: only a terminal answers a promise, so
+        // `await` belongs at the end and nowhere inside.
+        let out = rt
+            .run(with_host(
+                "return await db.books.where({ id: 1 }).orderBy('id').rows();",
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!([{ "id": 1 }]));
+    }
+
+    #[tokio::test]
+    async fn promise_all_issues_its_queries_without_waiting_for_each() {
+        // `Promise.all` is the spelling §1 promises works, and it is only
+        // meaningful because a host call suspends rather than blocks: both plans
+        // reach the host before either answer comes back.
+        let host = FakeHost::new(|plan| {
+            Ok(match plan["table"].as_str() {
+                Some("books") => json!([{ "id": 1 }]),
+                _ => json!([{ "id": 2 }]),
+            })
+        });
+        let out = CodeRuntime::new()
+            .run(with_host(
+                r#"const [books, shelves] = await Promise.all([
+                     db.books.rows(),
+                     db.shelves.rows(),
+                   ]);
+                   return { books: books, shelves: shelves };"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["books"], json!([{ "id": 1 }]));
+        assert_eq!(out["shelves"], json!([{ "id": 2 }]));
+        assert_eq!(host.plans().len(), 2);
     }
 
     #[tokio::test]
@@ -1841,6 +2103,73 @@ mod tests {
         let mut c = call("return db;");
         c.bindings.insert("db".into(), json!(1));
         assert_eq!(rt.run(c).await.unwrap(), json!(1));
+    }
+
+    #[tokio::test]
+    async fn an_expired_run_leaves_nothing_behind_for_the_next_one() {
+        // A run abandoned at its wall clock is suspended *inside* the isolate,
+        // and its continuation would otherwise resume during the next run's event
+        // loop — reaching that run's host, spending that run's call budget, and
+        // issuing queries in a stranger's name. So it is unwound before the
+        // worker takes another job.
+        let hung = Arc::new(FakeHost {
+            plans: Mutex::new(Vec::new()),
+            answer: Box::new(|_| Ok(json!([]))),
+            delay: Some(Duration::from_secs(30)),
+            calls: AtomicU32::new(0),
+        });
+        let rt = CodeRuntime::with_workers(1);
+        let mut expiring = with_host(
+            "await db.a.rows(); await db.a.rows(); return 'never';",
+            &*hung,
+        );
+        expiring.timeout = Some(Duration::from_millis(150));
+        let err = rt.run(expiring).await.unwrap_err().to_string();
+        assert!(err.contains("time limit"), "{err}");
+
+        // The next run on the same isolate is whole: its own host, and its own
+        // budget, neither spent by what the last one left behind.
+        let next = FakeHost::rows(json!([{ "id": 1 }]));
+        let mut c = with_host(
+            "let n = 0; for (let i = 0; i < 3; i++) n += (await db.b.rows()).length; return n;",
+            &*next,
+        );
+        c.max_calls = 3;
+        assert_eq!(rt.run(c).await.unwrap(), json!(3));
+        assert_eq!(
+            next.plans().len(),
+            3,
+            "the abandoned run spent none of this one's budget"
+        );
+        assert_eq!(
+            hung.calls.load(Ordering::SeqCst),
+            1,
+            "and reached none of its host either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_suspended_on_a_promise_that_never_settles_loses_the_run_not_the_worker() {
+        // The one shape the isolate's own two bounds cannot see: no JavaScript is
+        // running, so the watchdog has nothing to terminate, and no host call is
+        // in flight, so the deadline check is never reached. The **event loop**
+        // sees it — it empties with the run's promise still pending — so the run
+        // fails at once, by name, rather than holding the worker to its deadline.
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = call("await new Promise(() => {}); return 1;");
+        c.timeout = Some(Duration::from_secs(30));
+        let started = Instant::now();
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(
+            err.contains("awaited something that never happens"),
+            "{err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it waited it out"
+        );
+        // The same worker serves the next run normally.
+        assert_eq!(rt.run(call("return 1 + 1;")).await.unwrap(), json!(2));
     }
 
     #[tokio::test]
@@ -1861,7 +2190,7 @@ mod tests {
         let blocked = {
             let (rt, host) = (Arc::clone(&rt), Arc::clone(&slow));
             tokio::spawn(async move {
-                let mut c = with_host("return db.a.rows();", &*host);
+                let mut c = with_host("return await db.a.rows();", &*host);
                 c.timeout = Some(Duration::from_secs(2));
                 rt.run(c).await
             })

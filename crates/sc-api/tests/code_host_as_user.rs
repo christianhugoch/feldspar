@@ -552,19 +552,19 @@ async fn a_delegated_read_that_needs_the_formula_engine_completes_from_a_code_bo
     own_books(&cat, "owner.includes(user.email)", false).await?;
     let host = with_engine(as_reader(&cat, "bob@example.com"));
 
-    // The regression test for decision 1. This body runs on a **code** isolate,
-    // whose thread blocks on the host call; the host call runs a delegated read
-    // whose ownership formula only the **formula** isolate can decide. Two
-    // runtimes, so the blocked thread is never the one the formula needs. One
-    // isolate serving both would hang here — which is why this is a test with a
-    // timeout around it rather than a comment.
+    // The regression test for decision 1. This body runs on a **code** isolate
+    // and suspends on the host call; the host call runs a delegated read whose
+    // ownership formula only the **formula** isolate can decide. Two runtimes, so
+    // the isolate waiting is never the one the formula needs. One isolate serving
+    // both would hang here — which is why this is a test with a timeout around it
+    // rather than a comment.
     let runtime = CodeRuntime::new();
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         runtime.run(CodeCall {
             code: r#"
-                const mine = db.asUser().books.select("title").orderBy("id").rows();
-                const all  = db.books.count();
+                const mine = await db.asUser().books.select("title").orderBy("id").rows();
+                const all  = await db.books.count();
                 return { mine: mine.map((b) => b.title), all: all };
             "#
             .to_owned(),

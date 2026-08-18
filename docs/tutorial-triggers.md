@@ -229,7 +229,7 @@ tables, readable and writable from the body.
 | Code | see below |
 
 ```js
-const stale = db.tasks
+const stale = await db.tasks
   .where({ done: true })
   .select("id", "title", "owner")
   .orderBy("id")
@@ -237,25 +237,27 @@ const stale = db.tasks
   .rows();
 
 for (const task of stale) {
-  db.task_audit.insert({
+  await db.task_audit.insert({
     task: task.id,
     what: "swept: " + task.title,
     who: task.owner,
     at: Date.now(),
   });
 }
-return { swept: stale.length, left: db.tasks.where({ done: false }).count() };
+return { swept: stale.length, left: await db.tasks.where({ done: false }).count() };
 ```
 
 Press **Run**. The result is the object the body returned, and **Tables → task_audit** has one
 new row per finished task. That is the whole feature; the rest of this section is what the
 pieces mean.
 
-**A chain is pure; a terminal executes.** `.where()`, `.select()`, `.orderBy()`, `.limit()`,
-`.offset()`, `.groupBy()`, `.aggregate()` and `.having()` build a query and send nothing. `.rows()`, `.iter()`, `.first()`, `.get(id)`, `.count()`,
-`.sum(f)`, `.avg(f)`, `.min(f)`, `.max(f)` and `.exists()` are where a round trip happens — one
-per terminal, so `db.tasks.count()` inside a loop over a thousand rows is a thousand queries and
-will hit the call budget below.
+**A chain is pure; a terminal executes — and a terminal is awaited.** `.where()`, `.select()`,
+`.orderBy()`, `.limit()`, `.offset()`, `.groupBy()`, `.aggregate()` and `.having()` build a query
+and send nothing, so they are ordinary synchronous calls. `.rows()`, `.iter()`, `.first()`,
+`.get(id)`, `.count()`, `.sum(f)`, `.avg(f)`, `.min(f)`, `.max(f)` and `.exists()` are where a
+round trip happens — one per terminal, so `await db.tasks.count()` inside a loop over a thousand
+rows is a thousand queries and will hit the call budget below. `await` goes at the *front* of a
+whole chain, never in the middle of one.
 
 **A table too big for one read is walked with `.iter()`.** A read answers at most 1000 rows (the
 bounds are below), which is a real limit the first time a table gets big. `.iter()` yields the
@@ -263,8 +265,8 @@ same rows in the same order, reading a batch at a time, so only a batch is ever 
 
 ```js
 let swept = 0;
-for (const task of db.tasks.where({ done: true }).orderBy("title").iter()) {
-  db.task_audit.insert({ task: task.id, what: "swept: " + task.title, who: task.owner });
+for await (const task of db.tasks.where({ done: true }).orderBy("title").iter()) {
+  await db.task_audit.insert({ task: task.id, what: "swept: " + task.title, who: task.owner });
   swept += 1;
 }
 return { swept: swept };
@@ -294,8 +296,8 @@ The operators are the ones you already know from a URL — `eq`, `ne`, `gt`, `gt
 **A projection can be a formula**, which is how a join or a child count rides in the same read:
 
 ```js
-db.task_audit.select("id", { title: "taskⱵtitle" }, { by: "who" }).rows();
-db.tasks.select("id", "title", { audits: "task_auditↃtask.length" }).rows();
+await db.task_audit.select("id", { title: "taskⱵtitle" }, { by: "who" }).rows();
+await db.tasks.select("id", "title", { audits: "task_auditↃtask.length" }).rows();
 ```
 
 Those are the same `Ⱶ` and `Ↄ` paths [tutorial-ownership.md](tutorial-ownership.md) uses, and
@@ -308,7 +310,7 @@ says what to compute for each one; `.rows()` then answers one row per group, wit
 beside the values:
 
 ```js
-db.tasks
+await db.tasks
   .where({ done: false })
   .groupBy("owner")
   .aggregate({ open: "count()" })
@@ -332,8 +334,8 @@ triggers fire*. `.update()` and `.delete()` answer `{ updated | deleted, ids }` 
 should be able to do:
 
 ```js
-db.tasks.where({ id: 7 }).update({ done: true });   // { updated: 1, ids: [7] }
-db.tasks.update({ done: true });                    // throws: add a .where()
+await db.tasks.where({ id: 7 }).update({ done: true });   // { updated: 1, ids: [7] }
+await db.tasks.update({ done: true });                    // throws: add a .where()
 ```
 
 **By default the body writes as the admin, like every other action.** That is what lets it
@@ -341,9 +343,9 @@ write the audit row the caller may not. When you want the *caller's* authority i
 this person their own rows, whatever they ask for" — say so:
 
 ```js
-db.asUser().tasks.rows()          // the whole handle delegates
-db.tasks.asUser().count()         // one table
-db.tasks.where({ done: true }).asUser().rows()   // one query
+await db.asUser().tasks.rows()          // the whole handle delegates
+await db.tasks.asUser().count()         // one table
+await db.tasks.where({ done: true }).asUser().rows()   // one query
 ```
 
 Under `asUser()` every read is narrowed by the table's ownership formula and every write is
@@ -352,7 +354,7 @@ checked against it, exactly as if that person had called the API — a row they 
 
 ```js
 try {
-  db.asUser().tasks.insert({ title: payload.title, owner: "someone@else.com" });
+  await db.asUser().tasks.insert({ title: payload.title, owner: "someone@else.com" });
 } catch (e) {
   return { refused: e.message };
 }
@@ -369,12 +371,12 @@ the array and are **bound**, never pasted into the text, so `$1` is a value even
 spells SQL:
 
 ```js
-const ranked = db.sql(
+const ranked = await db.sql(
   "select owner, title, rank() over (partition by owner order by due) as r from tasks \
    where done = $1",
   [false],
 );
-db.sql("select * from tasks", [], { asUser: true });   // or db.asUser().sql("select * from tasks")
+await db.sql("select * from tasks", [], { asUser: true });   // or db.asUser().sql(…)
 ```
 
 The third argument is an options object — today it takes `asUser`, and it is an object so that
@@ -393,9 +395,22 @@ is refused (that is an accidental loop, not a workload); and the run has a wall 
 statements: a body that fails half way leaves the rows it already wrote, and their triggers have
 already fired.
 
-What `db` deliberately does *not* have: schema changes, transactions across statements, and
-anything awaitable. The API is synchronous — `db.tasks.rows()` returns rows, not a promise — and
-a body that returns a promise is refused rather than quietly turning into `{}`.
+**Await your queries.** Every terminal answers a promise, `.iter()` is walked with `for await`,
+and `await` is legal at the top level of a body — the body is the inside of an `async function`.
+Forgetting one is not silent: the promise a terminal answers throws *"this database call was not
+awaited"* the moment anything treats it as a value, so a missing `await` is a named error rather
+than `{}` in your JSON or a `TypeError` about something not being iterable. Two queries that do
+not depend on each other can be issued together, and really do run in parallel:
+
+```js
+const [open, overdue] = await Promise.all([
+  db.tasks.where({ done: false }).count(),
+  db.tasks.where({ done: false, due: { lt: Date.now() } }).rows(),
+]);
+```
+
+What `db` deliberately does *not* have: schema changes, transactions across statements, `fetch`,
+or timers. Awaiting is for the database and nothing else.
 
 ## The actions you have
 

@@ -89,7 +89,7 @@ fn sweep_report() -> Trigger {
     Trigger::new("sweep_report", EventKind::None, "run_js_code").config(
         "code",
         r#"
-const stale = db.tasks
+const stale = await db.tasks
   .where({ done: true })
   .select("id", "title", "owner")
   .orderBy("id")
@@ -97,14 +97,14 @@ const stale = db.tasks
   .rows();
 
 for (const task of stale) {
-  db.task_audit.insert({
+  await db.task_audit.insert({
     task: task.id,
     what: "swept: " + task.title,
     who: task.owner,
     at: Date.now(),
   });
 }
-return { swept: stale.length, left: db.tasks.where({ done: false }).count() };
+return { swept: stale.length, left: await db.tasks.where({ done: false }).count() };
 "#,
     )
 }
@@ -116,8 +116,8 @@ fn sweep_streamed() -> Trigger {
         "code",
         r#"
 let swept = 0;
-for (const task of db.tasks.where({ done: true }).orderBy("title").iter()) {
-  db.task_audit.insert({ task: task.id, what: "swept: " + task.title, who: task.owner });
+for await (const task of db.tasks.where({ done: true }).orderBy("title").iter()) {
+  await db.task_audit.insert({ task: task.id, what: "swept: " + task.title, who: task.owner });
   swept += 1;
 }
 return { swept: swept };
@@ -131,7 +131,7 @@ fn open_by_owner() -> Trigger {
     Trigger::new("open_by_owner", EventKind::None, "run_js_code").config(
         "code",
         r#"
-return db.tasks
+return await db.tasks
   .where({ done: false })
   .groupBy("owner")
   .aggregate({ open: "count()" })

@@ -46,14 +46,19 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// And `db`: the **tables**, read and written from the body (§10.1's `db`).
 ///
 /// ```js
-/// const overdue = db.invoices
+/// const overdue = await db.invoices
 ///   .where({ paid: false, due: { lt: payload.today } })
 ///   .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
 ///   .orderBy("due")
 ///   .limit(50)
 ///   .rows();
-/// for (const inv of overdue) db.reminders.insert({ invoice: inv.id, sent_to: inv.customerⱵemail });
-/// return { chased: overdue.length, owed: db.invoices.where({ paid: false }).sum("amount") };
+/// for (const inv of overdue) {
+///   await db.reminders.insert({ invoice: inv.id, sent_to: inv.customerⱵemail });
+/// }
+/// return {
+///   chased: overdue.length,
+///   owed: await db.invoices.where({ paid: false }).sum("amount"),
+/// };
 /// ```
 ///
 /// A chain is pure and a terminal executes, sending one plan to
@@ -70,12 +75,12 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// an `ON CONFLICT` — there is `db.sql`:
 ///
 /// ```js
-/// const ranked = db.sql(
+/// const ranked = await db.sql(
 ///   "select owner, title, rank() over (partition by owner order by pages desc) as r \
 ///    from books where pages > $1",
 ///   [200],
 /// );
-/// const mine = db.sql("select * from books", [], { asUser: true });  // or db.asUser().sql(…)
+/// const mine = await db.sql("select * from books", [], { asUser: true });  // or db.asUser().sql(…)
 /// ```
 ///
 /// The text is the trigger author's and runs as written; the values are
@@ -114,10 +119,15 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 ///   `only_if` or an ownership formula uses. Which is why the timeout here is
 ///   configurable at all: a bound on a pool nothing else depends on is not a
 ///   bound on every authorization decision in the process;
-/// - the code is **synchronous** — `db.books.rows()` returns rows, not a Promise,
-///   and `for (const row of db.books.iter())` is an ordinary loop.
-///   Nothing in the sandbox is awaitable, so a body that returns a Promise is
-///   refused rather than stringified to `{}`;
+/// - the code is **asynchronous**: every terminal answers a promise, `.iter()` is
+///   walked with `for await`, and `await` is legal at the top level of a body,
+///   which is the inside of an `async function`. A `Promise.all([…])` of two
+///   queries really does issue them together. The chain itself stays synchronous
+///   — `await` goes at the front of a whole chain, never inside one — and a
+///   forgotten `await` is a named error rather than `{}` in the result, because
+///   the promise a terminal answers refuses to be stringified, coerced or
+///   iterated. `db` is still the only awaitable thing there is: no `fetch`, no
+///   timers;
 /// - a **syntax error surfaces at fire time**, not on save. Checking it would
 ///   mean compiling in the engine, which the save path has no access to — an
 ///   admin tests a body with the Run button, as they would with any code.

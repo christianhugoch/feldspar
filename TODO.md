@@ -167,19 +167,23 @@ already bounds itself — a fact worth stating in §10.1, because it is the answ
 
 ## Phase 1 — The awaitable guest API (`sc-expr`)
 
-- [ ] `op_sc_db` becomes an `async` op awaiting the host directly; `host_call`'s
+- [x] `op_sc_db` becomes an `async` op awaiting the host directly; `host_call`'s
       `handle.block_on` and `RunState::handle` go away. Still one run per isolate at this phase,
       so the change is the API shape and nothing else — and is reviewable on its own.
-- [ ] `DB_PRELUDE`: `__scDbCall` returns a Promise; every terminal awaits it; `iterate` becomes
+- [x] `DB_PRELUDE`: `__scDbCall` returns a Promise; every terminal awaits it; `iterate` becomes
       `async function*`. The chain builders stay synchronous and untouched.
-- [ ] `build_code_script` wraps the body in an `async function`; `__scRun` awaits the result
+- [x] `build_code_script` wraps the body in an `async function`; `__scRun` awaits the result
       instead of refusing a Promise (`code.rs`'s current refusal inverts).
-- [ ] `DbPromise` with throwing `toJSON` / `Symbol.toPrimitive` / `Symbol.iterator`, so a
+- [x] `DbPromise` with throwing `toJSON` / `Symbol.toPrimitive` / `Symbol.iterator`, so a
       forgotten `await` is one named error rather than `{}`, `true`, or a bare `TypeError`.
-- [ ] The worker drives `run_event_loop` after `execute_script` so a single run's promises
+- [x] The worker drives `run_event_loop` after `execute_script` so a single run's promises
       actually settle; the watchdog is paused across the whole event-loop wait as it is across a
-      host call today.
-- [ ] Update every existing code test in `sc-expr` and `sc-api` to `await`, which is also the
+      host call today. **Deviation:** the watchdog is left *armed* across the event-loop wait
+      and paused only by the op, exactly as it is today — pausing it wholesale would leave a
+      `while (true)` after an `await` unbounded, losing the worker rather than the run. The
+      run's wall clock now bounds the whole event-loop wait instead, which covers the case that
+      motivated the bullet (a body suspended on a promise that never settles).
+- [x] Update every existing code test in `sc-expr` and `sc-api` to `await`, which is also the
       check that the surface reads the way §1 claims.
 
 ## Phase 2 — Many runs per isolate
@@ -244,14 +248,16 @@ already bounds itself — a fact worth stating in §10.1, because it is the answ
 - [ ] `DenoEvaluator::with_max_inflight` beside `with_code_workers`, and — the gap this milestone
       also closes — an actual config path: `sc-server` builds the evaluator with
       `DenoEvaluator::new()` and nothing reads either knob today.
-- [ ] `docs/TECHNICAL_DESIGN.md` §10.1: "The API is **synchronous**" becomes its opposite, with
+- [~] `docs/TECHNICAL_DESIGN.md` §10.1: "The API is **synchronous**" becomes its opposite, with
       the `for await` spelling, the two clocks, the admission bound, and the sentence naming the
-      connection pool as the ceiling that remains.
-- [ ] `ui/admin/src/codeTypes.ts`: terminals answer `Promise<…>`, `iter()` answers
+      connection pool as the ceiling that remains. *(Done in phase 1: the synchronous claim, the
+      `for await` spelling and every example. Still to do here: the two clocks, the admission
+      bound and the connection-pool ceiling, none of which exist yet.)*
+- [x] `ui/admin/src/codeTypes.ts`: terminals answer `Promise<…>`, `iter()` answers
       `AsyncIterableIterator<Row>`, and the doc comments lose "Synchronous — there are no promises
       in the sandbox". Monaco's own diagnostics then catch a forgotten `await` in the editor,
       which is where it is cheapest to catch.
-- [ ] `run_js_code`'s doc comment and `docs/tutorial-triggers.md`: every example gains its
+- [x] `run_js_code`'s doc comment and `docs/tutorial-triggers.md`: every example gains its
       `await`, and the "the code is **synchronous**" bullet is replaced by what a body now has to
       know — await your queries, `Promise.all` is real parallelism, and a body that computes for a
       second without yielding is the one shape the runtime will refuse.

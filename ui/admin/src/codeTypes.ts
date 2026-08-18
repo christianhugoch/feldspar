@@ -200,8 +200,10 @@ interface ScWriteResult {
   ids: ScValue[];
 }
 
-/** A query over one table. Every chain method is pure and returns a new query;
- * the **terminals** below execute, each one sending a single statement.
+/** A query over one table. Every chain method is pure, synchronous and returns
+ * a new query; the **terminals** below execute, each one sending a single
+ * statement and answering a **promise** — so \`await\` goes at the front of a
+ * whole chain, never inside one, and \`.iter()\` is walked with \`for await\`.
  *
  * Bounded, and the bounds are named errors rather than truncations: 1000 rows
  * per read, 200 database calls per run, and the trigger's \`timeout_ms\` wall
@@ -222,13 +224,13 @@ interface ScQuery<Row, Col extends string> {
   /** Run what follows as the server (the default). */
   asAdmin(): ScQuery<Row, Col>;
 
-  /** The matching rows. Synchronous — there are no promises in the sandbox. */
-  rows(): Row[];
+  /** The matching rows. Every terminal answers a promise: \`await\` it. */
+  rows(): Promise<Row[]>;
   /** The matching rows, **streamed**: one batch is read at a time, so a body can
    * walk a table far larger than the 1000 rows \`.rows()\` may answer.
    *
    * \`\`\`js
-   * for (const invoice of db.invoices.where({ paid: false }).iter()) { … }
+   * for await (const invoice of db.invoices.where({ paid: false }).iter()) { … }
    * \`\`\`
    *
    * Each batch is one database call and counts against the run's budget, and
@@ -239,27 +241,27 @@ interface ScQuery<Row, Col extends string> {
    * statements rather than one snapshot: a row whose **sort key** the loop
    * changes may be seen twice or not at all. A \`.limit()\` bounds the iteration;
    * \`iter(n)\` sets how many rows a batch reads. */
-  iter(batchSize?: number): IterableIterator<Row>;
+  iter(batchSize?: number): AsyncIterableIterator<Row>;
   /** The first matching row, or null. */
-  first(): Row | null;
+  first(): Promise<Row | null>;
   /** The row with this primary key, or null. */
-  get(pk: ScValue): Row | null;
-  exists(): boolean;
-  count(): number;
-  sum(field: Col): number | null;
-  avg(field: Col): number | null;
-  min(field: Col): ScValue;
-  max(field: Col): ScValue;
+  get(pk: ScValue): Promise<Row | null>;
+  exists(): Promise<boolean>;
+  count(): Promise<number>;
+  sum(field: Col): Promise<number | null>;
+  avg(field: Col): Promise<number | null>;
+  min(field: Col): Promise<ScValue>;
+  max(field: Col): Promise<ScValue>;
 
   /** Insert a row and return it as stored — coerced, calculated columns filled
    * in, and the table's own triggers fired. */
-  insert(values: Partial<Row>): Row;
-  insert(values: Partial<Row>[]): Row[];
+  insert(values: Partial<Row>): Promise<Row>;
+  insert(values: Partial<Row>[]): Promise<Row[]>;
   /** Update every row the \`.where()\` matched. A \`.where()\` is required: an
    * omitted one would rewrite the table. */
-  update(values: Partial<Row>): ScWriteResult;
+  update(values: Partial<Row>): Promise<ScWriteResult>;
   /** Delete every row the \`.where()\` matched. A \`.where()\` is required. */
-  delete(): ScWriteResult;
+  delete(): Promise<ScWriteResult>;
 }
 
 /** A query over a table named at runtime, whose columns are therefore not
@@ -332,14 +334,14 @@ export function tableDeclarations(tables: TableInfo[]): string {
       `   *\n` +
       `   * The escape hatch for what the chain does not express — a window\n` +
       `   * function, a recursive CTE, an \`ON CONFLICT\`. Values go in \`params\`\n` +
-      `   * and are **bound**, never written into the text: \`db.sql("select *\n` +
-      `   * from books where pages > $1", [200])\`.\n` +
+      `   * and are **bound**, never written into the text: \`await db.sql("select\n` +
+      `   * * from books where pages > $1", [200])\`.\n` +
       `   *\n` +
       `   * It does not go through the row layer, so no ownership formula filters\n` +
       `   * it, no rich type coerces it, and a write inside one raises **no table\n` +
       `   * event**. \`{ asUser: true }\` (or \`db.asUser().sql(…)\`) runs it at the\n` +
       `   * caller's role and user, which is what row-level security reads. */\n` +
-      `  sql(sql: string, params?: ScValue[], options?: ScSqlOptions): ScRow[];\n` +
+      `  sql(sql: string, params?: ScValue[], options?: ScSqlOptions): Promise<ScRow[]>;\n` +
       `  /** Delegate everything that follows to the person who caused the event. */\n` +
       `  asUser(): ScDb;\n` +
       `  /** Act as the server (the default). */\n` +

@@ -222,10 +222,10 @@ async fn both_spellings_of_delegation_reach_the_same_statement() -> Result<()> {
     let out = runtime
         .run(CodeCall {
             code: r#"
-                const opt   = db.sql("select title from books order by id", [], { asUser: true });
-                const fluent = db.asUser().sql("select title from books order by id");
-                const admin  = db.sql("select count(*) as n from books");
-                const forced = db.asUser().sql("select count(*) as n from books", [], { asUser: false });
+                const opt   = await db.sql("select title from books order by id", [], { asUser: true });
+                const fluent = await db.asUser().sql("select title from books order by id");
+                const admin  = await db.sql("select count(*) as n from books");
+                const forced = await db.asUser().sql("select count(*) as n from books", [], { asUser: false });
                 return {
                   opt: opt.map((b) => b.title),
                   fluent: fluent.map((b) => b.title),
@@ -253,7 +253,7 @@ async fn both_spellings_of_delegation_reach_the_same_statement() -> Result<()> {
     // was spelled wrong.
     let refused = runtime
         .run(CodeCall {
-            code: r#"return db.sql("select 1", [], { as_user: true });"#.to_owned(),
+            code: r#"return await db.sql("select 1", [], { as_user: true });"#.to_owned(),
             host: Some(&host),
             ..CodeCall::default()
         })
@@ -266,7 +266,7 @@ async fn both_spellings_of_delegation_reach_the_same_statement() -> Result<()> {
     // rather than by the database.
     let refused = runtime
         .run(CodeCall {
-            code: r#"return db.sql({ select: "everything" });"#.to_owned(),
+            code: r#"return await db.sql({ select: "everything" });"#.to_owned(),
             host: Some(&host),
             ..CodeCall::default()
         })

@@ -1086,16 +1086,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_async_code_body_is_refused_rather_than_returning_an_empty_object() {
-        // `JSON.stringify(promise)` is `{}`, which would look exactly like a
-        // result. There is nothing to await in the sandbox, so say so.
+    async fn an_async_code_body_is_awaited() {
+        use serde_json::json;
+        // A code body is the inside of an async function, so `await` is legal at
+        // its top level and a returned promise is the answer rather than the
+        // `{}` that `JSON.stringify(promise)` used to make of it.
         let ev = DenoEvaluator::new();
-        let err = ev
-            .run_code(code("return (async () => 1)();", &[]))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("Promise"), "{err}");
+        assert_eq!(
+            ev.run_code(code("return (async () => 1)();", &[]))
+                .await
+                .unwrap(),
+            json!(1)
+        );
+        assert_eq!(
+            ev.run_code(code("return 1 + (await Promise.resolve(2));", &[]))
+                .await
+                .unwrap(),
+            json!(3)
+        );
     }
 
     #[tokio::test]

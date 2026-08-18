@@ -54,7 +54,7 @@ const PASSWORD: &str = "hunter2pass";
 
 /// The milestone's definition-of-done body, verbatim.
 const CHASE: &str = r#"
-const overdue = db.invoices
+const overdue = await db.invoices
   .where({ paid: false, due: { lt: payload.today } })
   .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
   .orderBy("due")
@@ -62,9 +62,12 @@ const overdue = db.invoices
   .rows();
 
 for (const inv of overdue) {
-  db.reminders.insert({ invoice: inv.id, sent_to: inv.customerⱵemail });
+  await db.reminders.insert({ invoice: inv.id, sent_to: inv.customerⱵemail });
 }
-return { chased: overdue.length, owed: db.invoices.where({ paid: false }).sum("amount") };
+return {
+  chased: overdue.length,
+  owed: await db.invoices.where({ paid: false }).sum("amount"),
+};
 "#;
 
 struct Client {
@@ -250,12 +253,12 @@ async fn the_run_button_reads_joins_aggregates_and_writes() -> sc_error::Result<
         .client
         .code_trigger(
             "count_chased",
-            r#"return db.invoices
+            r#"const rows = await db.invoices
                  .where({ paid: false })
                  .select("id", { chased: "remindersↃinvoice.length" })
                  .orderBy("id")
-                 .rows()
-                 .map((i) => i.chased);"#,
+                 .rows();
+               return rows.map((i) => i.chased);"#,
         )
         .await;
     let (status, body) = server
@@ -281,7 +284,7 @@ async fn the_run_button_groups_and_answers_a_row_per_group() -> sc_error::Result
         .client
         .code_trigger(
             "owing",
-            r#"return db.invoices
+            r#"return await db.invoices
                  .where({ paid: false })
                  .groupBy("customerⱵemail")
                  .aggregate({ n: "count()", owed: "sum(amount)" })
@@ -315,9 +318,12 @@ async fn the_run_button_groups_and_answers_a_row_per_group() -> sc_error::Result
         .code_trigger(
             "owed_total",
             r#"try {
-                 db.invoices.groupBy("customer").count();
+                 await db.invoices.groupBy("customer").count();
                } catch (e) {
-                 return { refused: e.message, total: db.invoices.where({ paid: false }).sum("amount") };
+                 return {
+                   refused: e.message,
+                   total: await db.invoices.where({ paid: false }).sum("amount"),
+                 };
                }
                return null;"#,
         )
@@ -351,9 +357,15 @@ async fn a_plan_the_catalog_refuses_comes_back_as_a_message_the_admin_can_act_on
     // update: three mistakes an admin makes while writing a body, each of which
     // must come back from the button as its own sentence rather than as "500".
     for (code, expected) in [
-        ("return db.nope.rows();", "nope"),
-        ("return db.invoices.select(\"colour\").rows();", "colour"),
-        ("return db.invoices.update({ paid: true });", ".where()"),
+        ("return await db.nope.rows();", "nope"),
+        (
+            "return await db.invoices.select(\"colour\").rows();",
+            "colour",
+        ),
+        (
+            "return await db.invoices.update({ paid: true });",
+            ".where()",
+        ),
     ] {
         let id = server
             .client

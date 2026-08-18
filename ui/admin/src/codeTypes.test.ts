@@ -83,10 +83,10 @@ const OPTIONS: ts.CompilerOptions = {
 function sandboxFiles(body: string, tables: TableInfo[]): Record<string, string> {
   return {
     "sandbox.d.ts": codeLibrary(tables, { table: "invoices", event: "insert" }),
-    // A code body is the inside of a function: `return` at the top level is what
-    // the action runs, so it is wrapped for the compiler exactly as the runtime
-    // wraps it.
-    "body.js": `function __body() {\n${body}\n}\n`,
+    // A code body is the inside of an **async** function: `return` at the top
+    // level is what the action runs and `await` at it is legal, so it is wrapped
+    // for the compiler exactly as the runtime wraps it.
+    "body.js": `async function __body() {\n${body}\n}\n`,
   };
 }
 
@@ -219,7 +219,7 @@ describe("the types the code editor loads", () => {
     // Verbatim from `run_js_code`'s documentation and the TODO's definition of
     // done, which is the body these declarations exist to support.
     const errors = check(`
-      const overdue = db.invoices
+      const overdue = await db.invoices
         .where({ paid: false, due: { lt: payload.today } })
         .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
         .orderBy("due")
@@ -227,9 +227,12 @@ describe("the types the code editor loads", () => {
         .rows();
 
       for (const inv of overdue) {
-        db.people.insert({ email: String(inv["customerⱵemail"]) });
+        await db.people.insert({ email: String(inv["customerⱵemail"]) });
       }
-      return { chased: overdue.length, owed: db.invoices.where({ paid: false }).sum("amount") };
+      return {
+        chased: overdue.length,
+        owed: await db.invoices.where({ paid: false }).sum("amount"),
+      };
     `);
     expect(errors).toEqual([]);
   });
@@ -237,15 +240,21 @@ describe("the types the code editor loads", () => {
   it("cover the rest of the chain, both authorities and every terminal", () => {
     expect(
       check(`
-        const one = db.table("invoices").where("amount > 100").first();
-        const mine = db.asUser().invoices.where({ paid: true }).exists();
-        const n = db.invoices.where({ due: { is_null: true } }).count();
-        const top = db.invoices.orderBy("amount", "desc").limit(1).offset(0).rows();
-        const person = db.people.get(1);
-        const written = db.people.insert([{ email: "a@b.c" }, { email: "d@e.f" }]);
-        const updated = db.invoices.where({ paid: false }).asUser().update({ paid: true });
-        const gone = db.people.where({ email: { ilike: "%@example.com" } }).delete();
-        return [one, mine, n, top, person, written.length, updated.ids, gone.deleted];
+        const one = await db.table("invoices").where("amount > 100").first();
+        const mine = await db.asUser().invoices.where({ paid: true }).exists();
+        const n = await db.invoices.where({ due: { is_null: true } }).count();
+        const top = await db.invoices.orderBy("amount", "desc").limit(1).offset(0).rows();
+        const person = await db.people.get(1);
+        const written = await db.people.insert([{ email: "a@b.c" }, { email: "d@e.f" }]);
+        const updated = await db.invoices.where({ paid: false }).asUser().update({ paid: true });
+        const gone = await db.people.where({ email: { ilike: "%@example.com" } }).delete();
+        // Two queries that do not depend on each other, issued together.
+        const [paid, unpaid] = await Promise.all([
+          db.invoices.where({ paid: true }).count(),
+          db.invoices.where({ paid: false }).count(),
+        ]);
+        return [one, mine, n, top, person, written.length, updated.ids, gone.deleted,
+                paid + unpaid];
       `),
     ).toEqual([]);
   });
@@ -257,11 +266,11 @@ describe("the types the code editor loads", () => {
     expect(
       check(`
         let owed = 0;
-        for (const inv of db.invoices.where({ paid: false }).orderBy("due").iter(200)) {
+        for await (const inv of db.invoices.where({ paid: false }).orderBy("due").iter(200)) {
           owed += Number(inv.amount);
-          db.people.insert({ email: String(inv["customerⱵemail"]) });
+          await db.people.insert({ email: String(inv["customerⱵemail"]) });
         }
-        for (const p of db.people.limit(10).iter()) owed += p.id;
+        for await (const p of db.people.limit(10).iter()) owed += p.id;
         return owed;
       `),
     ).toEqual([]);
@@ -269,27 +278,27 @@ describe("the types the code editor loads", () => {
     // table does not have is caught at the `.orderBy()`, which is the one place
     // a streamed read is fussier than an unstreamed one.
     expect(
-      check(`for (const i of db.invoices.orderBy("nope").iter()) i.amount;`).join(" "),
+      check(`for await (const i of db.invoices.orderBy("nope").iter()) i.amount;`).join(" "),
     ).toMatch(/nope/);
   });
 
   it("type-check the body's own SQL, both spellings of its authority", () => {
     expect(
       check(`
-        const ranked = db.sql(
+        const ranked = await db.sql(
           "select title, rank() over (order by amount desc) as r from invoices where amount > $1",
           [100],
         );
-        const mine = db.sql("select * from invoices", [], { asUser: true });
-        const fluent = db.asUser().sql("select * from invoices");
-        const plain = db.sql("select count(*) as n from invoices");
+        const mine = await db.sql("select * from invoices", [], { asUser: true });
+        const fluent = await db.asUser().sql("select * from invoices");
+        const plain = await db.sql("select count(*) as n from invoices");
         return [ranked.length, mine.length, fluent.length, plain[0].n];
       `),
     ).toEqual([]);
 
     // An option nobody implements is refused by the prelude at run time, so the
     // editor must not complete it either.
-    expect(check(`return db.sql("select 1", [], { as_user: true });`).join(" ")).toMatch(
+    expect(check(`return await db.sql("select 1", [], { as_user: true });`).join(" ")).toMatch(
       /as_user/,
     );
   });
@@ -317,16 +326,21 @@ describe("the types the code editor loads", () => {
   it("refuse what the sandbox would refuse", () => {
     // Each of these is a mistake an admin can make, and each is a case where a
     // completion list that offered it would be lying.
-    expect(check(`return db.invoices.rowz();`).join(" ")).toMatch(/rowz/);
-    expect(check(`return db.invoicez.rows();`).join(" ")).toMatch(/invoicez/);
-    expect(check(`return db.invoices.orderBy("nope").rows();`).join(" ")).toMatch(/nope/);
-    expect(check(`return db.invoices.where({ paid: { gtt: 1 } }).rows();`).join(" ")).toMatch(
-      /gtt/,
-    );
+    expect(check(`return await db.invoices.rowz();`).join(" ")).toMatch(/rowz/);
+    expect(check(`return await db.invoicez.rows();`).join(" ")).toMatch(/invoicez/);
+    expect(check(`return await db.invoices.orderBy("nope").rows();`).join(" ")).toMatch(/nope/);
+    expect(
+      check(`return await db.invoices.where({ paid: { gtt: 1 } }).rows();`).join(" "),
+    ).toMatch(/gtt/);
     // `.update()` and `.delete()` answer a count and ids, not rows.
     expect(
-      check(`return db.invoices.where({ paid: false }).update({ paid: true }).length;`).join(" "),
+      check(
+        `return (await db.invoices.where({ paid: false }).update({ paid: true })).length;`,
+      ).join(" "),
     ).toMatch(/length/);
+    // And a forgotten `await` is a type error here, which is the cheapest place
+    // to learn it: the runtime's own named error is the next cheapest.
+    expect(check(`return db.invoices.count() + 1;`).join(" ")).toMatch(/Promise/);
   });
 
   it("survive a table with no readable fields", () => {

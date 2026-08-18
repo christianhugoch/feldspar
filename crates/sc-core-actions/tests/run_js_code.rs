@@ -258,11 +258,11 @@ async fn the_body_reads_and_writes_its_tables_through_db() -> Result<()> {
     let out = run(
         &catalog,
         &book_insert(),
-        "const long = db.books.where({ pages: { gte: 100 } }).select(\"id\", \"title\").rows();\n\
-         const made = db.books.insert({ id: 8, title: 'Second', pages: 20 });\n\
-         db.books.where({ id: 8 }).update({ pages: 21 });\n\
+        "const long = await db.books.where({ pages: { gte: 100 } }).select(\"id\", \"title\").rows();\n\
+         const made = await db.books.insert({ id: 8, title: 'Second', pages: 20 });\n\
+         await db.books.where({ id: 8 }).update({ pages: 21 });\n\
          return { long: long.map((b) => b.title), made: made.title, \
-                  pages: db.books.sum('pages'), n: db.books.count() };",
+                  pages: await db.books.sum('pages'), n: await db.books.count() };",
     )
     .await?;
     assert_eq!(
@@ -313,8 +313,8 @@ async fn as_user_delegates_to_the_event_own_caller() -> Result<()> {
                 "email": "ada@example.com",
             })),
         );
-    let body = "return { mine: db.asUser().notes.select('what').orderBy('id').rows().map((n) => n.what),\n\
-                          all: db.notes.count() };";
+    let body = "const mine = await db.asUser().notes.select('what').orderBy('id').rows();\n\
+                 return { mine: mine.map((n) => n.what), all: await db.notes.count() };";
     assert_eq!(
         run(&catalog, &event, body).await?,
         json!({ "mine": ["ada one", "ada two"], "all": 3 })
@@ -325,7 +325,7 @@ async fn as_user_delegates_to_the_event_own_caller() -> Result<()> {
     let out = run(
         &catalog,
         &event,
-        "try { db.asUser().notes.insert({ what: 'not mine', owner: 'bob@example.com' }); }\n\
+        "try { await db.asUser().notes.insert({ what: 'not mine', owner: 'bob@example.com' }); }\n\
          catch (e) { return { refused: e.message }; }\n\
          return { refused: null };",
     )
@@ -336,7 +336,7 @@ async fn as_user_delegates_to_the_event_own_caller() -> Result<()> {
     run(
         &catalog,
         &event,
-        "return db.notes.insert({ what: 'audited', owner: 'bob@example.com' }).id;",
+        "return (await db.notes.insert({ what: 'audited', owner: 'bob@example.com' })).id;",
     )
     .await?;
     Ok(())
@@ -540,19 +540,19 @@ async fn iter_streams_the_same_rows_the_unstreamed_read_answers() -> Result<()> 
     let out = run(
         &catalog,
         &book_insert(),
-        "const ids = (q) => q.rows().map((r) => r.id);\n\
-         const walk = (q, n) => { const out = []; for (const r of q.iter(n)) out.push(r.id); \
+        "const ids = async (q) => (await q.rows()).map((r) => r.id);\n\
+         const walk = async (q, n) => { const out = []; for await (const r of q.iter(n)) out.push(r.id); \
                                   return out; };\n\
          return {\n\
-           asc: ids(db.entries.orderBy('rank').orderBy('id')),\n\
-           asc_streamed: walk(db.entries.orderBy('rank'), 2),\n\
-           desc: ids(db.entries.orderBy('rank', 'desc').orderBy('id')),\n\
-           desc_streamed: walk(db.entries.orderBy('rank', 'desc'), 2),\n\
-           by_pk: ids(db.entries.orderBy('id')),\n\
-           by_pk_streamed: walk(db.entries, 4),\n\
-           filtered: ids(db.entries.where({ rank: 5 }).orderBy('id')),\n\
-           filtered_streamed: walk(db.entries.where({ rank: 5 }), 1),\n\
-           capped: walk(db.entries.orderBy('rank').limit(3), 2),\n\
+           asc: await ids(db.entries.orderBy('rank').orderBy('id')),\n\
+           asc_streamed: await walk(db.entries.orderBy('rank'), 2),\n\
+           desc: await ids(db.entries.orderBy('rank', 'desc').orderBy('id')),\n\
+           desc_streamed: await walk(db.entries.orderBy('rank', 'desc'), 2),\n\
+           by_pk: await ids(db.entries.orderBy('id')),\n\
+           by_pk_streamed: await walk(db.entries, 4),\n\
+           filtered: await ids(db.entries.where({ rank: 5 }).orderBy('id')),\n\
+           filtered_streamed: await walk(db.entries.where({ rank: 5 }), 1),\n\
+           capped: await walk(db.entries.orderBy('rank').limit(3), 2),\n\
          };",
     )
     .await?;
@@ -594,7 +594,7 @@ async fn iter_streams_the_same_rows_the_unstreamed_read_answers() -> Result<()> 
         &catalog,
         &book_insert(),
         "const rows = [];
-         for (const r of db.entries.select('label').orderBy('rank').iter(2)) rows.push(r);
+         for await (const r of db.entries.select('label').orderBy('rank').iter(2)) rows.push(r);
          return { labels: rows.map((r) => r.label), keys: Object.keys(rows[0]) };",
     )
     .await?;
@@ -623,9 +623,9 @@ async fn iter_pays_one_database_call_per_batch_and_stops_when_the_loop_does() ->
         &catalog,
         &book_insert(),
         "let n = 0;\n\
-         for (const r of db.entries.iter(2)) n += 1;\n\
+         for await (const r of db.entries.iter(2)) n += 1;\n\
          let first = null;\n\
-         for (const r of db.entries.iter(2)) { first = r.id; break; }\n\
+         for await (const r of db.entries.iter(2)) { first = r.id; break; }\n\
          return { n: n, first: first };",
     )
     .await?;
@@ -641,7 +641,7 @@ async fn iter_pays_one_database_call_per_batch_and_stops_when_the_loop_does() ->
         &catalog,
         &book_insert(),
         "let n = 0;\n\
-         for (let i = 0; i < 25; i++) { for (const r of db.entries.iter(1)) n += 1; }\n\
+         for (let i = 0; i < 25; i++) { for await (const r of db.entries.iter(1)) n += 1; }\n\
          return n;",
     )
     .await
@@ -674,7 +674,7 @@ async fn a_delegated_stream_obeys_the_ownership_formula_or_says_it_cannot() -> R
         &catalog,
         &event,
         "const mine = []; \
-         for (const n of db.asUser().notes.iter(1)) mine.push(n.what); \
+         for await (const n of db.asUser().notes.iter(1)) mine.push(n.what); \
          return mine;",
     )
     .await?;
@@ -686,7 +686,7 @@ async fn a_delegated_stream_obeys_the_ownership_formula_or_says_it_cannot() -> R
     let out = run(
         &catalog,
         &event,
-        "const all = []; for (const n of db.notes.iter(1)) all.push(n.what); return all;",
+        "const all = []; for await (const n of db.notes.iter(1)) all.push(n.what); return all;",
     )
     .await?;
     assert_eq!(out, json!(["ada one", "bob one", "ada two"]));
