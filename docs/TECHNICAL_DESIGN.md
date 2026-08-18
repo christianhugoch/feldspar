@@ -1827,16 +1827,18 @@ composing one.
   **single** glob; a query naming several is searched whole and filtered in the client, because
   sending the first of several would silently drop the files the others named.
 
-**The schema and the triggers.** `admin_copilot` is the first **app-building** trait: it
-describes and edits the catalog itself, and the trigger set over it. Asked to "create the database
+**The schema, the triggers, and an application's own SQL endpoints.** `admin_copilot` is the
+first **app-building** trait: it describes and edits the catalog itself, the trigger set over it,
+and the custom SQL queries an application serves as API endpoints. Asked to "create the database
 schema for a law firm's ERP system" it creates the connected tables and their fields in one act,
 edits what is already there — including, under its own grant, the access rules of §7.3 — drops
 what it is granted to drop, and answers questions about the schema **without ever seeing a row**.
-Asked to "email the client when a matter closes" it writes the trigger that does it. Views and
-applications are still nobody's tool; §11.6's copilot is the rest of that story, and this is where
-it will stand.
+Asked to "email the client when a matter closes" it writes the trigger that does it. Asked for "an
+endpoint that returns each author with their book count" it writes the SQL, and the database types
+the answer. Views are still nobody's tool; §11.6's copilot is the rest of that story, and this is
+where it will stand.
 
-Six tools, in two halves. `describe_schema` reads: every non-system table with its label, description, role
+Nine tools, in three parts. `describe_schema` reads: every non-system table with its label, description, role
 floors, ownership-formula **source** (not merely a boolean — a tool that may write a formula and
 can only read a flag has no way to edit one except by overwriting it blind), its
 `ownership_error` where a stored formula stopped validating, `rls_enabled` beside the
@@ -1977,6 +1979,53 @@ Four more decisions in that half:
   `TriggerDispatcher::reload` — the one thing every writer of a trigger calls afterwards, whether
   it is a handler, a restore or an agent. The handlers' own `refresh_triggers` calls are gone
   rather than double-firing beside it.
+
+**An application's custom SQL queries, and where the line is drawn.** The third part is
+`describe_applications`, `save_api_query` and `delete_api_query` (§13.4). An application record
+carries a subdomain, a framework and its settings, a table subset, file stores, exposed triggers,
+static directories and a CSP; **one** of those is the agent's to write and the rest are not. A
+framework's `store` and `source` say where somebody's code lives, a CSP is a security boundary, a
+subdomain is a DNS record somebody else configured — none of them is *building*, and all of them
+are the kind of setting whose damage is invisible from the transcript. A custom SQL query is the
+opposite: it is the escape hatch for the report the row layer's read cannot express, and it is the
+thing an admin most naturally asks for in a sentence. So the trait writes those and only reads
+everything else about the application.
+
+Four decisions in that part:
+
+- **`sc_app::save_application` is the one authority**, as `schema_edit` is for the schema and
+  `sc_action::save_trigger` is for the triggers. It runs the validation the admin's form and
+  `saltcorn api add-query` run, and then **prepares every query against the database** — which is
+  both the last validation and the typing. A statement Postgres will not prepare comes back
+  carrying Postgres's own message with nothing stored; one it will is stored with the result
+  columns the database reported, and those columns come back to the model as `returns` in the same
+  turn. The agent is told the shape of what it wrote without running it against anybody's rows.
+- **Which API a query belongs to is a rule, and it now has one home.** `select_api` moved from
+  `sc-cli` down into `sc-app` (layer 8), so the command line and the trait resolve it identically;
+  an application with two APIs that serve custom queries is refused as ambiguous rather than
+  resolved, because picking one would be picking which client method appears where. The refusal
+  names how *this* caller's user says which — `--api` at a command line, the `api` argument in a
+  tool call.
+- **The generated client is rewritten, and the running app is not.** The client is emitted on
+  every save for the reason the admin API emits it: the app's source tree must not disagree with
+  its definition. The **mount** is not touched — a mounted app's providers are built from its
+  record at mount time — so the tool result says the endpoint is served from the app's next build
+  rather than letting the model report a live endpoint that is not answering yet.
+- **The four grants cover this part too**, exactly as they cover the triggers: adding a query is
+  `allow_create`, changing one is `allow_edit`, deleting one is `allow_drop`, and a query's
+  `min_role` — which decides who may call the endpoint — is `allow_access_changes`. A query with
+  no stated floor is admin-only, which is §13.4's own rule rather than a new one.
+
+**Two areas, on top of the four grants.** The grants answer *what may this agent do*; the areas
+answer *to which of the three* — `allow_triggers` and `allow_applications`, both on by default,
+each removing its tools from the model's list when it is off rather than leaving them there to be
+refused. That asymmetry with the grants is deliberate: a grant must stay *visible*, because a model
+that cannot drop a table still has to be able to say that dropping one is what the admin's request
+needs; an area that is off is not part of this agent's job at all, and a tool the model can see is
+a tool it will try. An agent scoped to the schema should not spend a turn — and the admin's money —
+discovering it is not the trigger editor. The two are independent, and each composes with the
+grants rather than replacing them: the applications area on with `allow_drop` off is an agent that
+can write an SQL endpoint and cannot remove one.
 
 **Other agents.** `subagent` exposes **one configured agent** as one tool, so an agent is a
 thing an agent can be given, exactly as a table and a trigger are. The parent hands over one
@@ -3082,8 +3131,9 @@ would 403.
 changes, the client code must be updated automatically"). Re-emitting `src/saltcorn/**` is
 fast, runs no external process and cannot fail on a bundler, so it happens on every event that
 invalidates the endpoint set: `AppMounts::refresh_table` (a column added, a table's access
-changed), saving an application, and `saltcorn api add-query` / `remove-query`. All three go
-through one `sc_app::emit_app_client`, so they cannot disagree. `npm run build` stays the build
+changed), saving an application, `saltcorn api add-query` / `remove-query`, and an agent's
+`save_api_query` / `delete_api_query` (§11.3). All of them go through one
+`sc_app::emit_app_client`, so they cannot disagree. `npm run build` stays the build
 button's and the dev server's. A re-emit that fails — an unreachable store, a `code` app with
 no client path — is **logged and never fatal**: the catalog observer runs inside somebody's
 schema change, and an unreachable file store must not fail their edit or take a mounted
@@ -3267,14 +3317,17 @@ which would collapse into a single JSON property. Parameters project as **query 
 `GET`/`DELETE` and as a typed body otherwise, and `AuthRequirement::MinRole` comes from
 `min_role` — so a custom query is an endpoint like any other from the moment it is saved.
 
-**Two ways in, one stored value.** The admin UI's editor validates through `describeCustomQuery`,
-an admin endpoint that runs the model's rules *and* `describe` and stores nothing, so the whole
-refusal a save would give arrives in one round trip — and on success the columns it reports are
-also the documentation, being exactly what the client method will hand back. `saltcorn api
-add-query` / `list-queries` / `remove-query` do the same from a terminal (validating by saving,
-which is what prepares) and re-emit the app's generated client, because a command that changed
-the API and left the client describing the old one would be the drift §13.1 exists to prevent,
-introduced by the tool meant to avoid it.
+**Three ways in, one stored value.** The admin UI's editor validates through
+`describeCustomQuery`, an admin endpoint that runs the model's rules *and* `describe` and stores
+nothing, so the whole refusal a save would give arrives in one round trip — and on success the
+columns it reports are also the documentation, being exactly what the client method will hand
+back. `saltcorn api add-query` / `list-queries` / `remove-query` do the same from a terminal
+(validating by saving, which is what prepares) and re-emit the app's generated client, because a
+command that changed the API and left the client describing the old one would be the drift §13.1
+exists to prevent, introduced by the tool meant to avoid it. The third is an **agent** carrying
+`admin_copilot` (§11.3), whose `save_api_query` / `delete_api_query` go through the same
+`save_application` and the same re-emit; which API row a query lands on is `sc_app::select_api`
+for all three, so the answer cannot depend on which door the query came through.
 
 The tutorial for both halves of this provider is
 [tutorial-rest-queries.md](./tutorial-rest-queries.md).

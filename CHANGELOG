@@ -2,6 +2,94 @@
 
 Changes in reverse chronological order.
 
+## The admin copilot writes an application's SQL endpoints, and is scoped by area
+
+`admin_copilot` reached the catalog, then the trigger set. It now reaches the third thing an admin
+asks for in a sentence: **an application's custom SQL queries** (§13.4) — the escape hatch for the
+report the row layer's read cannot express. Asked for "an endpoint that returns each author with
+their book count", the agent writes the SQL, and comes back with the columns *Postgres* said the
+statement produces.
+
+Three tools, in the shape the other two halves already have. `describe_applications` reads what is
+served — each application's tables, exposed triggers and APIs, and each API's queries with their
+SQL, parameters, role floor and result columns. `save_api_query` writes one, by name, so saving
+under a name that exists edits that query and omitting an argument leaves it as it was.
+`delete_api_query` removes one.
+
+**One authority, as everywhere else.** `sc_app::save_application` is the only way in, so the agent
+runs the validation the admin's form and `saltcorn api add-query` run — one statement, declared
+parameters matching the used ones, a path no table route already answers — and then the save
+**prepares every query against the database**. That is the last validation and the typing at once:
+a statement Postgres will not prepare comes back carrying Postgres's own message with *nothing*
+stored, and one it will is stored with the columns the database reported, which reach the model as
+`returns` in the same turn. It is told the shape of what it wrote without running it against
+anybody's rows.
+
+**Which API a query belongs to now has one home.** `select_api` moved from `sc-cli` down into
+`sc-app`, beside `registered_api_provider_info` — the command line and the trait resolve it with
+the same function, so a query cannot land in one place from a terminal and another from a
+conversation. Its ambiguity refusal takes a parameter for *how this caller's user names an API*
+(`--api`, or the `api` argument), because a refusal that sends a model to a command line it is not
+standing at is a refusal it cannot act on. It also gained a check it was missing: naming an API
+that does **not** serve custom queries — the app's GraphQL one — is now refused there, where the
+mistake was made, rather than surviving to the save as "unknown setting `queries`", which is a true
+message about the wrong thing. `saltcorn api add-query` gets that fix with it.
+
+**What is live afterwards, stated rather than implied.** The generated TypeScript client is
+rewritten on every save, as it is on the admin API's — the source tree must never disagree with the
+definition. The mount is not: a mounted app's providers are built from its record when it is
+mounted, so the tool result says the endpoint is served from the app's next build rather than
+letting the model report a live endpoint that is not answering yet.
+
+**Two area checkboxes, on top of the four grants.** The grants say *what this agent may do*; the
+new `allow_triggers` and `allow_applications` say *to which of the three*. Both default on. An area
+that is off removes its tools from the model's list entirely — the opposite of how a grant behaves,
+and deliberately: a model that may not drop a table still has to be able to say that dropping one
+is what the request needs, whereas an area that is off is not part of this agent's job at all, and
+a tool the model can see is a tool it will try. An agent scoped to the schema should not spend a
+turn, and the admin's money, discovering that it is not the trigger editor. The areas compose with
+the grants rather than replacing them: applications on with `allow_drop` off is an agent that can
+write an SQL endpoint and cannot remove one.
+
+The tests are against a real Postgres, a real stored application and a real file store, because
+what is under test could not survive a mock: the `returns` a query comes back with are `describe`'s
+answer; a `select publisher from books` is refused with Postgres's message and leaves the stored
+application exactly as it was; and the app's `api.ts` grows the `topAuthors` method in the same
+call — and loses it again on delete. Beside them, the grants deciding add/edit/delete and who may
+call the endpoint, a non-admin refused by all three tools, and the areas deciding which of the nine
+tools an agent is offered.
+
+## An OpenAI agent run survives its first tool call
+
+A run of the admin copilot against an OpenAI provider failed the moment it came
+back from a tool: *"the LLM provider failed: RequestError: Assistant tool call
+`call_id` is required for OpenAI Responses API"*. The first turn worked, the
+tool ran, and the second turn — the one carrying the call and its result back —
+was refused before it left the process.
+
+**Two ids, and we were keeping the wrong one.** The Responses API gives a tool
+call an item id (`fc_…`) *and* a correlation id (`call_id`), and pairs the call
+with its output by the latter. `rig_bridge` read only rig's `id`, so it kept
+`fc_…` and sent rig's `call_id` as `None` on both the assistant's call and the
+tool result — and rig, which cannot invent one, rejects the request rather than
+send a history OpenAI would silently mis-pair. `ToolCall::id` now holds the
+correlation id where a provider has one, and fills both of rig's fields on the
+way out. Anthropic is unaffected either way: it has one id, which is both.
+
+One field rather than a second one threaded through `LlmMessage`, `_sc_runs` and
+every caller: an id a provider does not correlate by is an id nothing in the
+loop can use. rig drops a non-native item id from the payload by itself, so
+Anthropic's `toolu_…` travelling in that field costs nothing.
+
+The test is the one that was missing: a capturing stub replays a real
+`function_call` item whose `id` and `call_id` differ, and asserts on the *second*
+request's body — that the `function_call` and its `function_call_output` both
+carry `call_id: "call_1"`. Asserting on our own delta types could never have
+caught this, because the shape that was wrong only exists on the wire.
+
+Runs that already failed this way stay failed: their stored history holds the
+item id, and replaying it is a request OpenAI has no call to match.
+
 ## A code body is edited in a code editor, with the sandbox's own types
 
 `run_js_code` is now a program worth writing — it reads and writes tables — and it

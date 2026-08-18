@@ -265,15 +265,23 @@ protects a triggered run is the trigger's own `min_role`, not the caller's.
 Every agent so far worked *on* tables you had already made, and ran triggers somebody else set
 up. `admin_copilot` makes both.
 
-**Agents → New agent**, call it `architect`, and give it one trait — `admin_copilot` — with
-its first two checkboxes on and its last two off, which is how it arrives:
+**Agents → New agent**, call it `architect`, and give it one trait — `admin_copilot` — and leave
+its six checkboxes exactly as they arrive:
 
-| Checkbox | Leave it |
-|---|---|
-| May create tables, fields and triggers | **on** |
-| May change existing tables, fields and triggers | **on** |
-| May drop tables and fields, and delete triggers | off |
-| May change access rules | off |
+| Checkbox | Leave it | |
+|---|---|---|
+| May create tables, fields, triggers and custom SQL queries | **on** | *what it may do* |
+| May change existing tables, fields, triggers and custom SQL queries | **on** | |
+| May drop tables and fields, and delete triggers and custom SQL queries | off | |
+| May change access rules | off | |
+| May work on triggers | **on** | *what it may do it to* |
+| May work on applications' custom SQL queries | **on** | |
+
+The first four are **grants** and the last two are **areas**, and they are two different
+questions. A grant says what this agent may do; an area says which of the three things it may do
+it *to* — the schema, the triggers, an application's SQL endpoints. Untick an area and its tools
+are not offered at all, which is why an agent you only want near the schema should have both areas
+off rather than a stern system prompt.
 
 Notice what the form does *not* ask for: a table. It is the only trait that names none, because
 the tables it makes do not exist while you are configuring it. It is scoped by **what it may do**
@@ -342,6 +350,31 @@ Two things to try:
 Deleting is behind the drop grant, and it will tell you so — and will usually suggest switching
 the trigger off instead, which keeps its configuration.
 
+## Step 8b — The same agent, writing an SQL endpoint
+
+`architect` has three more tools, over the **custom SQL queries** of
+[tutorial-rest-queries.md](tutorial-rest-queries.md) — the escape hatch for the report the row
+layer's read cannot express. If you have an application with a REST API, ask for one:
+
+> Give the timesheet app an endpoint that returns each fee earner with the hours they billed
+> since a date the caller passes in.
+
+It calls `describe_applications` to find the app and its API, then `save_api_query` with the SQL,
+a `since` parameter and a path. What comes back is the interesting part: **the columns the
+database says the statement returns**, because saving a query *prepares* it. So the answer to "did
+that work?" is Postgres's, in the same turn — and a query with a typo in a column name is refused
+with Postgres's own message and nothing is stored.
+
+Three things to notice:
+
+- **The app's generated client already has the method.** Re-emitting it is part of the save, so
+  `src/saltcorn/api.ts` grows a typed `hoursByEarner(...)` before you have looked at it.
+- **The endpoint is not answering yet.** A mounted app's API is built from its record when the app
+  is mounted, so the agent will tell you it is served from the app's next **Build** — the same as
+  when you save one in the application form.
+- **Who may call it is an access rule.** With **May change access rules** off, every query the
+  agent writes is admin-only, and asking for a public one is refused by name.
+
 ## Step 9 — An agent that asks another agent
 
 The `librarian` from Step 2 reads one table. Suppose you now want an agent that talks to people
@@ -400,7 +433,7 @@ And the rule that has held all the way down this page still holds here: `librari
 | `run_trigger` | one trigger | runs it, with a payload it supplies |
 | `coding` | a store, a sub-directory, two grants and three bounds | browses, reads and greps the code; writes and edits it under **May create and change files**; runs one `package.json` script under **May run the project's scripts** |
 | `build_application` | an application's subdomain | builds it, and gets the diagnostics |
-| `admin_copilot` | four grants, and **no table** | describes and edits the schema itself, and the triggers over it |
+| `admin_copilot` | four grants, two areas, and **no table** | describes and edits the schema itself, the triggers over it, and an application's custom SQL endpoints |
 | `subagent` | one agent, when to use it, two bounds | hands it one task and reads back what it concluded |
 
 Each is a grant. Adding one is a decision you can read off the agent's page later.
@@ -440,8 +473,8 @@ Each is a grant. Adding one is a decision you can read off the agent's page late
   available in this context" — which the model reports rather than dies on. Chat is where an agent runs triggers.
 - **`admin_copilot`'s access-rules grant is the one to think hardest about.** The other
   three change *your* schema; that one changes what **everyone else** on the deployment can
-  reach — a table's role floors, and who may run a trigger through the API — and unlike a dropped
-  table it looks from the outside like nothing happened. It is off by default, it is a separate
+  reach — a table's role floors, who may run a trigger through the API, who may call a custom SQL
+  endpoint — and unlike a dropped table it looks from the outside like nothing happened. It is off by default, it is a separate
   checkbox from dropping on purpose, and every one of the trait's tools
   refuses any conversation whose user is not an admin — so an agent you expose to a Member at
   role 80 will not hand them the table editor even if you tick every box.

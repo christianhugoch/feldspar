@@ -234,6 +234,76 @@ async fn a_tool_call_split_across_chunks_is_emitted_once_its_arguments_parse() {
 }
 
 #[tokio::test]
+async fn a_tool_call_keeps_the_call_id_the_next_turn_has_to_send_back() {
+    // The Responses API pairs a `function_call` with its `function_call_output`
+    // by `call_id`, and **rejects outright** a request whose history holds
+    // either without one ("Assistant tool call `call_id` is required for OpenAI
+    // Responses API"). The `fc_…` item id beside it is not that id. So a turn
+    // that called a tool has to keep the `call_id`, and the turn after it has
+    // to put it back on the wire — which is what a run of the admin copilot got
+    // wrong on its *second* step, after the first had worked.
+    let stream = sse_events(&[
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 1,
+            "item": function_call_item("{\"limit\": 3}", "completed"),
+        }),
+        completed(2, 10, 2),
+    ]);
+    let (base, mut requests) = common::serve_capturing(Reply::sse(stream))
+        .await
+        .expect("the stub");
+    let provider =
+        OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1").expect("the adapter");
+
+    // First turn: the model asks for a tool.
+    let msg = provider
+        .stream(LlmRequest::prompt("how many?"))
+        .await
+        .expect("the stub's stream")
+        .collect()
+        .await
+        .expect("collecting");
+    let call = &msg.tool_calls[0];
+    // The correlation id, not the item id — those are different values here for
+    // exactly the reason this test exists.
+    assert_eq!(call.id, "call_1", "the item id `fc_1` is not the call id");
+    let _ = requests.next_body().await.expect("the first request");
+
+    // Second turn: the history goes back with the call and its result.
+    let req = LlmRequest {
+        messages: vec![
+            sc_llm::LlmMessage::user("how many?"),
+            msg.message(),
+            sc_llm::LlmMessage::tool_result(call, "3"),
+        ],
+        ..LlmRequest::default()
+    };
+    provider
+        .stream(req)
+        .await
+        .expect("a second stream")
+        .collect()
+        .await
+        .expect("collecting the second turn");
+
+    let body = requests.next_body().await.expect("the second request");
+    let input = body["input"].as_array().expect("an input array");
+    let call_item = input
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap_or_else(|| panic!("no function_call in the history: {body}"));
+    assert_eq!(call_item["call_id"], "call_1", "{body}");
+    let output_item = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap_or_else(|| panic!("no function_call_output in the history: {body}"));
+    // The pair has to agree, or the vendor cannot match the result to the call.
+    assert_eq!(output_item["call_id"], "call_1", "{body}");
+}
+
+#[tokio::test]
 async fn collect_reassembles_exactly_what_the_stream_emitted() {
     let provider = provider_for(&[
         text_delta(1, "Looking"),

@@ -199,6 +199,114 @@ pub async fn describe_api_queries(catalog: &Catalog, api: &ApiConfig) -> Result<
     Ok(api)
 }
 
+/// Whether the API provider registered under `name` serves **custom SQL
+/// queries**.
+///
+/// Read off [`registered_api_provider_info`]'s `supports_custom_queries` — the
+/// same declaration the admin form offers the query editor on — so a provider
+/// that grows custom queries is answered for here without this function hearing
+/// about it.
+pub fn serves_custom_queries(name: &str) -> bool {
+    registered_api_provider_info()
+        .iter()
+        .any(|p| p.name == name && p.supports_custom_queries)
+}
+
+/// The API row of `app` that holds custom SQL queries, chosen by `mount` or, when
+/// there is exactly one candidate, by there being nothing to choose.
+///
+/// The one answer to "which API does this query belong to", shared by everything
+/// that writes one: the CLI's `saltcorn api add-query`, and the `admin_copilot`
+/// trait's `save_api_query` (§11.3). Two answers would be two ways for a query to
+/// land somewhere its author did not mean.
+///
+/// Ambiguity is refused rather than resolved: an application with two such APIs
+/// has two places a query could land, and picking one would be picking which
+/// client method appears where. `how_to_name` is how *this* caller's user says
+/// which one they mean — `--api` at the command line, the `api` argument in a
+/// tool call — because the refusal is only useful if it names the thing the
+/// reader can type.
+///
+/// A **named** API that does not serve custom queries is refused here too, rather
+/// than handed back to be written to: the query would be stored under a settings
+/// key that provider does not declare, and the save would refuse it as an unknown
+/// setting — a true message about the wrong thing, arriving one step after the
+/// mistake was made.
+pub fn select_api<'a>(
+    app: &'a mut Application,
+    mount: Option<&str>,
+    how_to_name: &str,
+) -> Result<&'a mut ApiConfig> {
+    let mounts: Vec<String> = app.apis.iter().map(|a| a.mount.clone()).collect();
+    let serving: Vec<String> = app
+        .apis
+        .iter()
+        .filter(|a| serves_custom_queries(&a.provider))
+        .map(|a| a.mount.clone())
+        .collect();
+    if let Some(mount) = mount {
+        let api = app
+            .apis
+            .iter_mut()
+            .find(|a| a.mount == mount)
+            .ok_or_else(|| {
+                Error::config(format!(
+                    "application `{}` has no API mounted at `{mount}`; it has {}",
+                    app.subdomain,
+                    quoted(&mounts)
+                ))
+            })?;
+        if !serves_custom_queries(&api.provider) {
+            return Err(Error::config(format!(
+                "the `{}` API at `{mount}` of `{}` does not serve custom SQL \
+                 queries; the ones that do are {}",
+                api.provider,
+                app.subdomain,
+                quoted(&serving)
+            )));
+        }
+        return Ok(api);
+    }
+    let candidates: Vec<usize> = app
+        .apis
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| serves_custom_queries(&a.provider))
+        .map(|(i, _)| i)
+        .collect();
+    match candidates.as_slice() {
+        [only] => Ok(&mut app.apis[*only]),
+        [] => Err(Error::config(format!(
+            "application `{}` has no API that serves custom SQL queries; it has {}",
+            app.subdomain,
+            quoted(&mounts)
+        ))),
+        _ => Err(Error::config(format!(
+            "application `{}` has more than one API that serves custom SQL \
+             queries, so say which with {how_to_name}: {}",
+            app.subdomain,
+            quoted(
+                &candidates
+                    .iter()
+                    .map(|i| app.apis[*i].mount.clone())
+                    .collect::<Vec<_>>()
+            )
+        ))),
+    }
+}
+
+/// `` `a`, `b` `` — or "none" for an empty list, so a message never trails off.
+fn quoted(items: &[String]) -> String {
+    if items.is_empty() {
+        return "none".to_owned();
+    }
+    items
+        .iter()
+        .map(|i| format!("`{i}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The registered provider names, comma-separated — what an error naming what is
 /// available says.
 fn registered_provider_names() -> String {
@@ -677,5 +785,49 @@ mod mount_tests {
             listed.contains(REST_PROVIDER) && listed.contains(GRAPHQL_PROVIDER),
             "{listed}"
         );
+    }
+
+    #[test]
+    fn the_api_holding_a_custom_query_is_chosen_by_mount_or_by_there_being_one() {
+        let mut app = Application::new("Blog", "blog", FrameworkRef::new(REACT_FRAMEWORK))
+            .with_api(ApiConfig::new("rest", "/api"))
+            .with_api(ApiConfig::new("graphql", "/graphql"));
+
+        // Nothing named: the REST one, because it is the only one that serves
+        // custom SQL queries.
+        assert_eq!(select_api(&mut app, None, "--api").unwrap().mount, "/api");
+        assert_eq!(
+            select_api(&mut app, Some("/api"), "--api").unwrap().mount,
+            "/api"
+        );
+
+        // Naming one that cannot hold a query is refused *here*, where the
+        // mistake was made — not two steps later as an unknown setting.
+        let msg = select_api(&mut app, Some("/graphql"), "--api")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("does not serve custom SQL"), "{msg}");
+        assert!(msg.contains("/api"), "{msg}");
+
+        // A mount the app does not have names the ones it does.
+        let msg = select_api(&mut app, Some("/v2"), "--api")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("/api") && msg.contains("/graphql"), "{msg}");
+
+        // Two that serve them is ambiguous, and picking one would be picking
+        // which client method appears where. The refusal names how *this*
+        // caller's user says which, which is the whole reason it is a parameter.
+        app.apis.push(ApiConfig::new("rest", "/api2"));
+        let msg = select_api(&mut app, None, "--api").unwrap_err().to_string();
+        assert!(msg.contains("--api"), "{msg}");
+        let msg = select_api(&mut app, None, "`application`")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("`application`"), "{msg}");
+
+        // …and an app with none says so rather than inventing a place to put it.
+        let mut none = Application::new("Blog", "blog", FrameworkRef::new(REACT_FRAMEWORK));
+        assert!(select_api(&mut none, None, "--api").is_err());
     }
 }

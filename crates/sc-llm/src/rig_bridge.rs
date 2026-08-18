@@ -23,6 +23,14 @@
 //!   A tool call with unparsed arguments would reach a trait's `call` as a
 //!   string where an object was declared, so it is repaired here (a JSON string
 //!   is parsed) or dropped with an error (a fragment that never parsed).
+//! - **Carrying the correlation id a provider will ask for back.** rig's tool
+//!   call and tool result each have *two* identifiers: `id`, the item's own,
+//!   and `call_id`, which the Responses API pairs a call with its output by and
+//!   **requires** on every one it is sent. Ours has one, because one is what a
+//!   loop correlates on — so [`ToolCall::id`] holds the `call_id` where the
+//!   provider gave one, and both rig fields are filled from it on the way out.
+//!   Leaving `call_id` unset is what made a second turn after any tool call
+//!   fail against OpenAI outright.
 //! - **Deriving the stop reason**, which neither provider's streaming response
 //!   carries through rig 0.41. See [`StopReason`].
 
@@ -97,8 +105,11 @@ fn to_rig_messages(messages: Vec<LlmMessage>) -> Vec<Message> {
                 ..
             } => {
                 pending.push(UserContent::ToolResult(ToolResult {
+                    // Both fields, from the one id we keep: Anthropic reads
+                    // `id` and ignores `call_id`, the Responses API reads
+                    // `call_id` and refuses a result without one.
+                    call_id: Some(tool_call_id.clone()),
                     id: tool_call_id,
-                    call_id: None,
                     content: OneOrMany::one(ToolResultContent::Text(Text::from(content))),
                 }));
                 continue;
@@ -143,8 +154,12 @@ fn assistant_content(content: String, tool_calls: Vec<ToolCall>) -> OneOrMany<As
     }
     for call in tool_calls {
         items.push(AssistantContent::ToolCall(RigToolCall {
+            // As for a tool result: one id of ours fills both of rig's. Where
+            // it is not a native `fc_…` item id — an Anthropic call, or one
+            // assembled from fragments — rig drops it from the Responses
+            // payload and pairs the call with its output by `call_id` alone.
+            call_id: Some(call.id.clone()),
             id: call.id,
-            call_id: None,
             function: ToolFunction {
                 name: call.name,
                 arguments: call.arguments,
@@ -234,10 +249,14 @@ where
                         // rig has assembled it; the fragments for this call are
                         // now redundant, whatever state they are in.
                         partial.remove(&internal_call_id);
+                        // Recorded as rig's *item* id, which is what a fragment
+                        // is keyed by — the id our `ToolCall` keeps may be the
+                        // provider's separate correlation id.
+                        let item_id = tool_call.id.clone();
                         match complete_tool_call(&tool_call) {
                             Ok(call) => {
                                 saw_tool_call = true;
-                                emitted.push(call.id.clone());
+                                emitted.push(item_id);
                                 queued.push_back(Ok(LlmDelta::ToolCall(call)));
                             }
                             Err(e) => queued.push_back(Err(e)),
@@ -330,6 +349,11 @@ impl PartialToolCall {
 /// disagree about: arguments that arrive as a JSON *string* rather than an
 /// object are parsed, and a null becomes the empty object a no-argument tool
 /// declares.
+///
+/// The id kept is the provider's **correlation** id where there is one — the
+/// Responses API's `call_id`, not the `fc_…` item id beside it — because that
+/// is the one it will require back on both the call and its result. Anthropic
+/// sets only `id`, and there the two are the same thing.
 fn complete_tool_call(call: &RigToolCall) -> Result<ToolCall> {
     let arguments = match &call.function.arguments {
         Json::Null => Json::Object(serde_json::Map::new()),
@@ -343,7 +367,7 @@ fn complete_tool_call(call: &RigToolCall) -> Result<ToolCall> {
         other => other.clone(),
     };
     Ok(ToolCall {
-        id: call.id.clone(),
+        id: call.call_id.clone().unwrap_or_else(|| call.id.clone()),
         name: call.function.name.clone(),
         arguments,
     })

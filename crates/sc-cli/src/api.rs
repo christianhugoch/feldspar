@@ -9,13 +9,14 @@
 //! add-only command is a trap, because the first typo would need a browser to
 //! fix, which is exactly the situation the command exists to avoid.
 //!
-//! This module is the **parsing** and the **selection**: turning the flags into
-//! a [`CustomQuery`] and finding the API row that will hold it. Connecting,
-//! saving and re-emitting the client are the binary's, so this half is testable
-//! without a database.
+//! This module is the **parsing**: turning the flags into a [`CustomQuery`].
+//! Which API row holds it is [`sc_app::select_api`]'s, shared with the
+//! `admin_copilot` trait that writes one from a conversation (§11.3) — one rule,
+//! so a query cannot land in one place from the command line and another from an
+//! agent. Connecting, saving and re-emitting the client are the binary's, so this
+//! half is testable without a database.
 
 use sc_api::{CustomParam, CustomQuery, Method, ValueType};
-use sc_app::{ApiConfig, Application, registered_api_provider_info};
 use sc_error::{Error, Result};
 
 /// `saltcorn api add-query`'s arguments, parsed.
@@ -196,79 +197,6 @@ fn parse_method(raw: &str) -> Result<Method> {
     }
 }
 
-/// The API row of `app` that holds custom queries, chosen by `--api`'s mount or,
-/// when there is exactly one candidate, by there being nothing to choose.
-///
-/// Which providers are candidates comes from
-/// [`registered_api_provider_info`]'s `supports_custom_queries` — the same
-/// declaration the admin form offers the editor on — so a provider that grows
-/// custom queries is offered here too without this file hearing about it.
-///
-/// Ambiguity is refused rather than resolved: an application with two such APIs
-/// has two places a query could land, and picking one would be picking which
-/// client method appears where.
-pub fn select_api<'a>(app: &'a mut Application, mount: Option<&str>) -> Result<&'a mut ApiConfig> {
-    let mounts: Vec<String> = app.apis.iter().map(|a| a.mount.clone()).collect();
-    if let Some(mount) = mount {
-        return app
-            .apis
-            .iter_mut()
-            .find(|a| a.mount == mount)
-            .ok_or_else(|| {
-                Error::config(format!(
-                    "application `{}` has no API mounted at `{mount}`; it has {}",
-                    app.subdomain,
-                    list(&mounts)
-                ))
-            });
-    }
-    let candidates: Vec<usize> = app
-        .apis
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| serves_custom_queries(&a.provider))
-        .map(|(i, _)| i)
-        .collect();
-    match candidates.as_slice() {
-        [only] => Ok(&mut app.apis[*only]),
-        [] => Err(Error::config(format!(
-            "application `{}` has no API that serves custom SQL queries; it has {}",
-            app.subdomain,
-            list(&mounts)
-        ))),
-        _ => Err(Error::config(format!(
-            "application `{}` has more than one API that serves custom SQL \
-             queries, so name one with --api: {}",
-            app.subdomain,
-            list(
-                &candidates
-                    .iter()
-                    .map(|i| app.apis[*i].mount.clone())
-                    .collect::<Vec<_>>()
-            )
-        ))),
-    }
-}
-
-/// Whether the provider registered under `name` serves custom SQL queries.
-pub fn serves_custom_queries(name: &str) -> bool {
-    registered_api_provider_info()
-        .iter()
-        .any(|p| p.name == name && p.supports_custom_queries)
-}
-
-/// `` `a`, `b` `` — or "none" for an empty list, so a message never trails off.
-fn list(items: &[String]) -> String {
-    if items.is_empty() {
-        return "none".to_owned();
-    }
-    items
-        .iter()
-        .map(|i| format!("`{i}`"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<String> {
     it.next()
         .cloned()
@@ -421,33 +349,5 @@ mod tests {
         assert_eq!(parsed.app, "blog");
         assert_eq!(parsed.api, None);
         assert!(parse_query_ref("list-queries", &args(&["--api", "/api"])).is_err());
-    }
-
-    #[test]
-    fn the_api_is_chosen_by_mount_or_by_there_being_one_that_serves_queries() {
-        let mut app = Application::new("Blog", "blog", sc_app::FrameworkRef::new("react"))
-            .with_api(ApiConfig::new("rest", "/api"))
-            .with_api(ApiConfig::new("graphql", "/graphql"));
-
-        // No `--api`: the REST one, because it is the only one that serves them.
-        assert_eq!(select_api(&mut app, None).unwrap().mount, "/api");
-        assert_eq!(
-            select_api(&mut app, Some("/graphql")).unwrap().mount,
-            "/graphql"
-        );
-
-        // A mount the app does not have names the ones it does.
-        let msg = select_api(&mut app, Some("/v2")).unwrap_err().to_string();
-        assert!(msg.contains("/api") && msg.contains("/graphql"), "{msg}");
-
-        // Two that serve them is ambiguous, and picking one would be picking
-        // which client method appears where.
-        app.apis.push(ApiConfig::new("rest", "/api2"));
-        let msg = select_api(&mut app, None).unwrap_err().to_string();
-        assert!(msg.contains("--api"), "{msg}");
-
-        // …and an app with none says so rather than inventing a place to put it.
-        let mut none = Application::new("Blog", "blog", sc_app::FrameworkRef::new("react"));
-        assert!(select_api(&mut none, None).is_err());
     }
 }

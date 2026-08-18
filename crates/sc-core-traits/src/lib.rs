@@ -116,8 +116,9 @@ pub use table::{CFG_FIELDS, CFG_MAX_ROWS, CFG_TABLE};
 pub use files::{CFG_ROOT, CFG_STORE, FileScope, configured_scope, slugify};
 
 pub use admin_copilot::{
-    AdminCopilot, CFG_ALLOW_ACCESS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP, CFG_ALLOW_EDIT,
-    TOOL_DELETE_TRIGGER, TOOL_DESCRIBE, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT,
+    AdminCopilot, CFG_ALLOW_ACCESS, CFG_ALLOW_APPLICATIONS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP,
+    CFG_ALLOW_EDIT, CFG_ALLOW_TRIGGERS, TOOL_DELETE_QUERY, TOOL_DELETE_TRIGGER, TOOL_DESCRIBE,
+    TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_APPS, TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT, TOOL_SAVE_QUERY,
     TOOL_SAVE_TRIGGER,
 };
 pub use build_application::{BuildApplication, CFG_APPLICATION};
@@ -235,9 +236,9 @@ mod tests {
         //
         // `admin_copilot` is the exception, and the reason is the phase's point:
         // it names no table, because the tables it makes do not exist when it is
-        // configured. Its form is four grants, each with a default, and a blank
-        // one is a meaningful (read-only) configuration rather than an
-        // incomplete one.
+        // configured. Its form is four grants and two areas, each with a default,
+        // and a blank one is a meaningful (read-only over all three) configuration
+        // rather than an incomplete one.
         for trait_ in registry.all() {
             assert!(!trait_.description().is_empty(), "{}", trait_.name());
             let spec = trait_.config_spec();
@@ -313,15 +314,20 @@ mod tests {
         // asking the admin for it twice would be two places to get it wrong.
         assert_eq!(spec("build_application"), vec![CFG_APPLICATION]);
         // The trait that names no table: four grants, scoping it by what it may
-        // do rather than by what it may reach (§11.3) — over the schema and the
-        // triggers alike, which is why there are still four of them.
+        // do rather than by what it may reach (§11.3) — over the schema, the
+        // triggers and an application's custom SQL queries alike, which is why
+        // there are still four of them. Then the two **areas**, which are the
+        // other question and therefore two more checkboxes rather than eight more
+        // grants: not "what may it do?" but "to which of the three?".
         assert_eq!(
             spec("admin_copilot"),
             vec![
                 CFG_ALLOW_CREATE,
                 CFG_ALLOW_EDIT,
                 CFG_ALLOW_DROP,
-                CFG_ALLOW_ACCESS
+                CFG_ALLOW_ACCESS,
+                CFG_ALLOW_TRIGGERS,
+                CFG_ALLOW_APPLICATIONS,
             ]
         );
     }
@@ -389,7 +395,8 @@ mod tests {
             ]
         );
         // `admin_copilot`'s names are fixed rather than derived, and say the
-        // same six things every deployment's do.
+        // same nine things every deployment's do — two over the schema, four over
+        // the triggers, three over an application's custom SQL queries.
         assert_eq!(
             tool_names::admin_copilot(),
             [
@@ -399,6 +406,9 @@ mod tests {
                 "describe_action",
                 "save_trigger",
                 "delete_trigger",
+                "describe_applications",
+                "save_api_query",
+                "delete_api_query",
             ]
         );
         for name in tool_names::admin_copilot() {

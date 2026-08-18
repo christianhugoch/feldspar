@@ -2,12 +2,15 @@
 //!
 //! The first **app-building** trait, and a deliberate revision of the boundary
 //! the earlier traits drew. Everything before it reaches *rows*; this one reaches
-//! the **catalog** and the **trigger set**: asked to "create the database schema
-//! for a law firm's ERP system" it creates the connected tables and their fields
-//! in one act; asked to "email the client when a matter closes" it writes the
-//! trigger that does it. It edits what is already there — including, under its
-//! own grant, the access rules of §7.3 — deletes what it is granted to delete,
-//! and answers questions about either without ever seeing a row.
+//! the **catalog**, the **trigger set** and an application's **custom SQL
+//! queries**: asked to "create the database schema for a law firm's ERP system"
+//! it creates the connected tables and their fields in one act; asked to "email
+//! the client when a matter closes" it writes the trigger that does it; asked for
+//! "an endpoint that returns each fee earner's billed hours" it writes the SQL and
+//! the database types the answer ([`apps`]). It edits what is already there —
+//! including, under its own grant, the access rules of §7.3 — deletes what it is
+//! granted to delete, and answers questions about any of the three without ever
+//! seeing a row.
 //!
 //! Three things make it unlike every other built-in, each stated here because
 //! each is a rule broken on purpose:
@@ -32,16 +35,31 @@
 //!   role 1 — otherwise an agent exposed to a role-80 user through a chat view
 //!   would hand them the table editor.
 //!
-//! ## The four grants, over both halves
+//! ## The four grants, over all three parts
 //!
-//! The same four checkboxes scope the schema tools and the trigger tools, and
-//! they are read the same way in both: creating a table and creating a trigger
-//! are both [`CFG_ALLOW_CREATE`], deleting a trigger is [`CFG_ALLOW_DROP`]
-//! alongside dropping a table, and a trigger's `min_role` — which decides who may
-//! `POST /actions/{name}` — is an **access rule**, so it needs
-//! [`CFG_ALLOW_ACCESS`] exactly as a table's role floors do. A second set of
-//! checkboxes for the trigger half would have been four more decisions for the
-//! admin to make, on the same question, with the same right answers.
+//! The same four checkboxes scope the schema tools, the trigger tools and the
+//! application tools, and they are read the same way in each: creating a table, a
+//! trigger and a custom SQL query are all [`CFG_ALLOW_CREATE`]; deleting a trigger
+//! or a query is [`CFG_ALLOW_DROP`] alongside dropping a table; and a trigger's
+//! `min_role` — which decides who may `POST /actions/{name}` — and a query's,
+//! which decides who may call its endpoint, are **access rules**, so they need
+//! [`CFG_ALLOW_ACCESS`] exactly as a table's role floors do. A second and a third
+//! set of checkboxes would have been eight more decisions for the admin to make,
+//! on the same question, with the same right answers.
+//!
+//! ## The two areas, which are the other question
+//!
+//! A grant says *what this agent may do*; [`CFG_ALLOW_TRIGGERS`] and
+//! [`CFG_ALLOW_APPLICATIONS`] say *to which of the three it may do it*. Both
+//! default on, and an area that is off takes its tools out of the model's list
+//! rather than leaving them to be refused — the opposite of how a grant behaves,
+//! deliberately. A model that may not drop a table still has to be able to say
+//! that dropping one is what the admin asked for; an area that is off is not part
+//! of this agent's job at all, and a tool the model can see is a tool it will try.
+//!
+//! The schema has no area of its own: it is what the trait *is*, and an
+//! `admin_copilot` that may not describe a schema is an agent with no reason to
+//! carry the trait.
 //!
 //! ## Why the schema editor takes a list and the trigger editor does not
 //!
@@ -107,6 +125,7 @@
 //! levels (every action's name and one line; then one action's full settings) are
 //! that sequence made explicit and cheap.
 
+mod apps;
 mod schema;
 mod triggers;
 
@@ -118,6 +137,7 @@ use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Map, Value as Json};
 
+pub use apps::{TOOL_DELETE_QUERY, TOOL_DESCRIBE_APPS, TOOL_SAVE_QUERY};
 pub use triggers::{
     TOOL_DELETE_TRIGGER, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_TRIGGERS, TOOL_SAVE_TRIGGER,
 };
@@ -133,6 +153,21 @@ pub const CFG_ALLOW_DROP: &str = schema_edit::GRANT_DROP;
 /// floor does not.
 pub const CFG_ALLOW_ACCESS: &str = schema_edit::GRANT_ACCESS_CHANGES;
 
+/// Whether the trigger half is offered at all. On by default.
+///
+/// The first of the two **area** checkboxes, and a different kind of setting
+/// from the four grants above it: a grant says what this agent may *do*, an area
+/// says which of the three things it may do it *to*. They compose — an agent with
+/// the triggers area on and `allow_drop` off can write a trigger and cannot
+/// delete one — and an area that is off removes its tools from the model's list
+/// entirely rather than leaving them there to be refused. A tool the model can
+/// see is a tool it will try, and a conversation spent discovering what an agent
+/// is not for is a conversation the admin pays for.
+pub const CFG_ALLOW_TRIGGERS: &str = "allow_triggers";
+/// Whether the application half — an application's custom SQL queries — is
+/// offered at all. On by default, and read exactly as [`CFG_ALLOW_TRIGGERS`] is.
+pub const CFG_ALLOW_APPLICATIONS: &str = "allow_applications";
+
 /// The reading tool's name. Fixed rather than derived, because this trait is
 /// configured against no table to derive one from — which is also what makes a
 /// second `admin_copilot` on one agent refusable on save (§11.2): the two
@@ -145,8 +180,15 @@ pub const TOOL_EDIT: &str = "edit_schema";
 /// Build and inspect the schema and the triggers over it.
 pub struct AdminCopilot;
 
-/// The tools this trait offers — all six of them, under fixed names.
-pub fn tool_names() -> [&'static str; 6] {
+/// Every tool this trait can offer, under fixed names — the schema's two, the
+/// triggers' four and the applications' three.
+///
+/// *Can*, not *does*: the two area checkboxes decide whether the trigger and
+/// application halves are offered at all, so a configured instance offers a
+/// subset of these. This is the whole set, which is what the admin UI's "what
+/// will this be called?" and §11.2's collision check want — a name that any
+/// configuration could produce is a name that could collide.
+pub fn tool_names() -> [&'static str; 9] {
     [
         TOOL_DESCRIBE,
         TOOL_EDIT,
@@ -154,6 +196,9 @@ pub fn tool_names() -> [&'static str; 6] {
         TOOL_DESCRIBE_ACTION,
         TOOL_SAVE_TRIGGER,
         TOOL_DELETE_TRIGGER,
+        TOOL_DESCRIBE_APPS,
+        TOOL_SAVE_QUERY,
+        TOOL_DELETE_QUERY,
     ]
 }
 
@@ -164,28 +209,35 @@ impl AgentTrait for AdminCopilot {
     }
 
     fn description(&self) -> &str {
-        "Read and change the database schema and the triggers over it: create, \
-         alter and drop tables and fields, and configure the actions that run \
-         when something happens"
+        "Build the application: create, alter and drop tables and fields, \
+         configure the actions that run when something happens, and write the \
+         custom SQL queries an application serves as API endpoints"
     }
 
     fn config_spec(&self) -> Vec<FormField> {
         vec![
             FormField::new(CFG_ALLOW_CREATE, BasicType::Bool)
-                .label("May create tables, fields and triggers")
+                .label("May create tables, fields, triggers and custom SQL queries")
                 .default_value(true),
             FormField::new(CFG_ALLOW_EDIT, BasicType::Bool)
-                .label("May change existing tables, fields and triggers")
+                .label("May change existing tables, fields, triggers and custom SQL queries")
                 .default_value(true),
             FormField::new(CFG_ALLOW_DROP, BasicType::Bool)
-                .label("May drop tables and fields, and delete triggers")
+                .label("May drop tables and fields, and delete triggers and custom SQL queries")
                 .default_value(false),
             FormField::new(CFG_ALLOW_ACCESS, BasicType::Bool)
                 .label(
                     "May change access rules (roles, ownership formula, row-level \
-                     security, a trigger's minimum role)",
+                     security, a trigger's minimum role, who may call a custom \
+                     SQL query)",
                 )
                 .default_value(false),
+            FormField::new(CFG_ALLOW_TRIGGERS, BasicType::Bool)
+                .label("May work on triggers")
+                .default_value(true),
+            FormField::new(CFG_ALLOW_APPLICATIONS, BasicType::Bool)
+                .label("May work on applications' custom SQL queries")
+                .default_value(true),
         ]
     }
 
@@ -201,6 +253,8 @@ impl AgentTrait for AdminCopilot {
             CFG_ALLOW_EDIT,
             CFG_ALLOW_DROP,
             CFG_ALLOW_ACCESS,
+            CFG_ALLOW_TRIGGERS,
+            CFG_ALLOW_APPLICATIONS,
         ] {
             match check.config.get(key) {
                 None | Some(Json::Null) | Some(Json::Bool(_)) => {}
@@ -214,10 +268,18 @@ impl AgentTrait for AdminCopilot {
         Ok(())
     }
 
+    /// The schema's two tools always, and each other half's only where its area
+    /// checkbox is on.
+    ///
+    /// Removed rather than left in place and refused: a tool the model can see is
+    /// a tool it will try, and an agent scoped to the schema should not spend a
+    /// turn — and the admin's money — discovering that it is not the trigger
+    /// editor. The grants are the opposite case and stay visible, because there
+    /// the model must be able to *say* what it would need.
     fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
         let grants = grants(config);
         let rls = catalog.primary().capabilities().row_level_security;
-        vec![
+        let mut tools = vec![
             ToolSpec::new(
                 TOOL_DESCRIBE,
                 schema::describe_description(catalog),
@@ -228,27 +290,51 @@ impl AgentTrait for AdminCopilot {
                 schema::edit_description(&grants, rls),
                 schema::edit_parameters(),
             ),
-            ToolSpec::new(
-                TOOL_DESCRIBE_TRIGGERS,
-                triggers::describe_triggers_description(),
-                triggers::describe_triggers_parameters(),
-            ),
-            ToolSpec::new(
-                TOOL_DESCRIBE_ACTION,
-                triggers::describe_action_description(),
-                triggers::describe_action_parameters(),
-            ),
-            ToolSpec::new(
-                TOOL_SAVE_TRIGGER,
-                triggers::save_description(&grants),
-                triggers::save_parameters(),
-            ),
-            ToolSpec::new(
-                TOOL_DELETE_TRIGGER,
-                triggers::delete_description(&grants),
-                triggers::delete_parameters(),
-            ),
-        ]
+        ];
+        if area(config, CFG_ALLOW_TRIGGERS) {
+            tools.extend([
+                ToolSpec::new(
+                    TOOL_DESCRIBE_TRIGGERS,
+                    triggers::describe_triggers_description(),
+                    triggers::describe_triggers_parameters(),
+                ),
+                ToolSpec::new(
+                    TOOL_DESCRIBE_ACTION,
+                    triggers::describe_action_description(),
+                    triggers::describe_action_parameters(),
+                ),
+                ToolSpec::new(
+                    TOOL_SAVE_TRIGGER,
+                    triggers::save_description(&grants),
+                    triggers::save_parameters(),
+                ),
+                ToolSpec::new(
+                    TOOL_DELETE_TRIGGER,
+                    triggers::delete_description(&grants),
+                    triggers::delete_parameters(),
+                ),
+            ]);
+        }
+        if area(config, CFG_ALLOW_APPLICATIONS) {
+            tools.extend([
+                ToolSpec::new(
+                    TOOL_DESCRIBE_APPS,
+                    apps::describe_apps_description(),
+                    apps::describe_apps_parameters(),
+                ),
+                ToolSpec::new(
+                    TOOL_SAVE_QUERY,
+                    apps::save_description(&grants),
+                    apps::save_parameters(),
+                ),
+                ToolSpec::new(
+                    TOOL_DELETE_QUERY,
+                    apps::delete_description(&grants),
+                    apps::delete_parameters(),
+                ),
+            ]);
+        }
+        tools
     }
 
     async fn call(
@@ -263,10 +349,34 @@ impl AgentTrait for AdminCopilot {
         match tool {
             TOOL_DESCRIBE => schema::describe(ctx.catalog, args),
             TOOL_EDIT => schema::edit(ctx.catalog, config, args).await,
-            TOOL_DESCRIBE_TRIGGERS => triggers::describe_triggers(ctx, args).await,
-            TOOL_DESCRIBE_ACTION => triggers::describe_action(ctx, args).await,
-            TOOL_SAVE_TRIGGER => triggers::save(ctx, &grants, args).await,
-            TOOL_DELETE_TRIGGER => triggers::delete(ctx, &grants, args).await,
+            TOOL_DESCRIBE_TRIGGERS => {
+                require_area(config, CFG_ALLOW_TRIGGERS, tool)?;
+                triggers::describe_triggers(ctx, args).await
+            }
+            TOOL_DESCRIBE_ACTION => {
+                require_area(config, CFG_ALLOW_TRIGGERS, tool)?;
+                triggers::describe_action(ctx, args).await
+            }
+            TOOL_SAVE_TRIGGER => {
+                require_area(config, CFG_ALLOW_TRIGGERS, tool)?;
+                triggers::save(ctx, &grants, args).await
+            }
+            TOOL_DELETE_TRIGGER => {
+                require_area(config, CFG_ALLOW_TRIGGERS, tool)?;
+                triggers::delete(ctx, &grants, args).await
+            }
+            TOOL_DESCRIBE_APPS => {
+                require_area(config, CFG_ALLOW_APPLICATIONS, tool)?;
+                apps::describe_apps(ctx, args).await
+            }
+            TOOL_SAVE_QUERY => {
+                require_area(config, CFG_ALLOW_APPLICATIONS, tool)?;
+                apps::save(ctx, &grants, args).await
+            }
+            TOOL_DELETE_QUERY => {
+                require_area(config, CFG_ALLOW_APPLICATIONS, tool)?;
+                apps::delete(ctx, &grants, args).await
+            }
             other => Err(Error::invalid(format!(
                 "this trait offers {}, not `{other}`",
                 tool_names().map(|name| format!("`{name}`")).join(", ")
@@ -285,6 +395,28 @@ fn grants(config: &Attrs) -> Grants {
         drop: flag(CFG_ALLOW_DROP, false),
         access_changes: flag(CFG_ALLOW_ACCESS, false),
     }
+}
+
+/// Whether an area checkbox is on; an absent one reads as its default, which for
+/// both areas is on.
+fn area(config: &Attrs, key: &str) -> bool {
+    config.get(key).and_then(Json::as_bool).unwrap_or(true)
+}
+
+/// Refuse a tool whose area the admin switched off.
+///
+/// [`tools`](AdminCopilot::tools) already withholds it, so nothing a model chose
+/// from its own tool list reaches this — it is here because `call` is a public
+/// entry point that takes a name, and a switched-off area must mean the same
+/// thing however the name arrived.
+fn require_area(config: &Attrs, key: &str, tool: &str) -> Result<()> {
+    if area(config, key) {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "`{tool}` is switched off for this agent; turn on `{key}` in its \
+         `admin_copilot` settings to offer it."
+    )))
 }
 
 /// Refuse a run whose caller is not an admin, in words the model can relay.

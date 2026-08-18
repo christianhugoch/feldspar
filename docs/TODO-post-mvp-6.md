@@ -31,7 +31,9 @@ against: the provider seam, the agent record, the `AgentTrait` extension point, 
 storage and the chat UI — and those phases were held to "if this ends with a trait that constructs
 a table, something has gone wrong". **Phase 7 revises that boundary deliberately**, once the
 machinery is proven, with the first app-building trait: `admin_copilot`, over the catalog and
-nothing else.
+nothing else. *(It moved twice more after the milestone shipped — to the trigger set, and then to
+an application's custom SQL queries, both as further parts of `admin_copilot`. See "Carried past
+this milestone" below and the CHANGELOG.)*
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -586,9 +588,12 @@ because nothing else knows what building an app of that kind consists of.
 
 ## Explicitly OUT of scope for this milestone
 
-- **The copilot and the AppConstructor** (§11.6), and every app-building trait *other than* Phase
-  7's — creating views, triggers or applications from an agent, and the staged constructor over
-  them. Phase 7 draws the line at the catalog: tables and their fields, and nothing that is not one.
+- **The copilot and the AppConstructor** (§11.6), and the staged constructor over the app-building
+  traits. Phase 7 drew the line at the catalog — tables and their fields — and it moved twice
+  afterwards, out of band and recorded in the CHANGELOG: first to the **trigger set**, then to an
+  application's **custom SQL queries**, each as another part of `admin_copilot` under the same four
+  grants. What is still nobody's tool is **views**, and every *other* property of an application:
+  its framework settings, its table subset, its CSP, its subdomain.
 - **A `run_command` / shell trait** (decision 6), and giving an agent the IDE's terminal, which
   does not exist either.
 - **Encryption at rest for provider keys.** They sit in the primary database like every other

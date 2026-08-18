@@ -57,6 +57,12 @@ impl ToolSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// The provider's identifier for this call.
+    ///
+    /// Where a provider distinguishes an item id from a *correlation* id — the
+    /// Responses API's `fc_…` and `call_id` — this is the correlation id, since
+    /// that is the one it requires back on both the call and its result. One
+    /// field rather than two: an id a provider does not correlate by is an id
+    /// nothing in the loop has a use for.
     pub id: String,
     /// Which tool was called — a [`ToolSpec::name`] that was offered.
     pub name: String,

@@ -460,7 +460,7 @@ async fn add_query_command(args: &[String]) -> Result<()> {
 
     let (catalog, mut app) =
         open_app(&parsed.app, &db, &file_stores, base_domain.as_deref()).await?;
-    let api = sc_cli::api::select_api(&mut app, parsed.api.as_deref())?;
+    let api = sc_app::select_api(&mut app, parsed.api.as_deref(), "--api")?;
     let mut queries = sc_api::custom_queries(&api.config)?;
     if queries.iter().any(|q| q.name == parsed.query.name) {
         return Err(sc_error::Error::invalid(format!(
@@ -595,7 +595,7 @@ async fn remove_query_command(args: &[String]) -> Result<()> {
 
     let (catalog, mut app) =
         open_app(&parsed.app, &db, &file_stores, base_domain.as_deref()).await?;
-    let api = sc_cli::api::select_api(&mut app, parsed.api.as_deref())?;
+    let api = sc_app::select_api(&mut app, parsed.api.as_deref(), "--api")?;
     let mount = api.mount.clone();
     let mut queries = sc_api::custom_queries(&api.config)?;
     let before = queries.len();
