@@ -272,6 +272,77 @@ async fn the_run_button_reads_joins_aggregates_and_writes() -> sc_error::Result<
 }
 
 #[tokio::test]
+async fn the_run_button_groups_and_answers_a_row_per_group() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    // "Who owes for more than one invoice, and how much?" — one statement, one
+    // round trip, and the group key is a Ⱶ-path so the answer names the customer
+    // rather than their id.
+    let id = server
+        .client
+        .code_trigger(
+            "owing",
+            r#"return db.invoices
+                 .where({ paid: false })
+                 .groupBy("customerⱵemail")
+                 .aggregate({ n: "count()", owed: "sum(amount)" })
+                 .having({ n: { gt: 1 } })
+                 .orderBy("owed", "desc")
+                 .rows();"#,
+        )
+        .await;
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            &format!("/api/triggers/{id}/run"),
+            Some(Value::Null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["result"],
+        // Ada has two unpaid invoices totalling 600 — exact, as a decimal
+        // crosses this seam everywhere else. Bob has one, so `.having()` left
+        // him out.
+        json!([{ "customerⱵemail": "ada@example.com", "n": 2, "owed": "600" }]),
+        "{body}"
+    );
+
+    // The scalar terminals still answer a value rather than a row per group, and
+    // a `.groupBy()` with nothing to compute is refused in the body itself.
+    let id = server
+        .client
+        .code_trigger(
+            "owed_total",
+            r#"try {
+                 db.invoices.groupBy("customer").count();
+               } catch (e) {
+                 return { refused: e.message, total: db.invoices.where({ paid: false }).sum("amount") };
+               }
+               return null;"#,
+        )
+        .await;
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            &format!("/api/triggers/{id}/run"),
+            Some(Value::Null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["total"], json!("850"), "{body}");
+    assert!(
+        body["result"]["refused"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("answers one value"),
+        "{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_plan_the_catalog_refuses_comes_back_as_a_message_the_admin_can_act_on()
 -> sc_error::Result<()> {
     let mut server = setup().await?;

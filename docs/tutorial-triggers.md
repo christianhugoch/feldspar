@@ -251,8 +251,8 @@ Press **Run**. The result is the object the body returned, and **Tables → task
 new row per finished task. That is the whole feature; the rest of this section is what the
 pieces mean.
 
-**A chain is pure; a terminal executes.** `.where()`, `.select()`, `.orderBy()`, `.limit()` and
-`.offset()` build a query and send nothing. `.rows()`, `.first()`, `.get(id)`, `.count()`,
+**A chain is pure; a terminal executes.** `.where()`, `.select()`, `.orderBy()`, `.limit()`,
+`.offset()`, `.groupBy()`, `.aggregate()` and `.having()` build a query and send nothing. `.rows()`, `.first()`, `.get(id)`, `.count()`,
 `.sum(f)`, `.avg(f)`, `.min(f)`, `.max(f)` and `.exists()` are where a round trip happens — one
 per terminal, so `db.tasks.count()` inside a loop over a thousand rows is a thousand queries and
 will hit the call budget below.
@@ -280,6 +280,28 @@ Those are the same `Ⱶ` and `Ↄ` paths [tutorial-ownership.md](tutorial-owners
 they mean the same thing: one read, with the joined value and the child aggregate in the row.
 If you write a formula the server cannot turn into SQL, the error says so and tells you to
 compute it in the body instead — which costs you nothing, because the body is JavaScript.
+
+**Counting by group is one read.** `.groupBy()` says what makes a group and `.aggregate()`
+says what to compute for each one; `.rows()` then answers one row per group, with the group key
+beside the values:
+
+```js
+db.tasks
+  .where({ done: false })
+  .groupBy("owner")
+  .aggregate({ open: "count()" })
+  .having({ open: { gt: 1 } })
+  .orderBy("open", "desc")
+  .rows();
+// [ { owner: "member@example.com", open: 2 } ]
+```
+
+The aggregates are written the way a formula writes one — `count()`, `sum(price * qty)`,
+`avg(pages)`, `min(due)`, `max(due)` — and a group key may be a `Ⱶ`-path, so you can group
+`task_audit` by `taskⱵtitle` without joining anything yourself. `.having()` bounds the *groups*
+and its keys are the names you just gave the values; a condition on the rows is `.where()`, as
+before. `.count()` and friends are the same thing with nothing to group by, so they still answer
+a single value — and say so if you ask one of them for a query that groups.
 
 **Writes are writes.** `db.task_audit.insert({…})` goes through the same path the API uses, so
 the values are coerced and validated against their columns, and *the target table's own

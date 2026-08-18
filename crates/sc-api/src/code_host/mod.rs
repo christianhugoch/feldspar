@@ -247,41 +247,65 @@ impl<'a> TableHost<'a> {
         Ok(Json::Array(values.iter().map(|v| read.row(v)).collect()))
     }
 
-    /// An `aggregate`: one object, keyed by the aliases the plan asked for.
+    /// An `aggregate`: one object keyed by the aliases the plan asked for, or —
+    /// when the plan grouped — one such object **per group**, with the group keys
+    /// beside the values.
+    ///
+    /// The two are one path (§phase 6): `.count()` is
+    /// `.aggregate({ value: "count()" })` with nothing to group by, so the filter,
+    /// the caller context and §5's refusal are decided once rather than twice.
+    /// Only the shape of the answer differs, and it differs because the questions
+    /// do: a scalar terminal answers a value, and a grouped one answers rows.
     async fn aggregate(&self, plan: &Plan, actor: &Actor) -> Result<Json> {
-        let agg = plan::aggregate(self.catalog, plan, actor.role())?;
+        let agg = plan::aggregate(self.catalog, plan, &self.limits, actor.role())?;
         let values = match actor {
             Actor::Admin(context) => {
-                rows::aggregate_values(
+                rows::aggregate_grouped(
                     self.catalog,
                     &agg.table,
                     agg.projections,
-                    agg.filter,
+                    &agg.query,
                     Some(context),
                 )
                 .await?
             }
             Actor::Caller { role, user } => {
                 self.delegable_aggregate(&agg.table, *role, user.as_ref())?;
-                ownership::aggregate_values_as(
+                ownership::aggregate_grouped_as(
                     self.catalog,
                     &agg.table,
                     agg.projections,
-                    agg.filter,
+                    &agg.query,
                     *role,
                     user.as_ref(),
                 )
                 .await?
             }
         };
-        let mut out = serde_json::Map::with_capacity(plan.aggregate.len());
-        for spec in &plan.aggregate {
-            out.insert(
-                spec.alias.clone(),
-                values.get(&spec.alias).map_or(Json::Null, value_to_json),
-            );
+        let group = |values: &std::collections::BTreeMap<String, sc_query::Value>| {
+            let mut out = serde_json::Map::with_capacity(agg.keys.len());
+            for key in &agg.keys {
+                out.insert(
+                    key.clone(),
+                    values.get(key).map_or(Json::Null, value_to_json),
+                );
+            }
+            Json::Object(out)
+        };
+        if !agg.grouped {
+            // A scalar aggregate is one row by construction; an empty answer is
+            // the database saying something else, and reads back as nulls rather
+            // than as invented zeroes.
+            return Ok(group(&values.first().cloned().unwrap_or_default()));
         }
-        Ok(Json::Object(out))
+        // A grouped aggregate answers rows, so it is bounded like a read: a body
+        // that grouped a million-row table by a free-text column would otherwise
+        // materialise a million groups into the isolate.
+        self.within_cap(
+            values.len(),
+            &format!("grouping `{}` produced", agg.table.name),
+        )?;
+        Ok(Json::Array(values.iter().map(group).collect()))
     }
 
     /// An `insert`: the written row, or an array of them for an array in.

@@ -1065,10 +1065,33 @@ const rows = db.books
 | `.select(...cols)` | projections: field names, Ⱶ-paths, and `{ alias: "formula" }` objects |
 | `.orderBy(field, dir?)` | `"asc"` (default) or `"desc"`; repeated calls append keys |
 | `.limit(n)` / `.offset(n)` | the bound |
+| `.groupBy(...fields)` / `.aggregate({ alias: "fn(arg)" })` / `.having(cond)` | grouped aggregation |
 | `.asUser()` / `.asAdmin()` | authority (below) |
 
 The terminals are `.rows()`, `.first()`, `.get(pk)`, `.count()`, `.sum(f)`/`.avg(f)`/
 `.min(f)`/`.max(f)`, `.exists()`, and the three writes `.insert(v)`, `.update(v)`, `.delete()`.
+
+**Grouped aggregation.** `.aggregate({ … })` names the values to compute, written the way the
+formula language writes an aggregate, and `.rows()` answers **one row per group** with the group
+keys beside them:
+
+```js
+db.invoices
+  .where({ paid: false })
+  .groupBy("customerⱵemail")                        // a field, a Ⱶ-path or a formula
+  .aggregate({ n: "count()", owed: "sum(amount)" })
+  .having({ n: { gt: 1 } })                         // the object DSL, over these aliases
+  .orderBy("owed", "desc")
+  .rows();
+```
+
+The scalar terminals are the same path with nothing to group by — `.count()` is
+`.aggregate({ value: "count()" })` — so the filter, the caller context and the delegated
+refusal below are decided in one place. A `.having()` key is an alias of *this* aggregate and
+only that: a condition on a group key is a condition on the rows, which `.where()` says for
+less. Groups are rows, so the row cap bounds them, and an ordering may name an alias (the
+aggregate is repeated in the clause, since an output alias is not in scope in a `HAVING` and
+not portably in an `ORDER BY`).
 
 **One filter vocabulary, two spellings.** `where` takes either the object DSL every other
 surface already speaks — the REST query string, the GraphQL `where`, the agent tools — or a
@@ -1132,8 +1155,8 @@ catchable `Error`, so a body may try a delegated write and fall back. Events dif
 they have to delegate to and that is honoured rather than hidden: a table event or a
 directly-run trigger carries the user who caused it, while a **scheduled** or **startup**
 trigger carries nobody and therefore reads as the public role — which is why `asAdmin()` is the
-default. One asymmetry: a delegated **aggregate** over a table whose ownership formula the
-translator refuses is an error (an aggregate over rows it cannot filter would silently count
+default. One asymmetry: a delegated **aggregate** — grouped or not — over a table whose ownership
+formula the translator refuses is an error (an aggregate over rows it cannot filter would silently count
 rows the caller may not see), and the message says to read the rows and aggregate in the code
 body.
 
@@ -1174,7 +1197,8 @@ rather than a JavaScript feature:
 ```
 
 `op` is `select` | `aggregate` | `insert` | `update` | `delete`; `where` is either the object
-DSL or `{ "formula": "…" }`; `aggregate` carries `[{ "alias", "fn", "arg" }]`; `values` carries
+DSL or `{ "formula": "…" }`; `aggregate` carries `[{ "alias", "fn", "arg" }]` and `group`
+carries the grouping fields (with `having` keyed by the aggregate's aliases); `values` carries
 an insert's row(s) or an update's assignments. Every terminal is one plan and one round trip,
 built by `sc_expr`'s JavaScript prelude and answered by `sc_api::code_host::TableHost`, which
 is where all the table knowledge is — `sc-expr` sits below `sc-catalog` and does not learn what

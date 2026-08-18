@@ -82,9 +82,67 @@ pub fn comparison(
     op: &str,
     operand: &Json,
 ) -> Result<Expr> {
-    let lit = |operand: &Json| -> Result<Expr> {
-        Ok(Expr::lit(rows::column_value(table, column, operand)?))
-    };
+    comparison_on(&Operand::Column { table, column }, col, op, operand)
+}
+
+/// What a filter's operand is coerced against, and what the comparison calls
+/// itself when it refuses one.
+///
+/// Almost always a **column**, which is the rule stated in this module's docs: a
+/// literal beside one is coerced through [`rows::column_value`], so `"2026-01-01"`
+/// binds a date and the comparison the database performs is the one the column's
+/// type means.
+///
+/// The exception is a `HAVING` over a grouped aggregate (§10.1's `db`): `count()`
+/// and `sum(price * qty)` stand behind no column, so there is nothing to coerce
+/// against and the operand is read by its own JSON shape. It is a variant here
+/// rather than a second walk over the filter object, because "what does
+/// `{ gt: 3 }` mean" must have one answer wherever the object is written.
+pub enum Operand<'a> {
+    /// A column of a table: the operand is a value of that column.
+    Column {
+        /// The table it belongs to.
+        table: &'a Table,
+        /// Its name there.
+        column: &'a str,
+    },
+    /// An expression standing behind no column — an aggregate in a `having` —
+    /// named by the alias it was asked for under.
+    Untyped {
+        /// The alias, for the refusal to name.
+        alias: &'a str,
+    },
+}
+
+impl Operand<'_> {
+    /// The value one JSON operand binds as.
+    fn value(&self, operand: &Json) -> Result<Value> {
+        match self {
+            Operand::Column { table, column } => rows::column_value(table, column, operand),
+            Operand::Untyped { .. } => Ok(sc_expr::value_from_json(operand)),
+        }
+    }
+
+    /// How a refusal names what was being compared.
+    fn qualified(&self) -> String {
+        match self {
+            Operand::Column { table, column } => format!("`{}`.`{column}`", table.name),
+            Operand::Untyped { alias } => format!("`{alias}`"),
+        }
+    }
+
+    /// Its short name, for a message that has already named the table.
+    fn name(&self) -> &str {
+        match self {
+            Operand::Column { column, .. } => column,
+            Operand::Untyped { alias } => alias,
+        }
+    }
+}
+
+/// [`comparison`] against whatever the operand is coerced by.
+pub(crate) fn comparison_on(on: &Operand, col: Expr, op: &str, operand: &Json) -> Result<Expr> {
+    let lit = |operand: &Json| -> Result<Expr> { Ok(Expr::lit(on.value(operand)?)) };
     let binary = |op: BinOp, operand: &Json| -> Result<Expr> {
         Ok(Expr::binary(op, col.clone(), lit(operand)?))
     };
@@ -102,8 +160,8 @@ pub fn comparison(
         "in" | "nin" => {
             let Json::Array(items) = operand else {
                 return Err(Error::invalid(format!(
-                    "`{op}` on `{}`.`{column}` takes a list",
-                    table.name
+                    "`{op}` on {} takes a list",
+                    on.qualified()
                 )));
             };
             let set = InSet::List(items.iter().map(&lit).collect::<Result<Vec<_>>>()?);
@@ -120,13 +178,13 @@ pub fn comparison(
             Json::Bool(true) => Ok(Expr::unary(UnOp::IsNull, col)),
             Json::Bool(false) => Ok(Expr::unary(UnOp::IsNotNull, col)),
             _ => Err(Error::invalid(format!(
-                "`is_null` on `{}`.`{column}` takes a boolean",
-                table.name
+                "`is_null` on {} takes a boolean",
+                on.qualified()
             ))),
         },
         other => Err(Error::invalid(format!(
-            "`{other}` is not a comparison on `{}`.`{column}` — the comparisons are {}",
-            table.name,
+            "`{other}` is not a comparison on {} — the comparisons are {}",
+            on.qualified(),
             OPERATORS.join(", ")
         ))),
     }
@@ -214,7 +272,11 @@ pub(crate) fn where_resolved(
         let expr = if fields.contains(name) {
             let field = queryable_field(table, fields, name, WHERE)?;
             let column = &field.base.name;
-            Some(condition_expr(table, column, Expr::col(column), condition)?)
+            Some(condition_on(
+                &Operand::Column { table, column },
+                Expr::col(column),
+                condition,
+            )?)
         } else {
             match name.as_str() {
                 AND => combined(table, fields, condition, BinOp::And, name, resolve)?,
@@ -225,9 +287,11 @@ pub(crate) fn where_resolved(
                 // surface with paths and formulas gets to resolve it, and
                 // otherwise `queryable_field` refuses it naming the alternatives.
                 _ => match resolve(name, condition)? {
-                    Some(FilterKey::Joined(joined)) => Some(condition_expr(
-                        &joined.table,
-                        &joined.column,
+                    Some(FilterKey::Joined(joined)) => Some(condition_on(
+                        &Operand::Column {
+                            table: &joined.table,
+                            column: &joined.column,
+                        },
                         joined.expr,
                         condition,
                     )?),
@@ -235,7 +299,11 @@ pub(crate) fn where_resolved(
                     None => {
                         let field = queryable_field(table, fields, name, WHERE)?;
                         let column = &field.base.name;
-                        Some(condition_expr(table, column, Expr::col(column), condition)?)
+                        Some(condition_on(
+                            &Operand::Column { table, column },
+                            Expr::col(column),
+                            condition,
+                        )?)
                     }
                 },
             }
@@ -296,7 +364,7 @@ fn combined(
     Ok(parts.into_iter().reduce(|a, b| Expr::binary(op, a, b)))
 }
 
-/// One field's condition.
+/// One condition, on the column or aggregate the [`Operand`] names.
 ///
 /// A JSON object whose single key is one of [`OPERATORS`] is that comparison;
 /// **anything else is a literal to match exactly**, including an object destined
@@ -310,8 +378,9 @@ fn combined(
 /// mean the null tests (`{"eq": null}` is "unset", and SQL's `=` is never true of
 /// one), and an **empty** `in` list is refused rather than lowered to a
 /// membership test nothing can satisfy.
-fn condition_expr(table: &Table, name: &str, column: Expr, condition: &Json) -> Result<Expr> {
+pub(crate) fn condition_on(on: &Operand, column: Expr, condition: &Json) -> Result<Expr> {
     let col = || column.clone();
+    let name = on.name();
     if let Json::Object(map) = condition
         && map.len() == 1
         && let Some((op, operand)) = map.iter().next()
@@ -323,16 +392,12 @@ fn condition_expr(table: &Table, name: &str, column: Expr, condition: &Json) -> 
             ("in" | "nin", Json::Array(items)) if items.is_empty() => Err(Error::invalid(format!(
                 "`{name}`: `{op}` needs at least one value"
             ))),
-            (op, operand) => comparison(table, name, col(), op, operand),
+            (op, operand) => comparison_on(on, col(), op, operand),
         };
     }
     Ok(match condition {
         Json::Null => Expr::unary(UnOp::IsNull, col()),
-        other => Expr::binary(
-            BinOp::Eq,
-            col(),
-            Expr::lit(rows::column_value(table, name, other)?),
-        ),
+        other => Expr::binary(BinOp::Eq, col(), Expr::lit(on.value(other)?)),
     })
 }
 

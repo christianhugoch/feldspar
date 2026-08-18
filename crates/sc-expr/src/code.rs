@@ -203,6 +203,26 @@ const db = (function () {
     }
     throw new Error("select() takes field names and { alias: formula } objects");
   };
+  // An aggregate is written the way a formula writes one — `count()`,
+  // `sum(price * qty)` — and lowers to the plan's own { alias, fn, arg }, which
+  // is what the seam has always carried and what a scalar terminal sends.
+  const aggregates = (spec) => {
+    if (!spec || typeof spec !== "object") {
+      throw new Error('aggregate() takes an object like { n: "count()", total: "sum(price)" }');
+    }
+    return Object.keys(spec).map((alias) => {
+      const source = spec[alias];
+      const m = /^\s*([A-Za-z_][A-Za-z_0-9]*)\s*\(([\s\S]*)\)\s*$/.exec(String(source));
+      if (!m) {
+        throw new Error(
+          "`" + source + "` is not an aggregate: write count(), sum(field) or " +
+          "sum(an expression)"
+        );
+      }
+      const arg = m[2].trim();
+      return { alias: alias, fn: m[1], arg: arg === "" ? null : arg };
+    });
+  };
   const query = (state) => {
     const derive = (patch) => query(Object.assign({}, state, patch));
     const plan = (op, extra) => {
@@ -213,6 +233,9 @@ const db = (function () {
       if (state.select.length) p.select = state.select;
       if (state.order.length) p.order = state.order;
       if (state.group.length) p.group = state.group;
+      if (state.having.length === 1) p.having = state.having[0];
+      else if (state.having.length > 1) p.having = { and: state.having };
+      if (state.aggregate.length) p.aggregate = state.aggregate;
       if (state.limit !== null) p.limit = state.limit;
       if (state.offset !== null) p.offset = state.offset;
       return Object.assign(p, extra || {});
@@ -228,11 +251,35 @@ const db = (function () {
         );
       }
     };
-    const aggregate = (fn, arg) => {
+    // A scalar terminal is one nameless group: the same op, the same plan, the
+    // one value unwrapped. Grouped, there is no one value to unwrap, so it says
+    // so rather than answering the first group's.
+    const scalar = (fn, arg) => {
+      if (state.group.length || state.aggregate.length) {
+        throw new Error(
+          "." + fn + "() answers one value, and this query groups; ask for it by name: " +
+          '.aggregate({ ' + fn + ': "' + fn + "(" + (arg === undefined ? "" : arg) + ')" }).rows()'
+        );
+      }
       const r = send(plan("aggregate", {
         aggregate: [{ alias: "value", fn: fn, arg: arg === undefined ? null : arg }],
       }));
       return r === null || r === undefined || r.value === undefined ? null : r.value;
+    };
+    // What a terminal reads: the rows of a select, or the groups of an
+    // aggregate — which is one object when there is nothing to group by.
+    const read = (extra) => {
+      if (!state.aggregate.length) {
+        if (state.group.length) {
+          throw new Error(
+            "db." + state.table + ".groupBy(...) needs an .aggregate({ ... }): a group " +
+            "answers aggregate values, so say which"
+          );
+        }
+        return send(plan("select", extra));
+      }
+      const r = send(plan("aggregate", extra));
+      return Array.isArray(r) ? r : [r];
     };
     return {
       where: (c) => derive({ where: state.where.concat([condition(c)]) }),
@@ -241,20 +288,22 @@ const db = (function () {
       orderBy: (field, dir) =>
         derive({ order: state.order.concat([{ field: field, dir: dir === undefined ? "asc" : dir }]) }),
       groupBy: (...fields) => derive({ group: state.group.concat(fields) }),
+      aggregate: (spec) => derive({ aggregate: state.aggregate.concat(aggregates(spec)) }),
+      having: (c) => derive({ having: state.having.concat([condition(c)]) }),
       limit: (n) => derive({ limit: n }),
       offset: (n) => derive({ offset: n }),
       asUser: () => derive({ authority: "user" }),
       asAdmin: () => derive({ authority: "admin" }),
 
-      rows: () => send(plan("select")),
-      first: () => { const r = send(plan("select", { limit: 1 })); return r.length ? r[0] : null; },
+      rows: () => read(),
+      first: () => { const r = read({ limit: 1 }); return r.length ? r[0] : null; },
       get: (pk) => { const r = send(plan("select", { pk: pk, limit: 1 })); return r.length ? r[0] : null; },
       exists: () => send(plan("select", { limit: 1 })).length > 0,
-      count: () => aggregate("count"),
-      sum: (f) => aggregate("sum", f),
-      avg: (f) => aggregate("avg", f),
-      min: (f) => aggregate("min", f),
-      max: (f) => aggregate("max", f),
+      count: () => scalar("count"),
+      sum: (f) => scalar("sum", f),
+      avg: (f) => scalar("avg", f),
+      min: (f) => scalar("min", f),
+      max: (f) => scalar("max", f),
 
       insert: (values) => send(plan("insert", { values: values })),
       update: (values) => { bounded("update"); return send(plan("update", { values: values })); },
@@ -264,7 +313,8 @@ const db = (function () {
   const table = (authority, name) =>
     query({
       table: name, authority: authority,
-      where: [], select: [], order: [], group: [], limit: null, offset: null,
+      where: [], select: [], order: [], group: [], having: [], aggregate: [],
+      limit: null, offset: null,
     });
   // `db.table("x")` is the general form; `db.x` is a Proxy over the same call.
   const handle = (authority) => {
@@ -1186,6 +1236,92 @@ mod tests {
             json!([{ "alias": "value", "fn": "sum", "arg": "qty * price" }])
         );
         assert_eq!(plans[5]["values"], json!({ "title": "Orlando" }));
+    }
+
+    #[tokio::test]
+    async fn a_grouped_aggregate_is_one_plan_and_answers_rows() {
+        // The phase 6 chain: the group keys, the values written the way the
+        // formula language writes an aggregate, a bound on the groups, and rows
+        // out — one round trip, like every other terminal.
+        let host = FakeHost::new(|_| Ok(json!([{ "author": 1, "n": 3, "total": "42" }])));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_host(
+                r#"return db.books
+                     .where({ shelf: 2 })
+                     .groupBy("author")
+                     .aggregate({ n: "count()", total: "sum(price * qty)" })
+                     .having({ n: { gt: 2 } })
+                     .orderBy("n", "desc")
+                     .limit(10)
+                     .rows();"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!([{ "author": 1, "n": 3, "total": "42" }]));
+        let plans = host.plans();
+        assert_eq!(plans.len(), 1, "one terminal is one round trip");
+        assert_eq!(
+            plans[0],
+            json!({
+                "op": "aggregate",
+                "table": "books",
+                "authority": "admin",
+                "where": { "shelf": 2 },
+                "group": ["author"],
+                "having": { "n": { "gt": 2 } },
+                "aggregate": [
+                    { "alias": "n", "fn": "count", "arg": null },
+                    { "alias": "total", "fn": "sum", "arg": "price * qty" },
+                ],
+                "order": [ { "field": "n", "dir": "desc" } ],
+                "limit": 10
+            })
+        );
+
+        // Ungrouped, `.aggregate({…}).rows()` is the same plan without a `group`,
+        // and the host's one object reads back as the one row it is.
+        let host = FakeHost::new(|_| Ok(json!({ "n": 7 })));
+        let out = rt
+            .run(with_host(
+                r#"return db.books.aggregate({ n: "count()" }).rows();"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!([{ "n": 7 }]));
+    }
+
+    #[tokio::test]
+    async fn a_group_without_values_and_a_scalar_terminal_over_groups_are_both_refused() {
+        // Neither reaches the host: a group with nothing to compute is a
+        // question with no answer, and `.count()` over many groups has no one
+        // value to be.
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::new();
+        for (body, wanted) in [
+            (
+                r#"return db.books.groupBy("author").rows();"#,
+                "needs an .aggregate(",
+            ),
+            (
+                r#"return db.books.groupBy("author").count();"#,
+                "answers one value",
+            ),
+            (
+                r#"return db.books.aggregate({ n: "count" }).rows();"#,
+                "is not an aggregate",
+            ),
+        ] {
+            let err = rt
+                .run(with_host(body, &*host))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(wanted), "{err}");
+        }
+        assert!(host.plans().is_empty(), "nothing reached the host");
     }
 
     #[tokio::test]

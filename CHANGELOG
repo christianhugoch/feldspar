@@ -2,6 +2,56 @@
 
 Changes in reverse chronological order.
 
+## `db` in a code body can group
+
+`run_js_code`'s tables could answer "how many" and "how much" for a whole table; they could not
+answer "per customer" without reading every row into the isolate and counting them there. Now
+`.groupBy()` says what makes a group, `.aggregate()` says what to compute for each one, and
+`.rows()` answers **one row per group** with the keys beside the values:
+
+```js
+db.invoices
+  .where({ paid: false })
+  .groupBy("customerⱵemail")                        // a field, a Ⱶ-path or a formula
+  .aggregate({ n: "count()", owed: "sum(amount)" })
+  .having({ n: { gt: 1 } })
+  .orderBy("owed", "desc")
+  .rows();
+```
+
+**The scalar terminals became sugar for it.** `.count()`, `.sum(f)`, `.avg(f)`, `.min(f)` and
+`.max(f)` are the same plan, the same host function and the same statement with nothing to group
+by — so the filter, the row cap, the caller context and the delegated refusal are decided in one
+place rather than in two that could drift. `rows::aggregate_grouped` is that place, and
+`rows::aggregate_values` is now a call to it that takes the one row a scalar aggregate has.
+`RowQuery` grew `group` and `having` to carry the question, which the existing `Select` already
+knew how to render — grouping is the only part of this milestone that touched the read struct at
+all.
+
+**`having` is the filter object, over the aggregate's own names.** `{ n: { gt: 1 } }` means what
+it means everywhere else, because it goes through the same walk in `sc_api::filter` — which grew
+an `Operand` for the one thing that is new here: `count()` stands behind no column, so its
+operand is read by its own JSON shape instead of being coerced against a type it does not have.
+A `having` key that is not one of *this* aggregate's aliases is refused naming the ones that are,
+and says that a condition on the rows belongs in `.where()`, which means the same thing for less
+work. An `.orderBy()` may name an alias too, and the aggregate is repeated in the clause rather
+than named, since an output alias is not in scope in a `HAVING` on any database and not in an
+`ORDER BY` on some.
+
+**The bounds and the authority did not move.** Groups are rows, so the row cap refuses a read
+that would materialise more of them than a body may hold; a `.groupBy()` on a row read or a write
+is refused rather than ignored, as an unfiltered `.update()` is; two values under one alias is
+refused rather than silently answered as one; and a delegated grouped aggregate over a table
+whose ownership formula the translator cannot lower is refused for exactly the reason an
+ungrouped one is — the guard narrows the *rows*, and the grouping only partitions what is left.
+
+Tested where each claim lives: the prelude lowering one chain to one plan (and refusing
+`.count()` over groups, and `.groupBy()` with nothing to compute); the plan becoming a `SELECT`
+with the Ⱶ-path group key in both the projection and the `GROUP BY`; the statement answering, per
+group, against a real Postgres; the delegated case counting only the caller's rows and refusing
+where §5 says it must; the tutorial's own grouped example, executed; and the whole thing through
+the admin's **Run** button.
+
 ## The admin copilot writes an application's SQL endpoints, and is scoped by area
 
 `admin_copilot` reached the catalog, then the trigger set. It now reaches the third thing an admin

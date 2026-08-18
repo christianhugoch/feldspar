@@ -372,19 +372,40 @@ pub async fn aggregate_values_as(
     role: u8,
     user: Option<&User>,
 ) -> Result<BTreeMap<String, Value>> {
+    let query = rows::RowQuery::new().where_(filter);
+    let grouped = aggregate_grouped_as(cat, table, aggregates, &query, role, user).await?;
+    Ok(grouped.into_iter().next().unwrap_or_default())
+}
+
+/// [`aggregate_values_as`] **per group**: the same rule over
+/// [`rows::aggregate_grouped`], answering one row per group.
+///
+/// The rule does not change with the grouping, and that is worth saying rather
+/// than assuming: [`aggregate_guard`] narrows the *rows* the aggregate ranges
+/// over — in the `WHERE`, or through the database's own policies — and the
+/// `GROUP BY` then partitions whatever is left. So a caller whose access comes
+/// from an untranslatable ownership formula is refused here for exactly the
+/// reason an ungrouped count is: a per-group number computed over rows it could
+/// not filter would be several numbers nobody can check instead of one.
+pub async fn aggregate_grouped_as(
+    cat: &Catalog,
+    table: &Table,
+    projections: Vec<Projection>,
+    query: &rows::RowQuery,
+    role: u8,
+    user: Option<&User>,
+) -> Result<Vec<BTreeMap<String, Value>>> {
     match aggregate_guard(cat, table, &table.name, role, user)? {
         AggregateGuard::InContext => {
             let ctx = caller_context_at(role, user);
-            rows::aggregate_values(cat, table, aggregates, filter, Some(&ctx)).await
+            rows::aggregate_grouped(cat, table, projections, query, Some(&ctx)).await
         }
         AggregateGuard::Predicate(pred) => {
-            // Both, or whichever there is: `Option::or` on the tail, since with
-            // one of them absent the other is the whole filter.
-            let filter = match (filter, pred) {
-                (Some(a), Some(b)) => Some(a.and(b)),
-                (a, b) => a.or(b),
+            let query = match pred {
+                Some(pred) => query.clone().and_filter(pred),
+                None => query.clone(),
             };
-            rows::aggregate_values(cat, table, aggregates, filter, None).await
+            rows::aggregate_grouped(cat, table, projections, &query, None).await
         }
     }
 }

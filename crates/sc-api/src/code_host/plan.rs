@@ -79,9 +79,14 @@ pub struct Plan {
     /// `ORDER BY` keys, in precedence order.
     #[serde(default)]
     pub order: Vec<OrderKey>,
-    /// Grouping keys (phase 6).
+    /// Grouping keys: a field, a Ⱶ-path or a formula, one answer row per
+    /// distinct combination of them.
     #[serde(default)]
     pub group: Vec<String>,
+    /// The bound on the **groups** — the object DSL again, but keyed by this
+    /// aggregate's own aliases rather than by columns.
+    #[serde(default)]
+    pub having: Option<Json>,
     /// The bound the body asked for.
     #[serde(default)]
     pub limit: Option<u64>,
@@ -239,14 +244,23 @@ pub(crate) struct Write {
     pub(crate) values: Option<Json>,
 }
 
-/// An `aggregate` plan, resolved.
+/// An `aggregate` plan, resolved — grouped or not, which is one field of it
+/// rather than two structures (§the phase 6 rule: the scalar terminals are sugar
+/// for the grouped path with nothing to group by).
 pub(crate) struct Aggregate {
     /// The table being aggregated.
     pub(crate) table: Table,
-    /// One projection per requested value, aliased by its key.
+    /// One projection per group key and one per requested value, each aliased by
+    /// the key it rides back under.
     pub(crate) projections: Vec<Projection>,
-    /// Which rows it ranges over.
-    pub(crate) filter: Option<Expr>,
+    /// Which rows it ranges over, grouped how, ordered and bounded how.
+    pub(crate) query: RowQuery,
+    /// The answer's keys — the group keys first, then the values — in the order
+    /// the plan named them.
+    pub(crate) keys: Vec<String>,
+    /// Whether the plan grouped. An ungrouped aggregate is **one object** (the
+    /// shape `.count()` has always answered); a grouped one is a row per group.
+    pub(crate) grouped: bool,
 }
 
 /// Resolve a `select` plan against the catalog.
@@ -299,7 +313,7 @@ pub(crate) fn read(cat: &Catalog, plan: &Plan, limits: &HostLimits, role: u8) ->
     }
     query = query.order_by(order);
 
-    refuse_grouping(plan)?;
+    refuse_grouping(plan, "a row read")?;
     query = query.limit(bounded_limit(plan, limits, &table)?);
     if let Some(offset) = plan.offset {
         query = query.offset(offset);
@@ -312,19 +326,40 @@ pub(crate) fn read(cat: &Catalog, plan: &Plan, limits: &HostLimits, role: u8) ->
     })
 }
 
-/// Resolve an `aggregate` plan against the catalog.
-pub(crate) fn aggregate(cat: &Catalog, plan: &Plan, role: u8) -> Result<Aggregate> {
+/// Resolve an `aggregate` plan against the catalog — `.count()` and
+/// `.groupBy(…).aggregate({ … })` alike, which is one function because they are
+/// one statement with and without a `GROUP BY`.
+pub(crate) fn aggregate(
+    cat: &Catalog,
+    plan: &Plan,
+    limits: &HostLimits,
+    role: u8,
+) -> Result<Aggregate> {
     let table = cat.require(&plan.table)?;
     let low = Lowering::new(cat, &table, role)?;
     let filter = low.filter(plan.filter.as_ref())?;
-    refuse_grouping(plan)?;
     if plan.aggregate.is_empty() {
         return Err(Error::invalid(format!(
             "this aggregate names no value to compute over `{}`",
             table.name
         )));
     }
-    let mut projections = Vec::with_capacity(plan.aggregate.len());
+    let grouped = !plan.group.is_empty();
+    let mut projections = Vec::with_capacity(plan.group.len() + plan.aggregate.len());
+    let mut keys: Vec<String> = Vec::with_capacity(projections.capacity());
+    let mut group = Vec::with_capacity(plan.group.len());
+    // The group keys are projected as well as grouped by: a body reading back
+    // `{ n: 3 }` with no idea which author it counted would have to ask again.
+    for name in &plan.group {
+        let expr = low.value_expr(name)?;
+        group.push(expr.clone());
+        projections.push(Projection::expr_as(expr, name.clone()));
+        keys.push(name.clone());
+    }
+    // Alias → the aggregate it stands for, which is what a `having` compares:
+    // Postgres will not read an output alias in a `HAVING`, so the expression is
+    // repeated there rather than named.
+    let mut aggregates: BTreeMap<String, Expr> = BTreeMap::new();
     for spec in &plan.aggregate {
         let func = agg_func(&spec.func, &table)?;
         let value = match &spec.arg {
@@ -337,10 +372,19 @@ pub(crate) fn aggregate(cat: &Catalog, plan: &Plan, role: u8) -> Result<Aggregat
                 )));
             }
         };
-        projections.push(Projection::expr_as(
-            aggregate_expr(&func, false, value, &table.name)?,
-            spec.alias.clone(),
-        ));
+        let expr = aggregate_expr(&func, false, value, &table.name)?;
+        // Two values under one key is one value lost on the way back through
+        // JSON, so it is refused here rather than silently answered.
+        if keys.contains(&spec.alias) {
+            return Err(Error::invalid(format!(
+                "`{}` is asked for twice in this aggregate over `{}`; give each value its \
+                 own name",
+                spec.alias, table.name
+            )));
+        }
+        projections.push(Projection::expr_as(expr.clone(), spec.alias.clone()));
+        keys.push(spec.alias.clone());
+        aggregates.insert(spec.alias.clone(), expr);
     }
     // An aggregate is one `SELECT` with no room for a per-row decision, so a
     // projection that would need the caller's GUCs set cannot be honoured here
@@ -354,10 +398,35 @@ pub(crate) fn aggregate(cat: &Catalog, plan: &Plan, role: u8) -> Result<Aggregat
             table.name
         )));
     }
+
+    let mut query = RowQuery::new()
+        .where_(filter)
+        .group_by(group)
+        .having(low.having(plan.having.as_ref(), &aggregates)?);
+    // An ordering and a bound belong to a **grouped** aggregate, which answers
+    // many rows; over the single row of a scalar aggregate they say nothing, and
+    // an `ORDER BY` on a column that is in no `GROUP BY` is not even a statement.
+    if grouped {
+        let mut order = Vec::with_capacity(plan.order.len());
+        for key in &plan.order {
+            order.push(match key.dir {
+                Dir::Asc => OrderBy::asc(low.grouped_expr(&key.field, &aggregates)?),
+                Dir::Desc => OrderBy::desc(low.grouped_expr(&key.field, &aggregates)?),
+            });
+        }
+        query = query
+            .order_by(order)
+            .limit(bounded_limit(plan, limits, &table)?);
+        if let Some(offset) = plan.offset {
+            query = query.offset(offset);
+        }
+    }
     Ok(Aggregate {
         table,
         projections,
-        filter,
+        query,
+        keys,
+        grouped,
     })
 }
 
@@ -515,7 +584,7 @@ fn refuse_read_shaping(plan: &Plan, op: &str, matches_rows: bool) -> Result<()> 
             plan.table
         )));
     }
-    refuse_grouping(plan)
+    refuse_grouping(plan, &format!("an `{op}`"))
 }
 
 /// The row cap, applied to the plan's own bound.
@@ -539,16 +608,26 @@ fn bounded_limit(plan: &Plan, limits: &HostLimits, table: &Table) -> Result<u64>
     }
 }
 
-/// Grouped aggregation is phase 6; until then a `group` is refused rather than
-/// quietly ignored, which would answer one row where the body expected many.
-fn refuse_grouping(plan: &Plan) -> Result<()> {
-    match plan.group.is_empty() {
-        true => Ok(()),
-        false => Err(Error::invalid(
-            "`.groupBy()` is not available yet: aggregate in your code body, or \
-             aggregate once per group",
-        )),
+/// `.groupBy()` and `.having()` shape a **grouped aggregate** and mean nothing
+/// anywhere else, so they are refused rather than quietly ignored — a row read
+/// that dropped a `.groupBy()` would answer every row where the body expected one
+/// per group, which is a wrong answer that looks right.
+fn refuse_grouping(plan: &Plan, what: &str) -> Result<()> {
+    if !plan.group.is_empty() {
+        return Err(Error::invalid(format!(
+            "`.groupBy()` has no meaning in {what} of `{}`: a group answers aggregate \
+             values, so say which — `.groupBy(\"author\").aggregate({{ n: \"count()\" }}).rows()`",
+            plan.table
+        )));
     }
+    if plan.having.is_some() {
+        return Err(Error::invalid(format!(
+            "`.having()` bounds the groups of an aggregate and has no meaning in {what} of \
+             `{}` — filter the rows with `.where()` instead",
+            plan.table
+        )));
+    }
+    Ok(())
 }
 
 /// The aggregate a plan named, by the names the chain's terminals use.
@@ -673,6 +752,60 @@ impl<'a> Lowering<'a> {
             ))),
             None => self.formula_value(source),
         }
+    }
+
+    /// One `ORDER BY` key of a **grouped** aggregate.
+    ///
+    /// An alias of the aggregate wins over a field of the table, which is the
+    /// opposite of the rule a filter key follows and right for the same reason it
+    /// is right there: the rows a grouped aggregate answers *are* its aliases, so
+    /// `.orderBy("n")` beside `{ n: "count()" }` can only mean the count — and a
+    /// bare column that is in no `GROUP BY` would not be a statement at all. The
+    /// aggregate is repeated rather than named, because the alias is not in scope
+    /// in the clause the ordering compiles to on every database.
+    fn grouped_expr(&self, name: &str, aggregates: &BTreeMap<String, Expr>) -> Result<Expr> {
+        match aggregates.get(name) {
+            Some(expr) => Ok(expr.clone()),
+            None => self.value_expr(name),
+        }
+    }
+
+    /// The `HAVING` a plan asked for: the same filter object, over this
+    /// aggregate's own values.
+    ///
+    /// The keys are the aliases and **only** the aliases. A condition on a group
+    /// key is a condition on the rows, which is what `.where()` says, and saying
+    /// it here would compute the groups before throwing most of them away; a
+    /// condition on anything else is a name that is not in the answer. Both are
+    /// refused naming the values that exist.
+    ///
+    /// The operand has no column behind it — `count()` is a number, not a value
+    /// of anything — so it is read by its own JSON shape through
+    /// [`filter::Operand::Untyped`], while everything else about the condition
+    /// (the operators, the null tests, the combinators) is the one shared walk.
+    fn having(
+        &self,
+        having: Option<&Json>,
+        aggregates: &BTreeMap<String, Expr>,
+    ) -> Result<Option<Expr>> {
+        filter::where_resolved(&self.table, &[], having, &|key, condition| {
+            let Some(expr) = aggregates.get(key) else {
+                return Err(Error::invalid(format!(
+                    "`{key}` is not one of this aggregate's values ({}) — a condition on a \
+                     group key or a column belongs in `.where()`",
+                    aggregates
+                        .keys()
+                        .map(|a| format!("`{a}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            };
+            Ok(Some(FilterKey::Predicate(filter::condition_on(
+                &filter::Operand::Untyped { alias: key },
+                expr.clone(),
+                condition,
+            )?)))
+        })
     }
 
     /// A formula in value position: parsed, validated against the schema shape

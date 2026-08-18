@@ -481,12 +481,29 @@ assignments. Every terminal is one plan and one round trip.
 
 ## Phase 6 — Grouped aggregation (optional; the only part that changes `RowQuery`)
 
-- [ ] `RowQuery` gains `group: Vec<Expr>` and `having: Option<Expr>`, rendered by the existing
+- [x] `RowQuery` gains `group: Vec<Expr>` and `having: Option<Expr>`, rendered by the existing
       `Select`; `rows::aggregate_grouped` returns one row per group.
-- [ ] `.groupBy(...).aggregate({ n: "count()", total: "sum(price * qty)" }).rows()`.
-- [ ] The ungrouped terminals (`.count()`, `.sum(f)`, …) become sugar for the same path.
-- [ ] Tests: grouped counts and sums with a filter and an ordering; a group key that is a
+- [x] `.groupBy(...).aggregate({ n: "count()", total: "sum(price * qty)" }).rows()`.
+- [x] The ungrouped terminals (`.count()`, `.sum(f)`, …) become sugar for the same path —
+      `rows::aggregate_values` and `ownership::aggregate_values_as` are now the grouped
+      functions called with nothing to group by, so the filter, the row cap, the caller
+      context and §5's refusal are decided once.
+- [x] Tests: grouped counts and sums with a filter and an ordering; a group key that is a
       Ⱶ-path; the delegated case refuses for the same reason an ungrouped aggregate does.
+- [x] *Not on the list, and what `having` needed*: **the filter object had one coercion.**
+      Every operand it lowered was a value of a column, coerced against it — and `count()`
+      stands behind no column. So `sc_api::filter` gained an `Operand` (a column, or untyped
+      by its own JSON shape) and the comparison walk takes one, which keeps `{ gt: 3 }`
+      meaning one thing wherever it is written instead of growing a second walk for `having`.
+      A `having` key is an alias of *this* aggregate and only that: a condition on a group key
+      is a condition on the rows, which `.where()` says for less, and both refusals name the
+      values that exist.
+- [x] *Also not on the list*: an `.orderBy()` over a grouped read may name an aggregate's
+      alias (the expression is repeated, since an alias is not in scope in a `HAVING` and not
+      portably in an `ORDER BY`); groups are bounded by the row cap as rows are; a `.groupBy()`
+      on a row read or a write is refused rather than ignored; and two values under one alias
+      is refused rather than answered as one. Documented in §10.1 and in
+      `docs/tutorial-triggers.md`, whose grouped example is executed by `tutorial_triggers.rs`.
 
 ---
 

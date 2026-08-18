@@ -221,6 +221,67 @@ async fn the_scalar_terminals_answer_one_value_each() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_grouped_aggregate_answers_one_row_per_group() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+    let host = TableHost::new(&catalog);
+
+    // `db.books.where({ pages: { gt: 200 } }).groupBy("author")
+    //     .aggregate({ n: "count()", pages: "sum(pages)" }).orderBy("n", "desc").rows()`
+    let rows = ask(
+        &host,
+        json!({
+            "op": "aggregate", "table": "books",
+            "where": { "pages": { "gt": 200 } },
+            "group": ["author"],
+            "aggregate": [
+                { "alias": "n", "fn": "count", "arg": Json::Null },
+                { "alias": "pages", "fn": "sum", "arg": "pages" },
+            ],
+            "order": [ { "field": "n", "dir": "desc" }, { "field": "author" } ],
+        }),
+    )
+    .await?;
+    assert_eq!(
+        rows,
+        json!([
+            { "author": 1, "n": 2, "pages": "630" },
+            { "author": 2, "n": 1, "pages": "412" },
+        ]),
+        "the key rides back beside the values, and a sum is exact"
+    );
+
+    // A group key may be a Ⱶ-path, which is the correlated subquery a projection
+    // would be — grouped by the expression, since an alias is not in scope there.
+    // And `.having()` bounds the groups, in terms of the values and not the rows.
+    let rows = ask(
+        &host,
+        json!({
+            "op": "aggregate", "table": "books",
+            "group": ["authorⱵname"],
+            "aggregate": [ { "alias": "n", "fn": "count", "arg": Json::Null } ],
+            "having": { "n": { "gt": 1 } },
+            "order": [ { "field": "authorⱵname" } ],
+        }),
+    )
+    .await?;
+    assert_eq!(rows, json!([{ "authorⱵname": "Woolf", "n": 2 }]));
+
+    // The ungrouped terminals are the same path with nothing to group by, and
+    // keep answering one object rather than a row per group.
+    let one = ask(
+        &host,
+        json!({
+            "op": "aggregate", "table": "books",
+            "aggregate": [ { "alias": "value", "fn": "count", "arg": Json::Null } ],
+        }),
+    )
+    .await?;
+    assert_eq!(one, json!({ "value": 3 }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_row_cap_refuses_rather_than_truncating() -> Result<()> {
     let db = TestDb::new().await?;
     let catalog = setup(&db).await?;
@@ -257,6 +318,19 @@ async fn the_row_cap_refuses_rather_than_truncating() -> Result<()> {
     .await
     .expect_err("the cap refuses");
     assert!(err.to_string().contains("2 rows at once"), "{err}");
+
+    // Groups are rows too: three of them do not fit under a cap of two either,
+    // and a scalar aggregate — one row by construction — is never bounded.
+    let err = ask(
+        &host,
+        json!({
+            "op": "aggregate", "table": "books", "group": ["id"],
+            "aggregate": [ { "alias": "n", "fn": "count", "arg": Json::Null } ],
+        }),
+    )
+    .await
+    .expect_err("the cap refuses");
+    assert!(err.to_string().contains("grouping `books`"), "{err}");
     Ok(())
 }
 

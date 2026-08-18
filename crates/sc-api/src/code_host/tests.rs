@@ -93,10 +93,12 @@ async fn refusal(plan: Json) -> String {
         // request is: at the boundary, by serde, naming the field.
         Err(e) => format!("{e}"),
         Ok(plan) => match plan.op {
-            super::Op::Aggregate => plan::aggregate(&cat, &plan, ROLE_ADMIN)
-                .err()
-                .expect("this plan is refused")
-                .to_string(),
+            super::Op::Aggregate => {
+                plan::aggregate(&cat, &plan, &HostLimits::default(), ROLE_ADMIN)
+                    .err()
+                    .expect("this plan is refused")
+                    .to_string()
+            }
             super::Op::Insert => plan::insert(&cat, &plan, &HostLimits::default())
                 .err()
                 .expect("this plan is refused")
@@ -127,6 +129,21 @@ fn rendered(read: &Read) -> (String, Vec<Value>) {
     select.order = read.query.order.clone();
     select.limit = read.query.limit;
     select.offset = read.query.offset;
+    Pg.render(&Statement::Select(Box::new(select)))
+        .expect("renders")
+}
+
+/// The `SELECT` an aggregate lowers to — the projections, the grouping, the
+/// bound on the groups and the query's own order and limit.
+fn rendered_aggregate(agg: &plan::Aggregate) -> (String, Vec<Value>) {
+    let mut select =
+        Select::from(Source::table(agg.table.name.clone())).columns(agg.projections.clone());
+    select.filter = agg.query.filter.clone();
+    select.group = agg.query.group.clone();
+    select.having = agg.query.having.clone();
+    select.order = agg.query.order.clone();
+    select.limit = agg.query.limit;
+    select.offset = agg.query.offset;
     Pg.render(&Statement::Select(Box::new(select)))
         .expect("renders")
 }
@@ -357,14 +374,9 @@ async fn an_aggregate_plan_is_one_projection_per_value_over_the_filtered_rows() 
         ],
     }))
     .expect("a plan");
-    let agg = plan::aggregate(&cat, &plan, ROLE_ADMIN).expect("resolves");
-    let mut select = Select::from(Source::table("books")).columns(agg.projections);
-    if let Some(filter) = agg.filter {
-        select = select.filter(filter);
-    }
-    let (sql, _) = Pg
-        .render(&Statement::Select(Box::new(select)))
-        .expect("renders");
+    let agg = plan::aggregate(&cat, &plan, &HostLimits::default(), ROLE_ADMIN).expect("resolves");
+    assert!(!agg.grouped, "nothing to group by is one row");
+    let (sql, _) = rendered_aggregate(&agg);
     assert!(
         sql.contains("COALESCE(sum(\"pages\"), $1) AS \"value\""),
         "{sql}"
@@ -372,6 +384,92 @@ async fn an_aggregate_plan_is_one_projection_per_value_over_the_filtered_rows() 
     assert!(sql.contains("count(*) AS \"n\""), "{sql}");
     assert!(sql.contains("max((\"books\".\"price\" * $"), "{sql}");
     assert!(sql.contains("WHERE (\"author\" = $"), "{sql}");
+}
+
+#[tokio::test]
+async fn a_grouped_aggregate_projects_its_keys_beside_its_values_and_bounds_the_groups() {
+    // `db.books.where({ pages: { gt: 100 } }).groupBy("authorⱵname")
+    //     .aggregate({ n: "count()", pages: "sum(pages)" })
+    //     .having({ n: { gt: 1 } }).orderBy("n", "desc").limit(5).rows()`
+    let cat = library().await;
+    let plan: Plan = serde_json::from_value(json!({
+        "op": "aggregate",
+        "table": "books",
+        "where": { "pages": { "gt": 100 } },
+        "group": ["authorⱵname"],
+        "aggregate": [
+            { "alias": "n", "fn": "count", "arg": Json::Null },
+            { "alias": "pages", "fn": "sum", "arg": "pages" },
+        ],
+        "having": { "n": { "gt": 1 } },
+        "order": [ { "field": "n", "dir": "desc" } ],
+        "limit": 5,
+    }))
+    .expect("a plan");
+    let agg = plan::aggregate(&cat, &plan, &HostLimits::default(), ROLE_ADMIN).expect("resolves");
+    assert!(agg.grouped);
+    assert_eq!(agg.keys, vec!["authorⱵname", "n", "pages"], "keys in order");
+    let (sql, binds) = rendered_aggregate(&agg);
+
+    // The group key is a Ⱶ-path, so it is the same correlated subquery a
+    // projection or an ordering would be — projected under the path itself and
+    // grouped by the expression, because an output alias is not in scope there.
+    let joined = "(SELECT \"_sc_j1\".\"name\" FROM \"authors\" AS \"_sc_j1\" \
+                  WHERE (\"_sc_j1\".\"id\" = \"books\".\"author\"))";
+    assert!(
+        sql.contains(&format!("{joined} AS \"authorⱵname\"")),
+        "{sql}"
+    );
+    assert!(sql.contains(&format!("GROUP BY {joined}")), "{sql}");
+    // The values, the bound on the groups (the aggregate repeated, not the
+    // alias), the ordering by one of them, and the limit.
+    assert!(sql.contains("count(*) AS \"n\""), "{sql}");
+    assert!(sql.contains("AS \"pages\""), "{sql}");
+    assert!(sql.contains("HAVING (count(*) > $"), "{sql}");
+    assert!(sql.contains("ORDER BY count(*) DESC"), "{sql}");
+    assert!(sql.contains("LIMIT $"), "{sql}");
+    assert!(
+        binds.contains(&Value::Int(100)) && binds.contains(&Value::Int(1)),
+        "{binds:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_grouped_read_is_bounded_and_its_having_names_only_its_own_values() {
+    // Without a `.limit()` a grouped aggregate asks for one group more than the
+    // cap, exactly as a row read does — the groups are materialised too.
+    let cat = library().await;
+    let plan: Plan = serde_json::from_value(json!({
+        "op": "aggregate", "table": "books", "group": ["author"],
+        "aggregate": [ { "alias": "n", "fn": "count" } ],
+    }))
+    .expect("a plan");
+    let agg = plan::aggregate(&cat, &plan, &HostLimits::default(), ROLE_ADMIN).expect("resolves");
+    assert_eq!(agg.query.limit, Some(super::DEFAULT_MAX_ROWS + 1));
+
+    // A `having` on a column is a condition on the rows, which `.where()` says
+    // for less; it is refused naming the values that are there.
+    let refused = refusal(json!({
+        "op": "aggregate", "table": "books", "group": ["author"],
+        "aggregate": [ { "alias": "n", "fn": "count" } ],
+        "having": { "pages": { "gt": 10 } },
+    }))
+    .await;
+    assert!(
+        refused.contains("`pages`") && refused.contains("`n`") && refused.contains(".where()"),
+        "{refused}"
+    );
+
+    // Two values under one name is one value lost on the way back through JSON.
+    let twice = refusal(json!({
+        "op": "aggregate", "table": "books",
+        "aggregate": [
+            { "alias": "n", "fn": "count" },
+            { "alias": "n", "fn": "sum", "arg": "pages" },
+        ],
+    }))
+    .await;
+    assert!(twice.contains("asked for twice"), "{twice}");
 }
 
 #[tokio::test]
@@ -448,9 +546,18 @@ async fn every_refusal_names_what_was_wrong_with_the_plan() {
     .await;
     assert!(ambient.contains("`user`"), "{ambient}");
 
-    // Phase 6 and phase 3/4, refused rather than quietly ignored.
+    // Grouping shapes an aggregate and nothing else, so a row read carrying one
+    // is refused rather than quietly answering every row.
     let grouped = refusal(json!({ "op": "select", "table": "books", "group": ["author"] })).await;
-    assert!(grouped.contains("groupBy"), "{grouped}");
+    assert!(
+        grouped.contains(".groupBy()") && grouped.contains("aggregate"),
+        "{grouped}"
+    );
+    let having = refusal(json!({
+        "op": "select", "table": "books", "having": { "n": { "gt": 1 } },
+    }))
+    .await;
+    assert!(having.contains(".having()"), "{having}");
 }
 
 #[tokio::test]

@@ -109,6 +109,23 @@ return { swept: stale.length, left: db.tasks.where({ done: false }).count() };
     )
 }
 
+/// The tutorial's grouped read, verbatim: one row per owner, bounded by a
+/// condition on the count rather than on the rows.
+fn open_by_owner() -> Trigger {
+    Trigger::new("open_by_owner", EventKind::None, "run_js_code").config(
+        "code",
+        r#"
+return db.tasks
+  .where({ done: false })
+  .groupBy("owner")
+  .aggregate({ open: "count()" })
+  .having({ open: { gt: 1 } })
+  .orderBy("open", "desc")
+  .rows();
+"#,
+    )
+}
+
 struct Tutorial {
     catalog: Arc<Catalog>,
     dispatcher: Arc<TriggerDispatcher>,
@@ -173,6 +190,7 @@ async fn setup() -> Result<Tutorial> {
         archive_done(),
         nightly_sweep(),
         sweep_report(),
+        open_by_owner(),
     ] {
         save_trigger(&catalog, &registry, &trigger).await?;
     }
@@ -335,6 +353,39 @@ async fn the_code_body_reads_the_tasks_and_writes_an_audit_row_for_each() -> Res
     assert!(
         audit.iter().all(|(_, _, who)| who == member),
         "the owner rode along: {audit:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_grouped_read_answers_one_row_per_owner_as_the_document_prints_it() -> Result<()> {
+    let t = setup().await?;
+    let tasks = t.catalog.require("tasks")?;
+    // Two open tasks for the member, one for somebody else and one already done:
+    // enough for the `.where()`, the grouping and the `.having()` each to be
+    // doing something the reader can check by hand.
+    for (title, done, owner) in [
+        ("Draft the report", false, "member@example.com"),
+        ("Book the venue", false, "member@example.com"),
+        ("Renew the domain", false, "other@example.com"),
+        ("File the accounts", true, "member@example.com"),
+    ] {
+        rows::create_row(
+            &t.catalog,
+            &tasks,
+            &json!({ "title": title, "done": done, "owner": owner }),
+        )
+        .await?;
+    }
+
+    let result = t
+        .dispatcher
+        .run_trigger(&t.catalog, "open_by_owner", json!({}), None)
+        .await?;
+    assert_eq!(
+        result,
+        json!([{ "owner": "member@example.com", "open": 2 }]),
+        "the line the tutorial prints under the box: {result}"
     );
     Ok(())
 }

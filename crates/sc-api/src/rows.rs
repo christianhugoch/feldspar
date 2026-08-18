@@ -139,6 +139,20 @@ pub struct RowQuery {
     /// A bound applied **within each group** of rows rather than to the read as
     /// a whole. `None` for every ordinary read.
     pub partition: Option<Partition>,
+    /// `GROUP BY` keys, for an **aggregate** read ([`aggregate_grouped`]): one
+    /// answer row per distinct combination of these.
+    ///
+    /// Empty for every row read, and necessarily so — a row read projects the
+    /// table's own columns, and `SELECT *, count(*) … GROUP BY x` is not a
+    /// statement. Grouping lives on this struct rather than beside the
+    /// aggregate's projections because the rest of the question is the same one
+    /// a row read asks — which rows, in what order, how many at most — and a
+    /// second struct for it would be that question answered twice.
+    pub group: Vec<Expr>,
+    /// `HAVING`: the bound on the **groups** rather than on the rows, so it is
+    /// written in terms of the aggregates and not of the columns. `None` for
+    /// every read that is not a grouped aggregate.
+    pub having: Option<Expr>,
     /// Whether this read must run inside a caller-context transaction even
     /// though its own table is not protected by row-level security.
     ///
@@ -226,6 +240,19 @@ impl RowQuery {
         self
     }
 
+    /// Group an [`aggregate_grouped`] read by these keys — one answer row per
+    /// distinct combination.
+    pub fn group_by(mut self, group: Vec<Expr>) -> RowQuery {
+        self.group = group;
+        self
+    }
+
+    /// Keep only the groups this predicate admits (`HAVING`).
+    pub fn having(mut self, having: Option<Expr>) -> RowQuery {
+        self.having = having;
+        self
+    }
+
     /// Require this read to run inside a caller-context transaction — see
     /// [`in_caller_context`](Self::in_caller_context). `false` leaves the
     /// decision where it normally lives, with the table.
@@ -299,8 +326,9 @@ pub async fn list_row_values(
 /// expressions themselves come from `sc_expr`'s shared builder, so the wire and
 /// a formula answer the same question the same way.
 ///
-/// A scalar aggregate always has exactly one row; an empty result would mean the
-/// database answered something else, and the empty map that comes back then
+/// A scalar aggregate always has exactly one row — it is
+/// [`aggregate_grouped`] with nothing to group by — and an empty result would
+/// mean the database answered something else; the empty map that comes back then
 /// resolves as nulls rather than as invented zeroes.
 pub async fn aggregate_values(
     catalog: &Catalog,
@@ -309,12 +337,41 @@ pub async fn aggregate_values(
     filter: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<std::collections::BTreeMap<String, Value>> {
-    let mut select = Select::from(Source::table(table.name.clone())).columns(aggregates);
-    if let Some(filter) = filter {
-        select = select.filter(filter);
-    }
-    let rows = run_read(catalog, table, &select, context, false).await?;
-    Ok(rows.first().map(row_values).unwrap_or_default())
+    let query = RowQuery::new().where_(filter);
+    let grouped = aggregate_grouped(catalog, table, aggregates, &query, context).await?;
+    Ok(grouped.into_iter().next().unwrap_or_default())
+}
+
+/// [`aggregate_values`] **per group**: `projections` computed over the rows
+/// `query` leaves, once for each distinct combination of its
+/// [`group`](RowQuery::group) keys, in the query's own order and bound.
+///
+/// One row per group rather than one row full stop, which is the only difference
+/// — and the reason it is the general function and the scalar one is sugar for
+/// it: `db.orders.groupBy("customer").aggregate({ n: "count()" }).rows()` and
+/// `db.orders.count()` are the same statement with and without a `GROUP BY`, and
+/// two builders for that would be two places for the filter, the ordering or the
+/// caller context to be applied differently.
+///
+/// The grouping keys are `query.group`, and the caller projects them too if it
+/// wants them in the answer: a group key is an expression, and only the caller
+/// knows the name it wants to read the value back under.
+pub async fn aggregate_grouped(
+    catalog: &Catalog,
+    table: &Table,
+    projections: Vec<Projection>,
+    query: &RowQuery,
+    context: Option<&CallerContext>,
+) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
+    let mut select = Select::from(Source::table(table.name.clone())).columns(projections);
+    select.filter = query.filter.clone();
+    select.group = query.group.clone();
+    select.having = query.having.clone();
+    select.order = query.order.clone();
+    select.limit = query.limit;
+    select.offset = query.offset;
+    let rows = run_read(catalog, table, &select, context, query.in_caller_context).await?;
+    Ok(rows.iter().map(row_values).collect())
 }
 
 /// The alias `count_rows` reads its one value back under. Structural — chosen

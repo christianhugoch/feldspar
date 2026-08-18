@@ -190,6 +190,21 @@ async fn a_delegated_read_sees_only_the_rows_the_formula_grants() -> Result<()> 
     )
     .await?;
     assert_eq!(counted, json!({ "value": 2 }));
+
+    // Grouping does not change the rule, it partitions what is left of it: the
+    // formula narrows the rows, and only then are the groups formed. Ada's two
+    // books group into one owner; the table's four would group into two.
+    let grouped = ask(
+        &host,
+        json!({
+            "op": "aggregate", "table": "books", "authority": "user",
+            "group": ["owner"],
+            "aggregate": [ { "alias": "n", "fn": "count" } ],
+            "order": [ { "field": "owner" } ],
+        }),
+    )
+    .await?;
+    assert_eq!(grouped, json!([{ "owner": "ada@example.com", "n": 2 }]));
     Ok(())
 }
 
@@ -509,6 +524,24 @@ async fn a_delegated_aggregate_over_an_untranslatable_formula_says_where_to_put_
     );
     assert!(message.contains("`.rows()`"), "{message}");
     assert!(message.contains("code body"), "{message}");
+
+    // A grouped aggregate is refused for the very same reason — the guard is
+    // asked before the grouping, because the question is which *rows* it may
+    // range over — and says the same thing about where the work goes instead.
+    let refused = ask(
+        &host,
+        json!({
+            "op": "aggregate", "table": "books", "authority": "user",
+            "group": ["owner"],
+            "aggregate": [ { "alias": "n", "fn": "count" } ],
+        }),
+    )
+    .await
+    .expect_err("a grouped aggregate cannot carry a per-row formula either");
+    assert!(
+        refused.to_string().contains("cannot be aggregated for you"),
+        "{refused}"
+    );
     Ok(())
 }
 
