@@ -252,10 +252,32 @@ new row per finished task. That is the whole feature; the rest of this section i
 pieces mean.
 
 **A chain is pure; a terminal executes.** `.where()`, `.select()`, `.orderBy()`, `.limit()`,
-`.offset()`, `.groupBy()`, `.aggregate()` and `.having()` build a query and send nothing. `.rows()`, `.first()`, `.get(id)`, `.count()`,
+`.offset()`, `.groupBy()`, `.aggregate()` and `.having()` build a query and send nothing. `.rows()`, `.iter()`, `.first()`, `.get(id)`, `.count()`,
 `.sum(f)`, `.avg(f)`, `.min(f)`, `.max(f)` and `.exists()` are where a round trip happens — one
 per terminal, so `db.tasks.count()` inside a loop over a thousand rows is a thousand queries and
 will hit the call budget below.
+
+**A table too big for one read is walked with `.iter()`.** A read answers at most 1000 rows (the
+bounds are below), which is a real limit the first time a table gets big. `.iter()` yields the
+same rows in the same order, reading a batch at a time, so only a batch is ever in memory:
+
+```js
+let swept = 0;
+for (const task of db.tasks.where({ done: true }).orderBy("title").iter()) {
+  db.task_audit.insert({ task: task.id, what: "swept: " + task.title, who: task.owner });
+  swept += 1;
+}
+return { swept: swept };
+```
+
+Nothing is read until the loop asks for it, and stopping early (a `break`) reads no further — so
+"the first task whose title matches something only JavaScript can check" costs one batch, not the
+table. Each batch is one of the 200 database calls below, `.iter(200)` sets how many rows a batch
+reads, and a `.limit(n)` bounds the whole iteration. Two things to know: the ordering must name a
+column or a `keyⱵcolumn` path rather than an expression (a batch resumes by comparing against the
+last row's value, which needs a column), and the batches are separate queries rather than one
+snapshot — so if the loop **changes the column it is ordered by**, a row can be seen twice or
+missed. Order by something the loop does not write, and that cannot happen.
 
 **`where` takes what the rest of Saltcorn takes.** Either the object form the REST query string
 and the GraphQL API use, or a formula string like the one you typed into `delete_rows`:
@@ -364,8 +386,8 @@ is owned by a *formula* rather than by RLS, a delegated `db.sql()` still sees ev
 row cap, the call budget and the timeout below all apply, and one call runs one statement.
 
 **Three bounds, and each one tells you what to do about it.** A read of more than **1000 rows**
-is refused rather than trimmed (add a `.limit()` or narrow the `.where()` — half a table
-silently would make every total you compute wrong); more than **200 database calls** in one run
+is refused rather than trimmed (add a `.limit()`, narrow the `.where()`, or walk it with
+`.iter()` — half a table silently would make every total you compute wrong); more than **200 database calls** in one run
 is refused (that is an accidental loop, not a workload); and the run has a wall clock, the
 **Timeout (ms)** setting, default 5000 and at most 60000. There are no transactions across
 statements: a body that fails half way leaves the rows it already wrote, and their triggers have

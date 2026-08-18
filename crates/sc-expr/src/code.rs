@@ -281,6 +281,61 @@ const db = (function () {
       const r = send(plan("aggregate", extra));
       return Array.isArray(r) ? r : [r];
     };
+    // `.iter()`: the rows, one batch per host call, resuming each time from the
+    // cursor the last batch answered with. The isolate holds one batch rather
+    // than the whole answer, so a body can walk a table it could never fit in
+    // memory — and a body that stops early has paid for only what it read,
+    // because nothing is fetched until the loop asks for it.
+    //
+    // The order is the host's business: it appends the primary key to whatever
+    // this query sorts by, so that no two rows tie and no batch boundary can
+    // skip or repeat one.
+    function* iterate(batchSize) {
+      if (state.aggregate.length || state.group.length) {
+        throw new Error(
+          "db." + state.table + ".iter() streams rows, and this query aggregates them; " +
+          "ask for the groups with .rows(), which answers them all at once"
+        );
+      }
+      if (batchSize !== undefined &&
+          (typeof batchSize !== "number" || !isFinite(batchSize) || batchSize < 1)) {
+        throw new Error(
+          "iter()'s argument is how many rows to read at a time, e.g. .iter(200)"
+        );
+      }
+      // A `.limit()` bounds the **iteration**, not the batch: it is spent here,
+      // by stopping, and never sent as the plan's own bound — which for a
+      // streamed read is the size of one batch.
+      const total = state.limit;
+      let taken = 0;
+      let after = null;
+      for (;;) {
+        let want = batchSize;
+        if (total !== null) {
+          const left = total - taken;
+          if (left <= 0) return;
+          if (want === undefined || left < want) want = left;
+        }
+        const p = plan("select", { cursor: true });
+        if (want !== undefined) p.limit = want;
+        if (after !== null) {
+          p.after = after;
+          // An `.offset()` skips rows once, at the start of the iteration. The
+          // host refuses a resumed batch that carries one, which is the same
+          // rule said where a guest cannot reach it.
+          delete p.offset;
+        }
+        const reply = send(p);
+        const batch = reply.rows;
+        for (let i = 0; i < batch.length; i++) {
+          yield batch[i];
+          taken += 1;
+          if (total !== null && taken >= total) return;
+        }
+        if (reply.cursor === null || reply.cursor === undefined) return;
+        after = reply.cursor;
+      }
+    }
     return {
       where: (c) => derive({ where: state.where.concat([condition(c)]) }),
       select: (...cols) =>
@@ -296,6 +351,7 @@ const db = (function () {
       asAdmin: () => derive({ authority: "admin" }),
 
       rows: () => read(),
+      iter: (batchSize) => iterate(batchSize),
       first: () => { const r = read({ limit: 1 }); return r.length ? r[0] : null; },
       get: (pk) => { const r = send(plan("select", { pk: pk, limit: 1 })); return r.length ? r[0] : null; },
       exists: () => send(plan("select", { limit: 1 })).length > 0,
@@ -1155,6 +1211,150 @@ mod tests {
                 "offset": 0
             })
         );
+    }
+
+    /// A host that answers a cursor plan the way [`sc_api`]'s does: `count` rows
+    /// numbered from 1, one batch at a time, resuming after the cursor it last
+    /// answered with. Nothing here knows what a table is — which is the point of
+    /// testing the streaming *protocol* on this side of the seam.
+    fn paging_host(count: i64) -> Arc<FakeHost> {
+        FakeHost::new(move |plan: &Json| {
+            let batch = plan["limit"].as_i64().unwrap_or(1000);
+            let from = match plan["after"].as_array() {
+                Some(after) => after[0].as_i64().unwrap() + 1,
+                None => 1,
+            } + plan["offset"].as_i64().unwrap_or(0);
+            let ids: Vec<i64> = (from..=count).take(batch as usize).collect();
+            let rows: Vec<Json> = ids.iter().map(|id| json!({ "id": id })).collect();
+            let short = (rows.len() as i64) < batch;
+            Ok(json!({
+                "rows": rows,
+                "cursor": match (short, ids.last()) {
+                    (false, Some(last)) => json!([last]),
+                    _ => Json::Null,
+                },
+            }))
+        })
+    }
+
+    #[tokio::test]
+    async fn iter_streams_one_batch_at_a_time_and_resumes_from_the_cursor() {
+        let host = paging_host(5);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_host(
+                r#"const seen = [];
+                   for (const row of db.invoices.where({ paid: false }).iter(2)) {
+                     seen.push(row.id);
+                   }
+                   return seen;"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!([1, 2, 3, 4, 5]), "every row, once, in order");
+
+        let plans = host.plans();
+        assert_eq!(
+            plans.len(),
+            3,
+            "two full batches and the short one that ends it: {plans:#?}"
+        );
+        assert_eq!(
+            plans[0],
+            json!({
+                "op": "select",
+                "table": "invoices",
+                "authority": "admin",
+                "where": { "paid": false },
+                "cursor": true,
+                "limit": 2,
+            }),
+            "the first batch carries the whole query and no cursor"
+        );
+        // Each later batch is the same plan, resumed — the filter rides along,
+        // because a batch is a read of its own.
+        assert_eq!(plans[1]["after"], json!([2]));
+        assert_eq!(plans[1]["where"], json!({ "paid": false }));
+        assert_eq!(plans[2]["after"], json!([4]));
+    }
+
+    #[tokio::test]
+    async fn iter_fetches_nothing_until_it_is_asked_and_stops_when_the_loop_does() {
+        let host = paging_host(1000);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_host(
+                r#"const it = db.invoices.iter(10);
+                   const before = db.invoices.count();
+                   let first = null;
+                   for (const row of it) { first = row.id; break; }
+                   return { first: first, before: before };"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["first"], json!(1));
+
+        let plans = host.plans();
+        assert_eq!(
+            plans.len(),
+            2,
+            "the `.count()` ran before the iterator's first batch, so nothing was \
+             fetched at `.iter()` itself: {plans:#?}"
+        );
+        assert_eq!(plans[0]["op"], json!("aggregate"), "the count went first");
+        assert_eq!(
+            plans[1]["cursor"],
+            json!(true),
+            "and the loop's first batch second — the only one, because it broke"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_limit_bounds_the_iteration_and_the_batch_never_overshoots_it() {
+        let host = paging_host(1000);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_host(
+                r#"const seen = [];
+                   for (const row of db.invoices.limit(3).iter(2)) seen.push(row.id);
+                   return seen;"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!([1, 2, 3]),
+            "the limit is the total, not the batch"
+        );
+        let plans = host.plans();
+        let limits: Vec<&Json> = plans.iter().map(|p| &p["limit"]).collect();
+        assert_eq!(
+            limits,
+            vec![&json!(2), &json!(1)],
+            "the last batch asks for what is left rather than a batch of it"
+        );
+    }
+
+    #[tokio::test]
+    async fn iter_refuses_what_it_cannot_stream_in_front_of_the_author() {
+        let host = paging_host(10);
+        let rt = CodeRuntime::new();
+        async fn refused(rt: &CodeRuntime, host: &dyn CodeHost, code: &str) -> String {
+            rt.run(with_host(code, host)).await.unwrap_err().to_string()
+        }
+        let refused = |code: &'static str| refused(&rt, &*host, code);
+        let e = refused(
+            "for (const g of db.invoices.groupBy('paid').aggregate({ n: 'count()' }).iter()) {}",
+        )
+        .await;
+        assert!(e.contains("aggregates"), "{e}");
+        let e = refused("for (const r of db.invoices.iter(0)) {}").await;
+        assert!(e.contains("how many rows to read at a time"), "{e}");
+        let e = refused("for (const r of db.invoices.iter('lots')) {}").await;
+        assert!(e.contains("how many rows to read at a time"), "{e}");
     }
 
     #[tokio::test]

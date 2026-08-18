@@ -78,6 +78,29 @@
 //! the **call budget** (an accidental N+1 must not hammer the database quietly).
 //! The third — the wall clock — is the runtime's, since only it can stop a body
 //! that never asks for anything.
+//!
+//! # Streaming
+//!
+//! `.iter()` is the answer to the row cap rather than an exception to it. It
+//! sends one plan per **batch**, each a read of its own resumed from where the
+//! last stopped, so the cap holds on every one of them and what a body may walk
+//! is bounded by the call budget instead — which is the honest bound, because
+//! what a stream spends is round trips and not memory.
+//!
+//! Resuming is a **keyset** on the read's own ordering, built in [`plan`]: the
+//! primary key is appended to it so the order is total, null placement is stated
+//! so the predicate and the `ORDER BY` cannot disagree, and the cursor is the
+//! sort values of the last row read — projected into the same `SELECT` under
+//! reserved aliases, because a `.select()` narrows what comes back and a Ⱶ-path
+//! is no column of the table at all. Nothing in a cursor is trusted: it is
+//! coerced against the column it sorts on exactly as a `.where()` literal is.
+//!
+//! Delegation is where a stream can be refused, and it is §5's asymmetry again:
+//! a batch is bounded by the database, so the caller's read rule has to reach
+//! inside the statement. RLS policies do and a translatable ownership formula
+//! does; a formula only the evaluator can decide does not, and a batch of it
+//! would fetch the whole table, hand back what survived and do it again — so it
+//! is refused naming `.rows()`, which can decide row by row.
 
 mod plan;
 
@@ -101,7 +124,8 @@ pub use plan::{AggSpec, Authority, Dir, Op, OrderKey, Plan, Selection, SqlOp, Sq
 ///
 /// A read is materialised into the isolate: an unbounded `.rows()` over a large
 /// table is an out-of-memory, not a slow query, and the error says to add a
-/// `.limit()` because that is the fix.
+/// `.limit()` because that is the fix. A table that has to be walked whole is
+/// walked with `.iter()`, whose every batch is bounded by this same cap.
 pub const DEFAULT_MAX_ROWS: u64 = 1000;
 
 /// What one run of a code body may spend against the database.
@@ -242,8 +266,18 @@ impl<'a> TableHost<'a> {
     }
 
     /// A `select`: the rows, as the REST wire shape.
+    ///
+    /// One batch of an `.iter()` is the same read with two differences, both of
+    /// them in [`plan::read`]: it sorts by a **total** order, and it answers
+    /// `{ rows, cursor }` so the guest knows where the next batch starts and
+    /// whether there is one.
     async fn select(&self, plan: &Plan, actor: &Actor) -> Result<Json> {
         let read = plan::read(self.catalog, plan, &self.limits, actor.role())?;
+        if read.cursor.is_some()
+            && let Actor::Caller { role, user } = actor
+        {
+            self.streamable(&read.table, *role, user.as_ref())?;
+        }
         let values = match actor {
             Actor::Admin(context) => {
                 rows::list_row_values(self.catalog, &read.table, &read.query, Some(context)).await?
@@ -271,7 +305,14 @@ impl<'a> TableHost<'a> {
             &format!("reading `{}` returned", read.table.name),
             "add a `.limit()` or narrow the `.where()`",
         )?;
-        Ok(Json::Array(values.iter().map(|v| read.row(v)).collect()))
+        let rows = Json::Array(values.iter().map(|v| read.row(v)).collect());
+        let Some(cursor) = &read.cursor else {
+            return Ok(rows);
+        };
+        let mut out = serde_json::Map::with_capacity(2);
+        out.insert("rows".to_owned(), rows);
+        out.insert("cursor".to_owned(), cursor.next(&values));
+        Ok(Json::Object(out))
     }
 
     /// An `aggregate`: one object keyed by the aliases the plan asked for, or —
@@ -549,6 +590,39 @@ impl<'a> TableHost<'a> {
                 Repr::Invalid(message) => Error::invalid(format!(
                     "{message}. Read the rows with `.rows()` and aggregate them in your code \
                      body instead, which can decide row by row"
+                )),
+                _ => e,
+            }),
+        }
+    }
+
+    /// Whether a **delegated** read of `table` can be streamed — §5's asymmetry
+    /// again, in the one other place it bites.
+    ///
+    /// Streaming a read means the database bounding it: each batch is a `LIMIT`
+    /// over the rows the caller may see, resumed from where the last one
+    /// stopped. That works when the ownership rule reaches the statement — RLS
+    /// policies do, a translatable formula does — and cannot when the rule is a
+    /// formula only the evaluator can decide, because then the bound is applied
+    /// *after* the rows come back ([`ownership::read_row_values_as`] says so, and
+    /// says why). A batch of 1000 would fetch the whole table, hand back
+    /// whatever survived the formula, and do it again for the next batch: not
+    /// streaming, and quadratic while pretending otherwise.
+    ///
+    /// [`ownership::aggregate_guard`] is exactly this question already asked —
+    /// "can this caller's read rule be carried inside the statement?" — so it is
+    /// the thing asked, rather than a second copy of the rule to be subtly
+    /// wrong. Only the wording is this surface's own: an aggregate's way out is
+    /// not a stream's.
+    fn streamable(&self, table: &Table, role: u8, user: Option<&User>) -> Result<()> {
+        match ownership::aggregate_guard(self.catalog, table, &table.name, role, user) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(match e.repr() {
+                Repr::Invalid(_) => Error::invalid(format!(
+                    "`{}` cannot be streamed as this user: its ownership formula has to be \
+                     decided row by row, so a batch of it cannot be bounded by the database. \
+                     Read it with `.rows()` and a `.limit()`, which can decide row by row",
+                    table.name
                 )),
                 _ => e,
             }),

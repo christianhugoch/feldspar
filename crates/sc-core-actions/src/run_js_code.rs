@@ -104,7 +104,9 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// `insert_row`/`fetch` and formulas expresses. It is still bounded — no network,
 /// no disk, no schema changes, no transactions across statements, and three
 /// named bounds (1000 rows per read, 200 database calls per run, and the
-/// `timeout_ms` wall clock).
+/// `timeout_ms` wall clock). A table larger than one read is walked with
+/// `.iter()`, which yields the same rows a batch at a time — one database call
+/// each, so what bounds it is the call budget rather than the row cap.
 ///
 /// Three consequences of the runtime, all deliberate:
 ///
@@ -112,7 +114,8 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 ///   `only_if` or an ownership formula uses. Which is why the timeout here is
 ///   configurable at all: a bound on a pool nothing else depends on is not a
 ///   bound on every authorization decision in the process;
-/// - the code is **synchronous** — `db.books.rows()` returns rows, not a Promise.
+/// - the code is **synchronous** — `db.books.rows()` returns rows, not a Promise,
+///   and `for (const row of db.books.iter())` is an ordinary loop.
 ///   Nothing in the sandbox is awaitable, so a body that returns a Promise is
 ///   refused rather than stringified to `{}`;
 /// - a **syntax error surfaces at fire time**, not on save. Checking it would

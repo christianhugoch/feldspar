@@ -510,6 +510,55 @@ assignments. Every terminal is one plan and one round trip.
 
 ---
 
+## Phase 7 — Streaming reads (`.iter()`)
+
+The row cap is right and it is not enough: a body that has to *visit* a million rows had no way
+to, because the only shape a read had was one answer materialised into the isolate. `.iter()`
+gives it one — the same rows, a batch per database call — without a server-side cursor, whose
+held connection and open transaction would contradict §6 and the pool both.
+
+- [x] **The wire shape**: `Plan` gains `cursor: bool` and `after: Option<Vec<Json>>`. A cursor
+      plan is a `select` with a total order and a batch, and answers `{ rows, cursor }` — the
+      cursor being `null` when the batch came back short, which is how the guest learns to
+      stop rather than by counting rows itself.
+- [x] **Keyset resuming**, in `code_host::plan`: the lexicographic predicate over the read's
+      own ordering, with the primary key appended so no two rows tie, null placement stated
+      (`NULLS LAST` ascending, `NULLS FIRST` descending) so the predicate and the `ORDER BY`
+      cannot disagree, and each direction's own answer for a null cursor value.
+- [x] **The cursor is projected, not read off the answer**: each sort key is added to the
+      `SELECT` under a reserved `__sc_cursor_i` alias, because a `.select()` narrows what comes
+      back and a Ⱶ-path is no column of the table. The aliases are dropped before the rows
+      reach the guest, which `Read::row` already did by construction.
+- [x] **Typed cursor values**: a plain column and a calculated field coerce against their own
+      field, a Ⱶ-path against the column at the far end (through the same `walk` a filter on
+      that path uses). An **expression** order key is refused — resuming needs a type — as are
+      a table with no single-column primary key, a grouped aggregate, and an `.offset()` on a
+      resumed batch.
+- [x] **The batch is clamped where a `.rows()` bound is refused**, and the asymmetry is the
+      point: a `.limit()` on a read is the answer, so exceeding the cap is an error; a batch
+      size is round trips, so the same rows arrive either way.
+- [x] **The prelude**: `iter(batchSize?)` as a generator, so `for (const row of …)` is an
+      ordinary loop, nothing is fetched before the first `next()`, and a `break` stops. A
+      `.limit()` bounds the **iteration** and is spent by the guest.
+- [x] **Delegation**: a stream needs its ownership rule inside the statement, so
+      `TableHost::streamable` asks `ownership::aggregate_guard` — the same question already
+      asked of an aggregate — and refuses a formula only the evaluator can decide, naming
+      `.rows()`. RLS tables and translatable formulas stream.
+- [x] Tests: the guest-side protocol against a fake host (batching, laziness, `break`, the
+      `.limit()` total); the predicate for every direction × null-cursor combination and the
+      multi-key chain; and — the one that matters — an integration test over a table whose
+      sort key **ties and goes missing**, asserting that what `.iter()` yields is exactly what
+      the unstreamed read answers, in both directions, plus the delegated cases.
+- [x] `docs/TECHNICAL_DESIGN.md` §10.1, the action's doc comment, the editor's `.d.ts` and the
+      CHANGELOG.
+- [x] *Worth naming*: **an iteration is not a snapshot.** Batches are separate statements and
+      no transaction spans them (§6, exactly as for a bulk write), so a loop that changes a
+      row's *sort key* may see it twice or not at all; changing any other column is safe. Said
+      in §10.1 and in the editor's own types, because it is the one thing about `.iter()` that
+      a body's author has to know.
+
+---
+
 ## Explicitly OUT of scope for this milestone
 
 - **Transactions across statements** (`db.transaction(fn)`). The row layer has the seam
@@ -519,8 +568,9 @@ assignments. Every terminal is one plan and one round trip.
   `db` stays closed.
 - **Schema changes from code** — create table, add field, drop anything. The catalog's schema
   editor is an admin surface with its own rules; a code body gets rows.
-- **Streaming or cursors.** A read is materialised and bounded by `max_rows`; a body that
-  needs a million rows is a body that needs a different tool.
+- ~~**Streaming or cursors.**~~ Done after all, in **Phase 7** — but by paging, not by a
+  server-side cursor: a held connection and an open transaction across arbitrary guest code is
+  still the separate decision the first bullet describes.
 - **An awaitable guest API**, and with it `fetch` or timers inside a code body. The sandbox
   gains exactly one host surface here, and it is tables.
 - **The other guest languages** (§15's Python, Rust, Go adapters) — this milestone builds the

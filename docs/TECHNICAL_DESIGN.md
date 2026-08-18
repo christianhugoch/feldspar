@@ -1068,8 +1068,39 @@ const rows = db.books
 | `.groupBy(...fields)` / `.aggregate({ alias: "fn(arg)" })` / `.having(cond)` | grouped aggregation |
 | `.asUser()` / `.asAdmin()` | authority (below) |
 
-The terminals are `.rows()`, `.first()`, `.get(pk)`, `.count()`, `.sum(f)`/`.avg(f)`/
+The terminals are `.rows()`, `.iter(n?)`, `.first()`, `.get(pk)`, `.count()`, `.sum(f)`/`.avg(f)`/
 `.min(f)`/`.max(f)`, `.exists()`, and the three writes `.insert(v)`, `.update(v)`, `.delete()`.
+
+**Streaming.** `.iter()` is `.rows()` for a table that does not fit in one answer: it yields the
+same rows in the same order, one batch per database call, so the isolate holds a batch rather
+than the result.
+
+```js
+for (const invoice of db.invoices.where({ paid: false }).orderBy("due").iter()) {
+  db.reminders.insert({ invoice: invoice.id });
+}
+```
+
+Each batch is a read of its own, resumed from where the last one stopped — a **keyset** on the
+query's own ordering, with the primary key appended to it so that no two rows tie and no batch
+boundary can skip or repeat one. Which is where its three restrictions come from, each refused
+by name rather than silently approximated:
+
+- `.orderBy()` must name a column, a calculated field or a Ⱶ-path — never an expression.
+  Resuming binds the last row's value back into a `WHERE`, and a value needs a column's type.
+- The table needs a single-column primary key, for the same reason `.update()` and `.delete()`
+  do: something to address a row by.
+- A grouped aggregate cannot be streamed; groups have no key to break a tie on.
+
+Delegated, a stream needs its ownership rule to reach *inside* the statement, because that is
+what bounds a batch: RLS policies do and a translatable formula does, while a formula only the
+evaluator can decide is refused, naming `.rows()` — §5's asymmetry, exactly as for an aggregate.
+Batches are separate statements and no transaction spans them (§6), so an iteration is not a
+snapshot: a loop that changes a row's **sort key** may see that row twice or not at all, while
+changing any other column is safe. A `.limit(n)` bounds the iteration rather than a batch, and
+`.iter(n)` sets the batch size (the row cap by default, and clamped to it — the rows are the
+same either way, only the number of round trips differs). The bound on a stream is therefore the
+**call budget**, not the row cap: 200 batches of 1000 is the default reach.
 
 **Grouped aggregation.** `.aggregate({ … })` names the values to compute, written the way the
 formula language writes an aggregate, and `.rows()` answers **one row per group** with the group
@@ -1175,9 +1206,9 @@ raises **no table event**; what still holds is the caller-context transaction (a
 policies decide), the row cap and the call budget. `asUser()` there means the statement runs at
 the caller's role and user — which is what RLS reads, and nothing more. The API is **synchronous**: `db.books.rows()`
 returns rows, not a Promise. Three bounds, each with its own named error: **1000 rows per
-read** (a read is materialised into the isolate, so the error says to add a `.limit()`, and the
-cap **refuses** rather than truncating — a body handed 1000 of 4000 rows would compute a wrong
-answer out of a right-looking one), **200 host calls per run** (an accidental N+1 must not
+read** (a read is materialised into the isolate, so the error says to add a `.limit()` or to
+stream it with `.iter()`, and the cap **refuses** rather than truncating — a body handed 1000 of
+4000 rows would compute a wrong answer out of a right-looking one), **200 host calls per run** (an accidental N+1 must not
 hammer the database quietly), and the **wall clock** (`timeout_ms`) — which covers the whole
 call rather than the executing part of it: a body is refused a host call once it is spent, and
 the *caller* stops waiting shortly after it, which is the only bound that covers a run holding

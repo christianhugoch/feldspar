@@ -250,6 +250,29 @@ describe("the types the code editor loads", () => {
     ).toEqual([]);
   });
 
+  it("type-check a streamed read, and know what a row of it is", () => {
+    // `.iter()` is what a body walking a table larger than one answer writes, so
+    // the loop variable has to be a row of *that* table — not `any`, which would
+    // complete nothing and catch nothing.
+    expect(
+      check(`
+        let owed = 0;
+        for (const inv of db.invoices.where({ paid: false }).orderBy("due").iter(200)) {
+          owed += Number(inv.amount);
+          db.people.insert({ email: String(inv["customerⱵemail"]) });
+        }
+        for (const p of db.people.limit(10).iter()) owed += p.id;
+        return owed;
+      `),
+    ).toEqual([]);
+    // And the chain in front of it is checked as it always was: a column the
+    // table does not have is caught at the `.orderBy()`, which is the one place
+    // a streamed read is fussier than an unstreamed one.
+    expect(
+      check(`for (const i of db.invoices.orderBy("nope").iter()) i.amount;`).join(" "),
+    ).toMatch(/nope/);
+  });
+
   it("type-check the body's own SQL, both spellings of its authority", () => {
     expect(
       check(`

@@ -109,6 +109,22 @@ return { swept: stale.length, left: db.tasks.where({ done: false }).count() };
     )
 }
 
+/// The tutorial's streamed sweep, verbatim — the same work as [`sweep_report`]
+/// written for a table too big to read at once.
+fn sweep_streamed() -> Trigger {
+    Trigger::new("sweep_streamed", EventKind::None, "run_js_code").config(
+        "code",
+        r#"
+let swept = 0;
+for (const task of db.tasks.where({ done: true }).orderBy("title").iter()) {
+  db.task_audit.insert({ task: task.id, what: "swept: " + task.title, who: task.owner });
+  swept += 1;
+}
+return { swept: swept };
+"#,
+    )
+}
+
 /// The tutorial's grouped read, verbatim: one row per owner, bounded by a
 /// condition on the count rather than on the rows.
 fn open_by_owner() -> Trigger {
@@ -190,6 +206,7 @@ async fn setup() -> Result<Tutorial> {
         archive_done(),
         nightly_sweep(),
         sweep_report(),
+        sweep_streamed(),
         open_by_owner(),
     ] {
         save_trigger(&catalog, &registry, &trigger).await?;
@@ -386,6 +403,50 @@ async fn the_grouped_read_answers_one_row_per_owner_as_the_document_prints_it() 
         result,
         json!([{ "owner": "member@example.com", "open": 2 }]),
         "the line the tutorial prints under the box: {result}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_streamed_sweep_writes_the_same_rows_the_read_one_does() -> Result<()> {
+    let t = setup().await?;
+    let tasks = t.catalog.require("tasks")?;
+    let member = "member@example.com";
+    for (title, done) in [
+        ("Draft the report", true),
+        ("Book the venue", false),
+        ("Renew the domain", true),
+    ] {
+        rows::create_row(
+            &t.catalog,
+            &tasks,
+            &json!({ "title": title, "done": done, "owner": member }),
+        )
+        .await?;
+    }
+
+    // The document's claim about `.iter()` is that it is `.rows()` for a table
+    // that does not fit in one — so the test is that the body it prints does what
+    // the body above it does, on the same three tasks. Ordered by title here,
+    // which is what the printed example orders by.
+    let caller = CallerContext::new(40, Some(json!({ "email": member })));
+    let result = t
+        .dispatcher
+        .run_trigger(&t.catalog, "sweep_streamed", json!({}), Some(&caller))
+        .await?;
+    assert_eq!(
+        result,
+        json!({ "swept": 2 }),
+        "the body's own answer: {result}"
+    );
+
+    let audit = t.audit().await?;
+    let what: Vec<&str> = audit.iter().map(|(_, what, _)| what.as_str()).collect();
+    assert_eq!(
+        what,
+        vec!["swept: Draft the report", "swept: Renew the domain"],
+        "one audit row per finished task, in the title order the loop walked them \
+         in — and `Book the venue` is not finished, so it is in neither"
     );
     Ok(())
 }

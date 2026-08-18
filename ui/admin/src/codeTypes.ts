@@ -224,6 +224,22 @@ interface ScQuery<Row, Col extends string> {
 
   /** The matching rows. Synchronous — there are no promises in the sandbox. */
   rows(): Row[];
+  /** The matching rows, **streamed**: one batch is read at a time, so a body can
+   * walk a table far larger than the 1000 rows \`.rows()\` may answer.
+   *
+   * \`\`\`js
+   * for (const invoice of db.invoices.where({ paid: false }).iter()) { … }
+   * \`\`\`
+   *
+   * Each batch is one database call and counts against the run's budget, and
+   * stopping early (a \`break\`, a \`return\`) reads nothing further. The primary
+   * key is added to whatever this query orders by, so no batch boundary can skip
+   * or repeat a row — which means \`.orderBy()\` must name a column or a
+   * \`keyⱵcolumn\` path, never an expression, and that batches are separate
+   * statements rather than one snapshot: a row whose **sort key** the loop
+   * changes may be seen twice or not at all. A \`.limit()\` bounds the iteration;
+   * \`iter(n)\` sets how many rows a batch reads. */
+  iter(batchSize?: number): IterableIterator<Row>;
   /** The first matching row, or null. */
   first(): Row | null;
   /** The row with this primary key, or null. */

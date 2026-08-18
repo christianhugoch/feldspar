@@ -31,7 +31,9 @@ use sc_expr::{
     AggFunc, CalcFields, Env, Formula, JOIN, Operation, TranslateError, UserEnv, aggregate_expr,
     join_path_expr, translate, translate_value, value_from_json,
 };
-use sc_query::{Expr, OrderBy, Projection, Statement, Value, rewrite_named_params};
+use sc_query::{
+    BinOp, Expr, Nulls, OrderBy, OrderDir, Projection, Statement, UnOp, Value, rewrite_named_params,
+};
 use serde::Deserialize;
 use serde_json::Value as Json;
 
@@ -96,6 +98,26 @@ pub struct Plan {
     /// The primary key `.get(pk)` named.
     #[serde(default)]
     pub pk: Option<Json>,
+    /// Whether this read is **one batch of an `.iter()`**.
+    ///
+    /// It changes three things about the read and nothing else: the ordering is
+    /// made **total** (the primary key is appended to it, so no two rows tie),
+    /// null placement is stated rather than left to the dialect, and the answer
+    /// carries a [`Cursor`] beside the rows. `limit` stops being an answer the
+    /// body computes on and becomes the size of one batch — see
+    /// [`batch_limit`].
+    #[serde(default)]
+    pub cursor: bool,
+    /// Where the previous batch stopped: one value per `ORDER BY` key of the
+    /// cursor read, in the order the read sorts by, ending with the primary
+    /// key's.
+    ///
+    /// It is the value the host itself answered with, handed back verbatim —
+    /// and **nothing in it is trusted** for all that: each value is coerced
+    /// against the column its key sorts on, exactly as a `.where()` literal is,
+    /// and a cursor of the wrong length is refused rather than padded.
+    #[serde(default)]
+    pub after: Option<Vec<Json>>,
     /// What an `aggregate` asks for, each aliased by the key it rides back under.
     #[serde(default)]
     pub aggregate: Vec<AggSpec>,
@@ -240,6 +262,59 @@ pub(crate) struct Read {
     pub(crate) query: RowQuery,
     /// The keys the answer carries, or `None` for the whole row.
     keys: Option<Vec<String>>,
+    /// How the **next** batch resumes, for a read that is one batch of an
+    /// `.iter()`; `None` for every ordinary read.
+    pub(crate) cursor: Option<Cursor>,
+}
+
+/// How a streamed read resumes: the aliases its sort values ride back under, and
+/// the batch it asked for.
+///
+/// It exists because the cursor cannot be read off the *answer*. A body that
+/// `.select()`ed two columns still sorts by whatever it named, and a sort key may
+/// be a Ⱶ-path that is no column of this table at all — so the sort values are
+/// projected into the same `SELECT` under reserved aliases, read back here, and
+/// dropped before the rows reach the guest ([`Read::row`] answers the keys the
+/// body asked for, and these are not among them).
+pub(crate) struct Cursor {
+    /// The alias each sort value is projected under, in the order the read sorts
+    /// by — the primary key's last.
+    aliases: Vec<String>,
+    /// The batch this read asked the database for. A short answer means the rows
+    /// ran out, which is how the guest learns to stop.
+    batch: u64,
+}
+
+impl Cursor {
+    /// The cursor the next batch resumes from, or `Json::Null` when there is no
+    /// next batch.
+    ///
+    /// **The last row read, not the last row returned** — they are the same
+    /// thing here and it is worth saying why, because the difference is a class
+    /// of silent bug: every rule that narrows a streamed read (an RLS policy, a
+    /// translatable ownership formula) narrows it *inside* the statement, ahead
+    /// of the `LIMIT`, so a row the caller may not see is never a row the batch
+    /// counted. The one rule that cannot — an ownership formula only the
+    /// evaluator can decide — is refused a cursor outright, in
+    /// [`super::TableHost::delegable_stream`].
+    pub(crate) fn next(&self, values: &[BTreeMap<String, Value>]) -> Json {
+        // A batch the database could not fill is the last one. Asking again
+        // would cost a round trip to be told nothing; a body that iterates a
+        // table whose row count is an exact multiple of the batch pays that one
+        // extra call, which is the cheaper half of the trade.
+        if (values.len() as u64) < self.batch {
+            return Json::Null;
+        }
+        let Some(last) = values.last() else {
+            return Json::Null;
+        };
+        Json::Array(
+            self.aliases
+                .iter()
+                .map(|alias| last.get(alias).map_or(Json::Null, value_to_json))
+                .collect(),
+        )
+    }
 }
 
 impl Read {
@@ -317,7 +392,6 @@ pub(crate) fn read(cat: &Catalog, plan: &Plan, limits: &HostLimits, role: u8) ->
         });
     }
 
-    let mut query = RowQuery::new().where_(filter);
     let mut keys = Vec::with_capacity(plan.select.len());
     let mut extra = Vec::new();
     for selection in &plan.select {
@@ -340,22 +414,67 @@ pub(crate) fn read(cat: &Catalog, plan: &Plan, limits: &HostLimits, role: u8) ->
             }
         }
     }
+    refuse_grouping(plan, "a row read")?;
+
+    // The ordering, and — for a batch of an `.iter()` — the two things that
+    // follow from it: where the batch resumes, and where the next one will.
+    let (order, cursor) = match plan.cursor {
+        false => {
+            let mut order = Vec::with_capacity(plan.order.len());
+            for key in &plan.order {
+                let expr = low.value_expr(&key.field)?;
+                order.push(match key.dir {
+                    Dir::Asc => OrderBy::asc(expr),
+                    Dir::Desc => OrderBy::desc(expr),
+                });
+            }
+            (order, None)
+        }
+        true => {
+            let sort = low.sort_keys(plan)?;
+            if let Some(after) = &plan.after {
+                // An `.offset()` belongs to the *iteration*, so it is spent on
+                // the batch that starts it. Applied again to a resumed batch it
+                // would skip rows in the middle of the stream, which is a wrong
+                // answer that looks like a right one.
+                if plan.offset.is_some() {
+                    return Err(Error::invalid(format!(
+                        "this `.iter()` of `{}` resumed from a cursor *and* asked to skip \
+                         rows; an `.offset()` is skipped once, at the start of the iteration",
+                        plan.table
+                    )));
+                }
+                let resumed = after_predicate(&sort, after, &plan.table)?;
+                filter = Some(match filter {
+                    Some(existing) => existing.and(resumed),
+                    None => resumed,
+                });
+            }
+            let mut aliases = Vec::with_capacity(sort.len());
+            let mut order = Vec::with_capacity(sort.len());
+            for (i, key) in sort.iter().enumerate() {
+                // Projected even when the key is a column the read already
+                // carries: the alias is what the cursor is read back by, and one
+                // rule for every key is one thing to be right about rather than
+                // two. A duplicated column costs the database nothing.
+                let alias = format!("{CURSOR_ALIAS}{i}");
+                extra.push(Projection::expr_as(key.expr.clone(), alias.clone()));
+                aliases.push(alias);
+                order.push(key.order_by());
+            }
+            let batch = batch_limit(plan, limits);
+            (order, Some(Cursor { aliases, batch }))
+        }
+    };
+
+    let mut query = RowQuery::new().where_(filter).order_by(order);
     if !extra.is_empty() {
         query = query.projecting(extra);
     }
-
-    let mut order = Vec::with_capacity(plan.order.len());
-    for key in &plan.order {
-        let expr = low.value_expr(&key.field)?;
-        order.push(match key.dir {
-            Dir::Asc => OrderBy::asc(expr),
-            Dir::Desc => OrderBy::desc(expr),
-        });
-    }
-    query = query.order_by(order);
-
-    refuse_grouping(plan, "a row read")?;
-    query = query.limit(bounded_limit(plan, limits, &table)?);
+    query = query.limit(match &cursor {
+        Some(cursor) => cursor.batch,
+        None => bounded_limit(plan, limits, &table)?,
+    });
     if let Some(offset) = plan.offset {
         query = query.offset(offset);
     }
@@ -364,7 +483,158 @@ pub(crate) fn read(cat: &Catalog, plan: &Plan, limits: &HostLimits, role: u8) ->
         table,
         query,
         keys: (!plan.select.is_empty()).then_some(keys),
+        cursor,
     })
+}
+
+/// The prefix the sort values of a streamed read are projected under. Reserved:
+/// a body cannot ask for a column by this name, because `.select()` resolves its
+/// names against the catalog and no catalog field starts with it.
+const CURSOR_ALIAS: &str = "__sc_cursor_";
+
+/// One `ORDER BY` key of a streamed read: what it sorts by, which way, whether
+/// it can be null, and where its cursor value is typed.
+struct SortKey {
+    /// The expression sorted by — the very same one an unstreamed `.orderBy()`
+    /// produces, so a body that switches from `.rows()` to `.iter()` sorts by
+    /// the same thing.
+    expr: Expr,
+    /// Which way it sorts.
+    dir: Dir,
+    /// Whether a row's value for it can be null. A `NOT NULL` column cannot, and
+    /// saying so keeps the resume predicate free of a disjunct that could only
+    /// ever be false.
+    nullable: bool,
+    /// The table and column one cursor value is coerced against. A key that is a
+    /// Ⱶ-path types against the column at the far end, which is exactly what a
+    /// filter on that path already does.
+    typed: (Table, String),
+}
+
+impl SortKey {
+    /// The `ORDER BY` this key contributes, with null placement **stated**.
+    ///
+    /// Left to the dialect it would be a default that the resume predicate has
+    /// to agree with in order to be correct — and a default that differs between
+    /// two backends is a silently skipped row on one of them. Postgres' own
+    /// defaults are what these are; the point is that they are now written down
+    /// in the one place the predicate is built from.
+    fn order_by(&self) -> OrderBy {
+        match self.dir {
+            Dir::Asc => OrderBy {
+                expr: self.expr.clone(),
+                dir: OrderDir::Asc,
+                nulls: Some(Nulls::Last),
+            },
+            Dir::Desc => OrderBy {
+                expr: self.expr.clone(),
+                dir: OrderDir::Desc,
+                nulls: Some(Nulls::First),
+            },
+        }
+    }
+}
+
+/// "Sorts strictly after the cursor", as one predicate.
+///
+/// The lexicographic rule, which is the whole of streaming an ordered read: a row
+/// comes after the cursor if its first key does, **or** if that key ties and its
+/// second does, and so on down to the primary key — which is why the primary key
+/// is there at all. Ties are not a corner case: `.orderBy("due")` over a table
+/// where fifty invoices share a date will straddle a batch boundary, and without
+/// a total order those rows are skipped or served twice with nothing to show for
+/// it.
+///
+/// Nulls are the other half. They sort last ascending and first descending (which
+/// is what [`SortKey::order_by`] now states), and `NULL > x` is neither true nor
+/// false, so each direction needs its own answer:
+///
+/// | direction | cursor value | rows after it |
+/// |---|---|---|
+/// | ascending | a value | `k > v OR k IS NULL` — the nulls are still to come |
+/// | ascending | null | *none by this key* — the nulls are last, so only a later key can break the tie |
+/// | descending | a value | `k < v` — the nulls came first and are behind us |
+/// | descending | null | `k IS NOT NULL` — everything else is still to come |
+fn after_predicate(sort: &[SortKey], after: &[Json], table: &str) -> Result<Expr> {
+    if after.len() != sort.len() {
+        return Err(Error::invalid(format!(
+            "this `.iter()` of `{table}` resumed from a cursor of {} value(s) where its \
+             ordering has {} — the cursor a batch answers with is the one the next batch \
+             sends, unchanged",
+            after.len(),
+            sort.len()
+        )));
+    }
+    // Every value typed before any of them is built into a predicate, so a
+    // cursor that names a value the column cannot hold is refused whole rather
+    // than half-lowered.
+    let mut values = Vec::with_capacity(after.len());
+    for (key, json) in sort.iter().zip(after) {
+        let (table, column) = &key.typed;
+        values.push(match json.is_null() {
+            // A null is never bound: every branch that reads one asks `IS NULL`
+            // or `IS NOT NULL`, which take no operand — so a null cursor value
+            // never has to survive being coerced against a column that would
+            // refuse it for being one.
+            true => None,
+            false => Some(rows::column_value(table, column, json)?),
+        });
+    }
+
+    let mut terms: Vec<Expr> = Vec::with_capacity(sort.len());
+    for (i, key) in sort.iter().enumerate() {
+        let Some(after) = strictly_after(key, values[i].as_ref()) else {
+            continue;
+        };
+        // The keys before this one tie; this one breaks the tie. Chained in the
+        // order the read sorts by, so the predicate can be read against the
+        // `ORDER BY` it belongs to.
+        let ties = (0..i)
+            .map(|j| tied(&sort[j], values[j].as_ref()))
+            .reduce(Expr::and);
+        terms.push(match ties {
+            Some(ties) => ties.and(after),
+            None => after,
+        });
+    }
+    // Unreachable while the primary key is the last sort key: it is `NOT NULL`
+    // and its cursor value is one, so its own term is always built.
+    let mut predicate = terms.pop().ok_or_else(|| {
+        Error::invalid(format!(
+            "this `.iter()` of `{table}` has no ordering that can be resumed from"
+        ))
+    })?;
+    while let Some(term) = terms.pop() {
+        predicate = term.or(predicate);
+    }
+    Ok(predicate)
+}
+
+/// "This key ties with the cursor" — null-safely, since a tie on a null is a tie.
+fn tied(key: &SortKey, value: Option<&Value>) -> Expr {
+    match value {
+        Some(value) => key.expr.clone().eq(Expr::lit(value.clone())),
+        None => Expr::unary(UnOp::IsNull, key.expr.clone()),
+    }
+}
+
+/// "This key sorts strictly after the cursor", or `None` when nothing can —
+/// which is the ascending null: the nulls sort last, so a row that ties on it
+/// can only be told apart by a later key.
+fn strictly_after(key: &SortKey, value: Option<&Value>) -> Option<Expr> {
+    let expr = || key.expr.clone();
+    match (key.dir, value) {
+        (Dir::Asc, Some(value)) => {
+            let after = Expr::binary(BinOp::Gt, expr(), Expr::lit(value.clone()));
+            Some(match key.nullable {
+                false => after,
+                true => after.or(Expr::unary(UnOp::IsNull, expr())),
+            })
+        }
+        (Dir::Asc, None) => None,
+        (Dir::Desc, Some(value)) => Some(Expr::binary(BinOp::Lt, expr(), Expr::lit(value.clone()))),
+        (Dir::Desc, None) => Some(Expr::unary(UnOp::IsNotNull, expr())),
+    }
 }
 
 /// Resolve an `aggregate` plan against the catalog — `.count()` and
@@ -379,6 +649,17 @@ pub(crate) fn aggregate(
     let table = cat.require(&plan.table)?;
     let low = Lowering::new(cat, &table, role)?;
     let filter = low.filter(plan.filter.as_ref())?;
+    // A streamed read resumes from the last row's place in a total order, and
+    // the rows a grouped aggregate answers are groups: they have no primary key
+    // to break a tie on, and two runs of the same query need not even produce
+    // the same number of them.
+    if plan.cursor {
+        return Err(Error::invalid(format!(
+            "`.iter()` streams the **rows** of `{}` and this aggregates them; ask for the \
+             groups with `.rows()`, which answers them all at once",
+            table.name
+        )));
+    }
     if plan.aggregate.is_empty() {
         return Err(Error::invalid(format!(
             "this aggregate names no value to compute over `{}`",
@@ -614,6 +895,7 @@ fn refuse_read_shaping(plan: &Plan, op: &str, matches_rows: bool) -> Result<()> 
         (!plan.select.is_empty(), ".select()"),
         (!plan.aggregate.is_empty(), "an aggregate"),
         (plan.pk.is_some(), ".get()"),
+        (plan.cursor, ".iter()"),
         (!matches_rows && plan.filter.is_some(), ".where()"),
         (!matches_rows && !plan.order.is_empty(), ".orderBy()"),
         (!matches_rows && plan.limit.is_some(), ".limit()"),
@@ -646,6 +928,24 @@ fn bounded_limit(plan: &Plan, limits: &HostLimits, table: &Table) -> Result<u64>
         ))),
         Some(n) => Ok(n),
         None => Ok(limits.max_rows.saturating_add(1)),
+    }
+}
+
+/// The size of one batch of an `.iter()`.
+///
+/// **Clamped where [`bounded_limit`] refuses**, and the difference is the whole
+/// distinction between the two calls. A `.limit()` on a `.rows()` is the answer:
+/// a body that asked for 5000 rows and was handed 1000 would compute a wrong
+/// answer out of a right-looking one, so it is told. A batch size is a hint about
+/// round trips: iterating in batches of 1000 rather than the 5000 asked for
+/// yields the very same rows in the very same order, and only the number of
+/// database calls differs. Refusing that would make `.limit(5000).iter()` — a
+/// bound on the *iteration*, which the guest applies itself — an error for no
+/// reason a body's author could act on.
+fn batch_limit(plan: &Plan, limits: &HostLimits) -> u64 {
+    match plan.limit {
+        Some(n) => n.clamp(1, limits.max_rows),
+        None => limits.max_rows,
     }
 }
 
@@ -845,6 +1145,75 @@ impl<'a> Lowering<'a> {
             ))),
             None => self.formula_value(source),
         }
+    }
+
+    /// The ordering a streamed read sorts and resumes by: the keys the body
+    /// named, and the **primary key** after them.
+    ///
+    /// The primary key is what makes the order total, and a total order is what
+    /// makes streaming correct rather than approximately correct: two rows that
+    /// tie on every key the body named have no order between them, so a batch
+    /// boundary that falls among them serves some twice and skips the rest. It is
+    /// appended rather than required of the author, because it is not their
+    /// concern — `.orderBy("due")` means "by due date" whether or not the reader
+    /// knows why a tie-break is needed. A body that already ended its ordering
+    /// with the primary key ascending gets no second copy.
+    ///
+    /// A key that is an **expression** is refused, and that is the one thing
+    /// `.iter()` cannot do that `.rows()` can. Resuming means binding the last
+    /// row's value back into a `WHERE`, and a value needs a type: a column has
+    /// one, the far end of a Ⱶ-path has one, `qty * price` has none that this
+    /// server may assume.
+    fn sort_keys(&self, plan: &Plan) -> Result<Vec<SortKey>> {
+        let pk = rows::single_pk(&self.table)?;
+        let mut keys = Vec::with_capacity(plan.order.len() + 1);
+        for key in &plan.order {
+            keys.push(self.sort_key(&key.field, key.dir)?);
+        }
+        let ends_at_pk = plan
+            .order
+            .last()
+            .is_some_and(|key| key.field == pk && key.dir == Dir::Asc);
+        if !ends_at_pk {
+            keys.push(self.sort_key(&pk, Dir::Asc)?);
+        }
+        Ok(keys)
+    }
+
+    /// One key of that ordering: the expression an unstreamed `.orderBy()` would
+    /// sort by, plus what the cursor needs — where its value is typed, and
+    /// whether it can be null.
+    fn sort_key(&self, field: &str, dir: Dir) -> Result<SortKey> {
+        let expr = self.value_expr(field)?;
+        // A calculated field has a declared type like any other field, so its
+        // value can be typed — but it is an expression over the row, so nothing
+        // says it cannot be null even when every column it reads is required.
+        if let Some(f) = self.table.field(field) {
+            return Ok(SortKey {
+                expr,
+                dir,
+                nullable: f.is_calc() || !f.required,
+                typed: (self.table.clone(), field.to_owned()),
+            });
+        }
+        if field.contains(JOIN) {
+            let (target, column) = self.walk(field)?;
+            return Ok(SortKey {
+                expr,
+                dir,
+                // The far column may be `NOT NULL` and the value still absent:
+                // the row this one points at may not exist, or the key may be
+                // null, and either way the join answers nothing.
+                nullable: true,
+                typed: (target, column),
+            });
+        }
+        Err(Error::invalid(format!(
+            "`.iter()` of `{}` cannot resume from `{field}`: it orders by an expression, and \
+             resuming means comparing against the last row's value, which needs the type of a \
+             column. Order by a field or a Ⱶ-path, or read the rows with `.rows()`",
+            self.table.name
+        )))
     }
 
     /// One `ORDER BY` key of a **grouped** aggregate.

@@ -857,3 +857,304 @@ async fn a_sql_request_is_told_apart_from_a_plan_by_its_op_and_keeps_its_own_wor
     .expect_err("`sql` is not a field of a plan");
     assert!(refused.to_string().contains("sql"), "{refused}");
 }
+
+// ---------------------------------------------------------------------------
+// Streaming: `.iter()`
+// ---------------------------------------------------------------------------
+
+/// The `WHERE` a resumed batch adds, on its own — the clause that decides
+/// whether streaming is correct, read without the ordering and the bound around
+/// it.
+async fn resumed_where(order: Json, after: Json) -> String {
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": order,
+        "after": after,
+    }))
+    .await
+    .expect("resolves");
+    let select = Select::from(Source::table("books"))
+        .filter(read.query.filter.clone().expect("a resume predicate"));
+    let (sql, _) = Pg
+        .render(&Statement::Select(Box::new(select)))
+        .expect("renders");
+    sql.split_once(" WHERE ")
+        .map(|(_, w)| w.to_owned())
+        .unwrap_or_else(|| panic!("no WHERE in {sql}"))
+}
+
+#[tokio::test]
+async fn a_streamed_read_sorts_by_a_total_order_and_says_where_the_nulls_go() {
+    // `db.books.orderBy("published", "desc").iter()`. Two things are added to
+    // what `.rows()` would do, and both are what makes the next batch able to
+    // resume: the primary key ends the ordering, so no two rows tie, and null
+    // placement is stated rather than inherited from the dialect.
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": [{ "field": "published", "dir": "desc" }],
+    }))
+    .await
+    .expect("resolves");
+    let (sql, _) = rendered(&read);
+    assert!(
+        sql.contains(r#"ORDER BY "published" DESC NULLS FIRST, "id" ASC"#),
+        "{sql}"
+    );
+    // The batch is the row cap when the guest named no size of its own — not the
+    // cap plus one, which is `.rows()`'s way of telling "exactly the cap" from
+    // "more than we may answer". A short batch is how a stream ends instead.
+    assert_eq!(read.query.limit, Some(1000));
+    // Every sort value is projected under a reserved alias, because the cursor
+    // cannot be read off the answer: a `.select()` narrows what comes back, and a
+    // Ⱶ-path is no column of this table at all.
+    assert!(
+        sql.contains(r#""published" AS "__sc_cursor_0""#)
+            && sql.contains(r#""id" AS "__sc_cursor_1""#),
+        "{sql}"
+    );
+}
+
+#[tokio::test]
+async fn an_ordering_that_already_ends_at_the_primary_key_is_not_given_a_second_one() {
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": [{ "field": "id", "dir": "asc" }],
+    }))
+    .await
+    .expect("resolves");
+    let (sql, _) = rendered(&read);
+    assert_eq!(read.query.order.len(), 1, "{sql}");
+    assert!(sql.contains(r#"ORDER BY "id" ASC"#), "{sql}");
+}
+
+#[tokio::test]
+async fn resuming_is_the_lexicographic_rule_and_each_direction_answers_its_own_nulls() {
+    // Ascending: the rows after a value are the greater ones **and the nulls**,
+    // which sort last — and a tie on the value is broken by the primary key.
+    assert_eq!(
+        resumed_where(
+            json!([{ "field": "published", "dir": "asc" }]),
+            json!(["2020-01-01", 7]),
+        )
+        .await,
+        r#"((("published" > $1) OR ("published" IS NULL)) OR (("published" = $2) AND ("id" > $3)))"#
+    );
+
+    // Ascending from a **null**: the nulls are last, so no row sorts after this
+    // one by this key at all — only the tie-break can tell them apart. A term
+    // that could never be true is not emitted; it is the absence of one.
+    assert_eq!(
+        resumed_where(
+            json!([{ "field": "published", "dir": "asc" }]),
+            json!([null, 7]),
+        )
+        .await,
+        r#"(("published" IS NULL) AND ("id" > $1))"#
+    );
+
+    // Descending: the nulls came first, so they are behind us and the rule is
+    // plain.
+    assert_eq!(
+        resumed_where(
+            json!([{ "field": "published", "dir": "desc" }]),
+            json!(["2020-01-01", 7]),
+        )
+        .await,
+        r#"(("published" < $1) OR (("published" = $2) AND ("id" > $3)))"#
+    );
+
+    // Descending from a null: everything that is not null is still to come.
+    assert_eq!(
+        resumed_where(
+            json!([{ "field": "published", "dir": "desc" }]),
+            json!([null, 7]),
+        )
+        .await,
+        r#"(("published" IS NOT NULL) OR (("published" IS NULL) AND ("id" > $1)))"#
+    );
+
+    // Two keys: the chain is as long as the ordering, and the primary key ends
+    // it. `pages` is nullable here; `id` is not, which is why its own term
+    // carries no `IS NULL` disjunct.
+    assert_eq!(
+        resumed_where(
+            json!([
+                { "field": "published", "dir": "asc" },
+                { "field": "pages", "dir": "desc" },
+            ]),
+            json!(["2020-01-01", 300, 7]),
+        )
+        .await,
+        r#"((("published" > $1) OR ("published" IS NULL)) OR \
+((("published" = $2) AND ("pages" < $3)) OR \
+((("published" = $4) AND ("pages" = $5)) AND ("id" > $6))))"#
+            .replace("\\\n", "")
+            .as_str()
+    );
+
+    // No ordering at all: the primary key is the whole of it, and resuming is the
+    // one comparison everybody expects.
+    assert_eq!(resumed_where(json!([]), json!([7])).await, r#"("id" > $1)"#);
+}
+
+#[tokio::test]
+async fn a_cursor_value_is_bound_and_coerced_against_the_column_it_sorts_on() {
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": [{ "field": "published", "dir": "asc" }],
+        "after": ["2020-01-01", 7],
+    }))
+    .await
+    .expect("resolves");
+    let (_, binds) = rendered(&read);
+    // A date reaches the statement as a date and the key as an integer: the
+    // cursor is the host's own answer coming back, and it is typed on the way in
+    // exactly as a `.where()` literal is.
+    assert!(
+        matches!(binds.first(), Some(Value::Date(_))),
+        "the date is a date: {binds:?}"
+    );
+    // The date is bound twice — once for "sorts after it", once for the tie it
+    // breaks — because every literal is its own parameter.
+    assert_eq!(binds.get(2), Some(&Value::Int(7)));
+
+    // And a value the column cannot hold is refused, rather than reaching the
+    // database as something it will argue with.
+    let refused = refusal(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": [{ "field": "published", "dir": "asc" }],
+        "after": ["not a date", 7],
+    }))
+    .await;
+    assert!(refused.contains("published"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_streamed_read_can_sort_by_a_join_path_and_types_its_cursor_at_the_far_end() {
+    let read = read_of(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": [{ "field": "authorⱵname", "dir": "asc" }],
+        "after": ["Woolf", 7],
+    }))
+    .await
+    .expect("resolves");
+    let (sql, binds) = rendered(&read);
+    // The very same correlated subquery the ordering already used, now also in
+    // the `WHERE` and projected as the cursor's own value.
+    assert!(sql.contains(r#"AS "__sc_cursor_0""#), "{sql}");
+    assert_eq!(binds.first(), Some(&Value::Text("Woolf".to_owned())));
+    // A joined value can be absent however `NOT NULL` the far column is — the row
+    // it points at may not exist — so the ascending rule keeps its null disjunct.
+    assert!(sql.contains("IS NULL"), "{sql}");
+}
+
+#[tokio::test]
+async fn what_a_streamed_read_refuses_and_why() {
+    // An expression has no column to type a cursor value against.
+    let refused = refusal(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": [{ "field": "pages * price", "dir": "asc" }],
+    }))
+    .await;
+    assert!(refused.contains("resume"), "{refused}");
+    assert!(refused.contains(".rows()"), "{refused}");
+
+    // A grouped answer has no primary key to break a tie on.
+    let refused = refusal(json!({
+        "op": "aggregate",
+        "table": "books",
+        "cursor": true,
+        "group": ["author"],
+        "aggregate": [{ "alias": "n", "fn": "count" }],
+    }))
+    .await;
+    assert!(refused.contains("streams"), "{refused}");
+
+    // An `.offset()` is skipped once, at the start of the iteration; applied
+    // again to a resumed batch it would skip rows in the middle of the stream.
+    let refused = refusal(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "offset": 10,
+        "after": [7],
+    }))
+    .await;
+    assert!(refused.contains("skipped once"), "{refused}");
+
+    // A cursor is the host's own answer handed back: one that does not fit the
+    // ordering is refused rather than padded out to it.
+    let refused = refusal(json!({
+        "op": "select",
+        "table": "books",
+        "cursor": true,
+        "order": [{ "field": "published", "dir": "asc" }],
+        "after": [7],
+    }))
+    .await;
+    assert!(refused.contains("cursor of 1 value(s)"), "{refused}");
+
+    // And streaming a write is a shape the seam does not have.
+    let refused = refusal(json!({
+        "op": "delete",
+        "table": "books",
+        "cursor": true,
+        "where": { "id": 1 },
+    }))
+    .await;
+    assert!(refused.contains("`.iter()` has no meaning"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_table_with_no_primary_key_cannot_be_streamed() {
+    // Nothing to break a tie on, so nothing to resume from. The refusal is the
+    // row layer's own, which is where "a table this server can address rows in"
+    // is already defined.
+    let cat = catalog_of(vec![physical(
+        "logs",
+        &[("at", "timestamptz", true), ("msg", "text", true)],
+        &[],
+    )])
+    .await;
+    let plan: Plan = serde_json::from_value(json!({
+        "op": "select", "table": "logs", "cursor": true,
+    }))
+    .expect("a well-formed plan");
+    let refused = plan::read(&cat, &plan, &HostLimits::default(), ROLE_ADMIN)
+        .err()
+        .expect("no primary key")
+        .to_string();
+    assert!(refused.contains("no primary key"), "{refused}");
+}
+
+#[tokio::test]
+async fn the_batch_size_is_clamped_where_a_rows_bound_is_refused() {
+    // The two are different questions. `.limit()` on a `.rows()` is the answer,
+    // so asking for more than the cap is refused — a body handed 1000 of 5000
+    // rows would compute a wrong answer out of a right-looking one. A batch size
+    // is how many round trips the same rows arrive in, so it is clamped: the
+    // iteration yields exactly what it would have either way.
+    let refused = refusal(json!({ "op": "select", "table": "books", "limit": 5000 })).await;
+    assert!(refused.contains("may read 1000 rows at once"), "{refused}");
+
+    let read = read_of(json!({
+        "op": "select", "table": "books", "cursor": true, "limit": 5000,
+    }))
+    .await
+    .expect("resolves");
+    assert_eq!(read.query.limit, Some(1000));
+}

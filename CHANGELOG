@@ -2,6 +2,56 @@
 
 Changes in reverse chronological order.
 
+## `.iter()` — reads a code body can walk
+
+`db`'s reads answer at most 1000 rows, and the cap refuses rather than truncates, which is right:
+a body handed 1000 of 4000 rows computes a wrong answer out of a right-looking one. But it left a
+body that has to *visit* a large table with nowhere to go. Now there is `.iter()`:
+
+```js
+for (const invoice of db.invoices.where({ paid: false }).orderBy("due").iter()) {
+  db.reminders.insert({ invoice: invoice.id, sent_to: invoice.customerⱵemail });
+}
+```
+
+It yields the same rows `.rows()` would, in the same order, but reads **one batch per database
+call** — so the isolate holds a batch and never the result. Nothing is fetched before the loop
+asks for it, and a `break` (or a `return`) stops: a body that wanted the first match pays for one
+batch. `.iter(n)` sets the batch size; a `.limit(n)` bounds the **iteration** rather than a batch.
+
+**Ordered streaming, which is the part that has to be exactly right.** Each batch is a read of
+its own, resumed from where the last stopped by a keyset on the query's own ordering — with the
+**primary key appended to it**, so that no two rows tie and no batch boundary can skip or repeat
+one. Ties are not a corner case: fifty invoices sharing a due date will straddle a boundary. Null
+placement is stated rather than inherited (`NULLS LAST` ascending, `NULLS FIRST` descending) so
+the resume predicate and the `ORDER BY` cannot disagree, and each direction has its own answer
+for resuming *from* a null. The cursor is the sort values of the last row read, projected into
+the same `SELECT` under reserved aliases — because a `.select()` narrows what comes back and a
+Ⱶ-path is no column of the table at all — and it is coerced on the way back in against the column
+it sorts on, exactly as a `.where()` literal is.
+
+Three things it will not do, each refused by name rather than approximated:
+
+- **`.orderBy()` must name a column, a calculated field or a Ⱶ-path**, never an expression:
+  resuming binds the last row's value into a `WHERE`, and a value needs a column's type.
+- **The table needs a single-column primary key** — the same requirement `.update()` and
+  `.delete()` already have, for the same reason.
+- **A grouped aggregate cannot be streamed**; groups have no key to break a tie on.
+
+**Delegated**, a stream needs its ownership rule to reach inside the statement, because that is
+what bounds a batch. RLS policies do and a translatable ownership formula does; a formula only
+the evaluator can decide does not — a batch of it would fetch the whole table, hand back what
+survived and do it again — so it is refused naming `.rows()`, which is §5's asymmetry exactly as
+an aggregate meets it.
+
+**An iteration is not a snapshot.** Batches are separate statements and no transaction spans them
+(§6, as for a bulk write), so a loop that changes a row's *sort key* may see that row twice or not
+at all; changing any other column is safe. And because each batch is a database call, what bounds
+a stream is the **call budget** rather than the row cap — 200 batches of 1000 by default.
+
+The editor knows it: `iter(batchSize?): IterableIterator<Row>` is in the `.d.ts` the code editor
+loads, so the loop variable completes as a row of that table.
+
 ## `db.sql` — the body's own SQL
 
 `run_js_code`'s `db` could ask everything the row layer's read expresses and nothing else, so a

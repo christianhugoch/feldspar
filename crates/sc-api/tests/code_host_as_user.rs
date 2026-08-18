@@ -582,3 +582,95 @@ async fn a_delegated_read_that_needs_the_formula_engine_completes_from_a_code_bo
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_delegated_stream_is_refused_when_the_formula_decides_row_by_row() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = setup(&db).await?;
+    own_books(&cat, "owner.includes(user.email)", false).await?;
+    let host = with_engine(as_reader(&cat, "bob@example.com"));
+
+    // §5's asymmetry, in the place it bites a stream. This formula only the
+    // evaluator can decide, so a delegated read of `books` is bounded *after* the
+    // rows come back — which means a batch of it would fetch the whole table,
+    // hand back what survived, and do it again for the next batch. Not streaming,
+    // and quadratic while looking like it. So it is refused, and the refusal says
+    // what to do instead.
+    let refused = ask(
+        &host,
+        json!({ "op": "select", "table": "books", "authority": "user", "cursor": true }),
+    )
+    .await
+    .expect_err("a formula the database cannot carry cannot bound a batch");
+    assert!(
+        refused.to_string().contains("cannot be streamed"),
+        "{refused}"
+    );
+    assert!(refused.to_string().contains(".rows()"), "{refused}");
+
+    // And the way out is real: the same read unstreamed answers bob's rows, by
+    // the reified path, exactly as it did before.
+    let rows = ask(
+        &host,
+        json!({ "op": "select", "table": "books", "authority": "user", "order": [{ "field": "id" }] }),
+    )
+    .await?;
+    assert_eq!(titles(&rows), vec!["Emma", "Ubik"]);
+
+    // The refusal is about **delegation**, not about the table: the trigger's own
+    // authority streams it, because no formula narrows an admin's read.
+    let batch = ask(
+        &host,
+        json!({ "op": "select", "table": "books", "cursor": true, "limit": 2 }),
+    )
+    .await?;
+    assert_eq!(titles(&batch["rows"]), vec!["Dune", "Emma"]);
+    assert_eq!(
+        batch["cursor"],
+        json!([2]),
+        "the next batch resumes after Emma"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_delegated_stream_of_an_rls_table_is_bounded_by_the_policies() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = setup(&db).await?;
+    own_books(&cat, "owner === user.email", true).await?;
+    let host = as_reader(&cat, "ada@example.com");
+
+    // Row-level security is carried *inside* the statement by definition, so each
+    // batch is bounded over the rows the policies leave — the case a stream can
+    // serve, and the reason the guard asks how the rule travels rather than
+    // whether there is one.
+    let first = ask(
+        &host,
+        json!({ "op": "select", "table": "books", "authority": "user",
+                "cursor": true, "limit": 1 }),
+    )
+    .await?;
+    assert_eq!(titles(&first["rows"]), vec!["Dune"]);
+
+    let next = ask(
+        &host,
+        json!({ "op": "select", "table": "books", "authority": "user",
+                "cursor": true, "limit": 1, "after": first["cursor"].clone() }),
+    )
+    .await?;
+    assert_eq!(
+        titles(&next["rows"]),
+        vec!["Ilium"],
+        "bob's rows are not skipped over — they were never in the stream"
+    );
+
+    let last = ask(
+        &host,
+        json!({ "op": "select", "table": "books", "authority": "user",
+                "cursor": true, "limit": 1, "after": next["cursor"].clone() }),
+    )
+    .await?;
+    assert!(titles(&last["rows"]).is_empty());
+    assert_eq!(last["cursor"], Json::Null, "and the stream says it is done");
+    Ok(())
+}
