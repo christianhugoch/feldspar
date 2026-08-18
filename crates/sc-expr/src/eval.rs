@@ -54,7 +54,7 @@ use sc_query::Value;
 use crate::analyze::{Ambient, OpFlag};
 use crate::code::CodeCall;
 #[cfg(feature = "eval")]
-use crate::code::{CodeRuntime, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS};
+use crate::code::{CodeRuntime, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS, DEFAULT_MAX_INFLIGHT};
 use crate::formula::Formula;
 #[cfg(feature = "eval")]
 use crate::normalise::{is_join_ident, render_js};
@@ -252,6 +252,7 @@ pub struct DenoEvaluator {
     /// installations — should not pay for two more V8 isolates to find that out.
     code: OnceLock<CodeRuntime>,
     code_workers: usize,
+    code_max_inflight: usize,
     code_timeout: Duration,
 }
 
@@ -283,6 +284,7 @@ impl DenoEvaluator {
             tx,
             code: OnceLock::new(),
             code_workers: DEFAULT_CODE_WORKERS,
+            code_max_inflight: DEFAULT_MAX_INFLIGHT,
             code_timeout: DEFAULT_CODE_TIMEOUT,
         }
     }
@@ -291,6 +293,18 @@ impl DenoEvaluator {
     #[must_use]
     pub fn with_code_workers(mut self, workers: usize) -> DenoEvaluator {
         self.code_workers = workers;
+        self
+    }
+
+    /// How many runs each isolate keeps **resident** at once, in place of
+    /// [`DEFAULT_MAX_INFLIGHT`]. Beyond `workers × max_inflight` concurrent
+    /// bodies the rest queue for a worker, with the queue time still inside each
+    /// run's own deadline.
+    ///
+    /// [`DEFAULT_MAX_INFLIGHT`]: crate::DEFAULT_MAX_INFLIGHT
+    #[must_use]
+    pub fn with_max_inflight(mut self, max_inflight: usize) -> DenoEvaluator {
+        self.code_max_inflight = max_inflight;
         self
     }
 
@@ -347,7 +361,8 @@ impl JsEvaluator for DenoEvaluator {
     async fn run_code(&self, call: CodeCall<'_>) -> Result<serde_json::Value> {
         self.code
             .get_or_init(|| {
-                CodeRuntime::with_workers(self.code_workers).with_default_timeout(self.code_timeout)
+                CodeRuntime::with_workers_and_inflight(self.code_workers, self.code_max_inflight)
+                    .with_default_timeout(self.code_timeout)
             })
             .run(call)
             .await
@@ -1104,6 +1119,58 @@ mod tests {
                 .unwrap(),
             json!(3)
         );
+    }
+
+    /// A host that holds every call long enough for the runs that made them to
+    /// overlap, and records how many were ever in flight at once.
+    struct PeakHost {
+        live: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::CodeHost for PeakHost {
+        async fn call(&self, _request: serde_json::Value) -> Result<serde_json::Value> {
+            let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(live, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            Ok(serde_json::json!([]))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_code_pool_knobs_reach_the_pool() {
+        // The knobs are only worth having if they are wired: one isolate
+        // admitting two runs serves two bodies at once and queues the rest. The
+        // pool's own bound is tested in `code`; what is tested here is that
+        // `DenoEvaluator` hands it on, since the server configures the pool
+        // through this builder and nothing else.
+        let host = Arc::new(PeakHost {
+            live: std::sync::atomic::AtomicUsize::new(0),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let ev = Arc::new(
+            DenoEvaluator::new()
+                .with_code_workers(1)
+                .with_max_inflight(2),
+        );
+        let mut runs = Vec::new();
+        for _ in 0..8 {
+            let (ev, host) = (Arc::clone(&ev), Arc::clone(&host));
+            runs.push(tokio::spawn(async move {
+                let mut c = code("return (await db.books.rows()).length;", &[]);
+                c.host = Some(&*host);
+                c.timeout = Some(Duration::from_secs(10));
+                ev.run_code(c).await
+            }));
+        }
+        for run in runs {
+            assert_eq!(run.await.unwrap().unwrap(), serde_json::json!(0));
+        }
+        let peak = host.peak.load(Ordering::SeqCst);
+        assert!(peak > 1, "the eight runs never overlapped at all");
+        assert!(peak <= 2, "the admission bound was not applied: {peak}");
     }
 
     #[tokio::test]

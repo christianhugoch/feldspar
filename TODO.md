@@ -278,15 +278,19 @@ arrives that way — `__scRun` attaches a rejection handler to the body's promis
 
 ## Phase 5 — Configuration, documentation and the definition of done
 
-- [ ] `DenoEvaluator::with_max_inflight` beside `with_code_workers`, and — the gap this milestone
+- [x] `DenoEvaluator::with_max_inflight` beside `with_code_workers`, and — the gap this milestone
       also closes — an actual config path: `sc-server` builds the evaluator with
-      `DenoEvaluator::new()` and nothing reads either knob today.
-- [~] `docs/TECHNICAL_DESIGN.md` §10.1: "The API is **synchronous**" becomes its opposite, with
+      `DenoEvaluator::new()` and nothing reads either knob today. *(Both are now `ServerConfig`
+      fields and `saltcorn serve` flags — `--code-workers`, `--code-max-inflight` — applied by
+      `sc_server::js_evaluator`; flags rather than stored settings because a node's cores and
+      memory are that node's, not the application's.)*
+- [x] `docs/TECHNICAL_DESIGN.md` §10.1: "The API is **synchronous**" becomes its opposite, with
       the `for await` spelling, the two clocks, the admission bound, and the sentence naming the
       connection pool as the ceiling that remains. *(Done in phase 1: the synchronous claim, the
       `for await` spelling and every example. Done in phase 3: the two clocks, since leaving §10.1
       claiming three bounds once the slice existed would have been wrong rather than merely
-      incomplete. Still to do here: the admission bound and the connection-pool ceiling.)*
+      incomplete. Done here: "How many run at once" — the admission bound, the two flags that
+      size it, and the connection pool as the ceiling that remains.)*
 - [x] `ui/admin/src/codeTypes.ts`: terminals answer `Promise<…>`, `iter()` answers
       `AsyncIterableIterator<Row>`, and the doc comments lose "Synchronous — there are no promises
       in the sandbox". Monaco's own diagnostics then catch a forgotten `await` in the editor,
@@ -295,9 +299,10 @@ arrives that way — `__scRun` attaches a rejection handler to the body's promis
       `await`, and the "the code is **synchronous**" bullet is replaced by what a body now has to
       know — await your queries, `Promise.all` is real parallelism, and a body that computes for a
       second without yielding is the one shape the runtime will refuse.
-- [ ] The end-to-end test the milestone is defined by: 500 concurrent trigger fires on the
+- [x] The end-to-end test the milestone is defined by: 500 concurrent trigger fires on the
       default pool, all served, none timing out.
-- [ ] CHANGELOG.
+      *(`sc-server/tests/concurrent_code_bodies.rs`.)*
+- [x] CHANGELOG.
 
 ---
 

@@ -46,6 +46,25 @@ pub struct ServerConfig {
     /// request reaches the admin. App routing is opt-in because without a base
     /// domain to anchor it, a request's own `Host` header would choose its app.
     pub base_domain: Option<String>,
+    /// How many V8 isolates the **code** pool runs (`--code-workers`), and how
+    /// many runs each of them keeps resident at once (`--code-max-inflight`).
+    ///
+    /// A `run_js_code` body's run costs a pending promise rather than a thread,
+    /// so the worker count buys CPU parallelism and the admission bound buys
+    /// occupancy: the server serves `code_workers × code_max_inflight` bodies at
+    /// once (512 by default) and queues the rest, with the queue time still
+    /// inside each run's own deadline. Past that the ceiling is the database
+    /// connection pool, which is where it belongs (design §10.1).
+    ///
+    /// Flags rather than stored settings because both are properties of *this
+    /// process's* machine — its cores and its memory — not of the application,
+    /// and a node with more of either should be able to say so without every
+    /// other node against the same database hearing it.
+    pub code_workers: usize,
+    /// Runs each code isolate admits at once — see [`code_workers`].
+    ///
+    /// [`code_workers`]: ServerConfig::code_workers
+    pub code_max_inflight: usize,
     /// How this server obtains the certificate it serves HTTPS with (§13.5).
     ///
     /// **Not a command-line setting**, deliberately: certificates are edited in
@@ -69,6 +88,8 @@ impl Default for ServerConfig {
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,
             base_domain: None,
+            code_workers: sc_expr::DEFAULT_CODE_WORKERS,
+            code_max_inflight: sc_expr::DEFAULT_MAX_INFLIGHT,
             tls: TlsSettings::Off,
         }
     }
@@ -78,9 +99,9 @@ impl ServerConfig {
     /// Parse configuration from CLI arguments (everything after the subcommand).
     ///
     /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
-    /// `--session-ttl-hours <n>`, `--secure-cookies`, and `--base-domain
-    /// <domain>`. Unknown flags are an [`Error::Config`], so a typo fails loudly
-    /// rather than being ignored.
+    /// `--session-ttl-hours <n>`, `--secure-cookies`, `--base-domain <domain>`,
+    /// `--code-workers <n>` and `--code-max-inflight <n>`. Unknown flags are an
+    /// [`Error::Config`], so a typo fails loudly rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
     where
         I: IntoIterator<Item = S>,
@@ -104,6 +125,16 @@ impl ServerConfig {
                     cfg.session_ttl_hours = raw.parse().map_err(|e| {
                         Error::config(format!("invalid --session-ttl-hours `{raw}`: {e}"))
                     })?;
+                }
+                "--code-workers" => {
+                    cfg.code_workers =
+                        positive(&next_value(&mut it, "--code-workers")?, "--code-workers")?;
+                }
+                "--code-max-inflight" => {
+                    cfg.code_max_inflight = positive(
+                        &next_value(&mut it, "--code-max-inflight")?,
+                        "--code-max-inflight",
+                    )?;
                 }
                 "--secure-cookies" => cfg.secure_cookies = true,
                 "--base-domain" => {
@@ -129,6 +160,17 @@ where
         .ok_or_else(|| Error::config(format!("{flag} requires a value")))
 }
 
+/// Parse a count that must be at least one. Zero isolates or zero resident runs
+/// would serve nothing at all, and the pool silently clamps both — so a `0` on
+/// the command line is refused here rather than quietly meaning `1`.
+fn positive(raw: &str, flag: &str) -> Result<usize> {
+    match raw.parse::<usize>() {
+        Ok(n) if n > 0 => Ok(n),
+        Ok(_) => Err(Error::config(format!("{flag} must be at least 1"))),
+        Err(e) => Err(Error::config(format!("invalid {flag} `{raw}`: {e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +184,9 @@ mod tests {
         assert!(!cfg.secure_cookies);
         // App subdomain routing is opt-in.
         assert!(cfg.base_domain.is_none());
+        // The code pool's defaults are the engine's own (design §10.1).
+        assert_eq!(cfg.code_workers, sc_expr::DEFAULT_CODE_WORKERS);
+        assert_eq!(cfg.code_max_inflight, sc_expr::DEFAULT_MAX_INFLIGHT);
     }
 
     #[test]
@@ -156,6 +201,10 @@ mod tests {
             "--secure-cookies",
             "--base-domain",
             "example.com",
+            "--code-workers",
+            "4",
+            "--code-max-inflight",
+            "64",
         ])
         .expect("parse");
         assert_eq!(cfg.addr.to_string(), "0.0.0.0:8080");
@@ -166,6 +215,18 @@ mod tests {
         assert_eq!(cfg.session_ttl_hours, 12);
         assert!(cfg.secure_cookies);
         assert_eq!(cfg.base_domain.as_deref(), Some("example.com"));
+        assert_eq!(cfg.code_workers, 4);
+        assert_eq!(cfg.code_max_inflight, 64);
+    }
+
+    /// Both code-pool counts are clamped to at least one by the pool itself, so
+    /// a `0` here is a mistake that would be silently rewritten. Refuse it.
+    #[test]
+    fn rejects_a_zero_or_unparseable_code_pool() {
+        assert!(ServerConfig::from_args(["--code-workers", "0"]).is_err());
+        assert!(ServerConfig::from_args(["--code-max-inflight", "0"]).is_err());
+        assert!(ServerConfig::from_args(["--code-workers", "lots"]).is_err());
+        assert!(ServerConfig::from_args(["--code-max-inflight"]).is_err());
     }
 
     /// The IDE is not configurable, and asking for it is a typo like any other.

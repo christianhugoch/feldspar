@@ -48,8 +48,26 @@ pub use sc_agent::{ProviderConnector, StoredProviders};
 /// formulas' reified path runs on (§7.3). Constructed once at boot and shared —
 /// `AppMounts::with_evaluator(default_js_evaluator())` — so every provider of
 /// every mount evaluates on one isolate.
+///
+/// The code pool it lazily builds for `run_js_code` bodies takes its defaults;
+/// [`js_evaluator`] is the same thing with a [`ServerConfig`]'s knobs applied.
 pub fn default_js_evaluator() -> std::sync::Arc<dyn sc_expr::JsEvaluator> {
-    std::sync::Arc::new(sc_expr::DenoEvaluator::new())
+    js_evaluator(&ServerConfig::default())
+}
+
+/// The server's JavaScript evaluator, configured: `--code-workers` isolates in
+/// the code pool, each admitting `--code-max-inflight` runs at once (§10.1).
+///
+/// The formula isolate is unaffected by either — it is one isolate serving
+/// evaluations serially and has no host to wait on. The code pool is built on
+/// first use, so a server that never fires a `run_js_code` trigger pays for
+/// neither knob.
+pub fn js_evaluator(config: &ServerConfig) -> std::sync::Arc<dyn sc_expr::JsEvaluator> {
+    std::sync::Arc::new(
+        sc_expr::DenoEvaluator::new()
+            .with_code_workers(config.code_workers)
+            .with_max_inflight(config.code_max_inflight),
+    )
 }
 pub use config::{DEFAULT_BIND, ServerConfig};
 pub use handler::{

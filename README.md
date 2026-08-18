@@ -290,8 +290,19 @@ other users can read it.
 | `--session-ttl-hours <n>` | session lifetime | `24` |
 | `--secure-cookies` | set the `Secure` attribute on session/CSRF cookies (use behind HTTPS) | off |
 | `--base-domain <domain>` | domain that applications are served under: an app with subdomain `blog` is served at `blog.<domain>` | none (app routing off) |
+| `--code-workers <n>` | V8 isolates serving `run_js_code` trigger bodies | `2` |
+| `--code-max-inflight <n>` | runs each of those isolates keeps resident at once | `256` |
 
 Unknown flags in either group are rejected with a clear error rather than ignored.
+
+> **The two code-pool flags size concurrency, not parallelism.** A code body
+> suspended on a database call costs a pending promise rather than a thread, so
+> one isolate serves hundreds of bodies at once: `--code-workers` buys CPU
+> parallelism (what a body that *computes* wants) and `--code-max-inflight` buys
+> occupancy (memory: a resident run holds its scope, its bindings and its last
+> read). The defaults serve 512 bodies at once and queue the rest, with the queue
+> time counted inside each run's own `timeout_ms`. Past that the ceiling is the
+> database connection pool, which is where it belongs.
 
 > **`--base-domain` mounts your applications.** With it set, `saltcorn serve` loads
 > every `_sc_applications` row at boot, builds each, and serves it at

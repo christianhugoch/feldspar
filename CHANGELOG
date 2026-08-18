@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## The pool an operator can size, and five hundred fires to prove it
+
+The milestone's plumbing was finished; what was missing was the two ends of it. The knobs the
+pool grew — how many isolates, how many runs resident on each — could be set by a Rust caller
+and by nobody else: `sc-server` built the evaluator with `DenoEvaluator::new()`, and neither
+number had a way in. And the claim the whole milestone was defined by — five hundred concurrent
+bodies served on the default pool — was proved layer by layer against a fake host and nowhere
+against the assembled server.
+
+**Both knobs are now configuration.** `DenoEvaluator::with_max_inflight` sits beside
+`with_code_workers`, `ServerConfig` carries both, and `saltcorn serve` takes them as
+`--code-workers` (2) and `--code-max-inflight` (256) — 512 concurrent bodies by default, with
+the rest queued and their queue time still inside their own wall clock. `sc_server::js_evaluator`
+is what applies them; `default_js_evaluator()` is that with the defaults, so every test that
+wanted the old function still has it. A `0` for either is refused rather than silently clamped
+to 1, since the pool clamps and a zero on a command line is a mistake, not a request.
+
+They are **flags rather than stored settings**, which is the one decision here worth recording:
+a node's cores and its memory are properties of that node, not of the application, so a big box
+should be able to say so without every other node against the same database hearing it. TLS
+went the other way, and for the mirror-image reason (§13.5).
+
+**The definition of done, end to end.** `sc-server/tests/concurrent_code_bodies.rs` fires five
+hundred concurrent HTTP trigger runs at the default pool. Each body reads and writes through the
+real catalog and the real database; every one is answered inside its own five-second wall clock,
+with the answer its own payload decides, and the five hundred rows are there afterwards — one
+each, so nothing was served twice. That none of them timed out is the assertion: a run's clock
+runs while it queues, so five hundred bodies serialised two at a time (which is what this server
+did before the milestone: a host call blocked its isolate's thread for the whole round trip)
+would have been answered with the clock rather than with a result.
+
+Design §10.1 gained the paragraph that says all of this: how many run at once, what admission
+costs and why, and the sentence the milestone owed — that past the admission bound the ceiling
+is the **database connection pool**, which already bounds itself and is where the limit belongs.
+
 ## The hot path: compiled once, invoked per run
 
 Two isolates now serve hundreds of concurrent runs, and what those runs were still paying for,

@@ -152,8 +152,11 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // The JS engine ownership formulas evaluate on (§7.3): one isolate for the
     // whole server, shared by every mounted app's providers — and by the trigger
     // dispatcher, whose `only_if` formulas and action configuration are the same
-    // language evaluated the same way.
-    let evaluator = sc_server::default_js_evaluator();
+    // language evaluated the same way. It also carries the **code** pool a
+    // `run_js_code` body runs on, which is what `--code-workers` and
+    // `--code-max-inflight` size (§10.1) — built on first use, so a deployment
+    // with no code bodies pays for neither.
+    let evaluator = sc_server::js_evaluator(&config);
 
     // Agents: the built-in trait set and the two tables an agent and its runs
     // live in (§11.2). A stored agent that does not validate is reported and
@@ -782,6 +785,10 @@ fn print_usage() {
     eprintln!("    --base-domain DOMAIN     apps are served at <subdomain>.<domain>");
     eprintln!(
         "    --file-store NAME=PATH   connect a local directory as a named file store (repeatable)"
+    );
+    eprintln!(
+        "    --code-workers N         V8 isolates serving run_js_code bodies (default 2)
+    --code-max-inflight N    runs each of those isolates keeps resident (default 256)"
     );
     eprintln!();
     eprintln!(

@@ -1236,6 +1236,20 @@ reaching it stops the worker admitting new runs rather than aborting the process
 statements**: each autocommits, as every action's writes do, and
 `db.transaction(fn)` is a later addition whose seam is the row layer's `Executor::Transaction`.
 
+**How many run at once.** A run suspended on a host call costs a pending promise rather than a
+thread, so one isolate serves hundreds of bodies at once and the pool stays small: more isolates
+buy CPU parallelism, which is not what a body waiting on the database is short of. What
+concurrency does cost is memory — a resident run holds its scope, its bindings and up to a
+capped read in the V8 heap — so each worker **admits** a bounded number of runs and the rest
+queue for a place, with the queue time still inside each run's own wall clock. The two numbers
+are the deployment's, not the application's (a node's cores and memory are properties of that
+node), so they are `serve` flags rather than stored settings: `--code-workers` (2) and
+`--code-max-inflight` (256), 512 concurrent bodies by default. Past that the ceiling is the
+**database connection pool**, which is where it belongs and which already bounds itself: a code
+body's read is one pooled query like any other, so the answer to "how many `run_js_code` requests
+can this server serve" is the pool's, not a thread count's, and it is tuned where every other
+query's concurrency is.
+
 **A run does not cost a compile.** The `db` surface is compiled once per isolate, as a factory
 that builds one run's handle over that run's token; each body is compiled once per isolate too
 and kept under a content key, so a trigger firing a thousand times parses its source once and
