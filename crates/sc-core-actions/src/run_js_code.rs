@@ -58,19 +58,46 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 ///
 /// A chain is pure and a terminal executes, sending one plan to
 /// [`sc_api::code_host::TableHost`] — which resolves every table, column, Ⱶ-path
-/// and formula through the catalog, so nothing reaches SQL as text and there is
-/// no raw-SQL escape hatch here (§13.4's custom SQL queries are the governed
-/// way). Writes go through the row layer, which means they are coerced against
+/// and formula through the catalog, so nothing a chain produces reaches SQL as
+/// text. Writes go through the row layer, which means they are coerced against
 /// their columns, validated, and **observed by triggers**: a write from a code
 /// body is an event like any other, carrying this trigger's chain, so the cascade
 /// bound applies to it exactly as it does to `insert_row`.
+///
+/// ## The body's own SQL
+///
+/// For the question the chain does not ask — a window function, a recursive CTE,
+/// an `ON CONFLICT` — there is `db.sql`:
+///
+/// ```js
+/// const ranked = db.sql(
+///   "select owner, title, rank() over (partition by owner order by pages desc) as r \
+///    from books where pages > $1",
+///   [200],
+/// );
+/// const mine = db.sql("select * from books", [], { asUser: true });  // or db.asUser().sql(…)
+/// ```
+///
+/// The text is the trigger author's and runs as written; the values are
+/// **binds** and never part of it. It is the same admission §13.4's custom SQL
+/// queries are — a code body is server-side configuration written by an
+/// administrator — and it carries the same consequences, which the third
+/// argument is an object in order to keep saying: raw SQL does not go through
+/// the row layer, so no ownership formula filters it, no rich type coerces it,
+/// and **a write inside one raises no table event**. The row cap, the call
+/// budget and the caller-context transaction (so an RLS table's policies still
+/// decide) all still apply.
+///
+/// ## Whose authority
 ///
 /// Reads and writes are the **admin's** by default, carrying the event's user —
 /// a trigger is server-side configuration, and an audit row the caller may not
 /// insert is the archetype of what a trigger exists to write. `db.asUser()`
 /// delegates to the event's caller instead, and then §7.3's ownership rule
 /// decides every row; a refusal is a catchable error, so a body may try a
-/// delegated write and fall back.
+/// delegated write and fall back. On a `db.sql` it means less, and honestly so:
+/// the statement runs at the caller's role and user, which is what row-level
+/// security reads, and an ownership formula does not reach it.
 ///
 /// The escape hatch for the thing an elementary action cannot anticipate: a
 /// computation over the event and its tables that no combination of

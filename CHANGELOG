@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## `db.sql` — the body's own SQL
+
+`run_js_code`'s `db` could ask everything the row layer's read expresses and nothing else, so a
+window function, a recursive CTE or an `ON CONFLICT` meant leaving the trigger. Now the body can
+write the statement:
+
+```js
+const ranked = db.sql(
+  "select owner, title, rank() over (partition by owner order by pages desc) as r \
+   from books where pages > $1",
+  [200],
+);
+const mine = db.sql("select * from books", [], { asUser: true });  // or db.asUser().sql(…)
+```
+
+**The text is the author's; the values are binds.** The SQL runs as written — placeholders are
+the database's own (`$1` on Postgres) and the second argument is what they stand for, so a value
+that spells SQL is a value. This is the same admission §13.4's custom SQL queries are, on the
+same grounds: a code body is server-side configuration written by an administrator, which is
+what `Statement::Raw`'s rule ("authored, never assembled from what a caller sent") requires.
+
+**Whose authority, said twice because both readings are natural.** A third argument —
+an *object*, so what it can say may grow — takes `{ asUser: true }`, and `db.asUser().sql(…)`
+is the same thing said fluently; the option wins where both appear. Delegation means less here
+than on a chain, and the docs say so rather than implying otherwise: the statement runs at the
+caller's role and user, which is exactly what row-level security reads, and an ownership
+*formula* is applied by a row layer that raw SQL does not go through.
+
+**What is given up is listed where an author will read it** — in `run_js_code`'s own
+documentation, the code editor's completions and the host module: no ownership formula filters
+it, no rich type coerces what it returns, and a write inside one raises **no table event**. What
+still holds: the caller-context transaction (an RLS table's policies decide), the row cap (these
+rows are materialised into the isolate like any others) and the call budget.
+
+A `db.sql` request is a shape of its own rather than a sixth `Op` — it shares nothing with a plan
+but the authority — and `TableHost::call` tells the two apart by `op` before deserialising
+either, so a malformed request is refused in the words of the shape it was trying to be. Two
+things are read out of the text, both by `rewrite_named_params` (the one reader of admin SQL,
+which knows a `;` inside a literal separates nothing): a **second statement** is refused, and so
+is a `:name` parameter — that is the custom query's spelling, where the admin also declares each
+type, and left alone it would reach the database as a syntax error pointing at a colon.
+
 ## `db` in a code body can group
 
 `run_js_code`'s tables could answer "how many" and "how much" for a whole table; they could not

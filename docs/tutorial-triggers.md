@@ -341,6 +341,28 @@ Who "the user" is, is **whoever caused the event**: the signed-in person for a t
 reads as the public role, because a nightly job has no user to act as. That is why admin is the
 default.
 
+**When the chain cannot ask it, write the SQL.** A window function, a recursive CTE, an
+`ON CONFLICT` — `db.sql()` runs a statement you wrote and gives you its rows. The values go in
+the array and are **bound**, never pasted into the text, so `$1` is a value even when the value
+spells SQL:
+
+```js
+const ranked = db.sql(
+  "select owner, title, rank() over (partition by owner order by due) as r from tasks \
+   where done = $1",
+  [false],
+);
+db.sql("select * from tasks", [], { asUser: true });   // or db.asUser().sql("select * from tasks")
+```
+
+The third argument is an options object — today it takes `asUser`, and it is an object so that
+what it can say may grow. Be aware of what you are stepping outside of: raw SQL does not go
+through the row layer, so ownership formulas do not filter it, values are not coerced against
+their columns, and **a write inside it fires no triggers**. `asUser` here means the statement
+runs at that person's role and identity, which is what row-level security reads — if the table
+is owned by a *formula* rather than by RLS, a delegated `db.sql()` still sees everything. The
+row cap, the call budget and the timeout below all apply, and one call runs one statement.
+
 **Three bounds, and each one tells you what to do about it.** A read of more than **1000 rows**
 is refused rather than trimmed (add a `.limit()` or narrow the `.where()` — half a table
 silently would make every total you compute wrong); more than **200 database calls** in one run
@@ -349,9 +371,9 @@ is refused (that is an accidental loop, not a workload); and the run has a wall 
 statements: a body that fails half way leaves the rows it already wrote, and their triggers have
 already fired.
 
-What `db` deliberately does *not* have: raw SQL, schema changes, and anything awaitable. The API
-is synchronous — `db.tasks.rows()` returns rows, not a promise — and a body that returns a
-promise is refused rather than quietly turning into `{}`.
+What `db` deliberately does *not* have: schema changes, transactions across statements, and
+anything awaitable. The API is synchronous — `db.tasks.rows()` returns rows, not a promise — and
+a body that returns a promise is refused rather than quietly turning into `{}`.
 
 ## The actions you have
 

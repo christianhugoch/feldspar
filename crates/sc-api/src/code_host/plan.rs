@@ -29,9 +29,9 @@ use sc_catalog::{Catalog, DataFieldKind, Table};
 use sc_error::{Error, Result};
 use sc_expr::{
     AggFunc, CalcFields, Env, Formula, JOIN, Operation, TranslateError, UserEnv, aggregate_expr,
-    join_path_expr, translate, translate_value,
+    join_path_expr, translate, translate_value, value_from_json,
 };
-use sc_query::{Expr, OrderBy, Projection, Value};
+use sc_query::{Expr, OrderBy, Projection, Statement, Value, rewrite_named_params};
 use serde::Deserialize;
 use serde_json::Value as Json;
 
@@ -102,6 +102,47 @@ pub struct Plan {
     /// An insert's row(s), or an update's assignments (phase 3).
     #[serde(default)]
     pub values: Option<Json>,
+}
+
+/// The **other** thing a terminal may send: SQL the code body wrote itself
+/// (`db.sql("select …", [args])`).
+///
+/// A separate shape rather than a sixth [`Op`], because it shares nothing with a
+/// plan but the authority: there is no table to resolve, no column to check and
+/// no filter to lower — the whole statement is the author's text, and the only
+/// thing this server puts into it is the bound values. [`super::TableHost`]
+/// tells the two apart by the `op` field before it deserialises either, so a malformed
+/// request is refused in the words of the shape it was trying to be.
+///
+/// The rule written on [`Statement::Raw`](sc_query::Statement::Raw) — raw SQL is
+/// **admin-authored, never assembled from what a caller sent** — is what makes
+/// this admissible at all: a `run_js_code` body is server-side configuration,
+/// written by the same administrator who writes §13.4's custom SQL queries. The
+/// values a run has in hand (a row, a payload, a user) reach the statement as
+/// **binds** and nowhere else, which is why the parameters are an array rather
+/// than something the body interpolates.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlPlan {
+    /// Always `sql` — the field the two shapes are told apart by.
+    pub op: SqlOp,
+    /// Whose authority it runs under (§5). Admin unless the body delegated.
+    #[serde(default)]
+    pub authority: Authority,
+    /// The statement, with the database's own placeholders in it.
+    pub sql: String,
+    /// The values those placeholders stand for, in placeholder order.
+    #[serde(default)]
+    pub params: Vec<Json>,
+}
+
+/// The one operation a [`SqlPlan`] may be — a unit enum rather than an ignored
+/// field, so a request that says `sql` is the only thing that deserialises as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlOp {
+    /// `db.sql(…)`.
+    Sql,
 }
 
 /// The five operations a plan may be.
@@ -650,6 +691,58 @@ fn pk_expr(table: &Table, pk: &Json) -> Result<Expr> {
     let key = rows::single_pk(table)?;
     let value = rows::column_value(table, &key, pk)?;
     Ok(Expr::col(key).eq(Expr::lit(value)))
+}
+
+// ---------------------------------------------------------------------------
+// The body's own SQL
+// ---------------------------------------------------------------------------
+
+/// The statement one `db.sql(…)` runs: the body's text as it stands, and its
+/// arguments as bind values.
+///
+/// Two things are read out of the text, and only two — both because getting them
+/// wrong is silent rather than loud:
+///
+/// - **One statement.** A `Raw` is prepared and bound, and a backend that is
+///   handed `a; b` either refuses the pair or runs the second one unbound. Either
+///   way "the code body ran one query" stops being true, so a second statement is
+///   refused here, naming the way to run two: two calls.
+/// - **No `:name` parameters.** They are §13.4's spelling, where an admin also
+///   declares each one's type; here the arguments are positional, so a `:name`
+///   is an author expecting the other surface's rewriting. Left alone it would
+///   reach the database as a syntax error pointing at a colon, which says
+///   nothing about why.
+///
+/// The scan that answers both is `rewrite_named_params` — the one reader of
+/// admin SQL in the codebase, which knows that a `;` inside a literal or a
+/// comment separates nothing and that `x::text` is a cast. Its rewritten text is
+/// thrown away: what runs is what the body wrote.
+pub(crate) fn statement(cat: &Catalog, plan: &SqlPlan) -> Result<Statement> {
+    let dialect = cat.primary().dialect();
+    let named = rewrite_named_params(dialect, &plan.sql)
+        .map_err(|e| Error::invalid(format!("this code body's SQL {e}")))?;
+    if named.statements == 0 {
+        return Err(Error::invalid(
+            "`db.sql()` was given no SQL to run".to_owned(),
+        ));
+    }
+    if named.statements > 1 {
+        return Err(Error::invalid(format!(
+            "`db.sql()` was given {} statements; it runs one — call it twice, and note \
+             that the two do not share a transaction",
+            named.statements
+        )));
+    }
+    if let Some(name) = named.params.first() {
+        return Err(Error::invalid(format!(
+            "`db.sql()` binds its parameters by position, so `:{name}` is not one of them; \
+             write `{}` and pass the value in the array (a custom SQL query is the surface \
+             that takes `:{name}`)",
+            dialect.placeholder(1)
+        )));
+    }
+    let binds = plan.params.iter().map(value_from_json).collect();
+    Ok(Statement::raw(plan.sql.clone(), binds))
 }
 
 // ---------------------------------------------------------------------------

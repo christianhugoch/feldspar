@@ -15,9 +15,29 @@
 //! and one round trip. The guest builds it; **nothing in it is trusted**. The
 //! table is resolved through the catalog, every column against that table, every
 //! Ⱶ-path through [`ownership::join_guard`](crate::ownership), every formula
-//! through the one translator, and anything else is refused naming it. There is
-//! no raw-SQL escape hatch, and no way to add one from the guest: a plan carries
-//! names and values, and the statement is built here.
+//! through the one translator, and anything else is refused naming it: a plan
+//! carries names and values, and the statement is built here.
+//!
+//! # The one exception, named
+//!
+//! `db.sql("select …", [args])` sends a [`SqlPlan`] instead, and its text is the
+//! statement. It exists because the row layer's read does not express everything
+//! — a window function, a recursive CTE, an `ON CONFLICT` — and a code body that
+//! has to leave the server to ask is not an escape hatch. It is the **same**
+//! admission §13.4's custom SQL queries are, on the same grounds and with the
+//! same paragraph of consequences: a `run_js_code` body is server-side
+//! configuration written by an administrator, so the rule on
+//! [`Statement::Raw`](sc_query::Statement::Raw) — raw SQL is authored, never
+//! assembled from what a caller sent — holds by construction. The body's own
+//! values reach it as **binds** and nowhere else.
+//!
+//! What that costs is exactly the list of things the paragraph above is: no
+//! ownership formula filters it, no rich type coerces what it returns, no
+//! `File`-field rule governs it, and a write inside one raises **no table
+//! event** — so a trigger will not see it, and the row layer's `db.books.insert`
+//! is still the way to write a row that other triggers are meant to notice. What
+//! does still hold is the caller-context transaction (an RLS-protected table's
+//! policies decide), the row cap and the call budget.
 //!
 //! # Authority
 //!
@@ -37,6 +57,12 @@
 //! as it is *and* on the row as it would become, a withheld row is the same
 //! **not found** an absent row gets, and an RLS table is read and written inside
 //! a caller-context transaction where the database's own policies decide.
+//!
+//! Delegation means less for `db.sql()` than it does for the chain, and the
+//! difference is stated where the operation is: it runs the statement at the
+//! caller's role and user, which is what row-level security reads — and nothing
+//! else, because an ownership formula is applied by a row layer raw SQL does not
+//! go through.
 //!
 //! Events differ in whom they have to delegate to, and that difference is
 //! honoured rather than hidden: a table event or a directly-run trigger carries
@@ -69,7 +95,7 @@ use crate::convert::value_to_json;
 use crate::ownership;
 use crate::rows;
 
-pub use plan::{AggSpec, Authority, Dir, Op, OrderKey, Plan, Selection};
+pub use plan::{AggSpec, Authority, Dir, Op, OrderKey, Plan, Selection, SqlOp, SqlPlan};
 
 /// How many rows one read may return before it is refused.
 ///
@@ -193,7 +219,7 @@ impl<'a> TableHost<'a> {
         // decides the role every name in the plan is resolved *at*, so a
         // delegated read of a table the caller may not reach through a key is
         // refused by the same guard a REST embed is.
-        let actor = self.actor(plan)?;
+        let actor = self.actor(plan.authority)?;
         match plan.op {
             Op::Select => self.select(plan, &actor).await,
             Op::Aggregate => self.aggregate(plan, &actor).await,
@@ -205,8 +231,8 @@ impl<'a> TableHost<'a> {
     /// Whose authority this plan runs under, as the value the operations dispatch
     /// on. Delegation reads the event's caller back as an [`sc_auth::User`] here,
     /// so a caller object that is not one is refused before any statement runs.
-    fn actor(&self, plan: &Plan) -> Result<Actor> {
-        match plan.authority {
+    fn actor(&self, authority: Authority) -> Result<Actor> {
+        match authority {
             Authority::Admin => Ok(Actor::Admin(self.caller())),
             Authority::User => Ok(Actor::Caller {
                 role: self.role,
@@ -243,6 +269,7 @@ impl<'a> TableHost<'a> {
         self.within_cap(
             values.len(),
             &format!("reading `{}` returned", read.table.name),
+            "add a `.limit()` or narrow the `.where()`",
         )?;
         Ok(Json::Array(values.iter().map(|v| read.row(v)).collect()))
     }
@@ -304,8 +331,43 @@ impl<'a> TableHost<'a> {
         self.within_cap(
             values.len(),
             &format!("grouping `{}` produced", agg.table.name),
+            "add a `.limit()` or narrow the `.where()`",
         )?;
         Ok(Json::Array(values.iter().map(group).collect()))
+    }
+
+    /// A `db.sql(…)`: the body's own SQL, and its rows as JSON objects keyed by
+    /// the column names the database reported.
+    ///
+    /// **The one thing in `db` that is not resolved through the catalog**, and
+    /// the module documentation's paragraph on it says what that costs. What is
+    /// still true here is the part that does not depend on knowing the tables:
+    /// the arguments are **binds**, so a value that spells SQL is a value; the
+    /// row cap applies, because these rows are materialised into the isolate
+    /// exactly as a `.rows()`'s are; the call is one of the run's budget; and the
+    /// statement runs inside the same caller-context transaction every other
+    /// operation does, so an RLS-protected table's policies still decide what it
+    /// can see.
+    ///
+    /// What `asUser()` means here is therefore **narrower than it is anywhere
+    /// else**, and narrow in a way worth saying out loud: it runs the statement
+    /// at the caller's role and user, which is exactly what row-level security
+    /// reads — and nothing more. An ownership *formula* is applied by the row
+    /// layer, and raw SQL does not go through the row layer, so it does not
+    /// filter this. A delegated `db.sql()` over a table that is owned by formula
+    /// rather than by RLS sees the whole table; the body that wants §7.3's rule
+    /// wants the chain, which is why the chain is the default surface and this is
+    /// the escape hatch.
+    async fn sql(&self, plan: &SqlPlan) -> Result<Json> {
+        let statement = plan::statement(self.catalog, plan)?;
+        let context = self.actor(plan.authority)?.context(&self.chain);
+        let rows = sc_catalog::run_in_context(self.catalog, &context, &statement).await?;
+        self.within_cap(
+            rows.len(),
+            "this `db.sql()` returned",
+            "add a `LIMIT` to the statement",
+        )?;
+        Ok(crate::rest::custom::rows_to_json(&rows))
     }
 
     /// An `insert`: the written row, or an array of them for an array in.
@@ -388,6 +450,7 @@ impl<'a> TableHost<'a> {
         self.within_cap(
             values.len(),
             &format!("this {verb} of `{}` matched", table.name),
+            "add a `.limit()` or narrow the `.where()`",
         )?;
 
         let mut ids = Vec::with_capacity(values.len());
@@ -443,17 +506,16 @@ impl<'a> TableHost<'a> {
     }
 
     /// The row cap, asserted on rows that are already in hand — a read's answer,
-    /// or the rows a bulk write matched.
+    /// the rows a bulk write matched, or what the body's own SQL returned.
     ///
     /// Both are refusals rather than truncations, and for the same reason: a body
     /// handed 1000 of 4000 rows computes a wrong answer out of a right-looking
     /// one, and a body that updated 1000 of 4000 rows would report having done
     /// what it was asked.
-    fn within_cap(&self, rows: usize, clause: &str) -> Result<()> {
+    fn within_cap(&self, rows: usize, clause: &str, fix: &str) -> Result<()> {
         if rows as u64 > self.limits.max_rows {
             return Err(Error::invalid(format!(
-                "{clause} more than the {} rows a code body may take at once; add a \
-                 `.limit()` or narrow the `.where()`",
+                "{clause} more than the {} rows a code body may take at once; {fix}",
                 self.limits.max_rows
             )));
         }
@@ -539,17 +601,43 @@ impl Actor {
             Actor::Caller { role, .. } => *role,
         }
     }
+
+    /// The caller context a statement of this authority runs under — the GUCs an
+    /// RLS policy reads, and the chain a write's event carries.
+    ///
+    /// The chain-and-row-layer operations never ask: `Admin` already **is** the
+    /// context they were built from, and a delegated one is built by
+    /// `ownership`'s own `*_as` functions. `db.sql()` asks, because it is the one
+    /// operation that reaches the database without either of those in front of it.
+    fn context(&self, chain: &[String]) -> CallerContext {
+        match self {
+            Actor::Admin(context) => context.clone(),
+            Actor::Caller { role, user } => {
+                ownership::caller_context_at(*role, user.as_ref()).chained(chain.to_vec())
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl CodeHost for TableHost<'_> {
     async fn call(&self, request: Json) -> Result<Json> {
         self.spend_call()?;
-        let plan: Plan = serde_json::from_value(request).map_err(|e| {
+        let refuse = |e: serde_json::Error| {
             Error::invalid(format!(
                 "this database request is not one the server understands: {e}"
             ))
-        })?;
+        };
+        // Two shapes cross this seam, and the `op` says which before either is
+        // read: a plan over a table, and the body's own SQL — which shares
+        // nothing with a plan but the authority. Told apart here rather than by
+        // an untagged enum, so a malformed request is refused in the words of the
+        // shape it was trying to be.
+        if request.get("op").and_then(Json::as_str) == Some("sql") {
+            let plan: SqlPlan = serde_json::from_value(request).map_err(refuse)?;
+            return self.sql(&plan).await;
+        }
+        let plan: Plan = serde_json::from_value(request).map_err(refuse)?;
         self.run(&plan).await
     }
 }

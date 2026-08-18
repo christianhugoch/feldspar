@@ -250,6 +250,27 @@ describe("the types the code editor loads", () => {
     ).toEqual([]);
   });
 
+  it("type-check the body's own SQL, both spellings of its authority", () => {
+    expect(
+      check(`
+        const ranked = db.sql(
+          "select title, rank() over (order by amount desc) as r from invoices where amount > $1",
+          [100],
+        );
+        const mine = db.sql("select * from invoices", [], { asUser: true });
+        const fluent = db.asUser().sql("select * from invoices");
+        const plain = db.sql("select count(*) as n from invoices");
+        return [ranked.length, mine.length, fluent.length, plain[0].n];
+      `),
+    ).toEqual([]);
+
+    // An option nobody implements is refused by the prelude at run time, so the
+    // editor must not complete it either.
+    expect(check(`return db.sql("select 1", [], { as_user: true });`).join(" ")).toMatch(
+      /as_user/,
+    );
+  });
+
   it("declare the event's own bindings, with the row typed by the trigger's table", () => {
     expect(
       check(`

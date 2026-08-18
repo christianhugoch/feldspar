@@ -316,10 +316,45 @@ const db = (function () {
       where: [], select: [], order: [], group: [], having: [], aggregate: [],
       limit: null, offset: null,
     });
+  // `db.sql(text, params, options)`: the body's own SQL. The authority is the
+  // handle's, unless the options object says otherwise — `{ asUser: true }` is
+  // the third argument, and `db.asUser().sql(...)` is the same thing said
+  // fluently. Unknown option keys are refused rather than ignored, because an
+  // option that silently does nothing is the worst way to learn it was spelled
+  // wrong.
+  const sql = (authority, text, params, options) => {
+    if (typeof text !== "string") {
+      throw new Error('sql() takes the SQL text, e.g. db.sql("select 1 as n")');
+    }
+    if (params !== undefined && params !== null && !Array.isArray(params)) {
+      throw new Error(
+        "sql()'s second argument is the array of values its placeholders stand for"
+      );
+    }
+    let asUser = null;
+    if (options !== undefined && options !== null) {
+      if (typeof options !== "object" || Array.isArray(options)) {
+        throw new Error("sql()'s third argument is an options object, e.g. { asUser: true }");
+      }
+      Object.keys(options).forEach((key) => {
+        if (key !== "asUser") {
+          throw new Error("`" + key + "` is not an option of sql(); the options are: asUser");
+        }
+      });
+      if (options.asUser !== undefined) asUser = !!options.asUser;
+    }
+    return send({
+      op: "sql",
+      authority: asUser === null ? authority : (asUser ? "user" : "admin"),
+      sql: text,
+      params: params === undefined || params === null ? [] : params,
+    });
+  };
   // `db.table("x")` is the general form; `db.x` is a Proxy over the same call.
   const handle = (authority) => {
     const base = {
       table: (name) => table(authority, name),
+      sql: (text, params, options) => sql(authority, text, params, options),
       asUser: () => handle("user"),
       asAdmin: () => handle("admin"),
     };
@@ -1171,6 +1206,86 @@ mod tests {
             authority,
             vec!["admin", "user", "user", "user", "admin"],
             "asUser() sets one field of the plan, wherever it is said"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bodys_own_sql_is_a_request_of_its_own_and_says_whose_authority_it_runs_under() {
+        let host = FakeHost::rows(json!([{ "n": 3 }]));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_host(
+                r#"const a = db.sql("select count(*) as n from books where pages > $1", [200]);
+                   db.sql("select 1", [], { asUser: true });
+                   db.asUser().sql("select 1");
+                   db.asUser().sql("select 1", null, { asUser: false });
+                   return a[0].n;"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!(3), "the rows come back as they are");
+
+        let plans = host.plans();
+        assert_eq!(
+            plans.len(),
+            4,
+            "one call is one round trip, as a terminal is"
+        );
+        assert_eq!(
+            plans[0],
+            json!({
+                "op": "sql",
+                "authority": "admin",
+                "sql": "select count(*) as n from books where pages > $1",
+                "params": [200],
+            }),
+            "the text is the body's and the values ride beside it"
+        );
+        let authority: Vec<&str> = plans
+            .iter()
+            .filter_map(|p| p["authority"].as_str())
+            .collect();
+        assert_eq!(
+            authority,
+            vec!["admin", "user", "user", "admin"],
+            "the option and the handle say the same thing, and the option wins"
+        );
+        assert_eq!(
+            plans[2]["params"],
+            json!([]),
+            "no arguments is an empty list"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_sql_call_is_refused_before_anything_is_sent() {
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::new();
+        // Each of these is a body that meant something the host would have to
+        // guess at, so the prelude says what it takes instead — and says it
+        // without a round trip.
+        for (code, expected) in [
+            (r#"return db.sql({ from: "books" });"#, "SQL text"),
+            (
+                r#"return db.sql("select 1", { id: 1 });"#,
+                "array of values",
+            ),
+            (
+                r#"return db.sql("select 1", [], { asuser: true });"#,
+                "asuser",
+            ),
+        ] {
+            let refused = rt
+                .run(with_host(code, &*host))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains(expected), "{code}: {refused}");
+        }
+        assert!(
+            host.plans().is_empty(),
+            "nothing reached the host: each was refused in the guest"
         );
     }
 

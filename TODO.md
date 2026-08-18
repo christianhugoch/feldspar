@@ -217,10 +217,13 @@ may not see). The message says to read the rows and aggregate in the code body.
 
 - **Rows are the REST wire shape** — `sc_api::convert::value_to_json` — so a row means the
   same thing in `db.books.rows()` as it does over HTTP: a Decimal is exact, a Date is ISO.
-- **Nothing reaches SQL as text.** A chain builds a plain plan object; the host resolves every
-  table, column and join path through the catalog and lowers to a `Statement` whose literals
-  are parameterised on render. There is **no raw-SQL escape hatch** in `db` (an admin who
-  wants one has §13.4's custom SQL queries, which are governed).
+- **Nothing a chain produces reaches SQL as text.** It builds a plain plan object; the host
+  resolves every table, column and join path through the catalog and lowers to a `Statement`
+  whose literals are parameterised on render. The one exception is `db.sql(text, args, opts)`
+  — the body's own SQL, for what the chain does not express — which is the same admission
+  §13.4's custom SQL queries are: authored by an administrator, its values **bound**, and
+  outside the row layer (no ownership formula, no rich-type coercion, **no table event** on a
+  write), while the caller-context transaction, the row cap and the call budget still apply.
 - **The API is synchronous.** Nothing in the sandbox is awaitable today and nothing here
   changes that: `db.books.rows()` returns rows, not a Promise. A body that returns a Promise
   is still refused rather than stringified.

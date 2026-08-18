@@ -1162,10 +1162,18 @@ body.
 
 **Results, errors and bounds.** Rows are the REST wire shape (`sc_api::convert::value_to_json`),
 so a row means the same thing in `db.books.rows()` as it does over HTTP: a Decimal is exact, a
-Date is ISO. **Nothing reaches SQL as text** — a chain builds a plain plan object and the host
-resolves every table, column and join path through the catalog before lowering to a `Statement`
-whose literals are parameterised; there is no raw-SQL escape hatch in `db` (§13.4's custom SQL
-queries are the governed way to write SQL). The API is **synchronous**: `db.books.rows()`
+Date is ISO. **Nothing a chain produces reaches SQL as text** — it builds a plain plan object and
+the host resolves every table, column and join path through the catalog before lowering to a
+`Statement` whose literals are parameterised. The one exception is named and deliberate:
+`db.sql("select … $1", [args], { asUser })` runs SQL the body wrote, for the question the chain
+does not ask (a window function, a recursive CTE, an `ON CONFLICT`). It is the same admission
+§13.4's custom SQL queries are — a code body is server-side configuration written by an
+administrator, so `Statement::Raw`'s rule (authored, never assembled from what a caller sent)
+holds by construction, and the body's values are **binds**. It carries the same consequences:
+no ownership formula filters it, no rich type coerces what it returns, and a write inside one
+raises **no table event**; what still holds is the caller-context transaction (an RLS table's
+policies decide), the row cap and the call budget. `asUser()` there means the statement runs at
+the caller's role and user — which is what RLS reads, and nothing more. The API is **synchronous**: `db.books.rows()`
 returns rows, not a Promise. Three bounds, each with its own named error: **1000 rows per
 read** (a read is materialised into the isolate, so the error says to add a `.limit()`, and the
 cap **refuses** rather than truncating — a body handed 1000 of 4000 rows would compute a wrong

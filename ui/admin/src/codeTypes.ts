@@ -250,6 +250,14 @@ interface ScQuery<Row, Col extends string> {
  * known here. */
 type ScAnyQuery = ScQuery<ScRow, string>;
 
+/** \`db.sql()\`'s third argument. An object rather than a flag so what it can
+ * say may grow without the call changing shape. */
+interface ScSqlOptions {
+  /** Run the statement as the person who caused the event, rather than as the
+   * server: the caller's role and user are what row-level security reads. */
+  asUser?: boolean;
+}
+
 /** The signed-in person who caused the event, or null.
  *
  * \`id\` and \`role\` are always there; every other column of the users table
@@ -302,6 +310,20 @@ export function tableDeclarations(tables: TableInfo[]): string {
     `/** The tables, read and written from a code body. */\ninterface ScDb {\n` +
       `  /** Any table, by name — the general form of \`db.<table>\`. */\n` +
       `  table(name: ${tableName}): ScAnyQuery;\n` +
+      // The escape hatch, declared with the same warning the host carries: the
+      // text is the author's, so nothing the chain guarantees applies to it.
+      `  /** Run SQL this body wrote, and return its rows.\n` +
+      `   *\n` +
+      `   * The escape hatch for what the chain does not express — a window\n` +
+      `   * function, a recursive CTE, an \`ON CONFLICT\`. Values go in \`params\`\n` +
+      `   * and are **bound**, never written into the text: \`db.sql("select *\n` +
+      `   * from books where pages > $1", [200])\`.\n` +
+      `   *\n` +
+      `   * It does not go through the row layer, so no ownership formula filters\n` +
+      `   * it, no rich type coerces it, and a write inside one raises **no table\n` +
+      `   * event**. \`{ asUser: true }\` (or \`db.asUser().sql(…)\`) runs it at the\n` +
+      `   * caller's role and user, which is what row-level security reads. */\n` +
+      `  sql(sql: string, params?: ScValue[], options?: ScSqlOptions): ScRow[];\n` +
       `  /** Delegate everything that follows to the person who caused the event. */\n` +
       `  asUser(): ScDb;\n` +
       `  /** Act as the server (the default). */\n` +

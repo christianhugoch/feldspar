@@ -743,3 +743,117 @@ async fn the_call_budget_is_spent_once_per_plan_and_then_refused() {
         "{spent}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The body's own SQL
+// ---------------------------------------------------------------------------
+
+/// The statement one `db.sql(…)` lowers to, or the message it is refused with.
+async fn sql_of(request: Json) -> Result<(String, Vec<Value>)> {
+    let cat = library().await;
+    let plan: super::SqlPlan = serde_json::from_value(request)
+        .map_err(|e| sc_error::Error::invalid(format!("not a sql plan: {e}")))?;
+    let statement = plan::statement(&cat, &plan)?;
+    Ok(Pg.render(&statement).expect("renders"))
+}
+
+#[tokio::test]
+async fn the_bodys_own_sql_runs_as_written_and_its_arguments_are_binds() {
+    let (sql, binds) = sql_of(json!({
+        "op": "sql",
+        "sql": "select owner, count(*) as n from books where pages > $1 group by owner",
+        "params": [200],
+    }))
+    .await
+    .expect("one statement");
+
+    // The text is the author's, unchanged — that is what `db.sql()` is for. What
+    // the server put in it is nothing.
+    assert_eq!(
+        sql,
+        "select owner, count(*) as n from books where pages > $1 group by owner"
+    );
+    // And the argument never became part of it: a value is a value even when it
+    // spells SQL, which is the whole guarantee that survives the escape hatch.
+    assert_eq!(binds, vec![Value::Int(200)]);
+
+    let (_, binds) = sql_of(json!({
+        "op": "sql",
+        "sql": "select * from books where title = $1",
+        "params": ["'; drop table books; --"],
+    }))
+    .await
+    .expect("one statement");
+    assert_eq!(
+        binds,
+        vec![Value::Text("'; drop table books; --".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn a_second_statement_and_a_named_parameter_are_refused_saying_what_to_do() {
+    // Two statements: a `Raw` is prepared and bound, so the pair is either
+    // refused by the backend or half-run. Refused here, where the message can
+    // say what to do instead.
+    let refused = sql_of(json!({
+        "op": "sql", "sql": "insert into books (title) values ($1); delete from books",
+        "params": ["Dune"],
+    }))
+    .await
+    .expect_err("two statements");
+    assert!(refused.to_string().contains("2 statements"), "{refused}");
+    assert!(refused.to_string().contains("call it twice"), "{refused}");
+
+    // A `;` inside a literal or a comment separates nothing — the same scanner a
+    // custom SQL query is read by, so `db.sql()` cannot be broken by punctuation
+    // in a string.
+    sql_of(json!({ "op": "sql", "sql": "select 'a; b' as t -- ; not a statement" }))
+        .await
+        .expect("one statement");
+
+    // `:name` is §13.4's spelling, where the admin also declares each parameter's
+    // type. Here the arguments are positional, and saying so beats a syntax error
+    // pointing at a colon.
+    let refused = sql_of(json!({
+        "op": "sql", "sql": "select * from books where title = :title", "params": ["Dune"],
+    }))
+    .await
+    .expect_err("a named parameter");
+    assert!(refused.to_string().contains("`:title`"), "{refused}");
+    assert!(refused.to_string().contains("$1"), "{refused}");
+
+    // A cast is not a parameter, for the same reason it is not one anywhere else.
+    sql_of(json!({ "op": "sql", "sql": "select pages::text from books" }))
+        .await
+        .expect("a cast is a cast");
+
+    let empty = sql_of(json!({ "op": "sql", "sql": "  -- nothing at all\n" }))
+        .await
+        .expect_err("no SQL");
+    assert!(empty.to_string().contains("no SQL"), "{empty}");
+}
+
+#[tokio::test]
+async fn a_sql_request_is_told_apart_from_a_plan_by_its_op_and_keeps_its_own_words() {
+    let cat = library().await;
+
+    // The dispatch: `op: "sql"` is read as a `SqlPlan`, so a request that names a
+    // table the way a plan does is refused as the *sql* shape it said it was —
+    // rather than as a plan with a missing field.
+    let refused = sc_expr::CodeHost::call(
+        &super::TableHost::new(&cat),
+        json!({ "op": "sql", "table": "books", "sql": "select 1" }),
+    )
+    .await
+    .expect_err("`table` is not a field of a sql request");
+    assert!(refused.to_string().contains("table"), "{refused}");
+
+    // And the other way: a plan is still a plan.
+    let refused = sc_expr::CodeHost::call(
+        &super::TableHost::new(&cat),
+        json!({ "op": "select", "table": "books", "sql": "select 1" }),
+    )
+    .await
+    .expect_err("`sql` is not a field of a plan");
+    assert!(refused.to_string().contains("sql"), "{refused}");
+}
