@@ -48,6 +48,15 @@
 //! still inside the run's own deadline. Past that the ceiling is the database
 //! connection pool, which is the right place for it.
 //!
+//! # What a run costs
+//!
+//! Not a compile. The `db` surface is compiled once per isolate as a factory
+//! ([`DB_PRELUDE`]'s `__scMakeDb`), and each body is compiled once per isolate
+//! and kept under a content key ([`BodyCache`]) — so a trigger firing a thousand
+//! times parses its source once, and every run after that is
+//! `__scInvoke(token, key, bindings)`: a map lookup, a fresh `db`, a call. What
+//! is still per run is what has to be — the token, the bindings and the scope.
+//!
 //! # The seam
 //!
 //! What crosses into Rust is one plain JSON object per terminal — a *plan* — and
@@ -263,9 +272,14 @@ pub(crate) const DB: &str = "db";
 ///
 /// This is JavaScript rather than something generated from Rust on purpose
 /// (decision 4): Rust sees plans, so adding a chain method touches no Rust, and
-/// the same plans will serve the other guest languages. It is emitted **inside**
-/// each run's function scope (decision 5) — a body that assigns to `db` poisons
-/// nothing, because the next run builds its own.
+/// the same plans will serve the other guest languages.
+///
+/// It is compiled **once per isolate**, as a factory: `__scMakeDb(token)` builds
+/// a fresh handle over a fresh closure for one run, and every run of every body
+/// on that isolate calls it rather than compiling this text again. What that
+/// preserves is decision 5 — a body that assigns to `db` poisons nothing,
+/// because the next run is handed its own — and what it stops paying is a few
+/// hundred lines of parse per run.
 ///
 /// Only the terminals are asynchronous. The chain itself
 /// (`db.invoices.where(…).orderBy(…)`) is pure and synchronous: it builds a plan
@@ -275,10 +289,14 @@ pub(crate) const DB: &str = "db";
 /// forgotten `await` is a named error wherever the chain ended.
 #[cfg(feature = "eval")]
 pub(crate) const DB_PRELUDE: &str = r#"
-const db = (function () {
-  // Every plan carries the run's own token: with many runs resident on one
-  // isolate, the token is what tells the host *whose* call this is, and it is a
-  // `const` of this run's scope rather than an index another body could guess.
+Object.defineProperty(globalThis, "__scMakeDb", {
+  writable: false, configurable: false, enumerable: false,
+  // One run's `db`, over one run's token. The token is the factory's argument
+  // and lives in the closure it returns: with many runs resident on one isolate
+  // it is what tells the host *whose* call this is, and a body is handed the
+  // handle rather than the token, so there is nothing for another body to guess.
+  value: (__scTok) => {
+  // Every plan carries the run's own token.
   const send = (plan) => __scDbCall(__scTok, plan);
   // A condition is the object DSL every other surface speaks, or a formula
   // string — the two spellings §3 gives, lowered to one plan field.
@@ -521,7 +539,8 @@ const db = (function () {
     });
   };
   return handle("admin");
-})();
+  },
+});
 "#;
 
 /// Installed once per isolate: the op handles, the promise a database call
@@ -561,6 +580,16 @@ const db = (function () {
 /// stack of what was thrown. Both name the run by its token, which is how the
 /// Rust side finds the caller waiting for it.
 ///
+/// # Compiled once
+///
+/// A body is **defined** here and **invoked** per run. The isolate keeps its
+/// compiled bodies in a map keyed by a content key ([`BodyCache`]), so a trigger
+/// that fires a thousand times is one compile and a thousand calls: the Rust
+/// side sends the source only when it knows this isolate has not got it, and
+/// every other run's script is `__scInvoke(token, key, bindings)`. The two sides
+/// agree because Rust records a definition only once the script that carried it
+/// has run.
+///
 /// # Which run is running
 ///
 /// The watchdog stops *the isolate*, so before it fires something has to know
@@ -575,7 +604,7 @@ const db = (function () {
 /// A promise a body creates and discards must not fail *other* runs. Left to
 /// `deno_core`'s default, an unhandled rejection halts the whole event loop —
 /// which, with runs multiplexed, is every resident body punished for one body's
-/// dropped `db` call. The run's own failure never comes this way (`__scRun`
+/// dropped `db` call. The run's own failure never comes this way (`__scInvoke`
 /// attaches a rejection handler to the body's promise), so the handler here can
 /// say "handled" and mean it.
 #[cfg(feature = "eval")]
@@ -629,14 +658,44 @@ const SETUP: &str = r#"
     if (e instanceof Error) return e.stack ? e.stack : String(e);
     try { return String(e); } catch (_) { return "the code threw a value it cannot describe"; }
   };
+  // The compiled bodies of this isolate, by content key. A trigger that fires a
+  // thousand times is one compile: the Rust side knows what it has defined here,
+  // so a run's script carries the source only the first time and is
+  // `__scInvoke(token, key, bindings)` every time after.
+  const bodies = new Map();
+  fixed("__scDefine", (key, wantsDb, body) => {
+    bodies.set(key, { body: body, wantsDb: wantsDb });
+  });
+  // Dropped when the cache is full and this body is the one least recently run.
+  // A run already executing keeps its own reference, so forgetting a body can
+  // never pull one out from under a resident run — it only means the next run of
+  // it arrives with its source again.
+  fixed("__scForget", (key) => { bodies.delete(key); });
   // The run wrapper: start the body — an async function, so what comes back is
   // a promise — and report what it settles to through the completion ops. The
   // refusal of a returned Promise this used to carry has inverted: a promise is
   // what a body now answers with, and awaiting it is the point.
-  fixed("__scRun", (token, body, bindings) => {
+  //
+  // The `db` is made here rather than compiled into the body, from the token
+  // this run was invoked with: one factory call per run, and a handle that is
+  // this run's alone. A body with no host is defined to take one argument, so
+  // there is no `db` in its scope to name — a ReferenceError, as it has always
+  // been, rather than a handle that fails on use.
+  fixed("__scInvoke", (token, key, bindings) => {
+    const entry = bodies.get(key);
+    if (entry === undefined) {
+      // Unreachable while the Rust side and this map agree, which they do
+      // because Rust records a definition only once the script defining it has
+      // run. Named rather than silent, because the symptom of getting it wrong
+      // would otherwise be a run that never answers.
+      fail(token, "this code body is not compiled on the isolate it was sent to");
+      return;
+    }
     let running;
     try {
-      running = body(bindings);
+      running = entry.wantsDb
+        ? entry.body(bindings, __scMakeDb(token))
+        : entry.body(bindings);
     } catch (e) {
       fail(token, describe(e));
       return;
@@ -1497,9 +1556,16 @@ fn worker_thread(
     // failure here would leave every run unable to reach the host, so say so
     // rather than serving bodies that fail one by one for no visible reason.
     if let Err(e) = runtime.execute_script("sc_code_setup.js", SETUP) {
-        // Nothing to reply to yet; the first run's `__scRun is not defined` is
-        // the symptom, and this is the cause it will be diagnosed from.
+        // Nothing to reply to yet; the first run's `__scInvoke is not defined`
+        // is the symptom, and this is the cause it will be diagnosed from.
         debug_assert!(false, "code runtime setup failed: {e}");
+    }
+    // The `db` factory: a few hundred lines of JavaScript compiled **once** for
+    // this isolate rather than spliced into every run's script. Each run still
+    // gets a handle of its own — `__scMakeDb(token)` builds one — which is
+    // decision 5 preserved by the factory instead of by recompilation.
+    if let Err(e) = runtime.execute_script("sc_db.js", DB_PRELUDE) {
+        debug_assert!(false, "the db prelude failed to compile: {e}");
     }
     // Code bodies get the aggregation prelude too, so `rows().sum("qty")` means
     // in a body what it means in a formula.
@@ -1569,18 +1635,21 @@ async fn serve(
     // Runs whose isolate was terminated under them before they had reached the
     // database. They are owed another go, and nothing else is.
     let mut requeued: std::collections::VecDeque<CodeJob> = std::collections::VecDeque::new();
+    // What this isolate has already compiled. It lives as long as the isolate
+    // does, which is what makes the second run of a body cheap.
+    let mut bodies = BodyCache::new();
     loop {
         // Admit whatever is already waiting, up to the occupancy bound.
         while resident(op_state) < max_inflight {
             if let Some(job) = requeued.pop_front() {
-                start_run(runtime, op_state, job, &mut requeued, watchdog);
+                start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies);
                 continue;
             }
             if closed || pressure.load(Ordering::SeqCst) {
                 break;
             }
             match rx.try_recv() {
-                Ok(job) => start_run(runtime, op_state, job, &mut requeued, watchdog),
+                Ok(job) => start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     closed = true;
@@ -1601,7 +1670,9 @@ async fn serve(
             // Nothing to pump: park on the channel rather than poll an empty
             // event loop for ever.
             match rx.recv().await {
-                Some(job) => start_run(runtime, op_state, job, &mut requeued, watchdog),
+                Some(job) => {
+                    start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies)
+                }
                 None => closed = true,
             }
             continue;
@@ -1665,7 +1736,9 @@ async fn serve(
                     run.answer(Err(Error::invalid(format!("JavaScript code failed: {e}"))));
                 }
             }
-            Tick::Job(Some(job)) => start_run(runtime, op_state, job, &mut requeued, watchdog),
+            Tick::Job(Some(job)) => {
+                start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies)
+            }
             Tick::Job(None) => closed = true,
             Tick::Freed | Tick::Due => {}
         }
@@ -1918,6 +1991,7 @@ fn start_run(
     job: CodeJob,
     requeued: &mut std::collections::VecDeque<CodeJob>,
     watchdog: &Watchdog,
+    bodies: &mut BodyCache,
 ) {
     let CodeJob { run, reply } = job;
     // A job that never enters the table has to give its place back by hand;
@@ -1929,14 +2003,19 @@ fn start_run(
         )));
         return;
     };
-    let script = match build_code_script(&run, &token) {
-        Ok(script) => script,
+    let scripts = match build_run_scripts(&run) {
+        Ok(scripts) => scripts,
         Err(e) => {
             give_back(op_state);
             let _ = reply.send(Err(e));
             return;
         }
     };
+    // The body's source travels only when this isolate has not compiled it: a
+    // trigger firing repeatedly sends a token, a key and its bindings.
+    let key = BodyCache::key(&scripts.definition);
+    let held = bodies.holds(key, &scripts.definition);
+    let script = build_script(&scripts, &token, key, held);
     // A re-queued run carries the clock it was first admitted with: its caller
     // has been waiting since then, and a retry with a fresh deadline would
     // outlive the future that is going to answer with it.
@@ -1975,6 +2054,18 @@ fn start_run(
     let outcome = runtime.execute_script("sc_code.js", script);
     // A terminated run is already answered by name, so this comes first.
     handle_terminated(runtime, op_state, requeued, watchdog);
+    // The isolate has this body only if the script that defined it ran, so this
+    // is recorded here and not before: a syntax error, or a termination inside
+    // this very call, leaves the cache saying what is true — that the next run
+    // of this body must carry its source again.
+    if !held && outcome.is_ok() {
+        for gone in bodies.store(key, scripts.definition) {
+            // Rare (one distinct body past the cache's capacity), and cheap
+            // enough not to be worth batching into the next run's script, where
+            // it would have to be carried until there was a next run.
+            let _ = runtime.execute_script("sc_forget.js", format!("__scForget(\"{gone:016x}\");"));
+        }
+    }
     // The mark is deliberately **left standing** here. `execute_script`
     // returning does not mean the body has stopped running: an `async function`
     // that awaits anything but a host call — `await null` is the whole shape —
@@ -2026,15 +2117,36 @@ fn new_token() -> Option<String> {
 // The script
 // ---------------------------------------------------------------------------
 
-/// Assemble the script for one code body: the run's **token** as a `const`, the
-/// bindings as `const`s, the prelude (when there is a host) in the same scope,
-/// the code as the body of a nested **async** function — so a top-level `return`
-/// is legal, a top-level `await` is legal, and nothing it declares outlives the
-/// run — and the whole thing handed to the fixed `__scRun` wrapper.
+/// The two halves of one run's script: what depends on the **body** and what
+/// depends on this **run**.
 ///
-/// The token is bound *inside* the function, so it is this run's and no other's:
-/// the prelude closes over it, and a body that reads it can only ask the
-/// questions it was already allowed to ask.
+/// The split is the whole of the caching. The definition is a function of the
+/// code and the binding *names* alone, so it is what the isolate keeps and what
+/// a content key is taken over; the arguments are this run's binding *values*,
+/// which travel every time because they are what differs.
+#[cfg(feature = "eval")]
+struct RunScripts {
+    /// The compiled form: `async function (__b, db) { … }`, with the bindings
+    /// destructured into `const`s and the code as the body of a nested async
+    /// function.
+    definition: String,
+    /// This run's bindings, as the JSON object the definition reads from.
+    args: String,
+    /// Whether the definition takes the `db` handle — a body with no host does
+    /// not, so naming `db` in it is a ReferenceError rather than a handle that
+    /// fails on use.
+    wants_db: bool,
+}
+
+/// Build one code body's definition and one run's arguments: the bindings as
+/// `const`s, and the code as the body of a nested **async** function — so a
+/// top-level `return` is legal, a top-level `await` is legal, and nothing it
+/// declares outlives the run.
+///
+/// The token is *not* in here, and that is what makes the definition reusable:
+/// it arrives at `__scInvoke`, which is what builds this run's `db` over it. A
+/// body is handed the handle rather than the token, so there is nothing in its
+/// scope to pass to another run's host even if it could guess one.
 ///
 /// The code itself is **not** escaped, and cannot be: it is the admin's own
 /// JavaScript, spliced in as source. That is not a hole — the wrapper is no
@@ -2042,7 +2154,7 @@ fn new_token() -> Option<String> {
 /// of it. What *is* escaped is every value, which rides in as JSON exactly as a
 /// formula's bindings do.
 #[cfg(feature = "eval")]
-fn build_code_script(call: &CodeRun, token: &str) -> Result<String> {
+fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     let mut bindings = serde_json::Map::new();
     let mut consts = String::new();
     for (name, value) in &call.bindings {
@@ -2065,22 +2177,139 @@ fn build_code_script(call: &CodeRun, token: &str) -> Result<String> {
     }
     let args = serde_json::to_string(&Json::Object(bindings))
         .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
-    // A pure body gets no `db` at all: naming it is a ReferenceError, not a
-    // handle that fails on use.
-    let prelude = if call.host.is_some() { DB_PRELUDE } else { "" };
+    let wants_db = call.host.is_some();
+    // The parameter list is the only difference a pure body makes: no `db`
+    // parameter is no `db` in scope.
+    let params = if wants_db { "__b, db" } else { "__b" };
     let code = &call.code;
-    // The token is 32 hex characters this crate minted; quoting it is belt and
-    // braces rather than escaping.
-    let tok =
-        serde_json::to_string(token).map_err(|e| Error::msg(format!("encode run token: {e}")))?;
-    Ok(format!(
-        "__scRun({tok}, async function (__b) {{ \"use strict\";\n\
-         const __scTok = {tok};\n\
-         {consts}{prelude}\n\
-         const __result = await (async function () {{\n{code}\n}})();\n\
-         return __result;\n\
-         }}, {args})"
-    ))
+    Ok(RunScripts {
+        definition: format!(
+            "async function ({params}) {{ \"use strict\";\n\
+             {consts}\
+             const __result = await (async function () {{\n{code}\n}})();\n\
+             return __result;\n\
+             }}"
+        ),
+        args,
+        wants_db,
+    })
+}
+
+/// The compiled bodies one isolate holds, and the keys the isolate knows them
+/// by.
+///
+/// Owned by the worker rather than by the isolate, because the point of it is
+/// what the worker can leave **out** of a run's script: knowing that this
+/// isolate has already compiled this body is what turns a run into
+/// `__scInvoke(token, key, bindings)` with the source nowhere in it. A trigger
+/// that fires a thousand times compiles once.
+///
+/// The key is a hash of the definition, and the definition is kept beside it so
+/// that a hash *collision* costs a recompile rather than running the wrong body:
+/// a key whose stored definition is not this one is a miss, and defining under
+/// it replaces what the isolate had. That is what lets the key be cheap.
+///
+/// Bounded, because a server with many distinct bodies must not accumulate
+/// compiled functions in the isolate for ever: past [`BODY_CACHE_CAPACITY`] the
+/// least recently run body is dropped, here and — through `__scForget` — there.
+#[cfg(feature = "eval")]
+struct BodyCache {
+    entries: HashMap<u64, CachedBody>,
+    /// A logical clock: which entry was used last, without asking the operating
+    /// system for the time on the hot path.
+    clock: u64,
+}
+
+#[cfg(feature = "eval")]
+struct CachedBody {
+    definition: String,
+    used: u64,
+}
+
+/// How many compiled bodies one isolate keeps. Generous next to the number of
+/// triggers an installation has, and small next to the heap a run needs, so the
+/// eviction path is the one this will almost never take.
+#[cfg(feature = "eval")]
+const BODY_CACHE_CAPACITY: usize = 256;
+
+#[cfg(feature = "eval")]
+impl BodyCache {
+    fn new() -> BodyCache {
+        BodyCache {
+            entries: HashMap::new(),
+            clock: 0,
+        }
+    }
+
+    /// What the isolate will know this definition by.
+    fn key(definition: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        definition.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Whether the isolate already has *this* definition under `key` — which is
+    /// whether the run's script can leave the source out.
+    fn holds(&mut self, key: u64, definition: &str) -> bool {
+        self.clock += 1;
+        let now = self.clock;
+        match self.entries.get_mut(&key) {
+            Some(entry) if entry.definition == definition => {
+                entry.used = now;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Record a definition the isolate has just compiled, and answer with the
+    /// keys it should forget to make room for it.
+    fn store(&mut self, key: u64, definition: String) -> Vec<u64> {
+        self.clock += 1;
+        let used = self.clock;
+        self.entries.insert(key, CachedBody { definition, used });
+        let mut evicted = Vec::new();
+        while self.entries.len() > BODY_CACHE_CAPACITY {
+            // Never the entry just stored: it has the highest clock of them all.
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+            evicted.push(oldest);
+        }
+        evicted
+    }
+}
+
+/// One run's script: the definition when the isolate has not got it, and the
+/// invocation either way.
+///
+/// The token and the bindings are what is left travelling per run — 32 hex
+/// characters and this run's own values — because everything else is already
+/// there.
+#[cfg(feature = "eval")]
+fn build_script(scripts: &RunScripts, token: &str, key: u64, held: bool) -> String {
+    let RunScripts {
+        definition,
+        args,
+        wants_db,
+    } = scripts;
+    let mut script = String::new();
+    if !held {
+        script.push_str(&format!(
+            "__scDefine(\"{key:016x}\", {wants_db}, {definition});\n"
+        ));
+    }
+    // The token is 32 hex characters this crate minted and the key is 16 this
+    // one made; quoting them is belt and braces rather than escaping.
+    script.push_str(&format!("__scInvoke(\"{token}\", \"{key:016x}\", {args});"));
+    script
 }
 
 /// Whether a binding name is a plain JavaScript identifier — what can be spliced
@@ -2826,22 +3055,32 @@ mod tests {
     async fn the_globals_cannot_be_poisoned_for_the_next_run() {
         let host = FakeHost::rows(json!([{ "id": 1 }]));
         let rt = CodeRuntime::with_workers(1);
-        // A body that tries to replace the op handle, the run wrapper and `db`.
+        // A body that tries to replace the op handle, the run wrapper, the `db`
+        // factory and `db` itself — the last two of which are shared by every
+        // body on this isolate now that neither is compiled per run.
         let out = rt
             .run(with_host(
                 r#"let broke = [];
                    try { globalThis.__scDbCall = () => []; } catch (e) { broke.push("call"); }
-                   try { delete globalThis.__scRun; } catch (e) { broke.push("run"); }
+                   try { delete globalThis.__scInvoke; } catch (e) { broke.push("invoke"); }
+                   try { globalThis.__scMakeDb = () => ({}); } catch (e) { broke.push("makeDb"); }
                    try { Object.defineProperty(globalThis, "__scDbCall", { value: 1 }); }
                      catch (e) { broke.push("define"); }
                    globalThis.db = "poisoned";
+                   db = "poisoned for this run only";
                    return broke;"#,
                 &*host,
             ))
             .await
             .unwrap();
-        assert_eq!(out, json!(["call", "run", "define"]), "strict mode throws");
-        // The next run on the same isolate gets its own `db` and a working op.
+        assert_eq!(
+            out,
+            json!(["call", "invoke", "makeDb", "define"]),
+            "strict mode throws"
+        );
+        // The next run on the same isolate gets its own `db` and a working op —
+        // the handle is the factory's answer to *this* run's token, so what the
+        // last body did to its own binding went with it.
         let out = rt
             .run(with_host("return await db.books.rows();", &*host))
             .await
@@ -2859,19 +3098,28 @@ mod tests {
                 .unwrap();
             assert_eq!(out, json!(true), "sandbox leak: {probe}");
         }
-        // The op handle exists — that is the one surface — but it refuses a body
-        // with no host rather than reaching anything.
+        // The op handle exists — that is the one surface — but a body cannot
+        // name its own run to it: the token is the `db` factory's argument and
+        // stays in the handle's closure, so what a body holds is the handle.
+        let out = rt
+            .run(call("return typeof __scTok === 'undefined';"))
+            .await
+            .unwrap();
+        assert_eq!(out, json!(true), "the run token is in the guest's scope");
+        // The factory is a global like the op, so a body can ask it for a handle
+        // over any token it likes — and get one that names nothing, which is
+        // what the 128 random bits are for.
         let err = rt
             .run(call(
-                r#"return await __scDbCall(__scTok, { op: "select", table: "books" });"#,
+                r#"return await __scMakeDb("00000000000000000000000000000000").books.rows();"#,
             ))
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no database access"), "{err}");
-        // And a token that is not this run's names nothing: the table is keyed
-        // by 128 random bits precisely so that a body cannot reach another
-        // resident run's host by guessing at it.
+        assert!(err.contains("has already finished"), "{err}");
+        // And the same by hand, at the op: a token that is not this run's names
+        // nothing, because the table is keyed by those bits precisely so that a
+        // body cannot reach another resident run's host by guessing at it.
         let host = FakeHost::rows(json!([{ "id": 1 }]));
         let err = rt
             .run(with_host(
@@ -2888,8 +3136,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_returned_promise_is_awaited_rather_than_refused() {
-        // The inversion this milestone turns on: `__scRun` used to refuse a
-        // Promise because there was nothing in the sandbox to await it with.
+        // The inversion this milestone turns on: the run wrapper used to refuse
+        // a Promise because there was nothing in the sandbox to await it with.
         let rt = CodeRuntime::new();
         assert_eq!(
             rt.run(call("return (async () => 1)();")).await.unwrap(),
@@ -3547,5 +3795,203 @@ mod tests {
                 .unwrap(),
             json!(1)
         );
+    }
+
+    /// The body a run of `code` would be compiled from.
+    fn definition_of(code: &str, bindings: &[(&str, Json)]) -> RunScripts {
+        let mut run = CodeRun {
+            code: code.to_owned(),
+            bindings: BTreeMap::new(),
+            host: None,
+            timeout: Duration::from_secs(1),
+            max_calls: 10,
+            started: None,
+        };
+        for (name, value) in bindings {
+            run.bindings.insert((*name).to_owned(), value.clone());
+        }
+        build_run_scripts(&run).unwrap()
+    }
+
+    #[test]
+    fn a_body_travels_only_on_a_miss() {
+        // The hot path's whole claim: once the isolate has the body, what a run
+        // sends is a token, a key and its own bindings — and the source is not
+        // in it anywhere.
+        let mut cache = BodyCache::new();
+        let scripts = definition_of("return secret + 1;", &[("secret", json!(41))]);
+        let key = BodyCache::key(&scripts.definition);
+        assert!(
+            !cache.holds(key, &scripts.definition),
+            "nothing is warm yet"
+        );
+
+        let miss = build_script(&scripts, "aa", key, false);
+        assert!(miss.contains("__scDefine"), "{miss}");
+        assert!(miss.contains("return secret + 1;"), "{miss}");
+        assert!(miss.contains("__scInvoke"), "{miss}");
+        assert!(cache.store(key, scripts.definition.clone()).is_empty());
+
+        assert!(
+            cache.holds(key, &scripts.definition),
+            "the isolate has it now"
+        );
+        let hit = build_script(&scripts, "bb", key, true);
+        assert!(!hit.contains("__scDefine"), "{hit}");
+        assert!(
+            !hit.contains("return secret + 1;"),
+            "the source travelled: {hit}"
+        );
+        // The bindings still do, because they are what differs per run.
+        assert!(hit.contains("41"), "{hit}");
+        assert!(hit.contains("bb"), "{hit}");
+
+        // The *same* code with different binding names is a different body, and
+        // gets its own key: the `const`s are part of what was compiled.
+        let renamed = definition_of("return secret + 1;", &[("other", json!(41))]);
+        assert!(!cache.holds(BodyCache::key(&renamed.definition), &renamed.definition));
+    }
+
+    #[test]
+    fn a_key_collision_costs_a_compile_and_never_the_wrong_body() {
+        // The key is a cheap hash, so it is the *definition* beside it that
+        // decides a hit. Two sources under one key is a miss, and defining
+        // replaces what the isolate had rather than shadowing it.
+        let mut cache = BodyCache::new();
+        let first = definition_of("return 1;", &[]);
+        let key = BodyCache::key(&first.definition);
+        cache.store(key, first.definition.clone());
+        let second = definition_of("return 2;", &[]);
+        assert!(
+            !cache.holds(key, &second.definition),
+            "a different body under the same key must not be served from it"
+        );
+        cache.store(key, second.definition.clone());
+        assert!(cache.holds(key, &second.definition));
+        assert!(!cache.holds(key, &first.definition));
+    }
+
+    #[test]
+    fn the_cache_drops_the_least_recently_run_body() {
+        // Bounded, because a server with many distinct bodies must not
+        // accumulate compiled functions in an isolate for ever.
+        let mut cache = BodyCache::new();
+        let mut keys = Vec::new();
+        for n in 0..BODY_CACHE_CAPACITY {
+            let scripts = definition_of(&format!("return {n};"), &[]);
+            let key = BodyCache::key(&scripts.definition);
+            assert!(
+                cache.store(key, scripts.definition).is_empty(),
+                "no eviction yet"
+            );
+            keys.push(key);
+        }
+        // Touching the oldest is what makes the *second* oldest the one to go.
+        let oldest = definition_of("return 0;", &[]);
+        assert!(cache.holds(keys[0], &oldest.definition));
+
+        let extra = definition_of("return 'one too many';", &[]);
+        let evicted = cache.store(BodyCache::key(&extra.definition), extra.definition);
+        assert_eq!(evicted, vec![keys[1]], "the least recently run body goes");
+        assert!(
+            cache.holds(keys[0], &oldest.definition),
+            "the touched one stays"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_body_the_isolate_has_forgotten_is_compiled_again() {
+        // The eviction path end to end: one body, then more distinct bodies than
+        // the cache holds, then the first one again — which the isolate has
+        // forgotten and must be sent afresh. A cache that lied here would be a
+        // run that never answers.
+        let rt = CodeRuntime::with_workers(1);
+        assert_eq!(
+            rt.run(call("return 'first';")).await.unwrap(),
+            json!("first")
+        );
+        for n in 0..=BODY_CACHE_CAPACITY {
+            assert_eq!(
+                rt.run(call(&format!("return {n};"))).await.unwrap(),
+                json!(n),
+                "distinct body {n}"
+            );
+        }
+        assert_eq!(
+            rt.run(call("return 'first';")).await.unwrap(),
+            json!("first")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_compiled_body_hands_each_run_its_own_db() {
+        // Decision 5, now kept by the factory rather than by recompiling the
+        // prelude: the body is compiled once, and `db` is an argument built per
+        // run from that run's token. So a body that mutates its own `db` — the
+        // only thing it can do to it — takes nothing with it into the next run
+        // of the same compiled function, and each run reaches its own host.
+        let mine = FakeHost::rows(json!([{ "id": 1 }]));
+        let theirs = FakeHost::rows(json!([{ "id": 2 }, { "id": 3 }]));
+        let rt = CodeRuntime::with_workers(1);
+        let body = "const rows = await db.books.rows();
+                    db = 'wrecked for this run';
+                    return rows.length;";
+        assert_eq!(rt.run(with_host(body, &*mine)).await.unwrap(), json!(1));
+        // The same compiled body, a second run, a different host of its own.
+        assert_eq!(rt.run(with_host(body, &*theirs)).await.unwrap(), json!(2));
+        assert_eq!(mine.plans().len(), 1);
+        assert_eq!(theirs.plans().len(), 1);
+    }
+
+    /// Phase 4's benchmark: how many code bodies **one isolate** runs per
+    /// second.
+    ///
+    /// One body, run over and over against a host that answers at once, so what
+    /// is timed is the runtime's own overhead — what a body costs to compile, to
+    /// admit, and to carry through the bridge and back — rather than a database.
+    /// It is what the [`BodyCache`] and `__scMakeDb` were measured with: about
+    /// 2,000 runs a second before them and about 44,000 after, on the machine
+    /// they were written on. The assertion is deliberately loose, because a
+    /// benchmark that fails on a busy machine is a flaky test; the number it
+    /// *prints* is what the CHANGELOG records.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn throughput_of_one_isolate() {
+        const RUNS: usize = 2000;
+        const CONCURRENCY: usize = 32;
+        let host = FakeHost::rows(json!([{ "id": 1, "title": "Dune" }]));
+        let rt = CodeRuntime::with_workers(1);
+        let body = r#"const rows = await db.books
+                        .where({ id: payload.id })
+                        .limit(1)
+                        .rows();
+                      return rows.length;"#;
+        let one = |n: usize| {
+            let mut c = with_host(body, &*host);
+            c.bindings.insert("payload".into(), json!({ "id": n }));
+            c.timeout = Some(Duration::from_secs(30));
+            rt.run(c)
+        };
+        // Warm whatever there is to warm, so the number is the steady state.
+        for n in 0..CONCURRENCY {
+            assert_eq!(one(n).await.unwrap(), json!(1));
+        }
+        let started = Instant::now();
+        for batch in 0..(RUNS / CONCURRENCY) {
+            let outcomes = deno_core::futures::future::join_all(
+                (0..CONCURRENCY).map(|n| one(batch * CONCURRENCY + n)),
+            )
+            .await;
+            for outcome in outcomes {
+                assert_eq!(outcome.unwrap(), json!(1));
+            }
+        }
+        let elapsed = started.elapsed();
+        let per_second = RUNS as f64 / elapsed.as_secs_f64();
+        println!(
+            "one isolate: {RUNS} runs in {elapsed:?} = {per_second:.0} runs/second \
+             ({:.2} ms each)",
+            elapsed.as_secs_f64() * 1000.0 / RUNS as f64
+        );
+        assert!(per_second > 50.0, "{per_second:.0} runs/second");
     }
 }

@@ -1022,8 +1022,8 @@ exactly like an API caller's write. A second write path would quietly skip all o
 - `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and `db`,
   the tables (below). Its host surface is exactly that one: no network, no disk, no
   subprocess, no schema changes. It runs on its **own pool of isolates**, not the single pure
-  isolate every ownership formula shares, which is what lets it have a blocking host call and
-  a configurable `timeout_ms` (default 5s, max 60s) without either becoming a property of
+  isolate every ownership formula shares, which is what lets it suspend on a host call and
+  carry a configurable `timeout_ms` (default 5s, max 60s) without either becoming a property of
   every authorization decision in the process.
 
 An action's writes carry **admin authority** on an RLS table (`ROLE_ADMIN` plus the event's
@@ -1235,6 +1235,13 @@ rather than run a second time. Behind all four the isolate's **heap** is bounded
 reaching it stops the worker admitting new runs rather than aborting the process. There are **no transactions across
 statements**: each autocommits, as every action's writes do, and
 `db.transaction(fn)` is a later addition whose seam is the row layer's `Executor::Transaction`.
+
+**A run does not cost a compile.** The `db` surface is compiled once per isolate, as a factory
+that builds one run's handle over that run's token; each body is compiled once per isolate too
+and kept under a content key, so a trigger firing a thousand times parses its source once and
+every run after the first is a token, a key and its bindings. What is still per run is the
+token, the bindings and the scope — which is what makes the fixed cost of a code body the seam's
+round trip rather than V8's parser.
 
 **The plan is the seam.** The fluent surface is JavaScript; what crosses into Rust is one plain
 JSON object per terminal, which is what makes this the seam §15's other adapters implement

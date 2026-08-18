@@ -2,6 +2,45 @@
 
 Changes in reverse chronological order.
 
+## The hot path: compiled once, invoked per run
+
+Two isolates now serve hundreds of concurrent runs, and what those runs were still paying for,
+every single time, was **compilation**. Each run's script carried the whole of `db` — a few
+hundred lines of JavaScript — spliced in front of the body, and the body itself, and V8 parsed
+all of it afresh. A trigger that fires a thousand times compiled the same text a thousand times.
+
+Both halves are now compiled once per isolate.
+
+**`db` is a factory.** `DB_PRELUDE` is executed at isolate startup as `__scMakeDb(token)`, and a
+run is handed the handle it builds rather than a copy of the source that builds one. Decision 5
+of the previous milestone — a body that assigns to `db` poisons nothing — is preserved by the
+factory instead of by recompilation: each run gets a fresh handle over its own token. One thing
+follows that is worth saying out loud: the run token is no longer in the guest's scope at all.
+It is the factory's argument and stays in the handle's closure, so `__scTok` is gone from a body
+and what a body holds is the handle.
+
+**A body is compiled once and invoked per run.** The isolate keeps its compiled bodies in a map
+keyed by a content key, and the worker keeps the matching table — so it knows what this isolate
+has already got. A run is then `__scInvoke(token, key, bindings)` with the source nowhere in it;
+the source travels only on a miss. The key is a cheap hash of the definition with the definition
+kept beside it, so a collision costs a recompile rather than running the wrong body. The cache
+is bounded at 256 bodies: past that the least recently run one is dropped, here and — through
+`__scForget` — there, and a body the isolate has forgotten simply arrives with its source again.
+
+What is left per run is what has to be: the token, the bindings and the scope.
+
+**The benchmark** (`code::tests::throughput_of_one_isolate`, release build, one isolate, one
+worker, a body that reads through the seam against a host answering at once, 2000 runs at 32 at
+a time):
+
+| | runs/second | per run |
+|---|---|---|
+| before | 1,800 – 2,300 | 0.43 – 0.56 ms |
+| after | 37,600 – 50,600 | 0.02 ms |
+
+About twenty times, and the compile was all of it: what the numbers say is that a code body's
+overhead was never the seam, the admission or the event loop, but the parser.
+
 ## Two clocks, and the runaway that only stops one body
 
 A code body's isolate now serves hundreds of runs, and until this change one instrument enforced

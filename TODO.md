@@ -261,15 +261,20 @@ arrives that way — `__scRun` attaches a rejection handler to the body's promis
 
 ## Phase 4 — The hot path
 
-- [ ] Compile `DB_PRELUDE` **once per isolate** as a factory (`__scMakeDb(token)`) rather than
+- [x] Compile `DB_PRELUDE` **once per isolate** as a factory (`__scMakeDb(token)`) rather than
       splicing it into every run's script. The per-run `db` object is still fresh — decision 5 of
       the previous milestone (a body that assigns to `db` poisons nothing) is preserved by the
-      factory, not by recompilation.
-- [ ] Cache the compiled body per isolate, keyed by a content hash the Rust side sends: a run is
+      factory, not by recompilation. *One consequence worth recording: the run token is now the
+      factory's argument and lives in the handle's closure, so `__scTok` is gone from a body's
+      scope — what a body holds is the handle.*
+- [x] Cache the compiled body per isolate, keyed by a content hash the Rust side sends: a run is
       then `__scInvoke(token, key, bindings)`, with the source travelling only on a miss. A
-      trigger firing 1000 times compiles once.
-- [ ] Benchmark the three of them together (`cargo bench` or a timed test): runs/second on one
+      trigger firing 1000 times compiles once. The cache is bounded (`BODY_CACHE_CAPACITY`, 256)
+      and evicts the least recently run body through `__scForget`; the definition is kept beside
+      its key so a hash collision costs a recompile rather than running the wrong body.
+- [x] Benchmark the three of them together (`cargo bench` or a timed test): runs/second on one
       isolate against a fake host, before and after, recorded in the CHANGELOG.
+      *(`code::tests::throughput_of_one_isolate`: ~2,000 runs/second before, ~44,000 after.)*
 
 ## Phase 5 — Configuration, documentation and the definition of done
 

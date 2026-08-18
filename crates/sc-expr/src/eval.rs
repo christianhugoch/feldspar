@@ -1149,7 +1149,7 @@ mod tests {
         // its `db` exist only there. Raw script, so nothing is refused by the
         // binder before V8 sees it.
         let ev = DenoEvaluator::new();
-        for probe in ["Deno", "__scDbCall", "__scRun", "db"] {
+        for probe in ["Deno", "__scDbCall", "__scInvoke", "__scMakeDb", "db"] {
             assert!(
                 ev.eval_raw(format!("!!(typeof {probe} === 'undefined')"))
                     .await
