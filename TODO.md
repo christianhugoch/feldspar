@@ -1,6 +1,6 @@
-# Saltcorn v2 — Tables in code: `db` in `run_js_code`
+# Saltcorn v2 — Concurrent code bodies: many runs per isolate
 
-Ordered, checkable task list for the eleventh milestone after the MVP. Earlier lists are
+Ordered, checkable task list for the twelfth milestone after the MVP. Earlier lists are
 archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
 [docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
 [docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
@@ -12,38 +12,53 @@ formulae, calculated fields and row-level security),
 [docs/TODO-post-mvp-7.md](./docs/TODO-post-mvp-7.md) (the GraphQL provider),
 [docs/TODO-post-mvp-8.md](./docs/TODO-post-mvp-8.md) (REST queries, custom SQL and the
 generated client), [docs/TODO-post-mvp-9.md](./docs/TODO-post-mvp-9.md) (table constraints
-and indexes) and [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email). Scope and
-rationale remain in [docs/GOALS.md](./docs/GOALS.md) and
+and indexes), [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email) and
+[docs/TODO-post-mvp-11.md](./docs/TODO-post-mvp-11.md) (tables in code). Scope and rationale
+remain in [docs/GOALS.md](./docs/GOALS.md) and
 [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md).
 
-This milestone gives `run_js_code` **tables**. Today the action is deliberately pure: no host
-API, so a code body can compute over the event and nothing else. That bound was the right one
-to ship with and is the wrong one to keep — the escape hatch that cannot read a row is an
-escape hatch for arithmetic. What lands here is the seam §15's `sc-code` adapters were always
-going to need, arrived at from the one guest language the server already runs.
+The previous milestone gave `run_js_code` tables. It gave them **synchronously**, and that
+decision — right for getting the seam built, and honestly documented as a decision — bought
+correctness with the one currency the server cannot spend: concurrency. A host call blocks its
+isolate thread (`crates/sc-expr/src/code.rs`, `host_call`'s `handle.block_on`) for the whole
+round trip to the database, and a worker checks out one job at a time. So the number of
+`run_js_code` requests this server can serve **at once** is `DEFAULT_CODE_WORKERS`. Two.
 
-**Milestone definition of done:** an admin writes a trigger whose `run_js_code` body reads,
-joins, aggregates and writes —
+Everything else about the design is already asynchronous and already scales: the query itself is
+awaited on the caller's runtime, the row layer is async throughout, the connection pool bounds
+itself. The blocking is *only* in the guest seam, and it costs a thread per concurrent run —
+which is exactly the thing a server must not spend per request.
+
+Nor is it only a throughput ceiling. A code body's write raises table events, so a body whose
+`.insert()` fires a second `run_js_code` trigger needs a *second* worker while still holding its
+own. With two workers, two such requests hold both, the nested runs never get one, and all four
+fail at the wall clock. The pool size is not a tuning knob there; it is `1 + max nesting depth ×
+concurrency`, which is not a number anyone can pick.
+
+This milestone makes `db` **awaitable**, so that a run costs a pending promise rather than a
+thread, and one isolate serves hundreds of runs at once.
+
+**Milestone definition of done:** with the default two isolates, 500 concurrent requests each
+firing a `run_js_code` trigger that reads and writes are served concurrently — the fake-host
+integration test observes hundreds of host calls in flight at once, and the wall clock is the
+database's, not the pool's. A trigger whose write fires a second `run_js_code` trigger completes
+on a **one-worker** pool. A body that loops without yielding still fails, alone where that can be
+told, and says which trigger did it. And the body reads the way its author expects:
 
 ```js
-const overdue = db.invoices
+const overdue = await db.invoices
   .where({ paid: false, due: { lt: payload.today } })
-  .select("id", "amount", "customerⱵemail", { chased: "remindersↃinvoice.length" })
   .orderBy("due")
   .limit(50)
   .rows();
 
-for (const inv of overdue) {
-  db.reminders.insert({ invoice: inv.id, sent_to: inv.customerⱵemail });
-}
-return { chased: overdue.length, owed: db.invoices.where({ paid: false }).sum("amount") };
-```
+for await (const inv of db.customers.where({ active: true }).iter()) { … }
 
-— presses **Run**, and the rows are there. The same body written with `db.asUser()` reads
-exactly what the person who caused the event may read and no row more, refusing a write their
-ownership formula does not grant. Every `.insert()` fires the table's own triggers, is bounded
-by the cascade depth guard, and a body that forgets a `.limit()` on a million-row table gets a
-named error rather than an isolate that dies.
+const [chased, owed] = await Promise.all([
+  db.reminders.insert(overdue.map((i) => ({ invoice: i.id }))),
+  db.invoices.where({ paid: false }).sum("amount"),
+]);
+```
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -51,530 +66,215 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## The specification
 
-### 1. What is bound
+### 1. The guest API becomes asynchronous
 
-One binding is added to the `run_js_code` scope, beside `row`, `old`, `user` and `payload`:
+Every terminal returns a Promise: `.rows()`, `.row()`, the scalars, `.insert()`, `.update()`,
+`.delete()`, `.sql()`. `.iter()` becomes an **async generator**, walked with `for await`. The
+body itself is wrapped in an `async function`, so `await` at its top level is legal, and
+`__scRun`'s current refusal of a returned Promise inverts: a returned Promise is what a body now
+answers with, and it is awaited.
 
-```js
-db.table("invoices")   // the general form — any table name
-db.invoices            // sugar: a Proxy over the same call
-```
+The chain stays pure and synchronous — `db.invoices.where(…).orderBy(…)` builds a plan and
+touches nothing — so only the terminals change. That is what keeps the diff to the prelude small
+and the surface recognisable.
 
-`db` exists **only** in a code body. A formula — an ownership formula, an `only_if`, a
-calculated field, a `{{ }}` token — evaluates in the pure isolate it always did, where
-`typeof db === "undefined"` and there are no ops at all.
+### 2. A forgotten `await` must not be silent
 
-### 2. Reading
+This is the tax the change levies, and it is paid here rather than by every trigger author.
+`JSON.stringify(promise)` is `{}`, `if (promise)` is true, and `for (const r of promise)` is a
+bare `TypeError` — three ways for a missing `await` to look like a wrong answer instead of a
+mistake. So a terminal answers a `DbPromise` (a `Promise` subclass) whose `toJSON`,
+`Symbol.toPrimitive` and `Symbol.iterator` all throw one named error: *this database call was
+not awaited — write `await db.invoices.rows()`*. It costs nothing when the body is right.
 
-Chain methods are pure and return a new builder; **terminals execute**. The chain mirrors
-[`sc_query::Select`](./crates/sc-query/src/statement.rs) field for field — `filter`,
-`columns`, `order`, `limit`, `offset`, `group`, `having` — and the terminals reuse the names
-the Ↄ-aggregation chains already have in the formula language.
+### 3. Many runs on one isolate
 
-```js
-const rows = db.books
-  .where({ author: "Woolf", pages: { gt: 200 } })
-  .select("id", "title", "publisherⱵname")
-  .orderBy("published", "desc")
-  .limit(10)
-  .offset(20)
-  .rows();
-```
+A run stops being "what the isolate is doing" and becomes an **entry in a table**, keyed by a
+token minted per run:
 
-| chain method | meaning |
-| --- | --- |
-| `.where(cond)` | restrict; repeated calls **AND** |
-| `.select(...cols)` | projections: field names, Ⱶ-paths, and `{ alias: "formula" }` objects |
-| `.orderBy(field, dir?)` | `"asc"` (default) or `"desc"`; repeated calls append keys |
-| `.limit(n)` / `.offset(n)` | the bound |
-| `.groupBy(...fields)` | grouping (phase 6) |
-| `.asUser()` / `.asAdmin()` | authority (§5) |
+- `RunState` moves from a single `OpState` slot to a `HashMap<RunToken, RunState>`. The host,
+  the deadline, the call budget and the bindings are per entry, exactly as they are per run now;
+  what goes away is `handle`, because nothing blocks any more.
+- The token is a random 128 bits, bound as a `const` in the run's own function scope. Not an
+  index: two runs on one isolate may carry different authority (`db.asUser()` delegates to *this*
+  event's caller), and a body must not be able to reach another's host by writing `1`.
+- The op no longer blocks. `op_sc_db` becomes an ordinary `async` op that awaits
+  `BridgeHost::call` — which already only sends on a channel and awaits a oneshot, so its future
+  needs no reactor of its own and is driven by the isolate's own event loop.
+- A run's result is delivered by a **completion op** (`__scDone` / `__scFail`) rather than by
+  `execute_script`'s return value, because with runs resident that return value is a pending
+  promise and the event loop, not the call, is what finishes a run. A syntax error still surfaces
+  synchronously from the call, and still should.
+- The worker thread becomes a current-thread tokio runtime driving `run_event_loop`, accepting
+  new jobs while the resident ones are in flight.
 
-| terminal | result |
-| --- | --- |
-| `.rows()` | array of row objects |
-| `.first()` | one row object or `null` (`LIMIT 1`) |
-| `.get(pk)` | the row with that primary key, or `null` |
-| `.count()` | number |
-| `.sum(f)` `.avg(f)` `.min(f)` `.max(f)` | value or `null`; `f` is a field name or a formula |
-| `.exists()` | boolean |
-| `.insert(v)` `.update(v)` `.delete()` | writes (§4) |
+### 4. The two clocks
 
-### 3. The two spellings of a filter, and formula projections
+Today one watchdog enforces one run's JS time by terminating the isolate. With runs multiplexed
+that instrument is too blunt to keep pointed the same way: terminating the isolate stops
+everyone. So the two things it currently does are separated.
 
-`where` takes **either** the object DSL every other surface already speaks — the REST query
-string, the GraphQL `where`, the agent tools — **or** a formula string, which is what the
-`update_rows` and `delete_rows` actions take:
+- **The wall clock** (`timeout_ms`, per run) needs no termination at all. A run past its deadline
+  is refused its next host call, and the caller stops waiting `CALLER_GRACE` later — both already
+  written, both already correct, and between them they cover every run that is *waiting* rather
+  than *running*. Which, for an I/O-bound body, is all of them.
+- **The JS slice** is new and is what the watchdog now enforces: how long a body may run
+  **without yielding**. Small (default 1 s, never more than the run's remaining wall clock),
+  because a body that computes for a second between two queries is already pathological. A
+  `while (true) {}` is caught in a second rather than in five.
 
-```js
-.where({ status: "draft", pages: { gte: 100 }, id: { in: [1, 2, 3] } })
-.where('status === "draft" && ordersↃcustomer.length > 3')
-```
+Attribution: the isolate records the running run as each one starts and as each resumes (a cheap
+sync mark from the guest at the point a host call returns), so a slice overrun blames the body
+that actually overran it and names its trigger.
 
-Both lower to one [`sc_query::Expr`](./crates/sc-query/src/expr.rs) through the one
-vocabulary in [`sc_api::filter`](./crates/sc-api/src/filter.rs), so `eq`, `is_null`,
-`like` and the rest mean in a code body exactly what they mean in a URL. The object form
-grows `and`, `or` and `not` keys **in that shared module**, so the REST, GraphQL and agent
-filters gain them at the same moment and by the same code:
+The co-residents are the honest part. Termination takes them with it, and they must **not** be
+silently re-run: a body that has already inserted rows is not idempotent, and re-executing it is
+a worse failure than the one being handled. So a run that has made **zero** host calls is
+re-queued (provably no side effects yet); every other resident fails with its own named error
+saying another body on the same isolate did not yield. Rare, loud, and never a duplicated write.
 
-```js
-.where({ or: [ { status: "draft" }, { and: [ { status: "sent" }, { paid: false } ] } ] })
-```
+### 5. Admission, and what the ceiling becomes afterwards
 
-A projection may be a formula, which is where joins and child aggregations enter a select:
+Concurrency is no longer free-of-threads-but-free-of-everything: each resident run holds its
+scope, its bindings and up to a 1000-row read in the V8 heap. So a worker admits at most
+`max_inflight` runs (default 256; two workers → 512) and the rest queue exactly as they do now,
+with queue time still inside the deadline. The isolate gets a heap limit and a near-heap-limit
+callback, so pressure refuses new admissions instead of aborting the process.
 
-```js
-db.customers.select(
-  "id", "name",
-  { city:  "addressⱵcity" },                       // Ⱶ  → correlated scalar subquery
-  { spend: "ordersↃcustomer.sum(o => o.total)" },  // Ↄ  → correlated aggregate subquery
-  { net:   "price * (1 - discount)" },             // an ordinary expression
-).rows();
-```
-
-Each is an [`sc_expr::Formula`](./crates/sc-expr/src/formula.rs): parsed by `Formula::parse`,
-validated against the catalog's `SchemaShape`, translated by `translate_value`, and projected
-as a `RowQuery::extra` column — the same path a GraphQL `manager { email }` and a
-non-stored calculated field already take. **There is one expression language**, and this is
-it; a formula the translator refuses (one that needs the JS evaluator) is an error naming it
-and saying to compute it in the code body instead, which costs the author nothing because the
-code body is JavaScript.
-
-`.sum("qty * price")`, `.orderBy("customerⱵname")` and a Ⱶ-path in a `where` key resolve the
-same way.
-
-### 4. Writing
-
-```js
-const created = db.books.insert({ title: "Orlando", author: "Woolf" });   // → the written row
-const many    = db.books.insert([ { … }, { … } ]);                        // → array of rows
-const upd     = db.books.where({ author: "Woolf" }).update({ shelf: 3 }); // → { updated: 2, ids: [3, 7] }
-const del     = db.books.where({ id: 7 }).delete();                       // → { deleted: 1, ids: [7] }
-```
-
-- `.update()` or `.delete()` **with no `.where()` throws**. A whole table rewritten or emptied
-  is not something an omitted call should be able to cause — §10.1 refuses exactly this on the
-  `update_rows` and `delete_rows` actions, at save time, and the reason does not change when
-  the caller is a code body.
-- `{ updated, ids }` / `{ deleted, ids }` is the shape those two actions already return.
-- Writes go through the row layer (`rows::create_row_ctx` / `update_row_ctx` /
-  `delete_row_ctx`), so they are coerced against their columns, validated, File-field-checked,
-  and **observed by triggers**. A write from a code body is an event like any other: it
-  carries this trigger's chain, so `Event::firing`'s cascade bound applies and a body that
-  writes the table that fired it is stopped where any other action would be.
-- A bulk update or delete resolves its matched rows first and then writes them **one at a
-  time through the row layer**, exactly as `update_rows` does — the events are the point.
-
-### 5. Authority: admin by default, `asUser()` to delegate
-
-**By default a code body's reads and writes are the admin's**, carrying the event's user.
-This is the rule `rows_scope.rs` already states for `insert_row`/`update_rows`/`delete_rows`:
-a trigger is server-side configuration, and an audit row the caller may not insert is the
-archetype of what a trigger exists to write. Concretely: a `CallerContext` at `ROLE_ADMIN`
-— which clears every RLS policy's role floor, as the admin API's own row editor does — with
-the event's user still attached, so a policy that reads `user` sees who caused it.
-
-**`asUser()` delegates to the caller instead**, and is available on the handle, on a table and
-on a query; it sets one field of the plan, so where it appears in the chain does not matter:
-
-```js
-db.asUser().invoices.where({ paid: false }).rows();   // the whole handle
-db.invoices.asUser().where({ paid: false }).rows();   // one table
-db.invoices.where({ paid: false }).asUser().rows();   // one query
-db.invoices.asAdmin().insert({ … });                  // the default, said out loud
-```
-
-Under `asUser()` every operation goes through
-[`sc_api::ownership`](./crates/sc-api/src/ownership.rs)'s
-`read_rows_as` / `aggregate_values_as` / `insert_row_as` / `update_row_as` / `delete_row_as`
-at the event's own role and user — §7.3's rule, the same functions the agent tools use, with
-no second implementation of "meets the floor OR the formula grants it" to be subtly wrong.
-Which means, without this milestone writing any of it:
-
-- a read is narrowed to the rows the ownership formula grants, translated into the `WHERE`
-  where it can be and evaluated row by row where it cannot;
-- an update is checked **twice** — on the row as it is and on the row as it would become — so
-  it cannot move a row out of the caller's own ownership;
-- a row the formula withholds is the same **not found** an absent row gets, so a delegated
-  read cannot become a way to probe which rows exist;
-- an RLS-enforced table is read and written inside a caller-context transaction and the
-  database's own policies decide.
-
-The event's caller is what it delegates to, and events differ: a table event or a
-directly-run trigger carries the user who caused it; a **scheduled** or **startup** trigger
-carries nobody, so `asUser()` there reads as the public role. That is the honest answer to
-"on whose behalf" rather than an error — and it is why `asAdmin()` is the default.
-
-A denial is an `Error::auth` thrown into the code body with its own message, catchable like
-any other, so a body may try a delegated write and fall back.
-
-One asymmetry to state rather than hide: a delegated **aggregate** over a table whose
-ownership formula the translator refuses is an error (`aggregate_guard` will not fall back to
-the evaluator — an aggregate over rows it cannot filter would silently count rows the caller
-may not see). The message says to read the rows and aggregate in the code body.
-
-### 6. Results, errors and bounds
-
-- **Rows are the REST wire shape** — `sc_api::convert::value_to_json` — so a row means the
-  same thing in `db.books.rows()` as it does over HTTP: a Decimal is exact, a Date is ISO.
-- **Nothing a chain produces reaches SQL as text.** It builds a plain plan object; the host
-  resolves every table, column and join path through the catalog and lowers to a `Statement`
-  whose literals are parameterised on render. The one exception is `db.sql(text, args, opts)`
-  — the body's own SQL, for what the chain does not express — which is the same admission
-  §13.4's custom SQL queries are: authored by an administrator, its values **bound**, and
-  outside the row layer (no ownership formula, no rich-type coercion, **no table event** on a
-  write), while the caller-context transaction, the row cap and the call budget still apply.
-- **The API is synchronous.** Nothing in the sandbox is awaitable today and nothing here
-  changes that: `db.books.rows()` returns rows, not a Promise. A body that returns a Promise
-  is still refused rather than stringified.
-
-Three bounds, each with its own named error:
-
-| bound | default | why |
-| --- | --- | --- |
-| rows per read | 1000 | a read is materialised into the isolate; an unbounded `.rows()` on a large table is an OOM, not a slow query. The error says to add `.limit()`. |
-| host calls per run | 200 | an accidental N+1 loop must not hammer the database quietly. |
-| wall clock per run | 5 s, `timeout_ms` on the action, hard max 60 s | a trigger runs inside the request or the write that fired it, so an unbounded body is an unbounded hold on that caller — the bound `fetch` already keeps, for the same reason. |
-
-**No transactions in this milestone.** Each statement autocommits, as every action's writes do
-today; a body that fails half way leaves the writes it already made, and its events have
-already gone out. `db.transaction(fn)` is a later addition (the row layer's
-`Executor::Transaction` is the seam it will use) and is out of scope here — see the end.
-
-### 7. The host plan (the language-neutral seam)
-
-The fluent surface is JavaScript; what crosses into Rust is one plain JSON object per
-terminal, which is what makes this the seam §15's other adapters implement rather than a
-JavaScript feature:
-
-```json
-{
-  "op": "select",
-  "table": "invoices",
-  "authority": "admin",
-  "where": { "paid": false, "due": { "lt": "2026-08-17" } },
-  "select": [ "id", "amount", "customerⱵemail",
-              { "alias": "chased", "formula": "remindersↃinvoice.length" } ],
-  "order":  [ { "field": "due", "dir": "asc" } ],
-  "limit": 50,
-  "offset": 0
-}
-```
-
-`op` is `select` | `aggregate` | `insert` | `update` | `delete`; `where` is either the object
-DSL or `{ "formula": "…" }`; `aggregate` carries `[{ "alias", "fn", "arg" }]` and `group`
-carries the grouping fields (phase 6); `values` carries an insert's row(s) or an update's
-assignments. Every terminal is one plan and one round trip.
+Past that the ceiling is the **database connection pool**, which is the right place for it and
+already bounds itself — a fact worth stating in §10.1, because it is the answer to "how many
+`run_js_code` requests can this server serve" once this milestone lands.
 
 ---
 
 ## Decisions taken up front
 
-1. **A code body gets its own runtime, separate from the formula isolate.** The evaluator
-   today is one V8 isolate on one thread serving every ownership check in the process, with
-   no ops and a 250 ms watchdog. Giving *that* isolate a blocking host call would put every
-   authorization decision on the server behind whatever a trigger's code is doing — and
-   worse, it would **deadlock** the moment a delegated read's ownership formula needs the JS
-   evaluator, because the thread waiting for the host call is the thread the formula would
-   have to run on. So `CodeRuntime` is a small pool of isolates of its own (one op, its own
-   watchdog, its own longer timeout) and `DenoEvaluator`'s stays pure. This is not
-   scaffolding for this milestone: it is the runtime §15's JS adapter needs.
-2. **The host call is synchronous, and blocks a code thread.** The op blocks its own isolate
-   thread on the host's reply (`Handle::block_on`, legal because a code thread is not a
-   tokio runtime thread) rather than making the guest API awaitable. Two consequences, both
-   wanted: the guest language stays plain synchronous JavaScript, which is what an admin
-   writing five lines in a form expects; and the thread that is blocked is one of a small
-   pool nothing else depends on.
-3. **`sc-expr` does not learn what a table is.** It sits below `sc-catalog` and `sc-api`, and
-   it stays there: the runtime knows only a `CodeHost` trait taking JSON and returning JSON.
-   The table knowledge — catalog lookups, formula translation, the row layer, the §7.3 rule —
-   lives in `sc-api`, where all of it already is.
-4. **The fluent surface is written in JavaScript, not generated from Rust.** The builder, the
-   plan objects and the terminals are a prelude; Rust sees plans. Adding `.orderBy` later
-   touches no Rust, and the same plans serve Python when §15 gets there.
-5. **The prelude is built per run and cannot be poisoned.** Runs share an isolate, so a body
-   that assigns to a global is visible to the next one. `db` is therefore constructed fresh
-   inside each run's function scope, and the op handle and run wrapper are installed as
-   non-writable, non-configurable globals. (Tampering could never *escalate* — the host
-   re-validates every plan against the catalog and the authority — but a body that breaks the
-   next trigger's `db` would be a bug nobody could find.)
-6. **Admin by default, `asUser()` to delegate** — §5 above. Stated as a decision because the
-   alternative is defensible and rejected: running as the event's user by default would make a
-   trigger unable to write the audit row it exists to write, and would make the authority of a
-   trigger depend on who happened to touch a row.
+1. **Async, not a source transform.** Rewriting the body with swc to insert `await` at every
+   terminal was considered and rejected: aliasing (`const f = db.books.rows; f()`) makes it
+   unsound, and a surface that is *sometimes* magic is worse than one that is honestly async.
+2. **The pool stays small.** More isolates buy CPU parallelism, which is not what is short; this
+   milestone buys concurrency. `DEFAULT_CODE_WORKERS` stays 2.
+3. **The seam does not change.** `CodeHost` still takes one JSON plan and answers one JSON value.
+   Nothing in `sc-api`'s host, the plan language, authority, the row cap or the cascade guard is
+   touched by this milestone — §15's other guest languages inherit the same plans.
+4. **No backwards compatibility for the synchronous spelling.** Prototype status: existing bodies,
+   tests, docs and the editor's `.d.ts` are updated to `await`, and the sync form is gone rather
+   than deprecated.
+5. **`fetch` and timers stay out.** This milestone builds the plumbing that would make them
+   possible; the decision not to have them in the sandbox is unchanged and unrelated.
 
 ---
 
-## Phase 1 — The code runtime (`sc-expr`)
+## Phase 1 — The awaitable guest API (`sc-expr`)
 
-- [x] **The `CodeHost` seam**: `#[async_trait] pub trait CodeHost { async fn call(&self,
-      request: Json) -> Result<Json>; }` in `sc-expr`, and `CodeCall` gains
-      `host: Option<Arc<dyn CodeHost>>`, a wall-clock `deadline` and the call budget. A
-      `CodeCall` with no host is exactly today's pure body.
-- [x] **`CodeRuntime`**: a pool of isolate threads (default 2, configurable), each built with
-      one op `op_sc_db` and its own watchdog, fed by a job channel with a worker checkout.
-      `JsEvaluator::run_code` dispatches here; `eval`/`eval_value` keep the existing pure
-      isolate untouched. (Built lazily on the first code body: a process that never runs one
-      should not pay for two more isolates to find that out.)
-- [x] **The op**: blocks on `Handle::block_on(host.call(req))` with the handle captured when
-      the job was submitted; **disarms the watchdog for the duration of the call** so a slow
-      query is never reported as "your code timed out", and checks the run's wall-clock
-      deadline and call budget on entry, returning a named error into JS when either is spent.
-- [x] **Non-poisonable globals**: the op handle and the run wrapper installed with
-      `writable: false, configurable: false`; the prelude emitted inside the per-run function.
-      The fluent `db` builder itself (§2–§5's chain, terminals and `asUser()`) is that
-      prelude, written in JavaScript and lowering to §7's plans — the host validates them
-      from phase 2.
-- [x] Tests: two code bodies run concurrently on the pool; a body that spins is terminated and
-      the isolate recovers; a body that sleeps in the host does *not* count against the JS
-      watchdog but does against the deadline; the **formula** isolate still has no `Deno`, no
-      ops and no `db`.
-- [x] *Not on the list, found on the way*: `deno_core` **aborts the process** if V8 posts a
-      delayed task against an isolate built outside a tokio runtime context. Both engines now
-      build theirs inside one and drop the guard immediately (which is also what leaves a code
-      thread free to `block_on`); the formula evaluator had this latent since it was written.
+- [ ] `op_sc_db` becomes an `async` op awaiting the host directly; `host_call`'s
+      `handle.block_on` and `RunState::handle` go away. Still one run per isolate at this phase,
+      so the change is the API shape and nothing else — and is reviewable on its own.
+- [ ] `DB_PRELUDE`: `__scDbCall` returns a Promise; every terminal awaits it; `iterate` becomes
+      `async function*`. The chain builders stay synchronous and untouched.
+- [ ] `build_code_script` wraps the body in an `async function`; `__scRun` awaits the result
+      instead of refusing a Promise (`code.rs`'s current refusal inverts).
+- [ ] `DbPromise` with throwing `toJSON` / `Symbol.toPrimitive` / `Symbol.iterator`, so a
+      forgotten `await` is one named error rather than `{}`, `true`, or a bare `TypeError`.
+- [ ] The worker drives `run_event_loop` after `execute_script` so a single run's promises
+      actually settle; the watchdog is paused across the whole event-loop wait as it is across a
+      host call today.
+- [ ] Update every existing code test in `sc-expr` and `sc-api` to `await`, which is also the
+      check that the surface reads the way §1 claims.
 
-## Phase 2 — The host: reads (`sc-api`)
+## Phase 2 — Many runs per isolate
 
-- [x] **`sc_api::code_host`**: `TableHost { catalog, user, chain, limits }` implementing
-      `CodeHost`, plus `Authority { Admin, User }` and `HostLimits { max_rows, max_calls }`.
-      (The authority is a field of the *plan* rather than of the host — §5's "`asUser()` sets
-      one field of the plan, so where it appears in the chain does not matter" — so what the
-      host carries instead is what a delegated run will need: the event's caller and its
-      chain. A plan naming `user` authority is refused until phase 4 rather than silently
-      answered as the admin.)
-- [x] **The plan type**: `Plan` (serde, `deny_unknown_fields`) with the §7 shape, and one
-      validation pass that resolves the table via `catalog.require`, every named column
-      against the table, every Ⱶ-path through `ownership::join_guard`, and refuses anything
-      else by name.
-- [x] **One `where` lowering**: move the object-DSL walk out of
-      `sc-core-traits::table::{where_expr, required_where, condition_expr}` into
-      `sc_api::filter` beside the comparison vocabulary it already calls, add the `and` /
-      `or` / `not` combinators there, and have the agent traits call the moved function.
-      (Their tests come along and must still pass unchanged.) The moved walk now delegates
-      each comparison to `filter::comparison`, so `nin` — which existed in a URL and not in an
-      object — is one vocabulary again; a **field wins over a combinator**, as it does in the
-      REST query string; and a Ⱶ-path may be a filter key, resolved by a hook the agent
-      surfaces pass as "no join paths here".
-- [x] **Formulas in a plan**: `where: {formula}` and `{alias, formula}` projections parsed by
-      `Formula::parse`, validated against `catalog.schema_shape()` with the table's row as the
-      bare scope, translated by `translate_value`; a `TranslateError::Untranslatable` becomes
-      the "compute it in your code body" message naming the formula. A formula naming an
-      ambient object (`user`, `row`, …) is refused: those are the code body's bindings, and it
-      can splice the value into the plan itself.
-- [x] **The read terminals** against the row layer at admin authority: `select` →
-      `rows::list_row_values` through a `RowQuery`; `aggregate` → `rows::aggregate_values`;
-      `.get(pk)` → the single-pk read; `.exists()` → a bounded select.
-- [x] **The bounds enforced here**, not in JS: `max_rows` **refuses** rather than truncating
-      (the read asks for one row more than the cap, and a `.limit()` above the cap is refused
-      before any statement runs), `max_calls` counted per run.
-- [x] Tests (unit): plan → `Statement` for a join projection, a Ↄ-aggregate projection, each
-      filter operator, the combinators, order/limit/offset; and a named refusal for each of
-      unknown table, unknown column, unjoinable table, malformed plan, exceeded row cap.
-- [x] *Not on the list, done anyway*: `crates/sc-api/tests/code_host_reads.rs` — the same
-      plans against a real database, because "the plan lowers correctly" and "the rows come
-      back" are two claims and only one of them can be made without Postgres. `catalog_of` in
-      the shared test fixtures builds a catalog by **introspection** from a driver with no
-      rows behind it, so a unit test resolves join paths through a real schema shape.
+- [ ] `RunState` becomes a table keyed by a 128-bit random `RunToken`, bound as a `const` in the
+      run's scope; `op_sc_db` takes the token and looks the run up. An unknown token is a named
+      error, not a panic.
+- [ ] Completion ops `__scDone` / `__scFail`, and the run's oneshot moves into the table entry:
+      `execute_script` starts a run, the event loop finishes it. Errors carry `e.stack` so the
+      message an admin sees is no worse than today's.
+- [ ] The worker becomes `Builder::new_current_thread()` + `block_on`: a loop that admits jobs
+      while pumping the event loop, and that parks on the job channel when nothing is resident
+      (never a busy poll).
+- [ ] Per-worker job channels with a least-inflight dispatcher (an `AtomicUsize` per worker)
+      replacing the shared `Mutex<Receiver>`, so admission is load-aware and needs no MPMC
+      dependency.
+- [ ] `max_inflight` per worker (default 256), with the overflow queued exactly as now.
+- [ ] Caller side: `CodeRuntime::run`'s serving loop keeps in-flight host calls in a
+      `FuturesUnordered` instead of awaiting each inline, so a body's `Promise.all([…])` issues
+      its queries **in parallel**. Borrowed host, no spawn, no `'static` requirement.
+- [ ] Test: on a **one-worker** pool, 200 runs against a fake host that sleeps 50 ms each
+      complete in ~one round trip's order of magnitude, and the host records ≥ 100 calls in
+      flight at once.
+- [ ] Test: runs do not leak into each other — 50 concurrent runs with distinct bindings each
+      assert their own values, and one run exhausting its call budget leaves the others' budgets
+      untouched.
+- [ ] Test: a code body whose `.insert()` fires a second `run_js_code` trigger completes on a
+      one-worker pool. This is the deadlock the milestone removes, and it deserves a test that
+      would have failed before it.
 
-## Phase 3 — The host: writes
+## Phase 3 — The two clocks and the runaway
 
-- [x] `insert` (one row or many) → `rows::create_row_ctx`, returning the written row(s). The
-      answer's shape follows the call's: one row in, one row out; an array in, an array out.
-- [x] `update` / `delete` → matched rows resolved first, then `rows::update_row_ctx` /
-      `delete_row_ctx` per row, returning `{ updated | deleted, ids }`.
-- [x] A write plan with no `where` is refused in the host as well as in the prelude — the
-      prelude is a convenience, the host is the rule.
-- [x] The event's user and this trigger's **chain** ride on every write, so cascades are
-      bounded exactly as an action's are.
-- [x] Tests: an insert fires the table's own trigger; a body writing its own table hits the
-      cascade bound with the chain in the message; an unfiltered update is refused; a coerced
-      value reaches the column typed (a date string binds a date).
-- [x] *Not on the list, done anyway*: the read-shaping chain methods (`.select()`, an
-      aggregate, `.get()`) are **refused** on a write rather than ignored — a body that wrote
-      one meant something the write cannot do — while `.orderBy()`/`.limit()` are kept, so
-      "update the oldest ten" says what it means. A bulk insert's rows are all checked against
-      their columns **before the first one is written**, because with no transaction (§6) a bad
-      third row found on the third `INSERT` leaves two rows written and their events out. And
-      `rows::row_key` is now the one implementation of "which row is this", shared with the row
-      actions instead of spelled twice.
+- [ ] Split the budgets: the per-run wall clock keeps its two existing enforcement points
+      (deadline check in the op, `CALLER_GRACE` in `CodeRuntime::run`) and stops driving the
+      watchdog; the watchdog enforces the **JS slice** (`DEFAULT_JS_SLICE`, 1 s, clamped to the
+      run's remaining wall clock).
+- [ ] Attribution: the isolate tracks the currently-running token — set when a run starts and by
+      a cheap sync mark where a host call returns — so a slice overrun names the guilty body.
+- [ ] On termination: `cancel_terminate_execution`, fail the guilty run with the slice error,
+      re-queue only residents with **zero** host calls, fail the rest with their own named error.
+      Drop the run table's entries either way, so nothing outlives the isolate that held it.
+- [ ] V8 heap limit via `create_params` plus a near-heap-limit callback that stops admitting
+      rather than aborting the process.
+- [ ] Tests: `while (true) {}` fails with the slice error and names the trigger; a co-resident
+      that had made no host call still completes; one that had made a host call fails with the
+      co-resident error rather than being re-run (asserted by counting the fake host's writes).
 
-## Phase 4 — `asUser()`
+## Phase 4 — The hot path
 
-- [x] **The event's caller as a `User`**: `event.user` is JSON and `ownership::*_as` wants an
-      `sc_auth::User` — one helper (`User::from_json`, beside `from_row`) reading `id` and
-      `extra`, with `event.role` as the role, and `None` for an event with no caller. (A
-      caller object with no usable `id` is an error rather than an anonymous fallback: acting
-      as somebody requires knowing who. `extra` is typed by `sc_expr::value_from_json`, the
-      reading a trigger's own bindings get, since no column stands behind those values.)
-- [x] **Routing**: `Authority::User` sends every operation through
-      `ownership::read_row_values_as`, `aggregate_values_as`, `insert_row_as`,
-      `update_row_as`, `delete_row_as` at that role and user; `Authority::Admin` keeps the
-      phase 2/3 path. The authority is resolved once per plan into an `Actor`, which is also
-      the **role every name in the plan is resolved at** — so a delegated read's Ⱶ-path goes
-      through `ownership::join_guard` as the caller, not as the admin.
-- [x] **Bulk writes under delegation** resolve their ids through the *same* delegated read, so
-      a row the caller cannot see is never a row they can update by predicate.
-- [x] **The prelude**: `.asUser()` / `.asAdmin()` on the handle, on a table and on a query,
-      all setting `authority` — built in phase 1 and now answered rather than refused.
-- [x] The delegated-aggregate refusal (untranslatable ownership formula) carries the message
-      from §5, not a bare `Err`. (`aggregate_guard` is asked ahead of `aggregate_values_as`,
-      which asks it again: from here the refusal can name the way out, and only the `invalid`
-      one is rephrased — an `auth` denial is the same "you may not read this" a read gets, and
-      reading the rows instead would not help.)
-- [x] Tests (integration, real Postgres): a sub-floor user's delegated read returns only the
-      rows their ownership formula grants while the same body at admin authority returns all
-      of them; a delegated insert outside the formula throws and writes nothing; a delegated
-      update that would move a row out of the caller's ownership is refused; a delegated read
-      of an RLS table sees what the policies allow; a scheduled trigger's `asUser()` reads as
-      public. **And the deadlock regression test**: a delegated read whose ownership formula
-      is untranslatable (so the *formula* isolate must run inside the host call) completes.
-- [x] *Not on the list, and load-bearing*: `ownership::insert_row_as` / `update_row_as` /
-      `delete_row_as` now take the **trigger chain**, because they built their `CallerContext`
-      themselves and so dropped it. Without that, a delegated write restarts the cascade at
-      depth 0 and `db.asUser().t.insert(…)` from a trigger on `t` never stops — the one bound
-      phase 3 proved for the admin path. A request is not a firing and passes `&[]` (the REST,
-      GraphQL and agent-tool call sites); a code body passes the chain that led to it, and a
-      test asserts the event it raises is one deeper.
-- [x] *Found on the way*: a delegated **write** needs the evaluator even when the ownership
-      formula translates — the single-row check (`row_allowed`) is always the reified one — so
-      phase 5 must hand `run_js_code`'s host the engine, not only its catalog.
+- [ ] Compile `DB_PRELUDE` **once per isolate** as a factory (`__scMakeDb(token)`) rather than
+      splicing it into every run's script. The per-run `db` object is still fresh — decision 5 of
+      the previous milestone (a body that assigns to `db` poisons nothing) is preserved by the
+      factory, not by recompilation.
+- [ ] Cache the compiled body per isolate, keyed by a content hash the Rust side sends: a run is
+      then `__scInvoke(token, key, bindings)`, with the source travelling only on a miss. A
+      trigger firing 1000 times compiles once.
+- [ ] Benchmark the three of them together (`cargo bench` or a timed test): runs/second on one
+      isolate against a fake host, before and after, recorded in the CHANGELOG.
 
-## Phase 5 — Wiring, configuration and documentation
+## Phase 5 — Configuration, documentation and the definition of done
 
-- [x] `run_js_code` builds a `TableHost` from `ctx.catalog`, the event and `ctx.chain`, binds
-      `db`, and gains a `timeout_ms` config field (max 60000, validated at save time as
-      `fetch`'s is). Unset means **the engine's default** (5000) rather than a resolved 5000:
-      the pool has that default already, and a process started with another one should not be
-      overruled by a field the admin left alone.
-- [x] The action's doc comment stops saying there is no host API, and says what there is.
-- [x] `docs/TECHNICAL_DESIGN.md`: §10.1 gains the `db` specification above; §15 gains the
-      `CodeHost` seam as what an adapter implements.
-- [x] `docs/tutorial-triggers.md` gains a "reading and writing tables from code" section with
-      the milestone's own example, including `asUser()`. Its body is executed by
-      `tutorial_triggers.rs`, like every other formula the tutorial prints.
-- [x] CHANGELOG entry.
-- [x] Tests (integration): the milestone's definition-of-done body, run through the admin's
-      Run button endpoint, against a real database
-      (`crates/sc-server/tests/code_body_tables.rs`), plus the three mistakes an admin makes
-      while writing one — unknown table, unknown column, unfiltered update — coming back from
-      the button as sentences rather than as a 500.
-- [x] *Not on the list, and what the wiring actually needed*: **a host borrows the catalog.**
-      `TableHost` took an `Arc<Catalog>`, which no firing trigger has — the row layer, an
-      `ActionContext` and every request handler hold a `&Catalog`, and threading an `Arc` down
-      to a trigger would mean threading one through the write that fired it. So `TableHost<'a>`
-      borrows, `CodeCall::host` borrows with it, and `CodeRuntime::run` **bridges** the borrow
-      to the pool: the job carries a `'static` proxy, plans come back over a channel, and the
-      future that holds the borrow is the one serving them. The guest API and the blocking op
-      are unchanged.
-- [x] *Found on the way*: **a run could hold its caller without running at all.** The wall
-      clock lived in the isolate — the watchdog, and the deadline checked when the guest asks
-      for a host call — and neither can see a run that is not executing: one waiting for a free
-      isolate while every isolate is blocked in a host call of its own (a code body whose write
-      fires another code body, on a two-worker pool), or one host call that never comes back.
-      Both waited for ever, which is the unbounded hold `timeout_ms` exists to prevent.
-      `CodeRuntime::run` now gives up shortly after the run's own deadline (a 250 ms grace, so
-      the isolate's two bounds keep their more specific messages) and dropping the serving loop
-      fails the abandoned run at its next host call, so its worker comes back too.
-- [x] *Also not on the list*: the action's own tests now pin what only the action can be wrong
-      about — that a body reads and writes its tables at all, that `asUser()` obeys an
-      ownership formula over **this** event's caller while the trigger's own authority does
-      not, that the configured timeout is the bound on a run, and that `db` is still the only
-      host surface (no `fetch`, no timers, no `Deno`).
-
-## Phase 6 — Grouped aggregation (optional; the only part that changes `RowQuery`)
-
-- [x] `RowQuery` gains `group: Vec<Expr>` and `having: Option<Expr>`, rendered by the existing
-      `Select`; `rows::aggregate_grouped` returns one row per group.
-- [x] `.groupBy(...).aggregate({ n: "count()", total: "sum(price * qty)" }).rows()`.
-- [x] The ungrouped terminals (`.count()`, `.sum(f)`, …) become sugar for the same path —
-      `rows::aggregate_values` and `ownership::aggregate_values_as` are now the grouped
-      functions called with nothing to group by, so the filter, the row cap, the caller
-      context and §5's refusal are decided once.
-- [x] Tests: grouped counts and sums with a filter and an ordering; a group key that is a
-      Ⱶ-path; the delegated case refuses for the same reason an ungrouped aggregate does.
-- [x] *Not on the list, and what `having` needed*: **the filter object had one coercion.**
-      Every operand it lowered was a value of a column, coerced against it — and `count()`
-      stands behind no column. So `sc_api::filter` gained an `Operand` (a column, or untyped
-      by its own JSON shape) and the comparison walk takes one, which keeps `{ gt: 3 }`
-      meaning one thing wherever it is written instead of growing a second walk for `having`.
-      A `having` key is an alias of *this* aggregate and only that: a condition on a group key
-      is a condition on the rows, which `.where()` says for less, and both refusals name the
-      values that exist.
-- [x] *Also not on the list*: an `.orderBy()` over a grouped read may name an aggregate's
-      alias (the expression is repeated, since an alias is not in scope in a `HAVING` and not
-      portably in an `ORDER BY`); groups are bounded by the row cap as rows are; a `.groupBy()`
-      on a row read or a write is refused rather than ignored; and two values under one alias
-      is refused rather than answered as one. Documented in §10.1 and in
-      `docs/tutorial-triggers.md`, whose grouped example is executed by `tutorial_triggers.rs`.
-
----
-
-## Phase 7 — Streaming reads (`.iter()`)
-
-The row cap is right and it is not enough: a body that has to *visit* a million rows had no way
-to, because the only shape a read had was one answer materialised into the isolate. `.iter()`
-gives it one — the same rows, a batch per database call — without a server-side cursor, whose
-held connection and open transaction would contradict §6 and the pool both.
-
-- [x] **The wire shape**: `Plan` gains `cursor: bool` and `after: Option<Vec<Json>>`. A cursor
-      plan is a `select` with a total order and a batch, and answers `{ rows, cursor }` — the
-      cursor being `null` when the batch came back short, which is how the guest learns to
-      stop rather than by counting rows itself.
-- [x] **Keyset resuming**, in `code_host::plan`: the lexicographic predicate over the read's
-      own ordering, with the primary key appended so no two rows tie, null placement stated
-      (`NULLS LAST` ascending, `NULLS FIRST` descending) so the predicate and the `ORDER BY`
-      cannot disagree, and each direction's own answer for a null cursor value.
-- [x] **The cursor is projected, not read off the answer**: each sort key is added to the
-      `SELECT` under a reserved `__sc_cursor_i` alias, because a `.select()` narrows what comes
-      back and a Ⱶ-path is no column of the table. The aliases are dropped before the rows
-      reach the guest, which `Read::row` already did by construction.
-- [x] **Typed cursor values**: a plain column and a calculated field coerce against their own
-      field, a Ⱶ-path against the column at the far end (through the same `walk` a filter on
-      that path uses). An **expression** order key is refused — resuming needs a type — as are
-      a table with no single-column primary key, a grouped aggregate, and an `.offset()` on a
-      resumed batch.
-- [x] **The batch is clamped where a `.rows()` bound is refused**, and the asymmetry is the
-      point: a `.limit()` on a read is the answer, so exceeding the cap is an error; a batch
-      size is round trips, so the same rows arrive either way.
-- [x] **The prelude**: `iter(batchSize?)` as a generator, so `for (const row of …)` is an
-      ordinary loop, nothing is fetched before the first `next()`, and a `break` stops. A
-      `.limit()` bounds the **iteration** and is spent by the guest.
-- [x] **Delegation**: a stream needs its ownership rule inside the statement, so
-      `TableHost::streamable` asks `ownership::aggregate_guard` — the same question already
-      asked of an aggregate — and refuses a formula only the evaluator can decide, naming
-      `.rows()`. RLS tables and translatable formulas stream.
-- [x] Tests: the guest-side protocol against a fake host (batching, laziness, `break`, the
-      `.limit()` total); the predicate for every direction × null-cursor combination and the
-      multi-key chain; and — the one that matters — an integration test over a table whose
-      sort key **ties and goes missing**, asserting that what `.iter()` yields is exactly what
-      the unstreamed read answers, in both directions, plus the delegated cases.
-- [x] `docs/TECHNICAL_DESIGN.md` §10.1, the action's doc comment, the editor's `.d.ts` and the
-      CHANGELOG.
-- [x] *Worth naming*: **an iteration is not a snapshot.** Batches are separate statements and
-      no transaction spans them (§6, exactly as for a bulk write), so a loop that changes a
-      row's *sort key* may see it twice or not at all; changing any other column is safe. Said
-      in §10.1 and in the editor's own types, because it is the one thing about `.iter()` that
-      a body's author has to know.
+- [ ] `DenoEvaluator::with_max_inflight` beside `with_code_workers`, and — the gap this milestone
+      also closes — an actual config path: `sc-server` builds the evaluator with
+      `DenoEvaluator::new()` and nothing reads either knob today.
+- [ ] `docs/TECHNICAL_DESIGN.md` §10.1: "The API is **synchronous**" becomes its opposite, with
+      the `for await` spelling, the two clocks, the admission bound, and the sentence naming the
+      connection pool as the ceiling that remains.
+- [ ] `ui/admin/src/codeTypes.ts`: terminals answer `Promise<…>`, `iter()` answers
+      `AsyncIterableIterator<Row>`, and the doc comments lose "Synchronous — there are no promises
+      in the sandbox". Monaco's own diagnostics then catch a forgotten `await` in the editor,
+      which is where it is cheapest to catch.
+- [ ] `run_js_code`'s doc comment and `docs/tutorial-triggers.md`: every example gains its
+      `await`, and the "the code is **synchronous**" bullet is replaced by what a body now has to
+      know — await your queries, `Promise.all` is real parallelism, and a body that computes for a
+      second without yielding is the one shape the runtime will refuse.
+- [ ] The end-to-end test the milestone is defined by: 500 concurrent trigger fires on the
+      default pool, all served, none timing out.
+- [ ] CHANGELOG.
 
 ---
 
 ## Explicitly OUT of scope for this milestone
 
-- **Transactions across statements** (`db.transaction(fn)`). The row layer has the seam
-  (`Executor::Transaction`); holding one open across arbitrary guest code, with locks held
-  for the run's whole deadline, is its own decision and its own milestone.
-- **Raw SQL from a code body.** §13.4's custom SQL queries are the governed way to write SQL;
-  `db` stays closed.
-- **Schema changes from code** — create table, add field, drop anything. The catalog's schema
-  editor is an admin surface with its own rules; a code body gets rows.
-- ~~**Streaming or cursors.**~~ Done after all, in **Phase 7** — but by paging, not by a
-  server-side cursor: a held connection and an open transaction across arbitrary guest code is
-  still the separate decision the first bullet describes.
-- **An awaitable guest API**, and with it `fetch` or timers inside a code body. The sandbox
-  gains exactly one host surface here, and it is tables.
-- **The other guest languages** (§15's Python, Rust, Go adapters) — this milestone builds the
-  seam they will implement and nothing more.
-- **`db` in a formula.** Ownership formulas, `only_if`, calculated fields and `{{ }}` tokens
-  keep the pure isolate; a formula that could query is a formula that could be slow on every
-  row of every read.
+- **`fetch`, timers, or any second host surface.** Decision 5. The sandbox gains an event loop
+  here and exactly no new capability.
+- **Transactions across statements** (`db.transaction(fn)`). Still its own milestone, and
+  multiplexed runs make the case for it no easier: a held transaction across arbitrary guest
+  code is a lock held for the run's whole deadline, now with hundreds of runs resident.
+- **Preemptive scheduling.** One isolate runs one body's JavaScript at a time; this milestone
+  interleaves runs at their `await` points and bounds the slice between them. A body that wants
+  CPU parallelism is a body that wants a different tool.
+- **Growing or shrinking the pool at runtime.** The pool stays fixed and small (decision 2);
+  admission control, not elasticity, is what bounds occupancy.
+- **`db` in a formula.** Unchanged: the formula isolate stays pure and synchronous, and the
+  deadlock that would follow from giving it a host call is the reason `CodeRuntime` exists.
+- **The other guest languages** (§15's Python, Rust, Go adapters). The seam is untouched by
+  design (decision 3), which is the point — they inherit this concurrency without inheriting any
+  of its plumbing.
