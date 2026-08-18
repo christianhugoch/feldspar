@@ -286,6 +286,74 @@ interface ScUser {
   email?: string;
   [column: string]: any;
 }
+
+/** Request and response headers, as the web API has them. */
+declare class ScHeaders {
+  constructor(init?: Record<string, string> | [string, string][] | ScHeaders);
+  /** Every value under this name, joined with \`", "\` — or null. */
+  get(name: string): string | null;
+  has(name: string): boolean;
+  /** Replace whatever this name had. */
+  set(name: string, value: string): void;
+  /** Add another value under this name, leaving any others. */
+  append(name: string, value: string): void;
+  delete(name: string): void;
+  forEach(each: (value: string, name: string, headers: ScHeaders) => void, thisArg?: any): void;
+  entries(): IterableIterator<[string, string]>;
+  keys(): IterableIterator<string>;
+  values(): IterableIterator<string>;
+  [Symbol.iterator](): IterableIterator<[string, string]>;
+}
+
+/** What \`fetch\` answers with.
+ *
+ * A status the endpoint did not like is **not** an error: \`ok\` is false and
+ * nothing throws, exactly as in a browser. The body is read once — \`clone()\`
+ * first if two readers need it. */
+declare class ScResponse {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly statusText: string;
+  /** The URL that answered, which differs from the one asked for after a
+   * redirect. */
+  readonly url: string;
+  readonly redirected: boolean;
+  readonly headers: ScHeaders;
+  readonly bodyUsed: boolean;
+  readonly type: string;
+  text(): Promise<string>;
+  json(): Promise<any>;
+  bytes(): Promise<Uint8Array>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+  /** A second reader of the same body. */
+  clone(): ScResponse;
+}
+
+/** \`fetch\`'s options — the web's, minus what a server has no use for. */
+interface ScFetchOptions {
+  /** Default \`"GET"\`. */
+  method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
+  headers?: Record<string, string> | [string, string][] | ScHeaders;
+  /** A string is sent as written; an object is sent as JSON (with the content
+   * type to match), which is this sandbox's one difference from the browser;
+   * bytes are sent as they are. */
+  body?: string | Record<string, any> | any[] | Uint8Array | ArrayBuffer;
+  /** How long this one request may take. Always clamped to what is left of the
+   * code's own \`timeout_ms\`, so it can shorten a request but never lengthen
+   * the trigger. There is no \`AbortSignal\` here — no timers in the sandbox to
+   * drive one. */
+  timeout_ms?: number;
+  /** Redirects are followed; nothing else is supported. */
+  redirect?: "follow";
+  /** Accepted and ignored: a server has no use for them. */
+  mode?: string;
+  credentials?: string;
+  cache?: string;
+  referrer?: string;
+  referrerPolicy?: string;
+  integrity?: string;
+  keepalive?: boolean;
+}
 `;
 }
 
@@ -384,6 +452,29 @@ export function scopeDeclarations(scope: CodeScope, tables: TableInfo[]): string
   parts.push(
     `/** The tables. Only a code body has this — a formula (an \`only if\`, an\n` +
       ` * ownership rule) evaluates without it. */\ndeclare const db: ScDb;`,
+  );
+  parts.push(
+    `/** Call an HTTP endpoint. The web's \`fetch\`, with the web's rules: a\n` +
+      ` * non-2xx status is an answer rather than a throw, and only a transport\n` +
+      ` * failure rejects (with a \`TypeError\`).\n` +
+      ` *\n` +
+      ` * \`\`\`js\n` +
+      ` * const res = await fetch("https://api.example.com/rates", {\n` +
+      ` *   headers: { authorization: "Bearer " + payload.token },\n` +
+      ` * });\n` +
+      ` * if (!res.ok) throw new Error("rates: " + res.status);\n` +
+      ` * const { usd } = await res.json();\n` +
+      ` * \`\`\`\n` +
+      ` *\n` +
+      ` * Bounded like everything else a body reaches: 50 requests per run, each\n` +
+      ` * clamped to what is left of this code's \`timeout_ms\`, and a response of\n` +
+      ` * at most 8 MB. Only a code body has it — a formula evaluates without\n` +
+      ` * it. */\ndeclare function fetch(\n` +
+      `  url: string,\n` +
+      `  options?: ScFetchOptions,\n` +
+      `): Promise<ScResponse>;\n` +
+      `declare const Headers: typeof ScHeaders;\n` +
+      `declare const Response: typeof ScResponse;`,
   );
   return `${parts.join("\n\n")}\n`;
 }

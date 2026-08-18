@@ -160,8 +160,9 @@ already bounds itself — a fact worth stating in §10.1, because it is the answ
 4. **No backwards compatibility for the synchronous spelling.** Prototype status: existing bodies,
    tests, docs and the editor's `.d.ts` are updated to `await`, and the sync form is gone rather
    than deprecated.
-5. **`fetch` and timers stay out.** This milestone builds the plumbing that would make them
-   possible; the decision not to have them in the sandbox is unchanged and unrelated.
+5. ~~**`fetch` and timers stay out.**~~ **Superseded for `fetch`** (see the addendum below).
+   This milestone built the plumbing that made it possible and did not use it; `fetch` was then
+   asked for and added on top, on the same seam. Timers stay out.
 
 ---
 
@@ -306,10 +307,43 @@ arrives that way — `__scRun` attaches a rejection handler to the body's promis
 
 ---
 
+## Addendum — `fetch` in a code body
+
+Added after the milestone was finished, at the user's request, and recorded here rather than
+quietly: it reverses decision 5 for `fetch`, and the "explicitly out of scope" line below stood
+until it did. What it does *not* reverse is the reason that line existed — the milestone itself
+gained no capability, and this was built afterwards on the seam it left behind.
+
+- [x] `FetchHost` in `sc-expr`: a second host trait of the same shape as `CodeHost` (one JSON
+      request in, one JSON response out), a `fetch` field on `CodeCall`, and `op_sc_fetch` — an
+      async op with a budget (`DEFAULT_MAX_FETCHES`, 50) and a clock of its own, clamped to what
+      is left of the run less `FETCH_MARGIN` so a hung endpoint fails inside the body.
+- [x] One bridge for both surfaces: `HostRequest` carries which one it is for, so a
+      `Promise.all([fetch(…), db…])` is served in the one `FuturesUnordered` the caller already
+      had, and no second channel or loop exists to keep in step.
+- [x] `FETCH_PRELUDE`: `fetch`, `Headers` and `Response` — the web's shape, the web's rules (a
+      non-2xx is an answer; a transport failure is a `TypeError`), and the four honest
+      differences (no streaming, no `AbortSignal`, `timeout_ms`, an object body is JSON).
+      Compiled once per isolate; `fetch` is minted per run by `__scMakeFetch(token)` and handed
+      to the body as a parameter, exactly as `db` is.
+- [x] `CodeFetchHost` in `sc-core-actions`, over the same `reqwest` client the `fetch` action
+      uses and with the same rules (absolute `http`/`https` only), plus the response cap
+      (`MAX_RESPONSE_BYTES`, 8 MB, refused rather than truncated and enforced chunk by chunk).
+- [x] Tests: twelve in `sc-expr` against a fake network (the request a body builds, the response
+      it reads, a 404 that does not throw, a `TypeError` it can catch, the budget, a forgotten
+      `await`, two requests in flight at once, the clamp, bytes both ways, the refused options,
+      read-once-and-clone) and five in `sc-core-actions` against a **real socket** (a GET and a
+      POST as written, a body that writes what it fetched, a 503 it retries, a hung endpoint
+      that fails inside the body's own limit, and `file://` refused).
+- [x] `ui/admin/src/codeTypes.ts` and its type-check test; `run_js_code`'s doc comment;
+      `docs/TECHNICAL_DESIGN.md` §10.1 (a `fetch` subsection, and the sandbox's "no network"
+      line); `docs/tutorial-triggers.md`; CHANGELOG.
+
 ## Explicitly OUT of scope for this milestone
 
 - **`fetch`, timers, or any second host surface.** Decision 5. The sandbox gains an event loop
-  here and exactly no new capability.
+  here and exactly no new capability. *(`fetch` was added afterwards — see the addendum
+  above. Timers were not.)*
 - **Transactions across statements** (`db.transaction(fn)`). Still its own milestone, and
   multiplexed runs make the case for it no easier: a held transaction across arbitrary guest
   code is a lock held for the run's whole deadline, now with hundreds of runs resident.

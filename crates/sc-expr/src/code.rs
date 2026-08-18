@@ -144,6 +144,40 @@ pub const MAX_CODE_TIMEOUT: Duration = Duration::from_secs(60);
 /// is the failure this bounds — not malice, an N+1 nobody noticed.
 pub const DEFAULT_MAX_HOST_CALLS: u32 = 200;
 
+/// How many **outbound HTTP requests** one run may make.
+///
+/// A budget of its own rather than a share of [`DEFAULT_MAX_HOST_CALLS`],
+/// because the two bound different things. A database call is this server's own
+/// pooled query and 200 of them is an N+1 to notice; a `fetch` leaves the
+/// building, and fifty of them at somebody else's endpoint is a different kind
+/// of accident — one that a retry loop in a trigger can turn into a denial of
+/// service against a third party. Small enough that such a loop stops, large
+/// enough for the fan-out a body legitimately writes.
+pub const DEFAULT_MAX_FETCHES: u32 = 50;
+
+/// What one `fetch` gets when the body names no `timeout_ms` of its own.
+///
+/// Always clamped to what is left of the run's wall clock, which is the bound
+/// that actually matters: the default run has five seconds for everything it
+/// does, so this ceiling is only reached by a body that was given a longer one.
+pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How much of the run's remaining time a request is **not** given.
+///
+/// A request clamped to exactly what is left would time out at the same instant
+/// the run does, and the body would never see it: what the trigger's caller gets
+/// is "this code exceeded its time limit" rather than the `catch` the author
+/// wrote. Leaving a slice back means a hung endpoint fails *inside* the body,
+/// where it can be caught, logged, or answered with a fallback — which is the
+/// difference between a bound and a trap.
+#[cfg(feature = "eval")]
+const FETCH_MARGIN: Duration = Duration::from_millis(250);
+
+/// The least time worth starting a request with. Below this the run is refused
+/// one and told why, rather than sent to an endpoint it cannot wait for.
+#[cfg(feature = "eval")]
+const MIN_FETCH_WINDOW: Duration = Duration::from_millis(50);
+
 /// The **JS slice**: how long a body may run without yielding.
 ///
 /// Not the same clock as [`DEFAULT_CODE_TIMEOUT`], and this is the milestone's
@@ -192,6 +226,41 @@ pub trait CodeHost: Send + Sync {
     async fn call(&self, request: Json) -> Result<Json>;
 }
 
+/// The **second** host surface: one outbound HTTP request in, one response out.
+///
+/// Separate from [`CodeHost`] although the shape is the same, for two reasons
+/// worth keeping apart. It is a different capability — a body may have tables
+/// and no network, or the reverse — and it is implemented somewhere else: the
+/// table host holds this server's catalog, while this holds an HTTP client, and
+/// nothing sensible implements both. A run carries at most one of each.
+///
+/// The request and the response are plain JSON, exactly as a plan is, so §15's
+/// other guest languages inherit `fetch` the way they inherit `db`:
+///
+/// ```json
+/// { "url": "https://api.example.com/hooks", "method": "POST",
+///   "headers": [["content-type", "application/json"]],
+///   "body": "{\"id\":1}", "body_base64": false, "timeout_ms": 4000 }
+/// ```
+///
+/// ```json
+/// { "status": 200, "status_text": "OK", "url": "https://api.example.com/hooks",
+///   "redirected": false, "headers": [["content-type", "application/json"]],
+///   "text": "{\"ok\":true}" }
+/// ```
+///
+/// `timeout_ms` is filled in by the op from what the guest asked for and what is
+/// left of the run's wall clock, so an implementation may take it as given. An
+/// `Err` is a **transport** failure and is thrown into the guest as a
+/// `TypeError`, which is what the web API does; a response with a status the
+/// server did not like is not an error at all — it comes back as an ordinary
+/// response whose `ok` is false, again as the web API has it.
+#[async_trait]
+pub trait FetchHost: Send + Sync {
+    /// Send one request and answer its response.
+    async fn fetch(&self, request: Json) -> Result<Json>;
+}
+
 /// One run of a JavaScript **code body**: the source, the values in scope, and
 /// what it is allowed to reach and for how long.
 ///
@@ -223,11 +292,20 @@ pub struct CodeCall<'a> {
     /// bridges the two itself (see [`CodeRuntime::run`]) rather than making
     /// every caller find an `Arc<Catalog>` it does not have.
     pub host: Option<&'a dyn CodeHost>,
+    /// The HTTP surface, or `None` for a body that cannot reach the network —
+    /// in which case `fetch` is not bound at all, so naming it is a
+    /// `ReferenceError` rather than a call that fails.
+    ///
+    /// Borrowed for the same reason `host` is, and bridged the same way.
+    pub fetch: Option<&'a dyn FetchHost>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
     /// How many host calls this run may make.
     pub max_calls: u32,
+    /// How many outbound HTTP requests this run may make
+    /// ([`DEFAULT_MAX_FETCHES`]).
+    pub max_fetches: u32,
 }
 
 impl Default for CodeCall<'_> {
@@ -236,8 +314,10 @@ impl Default for CodeCall<'_> {
             code: String::new(),
             bindings: BTreeMap::new(),
             host: None,
+            fetch: None,
             timeout: None,
             max_calls: DEFAULT_MAX_HOST_CALLS,
+            max_fetches: DEFAULT_MAX_FETCHES,
         }
     }
 }
@@ -248,8 +328,10 @@ impl std::fmt::Debug for CodeCall<'_> {
             .field("code", &self.code)
             .field("bindings", &self.bindings)
             .field("host", &self.host.is_some())
+            .field("fetch", &self.fetch.is_some())
             .field("timeout", &self.timeout)
             .field("max_calls", &self.max_calls)
+            .field("max_fetches", &self.max_fetches)
             .finish()
     }
 }
@@ -262,6 +344,12 @@ impl std::fmt::Debug for CodeCall<'_> {
 /// feature there is no engine to build a script for.
 #[cfg(feature = "eval")]
 pub(crate) const DB: &str = "db";
+
+/// The name the HTTP surface binds under, reserved when a fetch host is present
+/// for the reason [`DB`] is. It is `fetch` because that is what the web calls
+/// it, and a body's author knows the name before they read anything of ours.
+#[cfg(feature = "eval")]
+pub(crate) const FETCH: &str = "fetch";
 
 // ---------------------------------------------------------------------------
 // The prelude (the fluent surface, in JavaScript)
@@ -543,6 +631,451 @@ Object.defineProperty(globalThis, "__scMakeDb", {
 });
 "#;
 
+/// The `fetch` surface: the web API's shape, over one JSON request and one JSON
+/// response.
+///
+/// Compiled **once per isolate**, like [`DB_PRELUDE`] and for the same reason,
+/// and split the same way: `Headers` and `Response` are ordinary globals because
+/// they are inert — they hold no authority and a body cannot reach anything by
+/// having them — while `fetch` itself is minted per run by `__scMakeFetch(token)`
+/// and handed to the body as a parameter. That is the whole of the isolation: a
+/// resident body holds a function closed over *its* token, so it cannot spend
+/// another run's budget or borrow another run's network.
+///
+/// # What is the web's, and what is not
+///
+/// The common surface is the web's, deliberately, because an author already
+/// knows it: `await fetch(url, { method, headers, body })` answers a `Response`
+/// with `ok`, `status`, `statusText`, `headers`, `url`, and `text()` / `json()` /
+/// `arrayBuffer()` / `bytes()` / `clone()`. A status the server did not like is
+/// **not** an error — `res.ok` is false and nothing throws — while a transport
+/// failure rejects with a `TypeError`, which is what a browser does. A body is
+/// read once; reading it twice throws, and `clone()` is the answer.
+///
+/// Four differences, each of them the sandbox showing through rather than an
+/// oversight:
+///
+/// - **No streaming**: `res.body` is not a `ReadableStream`, because the seam
+///   carries one JSON value and a stream is not one. `text()` is the whole body.
+/// - **No `AbortSignal`**: there are no timers in the sandbox to drive one, and
+///   the bound that matters is already there — the run's wall clock, which
+///   every request is clamped to. A `signal` in the options is refused by name
+///   rather than ignored, so a body that thinks it can cancel is told it cannot.
+/// - **`timeout_ms`** is an option of our own, since the browser's answer to
+///   that question is the `AbortSignal` we do not have.
+/// - **An object body** is JSON: `body: { id: 1 }` sends
+///   `application/json`, because the alternative — `[object Object]` on the
+///   wire, which is what the web does — is a bug every time it happens.
+///
+/// The options the browser needs and a server does not (`mode`, `credentials`,
+/// `cache`, `referrer`, `integrity`, `keepalive`) are accepted and ignored, so
+/// code that carries them works; anything else in the options is refused by
+/// name, because a misspelled `header:` that did nothing would be exactly the
+/// silent failure principle 5 is about.
+#[cfg(feature = "eval")]
+pub(crate) const FETCH_PRELUDE: &str = r#"
+(() => {
+  const fixed = (name, value) =>
+    Object.defineProperty(globalThis, name, {
+      value: value, writable: false, configurable: false, enumerable: false,
+    });
+
+  // --- header names and values -------------------------------------------
+  // A header a body builds must not be able to become two headers, so the
+  // checks are here rather than left to the host: the message wants to name the
+  // line in the body that wrote it.
+  const NAME_OK = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+  const headerName = (name) => {
+    const text = String(name);
+    if (!NAME_OK.test(text)) {
+      throw new TypeError("`" + text + "` is not a valid HTTP header name");
+    }
+    return text.toLowerCase();
+  };
+  const headerValue = (value) => {
+    const text = String(value).replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "");
+    if (/[\0\r\n]/.test(text)) {
+      throw new TypeError("an HTTP header value may not contain a newline");
+    }
+    return text;
+  };
+
+  class Headers {
+    #list = [];
+    constructor(init) {
+      if (init === undefined || init === null) return;
+      if (init instanceof Headers) {
+        // The pairs as written rather than as read: a repeated header stays
+        // two headers on the wire, which is the whole difference for the one
+        // header (`set-cookie`) where joining them with a comma is wrong.
+        for (const pair of init.__scPairs()) this.append(pair[0], pair[1]);
+        return;
+      }
+      if (Array.isArray(init)) {
+        for (const pair of init) {
+          if (!Array.isArray(pair) || pair.length !== 2) {
+            throw new TypeError("Headers takes [name, value] pairs");
+          }
+          this.append(pair[0], pair[1]);
+        }
+        return;
+      }
+      if (typeof init === "object") {
+        for (const name of Object.keys(init)) this.append(name, init[name]);
+        return;
+      }
+      throw new TypeError(
+        "Headers takes an object, an array of [name, value] pairs, or Headers"
+      );
+    }
+    append(name, value) { this.#list.push([headerName(name), headerValue(value)]); }
+    set(name, value) {
+      const key = headerName(name);
+      const text = headerValue(value);
+      this.#list = this.#list.filter((pair) => pair[0] !== key);
+      this.#list.push([key, text]);
+    }
+    // Repeated headers join with ", ", as the web API's does — one `set-cookie`
+    // and three `set-cookie`s should not need two ways of being read.
+    get(name) {
+      const key = headerName(name);
+      const found = this.#list.filter((pair) => pair[0] === key).map((pair) => pair[1]);
+      return found.length === 0 ? null : found.join(", ");
+    }
+    has(name) {
+      const key = headerName(name);
+      return this.#list.some((pair) => pair[0] === key);
+    }
+    delete(name) {
+      const key = headerName(name);
+      this.#list = this.#list.filter((pair) => pair[0] !== key);
+    }
+    // Sorted and combined, which is the order the web API iterates in.
+    #combined() {
+      const names = [...new Set(this.#list.map((pair) => pair[0]))].sort();
+      return names.map((name) => [name, this.get(name)]);
+    }
+    forEach(callback, thisArg) {
+      for (const [name, value] of this.#combined()) {
+        callback.call(thisArg, value, name, this);
+      }
+    }
+    *entries() { yield* this.#combined(); }
+    *keys() { for (const [name] of this.#combined()) yield name; }
+    *values() { for (const [, value] of this.#combined()) yield value; }
+    [Symbol.iterator]() { return this.entries(); }
+    // What crosses the seam: the pairs as written, uncombined, because the host
+    // is the one that knows how a repeated header is sent.
+    __scPairs() { return this.#list.map((pair) => [pair[0], pair[1]]); }
+  }
+  fixed("Headers", Headers);
+
+  // --- bytes --------------------------------------------------------------
+  // The seam is JSON, so a body that is not text travels base64. Both codecs are
+  // written out here because the sandbox has no `TextEncoder` and no `atob` —
+  // and because a response nobody asks for the bytes of pays for neither.
+  const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const encodeUtf8 = (text) => {
+    const out = [];
+    for (let i = 0; i < text.length; i++) {
+      let code = text.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+        const low = text.charCodeAt(i + 1);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+          i++;
+        }
+      }
+      if (code < 0x80) out.push(code);
+      else if (code < 0x800) out.push(0xc0 | (code >> 6), 0x80 | (code & 63));
+      else if (code < 0x10000) {
+        out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63));
+      } else {
+        out.push(
+          0xf0 | (code >> 18), 0x80 | ((code >> 12) & 63),
+          0x80 | ((code >> 6) & 63), 0x80 | (code & 63)
+        );
+      }
+    }
+    return new Uint8Array(out);
+  };
+  const toBase64 = (bytes) => {
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const a = bytes[i];
+      const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      out += B64[a >> 2];
+      out += B64[((a & 3) << 4) | (b >> 4)];
+      out += i + 1 < bytes.length ? B64[((b & 15) << 2) | (c >> 6)] : "=";
+      out += i + 2 < bytes.length ? B64[c & 63] : "=";
+    }
+    return out;
+  };
+  // Bytes back to text, the way a browser decodes a response body: UTF-8, with
+  // U+FFFD where the bytes are not. Built in chunks rather than by spreading the
+  // whole array into `String.fromCharCode`, because a megabyte of arguments is a
+  // stack overflow and a body that fetched a megabyte did nothing wrong.
+  const decodeUtf8 = (bytes) => {
+    const units = [];
+    let out = "";
+    const flush = () => {
+      if (units.length === 0) return;
+      out += String.fromCharCode.apply(null, units);
+      units.length = 0;
+    };
+    for (let i = 0; i < bytes.length; ) {
+      const byte = bytes[i];
+      let code;
+      let width;
+      if (byte < 0x80) { code = byte; width = 1; }
+      else if ((byte & 0xe0) === 0xc0) { code = byte & 0x1f; width = 2; }
+      else if ((byte & 0xf0) === 0xe0) { code = byte & 0x0f; width = 3; }
+      else if ((byte & 0xf8) === 0xf0) { code = byte & 0x07; width = 4; }
+      else { units.push(0xfffd); i++; continue; }
+      if (i + width > bytes.length) { units.push(0xfffd); i++; continue; }
+      let ok = true;
+      for (let n = 1; n < width; n++) {
+        const next = bytes[i + n];
+        if ((next & 0xc0) !== 0x80) { ok = false; break; }
+        code = (code << 6) | (next & 63);
+      }
+      if (!ok) { units.push(0xfffd); i++; continue; }
+      i += width;
+      if (code > 0x10ffff) units.push(0xfffd);
+      else if (code > 0xffff) {
+        code -= 0x10000;
+        units.push(0xd800 + (code >> 10), 0xdc00 + (code & 0x3ff));
+      } else units.push(code);
+      if (units.length >= 4096) flush();
+    }
+    flush();
+    return out;
+  };
+  const fromBase64 = (text) => {
+    const clean = String(text).replace(/[^A-Za-z0-9+/]/g, "");
+    const out = new Uint8Array((clean.length * 3) >> 2);
+    let at = 0;
+    for (let i = 0; i < clean.length; i += 4) {
+      const a = B64.indexOf(clean[i]);
+      const b = B64.indexOf(clean[i + 1]);
+      const c = B64.indexOf(clean[i + 2]);
+      const d = B64.indexOf(clean[i + 3]);
+      if (b >= 0) out[at++] = (a << 2) | (b >> 4);
+      if (c >= 0) out[at++] = ((b & 15) << 4) | (c >> 2);
+      if (d >= 0) out[at++] = ((c & 3) << 6) | d;
+    }
+    return out.subarray(0, at);
+  };
+  const asBytes = (value) => {
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    return null;
+  };
+
+  // --- the response -------------------------------------------------------
+  // Built by `fetch` from what the host answered, and constructible by a body
+  // for the same reason the web makes it constructible: a function that answers
+  // a Response is easier to test than one that answers a shape.
+  const INTERNAL = Symbol("sc.response");
+  class Response {
+    #text; #base64; #used = false;
+    constructor(body, init, internal) {
+      const options = init === undefined || init === null ? {} : init;
+      if (internal === INTERNAL) {
+        this.#text = options.text;
+        this.#base64 = options.base64;
+      } else if (body === undefined || body === null) {
+        this.#text = "";
+      } else {
+        const bytes = asBytes(body);
+        if (bytes !== null) {
+          this.#text = null;
+          this.#base64 = toBase64(bytes);
+        } else {
+          this.#text = typeof body === "string" ? body : JSON.stringify(body);
+        }
+      }
+      const status = options.status === undefined ? 200 : Number(options.status);
+      if (!Number.isInteger(status) || status < 200 || status > 599) {
+        throw new RangeError("a response status must be a whole number from 200 to 599");
+      }
+      Object.defineProperties(this, {
+        status: { value: status, enumerable: true },
+        statusText: {
+          value: options.statusText === undefined ? "" : String(options.statusText),
+          enumerable: true,
+        },
+        url: { value: options.url === undefined ? "" : String(options.url), enumerable: true },
+        redirected: { value: options.redirected === true, enumerable: true },
+        headers: { value: new Headers(options.headers), enumerable: true },
+        type: { value: "basic", enumerable: true },
+        ok: { value: status >= 200 && status < 300, enumerable: true },
+      });
+    }
+    get bodyUsed() { return this.#used; }
+    #take() {
+      if (this.#used) {
+        throw new TypeError("this response's body has already been read — use res.clone()");
+      }
+      this.#used = true;
+    }
+    // Asynchronous, as the web's are, although nothing is waited for: the body
+    // arrived with the response. Keeping the shape means `await res.json()` is
+    // written the same way here as everywhere else.
+    async text() {
+      this.#take();
+      // The host sends the text of every response it could read as text, so the
+      // decode below is only for a `Response` a body built out of bytes itself.
+      if (this.#text !== null && this.#text !== undefined) return this.#text;
+      return decodeUtf8(fromBase64(this.#base64));
+    }
+    async json() {
+      const text = await this.text();
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        throw new SyntaxError("the response body is not JSON: " + e.message);
+      }
+    }
+    async bytes() {
+      this.#take();
+      if (this.#base64 !== null && this.#base64 !== undefined) return fromBase64(this.#base64);
+      return encodeUtf8(this.#text === null || this.#text === undefined ? "" : this.#text);
+    }
+    async arrayBuffer() {
+      const bytes = await this.bytes();
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
+    // A second reader of the same body, which is what makes reading once
+    // enforceable without being a trap.
+    clone() {
+      if (this.#used) {
+        throw new TypeError("a response whose body has been read cannot be cloned");
+      }
+      return new Response(null, {
+        text: this.#text, base64: this.#base64,
+        status: this.status, statusText: this.statusText, url: this.url,
+        redirected: this.redirected, headers: this.headers,
+      }, INTERNAL);
+    }
+  }
+  fixed("Response", Response);
+
+  // --- the request --------------------------------------------------------
+  // Everything the browser needs and a server does not. Accepted and ignored
+  // rather than refused, so that code carrying them runs unchanged.
+  const IGNORED = [
+    "mode", "credentials", "cache", "referrer", "referrerPolicy", "integrity",
+    "keepalive", "window", "priority", "duplex",
+  ];
+  const KNOWN = ["method", "headers", "body", "redirect", "signal", "timeout_ms"].concat(IGNORED);
+  const METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+  const plan = (input, init) => {
+    const options = init === undefined || init === null ? {} : init;
+    if (typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("fetch()'s second argument is an options object");
+    }
+    for (const key of Object.keys(options)) {
+      if (!KNOWN.includes(key)) {
+        throw new TypeError(
+          "`" + key + "` is not an option of fetch(); the options are: " + KNOWN.join(", ")
+        );
+      }
+    }
+    let url = input;
+    if (url !== null && typeof url === "object") url = url.url;
+    if (typeof url !== "string" || url.trim() === "") {
+      throw new TypeError("fetch() takes an absolute http(s) URL as its first argument");
+    }
+    const method = String(options.method === undefined ? "GET" : options.method).toUpperCase();
+    if (!METHODS.includes(method)) {
+      throw new TypeError(
+        "`" + method + "` is not a method fetch() sends; the methods are: " + METHODS.join(", ")
+      );
+    }
+    if (options.signal !== undefined && options.signal !== null) {
+      throw new TypeError(
+        "fetch() takes no `signal` here — there are no timers in the sandbox to " +
+        "drive one. Use `timeout_ms`, which is clamped to what is left of this " +
+        "code's own time limit"
+      );
+    }
+    if (options.redirect !== undefined && options.redirect !== null &&
+        String(options.redirect) !== "follow") {
+      throw new TypeError(
+        "fetch() only follows redirects here; `redirect: \"" + options.redirect + "\"` is not supported"
+      );
+    }
+    const headers = new Headers(options.headers);
+    let body = null;
+    let base64 = false;
+    if (options.body !== undefined && options.body !== null) {
+      if (method === "GET" || method === "HEAD") {
+        throw new TypeError("a " + method + " request cannot carry a body");
+      }
+      const bytes = asBytes(options.body);
+      if (bytes !== null) {
+        body = toBase64(bytes);
+        base64 = true;
+        if (!headers.has("content-type")) headers.set("content-type", "application/octet-stream");
+      } else if (typeof options.body === "string") {
+        body = options.body;
+        if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
+      } else if (typeof options.body === "object") {
+        // Ours, not the web's: an object on the web is `[object Object]` on the
+        // wire, which is a mistake every single time it happens.
+        try {
+          body = JSON.stringify(options.body);
+        } catch (e) {
+          throw new TypeError("fetch()'s body could not be encoded as JSON: " + e.message);
+        }
+        if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      } else {
+        body = String(options.body);
+        if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
+      }
+    }
+    let timeout = null;
+    if (options.timeout_ms !== undefined && options.timeout_ms !== null) {
+      timeout = Number(options.timeout_ms);
+      if (!Number.isFinite(timeout) || timeout <= 0) {
+        throw new TypeError("fetch()'s `timeout_ms` must be a positive number of milliseconds");
+      }
+    }
+    return {
+      url: url.trim(),
+      method: method,
+      headers: headers.__scPairs(),
+      body: body,
+      body_base64: base64,
+      timeout_ms: timeout,
+    };
+  };
+
+  // One run's `fetch`, over one run's token — the same shape `__scMakeDb` has,
+  // and for the same reason: what a body holds is a function closed over its own
+  // authority, not a name it shares with everything else resident on the isolate.
+  fixed("__scMakeFetch", (__scTok) => (input, init) =>
+    __scFetchCall(__scTok, () => plan(input, init), (answer) =>
+      new Response(null, {
+        text: answer.text,
+        base64: answer.base64,
+        status: answer.status,
+        statusText: answer.status_text,
+        url: answer.url,
+        redirected: answer.redirected === true,
+        headers: answer.headers,
+      }, INTERNAL)
+    )
+  );
+})();
+"#;
+
 /// Installed once per isolate: the op handles, the promise a database call
 /// answers, and the run wrapper — as globals that a code body **cannot
 /// replace**.
@@ -611,6 +1144,7 @@ Object.defineProperty(globalThis, "__scMakeDb", {
 const SETUP: &str = r#"
 (() => {
   const call = Deno.core.ops.op_sc_db;
+  const send = Deno.core.ops.op_sc_fetch;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
   const mark = Deno.core.ops.op_sc_mark;
@@ -629,6 +1163,16 @@ const SETUP: &str = r#"
     toJSON() { throw notAwaited(); }
     [Symbol.toPrimitive]() { throw notAwaited(); }
     [Symbol.iterator]() { throw notAwaited(); }
+  }
+  // The same guard for the other surface, in that surface's own words: what a
+  // forgotten `await fetch(…)` reaches for is `res.status`, and `undefined` is a
+  // worse answer than a sentence.
+  const notAwaitedFetch = () =>
+    new Error("this fetch was not awaited — write `await fetch(url)`");
+  class FetchPromise extends Promise {
+    toJSON() { throw notAwaitedFetch(); }
+    [Symbol.toPrimitive]() { throw notAwaitedFetch(); }
+    [Symbol.iterator]() { throw notAwaitedFetch(); }
   }
   // One round trip: a plan in, a reply envelope out. A host error becomes an
   // ordinary JS Error at the await point, catchable like any other. The token
@@ -652,6 +1196,36 @@ const SETUP: &str = r#"
       else resolve(reply.ok);
     }, reject);
   }));
+  // One outbound request. `build` is called here rather than by the caller so
+  // that a bad option **rejects** rather than throwing where the web API would
+  // have rejected, and `wrap` turns the host's answer into a `Response` — both
+  // live in the fetch prelude, which is where the web's shapes are.
+  //
+  // A failure is a `TypeError`, which is what a browser rejects a failed
+  // request with; a status the server did not like is not a failure at all and
+  // arrives here as an ordinary answer.
+  fixed("__scFetchCall", (token, build, wrap) => new FetchPromise((resolve, reject) => {
+    let request;
+    try {
+      request = JSON.stringify(build());
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    send(token, request).then((answer) => {
+      mark(token);
+      const reply = JSON.parse(answer);
+      if (reply.error !== undefined) {
+        reject(new TypeError(reply.error));
+        return;
+      }
+      try {
+        resolve(wrap(reply.ok));
+      } catch (e) {
+        reject(e);
+      }
+    }, reject);
+  }));
   // What an admin should be shown: the stack when there is one, because a body
   // of any size wants the line, and the value itself when there is not.
   const describe = (e) => {
@@ -663,8 +1237,8 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, body) => {
-    bodies.set(key, { body: body, wantsDb: wantsDb });
+  fixed("__scDefine", (key, wantsDb, wantsFetch, body) => {
+    bodies.set(key, { body: body, wantsDb: wantsDb, wantsFetch: wantsFetch });
   });
   // Dropped when the cache is full and this body is the one least recently run.
   // A run already executing keeps its own reference, so forgetting a body can
@@ -693,9 +1267,13 @@ const SETUP: &str = r#"
     }
     let running;
     try {
-      running = entry.wantsDb
-        ? entry.body(bindings, __scMakeDb(token))
-        : entry.body(bindings);
+      // The handles this body was compiled to take, in the order its parameter
+      // list has them. A body with neither is the pure one `run_js_code` began
+      // as: nothing in its scope to reach anything with.
+      const handles = [bindings];
+      if (entry.wantsDb) handles.push(__scMakeDb(token));
+      if (entry.wantsFetch) handles.push(__scMakeFetch(token));
+      running = entry.body(...handles);
     } catch (e) {
       fail(token, describe(e));
       return;
@@ -735,12 +1313,19 @@ delete globalThis.Deno;
 #[cfg(feature = "eval")]
 struct RunState {
     host: Option<Arc<dyn CodeHost>>,
+    /// The network, when this run has it. Separate from `host` because it is a
+    /// separate capability: a body may have tables and no network.
+    fetch: Option<Arc<dyn FetchHost>>,
     /// Wall clock: when this run may make no further host calls.
     deadline: Instant,
     /// What the deadline was, for the message.
     timeout: Duration,
     calls_left: u32,
     max_calls: u32,
+    /// The outbound-request budget, counted apart from `calls_left` because a
+    /// call that leaves the building is a different thing to bound.
+    fetches_left: u32,
+    max_fetches: u32,
     /// How long this run may execute JavaScript without yielding, before the
     /// watchdog stops it: [`DEFAULT_JS_SLICE`], never more than its own timeout.
     /// A *fresh* window each time it resumes, not a budget it spends — the
@@ -912,6 +1497,99 @@ async fn op_sc_db(
     })
 }
 
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+async fn op_sc_fetch(
+    state: Rc<RefCell<OpState>>,
+    #[string] token: String,
+    #[string] request: String,
+) -> String {
+    let reply = fetch_call(&state, &token, &request).await;
+    serde_json::to_string(&reply).unwrap_or_else(|_| {
+        r#"{"error":"the fetch reply could not be encoded as JSON"}"#.to_owned()
+    })
+}
+
+/// One outbound request. [`host_call`]'s twin, and deliberately its own function
+/// rather than a flag on it: the budget it spends is a different budget, the
+/// capability it needs is a different capability, and every refusal here has to
+/// say `fetch` rather than "database" to be worth reading.
+///
+/// The one thing it does that `host_call` does not is **fill in the clock**. A
+/// request may not outlive the run that made it, so what the guest asked for
+/// (or [`DEFAULT_FETCH_TIMEOUT`]) is clamped to what is left of the wall clock
+/// and written into the plan — leaving the implementation nothing to decide and
+/// no way to hold the caller past its deadline.
+#[cfg(feature = "eval")]
+async fn fetch_call(state: &Rc<RefCell<OpState>>, token: &str, request: &str) -> Json {
+    let mut plan: Json = match serde_json::from_str(request) {
+        Ok(plan) => plan,
+        Err(e) => return refuse(format!("the fetch request is not JSON: {e}")),
+    };
+
+    let (host, remaining, run_timeout) = {
+        let mut state = state.borrow_mut();
+        let Some(table) = state.try_borrow_mut::<RunTable>() else {
+            return refuse("this code body cannot reach the network");
+        };
+        let Some(run) = table.runs.get_mut(token) else {
+            return refuse("this fetch belongs to a code run that has already finished");
+        };
+        if run.fetches_left == 0 {
+            let max = run.max_fetches;
+            return refuse(format!(
+                "this code made more than {max} fetch requests in one run;                  the bound exists so a loop cannot hammer somebody else's server"
+            ));
+        }
+        let now = Instant::now();
+        if now >= run.deadline {
+            let ms = run.timeout.as_millis();
+            return refuse(format!("this code exceeded its {ms} ms time limit"));
+        }
+        let Some(host) = run.fetch.clone() else {
+            return refuse("this code body cannot reach the network");
+        };
+        run.fetches_left -= 1;
+        run.retry = None;
+        (
+            host,
+            run.deadline.saturating_duration_since(now),
+            run.timeout,
+        )
+    };
+
+    // What the body asked for, bounded by what the run has left — less
+    // `FETCH_MARGIN`, so that a request which does not come back fails where the
+    // body can catch it rather than at the same moment the run itself expires.
+    let usable = remaining.saturating_sub(FETCH_MARGIN);
+    if usable < MIN_FETCH_WINDOW {
+        let ms = run_timeout.as_millis();
+        return refuse(format!(
+            "this code has too little of its {ms} ms time limit left to make a request"
+        ));
+    }
+    let asked = plan
+        .get("timeout_ms")
+        .and_then(Json::as_f64)
+        .filter(|ms| ms.is_finite() && *ms > 0.0)
+        .map_or(DEFAULT_FETCH_TIMEOUT, |ms| {
+            Duration::from_secs_f64(ms / 1000.0)
+        });
+    let allowed = asked.min(usable);
+    if let Some(object) = plan.as_object_mut() {
+        object.insert(
+            "timeout_ms".to_owned(),
+            Json::from(u64::try_from(allowed.as_millis()).unwrap_or(u64::MAX)),
+        );
+    }
+
+    match host.fetch(plan).await {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(e) => refuse(e.to_string()),
+    }
+}
+
 /// One host call. An **ordinary async op**: it awaits the host rather than
 /// blocking the isolate thread on it, so the run costs a pending promise and the
 /// isolate is free to serve every other resident run while the database works.
@@ -1038,7 +1716,7 @@ fn finish(state: &mut OpState, token: &str, outcome: Result<Json>) {
 #[cfg(feature = "eval")]
 deno_core::extension!(
     sc_db_ext,
-    ops = [op_sc_db, op_sc_done, op_sc_fail, op_sc_mark]
+    ops = [op_sc_db, op_sc_fetch, op_sc_done, op_sc_fail, op_sc_mark]
 );
 
 // ---------------------------------------------------------------------------
@@ -1203,9 +1881,11 @@ struct CodeRun {
     code: String,
     bindings: BTreeMap<String, Json>,
     host: Option<Arc<dyn CodeHost>>,
+    fetch: Option<Arc<dyn FetchHost>>,
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
+    max_fetches: u32,
     /// When the wall clock this run is being measured against started — set only
     /// on a run that is being **re-queued** after its isolate was terminated
     /// under it. A second start is not a second timeout: the caller is still
@@ -1220,12 +1900,25 @@ struct CodeJob {
     reply: tokio::sync::oneshot::Sender<Result<Json>>,
 }
 
-/// One host call in flight over a [`BridgeHost`]: the plan, and where the answer
-/// goes back to.
+/// One host call in flight over a [`BridgeHost`]: which surface it is for, the
+/// plan, and where the answer goes back to.
+///
+/// Both surfaces share one channel and one serving loop, so a body's
+/// `Promise.all([db…, fetch…])` really does issue the query and the request
+/// together — which two channels would not have given without two loops.
 #[cfg(feature = "eval")]
 struct HostRequest {
+    surface: Surface,
     plan: Json,
     reply: tokio::sync::oneshot::Sender<Result<Json>>,
+}
+
+/// Which borrowed host answers a bridged request.
+#[cfg(feature = "eval")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    Db,
+    Fetch,
 }
 
 /// The `'static` stand-in a **borrowed** host crosses to the isolate thread as.
@@ -1245,19 +1938,54 @@ struct BridgeHost {
 }
 
 #[cfg(feature = "eval")]
-#[async_trait]
-impl CodeHost for BridgeHost {
-    async fn call(&self, request: Json) -> Result<Json> {
+impl BridgeHost {
+    /// Send one request over the bridge and wait for the answer. `gone` and
+    /// `dropped` are the two ways there is no answer, in the words of whichever
+    /// surface asked.
+    async fn bridged(
+        &self,
+        surface: Surface,
+        plan: Json,
+        gone: &str,
+        dropped: &str,
+    ) -> Result<Json> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.requests
             .send(HostRequest {
-                plan: request,
+                surface,
+                plan,
                 reply,
             })
-            .map_err(|_| Error::msg("this code body's database connection has gone away"))?;
-        answer
-            .await
-            .map_err(|_| Error::msg("this database request was dropped without an answer"))?
+            .map_err(|_| Error::msg(gone.to_owned()))?;
+        answer.await.map_err(|_| Error::msg(dropped.to_owned()))?
+    }
+}
+
+#[cfg(feature = "eval")]
+#[async_trait]
+impl CodeHost for BridgeHost {
+    async fn call(&self, request: Json) -> Result<Json> {
+        self.bridged(
+            Surface::Db,
+            request,
+            "this code body's database connection has gone away",
+            "this database request was dropped without an answer",
+        )
+        .await
+    }
+}
+
+#[cfg(feature = "eval")]
+#[async_trait]
+impl FetchHost for BridgeHost {
+    async fn fetch(&self, request: Json) -> Result<Json> {
+        self.bridged(
+            Surface::Fetch,
+            request,
+            "this code body's network access has gone away",
+            "this fetch was dropped without an answer",
+        )
+        .await
     }
 }
 
@@ -1384,15 +2112,22 @@ impl CodeRuntime {
     /// the body asked for is real, and this is where it is honoured.
     pub async fn run(&self, call: CodeCall<'_>) -> Result<Json> {
         let (reply, answer) = tokio::sync::oneshot::channel();
-        // The proxy goes to the worker and the borrowed host stays here, with
-        // the receiving end of the channel between them. Only the run holds a
-        // sender, so the run ending is the receiver closing.
-        let mut bridged = None;
-        let proxy: Option<Arc<dyn CodeHost>> = call.host.map(|host| {
-            let (requests, incoming) = tokio::sync::mpsc::unbounded_channel();
-            bridged = Some((host, incoming));
-            Arc::new(BridgeHost { requests }) as Arc<dyn CodeHost>
-        });
+        // The proxies go to the worker and the borrowed hosts stay here, with
+        // the receiving end of one channel between them. Only the run holds a
+        // sender — the one made here is dropped below — so the run ending is the
+        // receiver closing. One bridge serves both surfaces, so a body that
+        // issues a query and a request together has them served together.
+        let (requests, incoming) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = Arc::new(BridgeHost { requests });
+        let proxy: Option<Arc<dyn CodeHost>> =
+            call.host.map(|_| Arc::clone(&bridge) as Arc<dyn CodeHost>);
+        let net: Option<Arc<dyn FetchHost>> = call
+            .fetch
+            .map(|_| Arc::clone(&bridge) as Arc<dyn FetchHost>);
+        // Whatever the run did not get a proxy for, nothing can ask for.
+        drop(bridge);
+        let bridged = (call.host.is_some() || call.fetch.is_some())
+            .then_some((call.host, call.fetch, incoming));
         let timeout = call
             .timeout
             .unwrap_or(self.default_timeout)
@@ -1413,8 +2148,10 @@ impl CodeRuntime {
                     code: call.code,
                     bindings: call.bindings,
                     host: proxy,
+                    fetch: net,
                     timeout,
                     max_calls: call.max_calls,
+                    max_fetches: call.max_fetches,
                     started: None,
                 }),
                 reply,
@@ -1442,7 +2179,7 @@ impl CodeRuntime {
             ))
         };
 
-        let Some((host, mut incoming)) = bridged else {
+        let Some((host, fetcher, mut incoming)) = bridged else {
             // A pure body asks for nothing; there is nothing to serve.
             return tokio::select! {
                 outcome = answer => outcome.map_err(|_| dropped())?,
@@ -1457,11 +2194,24 @@ impl CodeRuntime {
                 () = &mut expired => return Err(overdue()),
                 // Disabled once the run's proxy is gone, which is the run being
                 // over — the first branch is what then answers.
-                Some(HostRequest { plan, reply }) = incoming.recv() => {
-                    serving.push(async {
+                Some(HostRequest { surface, plan, reply }) = incoming.recv() => {
+                    serving.push(async move {
                         // A dropped receiver means the isolate stopped waiting
                         // for this one: the answer is simply not wanted.
-                        let _ = reply.send(host.call(plan).await);
+                        let answer = match surface {
+                            // Unreachable with no host: the op refuses the call
+                            // before it reaches the bridge, because the run
+                            // table has no host to hand it either.
+                            Surface::Db => match host {
+                                Some(host) => host.call(plan).await,
+                                None => Err(Error::msg("this code body has no database access")),
+                            },
+                            Surface::Fetch => match fetcher {
+                                Some(fetcher) => fetcher.fetch(plan).await,
+                                None => Err(Error::msg("this code body cannot reach the network")),
+                            },
+                        };
+                        let _ = reply.send(answer);
                     });
                 }
                 // Draining what is in flight. The deadline above interrupts the
@@ -1566,6 +2316,12 @@ fn worker_thread(
     // decision 5 preserved by the factory instead of by recompilation.
     if let Err(e) = runtime.execute_script("sc_db.js", DB_PRELUDE) {
         debug_assert!(false, "the db prelude failed to compile: {e}");
+    }
+    // The `fetch` factory and the two web shapes it answers with, on the same
+    // terms: compiled once, and a run is handed a function closed over its own
+    // token rather than a global anything could call.
+    if let Err(e) = runtime.execute_script("sc_fetch.js", FETCH_PRELUDE) {
+        debug_assert!(false, "the fetch prelude failed to compile: {e}");
     }
     // Code bodies get the aggregation prelude too, so `rows().sum("qty")` means
     // in a body what it means in a formula.
@@ -2034,10 +2790,13 @@ fn start_run(
             token.clone(),
             RunState {
                 host: run.host.clone(),
+                fetch: run.fetch.clone(),
                 deadline: started + run.timeout,
                 timeout: run.timeout,
                 calls_left: run.max_calls,
                 max_calls: run.max_calls,
+                fetches_left: run.max_fetches,
+                max_fetches: run.max_fetches,
                 slice: DEFAULT_JS_SLICE.min(run.timeout),
                 // Kept until the first host call, which is exactly as long as
                 // re-running this body would provably repeat nothing.
@@ -2136,6 +2895,8 @@ struct RunScripts {
     /// not, so naming `db` in it is a ReferenceError rather than a handle that
     /// fails on use.
     wants_db: bool,
+    /// Whether it takes `fetch`, on exactly the same terms.
+    wants_fetch: bool,
 }
 
 /// Build one code body's definition and one run's arguments: the bindings as
@@ -2168,6 +2929,11 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
                 "code binding `db` collides with the table handle bound in a code body",
             ));
         }
+        if call.fetch.is_some() && name == FETCH {
+            return Err(Error::msg(
+                "code binding `fetch` collides with the HTTP surface bound in a code body",
+            ));
+        }
         // `const x = __b["x"];` — the name was checked as an identifier; the key
         // lookup quotes via JSON escaping.
         let key =
@@ -2178,9 +2944,19 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     let args = serde_json::to_string(&Json::Object(bindings))
         .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
     let wants_db = call.host.is_some();
-    // The parameter list is the only difference a pure body makes: no `db`
-    // parameter is no `db` in scope.
-    let params = if wants_db { "__b, db" } else { "__b" };
+    let wants_fetch = call.fetch.is_some();
+    // The parameter list is the only difference a capability makes: no `fetch`
+    // parameter is no `fetch` in scope, which is a ReferenceError naming it
+    // rather than a call that fails somewhere in the host. It also means a body
+    // compiled with the network and one compiled without are different text,
+    // and so different entries in the body cache — which is what stops a cached
+    // body from being invoked with a scope it was not compiled for.
+    let params = match (wants_db, wants_fetch) {
+        (true, true) => "__b, db, fetch",
+        (true, false) => "__b, db",
+        (false, true) => "__b, fetch",
+        (false, false) => "__b",
+    };
     let code = &call.code;
     Ok(RunScripts {
         definition: format!(
@@ -2192,6 +2968,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         ),
         args,
         wants_db,
+        wants_fetch,
     })
 }
 
@@ -2299,11 +3076,12 @@ fn build_script(scripts: &RunScripts, token: &str, key: u64, held: bool) -> Stri
         definition,
         args,
         wants_db,
+        wants_fetch,
     } = scripts;
     let mut script = String::new();
     if !held {
         script.push_str(&format!(
-            "__scDefine(\"{key:016x}\", {wants_db}, {definition});\n"
+            "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
@@ -3803,8 +4581,10 @@ mod tests {
             code: code.to_owned(),
             bindings: BTreeMap::new(),
             host: None,
+            fetch: None,
             timeout: Duration::from_secs(1),
             max_calls: 10,
+            max_fetches: 10,
             started: None,
         };
         for (name, value) in bindings {
@@ -3993,5 +4773,475 @@ mod tests {
             elapsed.as_secs_f64() * 1000.0 / RUNS as f64
         );
         assert!(per_second > 50.0, "{per_second:.0} runs/second");
+    }
+
+    // -----------------------------------------------------------------------
+    // `fetch`: the second host surface
+    // -----------------------------------------------------------------------
+
+    type Answered = Box<dyn Fn(&Json) -> Result<Json> + Send + Sync>;
+
+    /// A network that records what it was asked to send and answers from a
+    /// closure — [`FakeHost`]'s counterpart, and the proof that the fetch seam
+    /// is JSON like the other one: no socket is opened anywhere in these tests.
+    struct FakeNet {
+        sent: Mutex<Vec<Json>>,
+        answer: Answered,
+        delay: Option<Duration>,
+        /// Requests in flight, and the most there have ever been at once —
+        /// which is how "these two went out together" is asserted.
+        live: AtomicU32,
+        peak: AtomicU32,
+    }
+
+    impl FakeNet {
+        fn new(answer: impl Fn(&Json) -> Result<Json> + Send + Sync + 'static) -> Arc<FakeNet> {
+            Arc::new(FakeNet {
+                sent: Mutex::new(Vec::new()),
+                answer: Box::new(answer),
+                delay: None,
+                live: AtomicU32::new(0),
+                peak: AtomicU32::new(0),
+            })
+        }
+
+        /// The everyday answer: 200, with this JSON as the body.
+        fn ok(body: Json) -> Arc<FakeNet> {
+            FakeNet::new(move |_| {
+                Ok(json!({
+                    "status": 200,
+                    "status_text": "OK",
+                    "url": "https://api.example.com/thing",
+                    "redirected": false,
+                    "headers": [["content-type", "application/json"]],
+                    "text": body.to_string(),
+                }))
+            })
+        }
+
+        fn sent(&self) -> Vec<Json> {
+            self.sent.lock().unwrap().clone()
+        }
+
+        fn peak(&self) -> u32 {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl FetchHost for FakeNet {
+        async fn fetch(&self, request: Json) -> Result<Json> {
+            self.sent.lock().unwrap().push(request.clone());
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            (self.answer)(&request)
+        }
+    }
+
+    /// A call with the network, and optionally the tables.
+    fn with_net<'a>(code: &str, net: &'a dyn FetchHost) -> CodeCall<'a> {
+        CodeCall {
+            code: code.to_owned(),
+            fetch: Some(net),
+            ..CodeCall::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_fetches_and_reads_the_response() {
+        let net = FakeNet::ok(json!({ "id": 7, "name": "Ada" }));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_net(
+                r#"const res = await fetch("https://api.example.com/thing");
+                   return {
+                     ok: res.ok,
+                     status: res.status,
+                     statusText: res.statusText,
+                     url: res.url,
+                     type: res.headers.get("content-type"),
+                     missing: res.headers.get("x-nope"),
+                     body: await res.json(),
+                   };"#,
+                &*net,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({
+                "ok": true, "status": 200, "statusText": "OK",
+                "url": "https://api.example.com/thing",
+                "type": "application/json", "missing": Json::Null,
+                "body": { "id": 7, "name": "Ada" },
+            })
+        );
+        // And what went out is one plain JSON request: a GET, no body.
+        let sent = net.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["url"], json!("https://api.example.com/thing"));
+        assert_eq!(sent[0]["method"], json!("GET"));
+        assert_eq!(sent[0]["body"], Json::Null);
+    }
+
+    #[tokio::test]
+    async fn a_post_sends_the_headers_and_body_the_body_built() {
+        let net = FakeNet::ok(json!({ "ok": true }));
+        let rt = CodeRuntime::new();
+        rt.run(with_net(
+            r#"await fetch("https://api.example.com/hooks", {
+                 method: "post",
+                 headers: { "Authorization": "Bearer t0ken" },
+                 body: { id: 1, title: "Orlando" },
+               });
+               const h = new Headers([["x-a", "1"]]);
+               h.append("x-a", "2");
+               h.set("content-type", "text/csv");
+               await fetch("https://api.example.com/csv", { method: "PUT", headers: h, body: "a,b" });
+               return null;"#,
+            &*net,
+        ))
+        .await
+        .unwrap();
+        let sent = net.sent();
+        // The method is upper-cased, an object body is JSON (which the web
+        // would have sent as `[object Object]`), and the content type it
+        // implies is filled in without overwriting one the body set.
+        assert_eq!(sent[0]["method"], json!("POST"));
+        assert_eq!(sent[0]["body"], json!(r#"{"id":1,"title":"Orlando"}"#));
+        assert_eq!(sent[0]["body_base64"], json!(false));
+        let headers = |plan: &Json| -> Vec<(String, String)> {
+            plan["headers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|pair| {
+                    (
+                        pair[0].as_str().unwrap().to_owned(),
+                        pair[1].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            headers(&sent[0]),
+            vec![
+                ("authorization".to_owned(), "Bearer t0ken".to_owned()),
+                ("content-type".to_owned(), "application/json".to_owned()),
+            ]
+        );
+        // A repeated header stays repeated on the wire; `set` replaced the one
+        // the string body would otherwise have implied.
+        assert_eq!(
+            headers(&sent[1]),
+            vec![
+                ("x-a".to_owned(), "1".to_owned()),
+                ("x-a".to_owned(), "2".to_owned()),
+                ("content-type".to_owned(), "text/csv".to_owned()),
+            ]
+        );
+        assert_eq!(sent[1]["body"], json!("a,b"));
+    }
+
+    #[tokio::test]
+    async fn a_status_the_server_did_not_like_is_not_an_error() {
+        // The web API's rule, and the one people are surprised by in the other
+        // direction: only a transport failure rejects. A 404 is an answer.
+        let net = FakeNet::new(|_| {
+            Ok(json!({
+                "status": 404, "status_text": "Not Found",
+                "url": "https://api.example.com/gone", "redirected": true,
+                "headers": [], "text": "no such thing",
+            }))
+        });
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_net(
+                r#"const res = await fetch("https://api.example.com/gone");
+                   return { ok: res.ok, status: res.status, redirected: res.redirected,
+                            text: await res.text() };"#,
+                &*net,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({ "ok": false, "status": 404, "redirected": true, "text": "no such thing" })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_a_type_error_the_body_can_catch() {
+        let net = FakeNet::new(|_| Err(Error::msg("connection refused")));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_net(
+                r#"try {
+                     await fetch("https://nowhere.invalid/");
+                     return "no throw";
+                   } catch (e) {
+                     return { name: e.constructor.name, message: e.message };
+                   }"#,
+                &*net,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["name"], json!("TypeError"), "{out}");
+        assert!(
+            out["message"]
+                .as_str()
+                .unwrap()
+                .contains("connection refused"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_without_the_network_cannot_name_fetch() {
+        // The capability is the parameter: no fetch host, no `fetch` in scope —
+        // a ReferenceError naming it, exactly as `db` is for a pure body.
+        let rt = CodeRuntime::new();
+        let err = rt
+            .run(call(r#"return await fetch("https://example.com/");"#))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fetch is not defined"), "{err}");
+        // A body with tables but no network is the same: one capability does
+        // not carry the other.
+        let host = FakeHost::rows(json!([]));
+        let err = rt
+            .run(with_host(
+                r#"await db.books.rows(); return typeof fetch;"#,
+                &*host,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(err, json!("undefined"));
+    }
+
+    #[tokio::test]
+    async fn the_fetch_budget_is_counted_apart_from_the_database_one() {
+        let net = FakeNet::ok(json!({}));
+        let host = FakeHost::rows(json!([{ "id": 1 }]));
+        let rt = CodeRuntime::new();
+        let mut c = CodeCall {
+            code: r#"let sent = 0;
+                     try {
+                       for (let i = 0; i < 10; i++) { await fetch("https://x.test/" + i); sent++; }
+                     } catch (e) {
+                       // The database is still there: the two budgets are two.
+                       const rows = await db.books.rows();
+                       return { sent: sent, rows: rows.length, why: e.message };
+                     }
+                     return { sent: sent };"#
+                .to_owned(),
+            host: Some(&*host),
+            fetch: Some(&*net),
+            ..CodeCall::default()
+        };
+        c.max_fetches = 3;
+        let out = rt.run(c).await.unwrap();
+        assert_eq!(out["sent"], json!(3), "{out}");
+        assert_eq!(out["rows"], json!(1), "{out}");
+        assert!(
+            out["why"]
+                .as_str()
+                .unwrap()
+                .contains("more than 3 fetch requests"),
+            "{out}"
+        );
+        assert_eq!(net.sent().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_await_on_a_fetch_says_so() {
+        let net = FakeNet::ok(json!({ "id": 1 }));
+        let rt = CodeRuntime::new();
+        let err = rt
+            .run(with_net(
+                r#"return { res: fetch("https://api.example.com/thing") };"#,
+                &*net,
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("this fetch was not awaited"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_fetches_in_one_promise_all_go_out_together() {
+        // The bridge is one channel serving both surfaces, so a body that asks
+        // for a query and two requests at once gets all three in flight — the
+        // parallelism it wrote, not three round trips in a row.
+        let net = Arc::new(FakeNet {
+            sent: Mutex::new(Vec::new()),
+            answer: Box::new(|_| {
+                Ok(json!({
+                    "status": 200, "status_text": "OK", "url": "https://x.test/",
+                    "redirected": false, "headers": [], "text": "{}",
+                }))
+            }),
+            delay: Some(Duration::from_millis(50)),
+            live: AtomicU32::new(0),
+            peak: AtomicU32::new(0),
+        });
+        let rt = CodeRuntime::new();
+        let mut c = with_net(
+            r#"const [a, b] = await Promise.all([
+                 fetch("https://x.test/a"),
+                 fetch("https://x.test/b"),
+               ]);
+               return [a.status, b.status];"#,
+            &*net,
+        );
+        c.timeout = Some(Duration::from_secs(10));
+        let started = Instant::now();
+        assert_eq!(rt.run(c).await.unwrap(), json!([200, 200]));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(140),
+            "the two requests were serialised: {elapsed:?}"
+        );
+        assert!(net.peak() >= 2, "never two at once");
+    }
+
+    #[tokio::test]
+    async fn a_request_may_not_outlive_the_run_that_made_it() {
+        // Whatever the body asks for, what reaches the host is bounded by what
+        // is left of the run's own wall clock — so a `fetch` cannot hold the
+        // trigger's caller past the timeout it was configured with.
+        let net = FakeNet::ok(json!({}));
+        let rt = CodeRuntime::new();
+        let mut c = with_net(
+            r#"await fetch("https://x.test/a", { timeout_ms: 60000 });
+               await fetch("https://x.test/b");
+               return null;"#,
+            &*net,
+        );
+        c.timeout = Some(Duration::from_millis(900));
+        rt.run(c).await.unwrap();
+        let sent = net.sent();
+        let asked = sent[0]["timeout_ms"].as_u64().unwrap();
+        assert!(asked <= 900, "a minute was allowed through: {asked}");
+        // The default is likewise what is left rather than the ten seconds a
+        // request gets when there is room for them.
+        assert!(sent[1]["timeout_ms"].as_u64().unwrap() <= 900);
+    }
+
+    #[tokio::test]
+    async fn bytes_survive_the_seam_in_both_directions() {
+        // Not text: the seam is JSON, so a body that is not valid UTF-8 travels
+        // base64 — and neither codec is the isolate's, because there is no
+        // `TextEncoder` in the sandbox to lend one.
+        let net = FakeNet::new(|request| {
+            assert_eq!(request["body_base64"], json!(true), "{request}");
+            // Echo what was sent, as bytes.
+            Ok(json!({
+                "status": 200, "status_text": "OK", "url": "https://x.test/",
+                "redirected": false, "headers": [],
+                "base64": request["body"],
+            }))
+        });
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_net(
+                r#"const sent = new Uint8Array([0, 159, 146, 150, 255]);
+                   const res = await fetch("https://x.test/", { method: "POST", body: sent });
+                   const got = await res.bytes();
+                   return Array.from(got);"#,
+                &*net,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!([0, 159, 146, 150, 255]));
+        // A text body comes back as bytes too, encoded as UTF-8 by the guest.
+        let net = FakeNet::ok(json!("héllo"));
+        let out = rt
+            .run(with_net(
+                r#"const res = await fetch("https://x.test/");
+                   return Array.from(new Uint8Array(await res.arrayBuffer()));"#,
+                &*net,
+            ))
+            .await
+            .unwrap();
+        // `"héllo"` as JSON text: the quotes are part of it, and é is two bytes.
+        assert_eq!(out, json!([34, 104, 195, 169, 108, 108, 111, 34]));
+    }
+
+    #[tokio::test]
+    async fn the_options_a_browser_needs_are_ignored_and_a_typo_is_not() {
+        let net = FakeNet::ok(json!({}));
+        let rt = CodeRuntime::new();
+        // What a browser needs and a server does not is accepted, so code that
+        // carries it runs unchanged.
+        rt.run(with_net(
+            r#"await fetch("https://x.test/", { mode: "cors", credentials: "omit", cache: "no-store" });
+               return null;"#,
+            &*net,
+        ))
+        .await
+        .unwrap();
+        // Everything else is refused **by name**: a misspelled `header` that
+        // silently sent nothing is the failure this exists to prevent.
+        for (code, expected) in [
+            (
+                r#"await fetch("https://x.test/", { header: { a: "b" } });"#,
+                "`header` is not an option",
+            ),
+            (
+                r#"await fetch("https://x.test/", { signal: {} });"#,
+                "no `signal`",
+            ),
+            (
+                r#"await fetch("https://x.test/", { redirect: "manual" });"#,
+                "only follows redirects",
+            ),
+            (
+                r#"await fetch("https://x.test/", { method: "GET", body: "x" });"#,
+                "cannot carry a body",
+            ),
+            (r#"await fetch("");"#, "absolute http(s) URL"),
+            (
+                r#"await fetch("https://x.test/", { method: "TRACE" });"#,
+                "is not a method",
+            ),
+        ] {
+            let err = rt.run(with_net(code, &*net)).await.unwrap_err().to_string();
+            assert!(err.contains(expected), "{code}\n{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_response_body_is_read_once_and_cloned_to_read_twice() {
+        let net = FakeNet::ok(json!({ "n": 1 }));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_net(
+                r#"const res = await fetch("https://x.test/");
+                   const copy = res.clone();
+                   const first = await res.json();
+                   let second = null;
+                   try { await res.text(); } catch (e) { second = e.message; }
+                   return { first: first, used: res.bodyUsed, second: second,
+                            clone: await copy.text() };"#,
+                &*net,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["first"], json!({ "n": 1 }));
+        assert_eq!(out["used"], json!(true));
+        assert!(
+            out["second"]
+                .as_str()
+                .unwrap()
+                .contains("already been read"),
+            "{out}"
+        );
+        assert_eq!(out["clone"], json!(r#"{"n":1}"#));
     }
 }

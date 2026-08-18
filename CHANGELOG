@@ -2,6 +2,68 @@
 
 Changes in reverse chronological order.
 
+## `fetch` in a code body
+
+A `run_js_code` body could read and write every table on the server and could not call a single
+endpoint. The `fetch` **action** could call one, but its response is the trigger's result and
+nothing else — so "ask that API, and depending on what it says, write these rows" was two
+triggers and a table between them, or it was nothing. A body now has the other half:
+
+```js
+const res = await fetch("https://api.example.com/rates", {
+  headers: { authorization: `Bearer ${payload.token}` },
+});
+if (!res.ok) throw new Error(`rates: ${res.status}`);
+const { usd } = await res.json();
+await db.invoices.where({ id: row.id }).update({ rate: usd });
+```
+
+**The shape is the web's**, because an author already knows it: `fetch(url, { method, headers,
+body })` answers a `Response` with `ok`, `status`, `statusText`, `headers`, `url`, `redirected`
+and `text()` / `json()` / `bytes()` / `arrayBuffer()` / `clone()`, and `Headers` and `Response`
+are classes in the sandbox. The web's rules come with it, including the one people are
+surprised by in both directions: **a status the endpoint did not like is not an error**. `res.ok`
+is false and nothing throws; only a failure to reach the endpoint rejects, with a `TypeError`.
+That is what makes a retry or a fallback something the body's author writes rather than a
+trigger that failed with somebody else's 503 in the message.
+
+Four things are not the web's, each of them the sandbox showing through. There is **no
+streaming** (`res.body` is not a `ReadableStream` — the seam carries one JSON value); there is
+**no `AbortSignal`**, and one passed is refused by name rather than ignored, because there are
+no timers here to drive it; **`timeout_ms`** is ours, since the browser's answer to that
+question is the signal we do not have; and **an object body is JSON**, because `[object
+Object]` on the wire — which is what a browser sends — is a bug every single time it happens.
+The options a browser needs and a server does not (`mode`, `credentials`, `cache`, …) are
+accepted and ignored so that copied code runs; anything else in the options is refused by name,
+because a misspelled `header:` that quietly sent nothing is the silent failure principle 5 is
+about.
+
+**It is the same capability the `fetch` action is**, reached the other way, so it has the same
+rules and the same client: absolute `http`/`https` only, and no notion of which hosts may be
+called — a code body is administrator-authored configuration running on the server, and a
+deployment that needs less than the server's own network has a firewall, which is where that
+rule belongs. What is new is two bounds of its own: **50 requests per run** (a budget apart
+from the 200 database calls, because a retry loop that leaves the building is a denial of
+service against a third party rather than an N+1) and **8 MB per response**, refused rather
+than truncated. Every request is clamped to what is left of the run's `timeout_ms` *less a
+margin*, so a hung endpoint fails inside the body — where the `catch` the author wrote actually
+runs — instead of at the same instant the run itself expires.
+
+**The plumbing is the previous milestone's, and that is the point.** `fetch` is a second
+`FetchHost` seam of exactly the same shape as `CodeHost` — one JSON request in, one JSON
+response out — bridged over the same channel, served in the same `FuturesUnordered`, and
+counted in the same run table. So `Promise.all([fetch(a), db.invoices.rows()])` issues both at
+once, a body suspended on an endpoint costs a pending promise rather than an isolate, and
+§15's other guest languages will inherit `fetch` the way they inherit `db`. Like `db`, it is a
+**parameter of the run's own function** rather than a global: what a body holds is a function
+closed over its own token, so one resident run cannot spend another's budget or borrow its
+network. A body without the capability has no `fetch` in scope at all — a `ReferenceError`
+naming it, not a call that fails somewhere in the host.
+
+Monaco knows all of it: `ScResponse`, `ScHeaders` and `ScFetchOptions` are in the generated
+library, so a forgotten `await`, a method the sandbox will not send and a misspelled option are
+caught while the body is being written.
+
 ## The pool an operator can size, and five hundred fires to prove it
 
 The milestone's plumbing was finished; what was missing was the two ends of it. The knobs the

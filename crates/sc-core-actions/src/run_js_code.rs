@@ -12,6 +12,8 @@ use serde_json::Value as Json;
 
 use sc_action::{Action, ActionContext, ConfigCheck, Event, config_str};
 
+use crate::code_fetch::CodeFetchHost;
+
 /// The code body.
 const CFG_CODE: &str = "code";
 /// How long one run may take.
@@ -43,7 +45,8 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// called with, the formula language has no way to reach it, and a `none`
 /// trigger's code is exactly what wants it.
 ///
-/// And `db`: the **tables**, read and written from the body (§10.1's `db`).
+/// And two host surfaces: `db`, the **tables**, read and written from the body
+/// (§10.1's `db`), and `fetch`, an **HTTP request** (below).
 ///
 /// ```js
 /// const overdue = await db.invoices
@@ -93,6 +96,36 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// budget and the caller-context transaction (so an RLS table's policies still
 /// decide) all still apply.
 ///
+/// ## Calling an endpoint
+///
+/// `fetch` is the web's, with the web's rules — an author who already knows a
+/// browser knows this one:
+///
+/// ```js
+/// const res = await fetch("https://api.example.com/rates", {
+///   headers: { authorization: `Bearer ${payload.token}` },
+/// });
+/// if (!res.ok) throw new Error(`rates: ${res.status}`);
+/// const { usd } = await res.json();
+/// await db.invoices.where({ id: row.id }).update({ rate: usd });
+/// ```
+///
+/// A status the endpoint did not like is **not** an error: `res.ok` is false
+/// and nothing throws, so the retry or the fallback is written in the body
+/// rather than being a trigger that failed. Only a transport failure rejects,
+/// with a `TypeError`, as a browser does. `Headers` and `Response` are there;
+/// what is not is streaming (`res.body`), because the seam carries one value,
+/// and `AbortSignal`, because there are no timers in the sandbox — the bound
+/// that matters is already the run's own clock, which every request is clamped
+/// to. One difference from the web is deliberate: an object body is sent as
+/// JSON, because `[object Object]` on the wire is a bug every time it happens.
+///
+/// It is the same capability the [`Fetch`](crate::Fetch) action is, reached the
+/// other way and bounded the same: absolute `http`/`https` only, 50 requests per
+/// run, at most 8 MB of response, and each request clamped to what is left of
+/// the body's `timeout_ms` — so a hung endpoint fails inside the body, where it
+/// can be caught, rather than holding the trigger's caller.
+///
 /// ## Whose authority
 ///
 /// Reads and writes are the **admin's** by default, carrying the event's user —
@@ -105,13 +138,14 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// security reads, and an ownership formula does not reach it.
 ///
 /// The escape hatch for the thing an elementary action cannot anticipate: a
-/// computation over the event and its tables that no combination of
-/// `insert_row`/`fetch` and formulas expresses. It is still bounded — no network,
-/// no disk, no schema changes, no transactions across statements, and four
-/// named bounds (1000 rows per read, 200 database calls per run, the
-/// `timeout_ms` wall clock, and one second of JavaScript at a time without
-/// awaiting anything — a body shares its isolate with every other body, and the
-/// sharing works because a body awaiting a query leaves it free). A table larger than one read is walked with
+/// computation over the event, its tables and what an endpoint says that no
+/// combination of `insert_row`/`fetch` and formulas expresses. It is still
+/// bounded — no disk, no subprocess, no schema changes, no transactions across
+/// statements, and six named bounds (1000 rows per read, 200 database calls per
+/// run, 50 fetches per run, 8 MB per response, the `timeout_ms` wall clock, and
+/// one second of JavaScript at a time without awaiting anything — a body shares
+/// its isolate with every other body, and the sharing works because a body
+/// awaiting a query leaves it free). A table larger than one read is walked with
 /// `.iter()`, which yields the same rows a batch at a time — one database call
 /// each, so what bounds it is the call budget rather than the row cap.
 ///
@@ -128,14 +162,33 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 ///   — `await` goes at the front of a whole chain, never inside one — and a
 ///   forgotten `await` is a named error rather than `{}` in the result, because
 ///   the promise a terminal answers refuses to be stringified, coerced or
-///   iterated. `db` is still the only awaitable thing there is: no `fetch`, no
-///   timers — and the one shape the runtime refuses outright is a body that
-///   computes for a second without yielding, because that is the isolate held
-///   against every other trigger;
+///   iterated. `db` and `fetch` are the two awaitable things there are — no
+///   timers, no disk, no second way to the network — and the one shape the
+///   runtime refuses outright is a body that computes for a second without
+///   yielding, because that is the isolate held against every other trigger;
 /// - a **syntax error surfaces at fire time**, not on save. Checking it would
 ///   mean compiling in the engine, which the save path has no access to — an
 ///   admin tests a body with the Run button, as they would with any code.
-pub struct RunJsCode;
+pub struct RunJsCode {
+    /// The HTTP client a body's `fetch` sends through, built at registration
+    /// like the [`Fetch`](crate::Fetch) action's and for the same reason: it
+    /// carries the connection pool and the TLS configuration, and building
+    /// those per firing would pay for a handshake every time a trigger runs.
+    client: reqwest::Client,
+}
+
+impl RunJsCode {
+    /// Build the action and the client its bodies reach the network with.
+    ///
+    /// Fallible because constructing the client initialises the TLS stack: a
+    /// deployment where that fails should say so at boot rather than at the
+    /// first body that calls an endpoint.
+    pub fn new() -> Result<RunJsCode> {
+        Ok(RunJsCode {
+            client: crate::fetch::http_client()?,
+        })
+    }
+}
 
 #[async_trait::async_trait]
 impl Action for RunJsCode {
@@ -192,10 +245,14 @@ impl Action for RunJsCode {
             .caused_by(ctx.event.role, ctx.event.user.clone())
             .chained(ctx.chain.clone())
             .with_evaluator(Some(Arc::clone(evaluator)));
+        // The network, on the same terms: borrowed for this run, bounded by the
+        // run's own clock, and counted on a budget of its own.
+        let net = CodeFetchHost::new(self.client.clone(), ctx.trigger);
         let call = CodeCall {
             code,
             bindings: bindings(ctx.event),
             host: Some(&host),
+            fetch: Some(&net),
             timeout,
             ..CodeCall::default()
         };
@@ -271,7 +328,7 @@ mod tests {
 
     #[test]
     fn the_code_is_required_and_the_timeout_is_the_other_setting() {
-        let spec = RunJsCode.config_spec();
+        let spec = RunJsCode::new().expect("client builds").config_spec();
         let names: Vec<&str> = spec.iter().map(|f| f.name()).collect();
         assert_eq!(names, vec![CFG_CODE, CFG_TIMEOUT]);
         assert!(spec[0].required);

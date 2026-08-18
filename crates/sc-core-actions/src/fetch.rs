@@ -61,11 +61,20 @@ impl Fetch {
     /// deployment where that fails must say so at boot rather than at the first
     /// firing.
     pub fn new() -> Result<Fetch> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| Error::config(format!("could not build the HTTP client: {e}")))?;
-        Ok(Fetch { client })
+        Ok(Fetch {
+            client: http_client()?,
+        })
     }
+}
+
+/// The HTTP client this crate sends with — this action's, and a code body's
+/// `fetch` (`crate::code_fetch`). One builder for both, so a deployment's TLS
+/// settings and connection pooling are one thing to reason about rather than
+/// two that could drift.
+pub(crate) fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .build()
+        .map_err(|e| Error::config(format!("could not build the HTTP client: {e}")))
 }
 
 #[async_trait::async_trait]

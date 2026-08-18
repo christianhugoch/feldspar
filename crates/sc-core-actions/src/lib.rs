@@ -38,6 +38,7 @@
 //! the translated `where` cares about), the two `where` strategies, the per-row
 //! prefetching, and the authority a write runs under.
 
+mod code_fetch;
 mod delete_rows;
 mod fetch;
 mod insert_row;
@@ -81,7 +82,7 @@ pub fn register_builtin_actions(registry: &mut ActionRegistry) -> Result<()> {
     registry.register(Arc::new(UpdateRows))?;
     registry.register(Arc::new(DeleteRows))?;
     registry.register(Arc::new(Fetch::new()?))?;
-    registry.register(Arc::new(RunJsCode))?;
+    registry.register(Arc::new(RunJsCode::new()?))?;
     registry.register(Arc::new(SendEmail))?;
     Ok(())
 }

@@ -204,20 +204,21 @@ async fn the_event_binds_what_it_has_and_nothing_else() -> Result<()> {
 }
 
 #[tokio::test]
-async fn the_sandbox_has_exactly_one_host_surface_and_it_is_tables() -> Result<()> {
+async fn the_sandbox_has_two_host_surfaces_and_nothing_else() -> Result<()> {
     let db = TestDb::new().await?;
     let catalog = setup(&db).await?;
 
-    // The bound this action keeps: `db` is the *whole* host API, so a body still
-    // cannot reach the network, a subprocess or the disk — even though this
-    // process can, and even though the same body can now read the `books` table.
+    // The bound this action keeps. There are exactly two ways out of a body —
+    // `db` and `fetch` — and everything else a JavaScript runtime usually has is
+    // still absent: no subprocess, no disk, no timers, and no second way to the
+    // network that would have its own rules.
     let probes = [
         "Deno",
-        "fetch",
         "require",
         "process",
         "XMLHttpRequest",
         "WebSocket",
+        "EventSource",
         "setTimeout",
         "globalThis.saltcorn",
         "globalThis.books",
@@ -230,11 +231,33 @@ async fn the_sandbox_has_exactly_one_host_surface_and_it_is_tables() -> Result<(
             "sandbox leak: {probe}"
         );
     }
-    // And the surface that *is* there is reached by name, not by a global per
+    // And the surfaces that *are* there are reached by name, not by a global per
     // table: `db.books` is a query builder, `books` is nothing.
     assert_eq!(
         run(&catalog, &book_insert(), "return typeof db.books.rows;").await?,
         json!("function")
+    );
+    // `fetch` is the web's name for the web's shape, with the two classes that
+    // go with it — an author who knows the browser knows this.
+    assert_eq!(
+        run(
+            &catalog,
+            &book_insert(),
+            "return [typeof fetch, typeof Headers, typeof Response];"
+        )
+        .await?,
+        json!(["function", "function", "function"])
+    );
+    // It is a **parameter**, not a global: a body cannot reach another run's
+    // network by taking one off `globalThis`.
+    assert_eq!(
+        run(
+            &catalog,
+            &book_insert(),
+            "return typeof globalThis.fetch === 'undefined';"
+        )
+        .await?,
+        json!(true)
     );
     // What the event bound is still exactly what it bound.
     assert_eq!(

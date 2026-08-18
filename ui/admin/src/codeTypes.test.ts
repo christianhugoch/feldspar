@@ -303,6 +303,42 @@ describe("the types the code editor loads", () => {
     );
   });
 
+  it("type-check a body that calls an endpoint and writes what it got", () => {
+    // `fetch` is the second thing a body can reach, and the editor has to know
+    // the web's shapes for it — the ones an author already knows.
+    expect(
+      check(`
+        const res = await fetch("https://api.example.com/rates", {
+          method: "POST",
+          headers: new Headers({ authorization: "Bearer " + String(payload.token) }),
+          body: { since: "2026-01-01", who: user === null ? null : user.email },
+          timeout_ms: 2000,
+        });
+        if (!res.ok) throw new Error("rates: " + res.status + " " + res.statusText);
+        const type = res.headers.get("content-type");
+        const rates = await res.json();
+        const copy = res.clone();
+        const bytes = await copy.bytes();
+        let seen = "";
+        for (const [name, value] of res.headers) {
+          if (name === "x-ratelimit") seen = value;
+        }
+        await db.people.insert({ email: String(rates.email) });
+        return { type, seen, n: bytes.length, url: res.url, again: res.redirected };
+      `),
+    ).toEqual([]);
+    // The counter-test: what the sandbox refuses, the editor refuses. A signal
+    // there is nothing to drive, a method it does not send, and a misspelled
+    // option are each a mistake worth catching before the trigger fires.
+    expect(check(`await fetch("https://x.test/", { signal: null });`).join(" ")).toMatch(/signal/);
+    expect(check(`await fetch("https://x.test/", { method: "TRACE" });`).join(" ")).toMatch(
+      /TRACE/,
+    );
+    expect(check(`await fetch("https://x.test/", { header: {} });`).join(" ")).toMatch(/header/);
+    // And a forgotten `await`, as with a query.
+    expect(check(`return fetch("https://x.test/").status;`).join(" ")).toMatch(/status/);
+  });
+
   it("declare the event's own bindings, with the row typed by the trigger's table", () => {
     expect(
       check(`

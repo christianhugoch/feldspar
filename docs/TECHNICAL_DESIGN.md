@@ -1019,12 +1019,12 @@ exactly like an API caller's write. A second write path would quietly skip all o
   configuration is validated against. The transport is handed in through `ActionContext`,
   exactly as the JavaScript engine is, which is what lets its tests assert *what would have
   been sent*.
-- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and `db`,
-  the tables (below). Its host surface is exactly that one: no network, no disk, no
-  subprocess, no schema changes. It runs on its **own pool of isolates**, not the single pure
-  isolate every ownership formula shares, which is what lets it suspend on a host call and
-  carry a configurable `timeout_ms` (default 5s, max 60s) without either becoming a property of
-  every authorization decision in the process.
+- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and two
+  host surfaces: `db`, the tables (below), and `fetch`, an HTTP request (below). Those two are
+  exactly the surface: no disk, no subprocess, no timers, no schema changes. It runs on its
+  **own pool of isolates**, not the single pure isolate every ownership formula shares, which
+  is what lets it suspend on a host call and carry a configurable `timeout_ms` (default 5s,
+  max 60s) without either becoming a property of every authorization decision in the process.
 
 An action's writes carry **admin authority** on an RLS table (`ROLE_ADMIN` plus the event's
 user): a trigger is the admin's configuration, and the audit row a user may not insert is
@@ -1211,7 +1211,8 @@ itself stays synchronous — it builds a plan and touches nothing — so `await`
 of a whole chain and never inside one, and a `Promise.all([…])` of two chains issues both
 queries at once. The forgotten `await` is not silent: a terminal answers a `DbPromise` whose
 `toJSON`, `Symbol.toPrimitive` and `Symbol.iterator` throw one named error, so a body that
-treats an un-awaited call as a value is told so rather than answering `{}`. Four bounds, each
+treats an un-awaited call as a value is told so rather than answering `{}`. Four bounds on the
+tables, each
 with its own named error: **1000 rows per
 read** (a read is materialised into the isolate, so the error says to add a `.limit()` or to
 stream it with `.iter()`, and the cap **refuses** rather than truncating — a body handed 1000 of
@@ -1231,7 +1232,8 @@ and every run resident on it. So the isolate tracks which run is executing (a ru
 it is admitted and as each host call answers it), an overrun is answered to the body that
 overran and names its trigger, and that body's co-residents are re-queued only where they have
 made **no** host call: one that has already written rows is answered with an error of its own
-rather than run a second time. Behind all four the isolate's **heap** is bounded too, and
+rather than run a second time. `fetch` adds two of its own (below). Behind all of them the
+isolate's **heap** is bounded too, and
 reaching it stops the worker admitting new runs rather than aborting the process. There are **no transactions across
 statements**: each autocommits, as every action's writes do, and
 `db.transaction(fn)` is a later addition whose seam is the row layer's `Executor::Transaction`.
@@ -1256,6 +1258,62 @@ and kept under a content key, so a trigger firing a thousand times parses its so
 every run after the first is a token, a key and its bindings. What is still per run is the
 token, the bindings and the scope — which is what makes the fixed cost of a code body the seam's
 round trip rather than V8's parser.
+
+#### `fetch`: an endpoint in a code body
+
+The second host surface, and the web's own:
+
+```js
+const res = await fetch("https://api.example.com/rates", {
+  method: "POST",
+  headers: { authorization: `Bearer ${payload.token}` },
+  body: { since: row.due },            // an object is JSON; a string is sent as written
+});
+if (!res.ok) throw new Error(`rates: ${res.status} ${res.statusText}`);
+const { usd } = await res.json();
+await db.invoices.where({ id: row.id }).update({ rate: usd });
+```
+
+**The shape is the browser's**, deliberately, because an author already knows it: `fetch(url,
+{ method, headers, body })` answers a `Response` with `ok`, `status`, `statusText`, `headers`,
+`url`, `redirected`, and `text()` / `json()` / `bytes()` / `arrayBuffer()` / `clone()`;
+`Headers` and `Response` are there as classes. **A status the endpoint did not like is not an
+error** — `res.ok` is false and nothing throws — while a transport failure rejects with a
+`TypeError`. That is the web's rule and it is the useful one here: the retry, the fallback and
+the log line are written in the body, rather than being a trigger that failed with somebody
+else's 503 in the message.
+
+Four differences, each the sandbox showing through rather than an oversight: **no streaming**
+(`res.body` is not a `ReadableStream`, because the seam carries one JSON value); **no
+`AbortSignal`** (there are no timers to drive one, and a `signal` is refused by name rather
+than ignored); **`timeout_ms`** as an option of ours, since the browser's answer to that
+question is the signal we do not have; and **an object body is JSON**, because `[object
+Object]` on the wire — which is what the web does — is a bug every time it happens. The options
+a browser needs and a server does not (`mode`, `credentials`, `cache`, …) are accepted and
+ignored; anything else in the options is refused by name, because a misspelled `header:` that
+did nothing would be exactly the silent failure principle 5 is about.
+
+**The rules are the `fetch` action's**, because it is the same capability reached the other way
+and an admin who can configure one can write the other: absolute `http`/`https` only (a
+relative URL has nothing to resolve against server-side, and `file:`/`data:` would make the
+server read something local). Which hosts may be called is deliberately not a question this
+answers — a code body is administrator-authored configuration running on the server, so the
+network it can reach is the network the server can reach, and a deployment that needs less than
+that has a firewall, which is where that rule belongs and where it cannot be argued with.
+
+**Bounded**, in the two ways that are this milestone's: **50 requests per run**, a budget of its
+own rather than a share of the 200 database calls (a call that leaves the building is a
+different accident — a retry loop in a trigger is a denial of service against a third party),
+and **8 MB per response**, refused rather than truncated for the reason a 1000-row read is.
+Every request is clamped to what is left of the run's `timeout_ms`, less a small margin, so a
+hung endpoint fails *inside* the body — where the `catch` the author wrote actually runs —
+rather than at the same instant the run itself expires. Requests are asynchronous like
+everything else, so `Promise.all([fetch(a), fetch(b)])` really does issue both at once, and a
+body suspended on an endpoint costs a pending promise rather than an isolate.
+
+The seam is JSON here too — one request object in, one response object out
+(`sc_expr::FetchHost`, implemented in `sc-core-actions` over the same HTTP client the `fetch`
+action uses) — so §15's other guest languages inherit `fetch` the way they inherit `db`.
 
 **The plan is the seam.** The fluent surface is JavaScript; what crosses into Rust is one plain
 JSON object per terminal, which is what makes this the seam §15's other adapters implement

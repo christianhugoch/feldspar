@@ -413,8 +413,37 @@ const [open, overdue] = await Promise.all([
 ]);
 ```
 
-What `db` deliberately does *not* have: schema changes, transactions across statements, `fetch`,
-or timers. Awaiting is for the database and nothing else.
+What `db` deliberately does *not* have: schema changes, transactions across statements, or
+timers.
+
+**Calling an endpoint.** The other thing a body can await is `fetch`, which is the web's, with
+the web's rules:
+
+```js
+const res = await fetch("https://api.example.com/rates", {
+  headers: { authorization: `Bearer ${payload.token}` },
+});
+if (!res.ok) throw new Error(`rates: ${res.status}`);      // a 404 is an answer, not a throw
+const { usd } = await res.json();
+await db.invoices.where({ id: row.id }).update({ rate: usd });
+```
+
+`res` has `ok`, `status`, `statusText`, `headers`, `url`, and `text()` / `json()` / `bytes()` /
+`clone()`; `Headers` and `Response` are there too. Three things to know, all of which follow
+from where this runs:
+
+- **a status you did not want is not an error.** Only a failure to reach the endpoint at all
+  rejects (with a `TypeError`), so the retry or the fallback is code you write rather than a
+  trigger that failed;
+- **an object body is JSON.** `body: { id: 1 }` sends `{"id":1}` with the content type to match.
+  (A browser would send `[object Object]`.) A string is sent as written;
+- **there is no `AbortSignal` and no streaming.** Pass `timeout_ms` if you want one request
+  shorter than the rest; every request is already clamped to what is left of the trigger's own
+  `timeout_ms`, so a hung endpoint fails inside your `try` rather than holding whoever fired
+  the trigger.
+
+Fifty requests per run, 8 MB per response, `http`/`https` only. And `Promise.all([fetch(a),
+fetch(b)])` really does send both at once.
 
 ## The actions you have
 
@@ -435,9 +464,15 @@ comes back as the trigger's result — so a `none` trigger exposed on your app c
 front end to somebody else's API.
 
 `run_js_code` is the escape hatch for a computation no combination of the others expresses. It
-sees `row`, `old`, `user` and `payload` — and `db`, your tables (Step 5). That is the whole host
-surface: no network, no disk, no subprocess, no schema changes. If you want an HTTP call, that
-is `fetch`, which is a separate action for a reason.
+sees `row`, `old`, `user` and `payload` — and two ways out: `db`, your tables (Step 5), and
+`fetch`, an HTTP request (Step 5 again). That is the whole host surface: no disk, no subprocess,
+no timers, no schema changes.
+
+The `fetch` **action** and a body's `fetch` are the same capability, and which to reach for is a
+question of what you do with the answer: the action is one configured request whose response
+*is* the trigger's result — no code, and a form an admin can read — while a body's `fetch` is
+for when the answer has to be branched on, looped over, combined with a query or written to a
+table.
 
 ## Things that trip people up
 
