@@ -387,13 +387,17 @@ runs at that person's role and identity, which is what row-level security reads 
 is owned by a *formula* rather than by RLS, a delegated `db.sql()` still sees everything. The
 row cap, the call budget and the timeout below all apply, and one call runs one statement.
 
-**Three bounds, and each one tells you what to do about it.** A read of more than **1000 rows**
+**Four bounds, and each one tells you what to do about it.** A read of more than **1000 rows**
 is refused rather than trimmed (add a `.limit()`, narrow the `.where()`, or walk it with
 `.iter()` — half a table silently would make every total you compute wrong); more than **200 database calls** in one run
-is refused (that is an accidental loop, not a workload); and the run has a wall clock, the
-**Timeout (ms)** setting, default 5000 and at most 60000. There are no transactions across
-statements: a body that fails half way leaves the rows it already wrote, and their triggers have
-already fired.
+is refused (that is an accidental loop, not a workload); the run has a wall clock, the
+**Timeout (ms)** setting, default 5000 and at most 60000; and no body may run for more than a
+**second at a time without awaiting anything**. That last one is not the wall clock: your body
+shares its JavaScript engine with every other trigger's body, and the sharing works because a
+body awaiting a query leaves the engine free. A second of solid computing between two `await`s
+holds up everyone, so it is refused — with a message naming your trigger. Read less and compute
+less, or do the arithmetic in SQL. There are no transactions across statements: a body that fails
+half way leaves the rows it already wrote, and their triggers have already fired.
 
 **Await your queries.** Every terminal answers a promise, `.iter()` is walked with `for await`,
 and `await` is legal at the top level of a body — the body is the inside of an `async function`.

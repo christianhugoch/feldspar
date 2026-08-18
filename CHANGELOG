@@ -2,6 +2,59 @@
 
 Changes in reverse chronological order.
 
+## Two clocks, and the runaway that only stops one body
+
+A code body's isolate now serves hundreds of runs, and until this change one instrument enforced
+one bound over all of them: a watchdog armed at the earliest JavaScript deadline any resident run
+had, terminating the isolate — and therefore every body on it — for whatever one body did. The two
+things it was doing have been separated, because they are two different bounds with two different
+right answers.
+
+**The wall clock** (`timeout_ms`) is how long a run may take, and for an I/O-bound body that is
+mostly the database's time. It no longer drives the watchdog at all: it is enforced where it costs
+the co-residents nothing — the op refuses a host call once it is spent, the worker reaps a
+suspended run past it, and the caller stops waiting `CALLER_GRACE` later. All three were already
+written, and between them they cover every run that is *waiting* rather than *running*.
+
+**The JS slice** (`DEFAULT_JS_SLICE`, one second, never more than what is left of the run's own
+wall clock) is the new bound and the watchdog's only one: how long a body may run **without
+yielding**. A body that computes for a second between two queries is already pathological, and it
+is holding an isolate that every other trigger's body shares. `while (true) {}` is now caught in a
+second rather than at the end of a five-second timeout, and the two clocks say different things —
+*"this code ran for 1000 ms without awaiting anything"* against *"this code exceeded its 100 ms
+time limit"* — so an admin is sent to the right thing to fix. A body given less wall clock than a
+slice is stopped by the wall clock, in the wall clock's words.
+
+**Attribution.** The isolate tracks the run whose JavaScript is on it: set when a run is admitted,
+and by a cheap synchronous op (`op_sc_mark`) at the point a host call's answer comes back, which is
+the moment Rust cannot otherwise see — a suspended body resumes inside a microtask drain. The mark
+is cleared when the event loop yields, which is the one moment Rust can see JavaScript *stop*. So an
+overrun is answered to the body that overran, and because that answer goes back to that body's own
+caller, the error names its trigger with no new plumbing. It is exact for a run that resumes alone
+in its turn of the event loop and best-effort when several resume together, which is documented at
+`op_sc_mark`: the alternative is releasing one answer per turn, a serialisation of the hot path to
+improve a message.
+
+**The co-residents.** Termination still takes them with it — one isolate runs one body's JavaScript
+at a time, and stopping it stops the isolate. What they must not be is silently re-run: a body that
+has already inserted rows is not idempotent. So a run that has made **zero** host calls goes back in
+the queue, carrying the deadline it was first admitted with (it still holds the job it was admitted
+with, which is true only while that is so — the copy is dropped at its first host call, which is
+exactly when re-running it would stop being free). Every other resident is answered with its own
+named error saying another body on its isolate did not yield, and saying why it is not being
+retried. Rare, loud, and never a duplicated write.
+
+**The heap.** The isolate is given `DEFAULT_MAX_HEAP` (256 MB) through `create_params`, and a
+near-heap-limit callback that raises the limit by a grace and stops the worker admitting anything
+new until the resident runs have given the heap back. V8's own answer to a heap limit is to abort
+the process; this is the answer instead. A body that fills even the grace is stopped through the
+same watchdog, so the unwinding, the attribution and the re-queueing are the ones already written.
+
+One shape the previous phase could not see is now covered as a consequence: a body that yields only
+to the *microtask* queue (`for (;;) await null;`) marks nothing, returns to Rust never, and used to
+hold its worker for ever. The mark from its own admission is left standing until the event loop
+yields, so the watchdog is on it.
+
 ## Many code bodies per isolate
 
 Making `db` awaitable took the *thread* out of a host call. This takes the *isolate* out of a run:

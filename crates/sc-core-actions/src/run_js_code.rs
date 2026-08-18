@@ -107,9 +107,11 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// The escape hatch for the thing an elementary action cannot anticipate: a
 /// computation over the event and its tables that no combination of
 /// `insert_row`/`fetch` and formulas expresses. It is still bounded — no network,
-/// no disk, no schema changes, no transactions across statements, and three
-/// named bounds (1000 rows per read, 200 database calls per run, and the
-/// `timeout_ms` wall clock). A table larger than one read is walked with
+/// no disk, no schema changes, no transactions across statements, and four
+/// named bounds (1000 rows per read, 200 database calls per run, the
+/// `timeout_ms` wall clock, and one second of JavaScript at a time without
+/// awaiting anything — a body shares its isolate with every other body, and the
+/// sharing works because a body awaiting a query leaves it free). A table larger than one read is walked with
 /// `.iter()`, which yields the same rows a batch at a time — one database call
 /// each, so what bounds it is the call budget rather than the row cap.
 ///
@@ -127,7 +129,9 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 ///   forgotten `await` is a named error rather than `{}` in the result, because
 ///   the promise a terminal answers refuses to be stringified, coerced or
 ///   iterated. `db` is still the only awaitable thing there is: no `fetch`, no
-///   timers;
+///   timers — and the one shape the runtime refuses outright is a body that
+///   computes for a second without yielding, because that is the isolate held
+///   against every other trigger;
 /// - a **syntax error surfaces at fire time**, not on save. Checking it would
 ///   mean compiling in the engine, which the save path has no access to — an
 ///   admin tests a body with the Run button, as they would with any code.

@@ -57,26 +57,38 @@
 //! JavaScript, in [`DB_PRELUDE`], and lowers to those plans; the table knowledge
 //! lives in `sc-api`, where all of it already is.
 //!
-//! # Bounds
+//! # The two clocks
 //!
-//! Three, each with its own named error: the **wall clock** for the run, the
-//! **call budget** (an accidental N+1 loop must not hammer the database quietly),
-//! and the **JS watchdog** — which is *paused for the duration of a host call*, so
-//! a slow query is never reported as "your code timed out". The row cap is the
-//! host's business, not this crate's.
+//! Four bounds, each with its own named error: the **wall clock** for the run,
+//! the **JS slice**, the **call budget** (an accidental N+1 loop must not hammer
+//! the database quietly) and the isolate's **heap**. The row cap is the host's
+//! business, not this crate's.
 //!
-//! The wall clock is enforced in three places, because no one of them is enough:
-//! the guest is refused a host call once it is spent, the worker reaps a resident
-//! run whose deadline has passed while it was suspended, and the caller stops
-//! waiting shortly after it (see `CALLER_GRACE`). Only the last covers a run that
-//! holds its caller without ever being admitted; only the middle one covers a run
-//! whose single query never comes back. A watchdog on an isolate that is not
-//! running cannot see any of them.
+//! The wall clock ([`CodeCall::timeout`]) is how long the run may take, and it
+//! is mostly the database's time. It is enforced in three places, because no one
+//! of them is enough: the guest is refused a host call once it is spent, the
+//! worker reaps a resident run whose deadline has passed while it was suspended,
+//! and the caller stops waiting shortly after it (see `CALLER_GRACE`). Only the
+//! last covers a run that holds its caller without ever being admitted; only the
+//! middle one covers a run whose single query never comes back. None of them
+//! stops anyone else's body, which is the point of enforcing it there.
 //!
-//! The watchdog itself is one instrument shared by every resident run, armed at
-//! the earliest JS deadline any of them still has — which is why it is owned by
-//! the run table rather than by a run. Pointing it at the body that actually
-//! overran, and sparing that body's co-residents, is the next milestone's work.
+//! The JS slice ([`DEFAULT_JS_SLICE`]) is how long a body may run **without
+//! yielding**, and it is the *watchdog's* bound — the only instrument that stops
+//! JavaScript, and a blunt one, because it stops the isolate and everything
+//! resident on it. So it is armed at the slice of the run that is executing
+//! (which the guest marks as it resumes), and a body that overruns it is the one
+//! told so; its co-residents are re-queued if they have made no host call at all
+//! and answered with an error of their own if they have. Never re-run after a
+//! write: a body that has inserted rows is not idempotent, and running it twice
+//! is a worse failure than the one being handled.
+//!
+//! The heap is the fourth. Occupancy is bounded in runs, which is a proxy for
+//! memory and not a measure of it, so the isolate is given
+//! [`DEFAULT_MAX_HEAP`] and a near-heap-limit callback: reaching it stops
+//! admission until the resident runs give the heap back, rather than aborting
+//! the process, and a body that fills even the callback's grace is stopped the
+//! way any other runaway is.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -122,6 +134,31 @@ pub const MAX_CODE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How many host calls one run may make. A loop that reads a row per iteration
 /// is the failure this bounds — not malice, an N+1 nobody noticed.
 pub const DEFAULT_MAX_HOST_CALLS: u32 = 200;
+
+/// The **JS slice**: how long a body may run without yielding.
+///
+/// Not the same clock as [`DEFAULT_CODE_TIMEOUT`], and this is the milestone's
+/// point. A run's wall clock is mostly the *database's* time, and enforcing it
+/// by terminating the isolate would stop every other body resident on it; a
+/// slice is the guest's own time, between one `await` and the next, and a body
+/// that computes for a whole second between two queries is already pathological.
+/// So the wall clock is enforced where it costs nobody else anything (the op
+/// refuses a call past it, the caller stops waiting, the worker reaps), and the
+/// watchdog — the one instrument that *does* stop everyone — is pointed at this.
+///
+/// Clamped down to whatever is left of the run's own wall clock: a body with
+/// 100 ms to live cannot spin for a second.
+pub const DEFAULT_JS_SLICE: Duration = Duration::from_secs(1);
+
+/// How much V8 heap one code isolate may fill before it stops admitting runs.
+///
+/// Occupancy is bounded by [`DEFAULT_MAX_INFLIGHT`] in runs, which is a proxy
+/// for memory and not a measure of it: one run holding a 1000-row read is not
+/// the same as one holding `{}`. This is the measure. Reaching it does not abort
+/// the process — a near-heap-limit callback raises the limit for as long as it
+/// takes the resident runs to finish, and the worker admits nothing new until
+/// they have.
+pub const DEFAULT_MAX_HEAP: usize = 256 * 1024 * 1024;
 
 /// How long past its own deadline the **caller** waits before giving up on a run.
 ///
@@ -524,6 +561,15 @@ const db = (function () {
 /// stack of what was thrown. Both name the run by its token, which is how the
 /// Rust side finds the caller waiting for it.
 ///
+/// # Which run is running
+///
+/// The watchdog stops *the isolate*, so before it fires something has to know
+/// whose JavaScript is on it. Rust can see a run start (`execute_script`) and
+/// see the isolate go idle (a poll of the event loop returning), but not the
+/// moment a suspended body resumes — that happens inside a microtask drain. So
+/// the guest says so: one cheap synchronous op at the point a host call's answer
+/// comes back, naming the run whose continuation is about to run.
+///
 /// # Rejections nobody awaited
 ///
 /// A promise a body creates and discards must not fail *other* runs. Left to
@@ -538,6 +584,7 @@ const SETUP: &str = r#"
   const call = Deno.core.ops.op_sc_db;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
+  const mark = Deno.core.ops.op_sc_mark;
   Deno.core.setUnhandledPromiseRejectionHandler(() => true);
   const fixed = (name, value) =>
     Object.defineProperty(globalThis, name, {
@@ -567,6 +614,10 @@ const SETUP: &str = r#"
       return;
     }
     call(token, request).then((answer) => {
+      // The resumption mark: from here the JavaScript about to run is this
+      // run's, so this is whose slice the watchdog should be watching and whose
+      // trigger an overrun should name. One sync op, once per host call.
+      mark(token);
       const reply = JSON.parse(answer);
       if (reply.error !== undefined) reject(new Error(reply.error));
       else resolve(reply.ok);
@@ -631,11 +682,17 @@ struct RunState {
     timeout: Duration,
     calls_left: u32,
     max_calls: u32,
-    /// JS execution time still allowed. Host calls do not consume it.
-    js_budget: Duration,
-    /// When this run's JS window was armed, or `None` while it is suspended in
-    /// a host call — the database's time is not the guest's.
-    armed_at: Option<Instant>,
+    /// How long this run may execute JavaScript without yielding, before the
+    /// watchdog stops it: [`DEFAULT_JS_SLICE`], never more than its own timeout.
+    /// A *fresh* window each time it resumes, not a budget it spends — the
+    /// database's time is not the guest's, and a body that awaits fifty queries
+    /// has yielded fifty times.
+    slice: Duration,
+    /// The job this run was admitted with, kept only while the run has made
+    /// **no host call** — which is exactly while re-running it would provably
+    /// repeat no side effect. Dropped at the first call, so a body that has
+    /// written is one this can no longer offer to re-queue.
+    retry: Option<Box<CodeRun>>,
     /// Where the answer goes. The run's oneshot lives here rather than with the
     /// worker's loop, because the loop no longer waits for one run: a completion
     /// op finds the run by its token and answers whoever asked for it.
@@ -644,25 +701,6 @@ struct RunState {
 
 #[cfg(feature = "eval")]
 impl RunState {
-    /// When this run's JS window runs out, or `None` while it is suspended.
-    fn js_deadline(&self) -> Option<Instant> {
-        self.armed_at.map(|at| at + self.js_budget)
-    }
-
-    /// Stop the clock on JS execution: a host call is the database's time, not
-    /// the guest's, and reporting a slow query as "your code timed out" sends an
-    /// admin to rewrite code that was never the problem.
-    fn pause(&mut self) {
-        if let Some(at) = self.armed_at.take() {
-            self.js_budget = self.js_budget.saturating_sub(at.elapsed());
-        }
-    }
-
-    /// Start it again, with whatever JS time was left.
-    fn resume(&mut self) {
-        self.armed_at = Some(Instant::now());
-    }
-
     /// Answer the caller, once. A run answers exactly one thing, and which of
     /// the several places that can happen from got there first does not matter
     /// to the admin waiting for it.
@@ -680,12 +718,16 @@ impl RunState {
 /// event's caller — and a body must not be able to reach another run's host by
 /// writing `1`.
 ///
-/// The table also owns three things that are facts about the whole table rather
+/// The table also owns four things that are facts about the whole table rather
 /// than about any run:
 ///
-/// - the isolate's **watchdog**, which wants to be armed at the earliest JS
-///   deadline any resident run still has (every mutation ends in
-///   [`RunTable::rearm`]);
+/// - **which run is executing**, and when its JS slice runs out. One body's
+///   JavaScript is on the isolate at a time, and the watchdog stops the isolate,
+///   so this is both what the watchdog is armed at and who an overrun is blamed
+///   on (every mutation ends in [`RunTable::rearm`]);
+/// - the isolate's **watchdog**, which is now the JS slice's instrument and only
+///   that — a run's wall clock is enforced in three places that cost its
+///   co-residents nothing;
 /// - the worker's **outstanding count**, which the dispatcher reads to choose
 ///   between workers — a run leaving the table is what makes it drop, so
 ///   [`RunTable::take`] is the one place that has to be right;
@@ -697,6 +739,10 @@ impl RunState {
 #[cfg(feature = "eval")]
 struct RunTable {
     runs: HashMap<String, RunState>,
+    /// The run whose JavaScript is on the isolate, and when its slice expires;
+    /// `None` when the isolate is idle between polls, which is when nothing can
+    /// overrun a slice and the watchdog has nothing to point at.
+    running: Option<(String, Instant)>,
     watchdog: Arc<Watchdog>,
     outstanding: Arc<AtomicUsize>,
     freed: Arc<tokio::sync::Notify>,
@@ -711,17 +757,51 @@ impl RunTable {
     ) -> RunTable {
         RunTable {
             runs: HashMap::new(),
+            running: None,
             watchdog,
             outstanding,
             freed,
         }
     }
 
-    /// Point the one watchdog at the earliest JS deadline among the runs that
-    /// are actually executing; disarm it when none of them is.
+    /// This run's JavaScript is what runs next: give it a fresh slice and point
+    /// the watchdog at it.
+    ///
+    /// Called from two places, which between them are every way JavaScript can
+    /// start running: a run being admitted, and a host call's answer coming back
+    /// (`op_sc_mark`).
+    fn enter(&mut self, token: &str) {
+        let Some(run) = self.runs.get(token) else {
+            return;
+        };
+        let now = Instant::now();
+        // Clamped to what is left of the wall clock — a body with 100 ms to live
+        // cannot spin for a second — but only while there *is* some left. A run
+        // already past its deadline still gets a whole slice, because the
+        // alternative is terminating the isolate (and every co-resident on it)
+        // to enforce a bound that the op's own refusal and the reaper are about
+        // to enforce for free.
+        let until = if run.deadline > now {
+            (now + run.slice).min(run.deadline)
+        } else {
+            now + run.slice
+        };
+        self.running = Some((token.to_owned(), until));
+        self.rearm();
+    }
+
+    /// No JavaScript is on the isolate: whatever was running has yielded, and a
+    /// suspended body cannot overrun anything.
+    fn leave(&mut self) {
+        self.running = None;
+        self.rearm();
+    }
+
+    /// Point the watchdog at the running run's slice; disarm it when nothing is
+    /// running.
     fn rearm(&self) {
-        match self.runs.values().filter_map(RunState::js_deadline).min() {
-            Some(deadline) => self.watchdog.arm(deadline),
+        match self.running {
+            Some((_, until)) => self.watchdog.arm(until),
             None => self.watchdog.disarm(),
         }
     }
@@ -740,11 +820,14 @@ impl RunTable {
         Some(run)
     }
 
-    /// Take every run out, for a failure that is the isolate's rather than any
-    /// one run's.
-    fn drain(&mut self) -> Vec<RunState> {
+    /// Take every run out, with its token, for a failure that is the isolate's
+    /// rather than any one run's.
+    fn drain(&mut self) -> Vec<(String, RunState)> {
         let tokens: Vec<String> = self.runs.keys().cloned().collect();
-        tokens.iter().filter_map(|t| self.take(t)).collect()
+        tokens
+            .into_iter()
+            .filter_map(|t| self.take(&t).map(|run| (t, run)))
+            .collect()
     }
 }
 
@@ -815,25 +898,44 @@ async fn host_call(state: &Rc<RefCell<OpState>>, token: &str, request: &str) -> 
             return refuse("this code body has no database access");
         };
         run.calls_left -= 1;
-        run.pause();
-        table.rearm();
+        // Past this point the run has reached the database, so it is no longer
+        // one that could be re-run without repeating whatever it did there.
+        run.retry = None;
         host
     };
 
+    // No clock is stopped here. The slice is not a budget to pause: it is a
+    // fresh window granted at each resumption (`op_sc_mark`), and the isolate is
+    // free to serve every other run while this call is in flight — so the time
+    // the database takes is charged to nobody's JavaScript.
     let outcome = host.call(plan).await;
 
-    {
-        let mut state = state.borrow_mut();
-        if let Some(table) = state.try_borrow_mut::<RunTable>() {
-            if let Some(run) = table.runs.get_mut(token) {
-                run.resume();
-            }
-            table.rearm();
-        }
-    }
     match outcome {
         Ok(value) => serde_json::json!({ "ok": value }),
         Err(e) => refuse(e.to_string()),
+    }
+}
+
+/// A run's continuation is about to run: give it a fresh JS slice, and make it
+/// the run an overrun is blamed on.
+///
+/// The guest has to say this because Rust cannot see it. A suspended body
+/// resumes inside a microtask drain, several levels below the op whose answer
+/// woke it, and the only Rust either side of that drain is one poll of the event
+/// loop. One synchronous op per host call is what that costs.
+///
+/// **Attribution is exact for the run that is alone in its tick, and best-effort
+/// otherwise.** Several answers can arrive in one turn of the event loop; V8
+/// then runs every resumption handler before any of the bodies they woke, so the
+/// mark that stands when a body overruns is the last one of that turn rather
+/// than necessarily that body's. Naming a co-resident is a wrong name in a rare
+/// case; the alternative — releasing one answer per turn, so that each body
+/// resumes alone — is a serialisation of the hot path to improve a message.
+#[cfg(feature = "eval")]
+#[deno_core::op2(fast)]
+fn op_sc_mark(state: &mut OpState, #[string] token: &str) {
+    if let Some(table) = state.try_borrow_mut::<RunTable>() {
+        table.enter(token);
     }
 }
 
@@ -875,25 +977,55 @@ fn finish(state: &mut OpState, token: &str, outcome: Result<Json>) {
 }
 
 #[cfg(feature = "eval")]
-deno_core::extension!(sc_db_ext, ops = [op_sc_db, op_sc_done, op_sc_fail]);
+deno_core::extension!(
+    sc_db_ext,
+    ops = [op_sc_db, op_sc_done, op_sc_fail, op_sc_mark]
+);
 
 // ---------------------------------------------------------------------------
 // The watchdog
 // ---------------------------------------------------------------------------
 
+/// Why the isolate was terminated. Two instruments, one blunt tool: the
+/// distinction is what the run that caused it is told, and it is a different
+/// mistake in each case.
+#[cfg(feature = "eval")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trip {
+    /// A body ran JavaScript for longer than its slice without yielding.
+    Slice,
+    /// A body filled the isolate's heap past the grace the near-heap-limit
+    /// callback could buy it.
+    Heap,
+}
+
 /// Terminates a runaway body through the isolate's thread-safe handle — the only
 /// safe cross-thread operation on an isolate.
 ///
-/// Armed and disarmed by absolute deadline rather than by message, because a code
-/// run does both several times (once per host call) and a message protocol has to
-/// get the acknowledgement right in the middle of a race it can lose. Waiting on
-/// a condvar means an idle worker costs nothing.
+/// Armed and disarmed by absolute deadline rather than by message, because a
+/// resumption does both several times (once per host call) and a message
+/// protocol has to get the acknowledgement right in the middle of a race it can
+/// lose. Waiting on a condvar means an idle worker costs nothing.
+///
+/// What it is armed at is the **JS slice** of the run that is executing, and
+/// nothing else. A run's wall clock was the other thing it used to enforce, and
+/// it is no longer: terminating an isolate to bound one run's total time stops
+/// every body resident on it, and for an I/O-bound body that total is mostly the
+/// database's time anyway. The wall clock is enforced where it costs the
+/// co-residents nothing — the op refuses a call past it, the worker reaps a
+/// suspended run past it, and the caller stops waiting `CALLER_GRACE` later.
+///
+/// The handle is held rather than moved into the watching thread because the
+/// near-heap-limit callback trips the same instrument from the isolate's own
+/// thread: heap exhaustion and a runaway loop want exactly the same unwinding.
 #[cfg(feature = "eval")]
 struct Watchdog {
+    isolate: deno_core::v8::IsolateHandle,
     /// The armed deadline, or `None` for disarmed.
     deadline: Mutex<Option<Instant>>,
     wake: Condvar,
-    fired: AtomicBool,
+    /// 0 for "not fired", or a [`Trip`] discriminant plus one.
+    fired: AtomicUsize,
     stop: AtomicBool,
 }
 
@@ -901,20 +1033,21 @@ struct Watchdog {
 impl Watchdog {
     fn start(isolate: deno_core::v8::IsolateHandle) -> Arc<Watchdog> {
         let dog = Arc::new(Watchdog {
+            isolate,
             deadline: Mutex::new(None),
             wake: Condvar::new(),
-            fired: AtomicBool::new(false),
+            fired: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
         });
         let watched = Arc::clone(&dog);
         std::thread::Builder::new()
             .name("sc-code-watchdog".into())
-            .spawn(move || watched.watch(&isolate))
+            .spawn(move || watched.watch())
             .ok();
         dog
     }
 
-    fn watch(&self, isolate: &deno_core::v8::IsolateHandle) {
+    fn watch(&self) {
         let mut armed = self.deadline.lock().unwrap_or_else(|e| e.into_inner());
         while !self.stop.load(Ordering::SeqCst) {
             match *armed {
@@ -924,8 +1057,7 @@ impl Watchdog {
                 Some(deadline) => {
                     let now = Instant::now();
                     if now >= deadline {
-                        self.fired.store(true, Ordering::SeqCst);
-                        isolate.terminate_execution();
+                        self.trip(Trip::Slice);
                         *armed = None;
                     } else {
                         let (next, _) = self
@@ -952,12 +1084,30 @@ impl Watchdog {
         self.set(None);
     }
 
-    /// Whether the watchdog has terminated the isolate since this was last
-    /// cleared. Taken rather than read, because the worker acts on it exactly
+    /// Stop the isolate, and remember why. The first reason wins: a heap trip
+    /// and a slice trip in the same instant are one termination, and the run
+    /// being told about it should hear whichever actually stopped it.
+    fn trip(&self, why: Trip) {
+        let code = match why {
+            Trip::Slice => 1,
+            Trip::Heap => 2,
+        };
+        let _ = self
+            .fired
+            .compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+        self.isolate.terminate_execution();
+    }
+
+    /// Why the watchdog terminated the isolate since this was last cleared, if
+    /// it did. Taken rather than read, because the worker acts on it exactly
     /// once: it cancels the termination, and the next JS to run must not be
     /// treated as the terminated one.
-    fn took_fired(&self) -> bool {
-        self.fired.swap(false, Ordering::SeqCst)
+    fn took_fired(&self) -> Option<Trip> {
+        match self.fired.swap(0, Ordering::SeqCst) {
+            1 => Some(Trip::Slice),
+            2 => Some(Trip::Heap),
+            _ => None,
+        }
     }
 
     fn stop(&self) {
@@ -997,11 +1147,17 @@ struct CodeRun {
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
+    /// When the wall clock this run is being measured against started — set only
+    /// on a run that is being **re-queued** after its isolate was terminated
+    /// under it. A second start is not a second timeout: the caller is still
+    /// waiting on the first one, and giving the retry a fresh deadline would let
+    /// it outlive the future that will answer with it.
+    started: Option<Instant>,
 }
 
 #[cfg(feature = "eval")]
 struct CodeJob {
-    run: CodeRun,
+    run: Box<CodeRun>,
     reply: tokio::sync::oneshot::Sender<Result<Json>>,
 }
 
@@ -1117,6 +1273,14 @@ impl CodeRuntime {
     /// Start a pool of `workers` isolate threads, each admitting `max_inflight`
     /// runs at a time and queueing the rest.
     pub fn with_workers_and_inflight(workers: usize, max_inflight: usize) -> CodeRuntime {
+        CodeRuntime::build(workers, max_inflight, DEFAULT_MAX_HEAP)
+    }
+
+    /// The one constructor the others go through, with the heap bound spelled
+    /// out. Not public: [`DEFAULT_MAX_HEAP`] is a bound on the *engine*, not a
+    /// per-installation policy, and the tests are what want to say it in
+    /// megabytes rather than hundreds of them.
+    fn build(workers: usize, max_inflight: usize, max_heap: usize) -> CodeRuntime {
         let max_inflight = max_inflight.max(1);
         let mut pool = Vec::new();
         for n in 0..workers.max(1) {
@@ -1125,7 +1289,7 @@ impl CodeRuntime {
             let counted = Arc::clone(&outstanding);
             std::thread::Builder::new()
                 .name(format!("sc-code-{n}"))
-                .spawn(move || worker_thread(rx, &counted, max_inflight))
+                .spawn(move || worker_thread(rx, &counted, max_inflight, max_heap))
                 // Thread spawning fails only on resource exhaustion at process
                 // level; there is no useful recovery, and a run would error on a
                 // closed channel anyway.
@@ -1186,13 +1350,14 @@ impl CodeRuntime {
         worker
             .jobs
             .send(CodeJob {
-                run: CodeRun {
+                run: Box::new(CodeRun {
                     code: call.code,
                     bindings: call.bindings,
                     host: proxy,
                     timeout,
                     max_calls: call.max_calls,
-                },
+                    started: None,
+                }),
                 reply,
             })
             .map_err(|_| {
@@ -1270,6 +1435,7 @@ fn worker_thread(
     rx: tokio::sync::mpsc::UnboundedReceiver<CodeJob>,
     outstanding: &Arc<AtomicUsize>,
     max_inflight: usize,
+    max_heap: usize,
 ) {
     // The worker's runtime is both the isolate's tokio anchor (see
     // `build_isolate`) and what drives the isolate's event loop. Its own, rather
@@ -1288,9 +1454,44 @@ fn worker_thread(
         Some(local.handle()),
         deno_core::RuntimeOptions {
             extensions: vec![sc_db_ext::init()],
+            // The heap the resident runs share. Without a limit the isolate is
+            // bounded only by the machine, and the failure mode of that is the
+            // process — hundreds of resident runs are hundreds of scopes and
+            // their reads, and admission counts them without weighing them.
+            create_params: Some(deno_core::v8::CreateParams::default().heap_limits(0, max_heap)),
             ..Default::default()
         },
     );
+
+    let watchdog = Watchdog::start(runtime.v8_isolate().thread_safe_handle());
+    // Near the limit, V8's own answer is to abort the process. This is the
+    // answer instead: raise the limit by a grace, and tell the worker to admit
+    // nothing new until the runs holding the heap have finished with it. A body
+    // that fills even the grace is stopped like any other runaway — through the
+    // watchdog, so that the unwinding, the attribution and the re-queueing are
+    // the ones already written.
+    //
+    // V8 keeps whatever limit this returns, so an isolate that has been through
+    // one heap incident is left strict rather than generous: the grace has
+    // already been spent, and the next body to reach the raised limit is past
+    // the ceiling on arrival and stopped at once.
+    let pressure = Arc::new(AtomicBool::new(false));
+    {
+        let (dog, flag) = (Arc::clone(&watchdog), Arc::clone(&pressure));
+        runtime.add_near_heap_limit_callback(move |current, initial| {
+            flag.store(true, Ordering::SeqCst);
+            let grace = (initial / 2).max(1);
+            let ceiling = initial.saturating_add(initial);
+            if current >= ceiling {
+                dog.trip(Trip::Heap);
+                // Never the same limit twice: returning `current` is the abort
+                // this exists to avoid, and the terminated body needs somewhere
+                // to unwind into.
+                return current.saturating_add(grace);
+            }
+            current.saturating_add(grace).min(ceiling)
+        });
+    }
 
     // The op handles and the run wrapper, then `Deno` goes away — see SETUP. A
     // failure here would leave every run unable to reach the host, so say so
@@ -1304,7 +1505,6 @@ fn worker_thread(
     // in a body what it means in a formula.
     let _ = runtime.execute_script("sc_agg.js", crate::eval::AGG_PRELUDE);
 
-    let watchdog = Watchdog::start(runtime.v8_isolate().thread_safe_handle());
     let freed = Arc::new(tokio::sync::Notify::new());
     let op_state = runtime.op_state();
     op_state.borrow_mut().put(RunTable::new(
@@ -1320,6 +1520,7 @@ fn worker_thread(
         max_inflight,
         &watchdog,
         &freed,
+        &pressure,
     ));
     watchdog.stop();
 }
@@ -1348,6 +1549,12 @@ enum Tick {
 /// in flight. And the **timer** is what notices a deadline while every run is
 /// suspended — nothing is executing then, so neither the watchdog nor the op's
 /// own check can see it.
+///
+/// Two things gate admission besides the occupancy bound: runs handed back by a
+/// termination go in front of the queue (they were admitted once already, and
+/// their caller is still waiting on the clock that started then), and heap
+/// `pressure` stops admission entirely until the runs holding the heap have
+/// given it back.
 #[cfg(feature = "eval")]
 async fn serve(
     runtime: &mut deno_core::JsRuntime,
@@ -1356,13 +1563,24 @@ async fn serve(
     max_inflight: usize,
     watchdog: &Watchdog,
     freed: &tokio::sync::Notify,
+    pressure: &AtomicBool,
 ) {
     let mut closed = false;
+    // Runs whose isolate was terminated under them before they had reached the
+    // database. They are owed another go, and nothing else is.
+    let mut requeued: std::collections::VecDeque<CodeJob> = std::collections::VecDeque::new();
     loop {
         // Admit whatever is already waiting, up to the occupancy bound.
-        while !closed && resident(op_state) < max_inflight {
+        while resident(op_state) < max_inflight {
+            if let Some(job) = requeued.pop_front() {
+                start_run(runtime, op_state, job, &mut requeued, watchdog);
+                continue;
+            }
+            if closed || pressure.load(Ordering::SeqCst) {
+                break;
+            }
             match rx.try_recv() {
-                Ok(job) => start_run(runtime, op_state, job, watchdog),
+                Ok(job) => start_run(runtime, op_state, job, &mut requeued, watchdog),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     closed = true;
@@ -1370,23 +1588,45 @@ async fn serve(
             }
         }
         if resident(op_state) == 0 {
+            // An empty isolate is one that has given its heap back, whether or
+            // not there was anything queued to admit into it.
+            pressure.store(false, Ordering::SeqCst);
+            // And one with nothing left to run: an armed watchdog here would
+            // terminate an idle isolate, which is a termination the *next* run's
+            // JavaScript would be the one to suffer.
+            idle(op_state);
             if closed {
                 return; // The last CodeRuntime handle was dropped.
             }
             // Nothing to pump: park on the channel rather than poll an empty
             // event loop for ever.
             match rx.recv().await {
-                Some(job) => start_run(runtime, op_state, job, watchdog),
+                Some(job) => start_run(runtime, op_state, job, &mut requeued, watchdog),
                 None => closed = true,
             }
             continue;
         }
 
-        let admit = !closed && resident(op_state) < max_inflight;
+        let admit =
+            !closed && !pressure.load(Ordering::SeqCst) && resident(op_state) < max_inflight;
         let due = next_deadline(op_state);
         let tick = {
             let pump = runtime.run_event_loop(deno_core::PollEventLoopOptions::default());
             tokio::pin!(pump);
+            // The event loop yielding is the one moment Rust can see JavaScript
+            // *stop*: every resumption is inside this poll, and when it comes
+            // back pending there is nothing on the isolate. That is where the
+            // running mark is cleared — not after the `select!`, which may then
+            // wait seconds for a host answer with the watchdog still armed at a
+            // slice belonging to a body that suspended long ago, and terminate an
+            // idle isolate out from under whoever runs next.
+            let mut pump = std::future::poll_fn(|cx| {
+                let polled = std::future::Future::poll(pump.as_mut(), cx);
+                if polled.is_pending() {
+                    idle(op_state);
+                }
+                polled
+            });
             tokio::select! {
                 outcome = &mut pump => Tick::Quiet(outcome.map_err(|e| e.to_string())),
                 job = rx.recv(), if admit => Tick::Job(job),
@@ -1398,7 +1638,11 @@ async fn serve(
         // A termination during the pump, whatever else happened: the isolate is
         // poisoned until it is cancelled, and every resident run went down with
         // the one that overran it.
-        handle_terminated(runtime, op_state, watchdog);
+        handle_terminated(runtime, op_state, &mut requeued, watchdog);
+        // The pump has yielded, so no JavaScript is on the isolate: nothing can
+        // overrun a slice until something resumes, and the watchdog must not be
+        // left pointed at a body that is no longer running.
+        idle(op_state);
 
         match tick {
             // The event loop emptied with runs still resident: nothing is
@@ -1421,7 +1665,7 @@ async fn serve(
                     run.answer(Err(Error::invalid(format!("JavaScript code failed: {e}"))));
                 }
             }
-            Tick::Job(Some(job)) => start_run(runtime, op_state, job, watchdog),
+            Tick::Job(Some(job)) => start_run(runtime, op_state, job, &mut requeued, watchdog),
             Tick::Job(None) => closed = true,
             Tick::Freed | Tick::Due => {}
         }
@@ -1445,33 +1689,148 @@ fn drain_runs(op_state: &Rc<RefCell<OpState>>) -> Vec<RunState> {
     let mut state = op_state.borrow_mut();
     state
         .try_borrow_mut::<RunTable>()
-        .map_or_else(Vec::new, RunTable::drain)
+        .map_or_else(Vec::new, |table| {
+            table.drain().into_iter().map(|(_, run)| run).collect()
+        })
 }
 
-/// If the watchdog terminated the isolate: cancel that, and fail everything that
-/// was resident.
+/// No JavaScript is on the isolate. Called wherever JS has just stopped running
+/// — after a run's script, after a poll of the event loop — because the watchdog
+/// is armed at the *running* run's slice and a body that has yielded is not
+/// running.
+#[cfg(feature = "eval")]
+fn idle(op_state: &Rc<RefCell<OpState>>) {
+    if let Some(table) = op_state.borrow_mut().try_borrow_mut::<RunTable>() {
+        table.leave();
+    }
+}
+
+/// If the watchdog terminated the isolate: cancel that, tell the body that
+/// caused it, and deal with the ones that were merely in the room.
 ///
-/// One instrument for the whole isolate is the honest gap in this phase — a body
-/// that spins without yielding takes its co-residents with it. What must not
-/// happen is worse: leaving the isolate terminated, so that the *next* run's
-/// JavaScript is aborted in place of the guilty one's. Hence cancelling here,
-/// after every way JavaScript can have run.
+/// Termination is the blunt instrument — it stops the isolate, not a run — so
+/// the co-residents are the part that has to be got right. They must **not** be
+/// silently re-run: a body that has already inserted rows is not idempotent, and
+/// re-executing it is a worse failure than the one being handled. So a run that
+/// has made **zero** host calls goes back in the queue (it still holds the job it
+/// was admitted with, which is only true while that is so), and every other
+/// resident is answered with its own named error saying what happened to it.
+///
+/// Cancelling comes first and unconditionally, because the alternative is
+/// leaving the isolate terminated so that the *next* run's JavaScript is aborted
+/// in place of the guilty one's.
 #[cfg(feature = "eval")]
 fn handle_terminated(
     runtime: &mut deno_core::JsRuntime,
     op_state: &Rc<RefCell<OpState>>,
+    requeued: &mut std::collections::VecDeque<CodeJob>,
     watchdog: &Watchdog,
 ) {
-    if !watchdog.took_fired() {
+    let Some(why) = watchdog.took_fired() else {
         return;
-    }
+    };
     runtime.v8_isolate().cancel_terminate_execution();
-    for mut run in drain_runs(op_state) {
-        let ms = run.timeout.as_millis();
-        run.answer(Err(Error::invalid(format!(
-            "JavaScript code timed out after {ms} ms"
-        ))));
+
+    let mut failed: Vec<(RunState, Error)> = Vec::new();
+    {
+        let mut state = op_state.borrow_mut();
+        let Some(table) = state.try_borrow_mut::<RunTable>() else {
+            return;
+        };
+        // Whose JavaScript was on the isolate. `None` — an overrun in a turn
+        // where the mark had already been cleared — is not a reason to guess:
+        // every resident is then treated as a co-resident, which fails a body
+        // with the wrong reason but never re-runs one that wrote.
+        let guilty =
+            table
+                .running
+                .take()
+                .map(|(token, _)| token)
+                .or_else(|| match table.runs.len() {
+                    // Not a guess: with one run resident, whatever JavaScript was on
+                    // the isolate can only have been that run's.
+                    1 => table.runs.keys().next().cloned(),
+                    _ => None,
+                });
+        let now = Instant::now();
+        for (token, mut run) in table.drain() {
+            if Some(&token) == guilty.as_ref() {
+                let error = blame(why, &run, now);
+                failed.push((run, error));
+                continue;
+            }
+            match run.retry.take() {
+                // Provably no side effects yet, and its wall clock is what
+                // decides whether there is still any point in another go.
+                Some(job) if now < run.deadline => {
+                    if let Some(reply) = run.reply.take() {
+                        table.outstanding.fetch_add(1, Ordering::SeqCst);
+                        requeued.push_back(CodeJob { run: job, reply });
+                    }
+                }
+                Some(_) => {
+                    let ms = run.timeout.as_millis();
+                    let error =
+                        Error::invalid(format!("this code exceeded its {ms} ms time limit"));
+                    failed.push((run, error));
+                }
+                None => failed.push((run, bystander(why))),
+            }
+        }
     }
+    for (mut run, error) in failed {
+        run.answer(Err(error));
+    }
+}
+
+/// What the body that stopped the isolate is told.
+///
+/// Two clocks, two messages, and the difference matters to whoever reads it: a
+/// run out of *wall* clock spent its time somewhere (very likely in the database)
+/// and wants a longer timeout or a smaller job, while a run out of *slice* did
+/// not yield — it computed, in one go, for longer than a body sharing an isolate
+/// may.
+#[cfg(feature = "eval")]
+fn blame(why: Trip, run: &RunState, now: Instant) -> Error {
+    match why {
+        Trip::Heap => Error::invalid(
+            "this code used more memory than the JavaScript engine has, and was stopped; \
+             read fewer rows at a time (`.iter()` streams them in batches) or keep less of \
+             what you read",
+        ),
+        // The slice is clamped to what is left of the wall clock, so a body that
+        // spins through the end of its timeout trips the watchdog at the
+        // deadline rather than at the slice. That is the wall clock catching it,
+        // and saying so keeps one bound with one wording.
+        Trip::Slice if now >= run.deadline => Error::invalid(format!(
+            "this code exceeded its {} ms time limit",
+            run.timeout.as_millis()
+        )),
+        Trip::Slice => Error::invalid(format!(
+            "this code ran for {} ms without awaiting anything, and was stopped; a code body \
+             shares its isolate with every other body, so it must not compute for that long \
+             between two `await`s",
+            run.slice.as_millis()
+        )),
+    }
+}
+
+/// What a run that was merely *on* the isolate is told.
+///
+/// It is not being re-run, and the reason is the point: it had already reached
+/// the database, and a body that has written rows is not one to execute twice
+/// because something else misbehaved. Rare, loud, and never a duplicated write.
+#[cfg(feature = "eval")]
+fn bystander(why: Trip) -> Error {
+    let what = match why {
+        Trip::Slice => "ran without yielding",
+        Trip::Heap => "used more memory than the JavaScript engine has",
+    };
+    Error::invalid(format!(
+        "another code body on the same isolate {what} and had to be stopped, which stopped \
+         this one with it. It has not been re-run, because it had already reached the \
+         database and re-running it could repeat what it did there"
+    ))
 }
 
 /// How often the loop looks again when it has nothing to look at: the floor under
@@ -1480,8 +1839,8 @@ fn handle_terminated(
 const TICK_FLOOR: Duration = Duration::from_millis(1);
 
 /// When the loop next has something to do that is not an event: the earliest
-/// wall-clock deadline among the resident runs, or the earliest JS deadline the
-/// watchdog is armed at — whichever comes first.
+/// wall-clock deadline among the resident runs, or the slice the watchdog is
+/// armed at — whichever comes first.
 ///
 /// The watchdog's own deadline is here because the watchdog fires on a thread of
 /// its own: if it terminates the isolate while every run is suspended, the event
@@ -1497,8 +1856,8 @@ fn next_deadline(op_state: &Rc<RefCell<OpState>>) -> Instant {
             table
                 .runs
                 .values()
-                .flat_map(|run| [Some(run.deadline), run.js_deadline()])
-                .flatten()
+                .map(|run| run.deadline)
+                .chain(table.running.iter().map(|(_, until)| *until))
                 .min()
         })
         .unwrap_or(now + TICK_FLOOR)
@@ -1557,6 +1916,7 @@ fn start_run(
     runtime: &mut deno_core::JsRuntime,
     op_state: &Rc<RefCell<OpState>>,
     job: CodeJob,
+    requeued: &mut std::collections::VecDeque<CodeJob>,
     watchdog: &Watchdog,
 ) {
     let CodeJob { run, reply } = job;
@@ -1577,7 +1937,10 @@ fn start_run(
             return;
         }
     };
-    let started = Instant::now();
+    // A re-queued run carries the clock it was first admitted with: its caller
+    // has been waiting since then, and a retry with a fresh deadline would
+    // outlive the future that is going to answer with it.
+    let started = run.started.unwrap_or_else(Instant::now);
     {
         let mut state = op_state.borrow_mut();
         let Some(table) = state.try_borrow_mut::<RunTable>() else {
@@ -1591,21 +1954,35 @@ fn start_run(
         table.runs.insert(
             token.clone(),
             RunState {
-                host: run.host,
+                host: run.host.clone(),
                 deadline: started + run.timeout,
                 timeout: run.timeout,
                 calls_left: run.max_calls,
                 max_calls: run.max_calls,
-                js_budget: run.timeout,
-                armed_at: Some(started),
+                slice: DEFAULT_JS_SLICE.min(run.timeout),
+                // Kept until the first host call, which is exactly as long as
+                // re-running this body would provably repeat nothing.
+                retry: Some(Box::new(CodeRun {
+                    started: Some(started),
+                    ..*run
+                })),
                 reply: Some(reply),
             },
         );
-        table.rearm();
+        // This run's JavaScript is what is about to run.
+        table.enter(&token);
     }
     let outcome = runtime.execute_script("sc_code.js", script);
     // A terminated run is already answered by name, so this comes first.
-    handle_terminated(runtime, op_state, watchdog);
+    handle_terminated(runtime, op_state, requeued, watchdog);
+    // The mark is deliberately **left standing** here. `execute_script`
+    // returning does not mean the body has stopped running: an `async function`
+    // that awaits anything but a host call — `await null` is the whole shape —
+    // suspends into a microtask that the next poll of the event loop drains,
+    // with no op to mark it and no way for Rust to see it start. Keeping this
+    // run marked until the pump yields is what keeps that JavaScript watched;
+    // the alternative is a body that loops on microtasks holding its isolate for
+    // ever with the watchdog disarmed.
     if let Err(e) = outcome {
         let mut state = op_state.borrow_mut();
         if let Some(table) = state.try_borrow_mut::<RunTable>()
@@ -2367,11 +2744,51 @@ mod tests {
     #[tokio::test]
     async fn a_body_that_spins_is_terminated_and_its_isolate_recovers() {
         let rt = CodeRuntime::with_workers(1);
+        // A slice is never longer than what is left of the run's own wall clock,
+        // so a body given 100 ms is stopped at 100 ms — by the clock that ran out
+        // first, and in that clock's own words.
         let mut c = call("while (true) {}");
         c.timeout = Some(Duration::from_millis(100));
+        let started = Instant::now();
         let err = rt.run(c).await.unwrap_err().to_string();
-        assert!(err.contains("JavaScript code timed out"), "{err}");
+        assert!(err.contains("exceeded its 100 ms time limit"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "it was not the watchdog that stopped it: {:?}",
+            started.elapsed()
+        );
         // The same worker serves the next run normally.
+        assert_eq!(rt.run(call("return 1 + 1;")).await.unwrap(), json!(2));
+    }
+
+    #[tokio::test]
+    async fn a_body_that_never_yields_is_stopped_at_the_slice_not_at_its_timeout() {
+        // The second clock. This body has thirty seconds of wall clock and uses
+        // none of it in the database, so nothing about its *timeout* is what
+        // ought to stop it: what it is doing wrong is holding the isolate — and
+        // every other body resident on it — without yielding.
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = call("while (true) {}");
+        c.timeout = Some(Duration::from_secs(30));
+        let started = Instant::now();
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("without awaiting anything"), "{err}");
+        assert!(
+            err.contains(&format!("{} ms", DEFAULT_JS_SLICE.as_millis())),
+            "the slice is not named: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "it waited for the wall clock: {:?}",
+            started.elapsed()
+        );
+        // And a body that spins *after* an await is the same body: the slice is a
+        // fresh window at each resumption, not a budget the run spends.
+        let host = FakeHost::rows(json!([]));
+        let mut c = with_host("await db.books.rows(); while (true) {}", &*host);
+        c.timeout = Some(Duration::from_secs(30));
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("without awaiting anything"), "{err}");
         assert_eq!(rt.run(call("return 1 + 1;")).await.unwrap(), json!(2));
     }
 
@@ -2981,6 +3398,154 @@ mod tests {
             host.peak() <= 4,
             "the bound admitted more than it was given: {}",
             host.peak()
+        );
+    }
+
+    /// A host that records what it was asked to do and holds every call for
+    /// `delay`, so that a run can be left provably suspended — with a write
+    /// behind it — while something else happens on its isolate.
+    struct WriteCounter {
+        writes: AtomicU32,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl CodeHost for WriteCounter {
+        async fn call(&self, request: Json) -> Result<Json> {
+            if request["op"] == json!("insert") {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+            }
+            tokio::time::sleep(self.delay).await;
+            Ok(json!({ "id": 1 }))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_runaway_is_blamed_and_its_co_residents_are_never_re_run() {
+        // The termination is the blunt instrument: it stops the isolate, not the
+        // body that overran it. So three runs share one isolate and the
+        // difference between them is the whole of this phase.
+        //
+        //   W  has written, and is suspended waiting for the host. Stopping it
+        //      costs its caller an error; **re-running** it would cost a second
+        //      row, so it is answered rather than retried.
+        //   C  has made no host call at all — it is resident because its own
+        //      completion is a microtask the next poll will drain — so there is
+        //      provably nothing to repeat, and it goes back in the queue.
+        //   B  is the body that never yields, and the one the message is for.
+        let host = Arc::new(WriteCounter {
+            writes: AtomicU32::new(0),
+            delay: Duration::from_millis(800),
+        });
+        let rt = Arc::new(CodeRuntime::with_workers(1));
+
+        let writer = {
+            let (rt, host) = (Arc::clone(&rt), Arc::clone(&host));
+            tokio::spawn(async move {
+                let mut c = with_host("await db.log.insert({ n: 1 }); return 'W';", &*host);
+                c.timeout = Some(Duration::from_secs(20));
+                rt.run(c).await
+            })
+        };
+        // Long enough for W to be resident and suspended in its insert.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Both submitted from one task, so both are in the worker's channel
+        // before it wakes: it admits C, and admits B from the same burst without
+        // a poll in between — which is why C is still resident, and still
+        // callless, when B stops the isolate.
+        let mut spinner = call("while (true) {}");
+        spinner.timeout = Some(Duration::from_secs(20));
+        let (innocent, guilty) = tokio::join!(rt.run(call("return 'C';")), rt.run(spinner));
+
+        let blamed = guilty
+            .expect_err("a body that never yields is not a body that ran")
+            .to_string();
+        assert!(
+            blamed.contains("without awaiting anything"),
+            "the runaway was not the one blamed: {blamed}"
+        );
+        assert_eq!(
+            innocent.expect("a co-resident with no host call is owed another go"),
+            json!("C"),
+            "the callless co-resident was not re-run"
+        );
+        let bystander = writer
+            .await
+            .unwrap()
+            .expect_err("the writer went down with the isolate")
+            .to_string();
+        assert!(
+            bystander.contains("another code body on the same isolate"),
+            "the writer was told it was its own fault: {bystander}"
+        );
+        assert!(
+            bystander.contains("re-running it could repeat"),
+            "the message does not say why it was not retried: {bystander}"
+        );
+        assert_eq!(
+            host.writes.load(Ordering::SeqCst),
+            1,
+            "the body that had already written was run a second time"
+        );
+        // The isolate is whole afterwards.
+        assert_eq!(rt.run(call("return 1 + 1;")).await.unwrap(), json!(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_body_that_loops_on_microtasks_loses_its_run_and_not_its_worker() {
+        // The shape no op can see: a body that yields, but only to the microtask
+        // queue, so nothing marks a resumption and nothing ever returns to Rust.
+        // The mark left standing from the run's own admission is what keeps the
+        // watchdog on it.
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = call("for (;;) { await null; }");
+        c.timeout = Some(Duration::from_secs(20));
+        let started = Instant::now();
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("without awaiting anything"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the worker was held to the wall clock: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(rt.run(call("return 1 + 1;")).await.unwrap(), json!(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_heap_bound_stops_admitting_rather_than_the_process() {
+        // A body that keeps everything it reads, on an isolate given 24 MB to
+        // keep it in. V8's own answer to a heap limit is to abort the process;
+        // this is the answer instead — the near-heap-limit callback buys a grace
+        // and stops admission, and a body that fills even the grace is stopped
+        // the way any other runaway is.
+        //
+        // The body awaits between allocations, so its JS slice is fresh every
+        // time round: what stops it can only be the heap.
+        let host = FakeHost::rows(json!([{ "id": 1 }]));
+        let rt = CodeRuntime::build(1, 8, 24 * 1024 * 1024);
+        let mut hog = with_host(
+            "const kept = [];
+             for (let i = 0; i < 100; i++) {
+               await db.books.rows();
+               kept.push(new Array(200000).fill('x'));
+             }
+             return kept.length;",
+            &*host,
+        );
+        hog.timeout = Some(Duration::from_secs(30));
+        hog.max_calls = 1000;
+        let err = rt.run(hog).await.unwrap_err().to_string();
+        assert!(
+            err.contains("more memory than the JavaScript engine has"),
+            "{err}"
+        );
+        // And the isolate is still serving: the process is here to be asked.
+        assert_eq!(
+            rt.run(with_host("return (await db.books.rows()).length;", &*host))
+                .await
+                .unwrap(),
+            json!(1)
         );
     }
 }

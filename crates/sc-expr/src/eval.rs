@@ -1128,7 +1128,11 @@ mod tests {
         let mut runaway = code("while (true) {}", &[]);
         runaway.timeout = Some(Duration::from_millis(100));
         let err = ev.run_code(runaway).await.unwrap_err().to_string();
-        assert!(err.contains("JavaScript code timed out"), "{err}");
+        // A JS slice is never longer than what is left of the run's own wall
+        // clock, so 100 ms of timeout is what stops this one, in that clock's
+        // words. A body with room to spin says the other thing — see
+        // `code::tests::a_body_that_never_yields_is_stopped_at_the_slice_not_at_its_timeout`.
+        assert!(err.contains("exceeded its 100 ms time limit"), "{err}");
         // The code pool serves the next run normally...
         assert_eq!(
             ev.run_code(code("return 1 + 1;", &[])).await.unwrap(),

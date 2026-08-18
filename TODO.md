@@ -231,18 +231,31 @@ arrives that way — `__scRun` attaches a rejection handler to the body's promis
 
 ## Phase 3 — The two clocks and the runaway
 
-- [ ] Split the budgets: the per-run wall clock keeps its two existing enforcement points
+- [x] Split the budgets: the per-run wall clock keeps its two existing enforcement points
       (deadline check in the op, `CALLER_GRACE` in `CodeRuntime::run`) and stops driving the
       watchdog; the watchdog enforces the **JS slice** (`DEFAULT_JS_SLICE`, 1 s, clamped to the
-      run's remaining wall clock).
-- [ ] Attribution: the isolate tracks the currently-running token — set when a run starts and by
+      run's remaining wall clock). The worker's reaper — phase 2's third enforcement point, for a
+      run suspended past its deadline — stays, since it too costs the co-residents nothing.
+- [x] Attribution: the isolate tracks the currently-running token — set when a run starts and by
       a cheap sync mark where a host call returns — so a slice overrun names the guilty body.
-- [ ] On termination: `cancel_terminate_execution`, fail the guilty run with the slice error,
+      *Deviation:* the mark is exact for a run that resumes alone in its turn of the event loop
+      and best-effort when several resume together, because V8 runs every resumption handler of a
+      turn before any of the bodies they wake, and no mark we can inject is deeper than the body's
+      own continuation. Making it exact means releasing one host answer per turn — a serialisation
+      of the hot path to improve a message. Documented at `op_sc_mark`. Two things the list did
+      not mention proved necessary: the mark is **cleared when the event loop yields** (the one
+      moment Rust can see JavaScript stop; clearing it later terminates an idle isolate under
+      whoever runs next), and it is **left standing across `execute_script`** returning, which is
+      what watches a body that yields only to the microtask queue (`for (;;) await null;`) — a
+      shape that previously held its worker for ever.
+- [x] On termination: `cancel_terminate_execution`, fail the guilty run with the slice error,
       re-queue only residents with **zero** host calls, fail the rest with their own named error.
-      Drop the run table's entries either way, so nothing outlives the isolate that held it.
-- [ ] V8 heap limit via `create_params` plus a near-heap-limit callback that stops admitting
+      Drop the run table's entries either way, so nothing outlives the isolate that held it. A
+      re-queued run carries the deadline it was first admitted with, so a retry cannot outlive the
+      caller waiting on it.
+- [x] V8 heap limit via `create_params` plus a near-heap-limit callback that stops admitting
       rather than aborting the process.
-- [ ] Tests: `while (true) {}` fails with the slice error and names the trigger; a co-resident
+- [x] Tests: `while (true) {}` fails with the slice error and names the trigger; a co-resident
       that had made no host call still completes; one that had made a host call fails with the
       co-resident error rather than being re-run (asserted by counting the fake host's writes).
 
@@ -266,8 +279,9 @@ arrives that way — `__scRun` attaches a rejection handler to the body's promis
 - [~] `docs/TECHNICAL_DESIGN.md` §10.1: "The API is **synchronous**" becomes its opposite, with
       the `for await` spelling, the two clocks, the admission bound, and the sentence naming the
       connection pool as the ceiling that remains. *(Done in phase 1: the synchronous claim, the
-      `for await` spelling and every example. Still to do here: the two clocks, the admission
-      bound and the connection-pool ceiling, none of which exist yet.)*
+      `for await` spelling and every example. Done in phase 3: the two clocks, since leaving §10.1
+      claiming three bounds once the slice existed would have been wrong rather than merely
+      incomplete. Still to do here: the admission bound and the connection-pool ceiling.)*
 - [x] `ui/admin/src/codeTypes.ts`: terminals answer `Promise<…>`, `iter()` answers
       `AsyncIterableIterator<Row>`, and the doc comments lose "Synchronous — there are no promises
       in the sandbox". Monaco's own diagnostics then catch a forgotten `await` in the editor,

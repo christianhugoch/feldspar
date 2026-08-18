@@ -359,7 +359,7 @@ async fn the_configured_timeout_bounds_the_run_and_is_checked_on_save() -> Resul
     )
     .await
     .unwrap_err();
-    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(err.to_string().contains("100 ms time limit"), "{err}");
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "took {:?}",
@@ -430,12 +430,34 @@ async fn a_runaway_body_is_terminated_and_the_engine_survives() -> Result<()> {
         .unwrap_err();
     let elapsed = started.elapsed();
     let msg = err.to_string();
+    // A body's JS slice is never longer than what is left of its wall clock, so
+    // 100 ms of timeout is what stops this one — and the error names the trigger
+    // that did it, because it is answered to that trigger's own caller.
     assert!(
-        msg.contains("timed out") && msg.contains("compute"),
+        msg.contains("100 ms time limit") && msg.contains("compute"),
         "{msg}"
     );
     // The caller is released, not held by the loop.
     assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+
+    // Given room to spin, the same body meets the *other* clock: a code body may
+    // not hold its isolate — which every other trigger's body shares — for a
+    // whole second without awaiting anything. Still named, still the trigger's.
+    let roomy = Arc::new(DenoEvaluator::new().with_code_timeout(Duration::from_secs(20)));
+    let started = Instant::now();
+    let msg = run_with(&catalog, &book_insert(), "while (true) {}", &roomy)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        msg.contains("without awaiting anything") && msg.contains("compute"),
+        "{msg}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "it waited for the wall clock: {:?}",
+        started.elapsed()
+    );
 
     // And the isolate is usable afterwards: one trigger's mistake does not take
     // the process's only JavaScript engine with it.

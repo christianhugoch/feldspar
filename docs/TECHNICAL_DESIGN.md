@@ -1211,16 +1211,28 @@ itself stays synchronous — it builds a plan and touches nothing — so `await`
 of a whole chain and never inside one, and a `Promise.all([…])` of two chains issues both
 queries at once. The forgotten `await` is not silent: a terminal answers a `DbPromise` whose
 `toJSON`, `Symbol.toPrimitive` and `Symbol.iterator` throw one named error, so a body that
-treats an un-awaited call as a value is told so rather than answering `{}`. Three bounds, each
+treats an un-awaited call as a value is told so rather than answering `{}`. Four bounds, each
 with its own named error: **1000 rows per
 read** (a read is materialised into the isolate, so the error says to add a `.limit()` or to
 stream it with `.iter()`, and the cap **refuses** rather than truncating — a body handed 1000 of
 4000 rows would compute a wrong answer out of a right-looking one), **200 host calls per run** (an accidental N+1 must not
-hammer the database quietly), and the **wall clock** (`timeout_ms`) — which covers the whole
-call rather than the executing part of it: a body is refused a host call once it is spent, and
-the *caller* stops waiting shortly after it, which is the only bound that covers a run holding
-its caller **without executing** (waiting for a free isolate while every one of them is blocked
-in a host call, or one query that never comes back). There are **no transactions across
+hammer the database quietly), the **wall clock** (`timeout_ms`) — which covers the whole
+call rather than the executing part of it: a body is refused a host call once it is spent, the
+worker reaps a run suspended past it, and the *caller* stops waiting shortly after it, which is
+the only bound that covers a run holding its caller **without executing** (queued behind a full
+isolate, or one query that never comes back) — and the **JS slice**, one second of JavaScript
+without yielding.
+
+The two clocks are deliberately different instruments. The wall clock is mostly the database's
+time, and it is enforced in the three places above, none of which stops anybody else's body. The
+slice is the guest's own time, between one `await` and the next, and it is what the **watchdog**
+enforces — the only thing that can stop JavaScript, and a blunt one, because it stops the isolate
+and every run resident on it. So the isolate tracks which run is executing (a run marks itself as
+it is admitted and as each host call answers it), an overrun is answered to the body that
+overran and names its trigger, and that body's co-residents are re-queued only where they have
+made **no** host call: one that has already written rows is answered with an error of its own
+rather than run a second time. Behind all four the isolate's **heap** is bounded too, and
+reaching it stops the worker admitting new runs rather than aborting the process. There are **no transactions across
 statements**: each autocommits, as every action's writes do, and
 `db.transaction(fn)` is a later addition whose seam is the row layer's `Executor::Transaction`.
 
@@ -3749,8 +3761,8 @@ which is the point. The three halves are deliberately separable:
 An adapter therefore needs a *runtime*, not a data layer: something that runs guest code with
 a `CodeHost` in reach and a wall clock over it. `CodeRuntime` (a small pool of isolates, each
 serving **many resident runs at once** — a host call is an awaited promise rather than a
-blocked thread, runs are told apart by a per-run token, and the watchdog is paused for the
-duration of each call) is that for JavaScript, kept strictly separate from the pure formula
+blocked thread, runs are told apart by a per-run token, and the watchdog bounds only the
+JavaScript a body runs between two awaits) is that for JavaScript, kept strictly separate from the pure formula
 isolate — a blocking host call on the isolate that decides ownership formulas would put every
 authorization decision in the process behind whatever a guest is doing, and would deadlock the
 moment a delegated read's own formula needed the evaluator. Any adapter that blocks a thread on
