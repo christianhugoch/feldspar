@@ -12,7 +12,7 @@ rust-version.workspace = true
 # formulas — do not link V8 into their build. `sc-server` (Phase 5) turns it on.
 [features]
 default = ["eval"]
-eval = ["dep:deno_core", "dep:tokio"]
+eval = ["dep:deno_core", "dep:getrandom", "dep:tokio"]
 
 [dependencies]
 # Required (not `eval`-gated): the `JsEvaluator` trait itself is part of the
@@ -20,6 +20,9 @@ eval = ["dep:deno_core", "dep:tokio"]
 # without linking an engine.
 async-trait = { workspace = true }
 deno_core = { workspace = true, optional = true }
+# 128 bits per run token: the only thing separating two resident runs' authority
+# on one isolate, so it wants the operating system's entropy and not a counter.
+getrandom = { workspace = true, optional = true }
 sc-error = { workspace = true }
 sc-query = { workspace = true }
 serde_json = { workspace = true }

@@ -3747,12 +3747,14 @@ which is the point. The three halves are deliberately separable:
   implementation rather than growing its own idea of what a table is.
 
 An adapter therefore needs a *runtime*, not a data layer: something that runs guest code with
-a `CodeHost` in reach and a wall clock over it. `CodeRuntime` (a small pool of isolates, one
-op, a watchdog paused for the duration of each host call) is that for JavaScript, kept strictly
-separate from the pure formula isolate — a blocking host call on the isolate that decides
-ownership formulas would put every authorization decision in the process behind whatever a
-guest is doing, and would deadlock the moment a delegated read's own formula needed the
-evaluator. Any adapter that blocks a thread on a host call inherits that constraint.
+a `CodeHost` in reach and a wall clock over it. `CodeRuntime` (a small pool of isolates, each
+serving **many resident runs at once** — a host call is an awaited promise rather than a
+blocked thread, runs are told apart by a per-run token, and the watchdog is paused for the
+duration of each call) is that for JavaScript, kept strictly separate from the pure formula
+isolate — a blocking host call on the isolate that decides ownership formulas would put every
+authorization decision in the process behind whatever a guest is doing, and would deadlock the
+moment a delegated read's own formula needed the evaluator. Any adapter that blocks a thread on
+a host call inherits that constraint, and pays for it in threads per concurrent run.
 
 ---
 

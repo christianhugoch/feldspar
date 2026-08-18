@@ -188,31 +188,46 @@ already bounds itself — a fact worth stating in §10.1, because it is the answ
 
 ## Phase 2 — Many runs per isolate
 
-- [ ] `RunState` becomes a table keyed by a 128-bit random `RunToken`, bound as a `const` in the
+- [x] `RunState` becomes a table keyed by a 128-bit random `RunToken`, bound as a `const` in the
       run's scope; `op_sc_db` takes the token and looks the run up. An unknown token is a named
       error, not a panic.
-- [ ] Completion ops `__scDone` / `__scFail`, and the run's oneshot moves into the table entry:
+- [x] Completion ops `__scDone` / `__scFail`, and the run's oneshot moves into the table entry:
       `execute_script` starts a run, the event loop finishes it. Errors carry `e.stack` so the
       message an admin sees is no worse than today's.
-- [ ] The worker becomes `Builder::new_current_thread()` + `block_on`: a loop that admits jobs
+- [x] The worker becomes `Builder::new_current_thread()` + `block_on`: a loop that admits jobs
       while pumping the event loop, and that parks on the job channel when nothing is resident
-      (never a busy poll).
-- [ ] Per-worker job channels with a least-inflight dispatcher (an `AtomicUsize` per worker)
+      (never a busy poll). It waits on a **third** thing as well: a timer at the next deadline,
+      because a resident run's wall clock has to be enforceable while nothing at all is executing.
+      That replaces phase 1's `unwind_expired`, which the token makes moot.
+- [x] Per-worker job channels with a least-inflight dispatcher (an `AtomicUsize` per worker)
       replacing the shared `Mutex<Receiver>`, so admission is load-aware and needs no MPMC
       dependency.
-- [ ] `max_inflight` per worker (default 256), with the overflow queued exactly as now.
-- [ ] Caller side: `CodeRuntime::run`'s serving loop keeps in-flight host calls in a
+- [x] `max_inflight` per worker (default 256), with the overflow queued exactly as now
+      (`CodeRuntime::with_workers_and_inflight`; the `DenoEvaluator` knob is phase 5's).
+- [x] Caller side: `CodeRuntime::run`'s serving loop keeps in-flight host calls in a
       `FuturesUnordered` instead of awaiting each inline, so a body's `Promise.all([…])` issues
       its queries **in parallel**. Borrowed host, no spawn, no `'static` requirement.
-- [ ] Test: on a **one-worker** pool, 200 runs against a fake host that sleeps 50 ms each
+- [x] Test: on a **one-worker** pool, 200 runs against a fake host that sleeps 50 ms each
       complete in ~one round trip's order of magnitude, and the host records ≥ 100 calls in
       flight at once.
-- [ ] Test: runs do not leak into each other — 50 concurrent runs with distinct bindings each
+- [x] Test: runs do not leak into each other — 50 concurrent runs with distinct bindings each
       assert their own values, and one run exhausting its call budget leaves the others' budgets
       untouched.
-- [ ] Test: a code body whose `.insert()` fires a second `run_js_code` trigger completes on a
+- [x] Test: a code body whose `.insert()` fires a second `run_js_code` trigger completes on a
       one-worker pool. This is the deadlock the milestone removes, and it deserves a test that
       would have failed before it.
+
+*Deviation:* the watchdog is still one instrument per isolate, armed at the earliest JS deadline
+any resident run has — a faithful generalisation of phase 1's single window, with the same
+pause across each host call. So a run that does not yield still terminates its co-residents,
+whether it spins (`while (true) {}`) or simply never reaches an `await`. Phase 3's slice is what
+fixes that, because a slice is armed for the *currently running* token rather than for every
+resident one; splitting the clocks, attributing the overrun and sparing the co-residents is
+where the milestone already puts it. Multiplexing also needed one
+thing phase 2's list does not mention: `deno_core` halts the event loop on an **unhandled promise
+rejection**, which with runs resident is every body punished for one body's dropped `db` call, so
+the isolate now installs a handler that says such a rejection is handled (a run's own failure never
+arrives that way — `__scRun` attaches a rejection handler to the body's promise).
 
 ## Phase 3 — The two clocks and the runaway
 

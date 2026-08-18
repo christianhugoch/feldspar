@@ -2,6 +2,67 @@
 
 Changes in reverse chronological order.
 
+## Many code bodies per isolate
+
+Making `db` awaitable took the *thread* out of a host call. This takes the *isolate* out of a run:
+one isolate now serves hundreds of code bodies at the same time, and the number of `run_js_code`
+requests this server can answer at once stopped being the size of the isolate pool.
+
+A run used to be what the isolate was doing. It is now an **entry in a table**, keyed by a token
+minted per run — 128 bits from the operating system, bound as a `const` in that run's own function
+scope, which the prelude closes over and sends with every plan. Random rather than an index on
+purpose: two resident runs may carry different authority (`db.asUser()` delegates to *this*
+event's caller), so a body that could name another run's token could ask the database questions in
+that caller's name. A token that names nothing is a named error — *"this database call belongs to a
+code run that has already finished"* — which is also what an abandoned continuation resuming after
+its run was answered now gets, in place of the unwind-before-the-next-job dance the previous phase
+needed.
+
+Which moves where a run ends. `execute_script` **starts** one — the body is an async function, so
+it returns at the first `await` — and the answer is delivered by a **completion op**, `__scDone`
+with the JSON text of the result or `__scFail` with `e.stack`, once the event loop has carried the
+body to it. The run's oneshot lives in its table entry rather than in the worker's loop, because
+the loop no longer waits for one run. A syntax error still surfaces synchronously from the call.
+
+The worker is one `block_on` around a loop that waits on three things at once: the isolate's
+**event loop**, which advances every resident run; the **job channel**, which admits new ones
+without waiting for the resident ones to finish; and a **timer** at the next deadline, which is
+what notices a run's wall clock while every run is suspended and nothing is executing. It parks on
+the channel when nothing is resident, so an idle worker still costs nothing. Dispatch is
+least-outstanding across per-worker channels (an `AtomicUsize` each) in place of the shared
+`Mutex<Receiver>`, so a job goes to the worker with room rather than to whichever one happened to
+be waiting.
+
+`CodeRuntime::run` serves a run's host calls in a `FuturesUnordered` instead of awaiting each
+inline, so a body's `Promise.all([…])` issues its queries in parallel for real. The host is still
+borrowed, with no spawn and no `'static` requirement.
+
+Occupancy is what is bounded now that threads are not: each resident run holds its scope, its
+bindings and a capped read in the V8 heap, so a worker admits at most 256 runs
+(`CodeRuntime::with_workers_and_inflight`) and the rest queue exactly as they did when the number
+was one — with the queue time still inside the run's own deadline. Past that the ceiling is the
+database connection pool, which is where it belongs and already bounds itself.
+
+**The deadlock is gone.** A body whose `.insert()` fires a second `run_js_code` trigger completes
+on a **one-worker** pool, which has a test that would have failed before this. Two more measure
+what the milestone claims: 200 bodies on one isolate, each a read and a write against a host that
+takes 50 ms a call, finish in seconds rather than the 20 the serialised version would need — with
+the fake host recording over a hundred calls in flight at the same instant, because a fast wall
+clock could be a fast host while a hundred outstanding calls can only be concurrency. And 50
+concurrent runs with distinct bindings each answer their own values, with one run exhausting its
+call budget leaving the others' untouched.
+
+One thing multiplexing had to be taught: an unhandled promise rejection halts `deno_core`'s event
+loop, which with runs resident is every body punished for one body's dropped `db` call. A run's own
+failure never arrives that way — `__scRun` attaches a rejection handler to the body's promise — so
+the isolate now says such a rejection is handled and means it.
+
+The watchdog is the honest gap. It is still one instrument for the whole isolate, armed at the
+earliest JS deadline any resident run has, so a body that spins without yielding still takes its
+co-residents down with it. Splitting the wall clock from a JS slice, naming the body that actually
+overran, and re-queueing only the co-residents that provably have no side effects yet, is the next
+phase.
+
 ## `db` is awaitable
 
 `run_js_code`'s `db` was synchronous, and that bought correctness with the one currency a server

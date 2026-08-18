@@ -56,7 +56,7 @@ pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 pub use code::CodeRuntime;
 pub use code::{
     CodeCall, CodeHost, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS, DEFAULT_MAX_HOST_CALLS,
-    MAX_CODE_TIMEOUT,
+    DEFAULT_MAX_INFLIGHT, MAX_CODE_TIMEOUT,
 };
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;
