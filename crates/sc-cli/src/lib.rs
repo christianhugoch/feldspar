@@ -2,14 +2,20 @@
 //!
 //! The binary ([`main`](../main/index.html)) stays thin; the reusable pieces —
 //! parsing the database connection ([`DbConfig`]), reading the per-environment
-//! configuration file ([`config_file`]), parsing the `api` commands' flags
+//! configuration file (`sc-config-file`, re-exported here as [`config_file`]),
+//! parsing the `api` commands' flags
 //! ([`api`]) and standing up a connected [`Catalog`] ([`connect_catalog`]) —
 //! live here so integration tests can drive the same boot path the CLI uses.
 
 pub mod api;
 pub mod auth;
-pub mod config_file;
 pub mod db;
+
+/// The `saltcorn.toml` reader. It lives in its own layer-0 crate because the
+/// integration-test harness reads the same file (for the `test` environment),
+/// and the harness cannot depend on the binary that sits at the top of the
+/// workspace.
+pub use sc_config_file as config_file;
 
 use std::sync::Arc;
 

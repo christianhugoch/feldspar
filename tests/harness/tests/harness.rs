@@ -1,7 +1,8 @@
 //! Integration tests for the test harness itself, run against a real Postgres.
 //!
-//! These require a reachable Postgres (from `DATABASE_URL`, or the local
-//! default). They are the reference for how downstream crates use the harness.
+//! These require a reachable Postgres — from `DATABASE_URL`, from the `test`
+//! environment of `saltcorn.toml`, or the local default. They are the reference
+//! for how downstream crates use the harness.
 
 use sc_test_harness::TestDb;
 

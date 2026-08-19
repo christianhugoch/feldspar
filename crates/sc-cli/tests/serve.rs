@@ -18,33 +18,12 @@ use sc_server::{AppMounts, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use tower::ServiceExt;
 
-/// Matches the harness fallback so a bare `cargo test` works in CI.
-const DEFAULT_URL: &str = "postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test";
-
-/// Build a connection URL for the per-test database by replacing the database
-/// name in the base `DATABASE_URL` (which the harness also reads).
-fn url_for(db: &TestDb) -> String {
-    let base = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
-    // Strip any query string, then replace the final `/dbname` path segment.
-    let (authority_and_path, query) = match base.split_once('?') {
-        Some((head, q)) => (head, Some(q)),
-        None => (base.as_str(), None),
-    };
-    let cut = authority_and_path.rfind('/').expect("URL has a path");
-    let mut url = format!("{}/{}", &authority_and_path[..cut], db.name());
-    if let Some(q) = query {
-        url.push('?');
-        url.push_str(q);
-    }
-    url
-}
-
 #[tokio::test]
 async fn serve_boots_against_a_db_and_answers_health() -> sc_error::Result<()> {
     let db = TestDb::new().await?;
 
     // The full CLI boot path: parse a URL, connect, init the catalog, bootstrap.
-    let cfg = DbConfig::from_url(url_for(&db));
+    let cfg = DbConfig::from_url(db.url());
     let catalog = connect_catalog(&cfg).await?;
 
     // The users table now exists (bootstrap ran as part of connect_catalog).
@@ -117,7 +96,7 @@ async fn connect_to_an_unreachable_database_fails_loudly() {
 #[tokio::test]
 async fn boot_connects_stored_stores_and_refuses_a_flag_that_shadows_one() -> sc_error::Result<()> {
     let db = TestDb::new().await?;
-    let cfg = DbConfig::from_url(url_for(&db));
+    let cfg = DbConfig::from_url(db.url());
     let catalog = connect_catalog(&cfg).await?;
 
     // `connect_catalog` bootstraps the file-stores table alongside the others,

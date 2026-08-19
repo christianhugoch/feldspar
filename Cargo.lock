@@ -3684,6 +3684,7 @@ dependencies = [
  "sc-auth",
  "sc-catalog",
  "sc-config",
+ "sc-config-file",
  "sc-db",
  "sc-db-postgres",
  "sc-error",
@@ -3694,11 +3695,9 @@ dependencies = [
  "sc-server",
  "sc-test-harness",
  "sc-types",
- "serde",
  "serde_json",
  "tokio",
  "tokio-postgres",
- "toml",
  "tower",
  "uuid",
 ]
@@ -3719,6 +3718,15 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+]
+
+[[package]]
+name = "sc-config-file"
+version = "0.1.0"
+dependencies = [
+ "sc-error",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -3957,6 +3965,7 @@ name = "sc-test-harness"
 version = "0.1.0"
 dependencies = [
  "deadpool-postgres",
+ "sc-config-file",
  "sc-error",
  "tokio",
  "tokio-postgres",

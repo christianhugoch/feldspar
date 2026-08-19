@@ -43,9 +43,9 @@ uuid.workspace = true
 chrono.workspace = true
 sc-query.workspace = true
 # The `saltcorn.toml` configuration file: named environments, each with one set
-# of database connection parameters (`config_file.rs`).
-serde.workspace = true
-toml.workspace = true
+# of database connection parameters. It is its own crate because the
+# integration-test harness reads the same file.
+sc-config-file.workspace = true
 
 [dev-dependencies]
 # The end-to-end test presents the session this command writes to a real running

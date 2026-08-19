@@ -2,35 +2,16 @@
 //! `saltcorn.toml` with a `test` environment, `--environment test` on the command
 //! line, and the boot path connecting to the database that file names.
 //!
-//! The unit tests in `src/config_file.rs` and `src/db.rs` cover the parsing and
-//! the precedence rules. This one covers the thing neither can: that what comes
-//! out of the file is actually what gets connected — and, because the suite runs
-//! with `DATABASE_URL` set to a *different* database, that naming an environment
-//! really does outrank the ambient variables rather than merely claiming to.
+//! The unit tests in `sc-config-file` and `src/db.rs` cover the parsing and the
+//! precedence rules. This one covers the thing neither can: that what comes out
+//! of the file is actually what gets connected — and, because the fixture names
+//! a *different* database from the one the ambient environment points at, that
+//! naming an environment really does outrank the ambient variables rather than
+//! merely claiming to.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use sc_cli::{DbConfig, connect_catalog};
 use sc_test_harness::TestDb;
-
-/// Matches the harness fallback so a bare `cargo test` works in CI.
-const DEFAULT_URL: &str = "postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test";
-
-/// Build a connection URL for the per-test database by replacing the database
-/// name in the base `DATABASE_URL` (which the harness also reads).
-fn url_for(db: &TestDb) -> String {
-    let base = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
-    let (authority_and_path, query) = match base.split_once('?') {
-        Some((head, q)) => (head, Some(q)),
-        None => (base.as_str(), None),
-    };
-    let cut = authority_and_path.rfind('/').expect("URL has a path");
-    let mut url = format!("{}/{}", &authority_and_path[..cut], db.name());
-    if let Some(q) = query {
-        url.push('?');
-        url.push_str(q);
-    }
-    url
-}
 
 /// A `saltcorn.toml` on disk for the duration of one test.
 struct Fixture(std::path::PathBuf);
@@ -83,7 +64,7 @@ url = "postgres://saltcorn:secret@127.0.0.1:1/staging"
 [environments.test]
 url = "{}"
 "#,
-            url_for(&db)
+            db.url()
         ),
     );
 
@@ -113,10 +94,9 @@ url = "{}"
     let catalog = connect_catalog(&cfg).await?;
     assert!(catalog.get(sc_auth::USERS_TABLE)?.is_some());
 
-    // ...in *this* database. The suite runs with `DATABASE_URL` pointing at the
-    // harness's maintenance database, so a `users` table here — created by the
-    // bootstrap above, against a database whose name only the file knew — is the
-    // proof that the named environment beat the ambient variable.
+    // ...in *this* database. Nothing in the environment names it — only the
+    // fixture does — so a `users` table here, created by the bootstrap above, is
+    // the proof that the named environment decided the connection.
     let client = db.client().await?;
     let row = client
         .query_one(
@@ -140,7 +120,7 @@ async fn an_environment_given_as_parts_connects_just_like_a_url() -> sc_error::R
     // The same database, described the way an operator who does not want a URL
     // in the file would describe it: as parts. They are read back out of the
     // base connection string so this works on any machine the suite runs on.
-    let base: tokio_postgres::Config = url_for(&db).parse().map_err(|e| {
+    let base: tokio_postgres::Config = db.url().parse().map_err(|e| {
         sc_error::Error::config(format!(
             "could not parse the harness connection string: {e}"
         ))

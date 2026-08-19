@@ -52,6 +52,9 @@ saltcorn/
 ├─ Cargo.toml                     # workspace
 ├─ crates/
 │  ├─ sc-error/                   # 0. error type, Result alias, no-silent-failure helpers
+│  ├─ sc-config-file/             # 0. `saltcorn.toml`: named environments (connection +
+│  │                              #    serving parameters). Read by the binary and, for its
+│  │                              #    `test` environment, by the integration-test harness
 │  ├─ sc-query/                   # 1. universal query language (enum AST) + SQL rendering trait
 │  ├─ sc-bus/                     # 1. message bus trait + drivers (pg NOTIFY, in-proc, redis…)
 │  ├─ sc-db/                      # 2. DatabaseDriver trait, connection, migrations, tx
@@ -3943,6 +3946,18 @@ collaboration, and server-driven UI pushes.
 **Testing (principle 4).** Integration tests run against a **real Postgres** that is
 reinitialised before each test. MVP test targets: table creation, field creation,
 initialising the catalog against existing tables, row CRUD, user create/login/logout.
+
+The harness (`tests/harness`) creates one database per test from a maintenance connection and
+drops it on teardown. **Where that connection comes from is the same question the server
+asks**, so it is answered out of the same file: `DATABASE_URL` first (what CI sets), then the
+`test` environment of `saltcorn.toml` (§2's `sc-config-file`, which exists as its own layer-0
+crate for exactly this reason — the harness cannot depend on `sc-cli`, which is layer 10),
+then a local default. The section may also carry `test_template`, the database each per-test
+database is cloned from, overridden by `SC_TEST_TEMPLATE`; a machine whose `template1` has a
+stale collation version cannot `CREATE DATABASE` without one. The point is that a developer
+writes their machine's parameters down **once**, where `saltcorn serve` already reads them,
+and `cargo test` needs no environment at all — while CI, which has an environment and no
+file, is unaffected.
 
 **Target platforms.** Linux, macOS, Windows, FreeBSD — constrains dependency choices,
 especially the cross-platform xattr library and the native code adapters.

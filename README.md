@@ -240,6 +240,7 @@ url = "postgres://saltcorn:change-me@staging.internal:5432/saltcorn"
 
 [environments.test]
 database = "saltcorn_test"
+test_template = "sc_template"   # read by `cargo test`, not by the server
 ```
 
 ```bash
@@ -250,7 +251,10 @@ saltcorn serve --environment test
 
 `environments` is an ordinary table: define as many as you have databases, named
 whatever you like. With no `default_environment` and nothing named on the command
-line, the environment used is `production`.
+line, the environment used is `production`. The `test` environment has one extra
+reader: the integration-test harness takes its connection (and `test_template`)
+from there, so a developer machine needs no test-specific environment variables —
+see "For developers" below.
 
 | Flag | Environment fallback | Meaning |
 |---|---|---|
@@ -497,10 +501,32 @@ cargo test --workspace
 ```
 
 Integration tests run against a **real Postgres**, reinitialised per test. Point
-them at a database with `DATABASE_URL` (the same variable the server uses); CI uses
-`postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test` against a
-`postgres:16` service. See [`docs/TECHNICAL_DESIGN.md`](docs/TECHNICAL_DESIGN.md)
-§16 for the testing approach.
+them at a database in either of two ways:
+
+- `DATABASE_URL` (the same variable the server uses). CI sets
+  `postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test` against a
+  `postgres:16` service.
+- the `test` environment of `saltcorn.toml` — the same file `saltcorn serve`
+  reads, on the same search paths. Written down there once, `cargo test` needs no
+  environment at all; `DATABASE_URL` still overrides it when set.
+
+```toml
+[environments.test]
+host = "/var/run/postgresql"     # a leading `/` is a Unix socket directory
+user = "dev"
+database = "saltcorn_test"       # only ever the maintenance connection
+test_template = "sc_template"    # optional: what per-test databases are cloned from
+```
+
+The named database is only the connection per-test databases are **created and
+dropped from** — no test writes to it. `test_template` (or `SC_TEST_TEMPLATE`,
+which overrides it) names the database each per-test database is cloned from; it
+must be **empty**, since every test inherits whatever is in it. Leave it unset,
+as CI does, to use Postgres's own `template1`; set it on a machine whose
+`template1` has a stale collation version, which makes `CREATE DATABASE` fail.
+
+See [`docs/TECHNICAL_DESIGN.md`](docs/TECHNICAL_DESIGN.md) §16 for the testing
+approach.
 
 ### Build resource use
 

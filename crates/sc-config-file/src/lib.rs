@@ -24,6 +24,7 @@
 //!
 //! [environments.test]
 //! database = "saltcorn_test"
+//! test_template = "saltcorn_template"
 //! ```
 //!
 //! An environment is a **deployment**, not only a connection string, so a
@@ -61,6 +62,18 @@
 //! not define is an error listing the ones it does. The one deliberately quiet
 //! path is *no file at all*, which is not a misconfiguration — it is the
 //! environment-variable deployment this file exists alongside.
+//!
+//! **Two readers, not one.** The `saltcorn` binary reads it to know where the
+//! primary database is; the integration-test harness reads the `test`
+//! environment to know which database it may create its per-test databases from,
+//! and which template to clone them out of ([`Environment::test_template`]).
+//! That is why the reader is a layer-0 crate of its own rather than a module of
+//! `sc-cli`: a `cargo test` on a developer's machine should need no environment
+//! variables that a `saltcorn serve` on the same machine does not.
+//!
+//! Not to be confused with `sc-config`, which is the `_sc_config` **table** —
+//! the settings an admin edits in the running server. This crate is the file on
+//! disk that says which database those settings live in.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -138,6 +151,16 @@ pub struct Environment {
     /// name says what it does to cookies and which equally decides whether an
     /// application's URL is `https`.
     pub secure_cookies: Option<bool>,
+    /// The database the integration-test harness clones each of its per-test
+    /// databases from. Only the test environment has any use for it.
+    ///
+    /// It is here rather than in the harness because it is a property of *this
+    /// machine's* Postgres, exactly like the connection parameters beside it: a
+    /// box whose `template1` carries a stale collation version cannot
+    /// `CREATE DATABASE` at all, and names an empty database it owns instead.
+    /// Unset means the server default (`template1`), which is what a clean CI
+    /// Postgres wants.
+    pub test_template: Option<String>,
 }
 
 impl Environment {
@@ -211,7 +234,7 @@ pub struct SelectedEnvironment {
     /// Whether the operator *named* this environment (`--environment` or
     /// [`ENVIRONMENT_VAR`]) rather than falling into it by default. This is what
     /// decides whether the file outranks the ambient `PG*`/`DATABASE_URL`
-    /// variables — see [`crate::db::DbConfig`].
+    /// variables — see `sc_cli::db::DbConfig`.
     pub explicit: bool,
     /// The connection parameters.
     pub section: Environment,
@@ -423,6 +446,7 @@ url = "postgres://sc:pw@staging:5432/sc"
 
 [environments.test]
 database = "saltcorn_test"
+test_template = "saltcorn_template"
 "#;
 
     fn parse(text: &str) -> Result<ConfigFile> {
@@ -449,6 +473,20 @@ database = "saltcorn_test"
         assert_eq!(
             file.environments["test"].database.as_deref(),
             Some("saltcorn_test")
+        );
+    }
+
+    #[test]
+    fn the_test_environment_may_name_a_template_database() {
+        let file = parse(SAMPLE).expect("parse");
+        assert_eq!(
+            file.environments["test"].test_template.as_deref(),
+            Some("saltcorn_template"),
+            "the harness reads this key; it must survive the round trip"
+        );
+        assert!(
+            file.environments["production"].test_template.is_none(),
+            "an environment that does not name one leaves it unset"
         );
     }
 

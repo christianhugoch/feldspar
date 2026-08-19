@@ -2,6 +2,53 @@
 
 Changes in reverse chronological order.
 
+## The test harness reads `saltcorn.toml`
+
+`cargo test` on a developer's machine needed two environment variables — `DATABASE_URL` and
+`SC_TEST_TEMPLATE` — that said exactly what `~/.config/saltcorn/saltcorn.toml` already said,
+in a `[environments.test]` section written down for the purpose. Forget to export them and the
+suite went looking for `postgres://saltcorn:saltcorn@localhost:5432/…`, which is CI's Postgres
+and nobody's laptop. The harness now reads that file:
+
+```toml
+[environments.test]
+host = "/var/run/postgresql"     # a leading `/` is a Unix socket directory
+user = "dev"
+database = "saltcorn_test"
+test_template = "sc_template"
+```
+
+and `cargo test --workspace` needs no environment at all.
+
+**The environment still wins, per setting.** `DATABASE_URL` outranks the file's connection and
+`SC_TEST_TEMPLATE` outranks its `test_template`, which is how CI runs unchanged: a clean
+postgres:16, a variable, no file. That order is the opposite of the one `--environment NAME`
+imposes on the server (§ the configuration file), and deliberately so — naming an environment
+is an instruction a person just typed, while a test run names nothing.
+
+`test_template` is new, and is the file's half of the reason the harness reads a file at all: it
+names the database each per-test database is cloned from. It is a property of *this machine's*
+Postgres, exactly like the host beside it — a box whose `template1` carries a stale glibc
+collation version cannot `CREATE DATABASE` at all and must clone an empty database it owns
+instead — so it belongs where that machine's parameters already live. Unset means Postgres's own
+`template1`, which is what CI wants.
+
+**The reader moved to its own crate**, `sc-config-file` (layer 0), out of `sc-cli::config_file`,
+which is now a re-export of it so nothing that used it had to change. It moved because the
+harness is the second reader and cannot depend on the binary at the top of the workspace; the
+file was never `sc-cli`'s in the first place, it is the deployment's. Not to be confused with
+`sc-config`, which is the `_sc_config` *table*: this crate is the file on disk that says which
+database that table lives in.
+
+Two smaller things fell out. The harness gained `TestDb::url()`, a connection string for the
+per-test database rendered from whatever the base connection resolved to — four integration
+suites had each written their own "replace the database name in `DATABASE_URL`" helper, and all
+four now ask the harness. It spells a Unix socket the way libpq does (an empty authority and
+`?host=/the/dir`) rather than as a `host=` parameter beside a `localhost` authority, which
+parses as *two* hosts and connects over whichever answers first. And naming a section that the
+file does not define (`SC_TEST_ENVIRONMENT`) is an error listing the ones it does, rather than a
+quiet fall-through to the default connection; no file at all stays quiet, because that is CI.
+
 ## `fetch` in a code body
 
 A `run_js_code` body could read and write every table on the server and could not call a single

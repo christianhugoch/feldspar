@@ -114,7 +114,7 @@ async fn setup() -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
     // Neutralise any `users` table inherited from the template database before
     // bootstrap introspects: a stray one in another schema would be found and
     // `sc_auth::bootstrap` would skip creating the real one. A no-op against a
-    // clean template, which is what `SC_TEST_TEMPLATE` should point at.
+    // clean template, which is what the configured test template should be.
     db.client()
         .await?
         .batch_execute(

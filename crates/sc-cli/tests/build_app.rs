@@ -19,25 +19,6 @@ use sc_files::LocalFileStore;
 use sc_test_harness::TestDb;
 use sc_types::{BasicType, TypeRef};
 
-/// Matches the harness fallback so a bare `cargo test` works in CI.
-const DEFAULT_URL: &str = "postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test";
-
-/// A connection URL for the per-test database.
-fn url_for(db: &TestDb) -> String {
-    let base = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
-    let (authority_and_path, query) = match base.split_once('?') {
-        Some((head, q)) => (head, Some(q)),
-        None => (base.as_str(), None),
-    };
-    let cut = authority_and_path.rfind('/').expect("URL has a path");
-    let mut url = format!("{}/{}", &authority_and_path[..cut], db.name());
-    if let Some(q) = query {
-        url.push('?');
-        url.push_str(q);
-    }
-    url
-}
-
 /// A scratch directory removed when the guard drops.
 struct TempDir(PathBuf);
 
@@ -94,7 +75,11 @@ fn without_a_subdomain_it_says_what_it_wanted() {
     assert!(!ok);
     assert!(stderr.contains("subdomain"), "{stderr}");
     // A flag in the subdomain's place is the same mistake, not a database error.
-    let (ok, _, stderr) = build_app(&["--database-url", DEFAULT_URL]);
+    // The URL is never connected — the argument check comes first.
+    let (ok, _, stderr) = build_app(&[
+        "--database-url",
+        "postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test",
+    ]);
     assert!(!ok);
     assert!(stderr.contains("subdomain"), "{stderr}");
 }
@@ -104,9 +89,9 @@ async fn an_unknown_subdomain_is_reported_as_such() -> sc_error::Result<()> {
     let db = TestDb::new().await?;
     // Bootstrap the tables so the failure is genuinely "no such app" rather than
     // "no such table".
-    connect_catalog(&DbConfig::from_url(url_for(&db))).await?;
+    connect_catalog(&DbConfig::from_url(db.url())).await?;
 
-    let (ok, _, stderr) = build_app(&["nosuchapp", "--database-url", &url_for(&db)]);
+    let (ok, _, stderr) = build_app(&["nosuchapp", "--database-url", &db.url()]);
     assert!(!ok);
     assert!(stderr.contains("nosuchapp"), "{stderr}");
     Ok(())
@@ -121,7 +106,7 @@ async fn it_builds_a_scaffolded_app_and_prints_the_tool_output() -> sc_error::Re
 
     let db = TestDb::new().await?;
     let tmp = TempDir::new("ok")?;
-    let catalog = connect_catalog(&DbConfig::from_url(url_for(&db))).await?;
+    let catalog = connect_catalog(&DbConfig::from_url(db.url())).await?;
 
     // The tutorial's data model and application, set up through the library, then
     // handed to the *binary* to build.
@@ -157,7 +142,7 @@ async fn it_builds_a_scaffolded_app_and_prints_the_tool_output() -> sc_error::Re
     let (ok, stdout, stderr) = build_app(&[
         "todo",
         "--database-url",
-        &url_for(&db),
+        &db.url(),
         "--file-store",
         &store_flag,
     ]);
