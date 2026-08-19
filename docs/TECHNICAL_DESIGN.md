@@ -52,6 +52,7 @@ saltcorn/
 ├─ Cargo.toml                     # workspace
 ├─ crates/
 │  ├─ sc-error/                   # 0. error type, Result alias, no-silent-failure helpers
+│  ├─ sc-log/                     # 0. structured logging + the error log sink
 │  ├─ sc-config-file/             # 0. `saltcorn.toml`: named environments (connection +
 │  │                              #    serving parameters). Read by the binary and, for its
 │  │                              #    `test` environment, by the integration-test harness
@@ -64,6 +65,7 @@ saltcorn/
 │  ├─ sc-expr/                    # 3. ownership-formula language: parse/analyse/validate,
 │  │                              #    symbolic (→ sc-query::Expr) + reified (deno_core) eval
 │  ├─ sc-catalog/                 # 4. Catalog, Table, Field, TableProvider trait, cache
+│  ├─ sc-config/                  # 5. `_sc_config`: declared settings, validation, ACME cache
 │  ├─ sc-auth/                    # 5. User, Role, authz (ACL/RLS), sessions, OAuth2 provider
 │  ├─ sc-code/                    # 5. code adapters (JS via a JS engine, Python via CPython)
 │  ├─ sc-files/                   # 5. FileStore trait, drivers (local, S3, git), xattr metadata
@@ -99,6 +101,95 @@ saltcorn/
 ├─ plugins/                       # first-party plugins (may be JS or Rust)
 └─ tests/                         # cross-crate integration tests (real Postgres)
 ```
+
+The dependency graph of the crates that exist today. **An arrow points from a crate to a
+crate it depends on**, so every arrow runs from a higher layer to a lower one and the graph is
+acyclic by construction. Arrows implied by transitivity are omitted — the picture is the
+*transitive reduction*, so `sc-server → sc-catalog` is real but not drawn; it is reached through
+`sc-core-actions → sc-api → sc-auth → sc-catalog`. That is worth remembering when a box looks
+sparser than it is — `sc-action` also depends directly on `sc-catalog`, `sc-db`, `sc-expr` and
+`sc-types`, all of which the one drawn arrow to `sc-email` already implies. The full
+direct-dependency lists follow the diagram.
+
+```mermaid
+graph TD
+  cli["sc-cli"] --> server["sc-server"]
+  cli --> cfgfile["sc-config-file"]
+  server --> coreact["sc-core-actions"]
+  server --> coretraits["sc-core-traits"]
+  server --> pg["sc-db-postgres"]
+  coretraits --> agent["sc-agent"]
+  coretraits --> app["sc-app"]
+  coreact --> api["sc-api"]
+  app --> api
+  agent --> action["sc-action"]
+  agent --> auth["sc-auth"]
+  agent --> llm["sc-llm"]
+  api --> action
+  api --> auth
+  action --> email["sc-email"]
+  email --> config["sc-config"]
+  config --> catalog["sc-catalog"]
+  auth --> catalog
+  llm --> catalog
+  catalog --> db["sc-db"]
+  catalog --> expr["sc-expr"]
+  catalog --> files["sc-files"]
+  pg --> db
+  db --> query["sc-query"]
+  expr --> query
+  files --> types["sc-types"]
+  types --> query
+  query --> error["sc-error"]
+  log["sc-log"] --> error
+  cfgfile --> error
+```
+
+The complete direct dependencies, in layer order (dev-dependencies excluded):
+
+| Crate | Depends directly on |
+|---|---|
+| `sc-error` | — (nothing) |
+| `sc-log` | `sc-error` |
+| `sc-config-file` | `sc-error` |
+| `sc-query` | `sc-error` |
+| `sc-types` | `sc-error` `sc-query` |
+| `sc-db` | `sc-error` `sc-query` |
+| `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
+| `sc-expr` | `sc-error` `sc-query` |
+| `sc-files` | `sc-error` `sc-types` |
+| `sc-catalog` | `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-email` | `sc-catalog` `sc-config` `sc-error` |
+| `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
+| `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
+| `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
+| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-types` |
+| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` |
+
+Three things the graph is worth reading for:
+
+- **`sc-db-postgres` is depended on by exactly two crates**, `sc-server` and `sc-cli`, and only
+  to *construct* the driver at startup. Everything between them and the database talks to the
+  `DatabaseDriver` trait in `sc-db`, which is what makes a second driver a matter of adding a
+  crate rather than editing the middle of the stack.
+- **`sc-core-actions` and `sc-core-traits` sit above `sc-api`/`sc-app`, not beside `sc-action`
+  and `sc-agent`.** The built-in action set and the built-in agent traits are *users* of the row
+  layer, not part of it — a trigger's write goes through the same path an HTTP request does
+  (§10.1, §11.3), so they must be above everything that path touches.
+- **`sc-expr` is reachable only through `sc-catalog`** and depends on nothing but `sc-query` (and
+  `sc-error`). That is the deliberate cut described below: the formula language knows the query
+  AST it compiles into and nothing about tables.
+
+Crates planned in the tree above but **not yet created**: `sc-bus`, `sc-db-sqlite`, `sc-code`,
+`sc-fieldview`, `sc-viewpattern`, `sc-workflow`, `sc-model`, `sc-copilot`. `sc-test-harness`
+(under `tests/`) is a dev-dependency of most crates and depends only on `sc-config-file` and
+`sc-error`; it is left out of the graph because a dev-only edge is not part of the layering.
 
 Notes:
 
@@ -948,6 +1039,176 @@ does, and re-projects the API providers of any mounted application exposing the 
 restart. The overlay is only consulted when its table exists in the database: bootstrap creates
 the overlay tables *through* `create_table`, which reloads, so a reload that assumed them present
 could never bootstrap them.
+
+
+### 9.2 Entity relationships
+
+The metadata tables **as they exist today** — the ones a bootstrap actually creates. Read the
+diagram with one caveat in mind, because it is the whole character of this schema: **almost none
+of these relationships is a database foreign key.**
+
+```mermaid
+erDiagram
+  ROLES["_sc_roles"] {
+    uuid id PK
+    int role UK "1..=100; the number authz compares"
+    text name UK
+    text description
+    json attributes
+  }
+  USERS["users"] {
+    uuid id PK
+    int role FK "-> _sc_roles.role, a real REFERENCES"
+    text email UK
+    text password_hash "argon2; nullable"
+    bool disabled
+  }
+  SESSIONS["_sc_sessions"] {
+    text token_hash PK "SHA-256 of the cookie token"
+    uuid user_id "deliberately NOT a foreign key"
+    timestamp expires_at
+  }
+  TABLES["_sc_tables"] {
+    uuid id PK
+    text name UK "the physical table it overlays"
+    text label
+    text description
+    int min_role_read
+    int min_role_write
+    json attributes
+  }
+  FIELDS["_sc_fields"] {
+    uuid id UK
+    text table_name PK "composite PK with name"
+    text name PK
+    text label
+    text description
+    text type "rich type name"
+    text kind "Plain | Key | File"
+    json attributes "kind parameters, incl. target_table"
+  }
+  TRIGGERS["_sc_triggers"] {
+    uuid id PK
+    text name UK
+    text description
+    text event
+    text channel "table name for table events"
+    text only_if
+    text action
+    json configuration
+    int min_role
+    json attributes "enabled, periodic timing"
+    timestamp last_run_at "written only by the scheduler"
+  }
+  AGENTS["_sc_agents"] {
+    uuid id PK
+    text name UK
+    text description
+    text provider "-> _sc_llm_providers.name"
+    text model
+    text system_prompt
+    json traits "enabled traits + their configuration"
+    int min_role
+    json attributes
+  }
+  LLM["_sc_llm_providers"] {
+    uuid id PK
+    text name UK
+    text description
+    text backend "openai_responses | anthropic"
+    json config "api_key is a redacted secret"
+    json attributes
+  }
+  STORES["_sc_file_stores"] {
+    uuid id PK
+    text name UK
+    text description
+    text backend
+    json config
+    int min_role
+    json attributes
+  }
+  RUNS["_sc_runs"] {
+    uuid id PK
+    text kind "agent | workflow"
+    text subject "the agent's or workflow's name"
+    text description
+    text state
+    text error
+    json context
+    uuid user_id "nullable, NOT a foreign key"
+    json attributes
+    timestamp created_at
+    timestamp updated_at
+  }
+  APPS["_sc_applications"] {
+    uuid id PK
+    text name
+    text description
+    text subdomain UK "the routing key"
+    json framework
+    json extra_frameworks
+    json tables "array of table names"
+    json file_stores "array of store names"
+    json triggers "array of trigger names; nullable"
+    json apis "array of provider + mount"
+    json static_dirs
+    json csp
+    json attributes
+  }
+  CONFIG["_sc_config"] {
+    text key PK "declared as a FormField in sc-config"
+    json value
+  }
+  ACME["_sc_acme_cache"] {
+    text key PK "digest of domains + CA directory URL"
+    text data
+  }
+
+  ROLES ||--o{ USERS : "role -- enforced FK"
+  USERS ||--o{ SESSIONS : "user_id -- by value"
+  USERS |o--o{ RUNS : "user_id -- by value, nullable"
+  TABLES ||--o{ FIELDS : "table_name -- same subject, joined by name"
+  FIELDS }o--o| TABLES : "attributes.target_table -- Key fields"
+  LLM ||--o{ AGENTS : "provider -- by name"
+  AGENTS ||--o{ RUNS : "subject -- by name, when kind = agent"
+  TRIGGERS }o--o| TABLES : "channel -- by name, table events"
+  AGENTS }o--o{ TRIGGERS : "traits -- run_trigger tool config"
+  APPS }o--o{ TABLES : "tables[] -- by name"
+  APPS }o--o{ STORES : "file_stores[] -- by name"
+  APPS }o--o{ TRIGGERS : "triggers[] -- by name"
+```
+
+Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _sc_roles.role`
+(§7.4), which is why `bootstrap_roles` must run before the users table is created. Every other
+line is a reference *by value*, and each one is a decision rather than an omission:
+
+- **`_sc_sessions.user_id` and `_sc_runs.user_id`** are unenforced on purpose. The schema layer
+  renders no `ON DELETE` action, so a foreign key here would mean an administrator cannot delete
+  a signed-in user, and cannot delete a user who once chatted without destroying the record of
+  what happened. A session resolves by *reading* the user, so a row naming somebody who is gone
+  resolves to nobody and the expiry sweep collects it; a run is evidence, and evidence outlives
+  its subject.
+- **References by name — `_sc_agents.provider`, `_sc_runs.subject`, `_sc_triggers.channel`, and
+  the JSON name arrays in `_sc_applications`** — are by name because the name is the thing an
+  admin writes and an action configuration quotes. An id would make the configuration
+  unreadable and unportable between installations.
+- **`_sc_tables` and `_sc_fields` are overlays, not parents.** The line between them is a join on
+  `table_name`, not ownership: the subject of both rows is a *physical* table, which exists
+  whether or not either row does (§9.1). A field overlay for a table with no `_sc_tables` row is
+  normal, and both may outlive the table itself as reported orphans.
+- **`_sc_fields.attributes.target_table`** points at a table for `Key` fields, but only supplies
+  the reference when the database does not already enforce one; atop an introspected foreign key
+  the overlay adds `summary_field` and nothing else (§9.1).
+
+Note also what is *not* an entity here. There is no `_sc_constraints`: a table's unique keys,
+indexes and row constraints are database objects, introspected like the primary key (§5.1). There
+is no per-file table: file metadata lives in xattrs on disk. And `_sc_config`/`_sc_acme_cache` are
+deliberately relationship-free key/value stores — every `_sc_config` key gets its meaning from a
+`FormField` declaration in `sc-config`, not from a row pointing anywhere.
+
+Tables named in §9 that are **not yet created**: `_sc_run_traces`, `_sc_errors`, `_sc_models`,
+`_sc_model_instances`.
 
 ---
 

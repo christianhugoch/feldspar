@@ -774,3 +774,256 @@ fn the_constraints_tutorial_covers_all_four_kinds_and_their_refusals() {
         );
     }
 }
+
+/// Read one `[section]` of a `Cargo.toml`, returning the `sc-*` keys declared in
+/// it. Deliberately a line scanner rather than a TOML parse: the manifests use
+/// one dependency per line in both `sc-foo.workspace = true` and
+/// `sc-foo = { … }` spellings, and this test has no business pulling a parser in
+/// to read them.
+fn manifest_section_sc_keys(manifest: &str, section: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == format!("[{section}]");
+            continue;
+        }
+        if !inside || !trimmed.starts_with("sc-") {
+            continue;
+        }
+        let key: String = trimmed
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if !key.is_empty() {
+            keys.push(key);
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// Every crate under `crates/`, with the `sc-*` crates it depends on directly
+/// (dev-dependencies excluded — a dev-only edge is not part of the layering).
+fn workspace_dependency_graph(root: &Path) -> Vec<(String, Vec<String>)> {
+    let mut graph = Vec::new();
+    let entries =
+        fs::read_dir(root.join("crates")).unwrap_or_else(|e| panic!("missing crates/: {e}"));
+    for entry in entries.flatten() {
+        let manifest_path = entry.path().join("Cargo.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("unreadable {}: {e}", manifest_path.display()));
+        let name = manifest
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("name = \""))
+            .and_then(|l| l.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("no package name in {}", manifest_path.display()))
+            .to_owned();
+        graph.push((name, manifest_section_sc_keys(&manifest, "dependencies")));
+    }
+    graph.sort();
+    graph
+}
+
+/// The body of the `n`th fenced ```mermaid block in `doc`.
+fn mermaid_block(doc: &str, n: usize) -> String {
+    doc.split("```mermaid\n")
+        .skip(1)
+        .map(|rest| {
+            rest.split_once("```")
+                .unwrap_or_else(|| panic!("an unterminated ```mermaid block"))
+                .0
+                .to_owned()
+        })
+        .nth(n)
+        .unwrap_or_else(|| panic!("the design document has no mermaid block {n}"))
+}
+
+/// §2's crate diagram and the dependency table under it are the picture of the
+/// layering, and a picture that has drifted from `Cargo.toml` is worse than no
+/// picture: it is read and believed. So the table is checked against the
+/// manifests column for column, and every arrow in the diagram is checked to be
+/// a dependency that actually exists.
+///
+/// The diagram is the graph's *transitive reduction*, so it is asserted to be a
+/// subset of the real edges, not equal to them; the table carries the complete
+/// lists, and that is what equality is asserted on.
+#[test]
+fn the_design_crate_diagram_matches_the_workspace_manifests() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    let actual = workspace_dependency_graph(&root);
+
+    // The documented table: rows of "| `sc-x` | `sc-y` `sc-z` |".
+    let mut documented: Vec<(String, Vec<String>)> = Vec::new();
+    for line in design.lines() {
+        let Some(rest) = line.strip_prefix("| `sc-") else {
+            continue;
+        };
+        let Some((crate_cell, deps_cell)) = rest.split_once("` | ") else {
+            continue;
+        };
+        let name = format!("sc-{crate_cell}");
+        let mut deps: Vec<String> = deps_cell
+            .trim_end_matches(" |")
+            .split_whitespace()
+            .filter_map(|tok| tok.strip_prefix('`')?.strip_suffix('`').map(str::to_owned))
+            .filter(|tok| tok.starts_with("sc-"))
+            .collect();
+        deps.sort();
+        documented.push((name, deps));
+    }
+    documented.sort();
+    documented.dedup();
+
+    // `sc-test-harness` lives under `tests/`, is a dev-dependency only, and is
+    // deliberately absent from both the table and the diagram.
+    let documented: Vec<_> = documented
+        .into_iter()
+        .filter(|(name, _)| name != "sc-test-harness")
+        .collect();
+
+    assert_eq!(
+        documented, actual,
+        "§2's direct-dependency table has drifted from the workspace manifests"
+    );
+
+    // Now the arrows. Nodes are declared as `id[\"sc-name\"]`; an edge is
+    // `lhs --> rhs`, where either side may carry its declaration.
+    let graph = mermaid_block(&design, 0);
+    assert!(
+        graph.trim_start().starts_with("graph "),
+        "the first mermaid block in the design should be the crate graph"
+    );
+    let mut labels: Vec<(String, String)> = Vec::new();
+    for token in graph.split_whitespace() {
+        if let Some((id, rest)) = token.split_once("[\"")
+            && let Some(name) = rest.strip_suffix("\"]")
+        {
+            labels.push((id.to_owned(), name.to_owned()));
+        }
+    }
+    let resolve = |token: &str| -> String {
+        let id = token.split_once("[\"").map_or(token, |(id, _)| id);
+        labels
+            .iter()
+            .find(|(node, _)| node == id)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| panic!("the crate diagram uses undeclared node `{id}`"))
+    };
+
+    let mut drawn = 0usize;
+    for line in graph.lines() {
+        let parts: Vec<&str> = line.trim().split(" --> ").collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let (from, to) = (resolve(parts[0]), resolve(parts[1]));
+        let deps = actual
+            .iter()
+            .find(|(name, _)| *name == from)
+            .unwrap_or_else(|| panic!("the crate diagram draws `{from}`, which is not a crate"))
+            .1
+            .clone();
+        assert!(
+            deps.contains(&to),
+            "the crate diagram draws `{from} --> {to}`, but {from} does not depend on {to}"
+        );
+        drawn += 1;
+    }
+    assert!(drawn > 20, "the crate diagram lost most of its arrows");
+
+    // Every crate that exists is in the picture.
+    for (name, _) in &actual {
+        assert!(
+            labels.iter().any(|(_, label)| label == name),
+            "the crate diagram is missing `{name}`"
+        );
+    }
+}
+
+/// Every `_sc_*` table (and `users`) that some crate bootstraps must appear in
+/// §9.2's entity-relationship diagram. A metadata table nobody drew is one an
+/// admin discovers in `psql`, which is the failure §9 exists to prevent.
+#[test]
+fn the_er_diagram_names_every_metadata_table() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    let er = mermaid_block(&design, 1);
+    assert!(
+        er.trim_start().starts_with("erDiagram"),
+        "the second mermaid block in the design should be the ER diagram"
+    );
+
+    let mut tables: Vec<String> = Vec::new();
+    let mut sources = Vec::new();
+    collect_rust_sources(&root.join("crates"), &mut sources);
+    for path in &sources {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        for line in text.lines() {
+            // `const SOMETHING_TABLE: &str = "…";` — the `_TABLE` suffix is what
+            // separates a table's name from the query-builder's `_sc_`-prefixed
+            // column aliases, which are not tables and are not drawn.
+            let trimmed = line.trim();
+            let Some(rest) = trimmed
+                .strip_prefix("pub const ")
+                .or_else(|| trimmed.strip_prefix("const "))
+                .or_else(|| {
+                    trimmed
+                        .split_once(") const ")
+                        .filter(|(vis, _)| vis.starts_with("pub("))
+                        .map(|(_, rest)| rest)
+                })
+            else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once(": &str = \"") else {
+                continue;
+            };
+            if !name.ends_with("_TABLE") {
+                continue;
+            }
+            let Some((table, _)) = value.split_once('"') else {
+                continue;
+            };
+            if table.starts_with("_sc_") || table == "users" {
+                tables.push(table.to_owned());
+            }
+        }
+    }
+    tables.sort();
+    tables.dedup();
+    assert!(
+        tables.len() >= 13,
+        "expected the bootstrapped metadata tables, found {tables:?}"
+    );
+    for table in &tables {
+        assert!(
+            er.contains(&format!("\"{table}\"")),
+            "§9.2's ER diagram does not draw `{table}`"
+        );
+    }
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            collect_rust_sources(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}

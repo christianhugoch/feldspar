@@ -2,6 +2,39 @@
 
 Changes in reverse chronological order.
 
+## Two diagrams in the technical design
+
+`docs/TECHNICAL_DESIGN.md` described the crate layering as an indented tree and the metadata
+schema as a table of one-line descriptions. Both are lists of nodes with the edges left to the
+reader, and the edges are the part that carries the design: which crate may call which, and which
+`_sc_*` row points at which. Two mermaid diagrams now draw them.
+
+**§2 gains the crate dependency graph** — an arrow from a crate to a crate it depends on, so
+every arrow runs down a layer and the acyclicity is visible rather than asserted. The picture is
+the *transitive reduction* (28 arrows instead of 150), with the complete direct-dependency lists
+in a table under it, generated from the manifests. Three things it makes visible that the tree
+did not: `sc-db-postgres` is depended on by exactly two crates and only to construct the driver;
+`sc-core-actions`/`sc-core-traits` sit *above* `sc-api`/`sc-app` rather than beside `sc-action`
+and `sc-agent`, because a trigger's write goes through the row layer rather than around it; and
+`sc-expr` hangs off `sc-query` alone. The §2 tree also gained `sc-log` and `sc-config`, which
+exist and were never listed.
+
+**§9.2 is new: the entity-relationship diagram of the `_sc_*` tables**, with the columns each one
+actually bootstraps. Its point is the caveat rather than the boxes — **exactly one** relationship
+in it is an enforced foreign key (`users.role → _sc_roles.role`), and the section now states why
+each of the others is a reference by value: an FK on `_sc_sessions.user_id` or `_sc_runs.user_id`
+would block deleting a signed-in user and destroy the record of what happened; references by name
+(`_sc_agents.provider`, `_sc_runs.subject`, `_sc_triggers.channel`, the name arrays in
+`_sc_applications`) are by name because the name is what an admin writes into a configuration;
+and the `_sc_tables`/`_sc_fields` line is a join, not ownership — the subject of both is a
+physical table that exists whether or not either row does.
+
+**Both diagrams are tested against the code** (`repo_hygiene.rs`). The dependency table is
+compared column for column with every `crates/*/Cargo.toml`, and every arrow drawn is checked to
+be a dependency that exists; every `*_TABLE` constant in the workspace is checked to appear in
+the ER diagram. A diagram that has drifted is worse than no diagram, because it is read and
+believed, so drift fails `cargo test` instead of misleading the next reader.
+
 ## The test harness reads `saltcorn.toml`
 
 `cargo test` on a developer's machine needed two environment variables — `DATABASE_URL` and
