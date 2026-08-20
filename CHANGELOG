@@ -2,6 +2,45 @@
 
 Changes in reverse chronological order.
 
+## A Debian 13 production quick start in the README
+
+The README explained every piece of a deployment — the database, the toolchain, the UI build,
+the connection flags, the configuration file, TLS — and never put them in order. An operator
+with a fresh box had to assemble the sequence themselves, and the two things that are *not*
+inferable from the reference sections were exactly the ones nobody had written down: which user
+the server should run as, and what its systemd unit needs.
+
+**§2 is new: a start-to-finish install on Debian 13 (trixie)**, in eight steps — apt packages,
+a service account, the database, rustup and the build, `/etc/saltcorn/saltcorn.toml`, the unit,
+first user and TLS, and how to update. Everything after it is unchanged reference material and
+is now numbered one higher (the old §2–§10 are §3–§11), with the document's internal `§N`
+references moved with them.
+
+Four things in it are decisions rather than transcription:
+
+- **Peer authentication over the Unix socket** (`host = "/var/run/postgresql"`), so the service
+  account connects as itself and the deployment has no database password on disk at all. The
+  remote-database case is one line in the same file.
+- **`Type=simple`, not `notify`.** The server handles `SIGTERM` — `systemctl stop` is a graceful
+  shutdown — but sends no readiness notification yet, and a unit claiming `Type=notify` would
+  hang until systemd's timeout. A test asserts the unit does not claim it, so it becomes a
+  documented change when the notification lands.
+- **`StateDirectory=saltcorn` + `ProtectSystem=strict`**, which makes `/var/lib/saltcorn` the one
+  writable path — plus `HOME` pointed at it, because the server runs `npm` when it builds an
+  application and npm needs a cache directory it can write. The checkout in `/opt/saltcorn/src`
+  stays read-only to the service, which matters more than it looks: `cargo build` records the
+  *absolute paths* of `ui/admin/dist` and `ui/ide/dist` in the binary, so the checkout has to
+  keep existing for the admin UI and the IDE to be served with no flags.
+- **`AmbientCapabilities=CAP_NET_BIND_SERVICE`**, the alternative to running as root for ports
+  80 and 443 — which the ACME TLS-ALPN-01 challenge needs to be reachable anyway.
+
+Three tests in `crates/sc-cli/tests/repo_hygiene.rs` keep the section honest, since a README is
+the one artefact nothing else compiles: the quick start's `saltcorn.toml` is parsed by
+`sc_cli::ConfigFile` (the reader the binary uses, `deny_unknown_fields` and all) and its
+production section checked; the systemd unit is checked for the lines that are invisible until
+they are missing; and every `§N` cross-reference in the document must name a section it actually
+has, which is what the renumbering could quietly have broken.
+
 ## Two diagrams in the technical design
 
 `docs/TECHNICAL_DESIGN.md` described the crate layering as an indented tree and the metadata

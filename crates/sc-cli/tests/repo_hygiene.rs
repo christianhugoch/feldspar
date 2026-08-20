@@ -1027,3 +1027,131 @@ fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+/// The README's own section cross-references (`§7`, `§10`, …) must name a
+/// section it actually has.
+///
+/// The document is written as numbered sections that point at each other, so
+/// inserting one — §2's Debian quick start was inserted ahead of eight existing
+/// sections — renumbers every reference after it. A stale `§5` is not a broken
+/// link a reader can see through: it sends them to a section about something
+/// else. References carrying a sub-section number (`§12.1`) or sitting next to
+/// the words "design"/"TECHNICAL_DESIGN" are the *technical design's* sections,
+/// not this document's, and are left alone.
+#[test]
+fn readme_section_references_resolve() {
+    let root = workspace_root();
+    let readme = read(&root, "README.md");
+
+    let sections: Vec<u32> = readme
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .filter_map(|rest| rest.split_once(". "))
+        .filter_map(|(n, _)| n.parse().ok())
+        .collect();
+    assert!(
+        sections.len() >= 11,
+        "expected the README's numbered sections, found {sections:?}"
+    );
+
+    for (idx, _) in readme.match_indices('§') {
+        let rest = &readme[idx + '§'.len_utf8()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        // A sub-section number, or a reference the sentence attributes to the
+        // design document: not ours to resolve.
+        if rest[digits.len()..].starts_with('.') {
+            continue;
+        }
+        let context = &readme[idx.saturating_sub(60)..idx];
+        if context.contains("design") || context.contains("TECHNICAL_DESIGN") {
+            continue;
+        }
+        let number: u32 = digits.parse().expect("digits");
+        assert!(
+            sections.contains(&number),
+            "README references §{number}, which is not one of its sections {sections:?}"
+        );
+    }
+}
+
+/// The `saltcorn.toml` the Debian quick start (§2.5) tells an operator to write
+/// must parse — with the *real* reader, the one the binary uses.
+///
+/// The file is `deny_unknown_fields` precisely so that a misspelled key fails
+/// instead of quietly connecting somewhere else, which makes a sample in the
+/// README a thing that can rot into a startup error on someone's first boot.
+#[test]
+fn readme_quick_start_config_file_parses() {
+    let root = workspace_root();
+    let readme = read(&root, "README.md");
+
+    // The sample is the heredoc the quick start pipes into /etc/saltcorn.
+    let (_, after) = readme
+        .split_once("sudo tee /etc/saltcorn/saltcorn.toml >/dev/null <<'TOML'\n")
+        .expect("§2.5 should write the configuration file with a TOML heredoc");
+    let sample = after
+        .split_once("\nTOML\n")
+        .expect("the heredoc should be terminated")
+        .0;
+
+    let config = sc_cli::ConfigFile::parse(sample, Path::new("README.md#2.5"))
+        .expect("the quick start's saltcorn.toml should parse");
+    assert_eq!(config.default_environment.as_deref(), Some("production"));
+
+    let production = config
+        .environment("production", Path::new("README.md#2.5"))
+        .expect("the quick start defines a production environment");
+    // Peer authentication over the socket: a host that is a directory, a user,
+    // a database — and deliberately no password to leave lying in /etc.
+    assert_eq!(production.host.as_deref(), Some("/var/run/postgresql"));
+    assert_eq!(production.user.as_deref(), Some("saltcorn"));
+    assert_eq!(production.database.as_deref(), Some("saltcorn"));
+    assert!(production.password.is_none() && production.url.is_none());
+    // The serving half: without a base domain the server mounts no application.
+    assert!(production.base_domain.is_some());
+    assert!(production.bind.is_some());
+}
+
+/// The quick start's systemd unit has to carry the four lines that make the
+/// service work as an unprivileged one, each of which is invisible until it is
+/// missing: the state directory it may write to (`ProtectSystem=strict` makes
+/// everything else read-only), a home for npm's cache when the server builds an
+/// application, and the capability that lets a non-root process bind 80/443.
+///
+/// `Type=simple` is asserted too, and is the one to revisit: the server does not
+/// send a readiness notification yet, so a unit claiming `Type=notify` would hang
+/// until systemd's timeout.
+#[test]
+fn readme_quick_start_systemd_unit_is_complete() {
+    let root = workspace_root();
+    let readme = read(&root, "README.md");
+    let (_, after) = readme
+        .split_once("sudo tee /etc/systemd/system/saltcorn.service >/dev/null <<'UNIT'\n")
+        .expect("§2.6 should write the unit with a heredoc");
+    let unit = after
+        .split_once("\nUNIT\n")
+        .expect("the heredoc should be terminated")
+        .0;
+
+    for line in [
+        "Type=simple",
+        "User=saltcorn",
+        "StateDirectory=saltcorn",
+        "ReadWritePaths=/var/lib/saltcorn",
+        "Environment=HOME=/var/lib/saltcorn",
+        "AmbientCapabilities=CAP_NET_BIND_SERVICE",
+        "WantedBy=multi-user.target",
+    ] {
+        assert!(
+            unit.contains(line),
+            "the quick start's systemd unit should contain `{line}`"
+        );
+    }
+    assert!(
+        !unit.contains("Type=notify"),
+        "the server sends no readiness notification, so the unit must not be Type=notify"
+    );
+}

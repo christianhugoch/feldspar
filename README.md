@@ -7,7 +7,9 @@ a table and field editor, a row editor, and user management — all driven from 
 JSON API.
 
 This README is for **operators**: how to install the prerequisites, set up the
-database, build the server, and run it. (Design and planning docs live under
+database, build the server, and run it. §2 is a start-to-finish recipe for a
+production deployment on Debian 13; the sections after it explain each piece on its
+own, for every other kind of box. (Design and planning docs live under
 [`docs/`](docs/); the roadmap is in [`TODO.md`](TODO.md).)
 
 ---
@@ -27,13 +29,272 @@ scope" section of [`TODO.md`](TODO.md).
 
 ---
 
-## 2. Prerequisites
+## 2. Quick start: a production install on Debian 13
+
+A complete deployment, from a clean Debian 13 ("trixie") machine to a service that
+starts at boot: PostgreSQL, a Rust toolchain, a build from source, a
+`saltcorn.toml`, and a systemd unit. Each step links to the section that explains
+it properly — read those when something does not fit your box. If you only want to
+*try* Saltcorn, skip this and follow §3–§8 instead.
+
+Everything below assumes a `sudo`-capable login, and uses `example.com` as the
+domain applications will be served under.
+
+### 2.1 Packages
+
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config git curl ca-certificates \
+                    postgresql postgresql-client nodejs npm
+```
+
+- **`build-essential` / `pkg-config`** — a C toolchain and linker for the Rust build.
+  No TLS libraries are needed: the server links rustls, not OpenSSL.
+- **`postgresql`** on trixie is PostgreSQL 17; the package starts the server and
+  enables it at boot for you.
+- **`nodejs` / `npm`** — trixie's packages are new enough (§3 asks for Node 18+).
+  They are needed **twice**: once at build time, for the two front-end bundles (§6),
+  and again at run time — the server itself runs `npm` whenever an application is
+  installed or built, from the admin UI's **Build** button or from
+  `saltcorn build-app` (§7).
+
+The build needs outbound network for cargo's crates and a prebuilt V8, but nothing
+listens on the internet until §2.7.
+
+### 2.2 A service account and a place to live
+
+Run the server as its own unprivileged system user, and keep the checkout somewhere
+that user can read:
+
+```bash
+sudo adduser --system --group --home /opt/saltcorn saltcorn
+sudo install -d -o "$USER" -g "$USER" /opt/saltcorn/src
+```
+
+The checkout is built and owned by *you* and is only ever read by the service; the
+service's writable state (disk file stores, application source trees and their
+`node_modules`, npm's cache) lives in `/var/lib/saltcorn`, which the systemd unit in
+§2.6 creates.
+
+> **The built binary keeps a path back into its checkout.** `cargo build` records the
+> absolute paths of `ui/admin/dist` and `ui/ide/dist` in the binary (§6), which is how
+> `saltcorn serve` serves the admin UI and the IDE with no flags at all. That path has
+> to keep existing: build in the directory you intend to keep, not in `/tmp` or a home
+> directory you will clean out. Copying or installing the *binary* elsewhere is fine —
+> the recorded paths are absolute. If you do need to separate the two, pass
+> `--static-dir` (§6).
+
+### 2.3 The database
+
+Create a role and a database it owns. Doing it over the Unix socket with **peer
+authentication** means the service account connects as itself, and no database
+password is written to disk anywhere:
+
+```bash
+sudo -u postgres createuser saltcorn
+sudo -u postgres createdb -O saltcorn saltcorn
+```
+
+Check it from the service account:
+
+```bash
+sudo -u saltcorn psql -h /var/run/postgresql -d saltcorn -c '\conninfo'
+```
+
+Saltcorn never creates or drops the database — this step is yours, once (§5). The
+role must own the database, because the server creates the `users` table on first
+start and the admin UI creates every table after that.
+
+For a Postgres on another host, give the role a password instead
+(`sudo -u postgres psql -c "CREATE ROLE saltcorn LOGIN PASSWORD 'change-me'"`) and put
+a `url` in the configuration file below rather than a socket path.
+
+### 2.4 Rust, and the build
+
+Install rustup as your own login user — the toolchain is only needed to build, and
+the service never uses it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+rustc --version    # must be >= 1.85, for edition 2024
+```
+
+Then clone and build. This compiles the workspace in release mode *and* runs
+`npm ci && npm run build` in both `ui/admin` and `ui/ide` (§6), so it takes a while
+and wants a few GB of RAM — on a small VM, add swap first (§11 explains why the
+build is heavy):
+
+```bash
+git clone <this-repo-url> /opt/saltcorn/src
+cd /opt/saltcorn/src
+cargo build --release -p sc-cli
+sudo install -m 0755 target/release/saltcorn /usr/local/bin/saltcorn
+saltcorn                       # prints the usage summary and the config paths it searches
+```
+
+### 2.5 The configuration file
+
+A service account has no home directory to keep a configuration file in, so put it in
+the system location — `/etc/saltcorn/saltcorn.toml`, which is one of the paths
+`saltcorn` searches on Linux (§7):
+
+```bash
+sudo install -d -m 0755 /etc/saltcorn
+sudo tee /etc/saltcorn/saltcorn.toml >/dev/null <<'TOML'
+default_environment = "production"
+
+[environments.production]
+host = "/var/run/postgresql"   # a leading `/` is a Unix socket directory
+user = "saltcorn"
+database = "saltcorn"
+
+base_domain = "example.com"    # each application is served at <subdomain>.example.com
+bind = "0.0.0.0:80"
+TOML
+sudo chown saltcorn:saltcorn /etc/saltcorn/saltcorn.toml
+sudo chmod 600 /etc/saltcorn/saltcorn.toml
+```
+
+Notes on that file, all of which §7 covers in full:
+
+- `base_domain` and `bind` mirror the flags of the same names, so `saltcorn serve`
+  needs neither on the command line — and a `saltcorn build-app` run against the same
+  environment writes the application's real URL into the documentation it generates.
+- **Without `base_domain` no application is served at all**, only the admin UI: the
+  server has no way to address an app.
+- A remote database goes in as a URL instead of the socket parts:
+  `url = "postgres://saltcorn:change-me@db.internal:5432/saltcorn"`.
+- Add a `[environments.staging]` section when you have a second database, and select
+  it with `saltcorn serve --environment staging`.
+- `chmod 600` because such a file may hold a password; the server warns on stderr when
+  it is readable by anyone else.
+- Leave `secure_cookies` unset for now. It is for a deployment behind a
+  TLS-terminating proxy — with Saltcorn's own TLS (§2.7) the session cookies become
+  `Secure` on their own.
+
+### 2.6 The systemd unit
+
+```bash
+sudo tee /etc/systemd/system/saltcorn.service >/dev/null <<'UNIT'
+[Unit]
+Description=Saltcorn
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=saltcorn
+Group=saltcorn
+ExecStart=/usr/local/bin/saltcorn serve --environment production
+Environment=SALTCORN_CONFIG=/etc/saltcorn/saltcorn.toml
+Environment=HOME=/var/lib/saltcorn
+StateDirectory=saltcorn
+WorkingDirectory=/var/lib/saltcorn
+Restart=on-failure
+RestartSec=5s
+
+# Bind ports 80/443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Everything read-only except the state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/saltcorn
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now saltcorn
+systemctl status saltcorn
+journalctl -u saltcorn -f      # the boot log names the environment and the file it came from
+```
+
+Why each of the less obvious lines:
+
+- **`Type=simple`, not `notify`.** The server does not send a readiness notification
+  yet. It does handle `SIGTERM`, so `systemctl stop` and `systemctl restart` are
+  graceful shutdowns.
+- **`--environment production`**, even though it is the file's default: *naming* an
+  environment makes that section outrank any ambient `DATABASE_URL`/`PG*` in the unit's
+  environment, so the service cannot be pointed at the wrong database by accident (§7).
+- **`SALTCORN_CONFIG`** names the file outright instead of relying on the search paths,
+  which depend on `HOME`.
+- **`StateDirectory=saltcorn`** creates `/var/lib/saltcorn` owned by the service user,
+  and **`ReadWritePaths`** makes it the one writable place under `ProtectSystem=strict`.
+  Keep disk file stores inside it; a store pointed anywhere else will fail to write.
+- **`HOME=/var/lib/saltcorn`** gives npm a writable home for its cache when the server
+  builds an application.
+- **`WorkingDirectory`** is what a relative file-store path resolves against.
+- **`AmbientCapabilities=CAP_NET_BIND_SERVICE`** lets an unprivileged process bind 80
+  and 443. Drop both capability lines if you bind a high port behind a reverse proxy.
+
+Confirm the process is up (§9):
+
+```bash
+curl -s http://127.0.0.1/health      # {"status":"ok"}
+```
+
+If it is not, `journalctl -u saltcorn` has the reason: the server exits immediately,
+naming the target, rather than booting half-working (§10).
+
+### 2.7 First user, DNS, TLS
+
+1. **DNS.** Point `example.com` at the box, and a wildcard `*.example.com` beside it —
+   each application is a subdomain of the base domain (§7).
+2. **The admin user.** Open `http://example.com`, and the SPA offers a
+   create-first-user screen. That first account is an admin (§8). Do this before the
+   site is reachable from the internet, or do it over an SSH tunnel: the screen is
+   open to whoever reaches it first.
+3. **TLS**, in the admin UI under **Settings → SSL / TLS certificates**, not on the
+   command line (§7). Choose `letsencrypt`, give a contact address, and restart the
+   service; the server then binds 443 beside the plain listener and redirects to it.
+   Validation is TLS-ALPN-01, so port 443 must be reachable from the internet, and the
+   certificate covers the base domain plus every mounted application's subdomain —
+   **adding an application adds a name at the next restart**. Try the Let's Encrypt
+   *staging* directory first if you are iterating.
+4. **Firewall.** Only 80 and 443 need to be open. Postgres stays on its Unix socket,
+   and nothing else listens.
+
+### 2.8 Updating
+
+The project is a **prototype**: it does not migrate databases created by older builds,
+so take a dump before you upgrade one.
+
+```bash
+sudo -u saltcorn pg_dump -h /var/run/postgresql saltcorn > ~/saltcorn-$(date +%F).sql
+
+cd /opt/saltcorn/src && git pull
+cargo build --release -p sc-cli
+sudo install -m 0755 target/release/saltcorn /usr/local/bin/saltcorn
+sudo systemctl restart saltcorn
+```
+
+The restart rebuilds and remounts every stored application; one that fails to build is
+logged and skipped rather than taking the server with it (§7). To rebuild a single
+application on its own, and to see the bundler's own diagnostics when it fails:
+
+```bash
+saltcorn build-app blog --environment production
+```
+
+That command mounts nothing, so it is safe to run against the live deployment's
+database (§7).
+
+---
+
+## 3. Prerequisites
 
 | Component | Version | Needed for |
 |---|---|---|
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `saltcorn` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store |
-| **Node.js + npm** | Node 18+ | *only* to build the admin UI bundle (optional; see §5) |
+| **Node.js + npm** | Node 18+ | *only* to build the admin UI bundle (optional; see §6) |
 
 Install Rust via [rustup](https://rustup.rs/):
 
@@ -44,17 +305,17 @@ rustc --version   # must be >= 1.85
 
 Node is required **only** if you want the admin web UI. Without it the server
 still runs and its JSON API works, but the browser UI will be a blank bootstrap
-page (see §5 and §9 Troubleshooting).
+page (see §6 and §10 Troubleshooting).
 
 ---
 
-## 3. Get the code and do a first build
+## 4. Get the code and do a first build
 
 ```bash
 git clone <this-repo-url> saltcorn
 cd saltcorn
 
-# Compile the server binary (without the web UI bundle for now — see §5).
+# Compile the server binary (without the web UI bundle for now — see §6).
 cargo build --release -p sc-cli
 ```
 
@@ -64,7 +325,7 @@ for a plain `cargo build`). You can also run it through cargo with
 
 ---
 
-## 4. Database setup
+## 5. Database setup
 
 Saltcorn needs one Postgres database and a role that **owns** it (so it can create
 the `users` table and any tables you add from the admin UI).
@@ -111,7 +372,7 @@ That gives you `postgres://saltcorn:change-me@localhost:5432/saltcorn`.
 
 ---
 
-## 5. Building the admin web UI
+## 6. Building the admin web UI
 
 The admin SPA lives in [`ui/admin`](ui/admin) and is compiled to a static bundle
 that the server serves. **`cargo build` builds it for you**: `sc-cli`'s build
@@ -141,7 +402,7 @@ Any other value (including `1` and `true`) builds the UI, as does leaving it uns
 > **`SC_BUILD_ADMIN` is a _build-time_ variable, read by `cargo build` — not by
 > `saltcorn serve`.** Putting it on the run command has **no effect** either way:
 > a binary built without the bundle stays without it, and the browser gets a blank
-> page (see §9).
+> page (see §10).
 
 Such a binary still serves the whole JSON API; only the browser UI is missing, and
 you can supply it at run time instead — build the SPA yourself and point the server
@@ -151,7 +412,7 @@ at the output with `--static-dir`:
 cd ui/admin && npm ci && npm run build   # outputs ui/admin/dist (index.html + hashed assets/)
 cd ../..
 
-target/release/saltcorn serve --static-dir ui/admin/dist ...   # see §6
+target/release/saltcorn serve --static-dir ui/admin/dist ...   # see §7
 ```
 
 That is also the quickest loop when you are *working on* the UI: what you serve is
@@ -160,7 +421,7 @@ The bundle's entry points carry a content hash in their names, and the server se
 the bundle's own `index.html` (including for client-routed deep links), so a rebuild
 is picked up by a plain reload — no cache to disable. With neither the embedded
 bundle nor `--static-dir`, the browser shows a document saying the admin UI is not
-built. See §9 Troubleshooting.
+built. See §10 Troubleshooting.
 
 ### The file-store IDE (`ui/ide`)
 
@@ -198,7 +459,7 @@ and everything else about the workbench goes on working.
 
 ---
 
-## 6. Running the server
+## 7. Running the server
 
 The main command is `saltcorn serve`. It takes **database flags** and **server
 flags**; database settings may also come from environment variables or from a
@@ -375,7 +636,7 @@ against a live deployment's database cannot disturb what that server is serving.
 ### Examples
 
 Local development, connecting with a URL and serving the pre-built bundle
-(Option A from §5 — the simplest path):
+(Option A from §6 — the simplest path):
 
 ```bash
 target/release/saltcorn serve \
@@ -393,7 +654,7 @@ target/release/saltcorn serve \
   --bind 0.0.0.0:8080
 ```
 
-With the bundle baked into the binary (the default build, §5 — `--static-dir` is
+With the bundle baked into the binary (the default build, §6 — `--static-dir` is
 then unnecessary):
 
 ```bash
@@ -428,9 +689,9 @@ sends) and shuts down gracefully.
 
 ---
 
-## 7. First run: create the admin user
+## 8. First run: create the admin user
 
-1. Start the server (§6).
+1. Start the server (§7).
 2. Open the admin URL in a browser, e.g. `http://127.0.0.1:3032`.
 3. The SPA detects that no user exists yet and shows a **create-first-user**
    screen. Enter an email and password; that first user is created as **role 1
@@ -451,7 +712,7 @@ curl -s -X POST http://127.0.0.1:3032/api/first-user \
 
 ---
 
-## 8. Health check
+## 9. Health check
 
 The server exposes an unauthenticated liveness route for load balancers,
 orchestrators, and smoke tests:
@@ -465,18 +726,18 @@ A `200` here means the process booted and is accepting requests.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 - **`error: connecting to database ...` on startup.** The database is unreachable
   or the credentials/host/port/name are wrong. The message names the target
   (without the password). Confirm you can `psql` to the same URL, and that the
-  database exists (§4) — the server does not create it.
+  database exists (§5) — the server does not create it.
 - **Startup error mentioning the `users` table or permissions.** The connecting
-  role cannot create tables. Make it the owner of the database (§4).
+  role cannot create tables. Make it the owner of the database (§5).
 - **The page says "The Saltcorn admin UI is not built".** The server has no admin
   bundle to serve. That means the binary was built with `SC_BUILD_ADMIN` set to
   `0`/`false` — note it is a **build-time** variable, so unsetting it on the run
-  command changes nothing (see §5). Fix it either way:
+  command changes nothing (see §6). Fix it either way:
   - quickest: restart with `--static-dir ui/admin/dist` (after `npm run build` in
     `ui/admin`), or
   - rebuild the binary with `cargo build --release -p sc-cli` and `SC_BUILD_ADMIN`
@@ -490,7 +751,7 @@ A `200` here means the process booted and is accepting requests.
 
 ---
 
-## 10. For developers
+## 11. For developers
 
 Run the workspace checks and tests:
 
