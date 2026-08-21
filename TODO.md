@@ -415,3 +415,36 @@ atomic nor bounded usefully); streaming and partial reads (the seam carries one 
 the same limit `res.body` has); a default store (a body that does not name its store breaks when
 a second store appears); and any promise about **rollback** — a file a failed trigger wrote stays
 written, which the documentation says rather than implies.
+
+
+---
+
+## Addendum — `trigger`: running another trigger from a code body
+
+Agreed and implemented after the milestone above, as a fourth host surface beside `db`, `fetch`
+and `fs`. `trigger(name)` is a handle, `run(payload)` is the only verb, and what it runs is the
+dispatcher's trigger — the same call the Run button makes.
+
+- [x] `sc-expr`: the `TriggerHost` seam (one run in, one value out, plus `trigger_names` for the
+      synchronous `trigger(name)`), `CodeCall::triggers` / `max_trigger_runs`
+      (`DEFAULT_MAX_TRIGGER_RUNS` = 20), `TRIGGERS_PRELUDE`'s `__scMakeTrigger`, `op_sc_trigger`
+      with its own budget and the clock filled in from what is left of the run, the
+      `TriggerPromise` guard on a forgotten `await`, and the `wantsTrigger` parameter — so a body
+      that was given no dispatcher gets a `ReferenceError` naming `trigger` rather than a call
+      that fails.
+- [x] `sc-api`: `code_host::TriggerRunHost` over the one `TriggerDispatcher` — the width budget
+      counted host-side as well as in the guest, `min_role` enforced under `asUser()` and not
+      under the default, the event's caller and chain on the child event, and the run abandoned
+      at the parent's deadline.
+- [x] `sc-action`: `ActionContext::triggers` and `fire_trigger(&TriggerDispatcher, …)`, which is
+      how an action reaches the dispatcher that is running it without an `Arc` cycle.
+- [x] `run_js_code` binds it when the context has a dispatcher, carrying the event's role, its
+      user and this trigger's chain.
+- [x] Tests: eight in `sc-expr` against a fake host, six in `sc-core-actions` against a real
+      dispatcher and database, one in the executed tutorial, and one type-check test.
+- [x] `ui/admin/src/codeTypes.ts` (`triggerDeclarations`, `declare const trigger: ScTriggers`);
+      `run_js_code`'s doc comment; `docs/TECHNICAL_DESIGN.md` §10.1 (a `trigger` subsection);
+      `docs/tutorial-triggers.md`; CHANGELOG.
+
+**Deliberately not in it.** Firing an event by kind and channel; fire-and-forget (§18's queue);
+a transaction spanning parent and child; and a `run_trigger` action for non-code triggers.

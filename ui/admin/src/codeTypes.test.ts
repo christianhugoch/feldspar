@@ -379,6 +379,30 @@ describe("the types the code editor loads", () => {
     expect(check(`return fs("uploads").open("a.txt").text().length;`).join(" ")).toMatch(/length/);
   });
 
+  it("type-check a body that runs another trigger", () => {
+    // `trigger` is the fourth thing a body can reach. The editor has to know
+    // that the handle is not a promise, that `run()` is what is awaited, and
+    // that authority is chosen on the handle.
+    expect(
+      check(`
+        const archived = await trigger("archive_done").run({ before: payload.today });
+        const nothing = await trigger("reindex").run();
+        const handle = trigger("send_invoice");
+        try {
+          await handle.asUser().run({ id: row.id });
+        } catch (e) {
+          await handle.asAdmin().run({ id: row.id, why: String(e) });
+        }
+        return { archived, nothing, name: handle.name, known: trigger.names.length };
+      `),
+    ).toEqual([]);
+    // The counter-tests: a verb the sandbox does not have, and the forgotten
+    // `await` — a handle is not a result.
+    expect(check(`await trigger("x").fire();`).join(" ")).toMatch(/fire/);
+    expect(check(`return trigger("x").run().then;`).join(" ")).not.toEqual([]);
+    expect(check(`return trigger.all;`).join(" ")).toMatch(/all/);
+  });
+
   it("declare the event's own bindings, with the row typed by the trigger's table", () => {
     expect(
       check(`

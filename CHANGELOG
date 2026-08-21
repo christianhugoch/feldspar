@@ -2,6 +2,71 @@
 
 Changes in reverse chronological order.
 
+## `trigger`: a code body runs this server's other triggers
+
+A `run_js_code` body could reach the tables, the network and the file stores. What it could not
+reach was **the rest of the trigger set** — so a body that wanted to hand its work to the
+trigger an admin had already configured had to reimplement it, and two triggers that shared a
+step shared it by copy.
+
+**`trigger` is the fourth host surface.** `trigger(name)` is a handle — getting one does nothing
+— and `run` is the only verb:
+
+```js
+const archived = await trigger("archive_done").run({ before: payload.today });
+await trigger("reindex").run();                            // no payload is {}
+await trigger("send_invoice").asUser().run({ id: row.id });
+trigger.names;                                             // what this run may name
+```
+
+A handle rather than `db.books`'s property access, because a trigger's name is the admin's own
+sentence and may contain spaces; and the names travel into the run with the body, so
+`trigger("archiv")` is refused where the typo is, naming the triggers that do exist rather than
+failing a line later.
+
+**It runs the dispatcher's trigger, not a copy of it.** The call goes through the same
+`TriggerDispatcher::run_trigger` the admin's Run button, `POST {mount}/actions/{name}` and the
+scheduler use, so everything that is true of a trigger stays true however it was asked: its
+`only_if` runs — and `null` comes back when it declines, which is not a failure — a disabled
+trigger stays disabled, one that failed validation says why, and a trigger that fails is an
+ordinary catchable error, so a body may run one and fall back.
+
+**The cascade is bounded by construction.** The child event carries the calling trigger's chain,
+so `Event::firing` refuses past `MAX_DEPTH` and names the whole chain: a body that runs the
+trigger it is itself the action of stops at the fifth turn with a sentence an admin can read,
+not a stack overflow. Two bounds are new: **20 trigger runs per body** — the *width* of a
+cascade, where the chain bounds its depth — and each run **clamped to what is left of the
+calling body's wall clock**, so a slow child fails inside the body that started it rather than
+holding the request that fired the outermost trigger.
+
+**Authority is `db`'s, for `db`'s reason.** Running a trigger from a trigger is server-side
+configuration calling server-side configuration, so the default is the **admin's** and no floor
+is consulted; `asUser()` delegates, and then the target's own `min_role` decides. What does not
+depend on the authority is who the child event says caused it — the event's role and user travel
+either way, so the trigger that runs sees the same `user` it would have seen had that caller run
+it directly. Causation is a fact; authority is a decision.
+
+The seam is JSON, like the three before it: `sc_expr::TriggerHost` takes one run
+(`{ trigger, payload, authority, timeout_ms }`) and answers one value, implemented by
+`sc_api::code_host::TriggerRunHost` over the one dispatcher — so §15's other guest languages
+inherit `trigger` the way they inherit `db`. Reaching the dispatcher from an action needed one
+wiring change and no cycle: `fire_trigger` now takes `&TriggerDispatcher` and puts it in the
+`ActionContext`, which is a borrow of the stack frame already running the action.
+
+**Deliberately not in it.** Firing an *event* by kind and channel (a body that wants a table's
+triggers writes the row); fire-and-forget, which needs §18's queue and is otherwise a run nobody
+waits for or reports; a transaction spanning parent and child; and a `run_trigger` **action**,
+so a non-code trigger could chain — worth having, and a different item.
+
+Tests: eight in `sc-expr` against a fake host (the plan a handle builds, the empty payload,
+authority on the handle, an unknown name refused at once, a catchable failure, the run budget,
+the clamped clock, a child that outlives its parent, a forgotten `await`, and `trigger` absent
+from a body that was not given it), six in `sc-core-actions` against a real dispatcher and
+database (a child that really writes, the floor deciding a delegated run and not the default
+one, a declining `only_if` reading as `null`, the cascade bound naming its chain, a failing
+child the parent catches, and a disabled trigger and a typo as different answers), one in the
+executed tutorial, and one type-check test for the editor's declarations.
+
 ## `fs`: a code body reads and writes file stores
 
 A `run_js_code` body could reach the tables and the network and nothing else. The one thing

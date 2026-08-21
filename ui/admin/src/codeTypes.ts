@@ -486,6 +486,43 @@ interface ScFs {
 `;
 }
 
+/** The declarations for `trigger`: a handle over one of this server's triggers,
+ * and the function that answers one.
+ *
+ * A transcription of `sc-expr`'s `TRIGGERS_PRELUDE`, on the same terms as
+ * {@link fileDeclarations}. The name is left as a plain `string` rather than a
+ * union of this server's triggers: a trigger's name is the admin's own sentence
+ * and may be anything, and the run-time check (the names travel into the run)
+ * is the one that can be exact. */
+export function triggerDeclarations(): string {
+  return `
+/** One of this server's triggers, ready to run. Getting the handle does
+ * nothing — \`run()\` is what runs it. */
+interface ScTrigger {
+  /** The trigger's name. */
+  readonly name: string;
+  /** Run it, with \`payload\` as the event's payload — the same call the Run
+   * button and \`POST {mount}/actions/{name}\` make. Answers what its action
+   * returned, or \`null\` when its \`only if\` declined. Nothing passed is an
+   * empty payload. */
+  run(payload?: any): Promise<any>;
+  /** Run it on behalf of whoever caused this event, at which point the
+   * trigger's own \`min_role\` decides and a refusal is a catchable error. */
+  asUser(): ScTrigger;
+  /** Run it as the server (the default): a trigger is server-side
+   * configuration, so no floor is consulted. */
+  asAdmin(): ScTrigger;
+}
+
+/** This server's triggers, by name. */
+interface ScTriggers {
+  (name: string): ScTrigger;
+  /** The triggers this server has. */
+  readonly names: readonly string[];
+}
+`;
+}
+
 /** The declarations for this server's tables: a row interface and a column union
  * per table, and the `db` handle carrying one property per table. */
 export function tableDeclarations(tables: TableInfo[]): string {
@@ -622,6 +659,22 @@ export function scopeDeclarations(scope: CodeScope, tables: TableInfo[]): string
       ` * 8 MB across the boundary per read or write. Only a code body has it — a\n` +
       ` * formula evaluates without it. */\ndeclare const fs: ScFs;`,
   );
+  parts.push(
+    `/** This server's other triggers. \`trigger(name)\` is a handle — nothing\n` +
+      ` * happens until \`run()\`:\n` +
+      ` *\n` +
+      ` * \`\`\`js\n` +
+      ` * const archived = await trigger("archive_done").run({ before: payload.today });\n` +
+      ` * await trigger("send_invoice").asUser().run({ id: row.id });\n` +
+      ` * \`\`\`\n` +
+      ` *\n` +
+      ` * It runs the trigger the admin configured, through the same path every\n` +
+      ` * other event takes: its \`only if\` runs, a disabled one stays disabled,\n` +
+      ` * and the cascade is bounded — a chain five deep is refused, naming it.\n` +
+      ` * Bounded like everything else a body reaches: 20 runs per body, each\n` +
+      ` * clamped to what is left of this code's \`timeout_ms\`. Only a code body\n` +
+      ` * has it — a formula evaluates without it. */\ndeclare const trigger: ScTriggers;`,
+  );
   return `${parts.join("\n\n")}\n`;
 }
 
@@ -633,6 +686,7 @@ export function codeLibrary(tables: TableInfo[], scope: CodeScope): string {
     "",
     chainDeclarations(),
     fileDeclarations(),
+    triggerDeclarations(),
     tableDeclarations(tables),
     scopeDeclarations(scope, tables),
   ].join("\n");

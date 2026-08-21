@@ -164,6 +164,17 @@ pub const DEFAULT_MAX_FETCHES: u32 = 50;
 /// body legitimately writes.
 pub const DEFAULT_MAX_FILE_OPS: u32 = 100;
 
+/// How many **other triggers** one run may run.
+///
+/// Its own budget, on the grounds `fetch`'s and `fs`'s budgets are their own: a
+/// trigger run is neither a pooled query nor a request that leaves the building
+/// — it is a whole other action, with a whole other run's worth of budgets
+/// behind it — and small is the honest number. What it bounds is a body that
+/// runs a trigger per row of a read, which multiplies every other bound in this
+/// list by the length of that read; the depth of a chain is bounded elsewhere
+/// (a trigger's chain, in `sc-action`), and this is the *width*.
+pub const DEFAULT_MAX_TRIGGER_RUNS: u32 = 20;
+
 /// What one `fetch` gets when the body names no `timeout_ms` of its own.
 ///
 /// Always clamped to what is left of the run's wall clock, which is the bound
@@ -186,6 +197,18 @@ const FETCH_MARGIN: Duration = Duration::from_millis(250);
 /// one and told why, rather than sent to an endpoint it cannot wait for.
 #[cfg(feature = "eval")]
 const MIN_FETCH_WINDOW: Duration = Duration::from_millis(50);
+
+/// How much of the run's remaining time a **trigger run** is not given, for
+/// exactly [`FETCH_MARGIN`]'s reason: a child clamped to the whole of what is
+/// left expires at the instant its caller does, and what the admin then reads is
+/// "this code exceeded its time limit" rather than the sentence naming the
+/// trigger that took too long — which is the one they can act on.
+#[cfg(feature = "eval")]
+const TRIGGER_MARGIN: Duration = Duration::from_millis(250);
+
+/// The least time worth starting another trigger with.
+#[cfg(feature = "eval")]
+const MIN_TRIGGER_WINDOW: Duration = Duration::from_millis(50);
 
 /// The **JS slice**: how long a body may run without yielding.
 ///
@@ -313,6 +336,50 @@ pub trait FileHost: Send + Sync {
     }
 }
 
+/// The **fourth** host surface: one trigger run in, one JSON result out.
+///
+/// Separate from the other three for the reasons they are separate from each
+/// other — it is a different capability (a body may have tables and no way to
+/// run anything else), it is implemented somewhere else (over the server's one
+/// trigger dispatcher, in `sc-api`), and it spends a budget of its own. What
+/// crosses is plain JSON, so §15's other guest languages inherit `trigger` the
+/// way they inherit `db`:
+///
+/// ```json
+/// { "trigger": "archive_done", "payload": { "before": "2026-08-01" },
+///   "authority": "admin", "timeout_ms": 4750 }
+/// ```
+///
+/// The answer is what the trigger's action returned, or `null` when its
+/// `only_if` declined — the same value its caller gets through `POST
+/// {mount}/actions/{name}` or the admin's Run button, because it is the same
+/// call. `timeout_ms` is filled in by the op from what is left of the run's wall
+/// clock, so an implementation may take it as given rather than deciding how
+/// long a child may hold its parent.
+///
+/// An `Err` is thrown into the guest as an ordinary `Error` at the call site —
+/// a trigger that failed, one that is disabled, one the caller may not run — so
+/// a body may catch it and carry on. Nothing here is trusted: the name and the
+/// authority are re-checked by the implementation, which is the one that knows
+/// what triggers exist and what floor each has.
+#[async_trait]
+pub trait TriggerHost: Send + Sync {
+    /// Run one trigger and answer what its action returned.
+    async fn run(&self, request: Json) -> Result<Json>;
+
+    /// The trigger names to bind into the run's `trigger.names`, so
+    /// `trigger("typo")` can fail **at once** and name what does exist rather
+    /// than deferring to the run itself.
+    ///
+    /// Synchronous, for [`FileHost::store_names`]' reason: the guest's
+    /// `trigger(name)` is one expression with nothing to await in the middle of
+    /// it. A host that cannot enumerate without I/O answers with the default —
+    /// an empty list, which the guest reads as "no list to check against".
+    fn trigger_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// One run of a JavaScript **code body**: the source, the values in scope, and
 /// what it is allowed to reach and for how long.
 ///
@@ -356,6 +423,12 @@ pub struct CodeCall<'a> {
     ///
     /// Borrowed for the same reason `host` is, and bridged the same way.
     pub files: Option<&'a dyn FileHost>,
+    /// The trigger surface, or `None` for a body that cannot run another
+    /// trigger — in which case `trigger` is not bound at all, so naming it is a
+    /// `ReferenceError` rather than a call that fails.
+    ///
+    /// Borrowed for the same reason `host` is, and bridged the same way.
+    pub triggers: Option<&'a dyn TriggerHost>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
@@ -366,6 +439,9 @@ pub struct CodeCall<'a> {
     pub max_fetches: u32,
     /// How many file operations this run may make ([`DEFAULT_MAX_FILE_OPS`]).
     pub max_file_ops: u32,
+    /// How many other triggers this run may run
+    /// ([`DEFAULT_MAX_TRIGGER_RUNS`]).
+    pub max_trigger_runs: u32,
 }
 
 impl Default for CodeCall<'_> {
@@ -376,10 +452,12 @@ impl Default for CodeCall<'_> {
             host: None,
             fetch: None,
             files: None,
+            triggers: None,
             timeout: None,
             max_calls: DEFAULT_MAX_HOST_CALLS,
             max_fetches: DEFAULT_MAX_FETCHES,
             max_file_ops: DEFAULT_MAX_FILE_OPS,
+            max_trigger_runs: DEFAULT_MAX_TRIGGER_RUNS,
         }
     }
 }
@@ -392,10 +470,12 @@ impl std::fmt::Debug for CodeCall<'_> {
             .field("host", &self.host.is_some())
             .field("fetch", &self.fetch.is_some())
             .field("files", &self.files.is_some())
+            .field("triggers", &self.triggers.is_some())
             .field("timeout", &self.timeout)
             .field("max_calls", &self.max_calls)
             .field("max_fetches", &self.max_fetches)
             .field("max_file_ops", &self.max_file_ops)
+            .field("max_trigger_runs", &self.max_trigger_runs)
             .finish()
     }
 }
@@ -421,6 +501,13 @@ pub(crate) const FETCH: &str = "fetch";
 /// this server has many stores and no default one.
 #[cfg(feature = "eval")]
 pub(crate) const FS: &str = "fs";
+
+/// The name the trigger surface binds under, reserved when a trigger host is
+/// present for the reason [`DB`] is. It is `trigger` because that is the word
+/// the admin's own screen uses, and it is a *function* — `trigger("archive")` —
+/// since a trigger's name is the admin's sentence and need not be an identifier.
+#[cfg(feature = "eval")]
+pub(crate) const TRIGGER: &str = "trigger";
 
 // ---------------------------------------------------------------------------
 // The prelude (the fluent surface, in JavaScript)
@@ -1548,6 +1635,89 @@ pub(crate) const FILES_PRELUDE: &str = r##"
 })();
 "##;
 
+/// The `trigger` surface: the server's other triggers, as handles.
+///
+/// Compiled **once per isolate**, like the three preludes before it, and minted
+/// per run by `__scMakeTrigger(token, names)` — so a resident body holds a
+/// function closed over *its* token and *its* list of triggers, and cannot spend
+/// another run's budget.
+///
+/// # The shape
+///
+/// `trigger(name)` is a **handle** — no dispatch, and the run happens only at
+/// `run()`:
+///
+/// ```js
+/// const archived = await trigger("archive_done").run({ before: payload.today });
+/// await trigger("reindex").run();                       // no payload is {}
+/// await trigger("send_invoice").asUser().run({ id: row.id });
+/// ```
+///
+/// A handle rather than `db.books`'s property access, because a trigger's name
+/// is the admin's own words for it and may contain spaces; and `run()` as the
+/// only verb, because running one is the only thing a body can do to a trigger.
+///
+/// Authority is `db`'s and `fs`'s: the **admin's** by default, since a trigger
+/// is server-side configuration and running one from another is configuration
+/// calling configuration, and delegated with `asUser()`, at which point the
+/// target's own `min_role` decides and a refusal is an error the body can catch.
+#[cfg(feature = "eval")]
+pub(crate) const TRIGGERS_PRELUDE: &str = r#"
+(() => {
+  const fixed = (name, value) =>
+    Object.defineProperty(globalThis, name, {
+      value: value, writable: false, configurable: false, enumerable: false,
+    });
+
+  // Frozen, for `makeStore`'s reason: a body that assigns to `handle.run` breaks
+  // nothing but its own object, and the next `trigger("…")` answers a fresh one.
+  const makeHandle = (handle) => Object.freeze({
+    name: handle.trigger,
+    // What crosses is the plan; the payload is whatever the body passed, and
+    // nothing passed is `{}` rather than null — so `payload.x` in the trigger
+    // that runs is undefined instead of a TypeError.
+    run: (payload) => __scTriggerCall(handle.token, {
+      trigger: handle.trigger,
+      payload: payload === undefined ? {} : payload,
+      authority: handle.authority,
+    }),
+    asUser: () => makeHandle({
+      token: handle.token, trigger: handle.trigger, authority: "user",
+    }),
+    asAdmin: () => makeHandle({
+      token: handle.token, trigger: handle.trigger, authority: "admin",
+    }),
+  });
+
+  // One run's `trigger`, over one run's token — the same shape `__scMakeFs` has,
+  // and for the same reason.
+  fixed("__scMakeTrigger", (__scTok, names) => {
+    const known = Array.isArray(names) ? names.map(String) : [];
+    const trigger = (name) => {
+      if (typeof name !== "string" || name === "") {
+        throw new TypeError(
+          "trigger() takes the name of a trigger, as in trigger(\"archive_done\")"
+        );
+      }
+      // Named at once rather than at `run()`: the names were bound into this run
+      // when it started, so a typo is a sentence naming the triggers that do
+      // exist rather than an error one line later.
+      if (known.length > 0 && known.indexOf(name) < 0) {
+        throw new Error(
+          "there is no trigger named `" + name + "`; this server has: " + known.join(", ")
+        );
+      }
+      return makeHandle({ token: __scTok, trigger: name, authority: "admin" });
+    };
+    // What this run can reach, for a body that discovers rather than knows.
+    Object.defineProperty(trigger, "names", {
+      value: Object.freeze(known.slice()), enumerable: true,
+    });
+    return trigger;
+  });
+})();
+"#;
+
 /// Installed once per isolate: the op handles, the promise a database call
 /// answers, and the run wrapper — as globals that a code body **cannot
 /// replace**.
@@ -1618,6 +1788,7 @@ const SETUP: &str = r#"
   const call = Deno.core.ops.op_sc_db;
   const send = Deno.core.ops.op_sc_fetch;
   const disk = Deno.core.ops.op_sc_files;
+  const runs = Deno.core.ops.op_sc_trigger;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
   const mark = Deno.core.ops.op_sc_mark;
@@ -1727,6 +1898,36 @@ const SETUP: &str = r#"
       else resolve(reply.ok);
     }, reject);
   }));
+  // The same guard once more, in the trigger surface's words: a forgotten
+  // `await trigger("x").run()` is a trigger the author believes ran.
+  const notAwaitedTrigger = () =>
+    new Error(
+      "this trigger run was not awaited — write `await trigger(\"name\").run()`"
+    );
+  class TriggerPromise extends Promise {
+    toJSON() { throw notAwaitedTrigger(); }
+    [Symbol.toPrimitive]() { throw notAwaitedTrigger(); }
+    [Symbol.iterator]() { throw notAwaitedTrigger(); }
+  }
+  // One trigger run. The same envelope every other surface uses, and the same
+  // resumption mark: a host error — a failed action, a disabled trigger, a role
+  // that may not run it — becomes a plain `Error` at the await point, which is
+  // what lets a body run a trigger and fall back when it will not.
+  fixed("__scTriggerCall", (token, plan) => new TriggerPromise((resolve, reject) => {
+    let request;
+    try {
+      request = JSON.stringify(plan);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    runs(token, request).then((answer) => {
+      mark(token);
+      const reply = JSON.parse(answer);
+      if (reply.error !== undefined) reject(new Error(reply.error));
+      else resolve(reply.ok);
+    }, reject);
+  }));
   // What an admin should be shown: the stack when there is one, because a body
   // of any size wants the line, and the value itself when there is not.
   const describe = (e) => {
@@ -1738,9 +1939,10 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, body) => {
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, body) => {
     bodies.set(key, {
       body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
+      wantsTrigger: wantsTrigger,
     });
   });
   // Dropped when the cache is full and this body is the one least recently run.
@@ -1758,7 +1960,7 @@ const SETUP: &str = r#"
   // this run's alone. A body with no host is defined to take one argument, so
   // there is no `db` in its scope to name — a ReferenceError, as it has always
   // been, rather than a handle that fails on use.
-  fixed("__scInvoke", (token, key, bindings, stores) => {
+  fixed("__scInvoke", (token, key, bindings, stores, triggers) => {
     const entry = bodies.get(key);
     if (entry === undefined) {
       // Unreachable while the Rust side and this map agree, which they do
@@ -1780,6 +1982,10 @@ const SETUP: &str = r#"
       // one compiled body serves every run, and what stores this server has can
       // change between two of them.
       if (entry.wantsFs) handles.push(__scMakeFs(token, stores));
+      // The trigger names travel with the invocation for the reason the store
+      // names do: one compiled body serves every run, and the trigger set is
+      // reloaded whenever an admin saves one.
+      if (entry.wantsTrigger) handles.push(__scMakeTrigger(token, triggers));
       running = entry.body(...handles);
     } catch (e) {
       fail(token, describe(e));
@@ -1841,6 +2047,12 @@ struct RunState {
     /// building.
     file_ops_left: u32,
     max_file_ops: u32,
+    /// The other triggers this run may run, when it may run any.
+    triggers: Option<Arc<dyn TriggerHost>>,
+    /// The trigger-run budget, counted apart from all three of the others
+    /// because what it bounds is a whole other run rather than one call.
+    trigger_runs_left: u32,
+    max_trigger_runs: u32,
     /// How long this run may execute JavaScript without yielding, before the
     /// watchdog stops it: [`DEFAULT_JS_SLICE`], never more than its own timeout.
     /// A *fresh* window each time it resumes, not a budget it spends — the
@@ -2038,6 +2250,91 @@ async fn op_sc_files(
     serde_json::to_string(&reply).unwrap_or_else(|_| {
         r#"{"error":"the file store reply could not be encoded as JSON"}"#.to_owned()
     })
+}
+
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+async fn op_sc_trigger(
+    state: Rc<RefCell<OpState>>,
+    #[string] token: String,
+    #[string] request: String,
+) -> String {
+    let reply = trigger_call(&state, &token, &request).await;
+    serde_json::to_string(&reply).unwrap_or_else(|_| {
+        r#"{"error":"the trigger reply could not be encoded as JSON"}"#.to_owned()
+    })
+}
+
+/// One **trigger run**. [`host_call`]'s third twin, its own function for
+/// [`fetch_call`]'s reasons — its own budget, its own capability, and refusals
+/// that have to say which trigger to be worth reading.
+///
+/// Like a request and unlike a file operation, it **fills in the clock**: what
+/// runs at the other end is another trigger's whole action, which has a timeout
+/// of its own and no idea that something is waiting on it. Clamping it to what
+/// is left of this run's wall clock (less [`TRIGGER_MARGIN`]) is what keeps a
+/// slow child inside its parent, where the `catch` the author wrote can see it.
+#[cfg(feature = "eval")]
+async fn trigger_call(state: &Rc<RefCell<OpState>>, token: &str, request: &str) -> Json {
+    let mut plan: Json = match serde_json::from_str(request) {
+        Ok(plan) => plan,
+        Err(e) => return refuse(format!("the trigger request is not JSON: {e}")),
+    };
+
+    let (host, remaining, run_timeout) = {
+        let mut state = state.borrow_mut();
+        let Some(table) = state.try_borrow_mut::<RunTable>() else {
+            return refuse("this code body cannot run other triggers");
+        };
+        let Some(run) = table.runs.get_mut(token) else {
+            return refuse("this trigger run belongs to a code run that has already finished");
+        };
+        if run.trigger_runs_left == 0 {
+            let max = run.max_trigger_runs;
+            return refuse(format!(
+                "this code ran more than {max} other triggers in one run; \
+                 the bound exists so a loop over rows cannot become a run per row"
+            ));
+        }
+        let now = Instant::now();
+        if now >= run.deadline {
+            let ms = run.timeout.as_millis();
+            return refuse(format!("this code exceeded its {ms} ms time limit"));
+        }
+        let Some(host) = run.triggers.clone() else {
+            return refuse("this code body cannot run other triggers");
+        };
+        run.trigger_runs_left -= 1;
+        // Past this point the run has run another trigger, whose action may have
+        // done anything at all: re-running this body could no longer be said to
+        // repeat nothing.
+        run.retry = None;
+        (
+            host,
+            run.deadline.saturating_duration_since(now),
+            run.timeout,
+        )
+    };
+
+    let usable = remaining.saturating_sub(TRIGGER_MARGIN);
+    if usable < MIN_TRIGGER_WINDOW {
+        let ms = run_timeout.as_millis();
+        return refuse(format!(
+            "this code has too little of its {ms} ms time limit left to run another trigger"
+        ));
+    }
+    if let Some(object) = plan.as_object_mut() {
+        object.insert(
+            "timeout_ms".to_owned(),
+            Json::from(u64::try_from(usable.as_millis()).unwrap_or(u64::MAX)),
+        );
+    }
+
+    match host.run(plan).await {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(e) => refuse(e.to_string()),
+    }
 }
 
 /// One file operation. [`host_call`]'s other twin, and its own function for the
@@ -2299,6 +2596,7 @@ deno_core::extension!(
         op_sc_db,
         op_sc_fetch,
         op_sc_files,
+        op_sc_trigger,
         op_sc_done,
         op_sc_fail,
         op_sc_mark
@@ -2473,11 +2771,16 @@ struct CodeRun {
     /// **before** the job crosses to the worker: the guest's `fs(name)` is
     /// synchronous, so the list has to be in its scope rather than a call away.
     file_stores: Vec<String>,
+    triggers: Option<Arc<dyn TriggerHost>>,
+    /// The names of the triggers this run may run, resolved from the trigger
+    /// host before the job crosses, for [`CodeRun::file_stores`]' reason.
+    trigger_names: Vec<String>,
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
     max_fetches: u32,
     max_file_ops: u32,
+    max_trigger_runs: u32,
     /// When the wall clock this run is being measured against started — set only
     /// on a run that is being **re-queued** after its isolate was terminated
     /// under it. A second start is not a second timeout: the caller is still
@@ -2512,6 +2815,7 @@ enum Surface {
     Db,
     Fetch,
     Files,
+    Triggers,
 }
 
 /// The `'static` stand-in a **borrowed** host crosses to the isolate thread as.
@@ -2599,6 +2903,23 @@ impl FileHost for BridgeHost {
     // **real** host, in `CodeRuntime::run`, before this stand-in exists — a
     // bridge that answered here would have to make a blocking round trip to
     // answer a synchronous question.
+}
+
+#[cfg(feature = "eval")]
+#[async_trait]
+impl TriggerHost for BridgeHost {
+    async fn run(&self, request: Json) -> Result<Json> {
+        self.bridged(
+            Surface::Triggers,
+            request,
+            "this code body's trigger dispatcher has gone away",
+            "this trigger run was dropped without an answer",
+        )
+        .await
+    }
+
+    // The default, for `FileHost::store_names`' reason: the names are read from
+    // the real host in `CodeRuntime::run`, while it is still borrowed.
 }
 
 /// One isolate thread, from the dispatcher's side: where to send it work, and
@@ -2738,14 +3059,24 @@ impl CodeRuntime {
             .map(|_| Arc::clone(&bridge) as Arc<dyn FetchHost>);
         let disk: Option<Arc<dyn FileHost>> =
             call.files.map(|_| Arc::clone(&bridge) as Arc<dyn FileHost>);
-        // Asked of the **real** host, here, while it is still borrowed: the
-        // guest's `fs(name)` is synchronous, so the names have to travel with
-        // the job rather than be a call away.
+        let runner: Option<Arc<dyn TriggerHost>> = call
+            .triggers
+            .map(|_| Arc::clone(&bridge) as Arc<dyn TriggerHost>);
+        // Asked of the **real** hosts, here, while they are still borrowed: the
+        // guest's `fs(name)` and `trigger(name)` are synchronous, so the names
+        // have to travel with the job rather than be a call away.
         let stores = call.files.map(FileHost::store_names).unwrap_or_default();
+        let trigger_names = call
+            .triggers
+            .map(TriggerHost::trigger_names)
+            .unwrap_or_default();
         // Whatever the run did not get a proxy for, nothing can ask for.
         drop(bridge);
-        let bridged = (call.host.is_some() || call.fetch.is_some() || call.files.is_some())
-            .then_some((call.host, call.fetch, call.files, incoming));
+        let bridged = (call.host.is_some()
+            || call.fetch.is_some()
+            || call.files.is_some()
+            || call.triggers.is_some())
+        .then_some((call.host, call.fetch, call.files, call.triggers, incoming));
         let timeout = call
             .timeout
             .unwrap_or(self.default_timeout)
@@ -2769,10 +3100,13 @@ impl CodeRuntime {
                     fetch: net,
                     files: disk,
                     file_stores: stores,
+                    triggers: runner,
+                    trigger_names,
                     timeout,
                     max_calls: call.max_calls,
                     max_fetches: call.max_fetches,
                     max_file_ops: call.max_file_ops,
+                    max_trigger_runs: call.max_trigger_runs,
                     started: None,
                 }),
                 reply,
@@ -2800,7 +3134,7 @@ impl CodeRuntime {
             ))
         };
 
-        let Some((host, fetcher, disk, mut incoming)) = bridged else {
+        let Some((host, fetcher, disk, runner, mut incoming)) = bridged else {
             // A pure body asks for nothing; there is nothing to serve.
             return tokio::select! {
                 outcome = answer => outcome.map_err(|_| dropped())?,
@@ -2835,6 +3169,12 @@ impl CodeRuntime {
                                 Some(disk) => disk.files(plan).await,
                                 None => {
                                     Err(Error::msg("this code body cannot reach a file store"))
+                                }
+                            },
+                            Surface::Triggers => match runner {
+                                Some(runner) => runner.run(plan).await,
+                                None => {
+                                    Err(Error::msg("this code body cannot run other triggers"))
                                 }
                             },
                         };
@@ -2955,6 +3295,10 @@ fn worker_thread(
     // a `Response` that body writes.
     if let Err(e) = runtime.execute_script("sc_files.js", FILES_PRELUDE) {
         debug_assert!(false, "the files prelude failed to compile: {e}");
+    }
+    // The `trigger` factory, on the same terms as the three above it.
+    if let Err(e) = runtime.execute_script("sc_triggers.js", TRIGGERS_PRELUDE) {
+        debug_assert!(false, "the triggers prelude failed to compile: {e}");
     }
     // Code bodies get the aggregation prelude too, so `rows().sum("qty")` means
     // in a body what it means in a formula.
@@ -3408,7 +3752,10 @@ fn start_run(
     // over. Per run rather than per body: the definition is cached across runs
     // and the stores a server has can change between two of them.
     let stores = serde_json::to_string(&run.file_stores).unwrap_or_else(|_| "[]".to_owned());
-    let script = build_script(&scripts, &token, key, held, &stores);
+    // The trigger names, on the same terms as the store names: per run, because
+    // an admin's save reloads the trigger set between two runs of one body.
+    let triggers = serde_json::to_string(&run.trigger_names).unwrap_or_else(|_| "[]".to_owned());
+    let script = build_script(&scripts, &token, key, held, &stores, &triggers);
     // A re-queued run carries the clock it was first admitted with: its caller
     // has been waiting since then, and a retry with a fresh deadline would
     // outlive the future that is going to answer with it.
@@ -3437,6 +3784,9 @@ fn start_run(
                 max_fetches: run.max_fetches,
                 file_ops_left: run.max_file_ops,
                 max_file_ops: run.max_file_ops,
+                triggers: run.triggers.clone(),
+                trigger_runs_left: run.max_trigger_runs,
+                max_trigger_runs: run.max_trigger_runs,
                 slice: DEFAULT_JS_SLICE.min(run.timeout),
                 // Kept until the first host call, which is exactly as long as
                 // re-running this body would provably repeat nothing.
@@ -3539,6 +3889,8 @@ struct RunScripts {
     wants_fetch: bool,
     /// Whether it takes `fs`, on exactly the same terms.
     wants_files: bool,
+    /// Whether it takes `trigger`, on exactly the same terms.
+    wants_triggers: bool,
 }
 
 /// Build one code body's definition and one run's arguments: the bindings as
@@ -3581,6 +3933,11 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
                 "code binding `fs` collides with the file surface bound in a code body",
             ));
         }
+        if call.triggers.is_some() && name == TRIGGER {
+            return Err(Error::msg(
+                "code binding `trigger` collides with the trigger surface bound in a code body",
+            ));
+        }
         // `const x = __b["x"];` — the name was checked as an identifier; the key
         // lookup quotes via JSON escaping.
         let key =
@@ -3593,6 +3950,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     let wants_db = call.host.is_some();
     let wants_fetch = call.fetch.is_some();
     let wants_files = call.files.is_some();
+    let wants_triggers = call.triggers.is_some();
     // The parameter list is the only difference a capability makes: no `fetch`
     // parameter is no `fetch` in scope, which is a ReferenceError naming it
     // rather than a call that fails somewhere in the host. It also means a body
@@ -3609,6 +3967,9 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     if wants_files {
         names.push(FS);
     }
+    if wants_triggers {
+        names.push(TRIGGER);
+    }
     let params = names.join(", ");
     let code = &call.code;
     Ok(RunScripts {
@@ -3623,6 +3984,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_db,
         wants_fetch,
         wants_files,
+        wants_triggers,
     })
 }
 
@@ -3725,24 +4087,33 @@ impl BodyCache {
 /// characters and this run's own values — because everything else is already
 /// there.
 #[cfg(feature = "eval")]
-fn build_script(scripts: &RunScripts, token: &str, key: u64, held: bool, stores: &str) -> String {
+fn build_script(
+    scripts: &RunScripts,
+    token: &str,
+    key: u64,
+    held: bool,
+    stores: &str,
+    triggers: &str,
+) -> String {
     let RunScripts {
         definition,
         args,
         wants_db,
         wants_fetch,
         wants_files,
+        wants_triggers,
     } = scripts;
     let mut script = String::new();
     if !held {
         script.push_str(&format!(
-            "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, {definition});\n"
+            "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
+             {wants_triggers}, {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
     // one made; quoting them is belt and braces rather than escaping.
     script.push_str(&format!(
-        "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores});"
+        "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores}, {triggers});"
     ));
     script
 }
@@ -5243,10 +5614,13 @@ mod tests {
             fetch: None,
             files: None,
             file_stores: Vec::new(),
+            triggers: None,
+            trigger_names: Vec::new(),
             timeout: Duration::from_secs(1),
             max_calls: 10,
             max_fetches: 10,
             max_file_ops: 10,
+            max_trigger_runs: 10,
             started: None,
         };
         for (name, value) in bindings {
@@ -5268,7 +5642,7 @@ mod tests {
             "nothing is warm yet"
         );
 
-        let miss = build_script(&scripts, "aa", key, false, "[]");
+        let miss = build_script(&scripts, "aa", key, false, "[]", "[]");
         assert!(miss.contains("__scDefine"), "{miss}");
         assert!(miss.contains("return secret + 1;"), "{miss}");
         assert!(miss.contains("__scInvoke"), "{miss}");
@@ -5278,7 +5652,7 @@ mod tests {
             cache.holds(key, &scripts.definition),
             "the isolate has it now"
         );
-        let hit = build_script(&scripts, "bb", key, true, "[]");
+        let hit = build_script(&scripts, "bb", key, true, "[]", "[]");
         assert!(!hit.contains("__scDefine"), "{hit}");
         assert!(
             !hit.contains("return secret + 1;"),
@@ -6452,21 +6826,284 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_three_surfaces_are_bound_together_and_named_apart() {
+    async fn the_four_surfaces_are_bound_together_and_named_apart() {
         let host = FakeHost::new(|_| Ok(json!([])));
         let net = FakeNet::ok(json!({ "ok": true }));
         let files = FakeFiles::new(&["s"]);
+        let runs = FakeTriggers::new(&["nightly"]);
         let rt = CodeRuntime::new();
         let out = rt
             .run(CodeCall {
-                code: r#"return [typeof db, typeof fetch, typeof fs];"#.to_owned(),
+                code: r#"return [typeof db, typeof fetch, typeof fs, typeof trigger];"#.to_owned(),
                 host: Some(&*host),
                 fetch: Some(&*net),
                 files: Some(&*files),
+                triggers: Some(&*runs),
                 ..CodeCall::default()
             })
             .await
             .unwrap();
-        assert_eq!(out, json!(["object", "function", "function"]));
+        assert_eq!(out, json!(["object", "function", "function", "function"]));
+    }
+
+    // -----------------------------------------------------------------------
+    // The fourth surface: other triggers
+    // -----------------------------------------------------------------------
+
+    /// A trigger host that records what it was asked to run and answers with the
+    /// payload it was given — enough to assert the plan a handle builds, which
+    /// is all this crate is responsible for.
+    struct FakeTriggers {
+        asked: Mutex<Vec<Json>>,
+        names: Vec<String>,
+        answer: Answered,
+        delay: Option<Duration>,
+    }
+
+    impl FakeTriggers {
+        fn new(names: &[&str]) -> Arc<FakeTriggers> {
+            FakeTriggers::answering(names, |request| Ok(request["payload"].clone()))
+        }
+
+        fn answering(
+            names: &[&str],
+            answer: impl Fn(&Json) -> Result<Json> + Send + Sync + 'static,
+        ) -> Arc<FakeTriggers> {
+            Arc::new(FakeTriggers {
+                asked: Mutex::new(Vec::new()),
+                names: names.iter().map(|n| (*n).to_owned()).collect(),
+                answer: Box::new(answer),
+                delay: None,
+            })
+        }
+
+        fn slow(names: &[&str], delay: Duration) -> Arc<FakeTriggers> {
+            let mut host = FakeTriggers::answering(names, |_| Ok(Json::Null));
+            Arc::get_mut(&mut host).unwrap().delay = Some(delay);
+            host
+        }
+
+        fn asked(&self) -> Vec<Json> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TriggerHost for FakeTriggers {
+        async fn run(&self, request: Json) -> Result<Json> {
+            self.asked.lock().unwrap().push(request.clone());
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            (self.answer)(&request)
+        }
+
+        fn trigger_names(&self) -> Vec<String> {
+            self.names.clone()
+        }
+    }
+
+    /// A call that can run other triggers and nothing else.
+    fn with_triggers<'a>(code: &str, triggers: &'a dyn TriggerHost) -> CodeCall<'a> {
+        CodeCall {
+            code: code.to_owned(),
+            triggers: Some(triggers),
+            ..CodeCall::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_runs_another_trigger_and_gets_its_result() {
+        let runs = FakeTriggers::new(&["archive_done", "reindex"]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_triggers(
+                r#"const archived = await trigger("archive_done").run({ before: "2026-08-01" });
+                   const nothing = await trigger("reindex").run();
+                   return {
+                     archived: archived, nothing: nothing,
+                     name: trigger("reindex").name, names: trigger.names,
+                   };"#,
+                &*runs,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({
+                "archived": { "before": "2026-08-01" },
+                // Nothing passed is an empty payload rather than null, so
+                // `payload.x` in the trigger that runs is undefined.
+                "nothing": {},
+                "name": "reindex",
+                "names": ["archive_done", "reindex"],
+            })
+        );
+        // What crossed is one plain plan per run: the name, the payload, and
+        // whose authority — the trigger's own unless the body said otherwise.
+        let asked = runs.asked();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert_eq!(asked[0]["trigger"], json!("archive_done"));
+        assert_eq!(asked[0]["payload"], json!({ "before": "2026-08-01" }));
+        assert_eq!(asked[0]["authority"], json!("admin"));
+        assert_eq!(asked[1]["trigger"], json!("reindex"));
+    }
+
+    #[tokio::test]
+    async fn authority_is_on_the_handle_and_the_default_is_the_triggers_own() {
+        let runs = FakeTriggers::new(&["send_invoice"]);
+        let rt = CodeRuntime::new();
+        rt.run(with_triggers(
+            r#"const t = trigger("send_invoice");
+               await t.asUser().run({ id: 1 });
+               await t.run({ id: 2 });
+               await t.asUser().asAdmin().run({ id: 3 });
+               return null;"#,
+            &*runs,
+        ))
+        .await
+        .unwrap();
+        let asked = runs.asked();
+        let authorities: Vec<&Json> = asked.iter().map(|a| &a["authority"]).collect();
+        assert_eq!(
+            authorities,
+            vec![&json!("user"), &json!("admin"), &json!("admin")]
+        );
+        // `asUser()` answers a *new* handle: the one it came from is unchanged,
+        // which is what makes `const t = trigger(…)` safe to reuse.
+        assert_eq!(asked[1]["payload"], json!({ "id": 2 }));
+    }
+
+    #[tokio::test]
+    async fn a_name_this_run_does_not_have_is_refused_at_once() {
+        let runs = FakeTriggers::new(&["archive_done"]);
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(with_triggers(
+                r#"return await trigger("archiv").run();"#,
+                &*runs,
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        // Named where the typo is, and told what does exist — rather than
+        // deferred to the dispatcher, which would say the same thing later.
+        assert!(error.contains("no trigger named `archiv`"), "{error}");
+        assert!(error.contains("archive_done"), "{error}");
+        assert!(runs.asked().is_empty(), "nothing was run");
+    }
+
+    #[tokio::test]
+    async fn a_trigger_that_failed_is_an_error_the_body_can_catch() {
+        let runs = FakeTriggers::answering(&["risky"], |_| {
+            Err(Error::invalid("trigger `risky`: the endpoint said no"))
+        });
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_triggers(
+                r#"try {
+                     await trigger("risky").run();
+                     return "ran";
+                   } catch (e) { return e.message; }"#,
+                &*runs,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            out.as_str().unwrap().contains("the endpoint said no"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_run_budget_bounds_the_width_of_a_cascade() {
+        let runs = FakeTriggers::new(&["nightly"]);
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(CodeCall {
+                code: r#"for (let i = 0; i < 10; i++) await trigger("nightly").run({ i: i });
+                         return "done";"#
+                    .to_owned(),
+                triggers: Some(&*runs),
+                max_trigger_runs: 3,
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than 3 other triggers"), "{error}");
+        // Bounded where it says it is: three ran, the fourth did not.
+        assert_eq!(runs.asked().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_child_is_clamped_to_what_is_left_of_the_parents_clock() {
+        let runs = FakeTriggers::new(&["nightly"]);
+        let rt = CodeRuntime::new();
+        rt.run(CodeCall {
+            code: r#"return await trigger("nightly").run();"#.to_owned(),
+            triggers: Some(&*runs),
+            timeout: Some(Duration::from_millis(2000)),
+            ..CodeCall::default()
+        })
+        .await
+        .unwrap();
+        // The op fills the clock in: what is left of the run, less the margin
+        // that keeps a slow child failing *inside* the body.
+        let asked = runs.asked();
+        let ms = asked[0]["timeout_ms"].as_u64().unwrap();
+        assert!(
+            (1000..=2000 - TRIGGER_MARGIN.as_millis() as u64).contains(&ms),
+            "{ms} ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_that_outlives_its_parent_is_the_parents_own_timeout() {
+        // The host here ignores the clock it is handed, which is what a real one
+        // must not do — the point being that the run is bounded anyway.
+        let runs = FakeTriggers::slow(&["slow"], Duration::from_secs(5));
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(CodeCall {
+                code: r#"return await trigger("slow").run();"#.to_owned(),
+                triggers: Some(&*runs),
+                timeout: Some(Duration::from_millis(300)),
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("300 ms time limit"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_await_on_a_trigger_run_says_so() {
+        let runs = FakeTriggers::new(&["nightly"]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_triggers(
+                r#"const pending = trigger("nightly").run();
+                   try { return JSON.stringify({ ran: pending }); }
+                   catch (e) { return e.message; }"#,
+                &*runs,
+            ))
+            .await
+            .unwrap();
+        assert!(out.as_str().unwrap().contains("was not awaited"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_body_without_the_trigger_host_cannot_name_it() {
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(CodeCall {
+                code: r#"return await trigger("nightly").run();"#.to_owned(),
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("trigger is not defined"), "{error}");
     }
 }

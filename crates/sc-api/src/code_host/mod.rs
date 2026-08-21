@@ -104,6 +104,7 @@
 
 mod files;
 mod plan;
+mod triggers;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -121,6 +122,7 @@ use crate::rows;
 
 pub use files::{FileStoreHost, MAX_COPY_BYTES, MAX_FILE_BYTES};
 pub use plan::{AggSpec, Authority, Dir, Op, OrderKey, Plan, Selection, SqlOp, SqlPlan};
+pub use triggers::TriggerRunHost;
 
 /// How many rows one read may return before it is refused.
 ///

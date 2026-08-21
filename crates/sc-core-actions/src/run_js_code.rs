@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sc_api::code_host::{FileStoreHost, TableHost};
+use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost};
 use sc_error::{Error, Result};
-use sc_expr::{CodeCall, DEFAULT_CODE_TIMEOUT, MAX_CODE_TIMEOUT};
+use sc_expr::{CodeCall, DEFAULT_CODE_TIMEOUT, MAX_CODE_TIMEOUT, TriggerHost};
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
 
@@ -45,9 +45,9 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// called with, the formula language has no way to reach it, and a `none`
 /// trigger's code is exactly what wants it.
 ///
-/// And three host surfaces: `db`, the **tables**, read and written from the body
-/// (§10.1's `db`); `fetch`, an **HTTP request**; and `fs`, the **file stores**
-/// (both below).
+/// And four host surfaces: `db`, the **tables**, read and written from the body
+/// (§10.1's `db`); `fetch`, an **HTTP request**; `fs`, the **file stores**; and
+/// `trigger`, this server's **other triggers** (all below).
 ///
 /// ```js
 /// const overdue = await db.invoices
@@ -173,6 +173,36 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// Two things a body should not assume: nothing streams, and **a file write is
 /// not rolled back** by a trigger that throws afterwards.
 ///
+/// ## Running another trigger
+///
+/// `trigger(name)` is a handle over one of this server's triggers — no dispatch,
+/// and `run` is the only verb:
+///
+/// ```js
+/// const archived = await trigger("archive_done").run({ before: payload.today });
+/// await trigger("reindex").run();                      // no payload is {}
+/// await trigger("send_invoice").asUser().run({ id: row.id });
+/// ```
+///
+/// It runs **the dispatcher's trigger, not a copy of it**: the same call the Run
+/// button, `POST {mount}/actions/{name}` and the scheduler make, so the target's
+/// `only_if` runs (and `null` comes back when it declines), a disabled trigger
+/// stays disabled, one that failed validation says why, and the **cascade bound**
+/// counts this run. That last is what makes the recursion safe rather than merely
+/// unlikely: the child event carries this trigger's chain, so a body that runs
+/// the trigger it is itself the action of stops at `MAX_DEPTH` with the whole
+/// chain named. A failing trigger is an ordinary catchable error, so a body may
+/// run one and fall back.
+///
+/// A handle rather than `db.books`'s property access, because a trigger's name is
+/// the admin's own words for it; and the names travel into the run, so a typo is
+/// refused where it is written, naming the triggers that do exist.
+///
+/// Bounded like the others: 20 trigger runs per body — the *width* of a cascade,
+/// where the chain bounds its depth — and each one clamped to what is left of
+/// this body's `timeout_ms`, so a slow child fails inside the body that started
+/// it rather than holding the request that fired the outermost trigger.
+///
 /// ## Whose authority
 ///
 /// Reads and writes — of tables and of files alike — are the **admin's** by
@@ -185,8 +215,14 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// files, where what decides is §14.1's path-cumulative rule instead — the
 /// store's floor, then every directory on the path, then the entry itself, most
 /// restrictive winning — and where a delegated body may **tighten** an access
-/// rule with `setMeta` but never loosen one. On a `db.sql` it means less, and
-/// honestly so:
+/// rule with `setMeta` but never loosen one. `trigger(name).asUser()` is the
+/// same move again, and there what decides is the target's own `min_role`: under
+/// the trigger's own authority no floor is consulted, because running a trigger
+/// from a trigger is configuration calling configuration. What does **not**
+/// depend on the authority is who the child event says caused it — the event's
+/// role and user travel either way, so the trigger that runs sees the same
+/// `user` it would have seen had that caller run it directly. On a `db.sql` it
+/// means less, and honestly so:
 /// the statement runs at the caller's role and user, which is what row-level
 /// security reads, and an ownership formula does not reach it.
 ///
@@ -195,10 +231,10 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// combination of `insert_row`/`fetch` and formulas expresses. It is still
 /// bounded — no subprocess, no schema changes, no transactions across
 /// statements, no path to a file except through a store an admin connected, and
-/// eight named bounds (1000 rows per read, 200 database calls per run, 50
-/// fetches per run, 100 file operations per run, 8 MB per response, 8 MB per
-/// file read or written, the `timeout_ms` wall clock, and one second of
-/// JavaScript at a time without awaiting anything — a body shares
+/// nine named bounds (1000 rows per read, 200 database calls per run, 50
+/// fetches per run, 100 file operations per run, 20 trigger runs per run, 8 MB
+/// per response, 8 MB per file read or written, the `timeout_ms` wall clock, and
+/// one second of JavaScript at a time without awaiting anything — a body shares
 /// its isolate with every other body, and the sharing works because a body
 /// awaiting a query leaves it free). A table larger than one read is walked with
 /// `.iter()`, which yields the same rows a batch at a time — one database call
@@ -217,9 +253,9 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 ///   — `await` goes at the front of a whole chain, never inside one — and a
 ///   forgotten `await` is a named error rather than `{}` in the result, because
 ///   the promise a terminal answers refuses to be stringified, coerced or
-///   iterated. `db`, `fetch` and `fs` are the three awaitable things there are —
-///   no timers, no second way to the network, no path to the disk that is not a
-///   store an admin connected — and the one shape the
+///   iterated. `db`, `fetch`, `fs` and `trigger` are the four awaitable things
+///   there are — no timers, no second way to the network, no path to the disk
+///   that is not a store an admin connected — and the one shape the
 ///   runtime refuses outright is a body that computes for a second without
 ///   yielding, because that is the isolate held against every other trigger;
 /// - a **syntax error surfaces at fire time**, not on save. Checking it would
@@ -308,12 +344,24 @@ impl Action for RunJsCode {
         // rather than its user, because a file rule is a role floor: `asUser()`
         // is checked against it, and the admin default clears every one.
         let files = FileStoreHost::new(ctx.catalog).caused_by(ctx.event.role);
+        // The other triggers, when this context has a dispatcher — and nothing
+        // at all when it does not, so a body that names `trigger` outside a
+        // server says so by name. It carries the caller *and* the chain: the
+        // caller because the trigger that runs must see who caused it, and the
+        // chain because that is what stops a body running the trigger it is
+        // itself the action of, at the same depth every other cascade stops at.
+        let runner = ctx.triggers().map(|d| {
+            TriggerRunHost::new(d, ctx.catalog)
+                .caused_by(ctx.event.role, ctx.event.user.clone())
+                .chained(ctx.chain.clone())
+        });
         let call = CodeCall {
             code,
             bindings: bindings(ctx.event),
             host: Some(&host),
             fetch: Some(&net),
             files: Some(&files),
+            triggers: runner.as_ref().map(|r| r as &dyn TriggerHost),
             timeout,
             ..CodeCall::default()
         };

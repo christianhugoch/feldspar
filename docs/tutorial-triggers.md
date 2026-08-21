@@ -490,6 +490,40 @@ truncated), and a copy may move 256 MB because those bytes never come through yo
 things to remember: nothing streams, and **a file you wrote stays written** even if your code
 throws afterwards — unlike a row, there is nothing to roll back.
 
+**Running another trigger.** The fourth thing a body can await is one of your other triggers, by
+name:
+
+```js
+const archived = await trigger("archive_done").run({ before: payload.today });
+await trigger("sweep_report").run();          // pass nothing and the payload is {}
+```
+
+`trigger("…")` gets you a handle and does nothing; `run()` is what runs it. What runs is the
+trigger you configured — the same thing the **Run** button and the app's `POST
+/actions/{name}` run — so its "only if" is checked, a trigger you switched off stays off, and
+what comes back is what its action returned (or `null` if its "only if" said no). A trigger that
+fails throws, so you can catch it:
+
+```js
+try {
+  await trigger("send_invoice").run({ id: row.id });
+} catch (e) {
+  await db.task_audit.insert({ task: row.id, what: `invoice failed: ${e.message}`, who: "system" });
+}
+```
+
+By default the trigger runs with the server's own authority, as your body's `db` does — a
+trigger is your configuration, and configuration calling configuration does not ask permission.
+`trigger("x").asUser().run(…)` runs it on behalf of whoever caused the event instead, and then
+the target trigger's own **minimum role** decides; if they may not, you get an error to catch.
+Either way the trigger you ran sees the same `user` your body sees, because that is who caused
+it.
+
+Twenty trigger runs per body, and each one clamped to what is left of your `timeout_ms`. And you
+cannot loop for ever: a trigger that runs a trigger that runs a trigger is a *chain*, and at five
+deep it is refused with the whole chain in the message — including the case where a body runs
+the trigger it is itself the code of.
+
 ## The actions you have
 
 Every action declares its own settings, and the form is rendered from that declaration — so an
@@ -509,10 +543,11 @@ comes back as the trigger's result — so a `none` trigger exposed on your app c
 front end to somebody else's API.
 
 `run_js_code` is the escape hatch for a computation no combination of the others expresses. It
-sees `row`, `old`, `user` and `payload` — and three ways out: `db`, your tables (Step 5),
-`fetch`, an HTTP request (Step 5 again), and `fs`, your file stores (Step 5 once more). That is
-the whole host surface: no subprocess, no timers, no schema changes, and no way to a file that
-is not a store you connected.
+sees `row`, `old`, `user` and `payload` — and four ways out: `db`, your tables (Step 5),
+`fetch`, an HTTP request (Step 5 again), `fs`, your file stores (Step 5 once more), and
+`trigger`, your other triggers (Step 5 once more again). That is the whole host surface: no
+subprocess, no timers, no schema changes, and no way to a file that is not a store you
+connected.
 
 The `fetch` **action** and a body's `fetch` are the same capability, and which to reach for is a
 question of what you do with the answer: the action is one configured request whose response
@@ -546,6 +581,10 @@ table.
 - **A formula is one pure expression.** No `new`, no assignment, no statements — so "now" is
   `Date.now()` (a number), not `new Date()`. `Math`, `JSON`, `String`, `Number` and `Date` are
   reachable as globals; a field of the same name shadows them.
+- **A trigger you run from code is one more caller, not a shortcut.** It goes through the same
+  path the Run button does, which is usually what you want — but it means the trigger's own "only
+  if" can decline it (you get `null`), a disabled trigger refuses, and its writes fire whatever
+  *they* trigger. If you wanted only the work and not the trigger, put the work in a body.
 - **`db` exists only in code, not in formulas.** An `only_if`, a field value, a `where` and a
   `{{ }}` template are evaluated in a sandbox with no database access at all, on purpose: a
   formula that could query is a formula that could be slow on every row of every read. If a

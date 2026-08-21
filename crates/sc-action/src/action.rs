@@ -22,6 +22,7 @@ use sc_expr::JsEvaluator;
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
 
+use crate::dispatch::TriggerDispatcher;
 use crate::event::Event;
 
 /// One elementary step: configurable, run against an event.
@@ -143,6 +144,19 @@ pub struct ActionContext<'a> {
     /// a unit test), so an action that sends mail out of context gets a named
     /// configuration error rather than doing nothing.
     mailer: Option<&'a Arc<dyn Mailer>>,
+    /// The dispatcher this action was fired by, for an action that can run
+    /// **another trigger** — `run_js_code`'s `trigger(…)`, and a workflow's
+    /// steps once §10.3 lands.
+    ///
+    /// *The* dispatcher rather than a handle of its own: what a body runs must
+    /// be the trigger the admin configured, with its `only_if`, its floor and
+    /// its cascade bound, so this is one more thing that can ask and not a
+    /// second way to fire. Borrowed, because the dispatcher is what is running
+    /// this action — the borrow is its own stack frame, one level up.
+    ///
+    /// `None` where a context has none (client generation, a unit test), and an
+    /// action that needs it says so by name rather than doing nothing.
+    triggers: Option<&'a TriggerDispatcher>,
     /// The run context: a JSON object the action may read and write. The seam the
     /// workflow engine's durable context grows into.
     pub context: Attrs,
@@ -168,6 +182,7 @@ impl<'a> ActionContext<'a> {
             chain: vec![trigger.to_owned()],
             evaluator: None,
             mailer: None,
+            triggers: None,
             context: Attrs::new(),
         }
     }
@@ -182,6 +197,12 @@ impl<'a> ActionContext<'a> {
     /// [`SettingsMailer`](sc_email::SettingsMailer), or a recording one in a test.
     pub fn with_mailer(mut self, mailer: &'a Arc<dyn Mailer>) -> ActionContext<'a> {
         self.mailer = Some(mailer);
+        self
+    }
+
+    /// Supply the dispatcher, so this action can run another trigger.
+    pub fn with_triggers(mut self, triggers: &'a TriggerDispatcher) -> ActionContext<'a> {
+        self.triggers = Some(triggers);
         self
     }
 
@@ -204,6 +225,17 @@ impl<'a> ActionContext<'a> {
                 self.trigger
             ))
         })
+    }
+
+    /// The dispatcher, when this context has one.
+    ///
+    /// An `Option` rather than [`evaluator`](ActionContext::evaluator)'s
+    /// `Result`, because the caller that asks is `run_js_code`, and what it does
+    /// with `None` is bind no `trigger` at all — so a body that names it in a
+    /// context with no dispatcher gets a `ReferenceError` naming it, which is
+    /// what every other absent surface there does.
+    pub fn triggers(&self) -> Option<&TriggerDispatcher> {
+        self.triggers
     }
 
     /// The mail transport, or a configuration error naming the trigger.

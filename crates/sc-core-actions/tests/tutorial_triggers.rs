@@ -125,6 +125,20 @@ return { swept: swept };
     )
 }
 
+/// The tutorial's "running another trigger" example, verbatim — the two lines
+/// the document prints, wrapped in the `return` a trigger needs to report
+/// anything.
+fn run_others() -> Trigger {
+    Trigger::new("run_others", EventKind::None, "run_js_code").config(
+        "code",
+        r#"
+const archived = await trigger("archive_done").run({ before: payload.today });
+const report = await trigger("sweep_report").run();
+return { archived: archived, report: report };
+"#,
+    )
+}
+
 /// The tutorial's grouped read, verbatim: one row per owner, bounded by a
 /// condition on the count rather than on the rows.
 fn open_by_owner() -> Trigger {
@@ -208,6 +222,7 @@ async fn setup() -> Result<Tutorial> {
         sweep_report(),
         sweep_streamed(),
         open_by_owner(),
+        run_others(),
     ] {
         save_trigger(&catalog, &registry, &trigger).await?;
     }
@@ -448,5 +463,60 @@ async fn the_streamed_sweep_writes_the_same_rows_the_read_one_does() -> Result<(
         "one audit row per finished task, in the title order the loop walked them \
          in — and `Book the venue` is not finished, so it is in neither"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_body_runs_the_other_two_triggers_the_tutorial_wrote() -> Result<()> {
+    let t = setup().await?;
+    let tasks = t.catalog.require("tasks")?;
+    let member = "member@example.com";
+    for (title, done) in [
+        ("Draft the report", true),
+        ("Book the venue", false),
+        ("Renew the domain", true),
+    ] {
+        rows::create_row(
+            &t.catalog,
+            &tasks,
+            &json!({ "title": title, "done": done, "owner": member }),
+        )
+        .await?;
+    }
+
+    // The document's claim about `trigger(…)` is that what runs is the trigger
+    // the reader configured, so this asserts on *both* of the other steps' work
+    // happening from one body: step 3's `archive_done` deletes this member's
+    // finished tasks, and step 5's `sweep_report` — which runs *after* it — finds
+    // none left to sweep.
+    let caller = CallerContext::new(40, Some(json!({ "email": member })));
+    let result = t
+        .dispatcher
+        .run_trigger(
+            &t.catalog,
+            "run_others",
+            json!({ "today": 0 }),
+            Some(&caller),
+        )
+        .await?;
+    assert_eq!(
+        result,
+        json!({
+            "archived": { "deleted": 2, "ids": [1, 3] },
+            "report": { "swept": 0, "left": 1 },
+        }),
+        "each child's own answer, in the body's object: {result}"
+    );
+    // And the writes really happened: the two finished tasks are gone, and the
+    // one that is not finished is not.
+    let left = t
+        ._db
+        .client()
+        .await?
+        .query("SELECT title FROM tasks ORDER BY id", &[])
+        .await
+        .map_err(|e| Error::database(e.to_string()))?;
+    let titles: Vec<String> = left.iter().map(|r| r.get(0)).collect();
+    assert_eq!(titles, vec!["Book the venue".to_owned()]);
     Ok(())
 }

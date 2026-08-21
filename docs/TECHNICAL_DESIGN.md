@@ -1283,10 +1283,12 @@ exactly like an API caller's write. A second write path would quietly skip all o
   configuration is validated against. The transport is handed in through `ActionContext`,
   exactly as the JavaScript engine is, which is what lets its tests assert *what would have
   been sent*.
-- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and three
-  host surfaces: `db`, the tables (below), `fetch`, an HTTP request (below), and `fs`, the file
-  stores (below). Those three are exactly the surface: no subprocess, no timers, no schema
-  changes, and no path to a file that is not a store an admin connected. It runs on its
+- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and four
+  host surfaces: `db`, the tables (below), `fetch`, an HTTP request (below), `fs`, the file
+  stores (below), and `trigger`, this server's other triggers (below). Those four are exactly
+  the surface: no subprocess, no timers, no schema changes, no path to a file that is not a
+  store an admin connected, and no way to fire an event except by being one more caller of the
+  dispatcher every event already goes through. It runs on its
   **own pool of isolates**, not the single pure isolate every ownership formula shares, which
   is what lets it suspend on a host call and carry a configurable `timeout_ms` (default 5s,
   max 60s) without either becoming a property of every authorization decision in the process.
@@ -1685,6 +1687,64 @@ languages inherit `fs` the way they inherit `db`:
 `toStore`/`toPath`, so a cross-store move is one operation. Nothing in a request is trusted: the
 store is resolved through the catalog, the path is re-checked for the traversal the guest already
 refused, and an unknown field is a refusal naming it.
+
+#### `trigger`: another trigger in a code body
+
+The fourth host surface, and the smallest. `trigger(name)` is a **handle** over one of this
+server's triggers — nothing has happened yet — and `run` is the only verb:
+
+```js
+const archived = await trigger("archive_done").run({ before: payload.today });
+await trigger("reindex").run();                            // no payload is {}
+await trigger("send_invoice").asUser().run({ id: row.id });
+trigger.names;                                             // what this run may name
+```
+
+A handle rather than `db.books`'s property access, because a trigger's name is the admin's own
+sentence and may contain spaces; and the names travel into the run, so `trigger("archiv")` is
+refused where the typo is, naming what does exist.
+
+**It runs the dispatcher's trigger, not a copy of it.** The call goes through the same
+[`TriggerDispatcher::run_trigger`](#the-fire-path-and-its-choke-point) the Run button, `POST
+{mount}/actions/{name}` and the scheduler use, so everything §10.2 says about a trigger holds
+however it was asked: the `only_if` runs — and `null` comes back when it declines, which is not a
+failure — a disabled trigger stays disabled, one that failed validation says why, and the
+**cascade bound** counts this run. That last is the important one. The child event carries the
+calling trigger's chain, so `Event::firing` refuses past `MAX_DEPTH` and names the whole chain: a
+body that runs the trigger it is itself the action of stops at the fifth turn with a sentence an
+admin can read, and this is bounded by construction rather than by convention. A trigger that
+fails is an ordinary catchable error, so a body may run one and fall back.
+
+**Authority** is `db`'s once more: the **admin's** by default — running a trigger from a trigger
+is server-side configuration calling server-side configuration, so no floor is consulted — and
+`asUser()` delegates, at which point the target's own `min_role` decides and a refusal is
+catchable. What does *not* depend on the authority is who the child event says caused it: the
+event's role and user travel either way, so the trigger that runs sees the same `user` it would
+have seen had that caller run it directly, and its own `db.asUser()` means the same person.
+Causation is a fact; authority is a decision.
+
+**Bounded** in two ways of its own: **20 trigger runs per body** — a budget apart from the other
+three, because what it bounds is a whole other run rather than one call, and because it bounds
+the *width* of a cascade where the chain bounds its depth — and each run **clamped to what is
+left of the calling body's wall clock**, so a slow child fails inside the body that started it
+rather than holding the request that fired the outermost trigger.
+
+The seam is JSON here too — one run in, one value out (`sc_expr::TriggerHost`, implemented by
+`sc_api::code_host::TriggerRunHost` over the one dispatcher) — so §15's other guest languages
+inherit `trigger` the way they inherit `db`:
+
+```json
+{ "trigger": "archive_done", "payload": { "before": "2026-08-01" },
+  "authority": "admin", "timeout_ms": 4750 }
+```
+
+`timeout_ms` is filled in by the op from what is left of the run, so an implementation has no
+policy to decide. Nothing in a request is trusted: the name is resolved against the live trigger
+set and the authority is re-checked, since what the guest sends is what a body could have sent.
+
+**Deliberately not in it**: firing an *event* by kind and channel (a body that wants a table's
+triggers writes the row); fire-and-forget, which needs §18's queue and is otherwise a run nobody
+waits for or reports; and a transaction spanning parent and child.
 
 ### 10.2 Triggers
 

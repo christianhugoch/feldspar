@@ -237,8 +237,7 @@ impl TriggerDispatcher {
         };
         let mut runs = Vec::with_capacity(matched.len());
         for trigger in matched {
-            let outcome =
-                fire_trigger(catalog, &self.registry, &self.services, &trigger, event).await;
+            let outcome = fire_trigger(self, catalog, &trigger, event).await;
             runs.push(TriggerRun {
                 trigger: trigger.name,
                 outcome,
@@ -332,7 +331,7 @@ impl TriggerDispatcher {
                 .caller(caller.role, caller.user.clone())
                 .chained(caller.chain.clone());
         }
-        let result = fire_trigger(catalog, &self.registry, &self.services, trigger, &event).await?;
+        let result = fire_trigger(self, catalog, trigger, &event).await?;
         Ok(result.unwrap_or(Json::Null))
     }
 }
@@ -407,22 +406,31 @@ fn event_kind(op: WriteOp) -> EventKind {
 ///
 /// `Ok(None)` means the `only_if` did not select this row — a trigger that
 /// deliberately did nothing, which is not a failure and must not read as one.
+///
+/// Takes **the dispatcher** rather than its registry and services separately,
+/// because an action may need the dispatcher itself: `run_js_code`'s `trigger(…)`
+/// runs another trigger, and what it must run is the one the admin configured,
+/// through the same path every other event takes. Passing `&self` down is what
+/// gives it that without an `Arc` cycle — the borrow is this stack frame, and the
+/// recursion it allows (a body running a trigger whose action is a body) is
+/// bounded where every other cascade is, by [`Event::firing`].
 pub async fn fire_trigger(
+    dispatcher: &TriggerDispatcher,
     catalog: &Catalog,
-    registry: &ActionRegistry,
-    services: &ActionServices,
     trigger: &Trigger,
     event: &Event,
 ) -> Result<Option<Json>> {
+    let services = &dispatcher.services;
     // The cascade bound, checked before anything else runs: past it, the trigger
     // does not fire and the error names the whole chain (§10.2).
     let chain = event.firing(&trigger.name)?;
     if !only_if_selects(catalog, services.evaluator.as_ref(), trigger, event).await? {
         return Ok(None);
     }
-    let action = registry.require(trigger.action.trim())?;
-    let mut ctx =
-        ActionContext::new(catalog, event, &trigger.configuration, &trigger.name).with_chain(chain);
+    let action = dispatcher.registry.require(trigger.action.trim())?;
+    let mut ctx = ActionContext::new(catalog, event, &trigger.configuration, &trigger.name)
+        .with_chain(chain)
+        .with_triggers(dispatcher);
     if let Some(evaluator) = &services.evaluator {
         ctx = ctx.with_evaluator(evaluator);
     }
