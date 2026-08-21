@@ -1283,9 +1283,10 @@ exactly like an API caller's write. A second write path would quietly skip all o
   configuration is validated against. The transport is handed in through `ActionContext`,
   exactly as the JavaScript engine is, which is what lets its tests assert *what would have
   been sent*.
-- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and two
-  host surfaces: `db`, the tables (below), and `fetch`, an HTTP request (below). Those two are
-  exactly the surface: no disk, no subprocess, no timers, no schema changes. It runs on its
+- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and three
+  host surfaces: `db`, the tables (below), `fetch`, an HTTP request (below), and `fs`, the file
+  stores (below). Those three are exactly the surface: no subprocess, no timers, no schema
+  changes, and no path to a file that is not a store an admin connected. It runs on its
   **own pool of isolates**, not the single pure isolate every ownership formula shares, which
   is what lets it suspend on a host call and carry a configurable `timeout_ms` (default 5s,
   max 60s) without either becoming a property of every authorization decision in the process.
@@ -1604,6 +1605,86 @@ an insert's row(s) or an update's assignments. Every terminal is one plan and on
 built by `sc_expr`'s JavaScript prelude and answered by `sc_api::code_host::TableHost`, which
 is where all the table knowledge is — `sc-expr` sits below `sc-catalog` and does not learn what
 a table is.
+
+#### `fs`: files in a code body
+
+The third host surface. `fs(name)` is a **file store** (§14.1), `open` is a **reference** to a
+path in it — no I/O, and the path need not exist — and everything that touches bytes is a
+method on that reference:
+
+```js
+const theFile = fs("myFileStore").open("the_file.txt");
+const exists = await theFile.exists();
+const theString = await theFile.text();
+```
+
+There is no separate way to *create* a file, and that is the design rather than an omission: a
+reference that can be read can be written, and the parent directories are made on the way.
+
+```js
+await fs("uploads").open("reports/2026-08.json").write({ rows: 12, ok: true });
+await fs("uploads").open("reports/2026-08.json").create("…");   // refuses: it is already there
+```
+
+`write` replaces, `create` refuses to, and both take a string, bytes (`Uint8Array` /
+`ArrayBuffer`), a `Response` — so `await file.write(await fetch(url))` saves a download — another
+**file**, which is copied host-side so the bytes never enter the sandbox, or any other value,
+which is stored as JSON for the reason `fetch`'s object body is *sent* as JSON. Both answer the
+number of bytes written.
+
+**The reading vocabulary is a `Response`'s**: `text()`, `json()`, `bytes()`, `arrayBuffer()`. An
+author who has read a fetch response has read a file. The one departure from a `Blob` is
+deliberate: `size` and `type` are part of `await file.stat()` rather than properties, because
+there is no synchronous I/O across this seam and a property that had to lie about a file it has
+not looked at is worse than an await. A missing file is `await file.exists() === false`, and an
+error only to something that was told to read it — `exists` is a question, not a `catch`.
+
+| on a file | |
+| --- | --- |
+| `path`, `name`, `parent`, `store`, `isDirectory` | identity; synchronous, and nothing has been read |
+| `exists()`, `stat()` | `{ size, isDirectory, modified, mimeType }`, or `null` for nothing there |
+| `text()`, `json()`, `bytes()`, `arrayBuffer()` | the contents |
+| `write(data)`, `create(data)` | create-or-replace, and create-or-refuse |
+| `delete()` | whether there was anything to delete |
+| `moveTo(dest)`, `copyTo(dest)` | `dest` may be a file in **another** store; answers the destination |
+| `meta()`, `setMeta({ minRole, attributes })` | the store's own per-file metadata |
+
+| on a directory | |
+| --- | --- |
+| `file(name)`, `dir(name)`, `parent`, `path`, `name` | references, synchronous |
+| `list()` | the direct children — as the same file and directory objects, so a listing is walked and acted on rather than re-opened by name |
+| `exists()`, `stat()`, `create()`, `delete()` | `create()` is `mkdir -p` and idempotent; `delete()` takes everything in it |
+
+**Authority** is `db`'s: the admin's by default, because a trigger is server-side configuration,
+and `fs(name).asUser()` delegates to the event's caller — at which point §14.1's
+**path-cumulative** `min_role` rule decides every operation (the store's floor, then every
+directory on the path, then the entry itself, most restrictive winning), and a listing is
+*filtered* rather than refused. One asymmetry is stated rather than inherited: a delegated body
+may **tighten** an access rule with `setMeta` and never loosen one, since a caller who can reach
+a file can already read it, and letting them publish it would make a non-admin the author of an
+access rule.
+
+**Bounded**, in three ways of its own: **100 operations per run** (a budget apart from the 200
+database calls and the 50 fetches, because a walk over a directory is a third kind of accident);
+**8 MB across the seam** per read and per write, refused rather than truncated for the reason a
+1000-row read is; and **256 MB per copy**, which is larger precisely because those bytes never
+enter the isolate. Two things a body must not assume: nothing **streams**, and a file write is
+**not rolled back** by a trigger that throws afterwards.
+
+The seam is JSON here too — one operation in, one value out (`sc_expr::FileHost`, implemented by
+`sc_api::code_host::FileStoreHost` over the catalog's connected stores) — so §15's other guest
+languages inherit `fs` the way they inherit `db`:
+
+```json
+{ "op": "read", "store": "uploads", "path": "notes/a.txt",
+  "authority": "admin", "encoding": "text" }
+```
+
+`op` is `read` | `write` | `stat` | `list` | `mkdir` | `delete` | `copy` | `rename` | `meta` |
+`setMeta`; bytes travel base64 (`base64`) or as text (`text`); `copy` and `rename` carry
+`toStore`/`toPath`, so a cross-store move is one operation. Nothing in a request is trusted: the
+store is resolved through the catalog, the path is re-checked for the traversal the guest already
+refused, and an unknown field is a refusal naming it.
 
 ### 10.2 Triggers
 

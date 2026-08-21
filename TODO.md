@@ -357,3 +357,61 @@ gained no capability, and this was built afterwards on the seam it left behind.
 - **The other guest languages** (§15's Python, Rust, Go adapters). The seam is untouched by
   design (decision 3), which is the point — they inherit this concurrency without inheriting any
   of its plumbing.
+
+---
+
+## Addendum — `fs` in a code body
+
+Added after the `fetch` addendum, at the user's request, and on the same terms: a **third** host
+surface, built on the seam the concurrency milestone left behind, with the API agreed before any
+of it was written. The shape is between what Bun and Deno do and what this server actually has —
+several named stores rather than one filesystem — so `fs(name)` is a store, `open(path)` is a
+*reference* (no I/O; the path need not exist), and there is no separate way to create a file
+because writing to a reference is one.
+
+- [x] `stat` on the `FileStore` trait (`sc-files`): `FileStat { size, is_dir, modified }`, with a
+      **default implementation that lists the parent** — so a backend that can only list still
+      answers `exists()` — and a real `metadata` call in `LocalFileStore`, which is the only one
+      that can report a modification time. `exists()` had no honest implementation before this:
+      `get_meta` answers a default for a file that is not there.
+- [x] `FileHost` in `sc-expr`: a third host trait of the same shape as the other two (one JSON
+      operation in, one JSON value out), a `files` field on `CodeCall`, `op_sc_files` with a
+      budget of its own (`DEFAULT_MAX_FILE_OPS`, 100), and `Surface::Files` on the **existing**
+      bridge — so `Promise.all([file.text(), db…])` is served in the one `FuturesUnordered` the
+      caller already had. Plus `store_names()`, which is why `fs("typo")` can fail *at once*
+      naming the stores that exist: the guest's `fs(name)` is synchronous, so the list travels
+      with the run rather than being a call away.
+- [x] `FILES_PRELUDE`: `fs`, the file and the directory objects, and the path handling (`..`, an
+      absolute path and a null byte are refused in the guest, where the message names the line
+      that wrote them, and again in the host, which trusts nothing). Compiled once per isolate;
+      `fs` is minted per run by `__scMakeFs(token, stores)` and handed to the body as a
+      parameter, exactly as `db` and `fetch` are. The read methods are **not `async`**: an
+      `async` function answers a native promise, and the forgotten-`await` guard lives on the
+      promise the host call answers — a test caught this, and `[object Promise]` written into a
+      file is the failure it would have been.
+- [x] `FileStoreHost` in `sc-api::code_host`: the operations over the catalog's connected stores,
+      the byte caps (`MAX_FILE_BYTES` 8 MB across the seam, `MAX_COPY_BYTES` 256 MB host-side),
+      and §14.1's path-cumulative rule under `asUser()` — with the store floor read once per run
+      and skipped entirely under admin authority, where every rule is cleared anyway. One
+      decision that is not inherited: a delegated `setMeta` may **tighten** a rule and never
+      loosen one.
+- [x] Tests: fourteen in `sc-expr` against a fake store (the plan each method builds, `exists`,
+      the four write shapes, bytes both ways, a listing walked, a copy and a move, the paths
+      refused before they are sent, an unknown store named at once, authority on the handle,
+      metadata, the budget, a forgotten `await`, and `fs` absent from a body that was not given
+      it) and nine in `sc-core-actions` against **real directories** (read and write, create vs
+      write, a directory made/listed/walked/deleted, a cross-store copy, metadata that is the
+      store's own, a delegated body refused by a folder rule and by the store's floor while the
+      trigger's own authority is not, an over-large file refused rather than truncated, and an
+      unconnected store named). Plus two in `sc-files` for `stat` — the local one and the
+      default's.
+- [x] `ui/admin/src/codeTypes.ts` (`fileDeclarations`, `declare const fs: ScFs`) and its
+      type-check test; `run_js_code`'s doc comment; `docs/TECHNICAL_DESIGN.md` §10.1 (an `fs`
+      subsection, and the "no disk" line, which is now "no path to a file that is not a store an
+      admin connected"); `docs/tutorial-triggers.md`; CHANGELOG.
+
+**Deliberately not in it.** `append` (the trait has none, and a read-modify-write is neither
+atomic nor bounded usefully); streaming and partial reads (the seam carries one value, which is
+the same limit `res.body` has); a default store (a body that does not name its store breaks when
+a second store appears); and any promise about **rollback** — a file a failed trigger wrote stays
+written, which the documentation says rather than implies.

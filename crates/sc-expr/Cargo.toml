@@ -32,6 +32,9 @@ swc_ecma_parser = { workspace = true }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The file seam carries bytes base64-encoded, so the fake store the `fs` tests
+# run against has to encode them the way the real host does.
+base64.workspace = true
 sc-test-harness = { workspace = true }
 sc-db-postgres = { workspace = true }
 tokio-postgres = { workspace = true }

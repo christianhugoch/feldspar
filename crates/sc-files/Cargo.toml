@@ -15,6 +15,10 @@ sc-error.workspace = true
 sc-types.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+# One job: turning a file's modification time into the RFC 3339 a `stat` reports.
+# Doing it by hand would be a civil-calendar conversion written out for a field
+# that already has one right answer in the workspace.
+chrono.workspace = true
 # The store-side search (§11.3): a find-in-files pattern is a regular expression
 # — or a literal escaped into one — and `regex-lite` is the engine already in the
 # tree for the `String` type's `regex` attribute. Correct matching is what a

@@ -357,6 +357,135 @@ interface ScFetchOptions {
 `;
 }
 
+/** The declarations for `fs`: a store, a file, a directory, and the shapes they
+ * exchange.
+ *
+ * A transcription of `sc-expr`'s `FILES_PRELUDE` and what `sc-api`'s
+ * `FileStoreHost` answers, on the same terms as {@link chainDeclarations}: close
+ * to correct rather than provably so, and a drift costs a wrong completion. */
+export function fileDeclarations(): string {
+  return `
+/** What one entry's own facts are, from \`await file.stat()\`.
+ *
+ * This is where \`size\` and \`type\` live, rather than being properties of the
+ * file: there is no synchronous I/O in the sandbox, and a property that had to
+ * lie about a file it has not looked at would be worse than an await. */
+interface ScFileStat {
+  /** Bytes; \`0\` for a directory. */
+  size: number;
+  isDirectory: boolean;
+  /** When it last changed (RFC 3339), where the backend records one. */
+  modified: string | null;
+  /** Guessed from the path, as a \`File\` field's MIME rule guesses it. */
+  mimeType: string | null;
+}
+
+/** A file's metadata: the store's own per-file record, which is where the
+ * \`min_role\` access rule is set. */
+interface ScFileMeta {
+  /** The rule set on this entry, if any. \`1\` is admin, \`100\` is public. */
+  minRole: number | null;
+  /** The rule that actually applies, given the store's floor and every
+   * directory above this entry — read-only, and the one to believe. */
+  effectiveMinRole: number | null;
+  attributes: Record<string, string>;
+}
+
+/** What a file can be written from.
+ *
+ * A string is written as it is; bytes as they are; a \`Response\` is its body
+ * (so \`await file.write(await fetch(url))\` saves a download); another file is
+ * copied host-side, so the bytes never enter the sandbox; anything else is
+ * stored as JSON. */
+type ScWritable = string | Uint8Array | ArrayBuffer | ScResponse | ScFile | Record<string, any> | any[];
+
+/** One file in a store — a **reference** to a path, which need not exist.
+ *
+ * \`fs("s").open("a.txt")\` touches nothing: every method that does is
+ * awaited. */
+declare class ScFile {
+  /** Store-relative, \`/\`-separated. */
+  readonly path: string;
+  /** The last component of the path. */
+  readonly name: string;
+  readonly isDirectory: false;
+  readonly store: ScFileStore;
+  readonly parent: ScDir;
+  /** Whether a **file** is there. A directory of the same name is not one, and
+   * this is the question to ask instead of catching a failed read. */
+  exists(): Promise<boolean>;
+  /** The entry's facts, or null when nothing is there. */
+  stat(): Promise<ScFileStat | null>;
+  text(): Promise<string>;
+  json(): Promise<any>;
+  bytes(): Promise<Uint8Array>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+  /** Create or replace, making the parent directories on the way. Answers the
+   * number of bytes written. */
+  write(data: ScWritable): Promise<number>;
+  /** The same, but refuses to replace a file that is already there. */
+  create(data: ScWritable): Promise<number>;
+  /** Whether there was anything to delete. */
+  delete(): Promise<boolean>;
+  /** Move it, within this store or to a file in another, and answer where it
+   * went. Refuses to replace an existing destination. */
+  moveTo(dest: ScFile | string): Promise<ScFile>;
+  /** Copy it, on the same terms. The bytes never enter the sandbox. */
+  copyTo(dest: ScFile | string): Promise<ScFile>;
+  meta(): Promise<ScFileMeta>;
+  /** Replace this entry's metadata — read it first if what you want is a change
+   * to one attribute. A delegated body may tighten a rule, never loosen one. */
+  setMeta(meta: { minRole?: number | null; attributes?: Record<string, string> }): Promise<ScFile>;
+}
+
+/** One directory in a store — a reference, like a file. */
+declare class ScDir {
+  readonly path: string;
+  readonly name: string;
+  readonly isDirectory: true;
+  readonly store: ScFileStore;
+  /** Null at the store's root. */
+  readonly parent: ScDir | null;
+  file(name: string): ScFile;
+  dir(name: string): ScDir;
+  /** The direct children, as the same objects everything else takes — so a
+   * listing is walked and acted on rather than re-opened by name. Under
+   * \`asUser()\` it is filtered to what that caller may see. */
+  list(): Promise<(ScFile | ScDir)[]>;
+  exists(): Promise<boolean>;
+  stat(): Promise<ScFileStat | null>;
+  /** Make it, parents included. Not an error if it is already there. */
+  create(): Promise<ScDir>;
+  /** It and everything in it. */
+  delete(): Promise<boolean>;
+  meta(): Promise<ScFileMeta>;
+  setMeta(meta: { minRole?: number | null; attributes?: Record<string, string> }): Promise<ScFile>;
+}
+
+/** One file store, as a code body reaches it. */
+declare class ScFileStore {
+  readonly name: string;
+  /** A file in this store. No I/O: the path need not exist, and writing to it
+   * is how it comes to. */
+  open(path: string): ScFile;
+  dir(path: string): ScDir;
+  readonly root: ScDir;
+  /** Delegate everything that follows to the person who caused the event, at
+   * which point the store's floor and every directory's \`min_role\` decide. */
+  asUser(): ScFileStore;
+  /** Act as the server (the default). */
+  asAdmin(): ScFileStore;
+}
+
+/** The file stores, by name. */
+interface ScFs {
+  (store: string): ScFileStore;
+  /** The stores this server has connected. */
+  readonly stores: readonly string[];
+}
+`;
+}
+
 /** The declarations for this server's tables: a row interface and a column union
  * per table, and the `db` handle carrying one property per table. */
 export function tableDeclarations(tables: TableInfo[]): string {
@@ -476,6 +605,23 @@ export function scopeDeclarations(scope: CodeScope, tables: TableInfo[]): string
       `declare const Headers: typeof ScHeaders;\n` +
       `declare const Response: typeof ScResponse;`,
   );
+  parts.push(
+    `/** The file stores. \`fs(name)\` is one store, \`open\` is a reference to a\n` +
+      ` * path in it — no I/O, and the path need not exist — and everything that\n` +
+      ` * touches bytes is awaited:\n` +
+      ` *\n` +
+      ` * \`\`\`js\n` +
+      ` * const theFile = fs("uploads").open("the_file.txt");\n` +
+      ` * if (await theFile.exists()) {\n` +
+      ` *   const theString = await theFile.text();\n` +
+      ` * }\n` +
+      ` * await fs("uploads").open("reports/summary.json").write({ rows: 12 });\n` +
+      ` * \`\`\`\n` +
+      ` *\n` +
+      ` * Bounded like everything else a body reaches: 100 operations per run and\n` +
+      ` * 8 MB across the boundary per read or write. Only a code body has it — a\n` +
+      ` * formula evaluates without it. */\ndeclare const fs: ScFs;`,
+  );
   return `${parts.join("\n\n")}\n`;
 }
 
@@ -486,6 +632,7 @@ export function codeLibrary(tables: TableInfo[], scope: CodeScope): string {
     "// server's tables; not a file in any project.",
     "",
     chainDeclarations(),
+    fileDeclarations(),
     tableDeclarations(tables),
     scopeDeclarations(scope, tables),
   ].join("\n");

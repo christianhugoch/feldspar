@@ -155,6 +155,15 @@ pub const DEFAULT_MAX_HOST_CALLS: u32 = 200;
 /// enough for the fan-out a body legitimately writes.
 pub const DEFAULT_MAX_FETCHES: u32 = 50;
 
+/// How many **file operations** one run may make.
+///
+/// Its own budget, on the same grounds `fetch`'s is: a file operation is neither
+/// a pooled query nor a request to somebody else's server, and the accident it
+/// bounds is a body that walks a directory doing something per file. Small
+/// enough that such a walk stops and says so, large enough for the fan-out a
+/// body legitimately writes.
+pub const DEFAULT_MAX_FILE_OPS: u32 = 100;
+
 /// What one `fetch` gets when the body names no `timeout_ms` of its own.
 ///
 /// Always clamped to what is left of the run's wall clock, which is the bound
@@ -261,6 +270,49 @@ pub trait FetchHost: Send + Sync {
     async fn fetch(&self, request: Json) -> Result<Json>;
 }
 
+/// The **third** host surface: one file operation in, one JSON answer out.
+///
+/// Separate from the other two for the reasons they are separate from each
+/// other — it is a different capability (a body may have tables and no files),
+/// it is implemented somewhere else (over the catalog's connected file stores,
+/// in `sc-api`), and it spends a budget of its own. And, as with them, what
+/// crosses is plain JSON, so §15's other guest languages inherit `fs` the way
+/// they inherit `db`:
+///
+/// ```json
+/// { "op": "read", "store": "uploads", "path": "notes/a.txt",
+///   "authority": "admin", "encoding": "text" }
+/// ```
+///
+/// ```json
+/// { "text": "hello" }
+/// ```
+///
+/// An `Err` is thrown into the guest as an ordinary `Error` at the call site —
+/// a refused write, a missing file — so a body may catch it. Nothing here is
+/// trusted: the store name, the path, and the authority are all re-checked by
+/// the implementation, which is the one that knows what stores exist and what
+/// rule guards each path.
+#[async_trait]
+pub trait FileHost: Send + Sync {
+    /// Answer one file operation.
+    async fn files(&self, request: Json) -> Result<Json>;
+
+    /// The store names to bind into the run's `fs.stores`, so `fs("typo")` can
+    /// fail **at once** and name what does exist rather than deferring to the
+    /// first operation.
+    ///
+    /// Synchronous, because the guest's `fs(name)` is: a body writes
+    /// `fs("uploads").open(…)` in one expression and there is nothing to await
+    /// in the middle of it. A host that cannot enumerate its stores without I/O
+    /// answers with the default — an empty list, which the guest reads as "no
+    /// list to check against" and lets every name through to be decided by the
+    /// operation itself.
+    fn store_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// One run of a JavaScript **code body**: the source, the values in scope, and
 /// what it is allowed to reach and for how long.
 ///
@@ -298,6 +350,12 @@ pub struct CodeCall<'a> {
     ///
     /// Borrowed for the same reason `host` is, and bridged the same way.
     pub fetch: Option<&'a dyn FetchHost>,
+    /// The file surface, or `None` for a body that cannot reach a file store —
+    /// in which case `fs` is not bound at all, so naming it is a
+    /// `ReferenceError` rather than a call that fails.
+    ///
+    /// Borrowed for the same reason `host` is, and bridged the same way.
+    pub files: Option<&'a dyn FileHost>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
@@ -306,6 +364,8 @@ pub struct CodeCall<'a> {
     /// How many outbound HTTP requests this run may make
     /// ([`DEFAULT_MAX_FETCHES`]).
     pub max_fetches: u32,
+    /// How many file operations this run may make ([`DEFAULT_MAX_FILE_OPS`]).
+    pub max_file_ops: u32,
 }
 
 impl Default for CodeCall<'_> {
@@ -315,9 +375,11 @@ impl Default for CodeCall<'_> {
             bindings: BTreeMap::new(),
             host: None,
             fetch: None,
+            files: None,
             timeout: None,
             max_calls: DEFAULT_MAX_HOST_CALLS,
             max_fetches: DEFAULT_MAX_FETCHES,
+            max_file_ops: DEFAULT_MAX_FILE_OPS,
         }
     }
 }
@@ -329,9 +391,11 @@ impl std::fmt::Debug for CodeCall<'_> {
             .field("bindings", &self.bindings)
             .field("host", &self.host.is_some())
             .field("fetch", &self.fetch.is_some())
+            .field("files", &self.files.is_some())
             .field("timeout", &self.timeout)
             .field("max_calls", &self.max_calls)
             .field("max_fetches", &self.max_fetches)
+            .field("max_file_ops", &self.max_file_ops)
             .finish()
     }
 }
@@ -350,6 +414,13 @@ pub(crate) const DB: &str = "db";
 /// it, and a body's author knows the name before they read anything of ours.
 #[cfg(feature = "eval")]
 pub(crate) const FETCH: &str = "fetch";
+
+/// The name the file surface binds under, reserved when a file host is present
+/// for the reason [`DB`] is. It is `fs` because that is what every runtime with
+/// files calls its module, and it is a *function* here — `fs("uploads")` — since
+/// this server has many stores and no default one.
+#[cfg(feature = "eval")]
+pub(crate) const FS: &str = "fs";
 
 // ---------------------------------------------------------------------------
 // The prelude (the fluent surface, in JavaScript)
@@ -876,6 +947,18 @@ pub(crate) const FETCH_PRELUDE: &str = r#"
     return null;
   };
 
+  // The codecs, for the other preludes compiled onto this isolate. The seam is
+  // JSON, so every surface that carries bytes carries them base64-encoded, and
+  // writing the encoder twice would be two chances to disagree about what a
+  // lone surrogate or a truncated sequence decodes to.
+  fixed("__scCodec", Object.freeze({
+    encodeUtf8: encodeUtf8,
+    decodeUtf8: decodeUtf8,
+    toBase64: toBase64,
+    fromBase64: fromBase64,
+    asBytes: asBytes,
+  }));
+
   // --- the response -------------------------------------------------------
   // Built by `fetch` from what the host answered, and constructible by a body
   // for the same reason the web makes it constructible: a function that answers
@@ -1076,6 +1159,395 @@ pub(crate) const FETCH_PRELUDE: &str = r#"
 })();
 "#;
 
+/// The `fs` surface: file stores, as objects.
+///
+/// Compiled **once per isolate**, like [`DB_PRELUDE`] and [`FETCH_PRELUDE`], and
+/// minted per run by `__scMakeFs(token, stores)` — so a resident body holds a
+/// function closed over *its* token and *its* list of stores, and cannot spend
+/// another run's budget or reach a store that run was not told about.
+///
+/// # The shape
+///
+/// `fs(name)` is a **store handle**, `open` and `dir` are **references** — no
+/// I/O, and the path need not exist — and everything that touches bytes is a
+/// method on the reference:
+///
+/// ```js
+/// const theFile = fs("myFileStore").open("the_file.txt");
+/// if (await theFile.exists()) {
+///   const theString = await theFile.text();
+/// }
+/// await fs("uploads").open("reports/2026-08.json").write({ rows: 12 });
+/// ```
+///
+/// Creating is not a second concept, which is the whole of the answer to "what
+/// replaces a `write(path, data)` free function": a reference that can be read
+/// can be written, and the parent directories are made on the way. `write`
+/// replaces what is there, `create` refuses to.
+///
+/// The reading vocabulary is `Response`'s — `text()`, `json()`, `bytes()`,
+/// `arrayBuffer()` — deliberately, so an author who has read a fetch response
+/// has read a file. **One departure from `Blob`**: `size` and `type` are not
+/// properties but part of `await file.stat()`, because there is no synchronous
+/// I/O across this seam and a property that lies is worse than an await.
+///
+/// # What crosses
+///
+/// One JSON operation per method that touches the store, and the *path
+/// handling* is here as well as in the host: `..`, a null byte and an absolute
+/// path are refused in the guest, where the message can name the line that
+/// wrote them, and refused again by the host, which trusts nothing it is sent.
+#[cfg(feature = "eval")]
+pub(crate) const FILES_PRELUDE: &str = r##"
+(() => {
+  const fixed = (name, value) =>
+    Object.defineProperty(globalThis, name, {
+      value: value, writable: false, configurable: false, enumerable: false,
+    });
+  // The bytes codecs, shared with the fetch prelude — see `__scCodec` there.
+  const codec = globalThis.__scCodec;
+  // What separates "made by this prelude" from "made by a body": a
+  // module-private symbol, so `new (file.constructor)(…)` cannot forge a handle
+  // to a store this run was not given.
+  const INTERNAL = Symbol("sc.file");
+
+  // --- paths --------------------------------------------------------------
+  // Store-relative, `/`-separated, and confined to the store: `..` is refused
+  // rather than resolved, because a path that climbs out is either a bug or an
+  // attempt, and neither is served by silently clamping it at the root.
+  const norm = (path, what) => {
+    if (typeof path !== "string") {
+      throw new TypeError(what + " takes a path, as a string");
+    }
+    if (path.indexOf("\u0000") >= 0) {
+      throw new TypeError("a file path may not contain a null byte");
+    }
+    if (path.charAt(0) === "/" || path.charAt(0) === "\\") {
+      throw new TypeError(
+        "`" + path + "` is an absolute path; a file store's paths are relative to its root"
+      );
+    }
+    const parts = [];
+    for (const segment of path.split("/")) {
+      if (segment === "" || segment === ".") continue;
+      if (segment === "..") {
+        throw new TypeError(
+          "`" + path + "` leaves the file store: `..` is not a path segment here"
+        );
+      }
+      parts.push(segment);
+    }
+    return parts.join("/");
+  };
+  const named = (path, what) => {
+    const clean = norm(path, what);
+    if (clean === "") throw new TypeError(what + " needs a name, not the store root");
+    return clean;
+  };
+  const join = (dir, rest) => (dir === "" ? rest : dir + "/" + rest);
+  const basename = (path) => {
+    const at = path.lastIndexOf("/");
+    return at < 0 ? path : path.slice(at + 1);
+  };
+  const dirname = (path) => {
+    const at = path.lastIndexOf("/");
+    return at < 0 ? "" : path.slice(0, at);
+  };
+
+  // --- one operation ------------------------------------------------------
+  // The handle is what carries authority: the token this run was minted with,
+  // the store's name, and whose authority its operations run under. Every
+  // operation below sends exactly those three plus what it says itself.
+  const send = (handle, plan) =>
+    __scFsCall(
+      handle.token,
+      Object.assign({ store: handle.store, authority: handle.authority }, plan)
+    );
+
+  // --- a file -------------------------------------------------------------
+  class SaltcornFile {
+    #handle; #path;
+    constructor(handle, path, internal) {
+      if (internal !== INTERNAL) {
+        throw new TypeError("a file is opened with fs(store).open(path), not constructed");
+      }
+      this.#handle = handle;
+      this.#path = path;
+    }
+    // Identity: synchronous, and none of it has touched the store.
+    get path() { return this.#path; }
+    get name() { return basename(this.#path); }
+    get isDirectory() { return false; }
+    get store() { return makeStore(this.#handle); }
+    get parent() { return new SaltcornDir(this.#handle, dirname(this.#path), INTERNAL); }
+    // For the operations that name two files (a copy, a move): the other file's
+    // own handle and path, reachable only from this prelude.
+    __scRef(internal) {
+      return internal === INTERNAL ? { handle: this.#handle, path: this.#path } : undefined;
+    }
+    toString() { return this.#handle.store + ":" + this.#path; }
+    toJSON() { return { store: this.#handle.store, path: this.#path }; }
+
+    // Reading. `exists` is a question rather than a `catch`: a missing file is
+    // `false` here, and an error everywhere that was told to read one.
+    //
+    // **Not `async` methods**, deliberately: an `async` function answers a
+    // native promise, and the promise the host call answers is the one that
+    // refuses to be stringified, coerced or iterated. Unwrapping with `.then`
+    // keeps that class through `Symbol.species`, so a forgotten `await` is a
+    // sentence rather than `[object Promise]` written into a file.
+    stat() { return send(this.#handle, { op: "stat", path: this.#path }); }
+    exists() {
+      // A directory sitting at this path is not this file: `open("a")` names a
+      // file, and `true` would send the body on to read it.
+      return this.stat().then(
+        (info) => info !== null && info !== undefined && info.isDirectory === false
+      );
+    }
+    text() {
+      return send(this.#handle, { op: "read", path: this.#path, encoding: "text" })
+        .then((answer) => answer.text);
+    }
+    json() {
+      const path = this.#path;
+      return this.text().then((text) => {
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          throw new SyntaxError("`" + path + "` is not JSON: " + e.message);
+        }
+      });
+    }
+    bytes() {
+      return send(this.#handle, { op: "read", path: this.#path, encoding: "base64" })
+        .then((answer) => codec.fromBase64(answer.base64));
+    }
+    arrayBuffer() {
+      return this.bytes().then(
+        (bytes) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      );
+    }
+
+    // Writing. Both answer the number of bytes written, and both make the
+    // parent directories on the way — a body that named a path has said where
+    // it wants the file.
+    write(data) { return this.#put(data, true); }
+    create(data) { return this.#put(data, false); }
+    #put(data, overwrite) {
+      // Another file is **copied host-side**: the bytes never enter the sandbox,
+      // so `await backup.write(original)` is not bounded by what one read may
+      // carry.
+      if (data instanceof SaltcornFile) {
+        const from = data.__scRef(INTERNAL);
+        return send(from.handle, {
+          op: "copy", path: from.path,
+          toStore: this.#handle.store, toPath: this.#path, overwrite: overwrite,
+        }).then((answer) => answer.bytes);
+      }
+      if (data instanceof SaltcornDir) {
+        throw new TypeError("a directory cannot be written to a file");
+      }
+      const handle = this.#handle;
+      const plan = { op: "write", path: this.#path, overwrite: overwrite };
+      const bytes = codec.asBytes(data);
+      if (typeof data === "string") {
+        plan.text = data;
+      } else if (
+        data !== null && typeof data === "object" &&
+        typeof globalThis.Response === "function" && data instanceof globalThis.Response
+      ) {
+        // What `await file.write(await fetch(url))` is for. The response's body
+        // is read once, exactly as reading it any other way would — and this is
+        // the one write whose promise is an ordinary one, because it starts by
+        // awaiting the response rather than the store.
+        return data.bytes().then((read) => {
+          plan.base64 = codec.toBase64(read);
+          return send(handle, plan).then((answer) => answer.bytes);
+        });
+      } else if (bytes !== null) {
+        plan.base64 = codec.toBase64(bytes);
+      } else if (data === undefined) {
+        throw new TypeError(
+          "there is nothing to write — write() takes a string, bytes, a Response, " +
+          "a file, or a value to store as JSON"
+        );
+      } else {
+        // An object is JSON, for the reason `fetch`'s object body is: the
+        // alternative is `[object Object]` in a file, which is a bug every time
+        // it happens.
+        plan.text = JSON.stringify(data);
+        if (plan.text === undefined) {
+          throw new TypeError("this value cannot be written: it is not JSON");
+        }
+      }
+      return send(handle, plan).then((answer) => answer.bytes);
+    }
+
+    // Removing and moving. `delete` answers whether anything was there, so a
+    // caller need not race the existence check it would otherwise write.
+    delete() { return send(this.#handle, { op: "delete", path: this.#path }); }
+    moveTo(dest) { return this.#relocate(dest, "rename", "moveTo()"); }
+    copyTo(dest) { return this.#relocate(dest, "copy", "copyTo()"); }
+    #relocate(dest, op, what) {
+      let store = this.#handle.store;
+      let path;
+      if (dest instanceof SaltcornFile) {
+        const to = dest.__scRef(INTERNAL);
+        store = to.handle.store;
+        path = to.path;
+      } else if (dest instanceof SaltcornDir) {
+        throw new TypeError(
+          what + " takes a file — name the file inside the directory with `dir.file(name)`"
+        );
+      } else {
+        path = named(dest, what);
+      }
+      // The destination, as a file: what a body does next is read it or write
+      // beside it, and neither should need the path spelled a second time.
+      const landing = store === this.#handle.store
+        ? this.#handle
+        : { token: this.#handle.token, store: store, authority: this.#handle.authority };
+      return send(this.#handle, {
+        op: op, path: this.#path, toStore: store, toPath: path, overwrite: false,
+      }).then(() => new SaltcornFile(landing, path, INTERNAL));
+    }
+
+    // Metadata: the rule set on this entry, the rule that actually applies given
+    // every directory above it, and the free-form attributes.
+    meta() { return send(this.#handle, { op: "meta", path: this.#path }); }
+    setMeta(meta) {
+      if (meta === null || typeof meta !== "object" || Array.isArray(meta)) {
+        throw new TypeError("setMeta() takes an object: { minRole, attributes }");
+      }
+      for (const key of Object.keys(meta)) {
+        if (key !== "minRole" && key !== "attributes") {
+          throw new TypeError(
+            "`" + key + "` is not part of a file's metadata; it holds: minRole, attributes"
+          );
+        }
+      }
+      // Replaces rather than merges, as the store's own metadata does — read it
+      // first when what you want is a change to one attribute.
+      return send(this.#handle, {
+        op: "setMeta", path: this.#path,
+        minRole: meta.minRole === undefined ? null : meta.minRole,
+        attributes: meta.attributes === undefined ? {} : meta.attributes,
+      }).then(() => this);
+    }
+  }
+
+  // --- a directory --------------------------------------------------------
+  class SaltcornDir {
+    #handle; #path;
+    constructor(handle, path, internal) {
+      if (internal !== INTERNAL) {
+        throw new TypeError("a directory is reached with fs(store).dir(path), not constructed");
+      }
+      this.#handle = handle;
+      this.#path = path;
+    }
+    get path() { return this.#path; }
+    get name() { return basename(this.#path); }
+    get isDirectory() { return true; }
+    get store() { return makeStore(this.#handle); }
+    // The root's parent is null rather than the root itself: a loop walking
+    // upwards has to end somewhere, and pretending a store contains itself is
+    // how it would not.
+    get parent() {
+      return this.#path === ""
+        ? null
+        : new SaltcornDir(this.#handle, dirname(this.#path), INTERNAL);
+    }
+    __scRef(internal) {
+      return internal === INTERNAL ? { handle: this.#handle, path: this.#path } : undefined;
+    }
+    toString() { return this.#handle.store + ":" + this.#path + "/"; }
+    toJSON() { return { store: this.#handle.store, path: this.#path, isDirectory: true }; }
+
+    file(name) {
+      return new SaltcornFile(this.#handle, join(this.#path, named(name, "file()")), INTERNAL);
+    }
+    dir(name) {
+      return new SaltcornDir(this.#handle, join(this.#path, named(name, "dir()")), INTERNAL);
+    }
+    // The children as the same objects everything else takes: a listing is
+    // walked and acted on, not read and then re-opened by name.
+    list() {
+      const handle = this.#handle;
+      return send(handle, { op: "list", path: this.#path }).then((entries) =>
+        entries.map((entry) =>
+          entry.isDirectory
+            ? new SaltcornDir(handle, entry.path, INTERNAL)
+            : new SaltcornFile(handle, entry.path, INTERNAL)
+        )
+      );
+    }
+    stat() { return send(this.#handle, { op: "stat", path: this.#path }); }
+    exists() {
+      return this.stat().then(
+        (info) => info !== null && info !== undefined && info.isDirectory === true
+      );
+    }
+    // Idempotent, parents included: a directory already there is what the caller
+    // wanted.
+    create() {
+      return send(this.#handle, { op: "mkdir", path: this.#path }).then(() => this);
+    }
+    // Everything in it, as the store's own delete has it.
+    delete() { return send(this.#handle, { op: "delete", path: this.#path }); }
+    meta() { return send(this.#handle, { op: "meta", path: this.#path }); }
+    setMeta(meta) {
+      // One implementation, on the file: a directory's metadata is a file's
+      // metadata, and the path-cumulative rule is the reason it is worth setting
+      // on a directory at all.
+      return SaltcornFile.prototype.setMeta.call(
+        new SaltcornFile(this.#handle, this.#path, INTERNAL), meta
+      );
+    }
+  }
+
+  // --- a store ------------------------------------------------------------
+  // Frozen, so a body that assigns to `store.open` breaks nothing but its own
+  // object — and the next `fs("…")` answers a fresh one regardless.
+  const makeStore = (handle) => Object.freeze({
+    name: handle.store,
+    open: (path) => new SaltcornFile(handle, named(path, "open()"), INTERNAL),
+    dir: (path) => new SaltcornDir(handle, norm(path, "dir()"), INTERNAL),
+    root: new SaltcornDir(handle, "", INTERNAL),
+    // Authority, exactly as `db`'s: the admin's by default, because a trigger is
+    // server-side configuration, and delegated on request — at which point the
+    // path-cumulative `min_role` rule decides every operation.
+    asUser: () => makeStore({ token: handle.token, store: handle.store, authority: "user" }),
+    asAdmin: () => makeStore({ token: handle.token, store: handle.store, authority: "admin" }),
+  });
+
+  // One run's `fs`, over one run's token — the same shape `__scMakeDb` has, and
+  // for the same reason.
+  fixed("__scMakeFs", (__scTok, stores) => {
+    const known = Array.isArray(stores) ? stores.map(String) : [];
+    const fs = (name) => {
+      if (typeof name !== "string" || name === "") {
+        throw new TypeError("fs() takes the name of a file store, as in fs(\"uploads\")");
+      }
+      // Named at once rather than at the first read: the names were bound into
+      // this run when it started, so a typo is a sentence naming the stores that
+      // do exist rather than an error four lines later.
+      if (known.length > 0 && known.indexOf(name) < 0) {
+        throw new Error(
+          "there is no file store named `" + name + "`; this server has: " + known.join(", ")
+        );
+      }
+      return makeStore({ token: __scTok, store: name, authority: "admin" });
+    };
+    // What this run can reach, for a body that discovers rather than knows.
+    Object.defineProperty(fs, "stores", {
+      value: Object.freeze(known.slice()), enumerable: true,
+    });
+    return fs;
+  });
+})();
+"##;
+
 /// Installed once per isolate: the op handles, the promise a database call
 /// answers, and the run wrapper — as globals that a code body **cannot
 /// replace**.
@@ -1145,6 +1617,7 @@ const SETUP: &str = r#"
 (() => {
   const call = Deno.core.ops.op_sc_db;
   const send = Deno.core.ops.op_sc_fetch;
+  const disk = Deno.core.ops.op_sc_files;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
   const mark = Deno.core.ops.op_sc_mark;
@@ -1226,6 +1699,34 @@ const SETUP: &str = r#"
       }
     }, reject);
   }));
+  // The same guard again, in the file surface's words: what a forgotten
+  // `await file.text()` reaches for is a string, and a promise stringified into
+  // a file would be written to disk before anyone noticed.
+  const notAwaitedFs = () =>
+    new Error("this file operation was not awaited — write `await file.text()`");
+  class FsPromise extends Promise {
+    toJSON() { throw notAwaitedFs(); }
+    [Symbol.toPrimitive]() { throw notAwaitedFs(); }
+    [Symbol.iterator]() { throw notAwaitedFs(); }
+  }
+  // One file operation. The same envelope the database call uses, and the same
+  // resumption mark: a host error becomes a plain `Error` at the await point,
+  // which is what lets a body try a write and fall back.
+  fixed("__scFsCall", (token, plan) => new FsPromise((resolve, reject) => {
+    let request;
+    try {
+      request = JSON.stringify(plan);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    disk(token, request).then((answer) => {
+      mark(token);
+      const reply = JSON.parse(answer);
+      if (reply.error !== undefined) reject(new Error(reply.error));
+      else resolve(reply.ok);
+    }, reject);
+  }));
   // What an admin should be shown: the stack when there is one, because a body
   // of any size wants the line, and the value itself when there is not.
   const describe = (e) => {
@@ -1237,8 +1738,10 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, body) => {
-    bodies.set(key, { body: body, wantsDb: wantsDb, wantsFetch: wantsFetch });
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, body) => {
+    bodies.set(key, {
+      body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
+    });
   });
   // Dropped when the cache is full and this body is the one least recently run.
   // A run already executing keeps its own reference, so forgetting a body can
@@ -1255,7 +1758,7 @@ const SETUP: &str = r#"
   // this run's alone. A body with no host is defined to take one argument, so
   // there is no `db` in its scope to name — a ReferenceError, as it has always
   // been, rather than a handle that fails on use.
-  fixed("__scInvoke", (token, key, bindings) => {
+  fixed("__scInvoke", (token, key, bindings, stores) => {
     const entry = bodies.get(key);
     if (entry === undefined) {
       // Unreachable while the Rust side and this map agree, which they do
@@ -1273,6 +1776,10 @@ const SETUP: &str = r#"
       const handles = [bindings];
       if (entry.wantsDb) handles.push(__scMakeDb(token));
       if (entry.wantsFetch) handles.push(__scMakeFetch(token));
+      // The store names come with the invocation rather than the definition:
+      // one compiled body serves every run, and what stores this server has can
+      // change between two of them.
+      if (entry.wantsFs) handles.push(__scMakeFs(token, stores));
       running = entry.body(...handles);
     } catch (e) {
       fail(token, describe(e));
@@ -1316,6 +1823,9 @@ struct RunState {
     /// The network, when this run has it. Separate from `host` because it is a
     /// separate capability: a body may have tables and no network.
     fetch: Option<Arc<dyn FetchHost>>,
+    /// The file stores, when this run has them — a third capability, held apart
+    /// from the other two for the same reason they are held apart.
+    files: Option<Arc<dyn FileHost>>,
     /// Wall clock: when this run may make no further host calls.
     deadline: Instant,
     /// What the deadline was, for the message.
@@ -1326,6 +1836,11 @@ struct RunState {
     /// call that leaves the building is a different thing to bound.
     fetches_left: u32,
     max_fetches: u32,
+    /// The file-operation budget, counted apart from both of the others because
+    /// a file operation is neither a pooled query nor a request that leaves the
+    /// building.
+    file_ops_left: u32,
+    max_file_ops: u32,
     /// How long this run may execute JavaScript without yielding, before the
     /// watchdog stops it: [`DEFAULT_JS_SLICE`], never more than its own timeout.
     /// A *fresh* window each time it resumes, not a budget it spends — the
@@ -1509,6 +2024,70 @@ async fn op_sc_fetch(
     serde_json::to_string(&reply).unwrap_or_else(|_| {
         r#"{"error":"the fetch reply could not be encoded as JSON"}"#.to_owned()
     })
+}
+
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+async fn op_sc_files(
+    state: Rc<RefCell<OpState>>,
+    #[string] token: String,
+    #[string] request: String,
+) -> String {
+    let reply = file_call(&state, &token, &request).await;
+    serde_json::to_string(&reply).unwrap_or_else(|_| {
+        r#"{"error":"the file store reply could not be encoded as JSON"}"#.to_owned()
+    })
+}
+
+/// One file operation. [`host_call`]'s other twin, and its own function for the
+/// same reasons [`fetch_call`] is: its own budget, its own capability, and
+/// refusals that have to say `fs` to be worth reading.
+///
+/// Unlike a request, an operation carries **no clock of its own**. A file store
+/// is this server's own disk or object store, reached through the same runtime
+/// as the database, so what bounds it is the wall clock the run is already
+/// measured against — checked here on entry, exactly as a database call is.
+#[cfg(feature = "eval")]
+async fn file_call(state: &Rc<RefCell<OpState>>, token: &str, request: &str) -> Json {
+    let plan: Json = match serde_json::from_str(request) {
+        Ok(plan) => plan,
+        Err(e) => return refuse(format!("the file request is not JSON: {e}")),
+    };
+
+    let host = {
+        let mut state = state.borrow_mut();
+        let Some(table) = state.try_borrow_mut::<RunTable>() else {
+            return refuse("this code body cannot reach a file store");
+        };
+        let Some(run) = table.runs.get_mut(token) else {
+            return refuse("this file operation belongs to a code run that has already finished");
+        };
+        if run.file_ops_left == 0 {
+            let max = run.max_file_ops;
+            return refuse(format!(
+                "this code made more than {max} file operations in one run; \
+                 the bound exists so a walk over a directory cannot run away"
+            ));
+        }
+        if Instant::now() >= run.deadline {
+            let ms = run.timeout.as_millis();
+            return refuse(format!("this code exceeded its {ms} ms time limit"));
+        }
+        let Some(host) = run.files.clone() else {
+            return refuse("this code body cannot reach a file store");
+        };
+        run.file_ops_left -= 1;
+        // Past this point the run has touched the filesystem, so it is no longer
+        // one that could be re-run without repeating whatever it did there.
+        run.retry = None;
+        host
+    };
+
+    match host.files(plan).await {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(e) => refuse(e.to_string()),
+    }
 }
 
 /// One outbound request. [`host_call`]'s twin, and deliberately its own function
@@ -1716,7 +2295,14 @@ fn finish(state: &mut OpState, token: &str, outcome: Result<Json>) {
 #[cfg(feature = "eval")]
 deno_core::extension!(
     sc_db_ext,
-    ops = [op_sc_db, op_sc_fetch, op_sc_done, op_sc_fail, op_sc_mark]
+    ops = [
+        op_sc_db,
+        op_sc_fetch,
+        op_sc_files,
+        op_sc_done,
+        op_sc_fail,
+        op_sc_mark
+    ]
 );
 
 // ---------------------------------------------------------------------------
@@ -1882,10 +2468,16 @@ struct CodeRun {
     bindings: BTreeMap<String, Json>,
     host: Option<Arc<dyn CodeHost>>,
     fetch: Option<Arc<dyn FetchHost>>,
+    files: Option<Arc<dyn FileHost>>,
+    /// The names of the stores this run may open, resolved from the file host
+    /// **before** the job crosses to the worker: the guest's `fs(name)` is
+    /// synchronous, so the list has to be in its scope rather than a call away.
+    file_stores: Vec<String>,
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
     max_fetches: u32,
+    max_file_ops: u32,
     /// When the wall clock this run is being measured against started — set only
     /// on a run that is being **re-queued** after its isolate was terminated
     /// under it. A second start is not a second timeout: the caller is still
@@ -1919,6 +2511,7 @@ struct HostRequest {
 enum Surface {
     Db,
     Fetch,
+    Files,
 }
 
 /// The `'static` stand-in a **borrowed** host crosses to the isolate thread as.
@@ -1987,6 +2580,25 @@ impl FetchHost for BridgeHost {
         )
         .await
     }
+}
+
+#[cfg(feature = "eval")]
+#[async_trait]
+impl FileHost for BridgeHost {
+    async fn files(&self, request: Json) -> Result<Json> {
+        self.bridged(
+            Surface::Files,
+            request,
+            "this code body's file stores have gone away",
+            "this file operation was dropped without an answer",
+        )
+        .await
+    }
+
+    // Deliberately the default (an empty list). The names are read from the
+    // **real** host, in `CodeRuntime::run`, before this stand-in exists — a
+    // bridge that answered here would have to make a blocking round trip to
+    // answer a synchronous question.
 }
 
 /// One isolate thread, from the dispatcher's side: where to send it work, and
@@ -2124,10 +2736,16 @@ impl CodeRuntime {
         let net: Option<Arc<dyn FetchHost>> = call
             .fetch
             .map(|_| Arc::clone(&bridge) as Arc<dyn FetchHost>);
+        let disk: Option<Arc<dyn FileHost>> =
+            call.files.map(|_| Arc::clone(&bridge) as Arc<dyn FileHost>);
+        // Asked of the **real** host, here, while it is still borrowed: the
+        // guest's `fs(name)` is synchronous, so the names have to travel with
+        // the job rather than be a call away.
+        let stores = call.files.map(FileHost::store_names).unwrap_or_default();
         // Whatever the run did not get a proxy for, nothing can ask for.
         drop(bridge);
-        let bridged = (call.host.is_some() || call.fetch.is_some())
-            .then_some((call.host, call.fetch, incoming));
+        let bridged = (call.host.is_some() || call.fetch.is_some() || call.files.is_some())
+            .then_some((call.host, call.fetch, call.files, incoming));
         let timeout = call
             .timeout
             .unwrap_or(self.default_timeout)
@@ -2149,9 +2767,12 @@ impl CodeRuntime {
                     bindings: call.bindings,
                     host: proxy,
                     fetch: net,
+                    files: disk,
+                    file_stores: stores,
                     timeout,
                     max_calls: call.max_calls,
                     max_fetches: call.max_fetches,
+                    max_file_ops: call.max_file_ops,
                     started: None,
                 }),
                 reply,
@@ -2179,7 +2800,7 @@ impl CodeRuntime {
             ))
         };
 
-        let Some((host, fetcher, mut incoming)) = bridged else {
+        let Some((host, fetcher, disk, mut incoming)) = bridged else {
             // A pure body asks for nothing; there is nothing to serve.
             return tokio::select! {
                 outcome = answer => outcome.map_err(|_| dropped())?,
@@ -2209,6 +2830,12 @@ impl CodeRuntime {
                             Surface::Fetch => match fetcher {
                                 Some(fetcher) => fetcher.fetch(plan).await,
                                 None => Err(Error::msg("this code body cannot reach the network")),
+                            },
+                            Surface::Files => match disk {
+                                Some(disk) => disk.files(plan).await,
+                                None => {
+                                    Err(Error::msg("this code body cannot reach a file store"))
+                                }
                             },
                         };
                         let _ = reply.send(answer);
@@ -2322,6 +2949,12 @@ fn worker_thread(
     // token rather than a global anything could call.
     if let Err(e) = runtime.execute_script("sc_fetch.js", FETCH_PRELUDE) {
         debug_assert!(false, "the fetch prelude failed to compile: {e}");
+    }
+    // The `fs` factory, on the same terms again — and **after** the fetch
+    // prelude, because it reads the bytes codecs that one publishes and answers
+    // a `Response` that body writes.
+    if let Err(e) = runtime.execute_script("sc_files.js", FILES_PRELUDE) {
+        debug_assert!(false, "the files prelude failed to compile: {e}");
     }
     // Code bodies get the aggregation prelude too, so `rows().sum("qty")` means
     // in a body what it means in a formula.
@@ -2771,7 +3404,11 @@ fn start_run(
     // trigger firing repeatedly sends a token, a key and its bindings.
     let key = BodyCache::key(&scripts.definition);
     let held = bodies.holds(key, &scripts.definition);
-    let script = build_script(&scripts, &token, key, held);
+    // The store names this run may open, as the array the guest's `fs` closes
+    // over. Per run rather than per body: the definition is cached across runs
+    // and the stores a server has can change between two of them.
+    let stores = serde_json::to_string(&run.file_stores).unwrap_or_else(|_| "[]".to_owned());
+    let script = build_script(&scripts, &token, key, held, &stores);
     // A re-queued run carries the clock it was first admitted with: its caller
     // has been waiting since then, and a retry with a fresh deadline would
     // outlive the future that is going to answer with it.
@@ -2791,12 +3428,15 @@ fn start_run(
             RunState {
                 host: run.host.clone(),
                 fetch: run.fetch.clone(),
+                files: run.files.clone(),
                 deadline: started + run.timeout,
                 timeout: run.timeout,
                 calls_left: run.max_calls,
                 max_calls: run.max_calls,
                 fetches_left: run.max_fetches,
                 max_fetches: run.max_fetches,
+                file_ops_left: run.max_file_ops,
+                max_file_ops: run.max_file_ops,
                 slice: DEFAULT_JS_SLICE.min(run.timeout),
                 // Kept until the first host call, which is exactly as long as
                 // re-running this body would provably repeat nothing.
@@ -2897,6 +3537,8 @@ struct RunScripts {
     wants_db: bool,
     /// Whether it takes `fetch`, on exactly the same terms.
     wants_fetch: bool,
+    /// Whether it takes `fs`, on exactly the same terms.
+    wants_files: bool,
 }
 
 /// Build one code body's definition and one run's arguments: the bindings as
@@ -2934,6 +3576,11 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
                 "code binding `fetch` collides with the HTTP surface bound in a code body",
             ));
         }
+        if call.files.is_some() && name == FS {
+            return Err(Error::msg(
+                "code binding `fs` collides with the file surface bound in a code body",
+            ));
+        }
         // `const x = __b["x"];` — the name was checked as an identifier; the key
         // lookup quotes via JSON escaping.
         let key =
@@ -2945,18 +3592,24 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
     let wants_db = call.host.is_some();
     let wants_fetch = call.fetch.is_some();
+    let wants_files = call.files.is_some();
     // The parameter list is the only difference a capability makes: no `fetch`
     // parameter is no `fetch` in scope, which is a ReferenceError naming it
     // rather than a call that fails somewhere in the host. It also means a body
     // compiled with the network and one compiled without are different text,
     // and so different entries in the body cache — which is what stops a cached
     // body from being invoked with a scope it was not compiled for.
-    let params = match (wants_db, wants_fetch) {
-        (true, true) => "__b, db, fetch",
-        (true, false) => "__b, db",
-        (false, true) => "__b, fetch",
-        (false, false) => "__b",
-    };
+    let mut names = vec!["__b"];
+    if wants_db {
+        names.push(DB);
+    }
+    if wants_fetch {
+        names.push(FETCH);
+    }
+    if wants_files {
+        names.push(FS);
+    }
+    let params = names.join(", ");
     let code = &call.code;
     Ok(RunScripts {
         definition: format!(
@@ -2969,6 +3622,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         args,
         wants_db,
         wants_fetch,
+        wants_files,
     })
 }
 
@@ -3071,22 +3725,25 @@ impl BodyCache {
 /// characters and this run's own values — because everything else is already
 /// there.
 #[cfg(feature = "eval")]
-fn build_script(scripts: &RunScripts, token: &str, key: u64, held: bool) -> String {
+fn build_script(scripts: &RunScripts, token: &str, key: u64, held: bool, stores: &str) -> String {
     let RunScripts {
         definition,
         args,
         wants_db,
         wants_fetch,
+        wants_files,
     } = scripts;
     let mut script = String::new();
     if !held {
         script.push_str(&format!(
-            "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {definition});\n"
+            "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
     // one made; quoting them is belt and braces rather than escaping.
-    script.push_str(&format!("__scInvoke(\"{token}\", \"{key:016x}\", {args});"));
+    script.push_str(&format!(
+        "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores});"
+    ));
     script
 }
 
@@ -3108,6 +3765,8 @@ fn is_plain_ident(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use serde_json::json;
     use std::sync::atomic::AtomicU32;
 
@@ -4582,9 +5241,12 @@ mod tests {
             bindings: BTreeMap::new(),
             host: None,
             fetch: None,
+            files: None,
+            file_stores: Vec::new(),
             timeout: Duration::from_secs(1),
             max_calls: 10,
             max_fetches: 10,
+            max_file_ops: 10,
             started: None,
         };
         for (name, value) in bindings {
@@ -4606,7 +5268,7 @@ mod tests {
             "nothing is warm yet"
         );
 
-        let miss = build_script(&scripts, "aa", key, false);
+        let miss = build_script(&scripts, "aa", key, false, "[]");
         assert!(miss.contains("__scDefine"), "{miss}");
         assert!(miss.contains("return secret + 1;"), "{miss}");
         assert!(miss.contains("__scInvoke"), "{miss}");
@@ -4616,7 +5278,7 @@ mod tests {
             cache.holds(key, &scripts.definition),
             "the isolate has it now"
         );
-        let hit = build_script(&scripts, "bb", key, true);
+        let hit = build_script(&scripts, "bb", key, true, "[]");
         assert!(!hit.contains("__scDefine"), "{hit}");
         assert!(
             !hit.contains("return secret + 1;"),
@@ -5243,5 +5905,568 @@ mod tests {
             "{out}"
         );
         assert_eq!(out["clone"], json!(r#"{"n":1}"#));
+    }
+
+    // -----------------------------------------------------------------------
+    // `fs`: the third host surface
+    // -----------------------------------------------------------------------
+
+    /// A file store that lives in a map — [`FakeNet`]'s counterpart, and the
+    /// same proof: the file seam is JSON, so nothing here touches a disk.
+    ///
+    /// It implements enough of the operations to round-trip (a write is
+    /// readable, a copy copies, a listing lists) because the thing under test is
+    /// the *prelude*: what plan each method builds, and what it makes of the
+    /// answer.
+    struct FakeFiles {
+        asked: Mutex<Vec<Json>>,
+        /// `store`, `path` → the bytes, with directories implied by the paths.
+        files: Mutex<BTreeMap<(String, String), Vec<u8>>>,
+        stores: Vec<String>,
+    }
+
+    impl FakeFiles {
+        fn new(stores: &[&str]) -> Arc<FakeFiles> {
+            Arc::new(FakeFiles {
+                asked: Mutex::new(Vec::new()),
+                files: Mutex::new(BTreeMap::new()),
+                stores: stores.iter().map(|s| (*s).to_owned()).collect(),
+            })
+        }
+
+        /// Put a file there before the body runs.
+        fn put(self: &Arc<FakeFiles>, store: &str, path: &str, body: &str) -> Arc<FakeFiles> {
+            self.files.lock().unwrap().insert(
+                (store.to_owned(), path.to_owned()),
+                body.as_bytes().to_vec(),
+            );
+            Arc::clone(self)
+        }
+
+        fn asked(&self) -> Vec<Json> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        fn read(&self, store: &str, path: &str) -> Option<String> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(&(store.to_owned(), path.to_owned()))
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        }
+
+        /// What one operation answers, in the shapes the prelude reads.
+        fn answer(&self, request: &Json) -> Result<Json> {
+            let text = |key: &str| request[key].as_str().unwrap_or_default().to_owned();
+            let (store, path, op) = (text("store"), text("path"), text("op"));
+            let key = (store.clone(), path.clone());
+            let mut files = self.files.lock().unwrap();
+            // A directory is not stored; it exists when something is under it.
+            let is_dir = |files: &BTreeMap<(String, String), Vec<u8>>, path: &str| {
+                path.is_empty()
+                    || files
+                        .keys()
+                        .any(|(s, p)| *s == store && p.starts_with(&format!("{path}/")))
+            };
+            match op.as_str() {
+                "read" => {
+                    let bytes = files.get(&key).cloned().ok_or_else(|| {
+                        Error::not_found(format!("{path:?} does not exist in file store {store}"))
+                    })?;
+                    if text("encoding") == "base64" {
+                        Ok(json!({ "base64": BASE64.encode(&bytes) }))
+                    } else {
+                        Ok(json!({ "text": String::from_utf8_lossy(&bytes) }))
+                    }
+                }
+                "write" => {
+                    let bytes = match (request["text"].as_str(), request["base64"].as_str()) {
+                        (Some(text), _) => text.as_bytes().to_vec(),
+                        (None, Some(encoded)) => BASE64.decode(encoded).unwrap(),
+                        _ => return Err(Error::msg("a write carries text or base64")),
+                    };
+                    if request["overwrite"] != json!(true) && files.contains_key(&key) {
+                        return Err(Error::invalid(format!(
+                            "{path:?} already exists in file store {store}"
+                        )));
+                    }
+                    let written = bytes.len();
+                    files.insert(key, bytes);
+                    Ok(json!({ "bytes": written }))
+                }
+                "stat" => {
+                    if let Some(bytes) = files.get(&key) {
+                        Ok(json!({
+                            "size": bytes.len(), "isDirectory": false,
+                            "modified": "2026-08-21T09:00:00.000Z", "mimeType": "text/plain",
+                        }))
+                    } else if is_dir(&files, &path) {
+                        Ok(json!({
+                            "size": 0, "isDirectory": true, "modified": null, "mimeType": null,
+                        }))
+                    } else {
+                        Ok(Json::Null)
+                    }
+                }
+                "list" => {
+                    let prefix = if path.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{path}/")
+                    };
+                    let mut out: Vec<Json> = Vec::new();
+                    let mut seen: Vec<String> = Vec::new();
+                    for ((s, p), bytes) in files.iter() {
+                        if *s != store || !p.starts_with(&prefix) {
+                            continue;
+                        }
+                        let rest = &p[prefix.len()..];
+                        match rest.split_once('/') {
+                            Some((dir, _)) => {
+                                if seen.iter().any(|s| s == dir) {
+                                    continue;
+                                }
+                                seen.push(dir.to_owned());
+                                out.push(json!({
+                                    "name": dir, "path": format!("{prefix}{dir}"),
+                                    "isDirectory": true, "size": null,
+                                }));
+                            }
+                            None => out.push(json!({
+                                "name": rest, "path": p, "isDirectory": false,
+                                "size": bytes.len(),
+                            })),
+                        }
+                    }
+                    Ok(Json::Array(out))
+                }
+                "delete" => Ok(Json::Bool(files.remove(&key).is_some())),
+                "mkdir" => Ok(Json::Null),
+                "copy" | "rename" => {
+                    let to_store = request["toStore"]
+                        .as_str()
+                        .map_or_else(|| store.clone(), str::to_owned);
+                    let to_path = text("toPath");
+                    let bytes = files.get(&key).cloned().ok_or_else(|| {
+                        Error::not_found(format!("{path:?} does not exist in file store {store}"))
+                    })?;
+                    let moved = bytes.len();
+                    files.insert((to_store, to_path), bytes);
+                    if op == "rename" {
+                        files.remove(&key);
+                        return Ok(Json::Null);
+                    }
+                    Ok(json!({ "bytes": moved }))
+                }
+                "meta" => Ok(json!({
+                    "minRole": 40, "effectiveMinRole": 10, "attributes": { "origin": "test" },
+                })),
+                "setMeta" => Ok(Json::Null),
+                other => Err(Error::invalid(format!("`{other}` is not a file operation"))),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl FileHost for FakeFiles {
+        async fn files(&self, request: Json) -> Result<Json> {
+            self.asked.lock().unwrap().push(request.clone());
+            self.answer(&request)
+        }
+
+        fn store_names(&self) -> Vec<String> {
+            self.stores.clone()
+        }
+    }
+
+    /// A call with the file stores and nothing else.
+    fn with_files<'a>(code: &str, files: &'a dyn FileHost) -> CodeCall<'a> {
+        CodeCall {
+            code: code.to_owned(),
+            files: Some(files),
+            ..CodeCall::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_opens_a_file_and_reads_it() {
+        let files = FakeFiles::new(&["myFileStore"]).put("myFileStore", "the_file.txt", "hello");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const theFile = fs("myFileStore").open("the_file.txt");
+                   const exists = await theFile.exists();
+                   const theString = await theFile.text();
+                   return {
+                     exists: exists, theString: theString,
+                     path: theFile.path, name: theFile.name,
+                     store: theFile.store.name, parent: theFile.parent.path,
+                     stores: fs.stores,
+                   };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({
+                "exists": true, "theString": "hello",
+                "path": "the_file.txt", "name": "the_file.txt",
+                "store": "myFileStore", "parent": "",
+                "stores": ["myFileStore"],
+            })
+        );
+        // Opening touched nothing: the two awaits are the two operations, and
+        // each carries the store, the path and whose authority it runs under.
+        let asked = files.asked();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert_eq!(asked[0]["op"], json!("stat"));
+        assert_eq!(asked[1]["op"], json!("read"));
+        assert_eq!(asked[1]["store"], json!("myFileStore"));
+        assert_eq!(asked[1]["path"], json!("the_file.txt"));
+        assert_eq!(asked[1]["encoding"], json!("text"));
+        assert_eq!(asked[1]["authority"], json!("admin"));
+    }
+
+    #[tokio::test]
+    async fn exists_is_a_question_and_a_missing_file_is_an_error_only_when_read() {
+        let files = FakeFiles::new(&["s"]).put("s", "there/deep.txt", "x");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const store = fs("s");
+                   let failed = null;
+                   try { await store.open("gone.txt").text(); } catch (e) { failed = e.message; }
+                   return {
+                     missing: await store.open("gone.txt").exists(),
+                     // A directory is not the file of that name.
+                     dirAsFile: await store.open("there").exists(),
+                     dir: await store.dir("there").exists(),
+                     file: await store.open("there/deep.txt").exists(),
+                     failed: failed,
+                   };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["missing"], json!(false));
+        assert_eq!(out["dirAsFile"], json!(false));
+        assert_eq!(out["dir"], json!(true));
+        assert_eq!(out["file"], json!(true));
+        assert!(
+            out["failed"].as_str().unwrap().contains("does not exist"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn writing_takes_a_string_bytes_a_value_or_another_file() {
+        let files = FakeFiles::new(&["s"]).put("s", "source.txt", "from the source");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const store = fs("s");
+                   const wrote = await store.open("notes/a.txt").write("hello");
+                   await store.open("data.json").write({ rows: 12, ok: true });
+                   await store.open("raw.bin").write(new Uint8Array([1, 2, 3]));
+                   // A file: copied host-side, so the bytes never come in here.
+                   const copied = await store.open("backup.txt").write(store.open("source.txt"));
+                   let clobber = null;
+                   try {
+                     await store.open("notes/a.txt").create("again");
+                   } catch (e) { clobber = e.message; }
+                   return { wrote: wrote, copied: copied, clobber: clobber,
+                            back: await store.open("data.json").json() };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["wrote"], json!(5));
+        assert_eq!(out["copied"], json!(15));
+        assert_eq!(out["back"], json!({ "rows": 12, "ok": true }));
+        assert!(out["clobber"].as_str().unwrap().contains("already exists"));
+        // An object was stored as JSON rather than as `[object Object]`, bytes
+        // travelled base64, and `create` said so by asking not to overwrite.
+        assert_eq!(files.read("s", "notes/a.txt").unwrap(), "hello");
+        assert_eq!(
+            files.read("s", "data.json").unwrap(),
+            r#"{"rows":12,"ok":true}"#
+        );
+        assert_eq!(files.read("s", "backup.txt").unwrap(), "from the source");
+        let asked = files.asked();
+        let write = |n: usize| {
+            asked
+                .iter()
+                .filter(|a| a["op"] == json!("write"))
+                .nth(n)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(write(0)["overwrite"], json!(true));
+        assert_eq!(write(2)["base64"], json!("AQID"));
+        let create = asked
+            .iter()
+            .find(|a| a["overwrite"] == json!(false))
+            .unwrap();
+        assert_eq!(create["op"], json!("write"));
+        // The copy is one operation naming both ends, not a read and a write.
+        let copy = asked.iter().find(|a| a["op"] == json!("copy")).unwrap();
+        assert_eq!(copy["path"], json!("source.txt"));
+        assert_eq!(copy["toPath"], json!("backup.txt"));
+    }
+
+    #[tokio::test]
+    async fn bytes_cross_as_base64_both_ways() {
+        let files = FakeFiles::new(&["s"]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const file = fs("s").open("blob.bin");
+                   await file.write(new Uint8Array([0, 1, 255, 128, 65]));
+                   const back = await file.bytes();
+                   const buffer = await fs("s").open("blob.bin").arrayBuffer();
+                   return { back: Array.from(back), bytes: buffer.byteLength };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["back"], json!([0, 1, 255, 128, 65]));
+        assert_eq!(out["bytes"], json!(5));
+    }
+
+    #[tokio::test]
+    async fn a_listing_answers_files_and_directories_to_act_on() {
+        let files = FakeFiles::new(&["s"])
+            .put("s", "docs/a.txt", "a")
+            .put("s", "docs/b.txt", "bb")
+            .put("s", "docs/sub/c.txt", "ccc");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const docs = fs("s").dir("docs");
+                   const listed = await docs.list();
+                   const names = listed.map((e) => e.name + (e.isDirectory ? "/" : ""));
+                   // The entries are the same objects everything else takes.
+                   let total = 0;
+                   for (const entry of listed) {
+                     if (!entry.isDirectory) total += (await entry.text()).length;
+                   }
+                   return { names: names, total: total,
+                            root: docs.parent.path, up: fs("s").root.parent };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["names"], json!(["a.txt", "b.txt", "sub/"]));
+        assert_eq!(out["total"], json!(3));
+        assert_eq!(out["root"], json!(""));
+        assert_eq!(out["up"], Json::Null, "the store root has no parent");
+    }
+
+    #[tokio::test]
+    async fn moving_and_copying_answer_the_destination() {
+        let files = FakeFiles::new(&["s", "archive"]).put("s", "in/report.txt", "quarterly");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const file = fs("s").open("in/report.txt");
+                   const copy = await file.copyTo(fs("archive").open("2026/report.txt"));
+                   const moved = await file.moveTo("done/report.txt");
+                   return { copy: copy.store.name + ":" + copy.path,
+                            moved: moved.path, text: await moved.text(),
+                            gone: await file.exists() };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["copy"], json!("archive:2026/report.txt"));
+        assert_eq!(out["moved"], json!("done/report.txt"));
+        assert_eq!(out["text"], json!("quarterly"));
+        assert_eq!(out["gone"], json!(false));
+        assert_eq!(
+            files.read("archive", "2026/report.txt").unwrap(),
+            "quarterly"
+        );
+        // The cross-store copy named the other store; neither ever names an
+        // absolute path.
+        let asked = files.asked();
+        let copy = asked.iter().find(|a| a["op"] == json!("copy")).unwrap();
+        assert_eq!(copy["toStore"], json!("archive"));
+        assert_eq!(copy["overwrite"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn a_path_that_leaves_the_store_is_refused_before_it_is_sent() {
+        let files = FakeFiles::new(&["s"]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const store = fs("s");
+                   const said = [];
+                   for (const bad of ["../etc/passwd", "a/../../b", "/etc/passwd", ".."]) {
+                     try { store.open(bad); said.push("allowed"); }
+                     catch (e) { said.push(e.constructor.name); }
+                   }
+                   // Tidied, though: the quirks of joining a path are not
+                   // allowed to change which file is meant.
+                   return { said: said, tidied: store.open("a//b/./c.txt").path };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out["said"],
+            json!(["TypeError", "TypeError", "TypeError", "TypeError"])
+        );
+        assert_eq!(out["tidied"], json!("a/b/c.txt"));
+        assert!(files.asked().is_empty(), "nothing reached the host");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_store_is_named_at_once() {
+        let files = FakeFiles::new(&["uploads", "assets"]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"try { fs("uplods"); return "allowed"; } catch (e) { return e.message; }"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        let message = out.as_str().unwrap();
+        assert!(
+            message.contains("no file store named `uplods`"),
+            "{message}"
+        );
+        assert!(message.contains("uploads, assets"), "{message}");
+        assert!(files.asked().is_empty(), "the typo cost no round trip");
+    }
+
+    #[tokio::test]
+    async fn authority_travels_with_the_handle() {
+        let files = FakeFiles::new(&["s"]).put("s", "a.txt", "x");
+        let rt = CodeRuntime::new();
+        rt.run(with_files(
+            r#"await fs("s").open("a.txt").text();
+               await fs("s").asUser().open("a.txt").text();
+               await fs("s").asUser().asAdmin().open("a.txt").text();
+               // The file keeps the authority it was opened with.
+               const delegated = fs("s").asUser().open("a.txt");
+               await delegated.parent.list();
+               return null;"#,
+            &*files,
+        ))
+        .await
+        .unwrap();
+        let said: Vec<String> = files
+            .asked()
+            .iter()
+            .map(|a| a["authority"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(said, ["admin", "user", "admin", "user"]);
+    }
+
+    #[tokio::test]
+    async fn metadata_reports_what_is_set_and_what_applies() {
+        let files = FakeFiles::new(&["s"]).put("s", "a.txt", "x");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const file = fs("s").open("a.txt");
+                   const meta = await file.meta();
+                   await file.setMeta({ minRole: 40, attributes: { origin: "trigger" } });
+                   let refused = null;
+                   try { await file.setMeta({ minRole: 40, colour: "red" }); }
+                   catch (e) { refused = e.message; }
+                   return { meta: meta, refused: refused };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["meta"]["minRole"], json!(40));
+        assert_eq!(out["meta"]["effectiveMinRole"], json!(10));
+        assert!(
+            out["refused"].as_str().unwrap().contains("`colour`"),
+            "{out}"
+        );
+        let set = files
+            .asked()
+            .into_iter()
+            .find(|a| a["op"] == json!("setMeta"))
+            .unwrap();
+        assert_eq!(set["minRole"], json!(40));
+        assert_eq!(set["attributes"], json!({ "origin": "trigger" }));
+    }
+
+    #[tokio::test]
+    async fn the_file_budget_bounds_a_walk_and_is_its_own() {
+        let files = FakeFiles::new(&["s"]);
+        let rt = CodeRuntime::new();
+        let mut call = with_files(
+            r#"const store = fs("s");
+               let done = 0;
+               try {
+                 for (let i = 0; i < 10; i++) { await store.open("f" + i).write("x"); done++; }
+               } catch (e) { return { done: done, said: e.message }; }
+               return { done: done, said: null };"#,
+            &*files,
+        );
+        call.max_file_ops = 3;
+        let out = rt.run(call).await.unwrap();
+        assert_eq!(out["done"], json!(3));
+        let said = out["said"].as_str().unwrap();
+        assert!(said.contains("more than 3 file operations"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_await_is_a_named_error() {
+        let files = FakeFiles::new(&["s"]).put("s", "a.txt", "hello");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const file = fs("s").open("a.txt");
+                   try { return "" + file.text(); } catch (e) { return e.message; }"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert!(out.as_str().unwrap().contains("was not awaited"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_body_without_the_file_host_has_no_fs_in_scope() {
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(CodeCall {
+                // `typeof` would answer "undefined" without throwing, which is
+                // exactly the silent absence the parameter list avoids.
+                code: r#"return fs("s");"#.to_owned(),
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        // Not `undefined`: a capability a body was not given is a name that does
+        // not exist, exactly as `db` and `fetch` are.
+        assert!(error.contains("fs is not defined"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_three_surfaces_are_bound_together_and_named_apart() {
+        let host = FakeHost::new(|_| Ok(json!([])));
+        let net = FakeNet::ok(json!({ "ok": true }));
+        let files = FakeFiles::new(&["s"]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(CodeCall {
+                code: r#"return [typeof db, typeof fetch, typeof fs];"#.to_owned(),
+                host: Some(&*host),
+                fetch: Some(&*net),
+                files: Some(&*files),
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, json!(["object", "function", "function"]));
     }
 }

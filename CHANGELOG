@@ -2,6 +2,98 @@
 
 Changes in reverse chronological order.
 
+## `fs`: a code body reads and writes file stores
+
+A `run_js_code` body could reach the tables and the network and nothing else. The one thing
+missing was the server's own **file stores** (§14.1) — the directories an admin connects, the
+ones the file manager browses — so a trigger that wanted to read an uploaded CSV, write a
+report beside it, or archive what an endpoint returned had no way to say so.
+
+**`fs` is the third host surface**, and its shape is the one thing here that was agreed before
+anything was written. `fs(name)` is a **store**, because this server has several and no default
+one; `open(path)` is a **reference**, not a handle — no I/O happens, and the path need not
+exist:
+
+```js
+const theFile = fs("myFileStore").open("the_file.txt");
+const exists = await theFile.exists();
+const theString = await theFile.text();
+```
+
+Which is also the answer to "how do you create one": there is no second concept. A reference
+that can be read can be written, and the parent directories are made on the way.
+
+```js
+await fs("uploads").open("reports/2026-08.json").write({ rows: 12, ok: true });
+await fs("uploads").open("logo.png").write(await fetch(url));     // a download, saved
+await fs("archive").open("2026/report.txt").write(theFile);       // a copy, host-side
+```
+
+`write` replaces, `create` refuses to, and both answer the bytes written. The reading vocabulary
+is a `Response`'s — `text()`, `json()`, `bytes()`, `arrayBuffer()` — so an author who has read a
+fetch response has read a file. **One departure from `Blob` is deliberate**: `size` and `type`
+are part of `await file.stat()` rather than properties, because there is no synchronous I/O
+across this seam and a property that had to lie about a file it has not looked at is worse than
+an await. A missing file is `await file.exists() === false` and an error only to something that
+was told to read it.
+
+A file also has `delete()`, `moveTo(dest)`, `copyTo(dest)` — where `dest` may be a file in
+**another** store — and `meta()` / `setMeta()` over the store's own per-file metadata.
+Directories are the same shape (`file`, `dir`, `list`, `create`, `exists`, `delete`), and
+`list()` answers the same file and directory objects, so a listing is walked and acted on rather
+than read and then re-opened by name:
+
+```js
+for (const entry of await fs("uploads").dir("in").list()) {
+  if (entry.isDirectory) continue;
+  await entry.copyTo(fs("archive").open(`2026/${entry.name}`));
+  await entry.delete();
+}
+```
+
+**Authority is `db`'s.** The admin's by default, because a trigger is server-side configuration;
+`fs(name).asUser()` delegates to the event's caller, and then §14.1's path-cumulative `min_role`
+rule decides every operation — the store's floor, then every directory on the path, then the
+entry — with a listing *filtered* rather than refused. One asymmetry is stated rather than
+inherited: a delegated body may **tighten** an access rule with `setMeta` and never loosen one,
+since a caller who can already reach a file publishing it to everyone would make a non-admin the
+author of an access rule.
+
+**Bounded in three ways of its own**: 100 operations per run (apart from the 200 database calls
+and the 50 fetches, because a walk over a directory is a third kind of accident); 8 MB across the
+seam per read and per write, **refused rather than truncated** for the reason a 1000-row read is;
+and 256 MB per copy, larger precisely because those bytes never enter the isolate. Two things a
+body must not assume, both documented rather than implied: nothing **streams**, and a file write
+is **not rolled back** by a trigger that throws afterwards.
+
+**The seam is JSON**, like the other two — one operation in, one value out (`sc_expr::FileHost`,
+implemented by `sc_api::code_host::FileStoreHost`) — so §15's other guest languages inherit `fs`
+the way they inherit `db`. It rides the **existing** bridge as `Surface::Files`, so
+`Promise.all([file.text(), db.books.rows()])` is served in the one `FuturesUnordered` the caller
+already had, and no second channel exists to keep in step.
+
+Three smaller things fell out of it:
+
+- **`FileStore::stat`** (`sc-files`) — `{ size, is_dir, modified }`, or `None` for nothing there.
+  `exists()` had no honest implementation before: `get_meta` answers a *default* for a file that
+  is not there. The trait's default implementation lists the parent directory, so a backend that
+  can only list still answers; `LocalFileStore` overrides it with one `metadata` call, which is
+  also the only way a modification time is known.
+- **`fs("typo")` fails at once**, naming the stores that exist, because the connected names are
+  bound into the run when it starts — the guest's `fs(name)` is synchronous, so a list a call
+  away would have meant deferring the error to the first read.
+- **The read methods are not `async`.** An `async` function answers a native promise, and the
+  forgotten-`await` guard lives on the promise the host call answers; a test caught it, and
+  `[object Promise]` written into a file is the failure it would otherwise have been.
+
+Twenty-five tests: fourteen in `sc-expr` against a fake store (the plan each method builds, the
+four write shapes, bytes both ways, the paths refused before they are sent, authority on the
+handle, the budget, a forgotten `await`), nine in `sc-core-actions` against **real directories**
+and the real engine (including a delegated body refused by a folder rule and by the store's
+floor while the trigger's own authority is not), and two in `sc-files` for `stat`. The editor's
+declarations (`ui/admin/src/codeTypes.ts`) gained the whole surface, and its type-check test a
+body that uses it.
+
 ## `serve` runs as a `Type=notify` systemd unit, with a watchdog
 
 `saltcorn serve` handled `SIGTERM` and bound a port, and told nothing that started it about

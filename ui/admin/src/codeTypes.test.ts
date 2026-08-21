@@ -339,6 +339,46 @@ describe("the types the code editor loads", () => {
     expect(check(`return fetch("https://x.test/").status;`).join(" ")).toMatch(/status/);
   });
 
+  it("type-check a body that reads and writes files", () => {
+    // `fs` is the third thing a body can reach. The editor has to know that a
+    // reference is not a promise, that everything touching bytes is awaited, and
+    // what a listing hands back.
+    expect(
+      check(`
+        const theFile = fs("uploads").open("the_file.txt");
+        if (await theFile.exists()) {
+          const theString = await theFile.text();
+          const info = await theFile.stat();
+          const size = info === null ? 0 : info.size;
+          await fs("uploads").open("reports/" + String(size) + ".json").write({
+            lines: theString.split("\\n").length,
+          });
+        }
+        // A directory is walked, and what it hands back is acted on directly.
+        for (const entry of await fs("uploads").dir("in").list()) {
+          if (entry.isDirectory) continue;
+          await entry.copyTo(fs("archive").open("2026/" + entry.name));
+          await entry.delete();
+        }
+        const meta = await theFile.meta();
+        await theFile.setMeta({ minRole: 40, attributes: { origin: "trigger" } });
+        // Delegation, and the bytes of a download saved as they are.
+        const mine = await fs("uploads").asUser().open("mine.txt").text();
+        const res = await fetch("https://x.test/logo.png");
+        const saved = await fs("uploads").open("logo.png").write(res);
+        return { mine, saved, rule: meta.effectiveMinRole, stores: fs.stores.length };
+      `),
+    ).toEqual([]);
+    // The counter-tests: a property the sandbox does not have (the departure
+    // from `Blob` the API is deliberate about), a misspelled method, and a
+    // forgotten `await`.
+    expect(check(`return fs("uploads").open("a.txt").size;`).join(" ")).toMatch(/size/);
+    expect(check(`return await fs("uploads").open("a.txt").readText();`).join(" ")).toMatch(
+      /readText/,
+    );
+    expect(check(`return fs("uploads").open("a.txt").text().length;`).join(" ")).toMatch(/length/);
+  });
+
   it("declare the event's own bindings, with the row typed by the trigger's table", () => {
     expect(
       check(`

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sc_api::code_host::TableHost;
+use sc_api::code_host::{FileStoreHost, TableHost};
 use sc_error::{Error, Result};
 use sc_expr::{CodeCall, DEFAULT_CODE_TIMEOUT, MAX_CODE_TIMEOUT};
 use sc_types::{Attrs, BasicType, FormField};
@@ -45,8 +45,9 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// called with, the formula language has no way to reach it, and a `none`
 /// trigger's code is exactly what wants it.
 ///
-/// And two host surfaces: `db`, the **tables**, read and written from the body
-/// (§10.1's `db`), and `fetch`, an **HTTP request** (below).
+/// And three host surfaces: `db`, the **tables**, read and written from the body
+/// (§10.1's `db`); `fetch`, an **HTTP request**; and `fs`, the **file stores**
+/// (both below).
 ///
 /// ```js
 /// const overdue = await db.invoices
@@ -126,24 +127,78 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// the body's `timeout_ms` — so a hung endpoint fails inside the body, where it
 /// can be caught, rather than holding the trigger's caller.
 ///
+/// ## Reading and writing files
+///
+/// `fs(name)` is a **file store**, `open` is a reference to a path in it — no
+/// I/O, and the path need not exist — and everything that touches bytes is a
+/// method on that reference:
+///
+/// ```js
+/// const theFile = fs("myFileStore").open("the_file.txt");
+/// if (await theFile.exists()) {
+///   const rows = (await theFile.text()).split("\n");
+///   await fs("myFileStore").open("reports/summary.json").write({ rows: rows.length });
+/// }
+/// ```
+///
+/// Creating is not a second concept: a reference that can be read can be
+/// written, and the parent directories are made on the way. `write` replaces
+/// what is there, `create` refuses to, and both take a string, bytes, a
+/// `Response` (so `await file.write(await fetch(url))` saves a download),
+/// another file (copied host-side, so the bytes never enter the sandbox), or any
+/// other value — which is stored as JSON, for the reason `fetch`'s object body
+/// is sent as JSON.
+///
+/// The reading vocabulary is a `Response`'s — `text()`, `json()`, `bytes()`,
+/// `arrayBuffer()` — so an author who has read a fetch response has read a file.
+/// The one departure from a `Blob` is that `size` and `type` are part of
+/// `await file.stat()` rather than properties, because there is no synchronous
+/// I/O in the sandbox and a property that lies is worse than an await. A missing
+/// file is `await file.exists() === false`, and an error only to something that
+/// was told to read it.
+///
+/// Directories are the same shape: `fs(s).dir("notes")` has `list()` — which
+/// answers the same file and directory objects, so a listing is walked and acted
+/// on rather than read and re-opened by name — `create()`, `exists()` and
+/// `delete()`. A file also has `delete()`, `moveTo(dest)`, `copyTo(dest)` (where
+/// `dest` may be a file in **another** store), and `meta()` / `setMeta()` over
+/// the store's own per-file metadata — which is where §14.1's `min_role` rule is
+/// set, and is reported as both what is set on the entry and what actually
+/// applies given every directory above it.
+///
+/// Bounded like the other two: 100 file operations per run, 8 MB across the seam
+/// per read and per write — **refused rather than truncated**, since a body
+/// handed the first 8 MB of a larger file would compute a wrong answer out of a
+/// right-looking one — and 256 MB per copy, which never crosses the seam at all.
+/// Two things a body should not assume: nothing streams, and **a file write is
+/// not rolled back** by a trigger that throws afterwards.
+///
 /// ## Whose authority
 ///
-/// Reads and writes are the **admin's** by default, carrying the event's user —
+/// Reads and writes — of tables and of files alike — are the **admin's** by
+/// default, carrying the event's user —
 /// a trigger is server-side configuration, and an audit row the caller may not
 /// insert is the archetype of what a trigger exists to write. `db.asUser()`
 /// delegates to the event's caller instead, and then §7.3's ownership rule
 /// decides every row; a refusal is a catchable error, so a body may try a
-/// delegated write and fall back. On a `db.sql` it means less, and honestly so:
+/// delegated write and fall back. `fs(name).asUser()` is the same move for
+/// files, where what decides is §14.1's path-cumulative rule instead — the
+/// store's floor, then every directory on the path, then the entry itself, most
+/// restrictive winning — and where a delegated body may **tighten** an access
+/// rule with `setMeta` but never loosen one. On a `db.sql` it means less, and
+/// honestly so:
 /// the statement runs at the caller's role and user, which is what row-level
 /// security reads, and an ownership formula does not reach it.
 ///
 /// The escape hatch for the thing an elementary action cannot anticipate: a
 /// computation over the event, its tables and what an endpoint says that no
 /// combination of `insert_row`/`fetch` and formulas expresses. It is still
-/// bounded — no disk, no subprocess, no schema changes, no transactions across
-/// statements, and six named bounds (1000 rows per read, 200 database calls per
-/// run, 50 fetches per run, 8 MB per response, the `timeout_ms` wall clock, and
-/// one second of JavaScript at a time without awaiting anything — a body shares
+/// bounded — no subprocess, no schema changes, no transactions across
+/// statements, no path to a file except through a store an admin connected, and
+/// eight named bounds (1000 rows per read, 200 database calls per run, 50
+/// fetches per run, 100 file operations per run, 8 MB per response, 8 MB per
+/// file read or written, the `timeout_ms` wall clock, and one second of
+/// JavaScript at a time without awaiting anything — a body shares
 /// its isolate with every other body, and the sharing works because a body
 /// awaiting a query leaves it free). A table larger than one read is walked with
 /// `.iter()`, which yields the same rows a batch at a time — one database call
@@ -162,8 +217,9 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 ///   — `await` goes at the front of a whole chain, never inside one — and a
 ///   forgotten `await` is a named error rather than `{}` in the result, because
 ///   the promise a terminal answers refuses to be stringified, coerced or
-///   iterated. `db` and `fetch` are the two awaitable things there are — no
-///   timers, no disk, no second way to the network — and the one shape the
+///   iterated. `db`, `fetch` and `fs` are the three awaitable things there are —
+///   no timers, no second way to the network, no path to the disk that is not a
+///   store an admin connected — and the one shape the
 ///   runtime refuses outright is a body that computes for a second without
 ///   yielding, because that is the isolate held against every other trigger;
 /// - a **syntax error surfaces at fire time**, not on save. Checking it would
@@ -248,11 +304,16 @@ impl Action for RunJsCode {
         // The network, on the same terms: borrowed for this run, bounded by the
         // run's own clock, and counted on a budget of its own.
         let net = CodeFetchHost::new(self.client.clone(), ctx.trigger);
+        // The file stores, on the same terms again. It carries the event's role
+        // rather than its user, because a file rule is a role floor: `asUser()`
+        // is checked against it, and the admin default clears every one.
+        let files = FileStoreHost::new(ctx.catalog).caused_by(ctx.event.role);
         let call = CodeCall {
             code,
             bindings: bindings(ctx.event),
             host: Some(&host),
             fetch: Some(&net),
+            files: Some(&files),
             timeout,
             ..CodeCall::default()
         };

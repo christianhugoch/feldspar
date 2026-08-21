@@ -16,7 +16,13 @@ use bytes::Bytes;
 use sc_error::{Context, Error, Result};
 use std::path::{Path, PathBuf};
 
-use crate::store::{Entry, FileMeta, FileStore};
+use crate::store::{Entry, FileMeta, FileStat, FileStore};
+
+/// A modification time as RFC 3339 in UTC, which is how every other timestamp
+/// crosses this server's wire.
+fn rfc3339(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
 
 /// Name of the extended attribute holding a file's serialised [`FileMeta`]. On
 /// Unix the effective key is `user.saltcorn.meta` (the `user.` namespace is
@@ -249,6 +255,37 @@ impl FileStore for LocalFileStore {
         // A local store is all local path; `resolve` applies the same traversal
         // sandboxing the byte-level methods get.
         self.resolve(rel).map(Some)
+    }
+
+    /// The entry's own facts, from one `stat` call rather than the default
+    /// implementation's listing of its parent — which on a directory of ten
+    /// thousand files is ten thousand entries built to answer one question.
+    ///
+    /// Follows symlinks, as [`read`](FileStore::read) does: what a caller asks
+    /// about is the file they would read.
+    async fn stat(&self, path: &str) -> Result<Option<FileStat>> {
+        let abs = self.resolve(path)?;
+        let meta = match tokio::fs::metadata(&abs).await {
+            Ok(meta) => meta,
+            // Nothing there is an answer, not a failure — and so is a path whose
+            // parent is a file, which the OS reports as `NotADirectory`.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::NotADirectory =>
+            {
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(Error::from(e))
+                    .with_context(|| format!("stat {path:?} in store {}", self.name));
+            }
+        };
+        let is_dir = meta.is_dir();
+        Ok(Some(FileStat {
+            size: if is_dir { 0 } else { meta.len() },
+            is_dir,
+            modified: meta.modified().ok().map(rfc3339),
+        }))
     }
 
     async fn get_meta(&self, path: &str) -> Result<FileMeta> {

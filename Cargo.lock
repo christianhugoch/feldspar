@@ -3838,6 +3838,7 @@ name = "sc-expr"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "deno_core",
  "getrandom 0.3.4",
  "sc-db-postgres",
@@ -3858,6 +3859,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
  "fsquirrel",
  "mime_guess",
  "regex-lite",

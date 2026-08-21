@@ -46,7 +46,7 @@ pub use search::{
     DEFAULT_EXCLUDED_DIRS, DEFAULT_MAX_RESULTS, MAX_FILE_BYTES, MAX_FILES_SCANNED, MAX_LINE_CHARS,
     SearchHit, SearchOutcome, SearchQuery, glob_matches, search_store,
 };
-pub use store::{Entry, FileMeta, FileStore};
+pub use store::{Entry, FileMeta, FileStat, FileStore};
 
 #[cfg(test)]
 mod tests {
@@ -85,6 +85,102 @@ mod tests {
             .unwrap();
         let got = store.read("a/b/hello.txt").await.unwrap();
         assert_eq!(&got[..], b"hello world");
+    }
+
+    #[tokio::test]
+    async fn stat_answers_the_entrys_own_facts_and_none_for_what_is_not_there() {
+        let (_base, store) = temp_store();
+        store
+            .write("docs/a.txt", Bytes::from_static(b"12345"))
+            .await
+            .unwrap();
+
+        let file = store
+            .stat("docs/a.txt")
+            .await
+            .unwrap()
+            .expect("it is there");
+        assert_eq!(file.size, 5);
+        assert!(!file.is_dir);
+        // A real modification time, in the shape every other timestamp crosses
+        // the wire in.
+        let modified = file.modified.expect("a local file has one");
+        assert!(
+            modified.contains('T') && modified.ends_with('Z'),
+            "{modified}"
+        );
+
+        let dir = store.stat("docs").await.unwrap().expect("it is there");
+        assert!(dir.is_dir);
+        assert_eq!(dir.size, 0, "a directory has no size to report");
+        assert!(store.stat("").await.unwrap().unwrap().is_dir, "the root is");
+
+        // Nothing there is an answer rather than an error — which is what makes
+        // `exists()` a question instead of a `catch`. Including the case where a
+        // *file* is in the middle of the path.
+        assert!(store.stat("docs/gone.txt").await.unwrap().is_none());
+        assert!(store.stat("nowhere/at/all").await.unwrap().is_none());
+        assert!(store.stat("docs/a.txt/deeper").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_default_stat_answers_from_a_listing() {
+        /// A store with no `stat` of its own: everything else is the local
+        /// store's, so what is under test is the trait's default — the answer a
+        /// backend that can only list still gives.
+        struct ListOnly(LocalFileStore);
+
+        #[async_trait::async_trait]
+        impl FileStore for ListOnly {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            async fn read(&self, path: &str) -> sc_error::Result<Bytes> {
+                self.0.read(path).await
+            }
+            async fn write(&self, path: &str, data: Bytes) -> sc_error::Result<()> {
+                self.0.write(path, data).await
+            }
+            async fn list(&self, dir: &str) -> sc_error::Result<Vec<Entry>> {
+                self.0.list(dir).await
+            }
+            async fn mkdir(&self, path: &str) -> sc_error::Result<()> {
+                self.0.mkdir(path).await
+            }
+            async fn delete(&self, path: &str) -> sc_error::Result<bool> {
+                self.0.delete(path).await
+            }
+            async fn rename(&self, from: &str, to: &str) -> sc_error::Result<()> {
+                self.0.rename(from, to).await
+            }
+            fn is_git_repo(&self) -> bool {
+                false
+            }
+            async fn get_meta(&self, path: &str) -> sc_error::Result<FileMeta> {
+                self.0.get_meta(path).await
+            }
+            async fn set_meta(&self, path: &str, meta: &FileMeta) -> sc_error::Result<()> {
+                self.0.set_meta(path, meta).await
+            }
+        }
+
+        let (_base, inner) = temp_store();
+        let store = ListOnly(inner);
+        store
+            .write("docs/a.txt", Bytes::from_static(b"123"))
+            .await
+            .unwrap();
+
+        let file = store.stat("docs/a.txt").await.unwrap().expect("listed");
+        assert_eq!(file.size, 3);
+        assert!(!file.is_dir);
+        // The one thing a listing cannot say. `None` is the honest answer, not
+        // an invented time.
+        assert_eq!(file.modified, None);
+        assert!(store.stat("docs").await.unwrap().unwrap().is_dir);
+        assert!(store.stat("").await.unwrap().unwrap().is_dir);
+        assert!(store.stat("docs/gone.txt").await.unwrap().is_none());
+        assert!(store.stat("nowhere/at/all").await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -204,14 +204,15 @@ async fn the_event_binds_what_it_has_and_nothing_else() -> Result<()> {
 }
 
 #[tokio::test]
-async fn the_sandbox_has_two_host_surfaces_and_nothing_else() -> Result<()> {
+async fn the_sandbox_has_three_host_surfaces_and_nothing_else() -> Result<()> {
     let db = TestDb::new().await?;
     let catalog = setup(&db).await?;
 
-    // The bound this action keeps. There are exactly two ways out of a body —
-    // `db` and `fetch` — and everything else a JavaScript runtime usually has is
-    // still absent: no subprocess, no disk, no timers, and no second way to the
-    // network that would have its own rules.
+    // The bound this action keeps. There are exactly three ways out of a body —
+    // `db`, `fetch` and `fs` — and everything else a JavaScript runtime usually
+    // has is still absent: no subprocess, no timers, no second way to the
+    // network that would have its own rules, and no path to a *file* except
+    // through a store an admin connected.
     let probes = [
         "Deno",
         "require",
@@ -222,6 +223,10 @@ async fn the_sandbox_has_two_host_surfaces_and_nothing_else() -> Result<()> {
         "setTimeout",
         "globalThis.saltcorn",
         "globalThis.books",
+        // The disk, except through `fs`: no module and no path, and `fs`
+        // itself is a parameter rather than a global, so a body cannot reach
+        // another run's stores by taking one off `globalThis`.
+        "globalThis.fs",
     ];
     for probe in probes {
         let code = format!("return typeof {probe} === 'undefined';");
@@ -258,6 +263,31 @@ async fn the_sandbox_has_two_host_surfaces_and_nothing_else() -> Result<()> {
         )
         .await?,
         json!(true)
+    );
+    // `fs` is the third, and it is a function because this server has many
+    // stores and no default one. This catalog has none connected, so `fs.stores`
+    // is empty — and a body that names one is refused when it asks the store for
+    // anything, naming the store it could not find.
+    assert_eq!(
+        run(
+            &catalog,
+            &book_insert(),
+            "return [typeof fs, fs.stores.length];"
+        )
+        .await?,
+        json!(["function", 0]),
+        "a server with no connected store has an empty list, not no `fs`"
+    );
+    let refused = run(
+        &catalog,
+        &book_insert(),
+        r#"try { await fs("nope").open("a.txt").text(); return "read it"; }
+           catch (e) { return e.message; }"#,
+    )
+    .await?;
+    assert!(
+        refused.as_str().unwrap_or_default().contains("nope"),
+        "a store nothing connected cannot be read: {refused}"
     );
     // What the event bound is still exactly what it bound.
     assert_eq!(

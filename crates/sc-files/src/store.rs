@@ -27,6 +27,30 @@ pub struct Entry {
     pub size: Option<u64>,
 }
 
+/// What [`FileStore::stat`] answers: the facts about one entry that need no
+/// bytes read.
+///
+/// Deliberately not [`Entry`]. An `Entry` is a *child of a listing* — it carries
+/// the name and path the listing gave it — while this describes a path the
+/// caller already named, and it carries the one fact a listing has no place for:
+/// when the entry last changed. `size` is `0` for a directory, matching what a
+/// listing reports for one (`None` there, since nothing sensible can be said).
+///
+/// The MIME type is **not** here: it is a function of the path, which the caller
+/// already has ([`crate::mime_for_path`]), and a backend that guessed it from
+/// the bytes would disagree with the `File` field rule that guesses it from the
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStat {
+    /// Size in bytes; `0` for a directory.
+    pub size: u64,
+    /// Whether the entry is a directory.
+    pub is_dir: bool,
+    /// When the entry was last modified, as RFC 3339, where the backend knows.
+    /// `None` is an honest answer for a store whose backend does not record it.
+    pub modified: Option<String>,
+}
+
 /// Per-file metadata, stored out of band from the bytes (in xattrs for on-disk
 /// stores) so that files need no database row (design §9/§14.1).
 ///
@@ -105,6 +129,47 @@ pub trait FileStore: Send + Sync {
     /// as it is for the byte-level methods.
     fn local_path(&self, _rel: &str) -> Result<Option<std::path::PathBuf>> {
         Ok(None)
+    }
+
+    /// The facts about one entry, or `None` when nothing is there.
+    ///
+    /// `None` rather than an error, because "is there a file here?" is a
+    /// question a caller is entitled to ask and an error is not an answer to it:
+    /// a code body writes `if (await file.exists())`, and every other way of
+    /// asking would make a missing file a `catch`.
+    ///
+    /// The default implementation **lists the parent directory** and looks for
+    /// the entry, which is correct for any backend that can list — so a store
+    /// gains `exists()` without implementing anything. A backend with a cheaper
+    /// answer (and a modification time to report) should override it, as
+    /// [`crate::LocalFileStore`] does.
+    async fn stat(&self, path: &str) -> Result<Option<FileStat>> {
+        let trimmed = path.trim_matches('/');
+        // The root is the store, and the store is there.
+        if trimmed.is_empty() || trimmed == "." {
+            return Ok(Some(FileStat {
+                size: 0,
+                is_dir: true,
+                modified: None,
+            }));
+        }
+        let (parent, name) = match trimmed.rsplit_once('/') {
+            Some((parent, name)) => (parent, name),
+            None => ("", trimmed),
+        };
+        // A parent that cannot be listed (it does not exist, or it is a file)
+        // means the entry is not there either — which is what was asked.
+        let Ok(entries) = self.list(parent).await else {
+            return Ok(None);
+        };
+        Ok(entries
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| FileStat {
+                size: entry.size.unwrap_or(0),
+                is_dir: entry.is_dir,
+                modified: None,
+            }))
     }
 
     /// Read a file's metadata, returning [`FileMeta::default`] when none has been

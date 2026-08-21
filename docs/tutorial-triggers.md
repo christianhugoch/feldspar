@@ -416,7 +416,7 @@ const [open, overdue] = await Promise.all([
 What `db` deliberately does *not* have: schema changes, transactions across statements, or
 timers.
 
-**Calling an endpoint.** The other thing a body can await is `fetch`, which is the web's, with
+**Calling an endpoint.** The second thing a body can await is `fetch`, which is the web's, with
 the web's rules:
 
 ```js
@@ -445,6 +445,51 @@ from where this runs:
 Fifty requests per run, 8 MB per response, `http`/`https` only. And `Promise.all([fetch(a),
 fetch(b)])` really does send both at once.
 
+**Reading and writing files.** The third thing a body can await is `fs`, which is a **file
+store** by name — this server can have several, so there is no default one:
+
+```js
+const theFile = fs("myFileStore").open("the_file.txt");
+if (await theFile.exists()) {
+  const theString = await theFile.text();
+}
+```
+
+`open` does not open anything: it is a *reference* to a path, and the path need not exist yet.
+Which is why creating a file is not a second thing to learn — you write to the reference, and
+the folders are made on the way:
+
+```js
+await fs("uploads").open("reports/2026-08.json").write({ rows: 12, ok: true });
+```
+
+`write` replaces what is there and `create` refuses to. Both take a string, bytes, another file
+(copied without the contents ever coming into your code), a `Response` — so
+`await file.write(await fetch(url))` saves a download — or any other value, which is stored as
+JSON.
+
+Reading is a fetch response's vocabulary: `text()`, `json()`, `bytes()`, `arrayBuffer()`. The
+size and the MIME type are on `await file.stat()` rather than being properties, because nothing
+here can look at a file without awaiting it. A file also has `delete()`, `moveTo(dest)`,
+`copyTo(dest)` — where `dest` may be a file in *another* store — and `meta()` / `setMeta()` for
+the access rule and attributes the store keeps beside the bytes.
+
+Folders work the same way, and a listing hands back the same objects, so you act on them
+directly:
+
+```js
+for (const entry of await fs("uploads").dir("in").list()) {
+  if (entry.isDirectory) continue;
+  await entry.copyTo(fs("archive").open(`2026/${entry.name}`));
+  await entry.delete();
+}
+```
+
+A hundred file operations per run, 8 MB per read or write (a bigger file is refused, not
+truncated), and a copy may move 256 MB because those bytes never come through your code. Two
+things to remember: nothing streams, and **a file you wrote stays written** even if your code
+throws afterwards — unlike a row, there is nothing to roll back.
+
 ## The actions you have
 
 Every action declares its own settings, and the form is rendered from that declaration — so an
@@ -464,9 +509,10 @@ comes back as the trigger's result — so a `none` trigger exposed on your app c
 front end to somebody else's API.
 
 `run_js_code` is the escape hatch for a computation no combination of the others expresses. It
-sees `row`, `old`, `user` and `payload` — and two ways out: `db`, your tables (Step 5), and
-`fetch`, an HTTP request (Step 5 again). That is the whole host surface: no disk, no subprocess,
-no timers, no schema changes.
+sees `row`, `old`, `user` and `payload` — and three ways out: `db`, your tables (Step 5),
+`fetch`, an HTTP request (Step 5 again), and `fs`, your file stores (Step 5 once more). That is
+the whole host surface: no subprocess, no timers, no schema changes, and no way to a file that
+is not a store you connected.
 
 The `fetch` **action** and a body's `fetch` are the same capability, and which to reach for is a
 question of what you do with the answer: the action is one configured request whose response

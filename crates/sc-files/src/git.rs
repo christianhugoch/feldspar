@@ -65,7 +65,7 @@ use crate::def::{
     GIT_BACKEND,
 };
 use crate::local::LocalFileStore;
-use crate::store::{Entry, FileMeta, FileStore};
+use crate::store::{Entry, FileMeta, FileStat, FileStore};
 
 /// Environment variable overriding the base directory clones and keys live
 /// under, for tests and for an operator who wants them elsewhere.
@@ -965,6 +965,10 @@ impl FileStore for GitFileStore {
 
     fn local_path(&self, rel: &str) -> Result<Option<PathBuf>> {
         self.inner.local_path(rel)
+    }
+
+    async fn stat(&self, path: &str) -> Result<Option<FileStat>> {
+        self.inner.stat(path).await
     }
 
     async fn get_meta(&self, path: &str) -> Result<FileMeta> {

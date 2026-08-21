@@ -102,6 +102,7 @@
 //! would fetch the whole table, hand back what survived and do it again — so it
 //! is refused naming `.rows()`, which can decide row by row.
 
+mod files;
 mod plan;
 
 use std::sync::Arc;
@@ -118,6 +119,7 @@ use crate::convert::value_to_json;
 use crate::ownership;
 use crate::rows;
 
+pub use files::{FileStoreHost, MAX_COPY_BYTES, MAX_FILE_BYTES};
 pub use plan::{AggSpec, Authority, Dir, Op, OrderKey, Plan, Selection, SqlOp, SqlPlan};
 
 /// How many rows one read may return before it is refused.
