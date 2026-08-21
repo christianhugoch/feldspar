@@ -183,7 +183,8 @@ After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+WatchdogSec=30s
 User=saltcorn
 Group=saltcorn
 ExecStart=/usr/local/bin/saltcorn serve --environment production
@@ -217,9 +218,19 @@ journalctl -u saltcorn -f      # the boot log names the environment and the file
 
 Why each of the less obvious lines:
 
-- **`Type=simple`, not `notify`.** The server does not send a readiness notification
-  yet. It does handle `SIGTERM`, so `systemctl stop` and `systemctl restart` are
-  graceful shutdowns.
+- **`Type=notify`.** The server tells systemd when it is *serving*: `systemctl start`
+  returns once the port is bound and accepting, so a unit ordered `After=saltcorn.service`
+  never races the listener. Until then `systemctl status` shows what the boot is doing —
+  connecting to the database, building each application — and a boot step that legitimately
+  takes minutes (an application's first `npm install`) asks systemd for more time rather
+  than needing a large `TimeoutStartSec`. `SIGTERM` is handled, so `systemctl stop` and
+  `systemctl restart` are graceful shutdowns, and the unit shows `deactivating` while
+  in-flight requests drain.
+- **`WatchdogSec=30s`** is optional and cheap: the server pings every 15 seconds from an
+  async task, so a process whose runtime has stopped scheduling — a deadlock, a blocking
+  call that has eaten every worker — is killed and restarted by `Restart=on-failure`
+  instead of sitting there accepting connections it will never answer. Raise it or drop
+  the line on a machine where a 30-second stall is normal.
 - **`--environment production`**, even though it is the file's default: *naming* an
   environment makes that section outrank any ambient `DATABASE_URL`/`PG*` in the unit's
   environment, so the service cannot be pointed at the wrong database by accident (§7).

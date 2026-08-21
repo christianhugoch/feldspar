@@ -1121,9 +1121,12 @@ fn readme_quick_start_config_file_parses() {
 /// everything else read-only), a home for npm's cache when the server builds an
 /// application, and the capability that lets a non-root process bind 80/443.
 ///
-/// `Type=simple` is asserted too, and is the one to revisit: the server does not
-/// send a readiness notification yet, so a unit claiming `Type=notify` would hang
-/// until systemd's timeout.
+/// `Type=notify` and `WatchdogSec` are asserted too, because they are claims
+/// about the *binary*: the server sends `READY=1` once the listener is bound and
+/// pings the watchdog while it runs (`sc_server::ServiceManager`). A unit that
+/// dropped either would silently give up a guarantee the code still provides;
+/// one that kept them against a binary that stopped notifying would hang until
+/// systemd's start timeout.
 #[test]
 fn readme_quick_start_systemd_unit_is_complete() {
     let root = workspace_root();
@@ -1137,7 +1140,8 @@ fn readme_quick_start_systemd_unit_is_complete() {
         .0;
 
     for line in [
-        "Type=simple",
+        "Type=notify",
+        "WatchdogSec=",
         "User=saltcorn",
         "StateDirectory=saltcorn",
         "ReadWritePaths=/var/lib/saltcorn",
@@ -1151,7 +1155,7 @@ fn readme_quick_start_systemd_unit_is_complete() {
         );
     }
     assert!(
-        !unit.contains("Type=notify"),
-        "the server sends no readiness notification, so the unit must not be Type=notify"
+        !unit.contains("Type=simple"),
+        "the server notifies readiness, so the unit should claim it rather than Type=simple"
     );
 }

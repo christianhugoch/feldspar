@@ -4223,6 +4223,25 @@ file, is unaffected.
 **Target platforms.** Linux, macOS, Windows, FreeBSD — constrains dependency choices,
 especially the cross-platform xattr library and the native code adapters.
 
+**Process lifecycle and the service manager.** The server's shutdown is graceful — `SIGTERM`
+(and Ctrl-C) stops accepting and drains in-flight requests, `SIGHUP` reloads (§13.2) — and
+the process reports each of those transitions to whatever supervises it, so a unit may say
+`Type=notify` and `WatchdogSec` and mean them. `sc_server::ServiceManager` speaks the
+sd_notify protocol directly: `READY=1` **after every listener is bound**, so `systemctl start`
+returns when the port is accepting and a unit ordered after this one never races the
+listener; `STATUS=` lines through the boot, whose slow part happens before the port opens;
+`EXTEND_TIMEOUT_USEC=` before each application build, so a first `npm install` does not force
+a large `TimeoutStartSec` on every other failure; `WATCHDOG=1` at half the configured
+interval from an async task, which makes the watchdog a *runtime liveness* check — the
+failure a health endpoint cannot report, because a runtime that cannot schedule that task
+cannot answer a request either; and `STOPPING=1` when the shutdown signal arrives.
+
+The protocol is a datagram to an `AF_UNIX` socket, so it is **implemented in the standard
+library with no `libsystemd` and no feature flag**, and the target platforms above are
+unaffected: on the other Unixes `NOTIFY_SOCKET` is simply never set and every call is a
+no-op, and on Windows the implementation is compiled out. Nothing in it can fail the server —
+a socket that has gone away is reported on stderr and ignored.
+
 **Runtime and core dependencies.** The workspace is a single Cargo workspace on Rust
 **edition 2024** with an MSRV of **1.85**. The async runtime is **tokio** (multi-threaded);
 every async trait in this document is expressed with `async_trait` over it, and the

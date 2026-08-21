@@ -441,6 +441,13 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
     Ok(report)
 }
 
+/// How much longer one application's build may ask the service manager for.
+///
+/// A first build of an application with a cold npm cache is minutes, not
+/// seconds; this is per application and is requested again before each one, so a
+/// server mounting ten of them is not racing a single deadline.
+const APP_BUILD_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Load every stored application and build + mount each — what the server does at
 /// boot (design §13.2).
 ///
@@ -461,8 +468,18 @@ pub async fn mount_all(apps: &AppMounts) {
             return;
         }
     };
+    // Mounting is the slow half of the boot — `build_and_mount` runs `npm
+    // install` for an application whose dependencies are not on disk yet — and it
+    // is the half that happens before the port opens. So each application asks
+    // the service manager for more time before it starts, rather than the unit
+    // carrying one `TimeoutStartSec` big enough for the worst case and useless
+    // for every real failure. Where no service manager started this process, both
+    // calls do nothing.
+    let service = crate::systemd::ServiceManager::from_env();
     for app in stored {
         let subdomain = app.subdomain.clone();
+        service.notify_status(&format!("building application `{subdomain}`"));
+        service.extend_timeout(APP_BUILD_GRACE);
         match build_and_mount(apps, app).await {
             Ok(_) => eprintln!("saltcorn: mounted application `{subdomain}`"),
             Err(e) => {

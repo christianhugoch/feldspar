@@ -23,7 +23,7 @@ use sc_cli::{
     connect_catalog, connect_file_stores, connect_stored_file_stores, extract_file_stores,
 };
 use sc_error::Result;
-use sc_server::{AppMounts, ServerConfig, admin_handlers, mount_all, serve};
+use sc_server::{AppMounts, ServerConfig, ServiceManager, admin_handlers, mount_all, serve};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -102,9 +102,17 @@ async fn serve_command(args: &[String]) -> Result<()> {
         eprintln!("saltcorn: database configured from {source}");
     }
 
+    // The service manager that started this process, where one did (a
+    // `Type=notify` systemd unit). The boot is the interesting part of a
+    // Saltcorn start — everything below happens before the port opens — so each
+    // step says what it is doing, and `systemctl status` shows it. Off a service
+    // manager, every call on it does nothing.
+    let service = ServiceManager::from_env();
+
     // Bring the data layer up before binding: connect the database, load the
     // catalog, and ensure the users table exists. A bad connection fails here
     // with a clear message rather than a server that boots then 500s.
+    service.notify_status("connecting to the database");
     let catalog = connect_catalog(&db).await?;
 
     // How this process serves TLS is a **stored setting**, not a flag (§13.5):
@@ -175,6 +183,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // do.
     let triggers = sc_server::install_triggers(&catalog, evaluator.clone(), &agents).await?;
 
+    service.notify_status("mounting applications");
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
             .with_evaluator(evaluator)
@@ -204,6 +213,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // Everything is up — catalog, file stores, applications, triggers — and the
     // listener has not been announced yet, which is exactly what the `startup`
     // event means.
+    service.notify_status("running startup triggers");
     sc_server::fire_startup(&catalog, &triggers).await;
 
     // The clock's turn: from here a periodic trigger fires on its own schedule,

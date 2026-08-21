@@ -5,6 +5,13 @@
 //! `SIGHUP` reloads the catalog and the applications in place without building
 //! anything — see [`crate::reload`].
 //!
+//! The service manager is told when both of those are true: `READY=1` goes out
+//! once every listener is bound and accepting, and `STOPPING=1` when the
+//! shutdown signal arrives, so a unit may say `Type=notify` and `WatchdogSec`
+//! and mean them (see [`crate::systemd`]). Where there is no service manager —
+//! every development run, and every platform without one — the notifications are
+//! no-ops and this function behaves exactly as it did before.
+//!
 //! With TLS on there are **two** listeners: the configured bind address, which
 //! answers plain HTTP, and the TLS port beside it. What the plain one serves is
 //! the admin's choice — a permanent redirect to HTTPS (the default) or the
@@ -21,6 +28,7 @@ use crate::apps::AppMounts;
 use crate::config::ServerConfig;
 use crate::handler::HandlerRegistry;
 use crate::router::build_router_with_apps;
+use crate::systemd::ServiceManager;
 use crate::tls::{TlsSettings, graceful_shutdown, https_addr, redirect_router, serve_https};
 
 /// Build the router, bind the configured address, and serve until a shutdown
@@ -46,18 +54,32 @@ pub async fn serve(
 
     let app = build_router_with_apps(&endpoints, handlers, sessions, &config, apps)?;
 
+    // The service manager that started this process, if one did. Read here
+    // rather than passed in: it is a property of the process's environment, and
+    // every caller of `serve` would otherwise have to plumb the same thing.
+    let service = ServiceManager::from_env();
+
     let TlsSettings::Off = &config.tls else {
-        return serve_with_tls(config, app).await;
+        return serve_with_tls(config, app, service).await;
     };
 
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
         .with_context(|| format!("binding to {}", config.addr))?;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+    // Bound, therefore ready: a connection to the address now completes, so this
+    // is the moment `systemctl start` may return and dependent units may run.
+    let watchdog = service.spawn_watchdog();
+    service.notify_ready(&format!("serving on http://{}", config.addr));
+
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(service))
         .await
-        .map_err(|e| Error::msg(format!("server error: {e}")))
+        .map_err(|e| Error::msg(format!("server error: {e}")));
+    if let Some(watchdog) = watchdog {
+        watchdog.abort();
+    }
+    result
 }
 
 /// Serve `app` over both listeners: TLS on the configured HTTPS port, and plain
@@ -67,7 +89,11 @@ pub async fn serve(
 /// without the capability to bind it is the usual one — is an error at startup
 /// naming the address, rather than a server that is up on one protocol and
 /// silently missing on the other.
-async fn serve_with_tls(config: ServerConfig, app: axum::Router) -> Result<()> {
+async fn serve_with_tls(
+    config: ServerConfig,
+    app: axum::Router,
+    service: ServiceManager,
+) -> Result<()> {
     let port = config
         .tls
         .port()
@@ -96,14 +122,24 @@ async fn serve_with_tls(config: ServerConfig, app: axum::Router) -> Result<()> {
     let (stop_http, http_stopped) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn({
         let handle = handle.clone();
+        let service = service.clone();
         async move {
-            shutdown_signal().await;
+            shutdown_signal(service).await;
             let _ = stop_http.send(());
             graceful_shutdown(&handle);
         }
     });
 
     eprintln!("saltcorn: serving TLS on https://{tls_addr}");
+    // Both listeners are bound by now — the TLS one synchronously above, the
+    // plain one just after it — so readiness is not a claim about the TLS
+    // handshake (whose certificate may still be being ordered from an ACME CA)
+    // but about the ports, which is what a dependent unit waits on.
+    let watchdog = service.spawn_watchdog();
+    service.notify_ready(&format!(
+        "serving TLS on https://{tls_addr} and http://{}",
+        config.addr
+    ));
     let http = tokio::spawn(async move {
         axum::serve(http_listener, http_app)
             .with_graceful_shutdown(async move {
@@ -113,6 +149,9 @@ async fn serve_with_tls(config: ServerConfig, app: axum::Router) -> Result<()> {
     });
 
     let tls_result = serve_https(tls_listener, app, &config.tls, handle).await;
+    if let Some(watchdog) = watchdog {
+        watchdog.abort();
+    }
     // The plain listener is awaited whichever way the TLS one ended, so its
     // error is reported rather than dropped with the task.
     match http.await {
@@ -130,7 +169,11 @@ async fn serve_with_tls(config: ServerConfig, app: axum::Router) -> Result<()> {
 
 /// Resolve when the process is asked to stop: Ctrl-C on every platform, plus
 /// `SIGTERM` on Unix (the signal an orchestrator sends).
-async fn shutdown_signal() {
+///
+/// The service manager is told before this resolves, so the unit shows
+/// `deactivating` for the length of the graceful drain that follows rather than
+/// looking hung — and so a `WatchdogSec` unit is not restarted for the drain.
+async fn shutdown_signal(service: ServiceManager) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -153,4 +196,6 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
+
+    service.notify_stopping("draining in-flight requests");
 }

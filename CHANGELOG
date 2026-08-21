@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## `serve` runs as a `Type=notify` systemd unit, with a watchdog
+
+`saltcorn serve` handled `SIGTERM` and bound a port, and told nothing that started it about
+either. So the quick start's unit had to say `Type=simple`, which means "started" the moment
+the process forks: `systemctl start` returned before the listener existed, a unit ordered
+`After=saltcorn.service` raced it, and a boot that died connecting to the database looked
+like a successful start. It is also the boot where the wait is real — the catalog, the file
+stores, and an application build that runs `npm install` all happen before the port opens.
+
+**`sc_server::ServiceManager` (new, `crates/sc-server/src/systemd.rs`) speaks sd_notify.**
+It is wired into the two paths that own the process's lifecycle:
+
+- **`READY=1` after every listener is bound** — both of them under TLS, where the plain and
+  the HTTPS listeners are bound before either serves. Readiness is a claim about the ports,
+  not about the ACME order that may still be in flight behind them.
+- **`STATUS=` through the boot** — connecting to the database, building each application,
+  running the startup triggers — so `systemctl status` shows where a slow start is, and
+  ends at `serving on http://…`.
+- **`EXTEND_TIMEOUT_USEC=` before each application build** (10 minutes, per application, in
+  `mount_all`). A first build with a cold npm cache is minutes; asking for the time as it is
+  needed beats a `TimeoutStartSec` sized for the worst case and useless for every real hang.
+- **`WATCHDOG=1` at half `WatchdogSec`**, from a task the tokio runtime has to schedule. That
+  makes the watchdog a *liveness* check in the strict sense — a deadlock, or a blocking call
+  that has eaten every worker — which is exactly the failure a health endpoint cannot report,
+  because a runtime that cannot schedule that task cannot answer a request either. It obeys
+  `WATCHDOG_PID`, so a child that inherited the environment does not answer for its parent.
+- **`STOPPING=1` on `SIGTERM`**, so the unit shows `deactivating` for the graceful drain
+  instead of looking hung — and a watchdog unit is not restarted for the drain.
+
+**No `libsystemd`, and no feature flag.** The protocol is one datagram to an `AF_UNIX`
+socket, so it is written against `std` and compiles everywhere the server already does: on
+Linux with or without `libsystemd-dev` (including the abstract-namespace `NOTIFY_SOCKET=@…`
+a user-scoped unit gets, via the stable `SocketAddrExt::from_abstract_name`), on the other
+Unixes — where `NOTIFY_SOCKET` is never set and every call is a no-op — and on Windows,
+where the implementation is compiled out. Nothing in it can fail the server: a socket that
+has gone away is reported on stderr and ignored.
+
+Tests: eight unit tests in the module for the protocol, the `WATCHDOG_USEC` halving and its
+floor, the `WATCHDOG_PID` check, a status line that cannot smuggle a second directive through
+a newline, and both socket flavours end to end. Plus `crates/sc-server/tests/systemd_notify.rs`,
+which stands the **real** `serve` up behind a real notify socket and asserts the three moments
+a unit file depends on: `READY=1` arrives *and a TCP connection to the address succeeds at
+that moment* (the listener was bound first, which is the whole point), `WATCHDOG=1` keeps
+arriving about every second for `WatchdogSec=2s`, and a `SIGTERM` — caught, because the
+running server installed the handler — produces `STOPPING=1` and then an actual shutdown.
+
+README §2.6's unit becomes `Type=notify` with `WatchdogSec=30s`, and the hygiene test that
+asserted the opposite now asserts this, so the unit and the binary cannot drift apart.
+
 ## A Debian 13 production quick start in the README
 
 The README explained every piece of a deployment — the database, the toolchain, the UI build,
