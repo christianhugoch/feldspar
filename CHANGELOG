@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## Modules in-process: the phase 0 spike, and its gate
+
+No repository code changed. This entry records a **measurement**, because the next milestone —
+moving a module out of its `node` sidecar and onto a `deno_runtime` worker inside the server —
+was allowed to end in "no", and the answer is written down whichever way it goes.
+
+A throwaway binary outside the workspace (`deno_runtime` 0.263 + `deno_core` 0.408, one worker,
+node compatibility on, `ByonmNpmResolver` over a modules root this repo's own `Installer` built)
+ran `crates/sc-module/src/js/module-host.mjs` **unmodified**, keeping its newline-JSON transport
+by handing the worker a pair of pipes instead of a child process's stdio.
+
+**It works.** `@saltcorn/mqtt`, `@saltcorn/proxmox` and the `echo-module` fixture load
+in-process and answer manifests **byte-identical** to what `node` answers for the same requests
+— the actions, the `configFields`, the flattened `configuration_workflow`, the census of what
+this version does not load. The `Module._load` patch, the three tiers of `@saltcorn/*` stubs,
+`Workflow`, `Form` and `interpolate` all behave as they do under node, and `require`ing a real
+dependency out of the npm-built `node_modules` resolves through byonm. The whole thing runs with
+**no `node` on `PATH`**, which is the milestone's headline claim reached in phase 0.
+
+**A module calling `process.exit(3)` costs its own worker and nothing else.** With the host's
+stdin held open so the module's own exit is the only thing that can end the run: the exiting
+call is lost, the co-resident module's `ping` is answered, the exit code that reaches the host
+is the module's own `3`, and the spike's process runs to the end of `main()`. That is the
+sidecar's behaviour kept. One correction to the plan came out of it — the handler that calls
+`workerClose()` belongs to `deno_runtime`'s `WebWorker`, which cannot be driven with
+`execute_main_module` alone, and the door that does work (`deno_os::WatcherExitHandle`)
+terminates only *running* JavaScript, so a host whose event loop is parked must poll for the
+exit rather than wait to be told.
+
+**What it costs**, against a control binary linking only the `deno_core` the workspace already
+has: +263 crates in the lock file, a clean release build of 30 s → 257 s (302 s with a
+snapshot), peak build memory 2.4 GB → 6.9 GB, and a stripped binary of 47 MB → 125 MB. Plus one
+cost nobody had listed: four of `deno_runtime`'s unconditional extensions require
+`rusqlite/session`, so **`libclang` becomes a build requirement of the server** and no feature
+knob removes it.
+
+**And one number that came back the other way from the plan.** The milestone's specification
+argued partly from memory: a Deno worker at ~7 MB marginal against the sidecar's ~70 MB.
+Measured here, a snapshot-backed worker holding both modules costs 67 MB of RSS *inside the
+server* against the sidecar's 67 MB in its own process — gross, a wash. The saving is net and
+smaller: the first V8 in a process costs ~21 MB and the server already pays it for `sc-expr`'s
+code isolates, so the change is worth about 45 MB and one process. The case for the milestone is
+the `node` runtime requirement and the permission model, not memory, and `TODO.md` now says so.
+
+**Gate: go**, with the snapshot moved from optional to required — without one a worker start
+costs 159 ms instead of 9.7 ms and 5 MB more, and the `transpile` feature it would have avoided
+has to be on regardless. Full numbers, method and the two amendments to the specification are in
+`TODO.md`'s phase 0.
+
 ## SQLite: a second database backend
 
 `DatabaseDriver` has had one implementation since the first week, and a trait with one

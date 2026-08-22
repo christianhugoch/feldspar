@@ -316,24 +316,217 @@ a user rather than by a test.
 This phase is allowed to end in "no". Nothing in phases 1–5 is worth starting if the numbers
 here come back wrong, and the sidecar is a working system with no defect driving this change.
 
-- [ ] A throwaway binary in `/tmp` (not a workspace member): `deno_runtime` 0.263 + `deno_core`
+- [x] A throwaway binary in `/tmp` (not a workspace member): `deno_runtime` 0.263 + `deno_core`
       0.408, one worker with node compat on, `ByonmNpmResolver` over a modules root this repo's
       installer built, running `module-host.mjs` unmodified and answering one `load` for
       `@saltcorn/mqtt`. This is the whole risk of the milestone in one file.
-- [ ] Measure and record, in this list: clean build wall time and peak RSS of the link; the
+- [x] Measure and record, in this list: clean build wall time and peak RSS of the link; the
       binary's size before and after; a worker's start-to-first-`load` latency with and without
       a snapshot; and the process RSS with two modules loaded, against the ~70 MB the sidecar
       measures.
-- [ ] Confirm the four wirings the spike needs are as small as they look:
+- [x] Confirm the four wirings the spike needs are as small as they look:
       `NodeRequireLoader` (five methods, four with usable defaults),
       `NodeExtInitServices { node_require_loader, node_resolver, pkg_json_resolver, sys }`,
       a `ModuleLoader`, and `sys_traits`' `RealSys` for `ExtNodeSys`.
-- [ ] Confirm the exit handler: a module calling `process.exit(3)` closes its worker and leaves
+- [x] Confirm the exit handler: a module calling `process.exit(3)` closes its worker and leaves
       the spike's process alive. Use the `echo-module` fixture's `echo_exit`, which exists for
       exactly this.
-- [ ] **Gate.** Write the go/no-go here with the numbers next to it. A "no" is a legitimate
+- [x] **Gate.** Write the go/no-go here with the numbers next to it. A "no" is a legitimate
       outcome and the rest of this file is then archived unstarted, with the measurements kept —
       they are the answer to the next person who asks this question.
+
+### What was built
+
+`/home/tomn/spike-deno/` on this machine — outside the repository and not a workspace member,
+per the bullet above. Not in `/tmp`, which here is a 16 GB tmpfs: a `deno_runtime` target
+directory is 3–6 GB and tmpfs pages are RAM, which on the machine described in the root
+`Cargo.toml`'s profile note is how a build closes the terminal window rather than failing.
+
+Four things live there and all of them are throwaway:
+
+| | |
+|---|---|
+| `modules-root/` | built by **this repo's own `Installer`** (`--install-links`, the `@saltcorn/*` overrides, the stub packages), holding `@saltcorn/mqtt` 0.2.0, `@saltcorn/proxmox` 0.2.2 and the `echo-module` fixture, with `module-host.mjs` copied in as the server writes it |
+| `spike/` | `deno_runtime` 0.263, no snapshot — 423 lines of `main.rs` |
+| `spike-snapshot/` | the same, plus the §6 `build.rs` snapshot |
+| `control/` | `deno_core` 0.408 and nothing else: what `sc-expr`'s `eval` feature already links, so the deltas below are against **what the server already pays** rather than against zero |
+
+The spike keeps `module-host.mjs`'s transport as well as its text: a pair of `std::io::pipe`s
+are handed to the worker as its stdio and a reader thread sits on the far end, which is the
+sidecar's newline-JSON protocol with the process taken out. Nothing in the host script was
+edited.
+
+### It works, and the manifests are byte-identical
+
+`@saltcorn/mqtt`, `@saltcorn/proxmox` and the `echo-module` fixture all load in-process, and
+their manifests — the actions, the `configFields`, the flattened `configuration_workflow`, the
+`unsupported` census — are **byte-identical** to what `node module-host.mjs` answers for the
+same three `load` requests. `Module._load`, `createRequire`, the three tiers of stubs,
+`Workflow`, `Form` and `interpolate` all behave as they do under node; `require("async-mqtt")`
+resolves out of the npm-built `node_modules` through `ByonmNpmResolver`.
+
+Two differences, both cosmetic and both worth knowing:
+
+- A `run` of `mqtt_publish` against an unconfigured module fails with the **same message** under
+  both, but the stack differs: Deno gives CommonJS frames `file://` URLs where node gives bare
+  paths, and there is no `processTicksAndRejections` frame.
+- `process.version` reports Deno's node-compatibility version (`v26.3.0`) rather than the
+  installed node's (`v22.22.0`).
+
+And the milestone's headline claim holds already: the spike loads and runs both modules with
+**no `node` on `PATH` at all** (`env -i PATH=/tmp/nonode`, a directory containing one symlink to
+`timeout`).
+
+### The four wirings
+
+Smaller than they look, and none of them needed a workaround:
+
+| wiring | cost |
+|---|---|
+| `ModuleLoader` | **22 lines**: `FsModuleLoader` plus one branch, because a `node:` specifier is its own canonical form and `deno_core`'s module map answers it from the `lazy_loaded_esm` registry the `deno_node` extension registered. `module-host.mjs`'s four `import`s need nothing else. |
+| `NodeRequireLoader` | **40 lines**, three methods implemented. `ensure_read_permission` is handed the module's own `PermissionsContainer` on every read, which is exactly where phase 3 goes. |
+| `NodeExtInitServices` + `ByonmNpmResolver` | **29 lines**, including the `NodeResolver` and `PackageJsonResolver` it needs. `root_node_modules_dir` is the modules root's own `node_modules` and nothing else was configured. |
+| `RealSys` for `ExtNodeSys` | one line. |
+
+Two things the list did not predict and phase 1 must know:
+
+- **`WorkerOptions::bootstrap.has_node_modules_dir` must be `true`**, or `require` looks for a
+  Deno npm cache that does not exist.
+- **The `transpile` feature is mandatory without a snapshot.** `deno_runtime`'s extension
+  sources are TypeScript; with no snapshot to hold the transpiled form, the first worker dies
+  with `SyntaxError: Unexpected token ':'` in `ext:deno_bundle_runtime/bundle.ts`. With a
+  snapshot, the residual `lazy_loaded_*` sources the snapshot did not consume have to be
+  transpiled **by the build script** before they are embedded, or the first `node:` import is a
+  `SyntaxError` in `node:console`.
+
+### `process.exit(3)`
+
+Confirmed, with the `echo-module` fixture's `echo_exit`, and it confirms more than the bullet
+asked for. Both modules are loaded and answering; then `echo_exit` is fired and a `ping` to the
+co-resident `@saltcorn/mqtt` is fired straight after it, with the host's stdin deliberately held
+**open** so that the module's own exit is the only thing that can end the run:
+
+```
+[   59.4 ms] {"id":1,...}   @saltcorn-test/echo loaded
+[  105.3 ms] {"id":4,"ok":true,"value":{"pong":true,"node":"v26.3.0"}}   the co-resident call
+requests sent / replies seen:    4 / 3      the exiting call is lost, and only it
+op_exit ran before the last step: true
+exit code the module asked for:  Some(3)    the module's own code, not an EOF's 0
+the spike's own process reached the end of main(), so it is alive.
+```
+
+So: the exiting call is lost, its co-resident's call is answered, and the server does not exit —
+which is the sidecar's behaviour, kept. **But the mechanism is not the one §4 names, and §4
+should be corrected before phase 1 builds on it:**
+
+- §4 is right that `deno_os`'s `op_exit` fires only when no handler is installed, and right that
+  `deno_node`'s `process.exit` goes through `Deno.exit` and therefore through it.
+- The handler that calls `workerClose()` is installed by `deno_runtime`'s **`WebWorker`**
+  bootstrap. A bare `WebWorker` cannot simply be driven with `execute_main_module` +
+  `run_event_loop`: it panics `coding error: either js is polling or the worker is terminated`,
+  because it expects the worker-host plumbing (the message-polling loop) around it. Phase 1's
+  pool has to supply that, or use the other door.
+- The other door, which is what the spike used, is `deno_os::WatcherExitHandle`: put one in the
+  worker's `OpState` and `op_exit` calls `terminate_execution` on that isolate and sets a
+  `WatcherExited` marker instead of calling `std::process::exit`. Two lines, and it works on a
+  `MainWorker`.
+- **The catch, and it is the one thing here that would have been discovered in production:**
+  `terminate_execution` only throws out of *running* JavaScript. A module that exits while the
+  worker's event loop is parked on an idle resource leaves the loop parked — the spike hung for
+  120 s the first time. `WatcherExited` in `OpState` is the host's evidence that the exit
+  happened, and the host, not V8, is what must then drop the worker. Phase 1's
+  restart-and-replay path needs that poll.
+
+### The numbers
+
+Measured on this machine (12 cores, 31 GB), release profile, medians of three runs. "Sidecar"
+is the current `node module-host.mjs` doing the same two loads.
+
+**Start-to-first-`load`** — spawn (or worker construction) to the first reply on stdout:
+
+| | worker construction | host script evaluated | first `load` answered |
+|---|---|---|---|
+| `node` sidecar (today) | — | — | **54 ms** |
+| Deno worker, **no snapshot** | 159 ms | 204 ms | **255 ms** |
+| Deno worker, **with a snapshot** | **9.7 ms** | 56 ms | **105 ms** |
+
+The snapshot is worth 150 ms of every worker start and it is not optional in the way §6
+suggested it might be: the difference between 9.7 ms and 159 ms is the difference between a
+worker restart being invisible and being a hiccup, and the restart path is on the
+`process.exit()` road above.
+
+**RSS**, same runs:
+
+| | process baseline | + worker, no modules | + two modules loaded |
+|---|---|---|---|
+| `node` sidecar (today) | — | — | **67.2 MB** (whole process) |
+| Deno worker, no snapshot | 12.2 MB | 65.3 MB | **83.9 MB** |
+| Deno worker, with a snapshot | 12.2 MB | 60.0 MB | **79.5 MB** |
+| `deno_core` control | 4.8 MB | 25.8 MB (one bare isolate) | 57.5 MB (eight isolates) |
+
+**This is the measurement that does not come back the way §1 predicted, and the list should say
+so rather than quietly keep the old table.** §1 has a Deno worker with node compatibility on at
+12.4 MB first and 7.4 MB marginal, and concludes the sidecar's ~70 MB and its second V8 are what
+the change buys back. Measured here, a snapshot-backed worker with two real modules on it costs
+**67 MB of RSS inside the server** (79.5 − 12.2) against the sidecar's **67 MB in its own
+process**. Gross, that is a wash.
+
+The saving is real but it is *net*, and it is smaller: the control says the **first** V8 in a
+process costs ~21 MB (4.8 → 25.8 MB) and each isolate after it ~4.5 MB, and the server already
+pays that first 21 MB for `sc-expr`'s code isolates. So the honest figure is **~45 MB of RSS and
+one process**, not ~50 MB and a second V8. (§1's marginal-cost table was measured on Deno
+*workers inside an already-running `deno`*, where the runtime's snapshot is already resident and
+shared; a worker that is the first thing in its process does not get that.)
+
+**Build cost**, clean, `CARGO_INCREMENTAL=0`, under `scripts/cargo-guarded.sh`:
+
+| | crates | wall | peak toolchain RSS (sum / largest process) | binary (stripped) |
+|---|---|---|---|---|
+| `deno_core` control | 561 in the lock file | **30 s** | 2.4 GB / 0.78 GB | 66.6 MB (**47.4 MB**) |
+| + `deno_runtime`, no snapshot | 824 | **257 s** | 6.1 GB / 1.04 GB | 164.6 MB (**118.2 MB**) |
+| + `deno_runtime`, with snapshot | 824 | **302 s** | 6.9 GB / 1.89 GB | 172.1 MB (**125.2 MB**) |
+
+So `deno_runtime` costs **+263 crates in the lock file, +4.5 minutes of clean build, ~2.5× the
+build's peak memory, and +78 MB of stripped binary** over what the workspace already links.
+(The debug profile with the workspace's own `debug = 0` budget builds the same tree in 84 s at
+4.0 GB, so this is not the ~110-test-binary link problem the root `Cargo.toml` warns about — it
+is one more large link, not a hundred.)
+
+**A cost §5 does not list, and should:** `deno_cache`, `deno_kv`, `deno_node_sqlite` and
+`deno_webstorage` all require `rusqlite/session`, which turns on
+`libsqlite3-sys/preupdate_hook` → `buildtime_bindgen`. **`libclang` becomes a build requirement
+of the Saltcorn server**, along with the C headers bindgen needs, and there is no feature knob
+to turn it off — the same "every extension is unconditional" that §5 already records about the
+Rust side is true of the C toolchain. This machine has no clang at all; the spike borrowed
+`libclang.so` out of PyPI's `libclang` wheel and gcc's own freestanding headers to get a
+measurement. A deployment would install `libclang-dev`. It belongs in `README.md`'s requirements
+table (phase 5) and in CI.
+
+### Gate: **go**, with two amendments to the specification above
+
+The risk this phase existed to retire is retired: the JavaScript half is portable, the wirings
+are ninety lines, the modules load and run in-process with no `node` anywhere, and a module that
+calls `process.exit()` costs its own worker and nothing else.
+
+But the *reason* stated in §1 has to change, because the memory arithmetic did not survive
+contact:
+
+1. **§1's table is wrong for this use and should be replaced by the one above.** Merging the
+   pools is still the wrong answer, and every word of §1's coupling argument still holds — a
+   module is long-lived state, a code isolate is disposable, and the JS-slice watchdog stops the
+   isolate and everything on it. That argument is sufficient on its own and it is what should
+   carry §1. What should not be repeated is "what is saved is ~70 MB and a second V8": what is
+   saved is ~45 MB and a second *process*, and the honest case for this milestone is **the
+   `node` runtime requirement and the permission model of §2**, not memory.
+2. **§6's "the first version of this may go without a snapshot" is withdrawn.** Without one a
+   worker start costs 159 ms and 5 MB more, and the `transpile` feature has to be on anyway, so
+   the snapshot's `build.rs` is the cheaper of the two roads, not the later one. Phase 1 takes
+   the snapshot with it.
+
+The costs to accept, stated plainly so nobody is surprised in phase 5: **+78 MB of stripped
+binary, +4.5 minutes of clean build, +263 crates, and `libclang` as a new build-time
+requirement.** If any one of those is unacceptable, this is the point to stop — the sidecar
+works, and the four bullets above are the answer to the next person who asks.
 
 ## Phase 1 — The runtime (`sc-module`, behind a feature)
 
