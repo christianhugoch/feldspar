@@ -62,6 +62,7 @@ use sc_llm::{
     LlmProviderDef, LlmProviderDefId, LlmRequest, connect_provider, delete_llm_provider,
     list_llm_providers, load_llm_provider, provider_config_spec, save_llm_provider,
 };
+use sc_module::{load_module, load_module_by_name, save_module};
 use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement, Value};
 use sc_types::{
     FormField, Operation, OperationScope, registered_rich_types, rich_type_config_spec,
@@ -1200,6 +1201,160 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- modules ------------------------------------------------------------
+    // A module is somebody else's npm package, so every one of these handlers
+    // does the same two-part act: change the disk or the row, then **reload** —
+    // rebuild the action registry from the built-ins plus every installed
+    // module, swap it into the dispatcher, and revalidate the triggers against
+    // it (`ModuleServices::reload`). That is what makes a module's actions
+    // usable on a running server, which is the whole point of installing one
+    // from a form rather than from a deploy.
+
+    reg.register("listModules", {
+        let apps = apps.clone();
+        move |_ctx| {
+            let apps = apps.clone();
+            async move {
+                let services = modules_of(&apps)?;
+                let set = services.modules();
+                let modules: Vec<Json> = set.modules().iter().map(module_json).collect();
+                Ok(HandlerResponse::ok(json!({
+                    "modules": modules,
+                    "root": services.installer().root().display().to_string(),
+                    // Asked here rather than assumed, because a server with no
+                    // Node toolchain can do everything else and nothing on this
+                    // tab — and the tab should say so before the admin types a
+                    // package name.
+                    "npm": sc_module::have_npm().await,
+                    "node": sc_module::have_node().await,
+                })))
+            }
+        }
+    });
+
+    reg.register("installModule", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let services = modules_of(&apps)?;
+                let obj = require_object(&ctx.body)?;
+                let source = sc_module::ModuleSource::parse(non_empty_str_field(obj, "source")?)?;
+                let location = non_empty_str_field(obj, "location")?.trim().to_owned();
+
+                let package = services.installer().install(source, &location).await?;
+                // A package name that is already installed is an **upgrade**,
+                // not a collision: reinstalling is how a module is upgraded
+                // (TODO, out of scope: an upgrade UI), and the admin who typed
+                // `@saltcorn/mqtt@0.3.0` over a 0.2.0 install means exactly
+                // that. The row keeps its id and its configuration.
+                let mut module = match load_module_by_name(&catalog, &package.name).await? {
+                    Some(existing) => existing,
+                    None => sc_module::Module::new(&package.name, source, &location),
+                };
+                module.source = source;
+                module.location = location;
+                module.version = Some(package.version);
+                save_module(&catalog, &module).await?;
+
+                services.reload().await?;
+                let set = services.modules();
+                let loaded = set
+                    .get(&module.name)
+                    .ok_or_else(|| Error::msg("the installed module is not in the loaded set"))?;
+                Ok(HandlerResponse::ok(module_json(loaded)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateModule", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let services = modules_of(&apps)?;
+                let id = parse_module_id(ctx.path_param("id")?)?;
+                let mut module = sc_module::require_module(&catalog, id).await?;
+                let obj = require_object(&ctx.body)?;
+                let submitted = object_field(obj, "configuration")?;
+
+                // A module's `password` setting is a secret like any other: what
+                // the form was shown is the sentinel, and submitting it back
+                // unchanged keeps what is stored.
+                let set = services.modules();
+                module.configuration = match set.get(&module.name) {
+                    Some(loaded) => sc_types::merge_secrets(
+                        &loaded.config_spec,
+                        &module.configuration,
+                        &submitted,
+                    ),
+                    None => submitted,
+                };
+                drop(set);
+                save_module(&catalog, &module).await?;
+
+                // The configuration is what v1's `actions(cfg)` is called with,
+                // so it only takes effect when the module is loaded again.
+                services.reload().await?;
+                let set = services.modules();
+                let loaded = set
+                    .get(&module.name)
+                    .ok_or_else(|| Error::msg("the saved module is not in the loaded set"))?;
+                Ok(HandlerResponse::ok(module_json(loaded)))
+            }
+        }
+    });
+
+    reg.register("deleteModule", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let services = modules_of(&apps)?;
+                let id = parse_module_id(ctx.path_param("id")?)?;
+                let Some(module) = load_module(&catalog, id).await? else {
+                    return Ok(HandlerResponse::ok(json!({ "deleted": false })));
+                };
+                // The host first, so a restarted one does not reload a package
+                // that is about to go; then npm; then the row, which is what
+                // makes the module exist at all. npm failing must not leave a
+                // module nobody can delete, so its complaint is logged rather
+                // than returned.
+                services.host().unload(&module.name).await;
+                if let Err(e) = services.installer().uninstall(&module.name).await {
+                    sc_log::log_error!(
+                        "saltcorn: the module `{}` was removed but its package could not be \
+                         uninstalled: {}",
+                        module.name,
+                        sc_error::format_chain(&e)
+                    );
+                }
+                let deleted = sc_module::delete_module(&catalog, id).await?;
+                services.reload().await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    reg.register("reloadModules", {
+        let apps = apps.clone();
+        move |_ctx| {
+            let apps = apps.clone();
+            async move {
+                let services = modules_of(&apps)?;
+                services.reload().await?;
+                let count = services.modules().modules().len();
+                Ok(HandlerResponse::ok(json!({ "modules": count })))
+            }
+        }
+    });
+
     // --- agents -------------------------------------------------------------
     // The row ⇄ live-set path again (§11.2), for the third record that has it:
     // every save goes through `save_agent`, which validates against the *same*
@@ -1672,7 +1827,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let dispatcher = triggers_of(&apps)?;
                 let trigger = trigger_from_body(TriggerId::new(), &ctx.body)?;
-                save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
+                save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
                 dispatcher.reload(&catalog).await?;
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)).with_status(201))
             }
@@ -1694,7 +1849,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // The id is the path's, not the body's — the row's identity is
                 // not something a payload gets to reassign.
                 let trigger = trigger_from_body(id, &ctx.body)?;
-                save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
+                save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
                 dispatcher.reload(&catalog).await?;
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)))
             }
@@ -3714,6 +3869,74 @@ fn parse_llm_provider_id(raw: &str) -> Result<LlmProviderDefId> {
     uuid::Uuid::parse_str(raw)
         .map(LlmProviderDefId)
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid LLM provider id")))
+}
+
+/// One loaded module as JSON (matching `module_schema`): the row, what the
+/// package supplies, and everything wrong with it.
+///
+/// The actions' settings are translated here rather than carried from the
+/// registry because they are the same translation — v1's `configFields` through
+/// [`sc_module::config_fields_to_form_fields`] — and a module that failed to
+/// register an action (a name clash) still has settings the tab should show
+/// beside the reason it is not available.
+fn module_json(loaded: &sc_module::LoadedModule) -> Json {
+    let module = &loaded.module;
+    let actions: Vec<Json> = loaded
+        .manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .actions
+                .iter()
+                .map(|action| {
+                    let (spec, _) = sc_module::config_fields_to_form_fields(
+                        &action.config_fields,
+                        &action.name,
+                    );
+                    json!({
+                        "name": action.name,
+                        "description": action.description,
+                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "id": module.id.0,
+        "name": module.name,
+        "source": module.source.as_str(),
+        "location": module.location,
+        "version": module.version,
+        "configuration": Json::Object(sc_module::redacted_configuration(loaded)),
+        "config_spec": loaded
+            .config_spec
+            .iter()
+            .map(form_field_json)
+            .collect::<Vec<_>>(),
+        "actions": actions,
+        "unsupported": sc_module::unsupported_json(loaded),
+        "issues": loaded.issues,
+        "loaded": loaded.is_loaded(),
+        "api_version": loaded.manifest.as_ref().and_then(|m| m.api_version),
+    })
+}
+
+/// Parse a module id from a path parameter.
+fn parse_module_id(raw: &str) -> Result<sc_module::ModuleId> {
+    uuid::Uuid::parse_str(raw)
+        .map(sc_module::ModuleId)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid module id")))
+}
+
+/// The module services this server was built with, or a configuration error
+/// saying it has none — the same shape [`triggers_of`] has, and for the same
+/// reason: a test or an admin-only server may have booted without them, and the
+/// Modules tab should say so rather than appear to work.
+fn modules_of(apps: &AppMounts) -> Result<Arc<crate::ModuleServices>> {
+    apps.modules().cloned().ok_or_else(|| {
+        Error::config("this server has no module support installed, so modules cannot be managed")
+    })
 }
 
 /// One stored agent as JSON (matching `agent_schema`), with the reason it cannot

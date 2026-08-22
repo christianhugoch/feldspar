@@ -3901,6 +3901,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-module"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sc-action",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-error",
+ "sc-log",
+ "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sc-query"
 version = "0.1.0"
 dependencies = [
@@ -3949,6 +3969,7 @@ dependencies = [
  "sc-files",
  "sc-llm",
  "sc-log",
+ "sc-module",
  "sc-query",
  "sc-test-harness",
  "sc-types",

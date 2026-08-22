@@ -448,7 +448,7 @@ async fn a_delegated_write_is_an_event_at_the_depth_its_chain_says() -> Result<(
     bootstrap_triggers(&cat).await?;
     save_trigger(
         &cat,
-        dispatcher.registry(),
+        &dispatcher.registry(),
         &Trigger::new("watch", EventKind::Insert, "record").on("books"),
     )
     .await?;

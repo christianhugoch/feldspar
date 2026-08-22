@@ -84,7 +84,7 @@ async fn setup(min_role: Option<u8>) -> Result<Env> {
 
 /// The action registry the dispatcher was built over.
 fn registry(env: &Env) -> Arc<ActionRegistry> {
-    Arc::clone(env.dispatcher.as_ref().expect("a dispatcher").registry())
+    env.dispatcher.as_ref().expect("a dispatcher").registry()
 }
 
 /// `run_trigger` configured against it.

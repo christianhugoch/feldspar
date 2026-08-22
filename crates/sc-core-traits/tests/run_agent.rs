@@ -139,7 +139,7 @@ async fn setup(script: impl IntoIterator<Item = Reply>) -> Result<(Env, Arc<Scri
 
 /// The action registry the dispatcher was built over.
 fn registry(env: &Env) -> Arc<ActionRegistry> {
-    Arc::clone(env.dispatcher.as_ref().expect("a dispatcher").registry())
+    env.dispatcher.as_ref().expect("a dispatcher").registry()
 }
 
 /// The summaries the agent filed, oldest first.

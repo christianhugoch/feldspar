@@ -1,0 +1,404 @@
+// The **module host**: the Node child process a Saltcorn module runs in.
+//
+// Written into the modules root from the server binary at every host start (the
+// binary is the authority; a stale copy from an older version would be a bug
+// nobody would look for), and started with that directory as its working
+// directory, so `require` resolves out of the modules root's own
+// `node_modules`.
+//
+// ## Protocol
+//
+// Newline-delimited JSON on stdin and stdout. A request carries an `id`; the
+// reply carries it back, so many calls are in flight at once and a slow module's
+// action does not hold anybody else's:
+//
+//   → {"id":1,"op":"load","module":"@saltcorn/mqtt","dir":"…","configuration":{}}
+//   ← {"id":1,"ok":true,"value":{"name":"@saltcorn/mqtt","actions":[…]}}
+//   → {"id":2,"op":"run","module":"@saltcorn/mqtt","action":"mqtt_publish","args":{…}}
+//   ← {"id":2,"ok":false,"error":"connect ECONNREFUSED","stack":"…"}
+//
+// Anything the module writes to stdout would corrupt that stream, so
+// `console.log` is rebound to stderr before a module is ever required — which is
+// also where it belongs, since the server forwards stderr to its own log.
+//
+// ## The `@saltcorn` stubs
+//
+// A v1 plugin's first lines are `require("@saltcorn/data/models/table")` and
+// friends. Those packages are v1's server — the thing being replaced — and are
+// not installed, so `Module._load` is patched to answer every `@saltcorn/*`
+// specifier from the table below.
+//
+// Three tiers. `Workflow`, `Form` and `interpolate` are **real**, because the
+// first two are what a `configuration_workflow` is written in and the third is
+// called on every `proxmox_snapshot` run. Everything else is a stub whose
+// properties are reachable and whose **calls throw**, naming the API. A silent
+// no-op was the alternative and is refused on the same grounds the rest of this
+// system refuses silent failures: a `Table.findOne` that returns `undefined`
+// does not fail, it computes the wrong answer, inside somebody's trigger.
+
+import { createRequire } from "node:module";
+import Module from "node:module";
+import * as path from "node:path";
+import * as readline from "node:readline";
+
+const require = createRequire(import.meta.url);
+
+// ---------------------------------------------------------------------------
+// stdout belongs to the protocol
+// ---------------------------------------------------------------------------
+
+const writeReply = (obj) => {
+  process.stdout.write(JSON.stringify(obj) + "\n");
+};
+
+console.log = (...args) => console.error(...args);
+console.info = (...args) => console.error(...args);
+console.debug = (...args) => console.error(...args);
+
+// ---------------------------------------------------------------------------
+// The `@saltcorn` API: real, stubbed, and named
+// ---------------------------------------------------------------------------
+
+/** The message a stubbed API answers a *call* with. */
+const notAvailable = (what) =>
+  `the Saltcorn v1 API ${what} is not available to modules in this version of ` +
+  `Saltcorn. This module needs an API that has not been implemented yet; the ` +
+  `actions that do not use it still work.`;
+
+/** Properties that must answer `undefined` rather than a stub.
+ *
+ * `then` is the dangerous one: a stub that answers a callable `then` turns
+ * `await stub` into a call, and therefore into a throw from a line that never
+ * meant to use the API. The rest are the runtime's own probes — `util.inspect`,
+ * JSON serialisation, iteration — which must not report a stub as a function. */
+const passThrough = new Set(["then", "catch", "finally", "toJSON", "inspect", "nodeType"]);
+
+/** A stub reachable by property and fatal on call, naming the path that was
+ * used. Reached lazily so `a.b.c()` names `a.b.c`, not `a`. */
+function namedStub(pathName) {
+  const target = function () {};
+  return new Proxy(target, {
+    get(_t, prop) {
+      if (typeof prop === "symbol") return undefined;
+      if (passThrough.has(prop)) return undefined;
+      if (prop === "name") return pathName;
+      return namedStub(`${pathName}.${prop}`);
+    },
+    apply() {
+      throw new Error(notAvailable(pathName));
+    },
+    construct() {
+      throw new Error(notAvailable(`new ${pathName}`));
+    },
+  });
+}
+
+/** v1's `Form`: the fields are the whole of what this host reads back. */
+class Form {
+  constructor(opts = {}) {
+    Object.assign(this, opts);
+    this.fields = opts.fields || [];
+  }
+}
+
+/** v1's `Workflow`: a list of steps, each with a `form`. */
+class Workflow {
+  constructor(opts = {}) {
+    Object.assign(this, opts);
+    this.steps = opts.steps || [];
+  }
+}
+
+/** v1's `interpolate(template, row, user)`: `{{ expression }}` substitution with
+ * the row's columns and `user` in scope.
+ *
+ * Real rather than stubbed because `proxmox_snapshot` names every snapshot with
+ * one, and a snapshot called `{{ name }}-{{ id }}` literally is not a snapshot.
+ * The expression is JavaScript, as it is in v1. */
+function interpolate(template, row = {}, user = undefined) {
+  if (typeof template !== "string") return template;
+  return template.replace(/\{\{([^}]*)\}\}/g, (_all, expr) => {
+    const source = String(expr).trim();
+    if (source === "") return "";
+    const names = Object.keys(row || {}).filter((k) => /^[A-Za-z_$][\w$]*$/.test(k));
+    // eslint-disable-next-line no-new-func
+    const f = new Function(...names, "user", `return (${source});`);
+    const value = f(...names.map((n) => row[n]), user);
+    return value === null || value === undefined ? "" : String(value);
+  });
+}
+
+/** The `@saltcorn/*` specifiers this host answers itself, and with what. */
+function saltcornModule(specifier) {
+  switch (specifier) {
+    case "@saltcorn/data/models/form":
+    case "@saltcorn/data/models/form.js":
+      return Form;
+    case "@saltcorn/data/models/workflow":
+    case "@saltcorn/data/models/workflow.js":
+      return Workflow;
+    case "@saltcorn/data/utils":
+    case "@saltcorn/data/utils.js":
+      return { ...namedNamespace(specifier), interpolate };
+    default:
+      return namedNamespace(specifier);
+  }
+}
+
+/** A stub *namespace*: a plain object whose every property is a named stub, so
+ * `const { getState } = require("@saltcorn/data/db/state")` destructures
+ * without complaint and `getState()` throws naming `getState`. */
+function namedNamespace(specifier) {
+  const short = specifier.replace(/^@saltcorn\//, "").replace(/\.js$/, "");
+  return new Proxy(
+    {},
+    {
+      get(_t, prop) {
+        if (typeof prop === "symbol") return undefined;
+        if (passThrough.has(prop)) return undefined;
+        if (prop === "__esModule") return false;
+        if (prop === "default") return namedStub(`${short}.default`);
+        return namedStub(`${short}.${prop}`);
+      },
+      // A `require(…)` used as a constructor or a function — v1's models are
+      // classes, and `new Table(...)` has to say the same thing.
+      has() {
+        return true;
+      },
+    },
+  );
+}
+
+const originalLoad = Module._load;
+Module._load = function (request, parent, isMain) {
+  if (request === "@saltcorn" || request.startsWith("@saltcorn/")) {
+    return saltcornModule(request);
+  }
+  return originalLoad.apply(this, arguments);
+};
+
+// ---------------------------------------------------------------------------
+// Loading a module
+// ---------------------------------------------------------------------------
+
+/** The loaded modules, by package name: what `run` dispatches through. */
+const loaded = new Map();
+
+/** In-flight (and settled) loads, by package name.
+ *
+ * A `run` waits on its module's load before dispatching. Requests are handled
+ * concurrently — that is the point of the id in the protocol — so without this
+ * a `run` written straight after a `load` (which is exactly what the server
+ * does when it restarts this process and replays its module set) could reach
+ * `loaded` before the load had put anything in it. */
+const loading = new Map();
+
+/** The plugin keys this version reads. Everything else is counted and reported
+ * (the Modules tab says "also supplies: 1 table provider"), never loaded, so an
+ * admin knows what they are not getting. */
+const supportedKeys = new Set(["actions", "configuration_workflow"]);
+
+/** Keys that are metadata rather than an entity type. */
+const metadataKeys = new Set([
+  "sc_plugin_api_version",
+  "plugin_name",
+  "dependencies",
+  "ready_for_mobile",
+  "onLoad",
+]);
+
+/** How much of an exported entity there is, for the census. */
+function entityCount(value) {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === "object") return Object.keys(value).length;
+  return null;
+}
+
+/** Drop a package and everything under its directory from require's cache, so a
+ * reload of a symlinked local checkout picks up the edits. */
+function purgeCache(dir) {
+  const prefix = path.resolve(dir);
+  for (const key of Object.keys(require.cache)) {
+    if (path.resolve(key).startsWith(prefix)) delete require.cache[key];
+  }
+}
+
+/** v1's `configFields`: an array, or a function of a context, possibly async. */
+async function evalConfigFields(fields, context) {
+  const value = typeof fields === "function" ? await fields(context) : fields;
+  return Array.isArray(value) ? value : [];
+}
+
+/** The fields of a `configuration_workflow`'s steps, concatenated.
+ *
+ * v1 configures a plugin with a wizard and v2 has no wizard vocabulary, so the
+ * forms are flattened into one settings form. A step whose form cannot be built
+ * without context is skipped rather than fatal: the module still loads, and its
+ * actions still run. */
+async function configWorkflowFields(plugin) {
+  if (typeof plugin.configuration_workflow !== "function") return { fields: [], issues: [] };
+  const issues = [];
+  let workflow;
+  try {
+    workflow = await plugin.configuration_workflow({});
+  } catch (e) {
+    return { fields: [], issues: [`its configuration form could not be built: ${e.message}`] };
+  }
+  const fields = [];
+  for (const step of (workflow && workflow.steps) || []) {
+    try {
+      const form = typeof step.form === "function" ? await step.form({}) : step.form;
+      for (const field of (form && form.fields) || []) fields.push(field);
+    } catch (e) {
+      issues.push(`its configuration step "${step.name || "?"}" could not be built: ${e.message}`);
+    }
+  }
+  return { fields, issues };
+}
+
+/** Load (or reload) one module, and report what it supplies. */
+async function loadModule({ module: name, dir, configuration }) {
+  purgeCache(dir);
+  let plugin;
+  try {
+    plugin = require(dir);
+  } catch (e) {
+    // A module whose *own* dependency is missing is the common failure for a
+    // package installed from a checkout, and node's message names the package
+    // but not what to do about it. Say both: the admin can install it, and
+    // nobody else can.
+    if (e && e.code === "MODULE_NOT_FOUND") {
+      const missing = /Cannot find module '([^']+)'/.exec(e.message);
+      throw new Error(
+        `${name} needs the package ${missing ? missing[1] : "(unknown)"}, which is not ` +
+          `installed. Run \`npm install ${missing ? missing[1] : "<package>"}\` in the ` +
+          `modules directory, or add it to the module's own dependencies.`,
+      );
+    }
+    throw e;
+  }
+  const issues = [];
+
+  const actionsExport = plugin.actions;
+  let actionSet = {};
+  if (typeof actionsExport === "function") {
+    actionSet = (await actionsExport(configuration || {})) || {};
+  } else if (actionsExport && typeof actionsExport === "object") {
+    actionSet = actionsExport;
+  }
+
+  const actions = [];
+  for (const [actionName, action] of Object.entries(actionSet)) {
+    const impl = typeof action === "function" ? { run: action } : action || {};
+    let configFields = [];
+    try {
+      configFields = await evalConfigFields(impl.configFields, { mode: "trigger" });
+    } catch (e) {
+      issues.push(`the action "${actionName}" could not declare its settings: ${e.message}`);
+    }
+    actions.push({
+      name: actionName,
+      description: impl.description || "",
+      requireRow: !!impl.requireRow,
+      configFields,
+    });
+  }
+
+  const { fields: configFields, issues: configIssues } = await configWorkflowFields(plugin);
+  issues.push(...configIssues);
+
+  const unsupported = [];
+  for (const [key, value] of Object.entries(plugin)) {
+    if (supportedKeys.has(key) || metadataKeys.has(key)) continue;
+    unsupported.push({ key, count: entityCount(value) });
+  }
+
+  loaded.set(name, { plugin, actions: actionSet, configuration: configuration || {} });
+
+  return {
+    name,
+    api_version: plugin.sc_plugin_api_version ?? null,
+    plugin_name: plugin.plugin_name || null,
+    actions,
+    config_fields: configFields,
+    unsupported,
+    issues,
+  };
+}
+
+/** Run one action of one module, with v1's argument object. */
+async function runAction({ module: name, action: actionName, args }) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const action = entry.actions[actionName];
+  if (!action) throw new Error(`the module ${name} has no action ${actionName}`);
+  const impl = typeof action === "function" ? { run: action } : action;
+  if (typeof impl.run !== "function")
+    throw new Error(`the action ${actionName} of module ${name} has no run function`);
+  const result = await impl.run(args || {});
+  return result === undefined ? null : result;
+}
+
+// ---------------------------------------------------------------------------
+// The loop
+// ---------------------------------------------------------------------------
+
+async function handle(request) {
+  switch (request.op) {
+    case "ping":
+      return { pong: true, node: process.version };
+    case "load": {
+      const pending = loadModule(request);
+      // Recorded before it is awaited, and with its rejection absorbed: this
+      // copy exists to be waited *on*, and the caller of the load is the one
+      // who is told it failed.
+      loading.set(request.module, pending.catch(() => {}));
+      return await pending;
+    }
+    case "unload":
+      loaded.delete(request.module);
+      loading.delete(request.module);
+      return { unloaded: true };
+    case "run": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await runAction(request);
+    }
+    default:
+      throw new Error(`unknown module-host operation ${request.op}`);
+  }
+}
+
+const lines = readline.createInterface({ input: process.stdin });
+
+lines.on("line", (line) => {
+  if (!line.trim()) return;
+  let request;
+  try {
+    request = JSON.parse(line);
+  } catch (e) {
+    console.error(`module host: unreadable request: ${e.message}`);
+    return;
+  }
+  // Deliberately not awaited: each request is its own task, which is what puts
+  // many calls in flight at once.
+  handle(request).then(
+    (value) => writeReply({ id: request.id, ok: true, value: value ?? null }),
+    (e) =>
+      writeReply({
+        id: request.id,
+        ok: false,
+        error: (e && e.message) || String(e),
+        stack: (e && e.stack) || null,
+      }),
+  );
+});
+
+lines.on("close", () => process.exit(0));
+
+// A module's own unhandled rejection must not take the host down with it: the
+// call it belongs to has already been answered (or is about to time out), and
+// every other module in this process is innocent.
+process.on("unhandledRejection", (e) => {
+  console.error(`module host: unhandled rejection from a module: ${(e && e.stack) || e}`);
+});

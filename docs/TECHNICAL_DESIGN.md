@@ -121,8 +121,10 @@ graph TD
   coretraits --> agent["sc-agent"]
   coretraits --> app["sc-app"]
   coreact --> api["sc-api"]
+  server --> module["sc-module"]
+  module --> action["sc-action"]
   app --> api
-  agent --> action["sc-action"]
+  agent --> action
   agent --> auth["sc-auth"]
   agent --> llm["sc-llm"]
   api --> action
@@ -164,12 +166,13 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
+| `sc-module` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-types` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-module` `sc-query` `sc-types` |
 | `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` |
 
 Three things the graph is worth reading for:
@@ -1156,6 +1159,15 @@ erDiagram
     json csp
     json attributes
   }
+  MODULES["_sc_modules"] {
+    uuid id PK
+    text name UK "the npm package name"
+    text source "npm | local"
+    text location "the specifier that would reinstall it"
+    text version "what is installed; null before it is"
+    json configuration "the module's own settings; passwords redacted"
+    json attributes
+  }
   CONFIG["_sc_config"] {
     text key PK "declared as a FormField in sc-config"
     json value
@@ -1177,6 +1189,7 @@ erDiagram
   APPS }o--o{ TABLES : "tables[] -- by name"
   APPS }o--o{ STORES : "file_stores[] -- by name"
   APPS }o--o{ TRIGGERS : "triggers[] -- by name"
+  MODULES |o--o{ TRIGGERS : "action -- by name, an action the module supplies"
 ```
 
 Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _sc_roles.role`
@@ -1193,6 +1206,13 @@ line is a reference *by value*, and each one is a decision rather than an omissi
   the JSON name arrays in `_sc_applications`** — are by name because the name is the thing an
   admin writes and an action configuration quotes. An id would make the configuration
   unreadable and unportable between installations.
+- **`_sc_modules` is drawn against `_sc_triggers` but owns nothing there.** A module supplies
+  actions under v1's unqualified names (§15.1), and a trigger names an action — so the line is
+  "this trigger may be running something that module supplies", by name, and it is dotted in
+  both directions on purpose: the trigger does not know a module exists, and removing the module
+  leaves the trigger stored and reported rather than deleted. What is *not* in the row is what
+  the module supplies: the actions, their settings and the module's own settings form are read
+  from the package at load, never stored, because `npm install` can change all three.
 - **`_sc_tables` and `_sc_fields` are overlays, not parents.** The line between them is a join on
   `table_name`, not ownership: the subject of both rows is a *physical* table, which exists
   whether or not either row does (§9.1). A field overlay for a table with no `_sc_tables` row is
@@ -4251,6 +4271,62 @@ isolate — a blocking host call on the isolate that decides ownership formulas 
 authorization decision in the process behind whatever a guest is doing, and would deadlock the
 moment a delegated read's own formula needed the evaluator. Any adapter that blocks a thread on
 a host call inherits that constraint, and pays for it in threads per concurrent run.
+
+### 15.1 Modules: v1 plugins, in a Node sidecar (`sc-module`)
+
+A **module** is a Saltcorn v1 plugin — an npm package exporting `{ actions, viewtemplates,
+configuration_workflow, … }` — installed from the admin UI and live without a restart. It is
+the first half of the JavaScript adapter above, and the half that is about *compatibility*
+rather than about the host seam: the entity types it supplies are v1's, and the API its code
+calls is v1's.
+
+**It does not run in `CodeRuntime`, and cannot.** A v1 plugin is a CommonJS Node package whose
+dependencies are the point of it: `@saltcorn/mqtt` is a wrapper over `async-mqtt` (a TCP/TLS
+socket), `@saltcorn/proxmox` over `proxmox-api` (HTTPS). `CodeRuntime` is a bare V8 with four
+ops and no module loader — no `require`, no `net`, no `fs` — so running a v1 plugin there is
+not a shim but an implementation of Node, which is what `deno_runtime` is and why it is not
+`deno_core`. A module therefore runs where its dependencies already run: in one long-lived
+`node` child process, reached over a newline-delimited JSON protocol (`sc_module::host`), each
+request carrying an id so many calls are in flight at once. The process is started lazily — a
+deployment with no modules never needs Node — and restarted on death, replaying its loads, so a
+module that calls `process.exit()` costs the calls in flight and nothing else.
+
+**npm is the installer**, into one project the server owns (`--modules-dir`, else the
+platform's data directory). Two npm behaviours shape it, both found against real modules: a
+local directory is installed with `--install-links` (a copy, not a symlink), because npm
+neither installs a symlinked package's dependencies nor honours the project's `overrides` for
+them; and every `@saltcorn/*` dependency is redirected by an npm `override` to a local stub
+package of the same name, because those are v1's server — the program this one replaces — and
+the host answers every `@saltcorn/*` require itself.
+
+**The `@saltcorn` API is stubbed in three tiers** (`sc_module`'s `module-host.mjs`): `Workflow`
+and `Form` are real, because a v1 `configuration_workflow` is written in them and its first
+form *is* the module's settings form here; `utils.interpolate` is real, because a module that
+names a snapshot `{{ name }}-{{ id }}` needs the real thing; and everything else — `Table`,
+`File`, `User`, `getState`, `eval_expression` — is a stub whose properties are reachable and
+whose **calls throw**, naming the API. That last is principle 5 rather than politeness: a
+`Table.findOne` that answered `undefined` would not fail, it would compute the wrong answer
+inside somebody's trigger. Replacing that tier with the real thing is the same `CodeHost` seam
+the `db` surface already speaks, in the other direction, and is a later milestone.
+
+**What a module supplies arrives as data.** A load answers a manifest — the actions, their v1
+`configFields`, the `configuration_workflow`'s fields, and a census of the entity types this
+version does not load — and `sc_module::spec` translates v1's field vocabulary into
+`FormField`, which is the vocabulary every configurable thing here already speaks (§6.2). So a
+module's action is rendered by the trigger form, validated on save and run by the dispatcher
+with no code anywhere that knows what a module is: `ModuleAction` is an ordinary `Action`
+whose `run` marshals the `ActionContext` into v1's argument object.
+
+**Installing changes a running server.** The registry the dispatcher runs from is rebuilt from
+the built-ins plus every loaded module and swapped in whole
+(`TriggerDispatcher::set_registry`), then the trigger set is reloaded against it — which is
+what turns a trigger that was broken ("unknown action `mqtt_publish`") into a working one. A
+module that will not install, will not load, or claims a name a built-in already has is
+reported in the Modules tab and stops nothing else.
+
+**Installing a module runs arbitrary code as the server**: npm install scripts, and then the
+module itself, with this server's privileges and its network. There is no sandbox, the
+endpoints are admin-only, and the screen says so.
 
 ---
 

@@ -47,6 +47,7 @@ import {
   type FieldSpec,
 } from "../settings";
 import { BackupTab } from "./BackupTab";
+import { ModulesTab } from "./ModulesTab";
 import { TestEmail } from "./TestEmail";
 
 /** One section as the API describes it. */
@@ -77,9 +78,17 @@ export function settingsPayload(
   return payload;
 }
 
-/** The Backup tab's identity: the one tab that is not a declared section, and
- * therefore the one name this screen still has to hold. */
+/** The Backup tab's identity: one of the two tabs that are not declared
+ * sections, and therefore one of the two names this screen still has to hold. */
 export const BACKUP_TAB = "backup";
+
+/** The Modules tab's identity — the other one.
+ *
+ * Not a settings section because it is not a bag of values: it is a list of
+ * installed things, each with its own settings form read from the module's own
+ * declaration. It sits beside Backup for the same reason Backup does — it is
+ * about the *installation* rather than about anything in it. */
+export const MODULES_TAB = "modules";
 
 /** Which tab is showing: a section's `name`, or {@link BACKUP_TAB}. */
 export type SettingsTab = string;
@@ -96,6 +105,7 @@ export type TabSpec = { id: SettingsTab; label: string };
 export function settingsTabs(sections: Section[]): TabSpec[] {
   return [
     ...sections.map((section) => ({ id: section.name, label: section.label })),
+    { id: MODULES_TAB, label: "Modules" },
     { id: BACKUP_TAB, label: "Backup" },
   ];
 }
@@ -103,7 +113,7 @@ export function settingsTabs(sections: Section[]): TabSpec[] {
 /** Which tab a freshly loaded screen opens on: the first settings section, and
  * Backup only when the server declared no sections at all. */
 export function initialTab(sections: Section[]): SettingsTab {
-  return sections.length > 0 ? sections[0].name : BACKUP_TAB;
+  return sections.length > 0 ? sections[0].name : MODULES_TAB;
 }
 
 export function Settings() {
@@ -230,6 +240,9 @@ export function Settings() {
             <SectionExtra name={section.name} />
           </TabPanel>
         ))}
+        <TabPanel id={MODULES_TAB} showing={tab}>
+          <ModulesTab />
+        </TabPanel>
         <TabPanel id={BACKUP_TAB} showing={tab}>
           <BackupTab />
         </TabPanel>

@@ -64,6 +64,13 @@ export type DeleteLlmProviderResponse = { deleted: boolean };
 export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
 export type TestLlmProviderRequest = { id?: string | null; backend: string; config: unknown; model?: string | null };
 export type TestLlmProviderResponse = { ok: boolean; message: string; model: string };
+export type ListModulesResponse = { modules: Array<{ id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; node: boolean };
+export type InstallModuleRequest = { source: string; location: string };
+export type InstallModuleResponse = { id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type UpdateModuleRequest = { configuration: unknown };
+export type UpdateModuleResponse = { id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type DeleteModuleResponse = { deleted: boolean };
+export type ReloadModulesResponse = { modules: number };
 export type ListAgentsResponse = Array<{ id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null }>;
 export type CreateAgentRequest = { name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown };
 export type CreateAgentResponse = { id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null };
@@ -179,6 +186,11 @@ export interface ApiClient {
   deleteLlmProvider(id: string): Promise<DeleteLlmProviderResponse>;
   listLlmProviderBackends(): Promise<ListLlmProviderBackendsResponse>;
   testLlmProvider(body: TestLlmProviderRequest): Promise<TestLlmProviderResponse>;
+  listModules(): Promise<ListModulesResponse>;
+  installModule(body: InstallModuleRequest): Promise<InstallModuleResponse>;
+  updateModule(id: string, body: UpdateModuleRequest): Promise<UpdateModuleResponse>;
+  deleteModule(id: string): Promise<DeleteModuleResponse>;
+  reloadModules(): Promise<ReloadModulesResponse>;
   listAgents(): Promise<ListAgentsResponse>;
   createAgent(body: CreateAgentRequest): Promise<CreateAgentResponse>;
   updateAgent(id: string, body: UpdateAgentRequest): Promise<UpdateAgentResponse>;
@@ -585,6 +597,48 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("testLlmProvider", res);
       return (await res.json()) as TestLlmProviderResponse;
+    },
+    async listModules() {
+      const res = await doFetch(`${baseUrl}/api/modules`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listModules", res);
+      return (await res.json()) as ListModulesResponse;
+    },
+    async installModule(body) {
+      const res = await doFetch(`${baseUrl}/api/modules`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("installModule", res);
+      return (await res.json()) as InstallModuleResponse;
+    },
+    async updateModule(id, body) {
+      const res = await doFetch(`${baseUrl}/api/modules/${id}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateModule", res);
+      return (await res.json()) as UpdateModuleResponse;
+    },
+    async deleteModule(id) {
+      const res = await doFetch(`${baseUrl}/api/modules/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteModule", res);
+      return (await res.json()) as DeleteModuleResponse;
+    },
+    async reloadModules() {
+      const res = await doFetch(`${baseUrl}/api/modules-reload`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("reloadModules", res);
+      return (await res.json()) as ReloadModulesResponse;
     },
     async listAgents() {
       const res = await doFetch(`${baseUrl}/api/agents`, {

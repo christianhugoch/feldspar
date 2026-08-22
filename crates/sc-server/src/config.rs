@@ -65,6 +65,15 @@ pub struct ServerConfig {
     ///
     /// [`code_workers`]: ServerConfig::code_workers
     pub code_max_inflight: usize,
+    /// Where installed **modules** live: the npm project the server installs
+    /// packages into and runs the module host in (TODO "Modules", §1).
+    ///
+    /// `None` means the platform's data directory
+    /// (`sc_module::default_modules_root`). It is a flag rather than a stored
+    /// setting for the reason `--code-workers` is one: it is a property of
+    /// *this machine* — which disk has room, which directory the service
+    /// account may write — and not of the installation every node shares.
+    pub modules_dir: Option<PathBuf>,
     /// How this server obtains the certificate it serves HTTPS with (§13.5).
     ///
     /// **Not a command-line setting**, deliberately: certificates are edited in
@@ -90,6 +99,7 @@ impl Default for ServerConfig {
             base_domain: None,
             code_workers: sc_expr::DEFAULT_CODE_WORKERS,
             code_max_inflight: sc_expr::DEFAULT_MAX_INFLIGHT,
+            modules_dir: None,
             tls: TlsSettings::Off,
         }
     }
@@ -100,7 +110,8 @@ impl ServerConfig {
     ///
     /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
     /// `--session-ttl-hours <n>`, `--secure-cookies`, `--base-domain <domain>`,
-    /// `--code-workers <n>` and `--code-max-inflight <n>`. Unknown flags are an
+    /// `--code-workers <n>`, `--code-max-inflight <n>` and `--modules-dir
+    /// <path>`. Unknown flags are an
     /// [`Error::Config`], so a typo fails loudly rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
     where
@@ -135,6 +146,9 @@ impl ServerConfig {
                         &next_value(&mut it, "--code-max-inflight")?,
                         "--code-max-inflight",
                     )?;
+                }
+                "--modules-dir" => {
+                    cfg.modules_dir = Some(PathBuf::from(next_value(&mut it, "--modules-dir")?));
                 }
                 "--secure-cookies" => cfg.secure_cookies = true,
                 "--base-domain" => {
@@ -187,6 +201,9 @@ mod tests {
         // The code pool's defaults are the engine's own (design §10.1).
         assert_eq!(cfg.code_workers, sc_expr::DEFAULT_CODE_WORKERS);
         assert_eq!(cfg.code_max_inflight, sc_expr::DEFAULT_MAX_INFLIGHT);
+        // Modules land in the platform's data directory unless this machine
+        // says otherwise.
+        assert!(cfg.modules_dir.is_none());
     }
 
     #[test]
@@ -205,6 +222,8 @@ mod tests {
             "4",
             "--code-max-inflight",
             "64",
+            "--modules-dir",
+            "/srv/modules",
         ])
         .expect("parse");
         assert_eq!(cfg.addr.to_string(), "0.0.0.0:8080");
@@ -217,6 +236,10 @@ mod tests {
         assert_eq!(cfg.base_domain.as_deref(), Some("example.com"));
         assert_eq!(cfg.code_workers, 4);
         assert_eq!(cfg.code_max_inflight, 64);
+        assert_eq!(
+            cfg.modules_dir.as_deref(),
+            Some(std::path::Path::new("/srv/modules"))
+        );
     }
 
     /// Both code-pool counts are clamped to at least one by the pool itself, so

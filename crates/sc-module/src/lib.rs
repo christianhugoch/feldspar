@@ -1,0 +1,57 @@
+//! **Modules**: Saltcorn v1 JavaScript plugins, installed with npm and run in a
+//! Node sidecar (design §15; TODO "Modules").
+//!
+//! A module is an npm package exporting v1's plugin object — `{ actions,
+//! configuration_workflow, viewtemplates, … }` — and this milestone reads two of
+//! those keys: `actions`, which become [`Action`](sc_action::Action)s in the
+//! registry the built-ins live in, and `configuration_workflow`, whose first
+//! form is the module's own settings.
+//!
+//! ## Why the sidecar
+//!
+//! A v1 plugin is a CommonJS Node package **whose dependencies are the point**:
+//! `@saltcorn/mqtt` is a wrapper over `async-mqtt` (a TCP/TLS socket),
+//! `@saltcorn/proxmox` a wrapper over `proxmox-api` (HTTPS). `sc-expr`'s
+//! `CodeRuntime` is a bare V8 with four ops and no module loader — no `require`,
+//! no `net`, no `fs`. Running a v1 plugin there is not a shim, it is an
+//! implementation of Node. So a module runs where its dependencies already run:
+//! in one long-lived `node` child process ([`host`]), reached over a JSON line
+//! protocol.
+//!
+//! ## The pieces
+//!
+//! - [`module`] — what a module is: the row, and where its package came from.
+//! - [`store`] — `_sc_modules`, the row's schema and its lifecycle.
+//! - [`paths`] — where packages are installed.
+//! - [`install`] — npm, and what it turned out to have installed.
+//! - [`host`] — the Node child process and the line protocol.
+//! - [`spec`] — v1's `configFields` translated into this system's `FormField`.
+//! - [`action`] — a module's action as an `Action`.
+//! - [`modules`] — the loaded set: every stored module, its actions, its issues.
+//!
+//! ## What is *not* here
+//!
+//! Every other entity type a v1 plugin can export. They are counted and reported
+//! ([`ModuleManifest::unsupported`](host::ModuleManifest::unsupported)) so an
+//! admin knows what they are not getting, and loading them is a later milestone.
+
+pub mod action;
+pub mod host;
+pub mod install;
+pub mod module;
+pub mod modules;
+pub mod paths;
+pub mod spec;
+pub mod store;
+
+pub use action::ModuleAction;
+pub use host::{ActionManifest, ModuleHost, ModuleManifest, UnsupportedEntity};
+pub use install::{InstalledPackage, Installer, have_node, have_npm};
+pub use module::{MODULE_SOURCES, Module, ModuleId, ModuleSource};
+pub use modules::{LoadedModule, ModuleIssue, ModuleSet, redacted_configuration, unsupported_json};
+pub use paths::default_modules_root;
+pub use spec::config_fields_to_form_fields;
+pub use store::{
+    MODULES_TABLE, bootstrap_modules, delete_module, list_modules, load_module,
+    load_module_by_name, require_module, save_module,
+};

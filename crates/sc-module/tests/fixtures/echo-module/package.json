@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/echo",
+  "version": "0.1.0",
+  "description": "A Saltcorn v1-shaped module, for the module host's tests: it echoes what it was given, uses two of the stubbed APIs, and can take the host down on request.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

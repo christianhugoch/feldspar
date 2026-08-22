@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/broken",
+  "version": "0.1.0",
+  "description": "A module that throws while being required, for the module host's tests.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

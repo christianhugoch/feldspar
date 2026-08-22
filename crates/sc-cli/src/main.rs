@@ -183,12 +183,28 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // do.
     let triggers = sc_server::install_triggers(&catalog, evaluator.clone(), &agents).await?;
 
+    // Modules: every installed v1 plugin loaded into the Node host, its actions
+    // added to the registry the dispatcher just took, and the trigger set
+    // reloaded against the result — which is what lets a trigger name
+    // `mqtt_publish`. After the triggers because it *changes* what they were
+    // validated against; a module that will not load is reported and skipped,
+    // never a reason not to boot.
+    service.notify_status("loading modules");
+    let modules = sc_server::ModuleServices::install(
+        &catalog,
+        &triggers,
+        &agents,
+        config.modules_dir.clone(),
+    )
+    .await?;
+
     service.notify_status("mounting applications");
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
             .with_evaluator(evaluator)
             .with_triggers(triggers.clone())
-            .with_agents(agents),
+            .with_agents(agents)
+            .with_modules(modules),
     );
     if config.base_domain.is_some() {
         mount_all(&apps).await;
@@ -798,7 +814,9 @@ fn print_usage() {
     );
     eprintln!(
         "    --code-workers N         V8 isolates serving run_js_code bodies (default 2)
-    --code-max-inflight N    runs each of those isolates keeps resident (default 256)"
+    --code-max-inflight N    runs each of those isolates keeps resident (default 256)
+    --modules-dir PATH       where modules are installed (default: the platform's
+                             data directory, e.g. ~/.local/share/saltcorn/modules)"
     );
     eprintln!();
     eprintln!(

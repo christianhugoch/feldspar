@@ -134,6 +134,7 @@ pub(super) async fn describe_triggers(ctx: &TraitContext<'_>, args: &Json) -> Re
         .filter(|s| !s.is_empty());
     let dispatcher = ctx.require_triggers()?;
     let registry = dispatcher.registry();
+    let registry = registry.as_ref();
 
     // The **stored** rows, not the live set: a trigger that fails validation is
     // dropped from the live set and would otherwise be invisible to the agent
@@ -284,6 +285,7 @@ pub(super) fn describe_action_parameters() -> Json {
 pub(super) async fn describe_action(ctx: &TraitContext<'_>, args: &Json) -> Result<Json> {
     let args = crate::table::arguments(args, &[ARG_ACTION, ARG_TABLE])?;
     let registry = ctx.require_triggers()?.registry();
+    let registry = registry.as_ref();
     let Some(name) = args
         .get(ARG_ACTION)
         .and_then(Json::as_str)
@@ -530,9 +532,9 @@ pub(super) async fn save(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -
     let mut notes: Vec<String> = Vec::new();
     let trigger = build(ctx.catalog, dispatcher, &name, existing, &args, &mut notes)?;
 
-    sc_action::save_trigger(ctx.catalog, dispatcher.registry(), &trigger)
+    sc_action::save_trigger(ctx.catalog, &dispatcher.registry(), &trigger)
         .await
-        .map_err(|e| explain(ctx.catalog, dispatcher.registry(), &trigger, e))?;
+        .map_err(|e| explain(ctx.catalog, &dispatcher.registry(), &trigger, e))?;
     // Live before the answer is written: the model is about to tell somebody
     // this is set up, and a trigger that only fires after the next restart would
     // make that a lie. Any application exposing a trigger is re-projected by the
@@ -545,7 +547,7 @@ pub(super) async fn save(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -
         // The whole trigger as it now stands, not an echo of what was sent: an
         // edit merged into what was stored, and the difference between the two
         // is exactly what the model has to be able to report back.
-        "trigger": trigger_json(ctx.catalog, dispatcher.registry(), &trigger, None),
+        "trigger": trigger_json(ctx.catalog, &dispatcher.registry(), &trigger, None),
         "notes": notes,
     }))
 }
@@ -810,7 +812,7 @@ pub(super) async fn delete(ctx: &TraitContext<'_>, grants: &Grants, args: &Json)
         // What it was, because this is the last moment anything can say so and
         // an agent that has just deleted the wrong thing should be able to put
         // it back from its own transcript.
-        "was": trigger_json(ctx.catalog, dispatcher.registry(), &trigger, None),
+        "was": trigger_json(ctx.catalog, &dispatcher.registry(), &trigger, None),
     }))
 }
 

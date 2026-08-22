@@ -21,6 +21,9 @@ members = [
     "crates/sc-config",
     # Layer 6 — actions & triggers, the LLM provider seam and the mail transport
     "crates/sc-action",
+    # Modules: Saltcorn v1 JavaScript plugins. Beside the actions rather than
+    # above them, because what a module supplies *is* an `Action` (§15).
+    "crates/sc-module",
     "crates/sc-llm",
     "crates/sc-email",
     # Layer 7 — agents: the agent record, the trait extension point, the loop
@@ -72,6 +75,7 @@ sc-auth = { path = "crates/sc-auth" }
 sc-files = { path = "crates/sc-files" }
 sc-config = { path = "crates/sc-config" }
 sc-action = { path = "crates/sc-action" }
+sc-module = { path = "crates/sc-module" }
 sc-llm = { path = "crates/sc-llm" }
 sc-email = { path = "crates/sc-email" }
 sc-agent = { path = "crates/sc-agent" }

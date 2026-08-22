@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/clash",
+  "version": "0.1.0",
+  "description": "A module whose action name is already a built-in's, for the module host's tests.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

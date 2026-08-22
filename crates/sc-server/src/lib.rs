@@ -28,6 +28,7 @@ mod handler;
 mod handlers;
 mod logging;
 mod lsp;
+mod modules;
 mod reload;
 mod router;
 mod security;
@@ -77,6 +78,7 @@ pub use handler::{
 pub use handlers::admin_handlers;
 pub use logging::log_requests;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
+pub use modules::ModuleServices;
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
 pub use router::{
     BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
@@ -89,4 +91,4 @@ pub use tls::{
     TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,
     redirect_router, serve_https, tls_domains,
 };
-pub use triggers::{fire_startup, install_triggers, start_scheduler};
+pub use triggers::{base_action_registry, fire_startup, install_triggers, start_scheduler};

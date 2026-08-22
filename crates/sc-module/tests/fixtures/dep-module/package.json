@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/dep",
+  "version": "1.0.0",
+  "description": "A package a fixture module depends on, so the module tests can prove a linked checkout's own dependencies are installed and resolvable.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

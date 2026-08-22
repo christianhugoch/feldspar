@@ -122,7 +122,7 @@ async fn an_agents_insert_fires_the_tables_own_trigger() -> Result<()> {
         .with_triggers(builtin_actions()?)?;
     save_trigger(
         &env.catalog,
-        env.dispatcher.as_ref().unwrap().registry(),
+        &env.dispatcher.as_ref().unwrap().registry(),
         &Trigger::new("note_arrival", EventKind::Insert, "insert_row")
             .on("books")
             .config("table", "arrivals")

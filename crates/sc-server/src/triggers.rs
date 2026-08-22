@@ -46,13 +46,7 @@ pub async fn install_triggers(
     bootstrap_triggers(catalog)
         .await
         .context("ensuring the triggers table exists")?;
-    let mut registry = builtin_actions().context("registering the built-in actions")?;
-    sc_core_traits::register_agent_actions(
-        &mut registry,
-        Arc::clone(agents.registry()),
-        Arc::clone(agents.providers()),
-    )
-    .context("registering the agent action")?;
+    let registry = base_action_registry(agents)?;
     // The mail transport is the **settings-backed** one, not a transport built
     // here from the settings as they are now: an admin who fixes an SMTP
     // password gets it on the next message, which is what the Email section's
@@ -77,6 +71,26 @@ pub async fn install_triggers(
     }
     catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
     Ok(dispatcher)
+}
+
+/// The action set a server runs with **before its modules**: the built-ins plus
+/// `run_agent`.
+///
+/// Its own function because it is assembled twice — once at boot, here, and
+/// again every time a module is installed, configured or removed
+/// ([`ModuleServices::reload`](crate::ModuleServices::reload)), which rebuilds
+/// the whole set from this base rather than mutating the live one. Two copies of
+/// the assembly would be two chances for a module reload to quietly lose
+/// `run_agent`.
+pub fn base_action_registry(agents: &AgentServices) -> Result<sc_action::ActionRegistry> {
+    let mut registry = builtin_actions().context("registering the built-in actions")?;
+    sc_core_traits::register_agent_actions(
+        &mut registry,
+        Arc::clone(agents.registry()),
+        Arc::clone(agents.providers()),
+    )
+    .context("registering the agent action")?;
+    Ok(registry)
 }
 
 /// Start the periodic scheduler: the one task that fires `often`/`hourly`/

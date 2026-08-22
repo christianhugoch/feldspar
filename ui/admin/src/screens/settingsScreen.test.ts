@@ -26,6 +26,7 @@ import {
 } from "../settings";
 import {
   BACKUP_TAB,
+  MODULES_TAB,
   allFields,
   initialTab,
   settingsPayload,
@@ -227,6 +228,7 @@ describe("the settings screen's tabs", () => {
       { id: "ssl", label: "SSL / TLS certificates" },
       { id: "email", label: "Email" },
       { id: "development", label: "Development" },
+      { id: MODULES_TAB, label: "Modules" },
       { id: BACKUP_TAB, label: "Backup" },
     ]);
   });
@@ -237,17 +239,23 @@ describe("the settings screen's tabs", () => {
   it("has no tab without a section, and no section without a tab", () => {
     const tabs = settingsTabs([...sections, emailSection]);
     const sectionNames = [...sections, emailSection].map((s) => s.name);
-    expect(tabs.filter((t) => t.id !== BACKUP_TAB).map((t) => t.id)).toEqual(
-      sectionNames,
-    );
-    // Backup is the one tab that is not a section, and it is last.
-    expect(tabs[tabs.length - 1].id).toBe(BACKUP_TAB);
+    const standalone = [MODULES_TAB, BACKUP_TAB];
+    expect(
+      tabs.filter((t) => !standalone.includes(t.id)).map((t) => t.id),
+    ).toEqual(sectionNames);
+    // Modules and Backup are the two tabs that are not sections, and they are
+    // last, in that order.
+    expect(tabs.slice(-2).map((t) => t.id)).toEqual(standalone);
     expect(tabs.filter((t) => t.id === BACKUP_TAB)).toHaveLength(1);
+    expect(tabs.filter((t) => t.id === MODULES_TAB)).toHaveLength(1);
   });
 
-  it("keeps Backup even when the server declares no sections at all", () => {
-    expect(settingsTabs([])).toEqual([{ id: BACKUP_TAB, label: "Backup" }]);
-    expect(initialTab([])).toBe(BACKUP_TAB);
+  it("keeps Modules and Backup even when the server declares no sections at all", () => {
+    expect(settingsTabs([])).toEqual([
+      { id: MODULES_TAB, label: "Modules" },
+      { id: BACKUP_TAB, label: "Backup" },
+    ]);
+    expect(initialTab([])).toBe(MODULES_TAB);
   });
 
   it("opens on the first settings section rather than on Backup", () => {

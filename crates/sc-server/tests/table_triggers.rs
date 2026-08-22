@@ -133,7 +133,7 @@ impl Server {
     /// Store `trigger` and put it in the live set — what saving one in the admin
     /// UI will do once Phase 6 exposes it.
     async fn add_trigger(&self, trigger: Trigger) -> sc_error::Result<()> {
-        save_trigger(&self.catalog, self.dispatcher.registry(), &trigger).await?;
+        save_trigger(&self.catalog, &self.dispatcher.registry(), &trigger).await?;
         self.dispatcher.reload(&self.catalog).await
     }
 }

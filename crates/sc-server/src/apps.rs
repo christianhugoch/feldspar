@@ -125,6 +125,12 @@ pub struct AppMounts {
     /// process with no agents installed — a test, or a server booted without
     /// them — and every agent surface says so rather than pretending.
     agents: Option<crate::agents::AgentServices>,
+    /// The module machinery (TODO "Modules"): the npm project, the Node host,
+    /// and the loaded set. Here for the reason the three above are — the admin
+    /// handlers already hold this handle, and a module change has to reach the
+    /// *same* dispatcher a firing trigger runs from. `None` is a process with no
+    /// modules installed, where the Modules tab says so rather than pretending.
+    modules: Option<Arc<crate::modules::ModuleServices>>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
 }
@@ -142,6 +148,7 @@ impl AppMounts {
             evaluator: None,
             triggers: None,
             agents: None,
+            modules: None,
             by_subdomain: RwLock::new(HashMap::new()),
         }
     }
@@ -181,6 +188,18 @@ impl AppMounts {
     /// The agent services, if this server has them.
     pub fn agents(&self) -> Option<&crate::agents::AgentServices> {
         self.agents.as_ref()
+    }
+
+    /// Attach the module services, so the Modules tab can install, configure and
+    /// remove modules on the running server.
+    pub fn with_modules(mut self, modules: Arc<crate::modules::ModuleServices>) -> AppMounts {
+        self.modules = Some(modules);
+        self
+    }
+
+    /// The module services, if this server has them.
+    pub fn modules(&self) -> Option<&Arc<crate::modules::ModuleServices>> {
+        self.modules.as_ref()
     }
 
     /// Mount an app on its declared subdomain, refusing a collision.

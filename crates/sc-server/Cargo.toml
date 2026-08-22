@@ -26,6 +26,9 @@ sc-api.workspace = true
 # is where they meet the catalog, because it is the one that serves requests.
 sc-action.workspace = true
 sc-core-actions.workspace = true
+# Modules: the `_sc_modules` table, the npm installer and the Node host whose
+# actions join the registry the dispatcher runs from (TODO "Modules").
+sc-module.workspace = true
 # The LLM providers an admin configures (§11.1): their storage, their backend
 # registry, and the one request `testLlmProvider` makes. The agents that use them
 # arrive a layer above in the next phase; this crate needs the provider seam

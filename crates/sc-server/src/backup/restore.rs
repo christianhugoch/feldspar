@@ -913,7 +913,7 @@ async fn restore_triggers(
                     "it fires on a table this restore is not bringing",
                 ));
             }
-            sc_action::save_trigger(catalog, dispatcher.registry(), &trigger).await?;
+            sc_action::save_trigger(catalog, &dispatcher.registry(), &trigger).await?;
             Ok(String::new())
         }
         .await;

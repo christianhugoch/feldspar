@@ -350,7 +350,7 @@ async fn with_triggers(
     let dispatcher = Arc::new(TriggerDispatcher::new(Arc::new(registry)));
     bootstrap_triggers(catalog).await?;
     for trigger in &triggers {
-        save_trigger(catalog, dispatcher.registry(), trigger).await?;
+        save_trigger(catalog, &dispatcher.registry(), trigger).await?;
     }
     dispatcher.reload(catalog).await?;
     catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;

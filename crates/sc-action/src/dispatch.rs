@@ -106,7 +106,7 @@ pub struct ActionServices {
 /// swap it in ([`set_triggers`](TriggerDispatcher::set_triggers)) while events
 /// keep firing.
 pub struct TriggerDispatcher {
-    registry: Arc<ActionRegistry>,
+    registry: RwLock<Arc<ActionRegistry>>,
     triggers: RwLock<Arc<Triggers>>,
     services: ActionServices,
     observer: RwLock<Option<Arc<dyn crate::TriggerObserver>>>,
@@ -117,7 +117,7 @@ impl TriggerDispatcher {
     /// [`reload`](TriggerDispatcher::reload) once the catalog is up.
     pub fn new(registry: Arc<ActionRegistry>) -> TriggerDispatcher {
         TriggerDispatcher {
-            registry,
+            registry: RwLock::new(registry),
             triggers: RwLock::new(Arc::new(Triggers::empty())),
             services: ActionServices::default(),
             observer: RwLock::new(None),
@@ -143,8 +143,36 @@ impl TriggerDispatcher {
     }
 
     /// The actions this dispatcher can run.
-    pub fn registry(&self) -> &Arc<ActionRegistry> {
-        &self.registry
+    ///
+    /// A clone of the handle rather than a borrow, because the set is
+    /// **swappable**: installing a module adds actions to a live server, and a
+    /// borrow would hold the lock across whatever the caller does next.
+    pub fn registry(&self) -> Arc<ActionRegistry> {
+        match self.registry.read() {
+            Ok(guard) => Arc::clone(&guard),
+            // A poisoned lock means a panic while the set was being swapped.
+            // The set itself is an `Arc` that was either replaced or not, so
+            // the honest answer is the one that is in there.
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        }
+    }
+
+    /// Replace the actions this dispatcher can run — what installing,
+    /// configuring or removing a **module** does (TODO decision 5).
+    ///
+    /// The caller rebuilds the whole set (the built-ins plus every loaded
+    /// module's actions) and swaps it in one act, rather than adding to the
+    /// live one: a registry half way through a rebuild is a registry a firing
+    /// trigger could read. Reloading the trigger set afterwards is the caller's
+    /// job and is what turns a trigger that was broken ("unknown action
+    /// `mqtt_publish`") back into a working one.
+    pub fn set_registry(&self, registry: Arc<ActionRegistry>) -> Result<()> {
+        let mut guard = self
+            .registry
+            .write()
+            .map_err(|_| Error::msg("action registry lock poisoned"))?;
+        *guard = registry;
+        Ok(())
     }
 
     /// The live trigger set, including the ones that failed validation and why.
@@ -187,7 +215,7 @@ impl TriggerDispatcher {
     /// admin's save, a restore, and an agent's `save_trigger` all arrive here,
     /// and none of them has to remember to re-project anything.
     pub async fn reload(&self, catalog: &Catalog) -> Result<()> {
-        let triggers = Triggers::load(catalog, &self.registry).await?;
+        let triggers = Triggers::load(catalog, &self.registry()).await?;
         self.set_triggers(triggers)?;
         self.notify(catalog);
         Ok(())
@@ -427,7 +455,8 @@ pub async fn fire_trigger(
     if !only_if_selects(catalog, services.evaluator.as_ref(), trigger, event).await? {
         return Ok(None);
     }
-    let action = dispatcher.registry.require(trigger.action.trim())?;
+    let registry = dispatcher.registry();
+    let action = registry.require(trigger.action.trim())?;
     let mut ctx = ActionContext::new(catalog, event, &trigger.configuration, &trigger.name)
         .with_chain(chain)
         .with_triggers(dispatcher);

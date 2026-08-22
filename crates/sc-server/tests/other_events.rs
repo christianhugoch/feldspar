@@ -110,7 +110,7 @@ struct Server {
 
 impl Server {
     async fn add_trigger(&self, trigger: Trigger) -> sc_error::Result<()> {
-        save_trigger(&self.catalog, self.dispatcher.registry(), &trigger).await?;
+        save_trigger(&self.catalog, &self.dispatcher.registry(), &trigger).await?;
         self.dispatcher.reload(&self.catalog).await
     }
 }

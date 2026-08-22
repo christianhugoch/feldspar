@@ -722,6 +722,95 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- modules (Saltcorn v1 JavaScript plugins) ---------------------------
+    // A module, like a file store and an LLM provider, exists only as its stored
+    // row plus what is on disk, and these endpoints are that row's lifecycle.
+    // Two things are different from the others, and both come from the module
+    // being *somebody else's code*:
+    //
+    // - **What it supplies is read from the package, not from the row** — the
+    //   actions, their settings and the module's own settings are all in the
+    //   listing because they were read at load, never stored, so `npm install`
+    //   cannot leave the admin looking at last week's form.
+    // - **Everything that went wrong is reported rather than thrown**: a module
+    //   that would not load, an action whose name is already taken, a setting of
+    //   a type this version does not know. `issues` is that list, and it is why
+    //   `listModules` never fails because one module is broken.
+
+    set.register(
+        Endpoint::new("listModules", Method::Get, api().lit("modules"))
+            .output(TypeSchema::struct_of([
+                StructField::new("modules", TypeSchema::array(module_schema())),
+                // Where packages are installed on this server, and whether the
+                // toolchain that installs them is there — the two things an
+                // admin needs before the first install, and neither of which is
+                // a property of any module.
+                StructField::new("root", TypeSchema::text()),
+                StructField::new("npm", TypeSchema::bool()),
+                StructField::new("node", TypeSchema::bool()),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // **Install**: `npm install` in the modules root, then load. The body is the
+    // two things an admin types — which kind of source, and the specifier — and
+    // everything else about the module is discovered from the package.
+    set.register(
+        Endpoint::new("installModule", Method::Post, api().lit("modules"))
+            .input(TypeSchema::struct_of([
+                StructField::new("source", TypeSchema::text()),
+                StructField::new("location", TypeSchema::text()),
+            ]))
+            .output(module_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    // **Configure**: the module's own settings, the object v1's `actions(cfg)`
+    // is called with. A save reloads the module, so the next run of any of its
+    // actions uses the new value.
+    set.register(
+        Endpoint::new(
+            "updateModule",
+            Method::Put,
+            api().lit("modules").param("id", ValueType::Uuid),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "configuration",
+            TypeSchema::json(),
+        )]))
+        .output(module_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteModule",
+            Method::Delete,
+            api().lit("modules").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Reload**: re-read every installed package and rebuild the action set.
+    // The developer's button — a module installed from a local checkout is a
+    // symlink, so editing the checkout changes the module and nothing else has
+    // to happen for this to pick it up.
+    //
+    // Its own path rather than `modules/reload`, which would sit where an id
+    // goes.
+    set.register(
+        Endpoint::new("reloadModules", Method::Post, api().lit("modules-reload"))
+            .output(TypeSchema::struct_of([StructField::new(
+                "modules",
+                TypeSchema::int(),
+            )]))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- agents (configuration) ---------------------------------------------
     // An agent is its own record (§11.2, decision 4): a provider, a model, a
     // system prompt and a list of enabled traits. These endpoints are that
@@ -1902,6 +1991,52 @@ fn llm_provider_schema() -> TypeSchema {
 /// update).
 fn llm_provider_input_schema() -> TypeSchema {
     TypeSchema::Struct(llm_provider_fields())
+}
+
+/// One installed module, as the Modules tab reads it: the row, what the package
+/// turned out to supply, and everything wrong with it.
+///
+/// `configuration` is **redacted** (§11.1): a module's `password` field is a
+/// secret like any other, so what crosses the wire is the sentinel and a save
+/// that returns it unchanged keeps what is stored.
+fn module_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("source", TypeSchema::text()),
+        StructField::new("location", TypeSchema::text()),
+        StructField::new("version", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("configuration", TypeSchema::json()),
+        // The module's own settings, from its `configuration_workflow` — the
+        // same declaration a file store's backend sends, so the form is
+        // generic.
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+        StructField::new("actions", TypeSchema::array(module_action_schema())),
+        // What it also supplies and this version does not load: `{key, count}`,
+        // so the tab can say "also supplies 1 table provider (not yet
+        // supported)".
+        StructField::new(
+            "unsupported",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("key", TypeSchema::text()),
+                StructField::new("count", TypeSchema::optional(TypeSchema::int())),
+            ])),
+        ),
+        StructField::new("issues", TypeSchema::array(TypeSchema::text())),
+        // Whether the package loaded at all. A module with `loaded: false`
+        // supplies nothing and its `issues` say why.
+        StructField::new("loaded", TypeSchema::bool()),
+        StructField::new("api_version", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// One action a module supplies, with the settings it declares.
+fn module_action_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+    ])
 }
 
 /// A registered LLM provider backend and the settings it declares.

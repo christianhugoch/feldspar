@@ -303,7 +303,7 @@ async fn setup() -> sc_error::Result<Server> {
         audit_trigger("internal_only", Some(ROLE_READER)),
         summarise_trigger(),
     ] {
-        save_trigger(&catalog, dispatcher.registry(), &trigger).await?;
+        save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
     }
     dispatcher.reload(&catalog).await?;
 

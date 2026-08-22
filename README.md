@@ -305,7 +305,7 @@ database (§7).
 |---|---|---|
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `saltcorn` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store |
-| **Node.js + npm** | Node 18+ | *only* to build the admin UI bundle (optional; see §6) |
+| **Node.js + npm** | Node 18+ | building the admin UI bundle (optional; see §6), **and** installing and running modules (Settings → Modules) |
 
 Install Rust via [rustup](https://rustup.rs/):
 
@@ -314,9 +314,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustc --version   # must be >= 1.85
 ```
 
-Node is required **only** if you want the admin web UI. Without it the server
-still runs and its JSON API works, but the browser UI will be a blank bootstrap
-page (see §6 and §10 Troubleshooting).
+Node is required for two things, both optional. Without it the server still runs
+and its JSON API works, but the browser UI will be a blank bootstrap page (see §6
+and §10 Troubleshooting), and **modules** — Saltcorn v1 plugins, which are npm
+packages that run in a Node process beside the server — cannot be installed or
+loaded. A deployment that installs no module never starts that process.
 
 ---
 

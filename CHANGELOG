@@ -2,6 +2,90 @@
 
 Changes in reverse chronological order.
 
+## Modules: Saltcorn v1 plugins, supplying actions
+
+Everything this server could do, it could do because a Rust crate in this workspace implemented
+it. That is why the action list was six long, and why "can Saltcorn talk to my MQTT broker" was
+a pull request rather than an afternoon. Saltcorn v1's answer was **plugins** — an npm package,
+installed from the admin UI, live without a restart — and there are dozens of them.
+
+**Settings → Modules** installs them. Two sources, both JavaScript for now: an npm package
+(`@saltcorn/mqtt`, or `@saltcorn/mqtt@0.2.0` to pin) or an absolute path to a directory on the
+server. The tab lists what is installed, what each module supplies, what it also supplies that
+this version does not load yet, and everything wrong with it.
+
+**The actions it exports become actions triggers can run**, under v1's own unqualified names.
+Their settings are v1's `configFields`, translated into the `FormField` vocabulary every
+configurable thing here already speaks — so the trigger form renders a module's action with no
+code anywhere that knows what a module is, and `run` is called with v1's argument object
+(`{ row, old_row, table, configuration, user, payload, mode, req }`). A module's *own* settings
+are its v1 `configuration_workflow`'s form, read out of the package and rendered the same way,
+with password fields redacted like every other secret in the system.
+
+**It happens on a running server.** Installing rebuilds the action registry from the built-ins
+plus every loaded module, swaps it into the dispatcher whole, and reloads the trigger set
+against it — so a trigger that was refused as "unknown action `mqtt_publish`" starts working the
+moment the module is there, and deleting the module takes the action away again. Nothing
+restarts.
+
+### A Node sidecar, because a v1 plugin's dependencies are the point
+
+`@saltcorn/mqtt` is a wrapper over `async-mqtt` (a TCP/TLS socket); `@saltcorn/proxmox` over
+`proxmox-api` (HTTPS). `sc-expr`'s `CodeRuntime` is a bare V8 with four ops and no module
+loader — no `require`, no `net`, no `fs` — so running a v1 plugin there is not a shim but an
+implementation of Node. A module therefore runs in one long-lived `node` child process
+(`sc-module`'s `module-host.mjs`), reached over a newline-delimited JSON protocol with an id per
+request, so many calls are in flight at once. It is started lazily — a deployment with no
+modules never needs Node — and restarted on death, replaying its loads: a module that calls
+`process.exit()` costs the calls in flight and nothing else.
+
+### `@saltcorn/*` is stubbed, and the stub says which API you used
+
+`Workflow` and `Form` are real (a `configuration_workflow` is written in them), and
+`utils.interpolate` is real (a module that names a snapshot `{{ name }}-{{ id }}` needs the real
+thing). Everything else — `Table`, `File`, `User`, `getState`, `eval_expression` — is a stub
+whose properties are reachable and whose **calls throw**, naming the API:
+
+```
+the Saltcorn v1 API data/models/table.findOne is not available to modules in this version
+of Saltcorn.
+```
+
+A silent no-op was the alternative and is refused on principle 5's grounds: a `Table.findOne`
+that answered `undefined` would not fail, it would compute the wrong answer inside somebody's
+trigger. Replacing that tier with the real API — `sc-api`'s `CodeHost`, in the other direction —
+is a later milestone.
+
+### Two npm behaviours, found against the real modules
+
+A local directory is installed with **`--install-links`**, a copy rather than a symlink, because
+npm neither installs a symlinked package's dependencies nor honours the project's `overrides`
+for them — so a linked `@saltcorn/mqtt` cannot find `async-mqtt` and does not load at all, while
+also downloading the whole of v1's server. The cost is the developer loop: an edit to a checkout
+reaches the server when Install is pressed again.
+
+And every `@saltcorn/*` dependency is redirected by an npm **override** to a local stub package
+of the same name, because those are v1's server — 270 MB with its tree, which the host's
+`require` hook answers before a line of it could be read. `@saltcorn/mqtt` installs from the
+registry in under two seconds and four megabytes instead of twenty seconds and three hundred.
+A package v1 *hoisted* rather than declared (`@saltcorn/proxmox` requires `node-fetch` without
+depending on it) is a load failure naming it and saying to install it, which the same Install
+form can do.
+
+### Where the pieces are
+
+`sc-module` (layer 6, beside the actions): `_sc_modules` (the row is the module — the package's
+own version, its configuration, and the specifier that would reinstall it), the npm installer,
+the Node host, the v1 field-spec translation and `ModuleAction`. `sc-server` holds
+`ModuleServices`, which is the four-step reload every module change goes through, and the five
+admin endpoints. `TriggerDispatcher`'s action registry moved behind an `RwLock` so it can be
+swapped, and `--modules-dir` says where packages are installed (default: the platform's data
+directory).
+
+Installing a module runs arbitrary code as the server — npm install scripts, then the module
+itself, with the server's privileges and its network. There is no sandbox; the endpoints are
+admin-only and the screen says so.
+
 ## `trigger`: a code body runs this server's other triggers
 
 A `run_js_code` body could reach the tables, the network and the file stores. What it could not
