@@ -1965,18 +1965,27 @@ fn field_type_schema() -> TypeSchema {
 ///
 /// `password` is a **secret**: it goes out as the sentinel and comes back as
 /// the sentinel when the admin did not touch it, which is what
-/// `SECRET_SENTINEL` is for. The other five are the parts of a connection
+/// `SECRET_SENTINEL` is for. The Postgres ones are the parts of a connection
 /// rather than a URL — see `DbConnectionDef` for why the parts.
+///
+/// `backend` says which of the two kinds this is, and the last two are the
+/// SQLite half: a database file is a **file**, so it is named the way every
+/// other file is — a store and a path inside it — rather than as a path into the
+/// server's filesystem. The fields the chosen backend does not use are empty
+/// rather than absent, because this is one row and one form.
 fn db_connection_fields() -> Vec<StructField> {
     vec![
         StructField::new("name", TypeSchema::text()),
         StructField::new("description", TypeSchema::text()),
+        StructField::new("backend", TypeSchema::text()),
         StructField::new("host", TypeSchema::text()),
         StructField::new("port", TypeSchema::int()),
         StructField::new("database", TypeSchema::text()),
         StructField::new("username", TypeSchema::text()),
         StructField::new("password", TypeSchema::text()),
         StructField::new("schema", TypeSchema::text()),
+        StructField::new("file_store", TypeSchema::text()),
+        StructField::new("file_path", TypeSchema::text()),
     ]
 }
 

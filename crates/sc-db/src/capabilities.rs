@@ -29,6 +29,16 @@ pub struct DbCapabilities {
     /// Data-modifying statements can return affected rows (`RETURNING`), so an
     /// insert/update/delete yields the resulting row without a follow-up query.
     pub returning: bool,
+    /// An identity column is numbered by a **separate sequence object**, which
+    /// can therefore fall behind the rows in the table.
+    ///
+    /// Postgres's is: rows written with explicit keys (a restored backup, an
+    /// imported CSV that carries its own `id` column) do not move the sequence,
+    /// so the next insert collides unless something winds it past the largest
+    /// key — which is what `sc_api::csv` does after an import. A backend that
+    /// derives the next key from the table itself (SQLite's rowid) has nothing
+    /// to wind and must not be sent the statement that would do it.
+    pub identity_sequences: bool,
     /// A table can be created without write-ahead logging — Postgres's
     /// `UNLOGGED`. Drives
     /// [`SchemaChange::CreateTable::unlogged`](crate::SchemaChange::CreateTable),
@@ -47,6 +57,7 @@ impl DbCapabilities {
             composite_pk: false,
             listen_notify: false,
             returning: false,
+            identity_sequences: false,
             unlogged_tables: false,
         }
     }

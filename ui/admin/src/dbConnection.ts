@@ -1,11 +1,22 @@
 // The model behind the "Connect a database" dialog — the half of it that is not
 // React.
 //
-// A database connection is six boxes that are either all right or silently
-// wrong: get the host and the port right and the password wrong, and what you
-// get is not a form error but an empty table list. So the rules a test can pin
-// without a browser live here — when Connect may be pressed, what an empty port
-// box means, and how the connection reads back as one line in the list.
+// A database connection is a handful of boxes that are either all right or
+// silently wrong: get the host and the port right and the password wrong, and
+// what you get is not a form error but an empty table list. So the rules a test
+// can pin without a browser live here — when Connect may be pressed, what an
+// empty port box means, and how the connection reads back as one line in the
+// list.
+//
+// There are two kinds of database behind one form. A **postgres** connection is
+// a server: host, port, database, user, password, schema. A **sqlite**
+// connection is a file, so it is named the way every other file is — a file
+// store and a path inside it — and none of the server boxes apply to it. The
+// rules below branch on the backend rather than validating boxes the chosen
+// backend does not have.
+
+/** Which kind of database a connection is. */
+export type DbBackend = "postgres" | "sqlite";
 
 /** What the dialog holds while it is open. */
 export type DbConnectionForm = {
@@ -13,6 +24,7 @@ export type DbConnectionForm = {
   id: string | null;
   name: string;
   description: string;
+  backend: DbBackend;
   host: string;
   /** Kept as text, because an empty box is a real state and `0` is not it. */
   port: string;
@@ -20,6 +32,10 @@ export type DbConnectionForm = {
   username: string;
   password: string;
   schema: string;
+  /** For a SQLite connection: the file store the database file is in. */
+  fileStore: string;
+  /** For a SQLite connection: the path of the file inside that store. */
+  filePath: string;
 };
 
 /** The port a Postgres server listens on unless told otherwise. */
@@ -35,12 +51,15 @@ export const EMPTY_DB_CONNECTION_FORM: DbConnectionForm = {
   id: null,
   name: "",
   description: "",
+  backend: "postgres",
   host: "localhost",
   port: String(DEFAULT_PORT),
   database: "",
   username: "",
   password: "",
   schema: DEFAULT_SCHEMA,
+  fileStore: "",
+  filePath: "",
 };
 
 /** A connection as the server reports it, narrowed to what this module reads. */
@@ -48,12 +67,15 @@ export type DbConnectionRow = {
   id: string;
   name: string;
   description: string;
+  backend?: string;
   host: string;
   port: number;
   database: string;
   username: string;
   password: string;
   schema: string;
+  file_store?: string;
+  file_path?: string;
   connected: boolean;
   error?: string | null;
   tables: number;
@@ -71,26 +93,44 @@ export function formFromConnection(row: DbConnectionRow): DbConnectionForm {
     id: row.id,
     name: row.name,
     description: row.description,
+    backend: backendOf(row),
     host: row.host,
     port: String(row.port),
     database: row.database,
     username: row.username,
     password: row.password,
     schema: row.schema,
+    fileStore: row.file_store ?? "",
+    filePath: row.file_path ?? "",
   };
 }
 
-/** The body to send for this form: the port as a number, blanks trimmed. */
+/** Which kind of database a row is. A row that names none is Postgres, which is
+ * what every connection was before there was a second kind. */
+export function backendOf(row: DbConnectionRow): DbBackend {
+  return row.backend === "sqlite" ? "sqlite" : "postgres";
+}
+
+/** The body to send for this form: the port as a number, blanks trimmed.
+ *
+ * The boxes the chosen backend does not use are sent **empty** rather than with
+ * whatever the other backend's form last held — a SQLite connection carrying a
+ * leftover `localhost` would read back, in the list and in the row, as a server
+ * it has nothing to do with. */
 export function connectionBody(form: DbConnectionForm) {
+  const sqlite = form.backend === "sqlite";
   return {
     name: form.name.trim(),
     description: form.description.trim(),
-    host: form.host.trim(),
-    port: portOf(form),
-    database: form.database.trim(),
-    username: form.username.trim(),
-    password: form.password,
-    schema: form.schema.trim() || DEFAULT_SCHEMA,
+    backend: form.backend,
+    host: sqlite ? "" : form.host.trim(),
+    port: sqlite ? 0 : portOf(form),
+    database: sqlite ? "" : form.database.trim(),
+    username: sqlite ? "" : form.username.trim(),
+    password: sqlite ? "" : form.password,
+    schema: sqlite ? "" : form.schema.trim() || DEFAULT_SCHEMA,
+    file_store: sqlite ? form.fileStore.trim() : "",
+    file_path: sqlite ? form.filePath.trim() : "",
   };
 }
 
@@ -121,6 +161,13 @@ export function dbConnectionError(form: DbConnectionForm): string | null {
   if (name === "primary") {
     return "`primary` is the name of Saltcorn's own database. Choose another name.";
   }
+  if (form.backend === "sqlite") {
+    if (!form.fileStore.trim()) {
+      return "Choose the file store the SQLite file is in.";
+    }
+    if (!form.filePath.trim()) return "The connection needs the path of its SQLite file.";
+    return null;
+  }
   if (!form.host.trim()) return "The connection needs a host.";
   if (!form.database.trim()) return "The connection needs a database name.";
   if (!form.username.trim()) return "The connection needs a user to connect as.";
@@ -137,8 +184,11 @@ export function dbConnectionError(form: DbConnectionForm): string | null {
 }
 
 /** How a connection reads in the list's target column: `user@host:port/db`,
- * schema included, password never. */
+ * schema included, password never — or, for SQLite, the file and its store. */
 export function connectionTarget(row: DbConnectionRow): string {
+  if (backendOf(row) === "sqlite") {
+    return `${row.file_path ?? ""} in file store ${row.file_store ?? ""}`;
+  }
   return `${row.username}@${row.host}:${row.port}/${row.database} (schema ${row.schema})`;
 }
 
@@ -151,7 +201,9 @@ export function connectionTarget(row: DbConnectionRow): string {
 export function connectionSummary(row: DbConnectionRow): string {
   if (!row.connected) return row.error ?? "Not connected.";
   if (row.tables === 0) {
-    return `Connected, but schema ${row.schema} has no tables Saltcorn can use.`;
+    return backendOf(row) === "sqlite"
+      ? "Connected, but the file has no tables Saltcorn can use."
+      : `Connected, but schema ${row.schema} has no tables Saltcorn can use.`;
   }
   return `${row.tables} ${row.tables === 1 ? "table" : "tables"} in the tables list.`;
 }

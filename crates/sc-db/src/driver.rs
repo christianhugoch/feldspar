@@ -130,6 +130,44 @@ pub trait Transaction: Send {
         ))
     }
 
+    /// Make this transaction **read-only**: a write issued on it fails rather
+    /// than happening.
+    ///
+    /// A defence in depth for the statements Saltcorn has already decided are
+    /// reads — a custom SQL query declared read-only, reached by a `GET` (§13.4).
+    /// The declaration is checked before the statement is sent; this is what
+    /// makes the check true of the *database* rather than only of the parser, so
+    /// an `UPDATE` that got past it is refused by the server that would have run
+    /// it.
+    ///
+    /// Must be issued before the transaction's first statement, which is what
+    /// Postgres's `SET TRANSACTION` requires and what every caller does anyway.
+    /// The default errors: a backend that cannot make a transaction read-only
+    /// must say so rather than return a transaction that will happily write.
+    async fn set_read_only(&mut self) -> Result<()> {
+        Err(Error::database(
+            "this database backend cannot make a transaction read-only",
+        ))
+    }
+
+    /// Put foreign-key checking off to the end of the transaction, so a row may
+    /// reference one that arrives later in the same transaction.
+    ///
+    /// What a CSV import of a self-referencing table depends on (§13.1): the
+    /// rows arrive in the file's order, and a parent three lines further down is
+    /// there by the time the transaction commits. The keys are still checked —
+    /// at commit, all of them — so a reference to a row that never arrives is
+    /// still refused.
+    ///
+    /// The default errors rather than doing nothing, because "nothing" is the
+    /// difference between an import that works and one that refuses every
+    /// forward reference, and a caller told it succeeded would never know which.
+    async fn defer_constraints(&mut self) -> Result<()> {
+        Err(Error::database(
+            "this database backend cannot defer foreign-key checking to commit",
+        ))
+    }
+
     /// Apply a schema change within the transaction.
     async fn apply_schema(&mut self, change: &SchemaChange) -> Result<()>;
 

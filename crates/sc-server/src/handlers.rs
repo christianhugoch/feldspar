@@ -920,21 +920,23 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 };
                 let def =
                     db_connection_from_body(DbConnectionId::new(), &ctx.body, existing.as_ref())?;
-                Ok(HandlerResponse::ok(match sc_catalog::dial(&def).await {
-                    Ok(driver) => json!({
-                        "connected": true,
-                        "error": Json::Null,
-                        "tables": driver.introspect().await?.len(),
-                    }),
-                    // A failed test is an answer, not a request that went wrong:
-                    // 200 with the reason, so the form shows it beside the
-                    // button rather than as a red banner about the API.
-                    Err(e) => json!({
-                        "connected": false,
-                        "error": sc_error::format_causes(&e),
-                        "tables": 0,
-                    }),
-                }))
+                Ok(HandlerResponse::ok(
+                    match sc_catalog::dial(&catalog, &def).await {
+                        Ok(driver) => json!({
+                            "connected": true,
+                            "error": Json::Null,
+                            "tables": driver.introspect().await?.len(),
+                        }),
+                        // A failed test is an answer, not a request that went wrong:
+                        // 200 with the reason, so the form shows it beside the
+                        // button rather than as a red banner about the API.
+                        Err(e) => json!({
+                            "connected": false,
+                            "error": sc_error::format_causes(&e),
+                            "tables": 0,
+                        }),
+                    },
+                ))
             }
         }
     });
@@ -3973,6 +3975,7 @@ fn db_connection_json(catalog: &Catalog, def: &DbConnectionDef) -> Result<Json> 
         .count();
     Ok(json!({
         "id": def.id.0,
+        "backend": def.backend,
         "name": def.name,
         "description": def.description,
         "host": def.host,
@@ -3984,6 +3987,8 @@ fn db_connection_json(catalog: &Catalog, def: &DbConnectionDef) -> Result<Json> 
         // for it would tell the admin a password exists that does not.
         "password": if def.password.is_empty() { "" } else { SECRET_SENTINEL },
         "schema": def.schema,
+        "file_store": def.file_store,
+        "file_path": def.file_path,
         "connected": connected,
         "error": error,
         "tables": tables,
@@ -4047,9 +4052,17 @@ fn db_connection_from_body(
         (other, _) => other.to_owned(),
     };
 
+    // A body that names no backend means Postgres, which is what every
+    // connection was before there was a second kind.
+    let backend = match str_field("backend").as_str() {
+        "" => sc_catalog::POSTGRES_BACKEND.to_owned(),
+        other => other.to_owned(),
+    };
+    let sqlite = backend == sc_catalog::SQLITE_BACKEND;
     let schema = str_field("schema");
     Ok(DbConnectionDef {
         id,
+        backend,
         name,
         description: str_field("description"),
         host: str_field("host"),
@@ -4057,11 +4070,15 @@ fn db_connection_from_body(
         database: str_field("database"),
         username: str_field("username"),
         password,
-        schema: if schema.is_empty() {
-            sc_catalog::DEFAULT_SCHEMA.to_owned()
-        } else {
-            schema
+        // A SQLite database has one namespace and no name for it, so the
+        // default is not applied there: an empty schema is the truth about the
+        // connection rather than a box the admin forgot to fill in.
+        schema: match (schema.is_empty(), sqlite) {
+            (true, false) => sc_catalog::DEFAULT_SCHEMA.to_owned(),
+            _ => schema,
         },
+        file_store: str_field("file_store"),
+        file_path: str_field("file_path"),
         attributes: sc_types::Attrs::new(),
     })
 }

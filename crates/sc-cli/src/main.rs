@@ -773,6 +773,11 @@ fn print_usage() {
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
     eprintln!("    --database-url URL   full connection string (takes precedence)");
     eprintln!("    --db-host H  --db-port N  --db-user U  --db-password P  --db-name D");
+    eprintln!(
+        "    --sqlite PATH        use a SQLite file as the primary database instead \
+         (or SALTCORN_SQLITE);"
+    );
+    eprintln!("                         it is created if it is not there");
     eprintln!();
     eprintln!("  configuration file (used for whatever the flags and environment leave unset):");
     eprintln!(

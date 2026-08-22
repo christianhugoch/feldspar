@@ -56,6 +56,9 @@ rust_decimal.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# The SQLite backend, for the tests that run the row layer against a database
+# that is not Postgres — which is what having a `DatabaseDriver` trait is for.
+sc-db-sqlite.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
 # The real engines, for the two things a mock would hide: an ownership formula

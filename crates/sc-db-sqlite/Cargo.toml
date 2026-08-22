@@ -1,0 +1,30 @@
+[package]
+name = "sc-db-sqlite"
+description = "SQLite DatabaseDriver implementation (layer 2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+sc-log.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+# Backing types for the `Value` ⇆ SQLite storage-class mapping.
+uuid.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# The SQL echo is asserted from the capture sink rather than from stdout (§16).
+sc-log = { workspace = true, features = ["capture"] }
+
+[lints]
+workspace = true

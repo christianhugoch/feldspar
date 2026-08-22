@@ -88,6 +88,10 @@ rust_decimal.workspace = true
 
 [dev-dependencies]
 sc-test-harness.workspace = true
+# The SQLite backend, for the one test that connects a SQLite file as a
+# secondary database through the admin API: the test has to *create* the file
+# the admin then points at.
+sc-db-sqlite.workspace = true
 # The request log is asserted from the capture sink rather than from stderr
 # (§16).
 sc-log = { workspace = true, features = ["capture"] }

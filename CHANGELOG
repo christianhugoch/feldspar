@@ -2,6 +2,89 @@
 
 Changes in reverse chronological order.
 
+## SQLite: a second database backend
+
+`DatabaseDriver` has had one implementation since the first week, and a trait with one
+implementation is a guess about what varies. `sc-db-sqlite` is the second: `saltcorn serve
+--sqlite ./app.sqlite` is a whole installation on a machine with no Postgres at all, and a
+`.sqlite` file sitting in one of the file stores can be **connected** like any other database,
+its tables joining the tables list beside everything else.
+
+**Why SQLite and not a second server.** Postgres is what a deployment runs; SQLite is what a
+laptop, a Raspberry Pi, a demo and a one-file backup run — no server, no role, no `createdb`,
+and the database is a file somebody can copy. It also tests the trait harder than another
+server would, because it is not Postgres-shaped: five storage classes instead of a type system,
+an `ALTER TABLE` that can barely alter anything, no `COMMENT ON`, no policies, no
+`LISTEN`/`NOTIFY`. Everything the layers above quietly assumed showed up here as a failure
+rather than as a subtlety.
+
+**The declared type is the type.** SQLite stores five things and a column has only an affinity,
+so eleven `Value` kinds do not survive a round trip on storage class alone — a timestamp and a
+uuid are both text. What closes the gap is the one thing SQLite keeps verbatim and reports back:
+the *declared type name*. So the DDL emits `sc-types`' own names — `int8`, `jsonb`,
+`timestamptz`, `bytea` — rather than translating them into SQLite's five, and introspection and
+decoding read them back. A column this driver created as `timestamptz` still says `timestamptz`,
+which is why §6's type layer maps a SQLite column exactly as it maps a Postgres one, and why a
+file created by something else (`INTEGER`, `VARCHAR(64)`, `DATETIME`, `BLOB`) is readable too.
+Timestamps are written fixed-width UTC, so text order — which is what `ORDER BY` gives on a text
+column — is time order.
+
+**What `ALTER TABLE` cannot do, a rebuild does.** SQLite cannot alter a column or add a primary
+key, and those are exactly the two halves of "make this field the key" — which is how a table
+gets a key at all, since none is invented. So `SetPrimaryKey` and `SetColumnGenerator` are
+applied by the documented table rebuild: create the new shape, copy the rows, drop the old,
+rename, and put the indexes and triggers back, inside a savepoint with deferred foreign keys and
+a `foreign_key_check` before it is released. `render_ddl` refuses a rebuild rather than emitting
+a guess — it is written from the table's *current* columns, which the change does not carry. An
+identity key is `INTEGER PRIMARY KEY`, spelled exactly so and never beside a table-level key
+declaration, which would stop SQLite numbering it.
+
+**The three other gaps are filled rather than papered over.** There is no `COMMENT ON`, and a
+constraint's error message and a row constraint's formula ride in an object's comment — so the
+driver keeps them in a table of its own, written by the same `SetComment` change and read back
+by introspection. There is no SQLSTATE, and everything above reads the Postgres spelling — so
+the constraint result codes are translated (`23505`, `23502`, `23503`, `23514`), and an admin's
+own message for a violated rule is shown on either backend. Foreign keys are **off** by default
+in SQLite, and every other backend enforces them — so every connection turns them on.
+
+**What it does not advertise matters as much.** No row-level security (no policies, and nothing
+to write them against, so authorization is enforced above the database and `rls_available` is
+false), no `LISTEN`/`NOTIFY`, no unlogged tables. Row constraints and full-text indexes are
+generated as Postgres SQL and remain Postgres-only: they fail at the database with the
+database's own message rather than being silently skipped.
+
+**As the primary database**: `sqlite = "…"` in a `saltcorn.toml` environment, `--sqlite PATH`,
+or `SALTCORN_SQLITE`. The file is created if it is not there, which is what makes naming it the
+whole of the installation. It is exclusive with the Postgres parameters — a section naming both
+describes two databases and nothing can choose between them for the operator, so it is refused —
+and a `--database-url` typed on the command line still wins, because a flag outranks the file.
+
+**As a connection**: `_sc_db_connections` grows a `backend`, and a SQLite connection names a
+**file store and a path inside it** rather than a filesystem path. A SQLite database is a file,
+the stores are where Saltcorn's files already are with the access rules an admin already set,
+and a bare path would let anyone with that screen open any file the server process can read. The
+Connections dialog gains a Kind chooser and, for SQLite, a browser over the chosen store; the
+kind is fixed once saved, since changing it would repoint every table stamped with that name. A
+file that is not there is refused rather than created: a connection to a missing file is a
+mistake, and answering it with an empty database that works is the least helpful possible reply.
+
+**Three things the row layer assumed about Postgres are now asked of the driver.** A CSV import
+deferred its foreign keys with `SET CONSTRAINTS ALL DEFERRED` and a read-only custom query used
+`SET TRANSACTION READ ONLY`, both as raw text; they are now `Transaction::defer_constraints` and
+`Transaction::set_read_only`, which SQLite answers with `PRAGMA defer_foreign_keys` and `PRAGMA
+query_only` (cleared again when the transaction hands its connection back, or the next writer on
+that connection would fail). A CSV import also wound the sequence behind an identity key past
+the rows it had just written, which is a Postgres sequence and a Postgres statement — so
+`DbCapabilities` grows `identity_sequences`, false for a backend that numbers a key from the
+table itself. And the caller-context GUCs are now set only where the backend advertises
+row-level security: they exist for the policies to read, and a backend with no policies has
+nothing to hand them to. Every one of these was found by running the row layer on the second
+backend, which is the argument for having written it.
+
+**One new seam in the query layer**: `SqlDialect::binary_op`, defaulted to standard SQL. SQLite
+has no `ILIKE` — its `LIKE` is already case-insensitive for ASCII — and one operator is not a
+reason for a second copy of the renderer.
+
 ## Database connections: other PostgreSQL databases in the tables list
 
 Saltcorn had exactly one database, and every `Table` in the catalog carried a `DbId` that had

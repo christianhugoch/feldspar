@@ -47,6 +47,20 @@ pub trait SqlDialect {
         format!("'{}'", literal.replace('\'', "''"))
     }
 
+    /// The SQL spelling of a binary operator in this dialect.
+    ///
+    /// Defaulted to [`default_bin_op`], which is standard SQL as Postgres
+    /// spells it, and overridden only where a backend genuinely spells an
+    /// operator differently: SQLite has no `ILIKE` — its `LIKE` is already
+    /// case-insensitive for ASCII — so it maps that one onto `LIKE`.
+    ///
+    /// A hook rather than a `render` override, because the alternative for a
+    /// dialect that differs in one operator is a second copy of the whole
+    /// renderer, which would then drift from this one.
+    fn binary_op(&self, op: BinOp) -> &'static str {
+        default_bin_op(op)
+    }
+
     /// Render a statement to a SQL string plus its ordered bind values.
     ///
     /// The returned `Vec<Value>` is exactly the parameters the SQL placeholders
@@ -412,7 +426,8 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
                 self.push("(");
                 self.expr(l)?;
                 self.push(" ");
-                self.push(bin_op(*op));
+                let op = self.dialect.binary_op(*op);
+                self.push(op);
                 self.push(" ");
                 self.expr(r)?;
                 self.push(")");
@@ -616,8 +631,9 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
     }
 }
 
-/// The SQL spelling of a binary operator.
-fn bin_op(op: BinOp) -> &'static str {
+/// The SQL spelling of a binary operator in standard SQL — the default a
+/// dialect inherits from [`SqlDialect::binary_op`].
+pub fn default_bin_op(op: BinOp) -> &'static str {
     match op {
         BinOp::Eq => "=",
         BinOp::Ne => "<>",

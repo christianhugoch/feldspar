@@ -87,6 +87,19 @@ impl Transaction for PgTransaction {
         Ok(())
     }
 
+    async fn set_read_only(&mut self) -> Result<()> {
+        // `SET TRANSACTION` may only be issued before the transaction's first
+        // statement, which the trait states and every caller does.
+        self.simple("SET TRANSACTION READ ONLY").await
+    }
+
+    async fn defer_constraints(&mut self) -> Result<()> {
+        // Every foreign key this driver creates is `DEFERRABLE INITIALLY
+        // IMMEDIATE` (see `crate::ddl`), which is what makes this possible at
+        // all: a constraint declared without it cannot be deferred later.
+        self.simple("SET CONSTRAINTS ALL DEFERRED").await
+    }
+
     async fn apply_schema(&mut self, change: &SchemaChange) -> Result<()> {
         let client = self.client()?;
         crate::exec::run_ddl(client, &self.dialect, change).await
@@ -130,6 +143,19 @@ impl Transaction for PgTransaction {
             .await
             .map_err(|e| Error::database(format!("rollback transaction: {e}")))?;
         Ok(())
+    }
+}
+
+impl PgTransaction {
+    /// Run one statement that takes no binds and returns nothing, reporting a
+    /// failure with the server's own message.
+    async fn simple(&mut self, sql: &'static str) -> Result<()> {
+        let client = self.client()?;
+        sc_log::log_sql(sql, crate::exec::NO_BINDS);
+        client
+            .batch_execute(sql)
+            .await
+            .map_err(|e| Error::database(format!("{sql}: {}", crate::exec::db_error(&e))))
     }
 }
 

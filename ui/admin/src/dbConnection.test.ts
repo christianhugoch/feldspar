@@ -8,6 +8,11 @@
  * would be sent as `0` and dial nothing. And a connection that dialled fine but
  * points at an empty schema looks exactly like one that works, unless the list
  * says so.
+ *
+ * The SQLite half is the same argument about a different set of boxes: a file
+ * connection has no host to be wrong, and asking it for one — or sending the
+ * leftover `localhost` the Postgres form starts with — would describe it in the
+ * list as a server it has nothing to do with.
  */
 
 import { describe, expect, it } from "vitest";
@@ -17,6 +22,7 @@ import {
   DEFAULT_SCHEMA,
   EMPTY_DB_CONNECTION_FORM,
   SECRET_SENTINEL,
+  backendOf,
   connectionBody,
   connectionSummary,
   connectionTarget,
@@ -164,5 +170,68 @@ describe("how a connection reads in the list", () => {
     ).toMatch(/host name/);
     // A connection that failed with nothing recorded still says something.
     expect(connectionSummary(row({ connected: false, error: null }))).toMatch(/Not connected/);
+  });
+});
+
+describe("a SQLite connection", () => {
+  /** The same dialog, switched to the other kind of database. */
+  const sqlite = form({
+    name: "reporting",
+    backend: "sqlite",
+    fileStore: "data",
+    filePath: "reporting.sqlite",
+  });
+
+  it("wants a file store and a path, and nothing about a server", () => {
+    expect(dbConnectionError(sqlite)).toBe(null);
+    expect(dbConnectionError({ ...sqlite, fileStore: "" })).toMatch(/file store/);
+    expect(dbConnectionError({ ...sqlite, filePath: " " })).toMatch(/path/);
+    // None of the Postgres boxes apply: an empty host is not a problem here,
+    // and it is the state the form is saved in.
+    expect(dbConnectionError({ ...sqlite, host: "", database: "", username: "" })).toBe(null);
+  });
+
+  it("sends the server boxes empty, so the row does not describe a host it has nothing to do with", () => {
+    const body = connectionBody({ ...sqlite, host: "localhost", username: "reader" });
+    expect(body.backend).toBe("sqlite");
+    expect(body.file_store).toBe("data");
+    expect(body.file_path).toBe("reporting.sqlite");
+    expect(body.host).toBe("");
+    expect(body.username).toBe("");
+    expect(body.schema).toBe("");
+  });
+
+  it("still sends the Postgres parts for a Postgres connection", () => {
+    const body = connectionBody(complete);
+    expect(body.backend).toBe("postgres");
+    expect(body.host).toBe("db.example.com");
+    expect(body.schema).toBe(DEFAULT_SCHEMA);
+    expect(body.file_store).toBe("");
+  });
+
+  it("reads back as its file and its store, not as a host", () => {
+    const stored = row({
+      backend: "sqlite",
+      host: "",
+      username: "",
+      database: "",
+      schema: "",
+      file_store: "data",
+      file_path: "reporting.sqlite",
+    });
+    expect(backendOf(stored)).toBe("sqlite");
+    expect(connectionTarget(stored)).toBe("reporting.sqlite in file store data");
+    expect(connectionSummary({ ...stored, tables: 0 })).toMatch(/the file has no tables/i);
+    // A row from before there were two kinds — no backend at all — is Postgres.
+    expect(backendOf(row())).toBe("postgres");
+  });
+
+  it("reopens the dialog on what was stored", () => {
+    const reopened = formFromConnection(
+      row({ backend: "sqlite", file_store: "data", file_path: "a/b.sqlite" }),
+    );
+    expect(reopened.backend).toBe("sqlite");
+    expect(reopened.fileStore).toBe("data");
+    expect(reopened.filePath).toBe("a/b.sqlite");
   });
 });

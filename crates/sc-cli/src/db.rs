@@ -1,7 +1,7 @@
 //! Primary-database connection configuration for the `saltcorn` binary.
 //!
-//! [`DbConfig`] gathers where the primary Postgres database lives from three
-//! places, in this order of authority:
+//! [`DbConfig`] gathers where the primary database lives from three places, in
+//! this order of authority:
 //!
 //! 1. **CLI flags** — either a single connection URL (`--database-url`) or the
 //!    individual `host`/`port`/`user`/`password`/`db` parts (`--db-host` etc.).
@@ -12,7 +12,15 @@
 //!
 //! A URL, wherever it comes from, wins wholesale over the parts; otherwise the
 //! parts build a [`tokio_postgres::Config`]. Either way [`DbConfig::connect`]
-//! yields a pooled [`PgDriver`] the CLI hands to the catalog.
+//! yields the pooled driver the CLI hands to the catalog.
+//!
+//! **Or a file.** `--sqlite PATH` (or a `sqlite = "…"` in the selected
+//! environment) says the primary database is a SQLite file rather than a
+//! Postgres server — no host, no role, nothing to start, and the file is created
+//! if it is not there. It is checked first and it is exclusive: an environment
+//! that names both is refused by the configuration reader, and a `--database-url`
+//! typed on the command line beside a `sqlite` in the file wins, because a flag
+//! always outranks the file.
 //!
 //! **Naming an environment inverts 2 and 3.** With no `--environment`, the
 //! ambient variables outrank the file, which is the stated rule: the file
@@ -34,7 +42,11 @@
 //! connection failures are surfaced by the caller with the redacted
 //! [`target`](DbConfig::target) for context.
 
+use std::sync::Arc;
+
+use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
+use sc_db_sqlite::SqliteDriver;
 use sc_error::{Error, Result};
 
 use crate::config_file::{self, Environment, SelectedEnvironment};
@@ -107,6 +119,9 @@ const DEFAULT_HTTP_PORT: u16 = 3032;
 const DEFAULT_HOST: &str = "localhost";
 /// Default port when neither `--db-port` nor `PGPORT` is set.
 const DEFAULT_PORT: u16 = 5432;
+/// Environment variable naming a SQLite file to use as the primary database —
+/// the counterpart of `DATABASE_URL` for the other kind of database.
+const SQLITE_VAR: &str = "SALTCORN_SQLITE";
 
 /// How to reach the primary database. The flag fields hold only what was passed
 /// on the command line; the environment variables and the defaults are applied
@@ -121,6 +136,8 @@ pub struct DbConfig {
     user: Option<String>,
     password: Option<String>,
     dbname: Option<String>,
+    /// A SQLite file to use instead of a Postgres server.
+    sqlite: Option<String>,
     /// The environment selected out of `saltcorn.toml`, if there is one.
     selected: Option<SelectedEnvironment>,
 }
@@ -135,11 +152,19 @@ impl DbConfig {
         }
     }
 
+    /// A config whose primary database is the SQLite file at `path`.
+    pub fn from_sqlite(path: impl Into<String>) -> DbConfig {
+        DbConfig {
+            sqlite: Some(path.into()),
+            ..DbConfig::default()
+        }
+    }
+
     /// Pull the database flags out of `args`, returning the parsed config and the
     /// arguments that were **not** consumed (for the server config to parse).
     ///
     /// Recognised flags: `--database-url`, `--db-host`, `--db-port`, `--db-user`,
-    /// `--db-password`, `--db-name`, plus `--environment` (which environment of
+    /// `--db-password`, `--db-name`, `--sqlite`, plus `--environment` (which environment of
     /// the configuration file to use) and `--config` (which configuration file).
     /// Anything else is passed through untouched, so an unknown flag still fails
     /// loudly — in the server parser, not here.
@@ -166,6 +191,7 @@ impl DbConfig {
                 "--db-user" => &mut cfg.user,
                 "--db-password" => &mut cfg.password,
                 "--db-name" => &mut cfg.dbname,
+                "--sqlite" => &mut cfg.sqlite,
                 "--environment" | "--env" => &mut environment,
                 "--config" => &mut config_path,
                 other => {
@@ -215,9 +241,15 @@ impl DbConfig {
     /// This only builds the pool; the first real connection (and thus the first
     /// chance to observe an unreachable/misconfigured database) happens when the
     /// catalog introspects, so the caller wraps that with [`target`](Self::target).
-    pub async fn connect(&self) -> Result<PgDriver> {
+    pub async fn connect(&self) -> Result<Arc<dyn DatabaseDriver>> {
+        // The file first: it is a whole different kind of database, so there is
+        // nothing to merge it with — a deployment either has a SQLite file or a
+        // Postgres server.
+        if let Some(path) = self.resolved_sqlite() {
+            return Ok(Arc::new(SqliteDriver::open(&path)?));
+        }
         if let Some(url) = self.resolved_url() {
-            return PgDriver::connect(&url).await;
+            return Ok(Arc::new(PgDriver::connect(&url).await?));
         }
         let mut config = tokio_postgres::Config::new();
         config.host(self.resolved_host());
@@ -232,16 +264,38 @@ impl DbConfig {
         if let Some(dbname) = self.resolved(&self.dbname, "PGDATABASE", |e| e.database.clone()) {
             config.dbname(dbname);
         }
-        PgDriver::from_config(&config)
+        Ok(Arc::new(PgDriver::from_config(&config)?))
     }
 
     /// A human-readable, **password-free** description of the target, for error
     /// messages. Never includes credentials.
     pub fn target(&self) -> String {
+        if let Some(path) = self.resolved_sqlite() {
+            return format!("the SQLite file {path}");
+        }
         match self.resolved_url() {
             Some(url) => redact(&url),
             None => self.target_from_parts(),
         }
+    }
+
+    /// The SQLite file this connection is for, if it is for one: the flag, then
+    /// — in whichever order [`file_wins`](Self::file_wins) dictates —
+    /// [`SQLITE_VAR`] and the selected environment's `sqlite`.
+    ///
+    /// A `--database-url` **typed on the command line** takes it back: the flag
+    /// outranks the file, and an operator who names a Postgres database on the
+    /// command line means to use it, whatever the file says. A `DATABASE_URL` in
+    /// the environment does not, because a file that says `sqlite` is as
+    /// ambient as the variable and rather more deliberate.
+    fn resolved_sqlite(&self) -> Option<String> {
+        if let Some(path) = &self.sqlite {
+            return Some(path.clone());
+        }
+        if self.url.is_some() {
+            return None;
+        }
+        self.resolved(&self.sqlite, SQLITE_VAR, |e| e.sqlite.clone())
     }
 
     /// The `host:port/db` description used when no connection URL is in play.

@@ -18,6 +18,9 @@ sc-db.workspace = true
 # names `LocalFileStore` for exactly the same reason — a definition and the
 # thing it becomes belong within one crate of each other.
 sc-db-postgres.workspace = true
+# The same reason, for the other backend: a connection whose backend is `sqlite`
+# is a file in a file store, and opening it needs the SQLite driver.
+sc-db-sqlite.workspace = true
 sc-types.workspace = true
 sc-files.workspace = true
 # Ownership formulas (§7.3): the catalog parses and validates a table's stored

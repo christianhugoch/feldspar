@@ -177,14 +177,21 @@ pub async fn import_table(
 
     // On the database that hosts the table, not on the primary: a table created
     // on a connection takes its rows in the same database its columns are in.
-    let mut tx = catalog.driver_for(table)?.begin().await?;
+    let driver = catalog.driver_for(table)?;
+    let mut tx = driver.begin().await?;
     // The caller travels with the transaction, not with each statement: `SET
     // LOCAL` is transaction-scoped, so an RLS table's policies would see no
-    // caller at all (and deny everything) if this were left to the writes.
-    if let Some(context) = context {
+    // caller at all (and deny everything) if this were left to the writes. On a
+    // backend with no policies there is nothing to hand it to, and asking would
+    // fail an import that is perfectly safe to run.
+    if let Some(context) = context
+        && driver.capabilities().row_level_security
+    {
         sc_catalog::set_caller_context(tx.as_mut(), context).await?;
     }
-    tx.batch("SET CONSTRAINTS ALL DEFERRED").await?;
+    // Rows may reference rows that arrive later in the file; the keys are all
+    // checked at commit.
+    tx.defer_constraints().await?;
 
     for (index, record) in reader.records().enumerate() {
         // Line numbers as a spreadsheet counts them: the header is line 1, so
@@ -615,6 +622,13 @@ async fn row_exists(
 /// rather than being an error, which is what `pg_get_serial_sequence` returning
 /// null means.
 async fn advance_identity_sequence(catalog: &Catalog, table: &Table, pk: &str) -> Result<()> {
+    // Only where there is a sequence to advance. A backend that numbers a key
+    // from the table itself (SQLite's rowid) is already past the rows that were
+    // just written, and this statement is Postgres's own dialect — sending it
+    // there would fail an import that had already succeeded.
+    if !catalog.driver_for(table)?.capabilities().identity_sequences {
+        return Ok(());
+    }
     let table_lit = table.name.replace('\'', "''").replace('"', "\"\"");
     let pk_lit = pk.replace('\'', "''");
     // The table name reaches `pg_get_serial_sequence` **quoted**: it parses its

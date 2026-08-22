@@ -33,6 +33,7 @@ sc-agent.workspace = true
 sc-config.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
+sc-db-sqlite.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 serde_json.workspace = true

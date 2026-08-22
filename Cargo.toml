@@ -11,6 +11,7 @@ members = [
     # Layer 2 — database
     "crates/sc-db",
     "crates/sc-db-postgres",
+    "crates/sc-db-sqlite",
     # Layer 3 — types
     "crates/sc-types",
     # Layer 4 — catalog
@@ -69,6 +70,7 @@ sc-query = { path = "crates/sc-query" }
 sc-expr = { path = "crates/sc-expr", default-features = false }
 sc-db = { path = "crates/sc-db" }
 sc-db-postgres = { path = "crates/sc-db-postgres" }
+sc-db-sqlite = { path = "crates/sc-db-sqlite" }
 sc-types = { path = "crates/sc-types" }
 sc-catalog = { path = "crates/sc-catalog" }
 sc-auth = { path = "crates/sc-auth" }
@@ -152,6 +154,20 @@ tokio-postgres = { version = "0.7", features = [
     "with-serde_json-1",
 ] }
 deadpool-postgres = "0.14"
+# SQLite driver decision: **rusqlite**, with the amalgamation compiled in
+# (`bundled`). SQLite is an in-process C library rather than a server, so there
+# is no async client to choose: every call blocks the calling thread, and the
+# driver runs them on tokio's blocking pool. `bundled` rather than the system
+# library because the features this driver depends on are recent — `RETURNING`
+# (3.35), the `->` JSON operator (3.38), `IS DISTINCT FROM` and right/full joins
+# (3.39) — and a distribution's libsqlite3 is whatever that distribution froze.
+rusqlite = { version = "0.40", features = [
+    "bundled",
+    # `Statement::columns()`, which reports each result column's *declared*
+    # type — the one thing that lets a value be read back as the timestamp,
+    # uuid or json it was written as, in a database that stores five types.
+    "column_decltype",
+] }
 # tokio-postgres re-exports `bytes` in its `ToSql`/`FromSql` signatures; pinned
 # here so the Postgres driver names the same version.
 bytes = "1"

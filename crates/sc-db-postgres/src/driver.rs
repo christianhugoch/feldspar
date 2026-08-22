@@ -179,6 +179,7 @@ impl PgDriver {
             composite_pk: true,
             listen_notify: true,
             returning: true,
+            identity_sequences: true,
             unlogged_tables: true,
         }
     }

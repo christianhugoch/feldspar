@@ -25,7 +25,16 @@
 //! [environments.test]
 //! database = "saltcorn_test"
 //! test_template = "saltcorn_template"
+//!
+//! [environments.laptop]
+//! sqlite = "/home/me/saltcorn/app.sqlite"
 //! ```
+//!
+//! An environment names **one** database, and `sqlite` is the other kind it can
+//! name: a file rather than a server, with no host, no role and nothing to start
+//! (`sc-db-sqlite`). It is an alternative to the Postgres parameters, not a
+//! setting beside them, so a section that gives both is an error rather than a
+//! quiet preference for one of them.
 //!
 //! An environment is a **deployment**, not only a connection string, so a
 //! section may also say where that deployment is served:
@@ -140,6 +149,17 @@ pub struct Environment {
     /// The database name (`database`, not `dbname`: this is a file a person
     /// writes, and `--db-name`'s spelling is the CLI's own abbreviation).
     pub database: Option<String>,
+    /// A **SQLite** file to use as the primary database, instead of a Postgres
+    /// server.
+    ///
+    /// The whole connection: there is no host, port, user or password, because
+    /// SQLite has none — the database is the file, and the process that opens it
+    /// is the server. A relative path is resolved against the working directory
+    /// of whatever opens it, so a deployment writes an absolute one.
+    ///
+    /// Mutually exclusive with the Postgres parameters above; see
+    /// [`Environment::check`].
+    pub sqlite: Option<String>,
     /// The domain applications are served under — `--base-domain`. An app is at
     /// `<subdomain>.<base_domain>` (design §13.2).
     pub base_domain: Option<String>,
@@ -164,6 +184,39 @@ pub struct Environment {
 }
 
 impl Environment {
+    /// Refuse a section that names two different databases.
+    ///
+    /// `sqlite` is not one more connection parameter, it is a *different kind of
+    /// database*: a section holding both it and a Postgres host describes two,
+    /// and nothing can choose between them for the operator. Silently preferring
+    /// one would be exactly the accident the whole file exists to prevent — an
+    /// operator who thinks they are on the laptop's file and is in fact on the
+    /// production server.
+    pub fn check(&self, name: &str, path: &Path) -> Result<()> {
+        if self.sqlite.is_none() {
+            return Ok(());
+        }
+        let postgres: Vec<&str> = [
+            ("url", self.url.is_some()),
+            ("host", self.host.is_some()),
+            ("port", self.port.is_some()),
+            ("user", self.user.is_some()),
+            ("password", self.password.is_some()),
+            ("database", self.database.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, given)| given.then_some(key))
+        .collect();
+        if postgres.is_empty() {
+            return Ok(());
+        }
+        Err(Error::config(format!(
+            "the `{name}` environment of `{}` names a SQLite file *and* a Postgres              connection ({}); an environment is one database, so remove whichever              it is not",
+            path.display(),
+            postgres.join(", ")
+        )))
+    }
+
     /// Whether this section says nothing at all. An empty section is treated as
     /// no configuration rather than as "connect to the defaults", so a
     /// placeholder `[environments.staging]` with the parameters still to be
@@ -207,7 +260,7 @@ impl ConfigFile {
     /// The environment section `name`, erroring with the available names when it
     /// is not defined.
     pub fn environment(&self, name: &str, path: &Path) -> Result<&Environment> {
-        self.environments.get(name).ok_or_else(|| {
+        let section = self.environments.get(name).ok_or_else(|| {
             let available = self
                 .environments
                 .keys()
@@ -219,7 +272,9 @@ impl ConfigFile {
                  (it defines: {available}); select one with --environment NAME",
                 path.display(),
             ))
-        })
+        })?;
+        section.check(name, path)?;
+        Ok(section)
     }
 }
 
@@ -474,6 +529,37 @@ test_template = "saltcorn_template"
             file.environments["test"].database.as_deref(),
             Some("saltcorn_test")
         );
+    }
+
+    #[test]
+    fn an_environment_may_name_a_sqlite_file() {
+        let file = ConfigFile::parse(
+            "[environments.laptop]\nsqlite = \"/home/me/app.sqlite\"\n",
+            Path::new("test.toml"),
+        )
+        .expect("parses");
+        let section = file
+            .environment("laptop", Path::new("test.toml"))
+            .expect("a section naming one database is fine");
+        assert_eq!(section.sqlite.as_deref(), Some("/home/me/app.sqlite"));
+        assert!(section.url.is_none() && section.host.is_none());
+    }
+
+    /// Two databases in one section is the accident this file exists to
+    /// prevent, so it is an error and it names the keys that clash.
+    #[test]
+    fn an_environment_naming_a_file_and_a_server_is_refused() {
+        let file = ConfigFile::parse(
+            "[environments.production]\nsqlite = \"/a.sqlite\"\nhost = \"db\"\ndatabase = \"x\"\n",
+            Path::new("test.toml"),
+        )
+        .expect("it parses; it is the reading that refuses it");
+        let error = file
+            .environment("production", Path::new("test.toml"))
+            .expect_err("one environment is one database");
+        let text = format!("{error}");
+        assert!(text.contains("SQLite"), "{text}");
+        assert!(text.contains("host") && text.contains("database"), "{text}");
     }
 
     #[test]

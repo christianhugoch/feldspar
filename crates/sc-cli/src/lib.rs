@@ -23,7 +23,6 @@ use sc_catalog::{
     Catalog, DbConnections, FileStoreConnections, connect_all_db_connections,
     connect_all_file_stores,
 };
-use sc_db::DatabaseDriver;
 use sc_error::{Context, Error, Result};
 use sc_files::{FileStoreDef, connect_from_def};
 
@@ -53,7 +52,7 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
         .connect()
         .await
         .with_context(|| format!("connecting to database {}", db.target()))?;
-    let catalog = Catalog::init(Arc::new(driver) as Arc<dyn DatabaseDriver>)
+    let catalog = Catalog::init(driver)
         .await
         .with_context(|| format!("reading the schema of database {}", db.target()))?;
     let catalog = Arc::new(catalog);

@@ -20,7 +20,7 @@ mod named;
 mod statement;
 mod value;
 
-pub use dialect::{SqlDialect, render_policy_expr};
+pub use dialect::{SqlDialect, default_bin_op, render_policy_expr};
 pub use expr::{BinOp, CaseArm, ColRef, Expr, InSet, JsonStep, UnOp};
 pub use named::{NamedSql, rewrite_named_params};
 pub use statement::{

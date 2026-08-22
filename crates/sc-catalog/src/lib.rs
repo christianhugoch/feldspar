@@ -43,10 +43,11 @@ pub use constraint::{
     validate_formula, violated_constraint,
 };
 pub use db_connections::{
-    DB_CONNECTIONS_TABLE, DEFAULT_PORT, DEFAULT_SCHEMA, DbConnectionDef, DbConnectionId,
-    DbConnections, bootstrap_db_connections, check_db_connection_saveable,
-    connect_all_db_connections, connect_db_connection, delete_db_connection, dial,
-    list_db_connections, load_db_connection, load_db_connection_by_name, save_db_connection,
+    BACKENDS, DB_CONNECTIONS_TABLE, DEFAULT_PORT, DEFAULT_SCHEMA, DbConnectionDef, DbConnectionId,
+    DbConnections, POSTGRES_BACKEND, SQLITE_BACKEND, bootstrap_db_connections,
+    check_db_connection_saveable, connect_all_db_connections, connect_db_connection,
+    delete_db_connection, dial, list_db_connections, load_db_connection,
+    load_db_connection_by_name, save_db_connection,
 };
 pub use events::{TableEvents, TableWrite, WriteOp};
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};

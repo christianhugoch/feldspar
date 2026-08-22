@@ -25,6 +25,15 @@
 //! [`Table::database`], so the one thing that never happens is a statement meant
 //! for one database arriving at another.
 //!
+//! **Two kinds of database, one row.** A connection names a `backend`, and the
+//! rest of the row is read according to it: a `postgres` connection is a host,
+//! port, database, user, password and schema; a `sqlite` connection is a **file
+//! store and a path inside it**, because a SQLite database *is* a file and
+//! Saltcorn already has a place where files live (§14.1). That is the whole of
+//! the difference — a connected SQLite file's tables are in the tables list
+//! beside the primary's, read and written through the same paths, exactly as a
+//! foreign Postgres schema's are.
+//!
 //! **Reading is strict**, exactly as it is for file stores: a column that is
 //! missing or of the wrong shape is an [`Error::invalid`] naming the connection
 //! and the column, not a silently defaulted field.
@@ -36,6 +45,7 @@ use std::sync::Arc;
 
 use sc_db::{DatabaseDriver, Row};
 use sc_db_postgres::{PgConnectParams, PgDriver};
+use sc_db_sqlite::SqliteDriver;
 use sc_error::{Error, Result};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
 use sc_types::{Attrs, BasicType, TypeRef};
@@ -69,8 +79,21 @@ pub const COL_USERNAME: &str = "username";
 pub const COL_PASSWORD: &str = "password";
 /// The one schema the connection presents.
 pub const COL_SCHEMA: &str = "schema";
+/// Which kind of database this is — [`POSTGRES_BACKEND`] or [`SQLITE_BACKEND`].
+pub const COL_BACKEND: &str = "backend";
+/// For a SQLite connection: the file store the database file lives in.
+pub const COL_FILE_STORE: &str = "file_store";
+/// For a SQLite connection: the path of the file inside that store.
+pub const COL_FILE_PATH: &str = "file_path";
 /// The sparse per-connection values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
+
+/// A connection to another Postgres server.
+pub const POSTGRES_BACKEND: &str = "postgres";
+/// A connection to a SQLite file in one of the file stores.
+pub const SQLITE_BACKEND: &str = "sqlite";
+/// The backends a connection may name, in the order the UI offers them.
+pub const BACKENDS: [&str; 2] = [POSTGRES_BACKEND, SQLITE_BACKEND];
 
 /// The port a Postgres server listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 5432;
@@ -94,17 +117,20 @@ impl Default for DbConnectionId {
     }
 }
 
-/// Another Postgres database an admin has connected: what to dial, as who, and
-/// which schema of it to present.
+/// Another database an admin has connected: which kind, what to dial, as who,
+/// and which part of it to present.
 ///
-/// Postgres only, for now, and the type says so rather than carrying a `backend`
-/// column that only ever holds one value. A second backend adds the column then,
-/// when there is a second thing for it to distinguish and a second
-/// [`connect_db_connection`] arm to reach.
+/// One struct with a [`backend`](DbConnectionDef::backend) rather than an enum,
+/// because it is one row of one table and the admin form is one form: the fields
+/// that do not apply to the chosen backend are simply empty, which is what the
+/// row holds and what the screen shows. The two backends are told apart exactly
+/// where it matters — validation, [`dial`], and the description in a log line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbConnectionDef {
     /// Row identity, stable across a rename.
     pub id: DbConnectionId,
+    /// Which kind of database: [`POSTGRES_BACKEND`] or [`SQLITE_BACKEND`].
+    pub backend: String,
     /// The name its tables are stamped with. Unique, for the reason a file
     /// store's is: it is what everything resolves the connection through.
     pub name: String,
@@ -123,12 +149,22 @@ pub struct DbConnectionDef {
     pub password: String,
     /// The one schema whose tables this connection presents.
     pub schema: String,
+    /// For a SQLite connection: the file store holding the database file.
+    ///
+    /// A store rather than a bare path, because a bare path would let an admin
+    /// open any file the server process can read — the file stores are where
+    /// Saltcorn's files are, with the access rules an admin already set, and a
+    /// path is resolved *inside* one exactly as every other file reference is.
+    pub file_store: String,
+    /// For a SQLite connection: the path of the database file in that store.
+    pub file_path: String,
     /// Sparse per-connection values (§9).
     pub attributes: Attrs,
 }
 
 impl DbConnectionDef {
-    /// A connection with a fresh id, the default port and the `public` schema.
+    /// A Postgres connection with a fresh id, the default port and the `public`
+    /// schema.
     pub fn new(
         name: impl Into<String>,
         host: impl Into<String>,
@@ -136,6 +172,7 @@ impl DbConnectionDef {
     ) -> Self {
         DbConnectionDef {
             id: DbConnectionId::new(),
+            backend: POSTGRES_BACKEND.to_owned(),
             name: name.into(),
             description: String::new(),
             host: host.into(),
@@ -144,8 +181,32 @@ impl DbConnectionDef {
             username: String::new(),
             password: String::new(),
             schema: DEFAULT_SCHEMA.to_owned(),
+            file_store: String::new(),
+            file_path: String::new(),
             attributes: Attrs::new(),
         }
+    }
+
+    /// A SQLite connection to `path` inside the file store `store`.
+    pub fn sqlite(
+        name: impl Into<String>,
+        store: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        DbConnectionDef {
+            backend: SQLITE_BACKEND.to_owned(),
+            host: String::new(),
+            database: String::new(),
+            schema: String::new(),
+            file_store: store.into(),
+            file_path: path.into(),
+            ..DbConnectionDef::new(name, "", "")
+        }
+    }
+
+    /// Whether this connection is a SQLite file rather than a Postgres server.
+    pub fn is_sqlite(&self) -> bool {
+        self.backend.trim() == SQLITE_BACKEND
     }
 
     /// The same connection as the driver's connect parameters.
@@ -161,8 +222,15 @@ impl DbConnectionDef {
     }
 
     /// How the connection reads in a log line or an error: `user@host:port/db`,
-    /// schema included, **password never**.
+    /// schema included, **password never** — or, for SQLite, the file and the
+    /// store it is in.
     pub fn target(&self) -> String {
+        if self.is_sqlite() {
+            return format!(
+                "the SQLite file `{}` in file store `{}`",
+                self.file_path, self.file_store
+            );
+        }
         format!(
             "{}@{}:{}/{} (schema {})",
             self.username, self.host, self.port, self.database, self.schema
@@ -189,6 +257,11 @@ fn db_connection_fields() -> Vec<DataField> {
         // NOT NULL with a default.
         DataField::plain(COL_PASSWORD, text()),
         DataField::plain(COL_SCHEMA, text()).required(),
+        DataField::plain(COL_BACKEND, text()).required(),
+        // Empty for a Postgres connection, so neither is required — the row
+        // holds what the chosen backend uses and nothing more.
+        DataField::plain(COL_FILE_STORE, text()),
+        DataField::plain(COL_FILE_PATH, text()),
         DataField::plain(COL_ATTRIBUTES, json()).required(),
     ]
 }
@@ -218,25 +291,57 @@ pub async fn check_db_connection_saveable(catalog: &Catalog, def: &DbConnectionD
             "`{name}` is the name of the primary database and cannot name a connection"
         )));
     }
-    if def.host.trim().is_empty() {
+    if !BACKENDS.contains(&def.backend.trim()) {
         return Err(Error::invalid(format!(
-            "database connection `{name}` needs a host"
+            "database connection `{name}` names the backend `{}`; it is one of: {}",
+            def.backend,
+            BACKENDS.join(", ")
         )));
     }
-    if def.database.trim().is_empty() {
-        return Err(Error::invalid(format!(
-            "database connection `{name}` needs a database name"
-        )));
-    }
-    if def.username.trim().is_empty() {
-        return Err(Error::invalid(format!(
-            "database connection `{name}` needs a user to connect as"
-        )));
-    }
-    if def.schema.trim().is_empty() {
-        return Err(Error::invalid(format!(
-            "database connection `{name}` needs a schema"
-        )));
+    if def.is_sqlite() {
+        // A SQLite database is a file, so what it needs is where the file is —
+        // and the store has to be one that exists, or the connection could only
+        // ever fail with a message about a store rather than about a database.
+        if def.file_store.trim().is_empty() {
+            return Err(Error::invalid(format!(
+                "database connection `{name}` needs the file store its SQLite file is in"
+            )));
+        }
+        if def.file_path.trim().is_empty() {
+            return Err(Error::invalid(format!(
+                "database connection `{name}` needs the path of its SQLite file"
+            )));
+        }
+        if crate::load_file_store_by_name(catalog, def.file_store.trim())
+            .await?
+            .is_none()
+        {
+            return Err(Error::invalid(format!(
+                "database connection `{name}` names the file store `{}`, which does not exist",
+                def.file_store.trim()
+            )));
+        }
+    } else {
+        if def.host.trim().is_empty() {
+            return Err(Error::invalid(format!(
+                "database connection `{name}` needs a host"
+            )));
+        }
+        if def.database.trim().is_empty() {
+            return Err(Error::invalid(format!(
+                "database connection `{name}` needs a database name"
+            )));
+        }
+        if def.username.trim().is_empty() {
+            return Err(Error::invalid(format!(
+                "database connection `{name}` needs a user to connect as"
+            )));
+        }
+        if def.schema.trim().is_empty() {
+            return Err(Error::invalid(format!(
+                "database connection `{name}` needs a schema"
+            )));
+        }
     }
 
     if let Some(other) = load_db_connection_by_name(catalog, name).await?
@@ -361,7 +466,7 @@ impl DbConnections {
 /// The catalog is **not** reloaded here — the caller does that once, after
 /// connecting however many it is connecting.
 pub async fn connect_db_connection(catalog: &Catalog, def: &DbConnectionDef) -> Result<()> {
-    match dial(def).await {
+    match dial(catalog, def).await {
         Ok(driver) => catalog.connect_database(def.name.trim(), driver),
         Err(e) => {
             // The whole causal chain: "connecting database `reporting`" alone
@@ -378,13 +483,47 @@ pub async fn connect_db_connection(catalog: &Catalog, def: &DbConnectionDef) -> 
 /// Separate from [`connect_db_connection`] because a *test* button wants exactly
 /// this and nothing else: no registry entry, no recorded error, no effect on the
 /// catalog at all.
-pub async fn dial(def: &DbConnectionDef) -> Result<Arc<dyn DatabaseDriver>> {
-    let driver = PgDriver::connect_params(&def.connect_params())?;
+///
+/// The catalog is needed — even for a test that touches nothing — because a
+/// SQLite connection is a path *inside a file store*, and the stores are the
+/// catalog's.
+pub async fn dial(catalog: &Catalog, def: &DbConnectionDef) -> Result<Arc<dyn DatabaseDriver>> {
+    let driver: Arc<dyn DatabaseDriver> = if def.is_sqlite() {
+        Arc::new(SqliteDriver::open_existing(sqlite_path(catalog, def)?)?)
+    } else {
+        Arc::new(PgDriver::connect_params(&def.connect_params())?)
+    };
     driver
         .introspect()
         .await
         .map_err(|e| Error::database(format!("connecting to {}: {e}", def.target())))?;
-    Ok(Arc::new(driver) as Arc<dyn DatabaseDriver>)
+    Ok(driver)
+}
+
+/// Where a SQLite connection's file actually is on disk.
+///
+/// Two things have to be true, and each has its own message because each has its
+/// own repair: the store must be **connected** (a store that is only defined has
+/// no path to resolve against), and it must be a store with a local path at all
+/// — an object store has none, and SQLite cannot open a database over an API. A
+/// path that would escape the store's root is refused by the store itself, as it
+/// is for every other file.
+fn sqlite_path(catalog: &Catalog, def: &DbConnectionDef) -> Result<std::path::PathBuf> {
+    let store_name = def.file_store.trim();
+    let store = catalog.file_store(store_name)?.ok_or_else(|| {
+        Error::invalid(format!(
+            "database connection `{}` is in file store `{store_name}`, which is not connected",
+            def.name
+        ))
+    })?;
+    store
+        .local_path(def.file_path.trim())?
+        .ok_or_else(|| {
+            Error::invalid(format!(
+                "file store `{store_name}` has no local files, so the SQLite database                  `{}` cannot be opened from it — SQLite reads a file, not an API",
+                def.file_path
+            ))
+        })
 }
 
 /// Load every stored connection and connect each one, returning what happened.
@@ -422,6 +561,9 @@ fn connection_columns() -> Vec<String> {
         COL_USERNAME,
         COL_PASSWORD,
         COL_SCHEMA,
+        COL_BACKEND,
+        COL_FILE_STORE,
+        COL_FILE_PATH,
         COL_ATTRIBUTES,
     ]
     .iter()
@@ -442,6 +584,9 @@ fn connection_values(def: &DbConnectionDef) -> Vec<Value> {
         Value::Text(def.username.trim().to_owned()),
         Value::Text(def.password.clone()),
         Value::Text(def.schema.trim().to_owned()),
+        Value::Text(def.backend.trim().to_owned()),
+        Value::Text(def.file_store.trim().to_owned()),
+        Value::Text(def.file_path.trim().to_owned()),
         Value::Json(Json::Object(def.attributes.clone())),
     ]
 }
@@ -466,6 +611,7 @@ fn connection_from_row(row: &Row) -> Result<DbConnectionDef> {
 
     Ok(DbConnectionDef {
         id,
+        backend: text(row, COL_BACKEND)?,
         name: text(row, COL_NAME)?,
         description: optional_text(row, COL_DESCRIPTION)?,
         host: text(row, COL_HOST)?,
@@ -474,6 +620,8 @@ fn connection_from_row(row: &Row) -> Result<DbConnectionDef> {
         username: text(row, COL_USERNAME)?,
         password: optional_text(row, COL_PASSWORD)?,
         schema: text(row, COL_SCHEMA)?,
+        file_store: optional_text(row, COL_FILE_STORE)?,
+        file_path: optional_text(row, COL_FILE_PATH)?,
         attributes: object(row, COL_ATTRIBUTES)?,
     })
 }

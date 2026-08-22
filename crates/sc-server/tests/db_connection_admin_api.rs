@@ -522,3 +522,121 @@ async fn a_connection_cannot_claim_the_primary_databases_name() -> sc_error::Res
 
     Ok(())
 }
+
+/// A **SQLite file in a file store** connected through the same four endpoints.
+///
+/// The catalog half is `sc-catalog`'s `sqlite_connections.rs`; what only this
+/// layer can get right is the form's half: that a body naming `backend:
+/// "sqlite"` plus a store and a path reaches the driver at all, that the
+/// response describes a file rather than a host, and that the file's tables join
+/// the tables list stamped with the connection like any other.
+#[tokio::test]
+async fn a_sqlite_file_can_be_connected_from_a_file_store() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    // A directory with a SQLite database in it, and a file store over it — what
+    // an admin would already have under Files.
+    let dir = std::env::temp_dir().join(format!("sc-api-sqlite-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    {
+        let driver = sc_db_sqlite::SqliteDriver::open(dir.join("reporting.sqlite"))?;
+        driver
+            .apply_schema(&sc_db::SchemaChange::CreateTable {
+                name: "invoice".into(),
+                columns: vec![
+                    sc_db::ColumnDef::new("id", "int8").not_null().identity(),
+                    sc_db::ColumnDef::new("total", "numeric"),
+                ],
+                primary_key: vec!["id".into()],
+                unlogged: false,
+            })
+            .await?;
+    }
+    let store = sc_files::FileStoreDef::local("data", dir.display().to_string());
+    sc_catalog::bootstrap_file_stores(&catalog).await?;
+    sc_catalog::save_file_store(&catalog, &store).await?;
+    sc_catalog::connect_file_store_def(&catalog, &store)?;
+
+    // --- test before saving, exactly as the dialog's Test button does --------
+    let body = json!({
+        "name": "reporting",
+        "description": "",
+        "backend": "sqlite",
+        "host": "",
+        "port": 0,
+        "database": "",
+        "username": "",
+        "password": "",
+        "schema": "",
+        "file_store": "data",
+        "file_path": "reporting.sqlite",
+    });
+    let (status, tested) = client
+        .send("POST", "/api/db-connections/test", Some(body.clone()))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tested}");
+    assert_eq!(tested["connected"], json!(true), "{tested}");
+    assert_eq!(tested["tables"], json!(1));
+
+    // --- created and connected ----------------------------------------------
+    let (status, created) = client.send("POST", "/api/db-connections", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["connected"], json!(true), "{created}");
+    assert_eq!(created["backend"], json!("sqlite"));
+    assert_eq!(created["file_store"], json!("data"));
+    assert_eq!(created["file_path"], json!("reporting.sqlite"));
+    assert_eq!(created["tables"], json!(1));
+
+    // The file's table is in the tables list, stamped with the connection —
+    // and, as for any non-primary database, row-level security is not offered.
+    let listed = tables(&mut client).await;
+    let invoice = listed
+        .iter()
+        .find(|t| t["name"] == json!("invoice"))
+        .expect("the file's table is in the tables list");
+    assert_eq!(invoice["database"], json!("reporting"));
+    assert_eq!(invoice["rls_available"], json!(false));
+
+    // --- a body that names a file store nobody defined is refused ------------
+    let (status, refused) = client
+        .send(
+            "POST",
+            "/api/db-connections",
+            Some(json!({
+                "name": "elsewhere",
+                "description": "",
+                "backend": "sqlite",
+                "host": "",
+                "port": 0,
+                "database": "",
+                "username": "",
+                "password": "",
+                "schema": "",
+                "file_store": "nowhere",
+                "file_path": "a.sqlite",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(refused.to_string().contains("nowhere"), "{refused}");
+
+    // --- removing the connection leaves the file alone -----------------------
+    let id = created["id"].as_str().expect("an id").to_owned();
+    let (status, _) = client
+        .send("DELETE", &format!("/api/db-connections/{id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !tables(&mut client)
+            .await
+            .iter()
+            .any(|t| t["name"] == json!("invoice"))
+    );
+    assert!(
+        dir.join("reporting.sqlite").is_file(),
+        "nothing was deleted"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}

@@ -262,3 +262,79 @@ fn a_misspelled_serving_key_is_refused() {
         .expect_err("a misspelled key must fail");
     assert!(err.to_string().contains("base_domian"), "{err}");
 }
+
+/// An environment that names a **SQLite file** is a whole installation: the
+/// boot path connects to the file, creates it if it is not there, and needs
+/// nothing else in the section.
+#[tokio::test]
+async fn an_environment_may_name_a_sqlite_file_instead_of_a_server() -> sc_error::Result<()> {
+    let dir = std::env::temp_dir().join(format!("sc-cli-sqlite-env-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let db = dir.join("laptop.sqlite");
+
+    let file = Fixture::new(
+        "sqlite",
+        &format!(
+            "[environments.laptop]\nsqlite = \"{}\"\n",
+            db.display().to_string().replace('\\', "\\\\")
+        ),
+    );
+    let (cfg, rest) = DbConfig::extract([
+        "--environment",
+        "laptop",
+        "--config",
+        file.path(),
+        "--bind",
+        "x",
+    ])?;
+    assert_eq!(
+        rest,
+        vec!["--bind", "x"],
+        "only the database flags are consumed"
+    );
+    assert!(cfg.target().contains("laptop.sqlite"), "{}", cfg.target());
+
+    let catalog = connect_catalog(&cfg).await?;
+    assert!(db.is_file(), "the named file is the installation");
+    assert!(catalog.get(sc_auth::USERS_TABLE)?.is_some());
+
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
+
+/// A section naming a SQLite file **and** a Postgres server describes two
+/// databases, and nothing can choose between them for the operator — so it is
+/// refused rather than silently preferring one.
+#[test]
+fn an_environment_that_names_two_databases_is_refused() {
+    let file = Fixture::new(
+        "both",
+        "[environments.production]\nsqlite = \"/tmp/a.sqlite\"\nhost = \"db.internal\"\n",
+    );
+    let err = DbConfig::extract(["--environment", "production", "--config", file.path()])
+        .expect_err("two databases in one environment must fail");
+    assert!(err.to_string().contains("SQLite"), "{err}");
+    assert!(err.to_string().contains("host"), "{err}");
+}
+
+/// A `--database-url` typed on the command line outranks a `sqlite` in the
+/// file: a flag always wins, and an operator who names a Postgres database on
+/// the command line means to use it.
+#[test]
+fn a_url_flag_outranks_the_files_sqlite() {
+    let file = Fixture::new(
+        "outrank",
+        "[environments.laptop]\nsqlite = \"/tmp/a.sqlite\"\n",
+    );
+    let (cfg, _) = DbConfig::extract([
+        "--environment",
+        "laptop",
+        "--config",
+        file.path(),
+        "--database-url",
+        "postgres://u:p@h:5432/db",
+    ])
+    .expect("extract");
+    assert!(!cfg.target().contains("a.sqlite"), "{}", cfg.target());
+    assert!(cfg.target().contains("h:5432"), "{}", cfg.target());
+}

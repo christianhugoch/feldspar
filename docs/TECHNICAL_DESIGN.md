@@ -60,7 +60,7 @@ saltcorn/
 │  ├─ sc-bus/                     # 1. message bus trait + drivers (pg NOTIFY, in-proc, redis…)
 │  ├─ sc-db/                      # 2. DatabaseDriver trait, connection, migrations, tx
 │  │   ├─ sc-db-postgres/         #    Postgres driver (MVP)
-│  │   └─ sc-db-sqlite/           #    SQLite driver (later; embedded/mobile)
+│  │   └─ sc-db-sqlite/           #    SQLite driver (primary database, or a file in a store)
 │  ├─ sc-types/                   # 3. type system: RichType, BasicType, attributes, validation
 │  ├─ sc-expr/                    # 3. ownership-formula language: parse/analyse/validate,
 │  │                              #    symbolic (→ sc-query::Expr) + reified (deno_core) eval
@@ -136,9 +136,12 @@ graph TD
   llm --> catalog
   catalog --> db["sc-db"]
   catalog --> pg
+  catalog --> sqlite["sc-db-sqlite"]
+  cli --> sqlite
   catalog --> expr["sc-expr"]
   catalog --> files["sc-files"]
   pg --> db
+  sqlite --> db
   db --> query["sc-query"]
   expr --> query
   files --> types["sc-types"]
@@ -159,9 +162,10 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-types` | `sc-error` `sc-query` |
 | `sc-db` | `sc-error` `sc-query` |
 | `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
+| `sc-db-sqlite` | `sc-db` `sc-error` `sc-log` `sc-query` |
 | `sc-expr` | `sc-error` `sc-query` |
 | `sc-files` | `sc-error` `sc-types` |
-| `sc-catalog` | `sc-db` `sc-db-postgres` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-catalog` | `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-email` | `sc-catalog` `sc-config` `sc-error` |
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
@@ -174,14 +178,16 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
 | `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-module` `sc-query` `sc-types` |
-| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` |
+| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` |
 
 Three things the graph is worth reading for:
 
-- **`sc-db-postgres` is depended on by exactly two crates**, `sc-server` and `sc-cli`, and only
-  to *construct* the driver at startup. Everything between them and the database talks to the
-  `DatabaseDriver` trait in `sc-db`, which is what makes a second driver a matter of adding a
-  crate rather than editing the middle of the stack.
+- **The two concrete drivers are depended on only where a driver is *constructed***: `sc-cli`
+  and `sc-server` at startup, and `sc-catalog` for the connections an admin adds in the UI, which
+  are rows it turns into drivers. Everything between them and the database talks to the
+  `DatabaseDriver` trait in `sc-db` — which is what made adding `sc-db-sqlite` a matter of adding
+  a crate rather than editing the middle of the stack, and is now demonstrated rather than
+  claimed.
 - **`sc-core-actions` and `sc-core-traits` sit above `sc-api`/`sc-app`, not beside `sc-action`
   and `sc-agent`.** The built-in action set and the built-in agent traits are *users* of the row
   layer, not part of it — a trigger's write goes through the same path an HTTP request does
@@ -190,7 +196,7 @@ Three things the graph is worth reading for:
   `sc-error`). That is the deliberate cut described below: the formula language knows the query
   AST it compiles into and nothing about tables.
 
-Crates planned in the tree above but **not yet created**: `sc-bus`, `sc-db-sqlite`, `sc-code`,
+Crates planned in the tree above but **not yet created**: `sc-bus`, `sc-code`,
 `sc-fieldview`, `sc-viewpattern`, `sc-workflow`, `sc-model`, `sc-copilot`. `sc-test-harness`
 (under `tests/`) is a dev-dependency of most crates and depends only on `sc-config-file` and
 `sc-error`; it is left out of the graph because a dev-only edge is not part of the layering.
@@ -418,6 +424,15 @@ the only one. An admin adds a **connection** in Tables → Connections — host,
 user, password, schema — and that database's tables join the catalog beside the primary's, with
 the connection's name badged next to each in the tables list.
 
+A connection names a **backend**: `postgres`, or `sqlite`. A SQLite connection is not a host and
+a role, because a SQLite database is a *file* — so it names a **file store and a path inside
+it** (§14.1), which is where Saltcorn's files already are and where the admin has already said
+who may read them. A bare filesystem path would let anyone with that screen open any file the
+server process can read. Everything after the dial is identical: the file's tables are in the
+tables list, stamped with the connection, read and written through the same paths. A file that
+is not there is refused rather than created — a connection to a missing file is a mistake, and
+answering it with an empty database that works would be the least helpful possible reply.
+
 - **A connection is a row** (`_sc_db_connections`, §9.2), not a line in the configuration file,
   because it is added on a running server with immediate effect. It is stored as columns rather
   than as a URL, so the password is a column that can be declared secret: it is redacted to
@@ -524,6 +539,55 @@ index that stopped covering the table it claims to cover is the failure nobody n
 The **primary database** is one connected driver, distinguished by the fact that it hosts
 the `_sc_*` metadata tables and the `users` table. Additional databases are connected for
 data only. (MVP: single database, same as the primary store.)
+
+### 5.2 The SQLite backend (`sc-db-sqlite`)
+
+Postgres is what a deployment runs; SQLite is what a laptop, a Raspberry Pi and a one-file
+backup run. It is a second implementation of the same `DatabaseDriver` trait and it is reached
+two ways: as the **primary** database, named by `sqlite = "…"` in `saltcorn.toml` (or `--sqlite
+PATH`), and as a **secondary connection** to a `.sqlite` file sitting in one of the file stores
+(§5.0). Nothing above layer 2 changes for either: the catalog holds an `Arc<dyn DatabaseDriver>`
+and does not ask which one it is.
+
+What the backend has to solve, and how:
+
+- **Five storage classes, eleven value types.** SQLite is dynamically typed, so a timestamp and
+  a uuid are both text and a bool and a row count are both integers. What closes the gap is the
+  **declared type**, which SQLite keeps verbatim and reports back: the DDL emits `sc-types`' own
+  names (`int8`, `jsonb`, `timestamptz`) rather than translating them, so introspection and
+  decoding read a value back as the thing it was written as, and §6's type layer maps a SQLite
+  column exactly as it maps a Postgres one. Timestamps are written fixed-width UTC
+  (`YYYY-MM-DDTHH:MM:SS.mmmZ`) so that text order — which is what `ORDER BY` gives on a text
+  column — is time order. Reading is more lenient than writing, because a file created by
+  something else holds `DATETIME` columns and `2024-05-06 12:00:00`.
+- **`ALTER TABLE` does very little.** SQLite cannot alter a column or add a primary key, so
+  `SetPrimaryKey` and `SetColumnGenerator` — the two halves of "make this field the key", which
+  is how a table gets one, since none is invented — are applied by the documented **table
+  rebuild**: create the new shape, copy the rows, drop the old, rename, and put the indexes and
+  triggers back. It runs inside a savepoint with `PRAGMA defer_foreign_keys`, and the foreign
+  keys are checked before the savepoint is released. `render_ddl` refuses a rebuild rather than
+  emitting a guess: it is written from the table's *current* columns, which the change does not
+  carry.
+- **An identity key is `INTEGER PRIMARY KEY`** — the rowid alias, spelled exactly so, and never
+  beside a table-level key declaration, which would stop SQLite numbering it.
+- **There is no `COMMENT ON`.** A constraint's error message and a row constraint's formula ride
+  in an object's comment (§5.1), so the driver keeps them in a table of its own
+  (`_sc_object_comments`), written by the same `SetComment` change and read back by
+  introspection.
+- **A constraint violation arrives wearing a SQLSTATE.** SQLite reports an extended result code;
+  the driver translates the constraint ones to the Postgres spellings (`23505`, `23502`,
+  `23503`, `23514`) that `sc_api::rows` and the catalog's constraint mapping already read, so an
+  admin's own error message for a rule is shown on either backend.
+- **It is a library, not a server**, so every call blocks: the driver runs them on tokio's
+  blocking pool, over a small pool of connections (a transaction owns one; WAL lets readers run
+  beside the writer).
+
+What it does **not** advertise is as load-bearing as what it does: no `row_level_security` (no
+policies, and nothing to write them against — so §7 enforces authorization above the database
+and `rls_available` is false), no `listen_notify` (§16's bus does not use the database), no
+`unlogged_tables`. Row constraints, which are generated as PL/pgSQL triggers, and full-text
+indexes, which are `to_tsvector` expressions, are Postgres-only for now: they fail at the
+database with the database's own message rather than being silently skipped.
 
 ---
 
@@ -1092,6 +1156,11 @@ The metadata tables **as they exist today** — the ones a bootstrap actually cr
 diagram with one caveat in mind, because it is the whole character of this schema: **almost none
 of these relationships is a database foreign key.**
 
+One of them is not bootstrapped and is not in the primary database at all:
+`_sc_object_comments` is the SQLite driver's stand-in for `COMMENT ON` (§5.2), created on demand
+in whichever SQLite database a comment is set in. It is drawn here because it is a `_sc_` table
+somebody will meet, and it is not connected to anything because it is not part of this schema.
+
 ```mermaid
 erDiagram
   ROLES["_sc_roles"] {
@@ -1168,13 +1237,22 @@ erDiagram
     uuid id PK
     text name UK "stamped onto every table it contributes"
     text description
+    text backend "postgres | sqlite"
     text host
     int port
     text database
     text username
     text password "a redacted secret"
     text schema "the one schema it presents"
+    text file_store "sqlite: the store its file is in"
+    text file_path "sqlite: the file, inside that store"
     json attributes
+  }
+  COMMENTS["_sc_object_comments"] {
+    text kind PK "index | trigger"
+    text table PK "empty for an index, which is named on its own"
+    text name PK
+    text comment "what COMMENT ON would have held"
   }
   STORES["_sc_file_stores"] {
     uuid id PK

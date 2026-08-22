@@ -304,7 +304,7 @@ database (§7).
 | Component | Version | Needed for |
 |---|---|---|
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `saltcorn` binary |
-| **PostgreSQL** | 13 or newer (16 recommended) | the primary data store |
+| **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
 | **Node.js + npm** | Node 18+ | building the admin UI bundle (optional; see §6), **and** installing and running modules (Settings → Modules) |
 
 Install Rust via [rustup](https://rustup.rs/):
@@ -341,7 +341,9 @@ for a plain `cargo build`). You can also run it through cargo with
 ## 5. Database setup
 
 Saltcorn needs one Postgres database and a role that **owns** it (so it can create
-the `users` table and any tables you add from the admin UI).
+the `users` table and any tables you add from the admin UI) — or, on a machine
+where a database server is more setup than the whole installation is worth, a
+SQLite file (Option C).
 
 ### Option A — local PostgreSQL
 
@@ -374,9 +376,31 @@ docker run --name saltcorn-db \
 
 That gives you `postgres://saltcorn:change-me@localhost:5432/saltcorn`.
 
+### Option C — a SQLite file, and nothing else
+
+```bash
+target/release/saltcorn serve --sqlite ./app.sqlite
+```
+
+No server, no role, nothing to create: the file is the database, and it is created
+on first start. This is the whole of the setup on a laptop, a Raspberry Pi or a
+demo box, and the resulting installation can be copied, backed up or handed over
+as one file. SQLite is a full backend — composite keys, foreign keys, `RETURNING`,
+transactions and the schema editor all work — with two things genuinely absent,
+which Saltcorn adapts to rather than pretending otherwise: row-level security
+(there are no policies, so authorization is enforced above the database) and
+`LISTEN`/`NOTIFY` (the message bus does not use the database). Row constraints and
+full-text indexes are generated as Postgres SQL and are Postgres-only for now.
+
+A SQLite file can also be attached to a *Postgres* deployment as a second database:
+put it in a file store and add it under **Tables → Connections**, choosing
+**SQLite file**.
+
 ### Notes
 
 - **The server never creates or drops the database.** Create it once as above.
+  (A SQLite file is the exception: naming one creates it, because naming it is
+  the whole of the setup.)
 - The connecting role must be able to `CREATE TABLE` in the database (owning it is
   the simplest way). On startup the server creates a `users` table if one is not
   already present.
@@ -492,6 +516,23 @@ anything the environment does not set is taken from the configuration file below
 | `--db-user <user>` | `PGUSER` | `user` | (libpq default) |
 | `--db-password <pw>` | `PGPASSWORD` | `password` | — |
 | `--db-name <name>` | `PGDATABASE` | `database` | (libpq default) |
+| `--sqlite <path>` | `SALTCORN_SQLITE` | `sqlite` | — |
+
+`--sqlite` names the other kind of database: a **SQLite file** rather than a
+Postgres server, with no host, no role and nothing to start. The file is created
+if it is not there, which is what makes `saltcorn serve --sqlite ./app.sqlite` a
+complete installation on a laptop or a Raspberry Pi. It is exclusive with the
+Postgres parameters — an environment that names both is refused rather than
+quietly preferring one — and a `--database-url` typed on the command line beside
+a `sqlite` in the configuration file wins, because a flag always outranks the
+file.
+
+SQLite is a full backend, not a demo mode: composite keys, foreign keys,
+`RETURNING`, transactions and the schema editor all work. Two things are
+genuinely absent, and Saltcorn adapts rather than pretending: **row-level
+security** (SQLite has no policies, so authorization is enforced above the
+database and the tables list says `rls_available: false`) and **`LISTEN`/
+`NOTIFY`** (so the message bus does not use the database).
 
 ### Environments, and the configuration file
 

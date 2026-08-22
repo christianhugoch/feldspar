@@ -97,16 +97,21 @@ async fn run_in_context_mode(
     stmt: &Statement,
     access: Access,
 ) -> Result<Vec<Row>> {
-    let mut tx = catalog.primary().begin().await?;
+    let driver = catalog.primary();
+    let mut tx = driver.begin().await?;
     // Before anything else, including the GUCs: `SET TRANSACTION` may only be
     // issued before the transaction's first statement, so a read-only
     // transaction that set its caller context first would not be one.
     if access == Access::ReadOnly {
-        tx.batch("SET TRANSACTION READ ONLY").await?;
+        tx.set_read_only().await?;
     }
-    tx.set_local(ROLE_GUC, &context.role.to_string()).await?;
-    if let Some(user_json) = context.user_json() {
-        tx.set_local(USER_GUC, &user_json).await?;
+    // The caller context exists **for the policies**, which is the whole of what
+    // reads it. A backend that has no row-level security has nothing to hand it
+    // to, and asking for a transaction-local setting there would fail a
+    // statement that is perfectly safe to run — the authorization it would have
+    // enforced is enforced above the database on such a backend (§7).
+    if driver.capabilities().row_level_security {
+        set_caller_context(tx.as_mut(), context).await?;
     }
     let outcome = match tx.query(stmt).await {
         Ok(stream) => stream.try_collect().await,
