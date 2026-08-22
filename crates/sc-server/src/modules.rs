@@ -31,8 +31,8 @@ use sc_module::{Installer, ModuleHost, ModuleSet, bootstrap_modules};
 
 use crate::agents::AgentServices;
 
-/// The module machinery a running server holds: the npm project, the Node host,
-/// and the loaded set.
+/// The module machinery a running server holds: the npm project, the worker
+/// pool modules run on, and the loaded set.
 pub struct ModuleServices {
     catalog: Arc<Catalog>,
     dispatcher: Arc<TriggerDispatcher>,
@@ -51,11 +51,15 @@ impl ModuleServices {
     /// platform's data directory. Resolving it is **not** fatal when it fails
     /// and no module is installed: a server with no modules should not refuse to
     /// start because it could not work out where it would have put them.
+    /// `workers` is how many module workers the pool runs (`--module-workers`):
+    /// a module is pinned to one for its lifetime, so the reason to run a second
+    /// is blast radius rather than throughput.
     pub async fn install(
         catalog: &Arc<Catalog>,
         dispatcher: &Arc<TriggerDispatcher>,
         agents: &AgentServices,
         root: Option<PathBuf>,
+        workers: usize,
     ) -> Result<Arc<ModuleServices>> {
         bootstrap_modules(catalog)
             .await
@@ -80,7 +84,7 @@ impl ModuleServices {
             dispatcher: Arc::clone(dispatcher),
             agents: agents.clone(),
             installer: Installer::new(&root),
-            host: Arc::new(ModuleHost::new(&root)),
+            host: Arc::new(ModuleHost::with_workers(&root, workers)),
             loaded: RwLock::new(Arc::new(ModuleSet::empty())),
         });
         services.reload().await?;
@@ -130,7 +134,7 @@ impl ModuleServices {
         &self.installer
     }
 
-    /// The Node host modules run in.
+    /// The worker pool modules run on.
     pub fn host(&self) -> &Arc<ModuleHost> {
         &self.host
     }

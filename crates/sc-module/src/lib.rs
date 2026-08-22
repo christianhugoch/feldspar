@@ -16,19 +16,16 @@
 //! `CodeRuntime` is a bare V8 with four ops and no module loader — no `require`,
 //! no `net`, no `fs` — so a module cannot run there.
 //!
-//! It runs on an implementation of Node instead. Two of them exist in this
-//! crate while the milestone is in flight:
+//! It runs on an implementation of Node instead: [`deno`], a `deno_runtime`
+//! worker thread **in this process**, on the same V8 the code pool already
+//! links, entered by an ordinary V8 function call. [`host`] is the façade the
+//! rest of the server names — `load`, `run`, `unload`, and the manifest.
 //!
-//! - [`host`] — one long-lived `node` child process behind a newline-JSON pipe.
-//!   What ships today, and what phase 2 deletes.
-//! - [`deno`] — a `deno_runtime` worker thread **in this process**, on the same
-//!   V8 the code pool already links, speaking the same protocol over a pipe that
-//!   no longer crosses a process boundary. Behind the `deno-host` feature.
-//!
-//! The second exists because of what it makes possible rather than what it
-//! saves: `node` stops being a runtime requirement of a Saltcorn server, and a
-//! module's worker can be handed a permission set, which `node` has no way to
-//! offer.
+//! It used to be a `node` child process behind a newline-JSON pipe, and the
+//! change was made for what it makes possible rather than what it saves: `node`
+//! is no longer a runtime requirement of a Saltcorn server (npm still installs
+//! modules, so it is still a requirement of *installing* one), and a module's
+//! worker can be handed a permission set, which `node` had no way to offer.
 //!
 //! ## The pieces
 //!
@@ -37,7 +34,7 @@
 //! - [`paths`] — where packages are installed.
 //! - [`install`] — npm, and what it turned out to have installed.
 //! - [`bounds`] — the four bounds a module call is under, and the pool's size.
-//! - [`host`] — the Node child process and the line protocol.
+//! - [`host`] — the module host as the rest of the server sees it.
 //! - [`deno`] — the in-process worker pool (feature `deno-host`).
 //! - [`spec`] — v1's `configFields` translated into this system's `FormField`.
 //! - [`action`] — a module's action as an `Action`.

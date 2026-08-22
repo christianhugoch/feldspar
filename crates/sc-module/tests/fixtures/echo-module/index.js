@@ -63,8 +63,29 @@ module.exports = {
         throw new Error("the module said no");
       },
     },
+    echo_log: {
+      description: "Write to the server's log the way a v1 plugin does",
+      run: async ({ configuration }) => {
+        // Four of the six `console` methods a v1 plugin actually reaches for,
+        // and `%s` formatting, because the host formats with node's own
+        // `util.format` rather than joining with spaces.
+        console.log("echo says %s", (configuration || {}).greeting || "nothing");
+        console.info({ from: "echo" });
+        console.warn("echo is warning");
+        console.error("echo is complaining");
+        return "logged";
+      },
+    },
+    echo_cycle: {
+      description: "Answer with a value JSON cannot encode",
+      run: async () => {
+        const loop = { name: "echo" };
+        loop.self = loop;
+        return loop;
+      },
+    },
     echo_exit: {
-      description: "Take the host process down",
+      description: "Take the host worker down",
       run: async () => process.exit(3),
     },
     echo_spin: {

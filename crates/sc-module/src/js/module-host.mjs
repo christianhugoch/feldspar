@@ -1,25 +1,44 @@
-// The **module host**: the Node child process a Saltcorn module runs in.
+// The **module host**: the JavaScript half of the Deno worker a Saltcorn module
+// runs on.
 //
-// Written into the modules root from the server binary at every host start (the
-// binary is the authority; a stale copy from an older version would be a bug
-// nobody would look for), and started with that directory as its working
-// directory, so `require` resolves out of the modules root's own
-// `node_modules`.
+// Written into the modules root from the server binary at every worker start
+// (the binary is the authority; a stale copy from an older version would be a
+// bug nobody would look for), and evaluated as that worker's main module with
+// the modules root as its directory, so `require` resolves out of the modules
+// root's own `node_modules`.
 //
-// ## Protocol
+// ## The entry point
 //
-// Newline-delimited JSON on stdin and stdout. A request carries an `id`; the
-// reply carries it back, so many calls are in flight at once and a slow module's
-// action does not hold anybody else's:
+// There is no protocol. The Rust side calls `globalThis.__scModuleHost(id,
+// request)` — one V8 function call, with the request as a real object — and the
+// answer comes back through two functions the host installed on the global
+// before this script was evaluated:
 //
-//   → {"id":1,"op":"load","module":"@saltcorn/mqtt","dir":"…","configuration":{}}
-//   ← {"id":1,"ok":true,"value":{"name":"@saltcorn/mqtt","actions":[…]}}
-//   → {"id":2,"op":"run","module":"@saltcorn/mqtt","action":"mqtt_publish","args":{…}}
-//   ← {"id":2,"ok":false,"error":"connect ECONNREFUSED","stack":"…"}
+//   __scDone(id, jsonText)             a call answered
+//   __scFail(id, message, stack)       a call threw
 //
-// Anything the module writes to stdout would corrupt that stream, so
-// `console.log` is rebound to stderr before a module is ever required — which is
-// also where it belongs, since the server forwards stderr to its own log.
+// The `id` is the host's, not this script's: many calls are in flight at once
+// and a slow module's action does not hold anybody else's, which is what the id
+// was always for. What crosses back is `JSON.stringify`'s text rather than the
+// value itself, because a module's result is a module's own object — a function
+// property, a stream, a cycle — and `JSON.stringify` is the rule v1 itself
+// applies to one. A value it will not encode is a **failure naming why**, never
+// a mangled result.
+//
+// (Until the "Modules in-process" milestone's phase 2 this was newline-JSON over
+// a pipe to a `node` child process. Nothing above the transport changed: the
+// stubs, `Workflow`, `Form`, `interpolate` and the manifest are the same text
+// phase 0 proved portable.)
+//
+// ## Logging
+//
+// `console.log` and its five siblings go to the server's own log through
+// `__scLog(level, module, message)`, tagged with the module that was running —
+// tracked through an `AsyncLocalStorage`, so a line written from a callback the
+// module registered during a call is still that module's line. Nothing is
+// written to this process's stdout by this script, and nothing needs to be: the
+// server's log is one place with one format, and a module's `console.log` is
+// part of it rather than beside it.
 //
 // ## The `@saltcorn` stubs
 //
@@ -39,21 +58,56 @@
 import { createRequire } from "node:module";
 import Module from "node:module";
 import * as path from "node:path";
-import * as readline from "node:readline";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { format } from "node:util";
 
 const require = createRequire(import.meta.url);
 
 // ---------------------------------------------------------------------------
-// stdout belongs to the protocol
+// What the host installed before this script ran
 // ---------------------------------------------------------------------------
 
-const writeReply = (obj) => {
-  process.stdout.write(JSON.stringify(obj) + "\n");
-};
+/** A call answered: `(id, jsonText)`. */
+const done = globalThis.__scDone;
+/** A call threw: `(id, message, stack)`. */
+const fail = globalThis.__scFail;
+/** One log line: `(level, moduleName | null, message)`. */
+const log = globalThis.__scLog;
 
-console.log = (...args) => console.error(...args);
-console.info = (...args) => console.error(...args);
-console.debug = (...args) => console.error(...args);
+// ---------------------------------------------------------------------------
+// Which module is speaking
+// ---------------------------------------------------------------------------
+
+/** The module whose call is running, for the log tag.
+ *
+ * An `AsyncLocalStorage` rather than a variable, because the interesting lines
+ * are not the ones written on the way in: `@saltcorn/mqtt` logs from a `connect`
+ * callback it registered while it was being loaded, long after `load` answered,
+ * and a plain variable would have moved on by then. The store is captured when
+ * the callback's async resource is created, so that line still says which module
+ * wrote it. */
+const running = new AsyncLocalStorage();
+
+/** The module's own logging, in the server's log rather than beside it.
+ *
+ * `format` is node's own, so `console.log("%s rows", n)` and an object argument
+ * both read the way their author expected. */
+const speak = (level) =>
+  (...args) => {
+    try {
+      log(level, running.getStore() ?? null, format(...args));
+    } catch (_) {
+      // A module that logs an object whose inspection throws must not have that
+      // become the failure of whatever it was doing.
+    }
+  };
+
+console.log = speak("info");
+console.info = speak("info");
+console.debug = speak("verbose");
+console.trace = speak("verbose");
+console.warn = speak("warning");
+console.error = speak("error");
 
 // ---------------------------------------------------------------------------
 // The `@saltcorn` API: real, stubbed, and named
@@ -340,7 +394,7 @@ async function runAction({ module: name, action: actionName, args }) {
 }
 
 // ---------------------------------------------------------------------------
-// The loop
+// The entry point
 // ---------------------------------------------------------------------------
 
 async function handle(request) {
@@ -369,36 +423,49 @@ async function handle(request) {
   }
 }
 
-const lines = readline.createInterface({ input: process.stdin });
-
-lines.on("line", (line) => {
-  if (!line.trim()) return;
-  let request;
+/** Answer one call, with the module's result encoded as v1 would encode it.
+ *
+ * `JSON.stringify` answers `undefined` for a function, a symbol, or nothing at
+ * all, and **throws** on a cycle or on a `toJSON` that does. The first is the
+ * `null` an action that returns nothing has always answered; the second is a
+ * failure that names the value rather than a reply nobody can read. */
+function answer(id, value) {
+  let text;
   try {
-    request = JSON.parse(line);
+    text = JSON.stringify(value === undefined ? null : value);
   } catch (e) {
-    console.error(`module host: unreadable request: ${e.message}`);
+    fail(id, `the module answered with a value that is not JSON: ${(e && e.message) || e}`, null);
     return;
   }
-  // Deliberately not awaited: each request is its own task, which is what puts
-  // many calls in flight at once.
-  handle(request).then(
-    (value) => writeReply({ id: request.id, ok: true, value: value ?? null }),
-    (e) =>
-      writeReply({
-        id: request.id,
-        ok: false,
-        error: (e && e.message) || String(e),
-        stack: (e && e.stack) || null,
-      }),
-  );
-});
+  done(id, text === undefined ? "null" : text);
+}
 
-lines.on("close", () => process.exit(0));
+/** What the Rust side calls. One request in, one answer out through `done` or
+ * `fail`, and never a throw: a synchronous failure here would unwind into V8
+ * from a host call that has no way to report it, so everything is settled
+ * through the two functions instead.
+ *
+ * Deliberately not awaited by the caller — each request is its own task, which
+ * is what puts many calls in flight at once. */
+globalThis.__scModuleHost = (id, request) => {
+  running.run(request && request.module ? request.module : null, () => {
+    let pending;
+    try {
+      pending = handle(request);
+    } catch (e) {
+      fail(id, (e && e.message) || String(e), (e && e.stack) || null);
+      return;
+    }
+    pending.then(
+      (value) => answer(id, value),
+      (e) => fail(id, (e && e.message) || String(e), (e && e.stack) || null),
+    );
+  });
+};
 
-// A module's own unhandled rejection must not take the host down with it: the
+// A module's own unhandled rejection must not take the worker down with it: the
 // call it belongs to has already been answered (or is about to time out), and
-// every other module in this process is innocent.
+// every other module on this worker is innocent.
 process.on("unhandledRejection", (e) => {
-  console.error(`module host: unhandled rejection from a module: ${(e && e.stack) || e}`);
+  console.error(`unhandled rejection from a module: ${(e && e.stack) || e}`);
 });

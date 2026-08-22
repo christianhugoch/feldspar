@@ -1,12 +1,13 @@
 //! A module's actions in the action registry, and one of them run through an
 //! [`ActionContext`] — the whole path from a stored row to a JavaScript `run`.
 
+#![cfg(feature = "deno-host")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 
 use std::sync::Arc;
 
-use common::{fixture, have_node, have_npm, temp_root};
+use common::{fixture, have_npm, temp_root};
 use sc_action::{Action, ActionContext, ActionRegistry, Event, EventKind};
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
@@ -85,10 +86,7 @@ async fn set_up(
 
 #[tokio::test]
 async fn a_modules_actions_reach_the_registry_with_their_declared_settings() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let db = TestDb::new().await.unwrap();
     let cat = catalog(&db).await.unwrap();
     bootstrap_modules(&cat).await.unwrap();
@@ -129,10 +127,7 @@ async fn a_modules_actions_reach_the_registry_with_their_declared_settings() {
 
 #[tokio::test]
 async fn running_a_module_action_reaches_the_module_with_the_event() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let db = TestDb::new().await.unwrap();
     let cat = catalog(&db).await.unwrap();
     bootstrap_modules(&cat).await.unwrap();
@@ -168,10 +163,7 @@ async fn running_a_module_action_reaches_the_module_with_the_event() {
 
 #[tokio::test]
 async fn a_module_that_claims_a_taken_name_is_reported_and_does_not_displace_it() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let db = TestDb::new().await.unwrap();
     let cat = catalog(&db).await.unwrap();
     bootstrap_modules(&cat).await.unwrap();
@@ -204,10 +196,7 @@ async fn a_module_that_claims_a_taken_name_is_reported_and_does_not_displace_it(
 
 #[tokio::test]
 async fn a_module_whose_package_is_gone_is_reported_and_the_rest_still_load() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let db = TestDb::new().await.unwrap();
     let cat = catalog(&db).await.unwrap();
     bootstrap_modules(&cat).await.unwrap();

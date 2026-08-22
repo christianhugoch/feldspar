@@ -523,6 +523,12 @@ contact:
    the snapshot's `build.rs` is the cheaper of the two roads, not the later one. Phase 1 takes
    the snapshot with it.
 
+   **Reversed by phase 2, and the numbers are not why.** V8 shares one read-only heap per
+   process and the first isolate built decides it, so a snapshot-backed worker built after one
+   of `sc-expr`'s bare `deno_core` isolates aborts the process. The spike could not see this
+   because it linked `deno_runtime` and nothing else. See phase 2's own notes below; §6's
+   original bargain — start lazily and pay the 150 ms once — is what stands.
+
 The costs to accept, stated plainly so nobody is surprised in phase 5: **+78 MB of stripped
 binary, +4.5 minutes of clean build, +263 crates, and `libclang` as a new build-time
 requirement.** If any one of those is unacceptable, this is the point to stop — the sidecar
@@ -616,26 +622,77 @@ something V8 does not promise — while a module that hangs a server hangs it by
 
 ## Phase 2 — The host protocol becomes a function call
 
-- [ ] `module-host.mjs` keeps its shape but loses its transport: the `load` / `run` / `unload`
+- [x] `module-host.mjs` keeps its shape but loses its transport: the `load` / `run` / `unload`
       handlers become an exported entry point the Rust side calls, and the newline-JSON framing,
       the stdout rebinding and the `readline` loop go. The three tiers of `@saltcorn/*` stubs,
       the `Module._load` patch, `Workflow`, `Form`, `interpolate` and the manifest shape are
       untouched — that code is proven portable (see the measurements above) and this milestone
       has no business editing it.
-- [ ] `ModuleHost` keeps its public surface — `load`, `run`, `unload`, `manifest` — so
+- [x] `ModuleHost` keeps its public surface — `load`, `run`, `unload`, `manifest` — so
       `ModuleServices`, `ModuleAction`, `sc-server`'s five endpoints and the four-step reload
       do not know the runtime changed. The `host.rs` module doc is rewritten; nothing that calls
       it is.
-- [ ] `sc-expr`: `__scInvoke`'s wrapper shadows the node globals as parameters (specification
+- [x] `sc-expr`: `__scInvoke`'s wrapper shadows the node globals as parameters (specification
       §1a). Worth doing even though code bodies do not run on the module pool's isolates — it
       costs one signature and makes `process` in a code body a `ReferenceError`-shaped mistake
       rather than a silently working one if the pools are ever brought closer.
-- [ ] Test (`sc-expr`): a code body naming `process`, `require` or `Buffer` sees `undefined`,
+- [x] Test (`sc-expr`): a code body naming `process`, `require` or `Buffer` sees `undefined`,
       and one naming `db` still works.
-- [ ] `console.log` from a module goes to `sc-log` directly rather than to a forwarded stderr,
+- [x] `console.log` from a module goes to `sc-log` directly rather than to a forwarded stderr,
       tagged with the module's name.
-- [ ] Delete the child-process path. Prototype status, no compatibility shim, no `--node-host`
+- [x] Delete the child-process path. Prototype status, no compatibility shim, no `--node-host`
       escape hatch: two runtimes for the same thing is two things to debug.
+
+### What was built, and the measurement that undid phase 1's snapshot
+
+`module-host.mjs` ends in `globalThis.__scModuleHost(id, request)` and nothing else; the Rust
+side calls it through `deno_core::scope!` with the request handed over by `serde_v8`, and the
+answer comes back through two native functions installed on the isolate's global before the
+script is evaluated. `ModuleHost` is now a façade over `DenoModuleHost` (and, on a build without
+`deno-host`, a refusal that names the missing feature); `ModuleServices::install` takes
+`--module-workers` and sizes the pool with it. The pipes, their two helper threads and
+`tokio::process` are gone from the host.
+
+**Native functions rather than ops, which was not a preference.** An op is reached from
+JavaScript through `Deno.core.ops`, and `deno_runtime`'s worker bootstrap ends by calling
+`removeImportedOps()` — which deletes every entry there that is not on its own allow-list. A
+module host's ops are gone before its main module runs. `v8::Function::new` plus a `v8::Global`
+is smaller anyway, and `JsRuntime::op_state_from(scope)` gets the callback back to the worker's
+channel.
+
+**`run_event_loop` returning `Ok(())` stopped being an ending.** Over the pipe it could not
+happen — a `readline` on stdin is a resource — so phase 1 treated it as one. With no transport
+there is nothing to hold the loop open between calls, and "the event loop has nothing to do" is
+what an idle module host *is*. The branch is taken out of the `select!` until the next call into
+the isolate gives it something to drive; leaving it in is a spin at the speed of the scheduler.
+
+**And the snapshot phase 1 built has to go, which reverses the phase 0 gate's second
+amendment.** The measurement behind it stands — 9.7 ms of worker construction with a snapshot
+against 159 ms without — but the snapshot cannot be used in *this* process, for a reason the
+spike could not show because the spike linked `deno_runtime` and nothing else:
+
+- **V8 shares one read-only heap across every isolate in a process, and the first isolate built
+  decides it.** A `deno_runtime` worker built from a custom startup snapshot *after* a bare
+  `deno_core` isolate exists aborts the process inside V8's own deserializer
+  (`vector.h:415: libc++ Hardening assertion __n < size() failed`, SIGABRT). `sc-expr`'s code
+  isolates are bare `deno_core` with no snapshot, so in a server the two pools cannot both have
+  their way. Phase 1 could not see it because nothing called the pool; phase 2 saw it as
+  `cargo test -p sc-server --test modules_api` aborting on the first test that loads a module.
+- **The reverse order works and is not a fix.** A custom snapshot's read-only heap *is* the
+  embedded one's, so a bare isolate built afterwards is content — but both pools are lazy by
+  design (a deployment with no modules never builds a module isolate; one with no code bodies
+  never builds a code one), so "the module pool goes first" is an invariant nothing could keep.
+- So `crates/sc-module/build.rs` is deleted, `startup_snapshot` is `None`, and a worker starts
+  from V8's embedded snapshot, transpiling `deno_runtime`'s TypeScript extension sources as it
+  goes — which is why the `transpile` feature is still not optional. The cost is ~150 ms and
+  ~5 MB on the first module call after a server start, once per worker, on a path that already
+  waits on npm and somebody else's network. Measured here as the `deno_host` suite going from
+  2.6 s to 6.8 s, which is eight worker starts.
+
+The one thing the phase 4 bullet about "existing suites pass unchanged" has to be told: they do,
+apart from the skip condition. `tests/host.rs` and `tests/module_actions.rs` skipped without
+`node && npm` and now skip without `npm` alone, because that is the behaviour change this
+milestone exists to make.
 
 ## Phase 2a — `functions`: what a module supplies besides actions
 

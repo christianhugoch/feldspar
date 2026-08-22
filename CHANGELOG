@@ -2,6 +2,71 @@
 
 Changes in reverse chronological order.
 
+## Modules in-process, phase 2: the protocol becomes a function call
+
+The `node` child process is gone. A module now runs on a `deno_runtime` worker in the server's
+own process and is entered by an ordinary V8 function call — no framing, no pipe, no second
+runtime to debug. **`node` is no longer a runtime requirement of a Saltcorn server**; npm still
+installs modules, so it remains a requirement of *installing* one.
+
+- **`module-host.mjs` keeps its shape and loses its transport.** The `readline` loop, the
+  newline-JSON framing and the stdout rebinding are gone; what is left is
+  `globalThis.__scModuleHost(id, request)`, which the Rust side calls with the request converted
+  straight into a V8 object. Everything above the transport is untouched — the three tiers of
+  `@saltcorn/*` stubs, the `Module._load` patch, `Workflow`, `Form`, `interpolate` and the
+  manifest — because that is the code phase 0 proved portable and this milestone had no business
+  editing it.
+- **Answers come back through native functions on the isolate's global**, not through
+  `deno_core` ops, and that is a constraint rather than a preference: `deno_runtime`'s worker
+  bootstrap ends by calling `removeImportedOps()`, which deletes every entry in `Deno.core.ops`
+  that is not on its own allow-list — a module host's ops would be gone before its main module
+  ran. `__scDone(id, jsonText)` and `__scFail(id, message, stack)` cost `v8::Function::new` and
+  a `v8::Global`. What crosses back is `JSON.stringify`'s text rather than the value, because
+  the value is a module's own object and `JSON.stringify` is the rule v1 itself applies to one;
+  a value it will not encode is now a **failure naming why** rather than a mangled result.
+- **`ModuleHost` keeps its public surface** — `load`, `run`, `unload`, `ping`, the manifest — so
+  `ModuleServices`, `ModuleAction`, the five module endpoints and the four-step reload do not
+  know the runtime changed. It is a façade over the pool now, and on a build without the
+  `deno-host` feature its calls fail saying exactly that instead of pretending.
+- **`--module-workers <n>` is read**: `ModuleServices::install` takes it and sizes the pool.
+- **A module's `console.log` goes straight into `sc-log`**, tagged with the module that was
+  running — tracked through an `AsyncLocalStorage`, so a line written from a callback the module
+  registered during a call is still that module's line. There is nothing to forward and nothing
+  to corrupt: the reason `console.log` used to be rebound to stderr was that stdout carried the
+  protocol.
+- **The node globals are shadowed in a code body** (`sc-expr`): `process`, `Deno`, `Buffer`,
+  `require`, `module`, `exports`, `__dirname` and `global` are parameters of the wrapper a body
+  is compiled into, and nobody passes them. Hygiene rather than privilege, and the code says so:
+  a sound fence would be a separate V8 context, which `deno_core` 0.408 does not expose, and a
+  trigger's code body and a module install are behind the same admin check anyway. It costs one
+  signature and makes `process.env` in a code body a mistake on the line that made it. A binding
+  of the same name still wins.
+- **The child-process path is deleted.** No `--node-host` escape hatch: prototype status, and
+  two runtimes for the same thing is two things to debug. `tests/host.rs` and
+  `tests/module_actions.rs` pass unchanged against the new runtime apart from their skip
+  condition, which is now `npm` alone.
+
+**And the build-time snapshot is gone, which reverses phase 1.** Phase 0's gate withdrew "the
+first version may go without one" on a measurement of 150 ms and ~5 MB per worker start. That
+measurement stands; the snapshot cannot be used anyway, for a reason the spike's process could
+not show:
+
+- **V8 shares one read-only heap across every isolate in a process, and the first isolate built
+  decides it.** A `deno_runtime` worker built from a custom startup snapshot *after* a bare
+  `deno_core` isolate exists aborts the process inside V8's deserializer —
+  `vector[] index out of bounds`, not an error a `Result` can carry. `sc-expr`'s code isolates
+  are bare `deno_core` and carry no snapshot, so in a real server the two pools cannot both have
+  their way. It is invisible until something calls the pool, which is why phase 2 is where it
+  turned up: `cargo test -p sc-server --test modules_api` aborted with SIGABRT on the first test
+  that loaded a module.
+- The reverse order happens to work — a custom snapshot's read-only heap *is* the embedded one's,
+  so a later bare isolate is content — and that is **not** a fix. Both pools are lazy by design,
+  so "the module pool must build its isolate first" is an invariant nothing could keep.
+- So `crates/sc-module/build.rs` is deleted and a worker starts from V8's own embedded snapshot,
+  transpiling `deno_runtime`'s TypeScript extension sources as it goes (which is why the
+  `transpile` feature is still not optional). The cost is ~150 ms on the first module call after
+  a server start, on a path that already waits on npm and somebody else's network.
+
 ## Modules in-process, phase 1: the Deno worker pool
 
 The runtime half of the milestone. `sc-module` grows a second implementation of "where a module

@@ -1,6 +1,6 @@
 //! The **in-process** module host: a v1 plugin loaded and run on a Deno worker
 //! in this process, with no `node` anywhere near it (TODO "Modules in-process",
-//! phase 1).
+//! phases 1 and 2).
 //!
 //! `npm` is still needed to *install* a module and these tests skip without it.
 //! `node` is not: every assertion below runs on a `deno_runtime` worker inside
@@ -75,6 +75,75 @@ async fn a_module_loads_and_runs_in_this_process() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("models/table.findOne"), "{err}");
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// Phase 2: a module's `console.*` is the server's log, not a forwarded stderr.
+///
+/// What is asserted here is the **seam**, which is what a test can see from
+/// outside the worker thread: `console.log` and its siblings resolve to the
+/// native `__scLog` the host installed, and calling four of them formats and
+/// logs without throwing. Were the global missing, or its signature wrong, the
+/// action would fail with a `ReferenceError` instead of answering — which is
+/// exactly what this asserts it does not do. (The lines themselves go to
+/// `sc_log` from the worker's own thread, and `sc_log`'s capture is
+/// thread-local, so the *text* is not reachable from here.)
+#[tokio::test]
+async fn a_modules_console_log_goes_to_the_log_and_not_to_a_pipe() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-log", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+    host.load(name, &installer.package_dir(name), &json!({}))
+        .await
+        .unwrap();
+
+    let value = host
+        .run(
+            name,
+            "echo_log",
+            json!({ "configuration": { "greeting": "hello" } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value, json!("logged"));
+
+    // And the worker is still serving afterwards: a log line is not a call, and
+    // nothing about it can be mistaken for one now that there is no stream for
+    // it to corrupt.
+    assert_eq!(host.ping().await.unwrap()["pong"], json!(true));
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// §4a's third limit, one milestone early because the seam is where it lands: a
+/// result that will not serialise is a failure naming why, not a mangled value.
+#[tokio::test]
+async fn a_result_that_is_not_json_fails_with_a_sentence() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-cycle", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+    host.load(name, &installer.package_dir(name), &json!({}))
+        .await
+        .unwrap();
+
+    let err = host.run(name, "echo_cycle", json!({})).await.unwrap_err();
+    assert!(
+        err.to_string().contains("not JSON"),
+        "the failure should name what went wrong: {err}"
+    );
+    // The module's fault, and the worker is untouched by it.
+    assert_eq!(err.kind(), sc_error::ErrorKind::Application);
+    assert_eq!(
+        host.run(name, "echo_row", json!({ "configuration": {} }))
+            .await
+            .unwrap()["row"],
+        json!(null)
+    );
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());

@@ -161,7 +161,7 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
     let root = std::env::temp_dir().join(format!("sc-modules-api-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let modules =
-        ModuleServices::install(&catalog, &dispatcher, &agents, Some(root.clone())).await?;
+        ModuleServices::install(&catalog, &dispatcher, &agents, Some(root.clone()), 1).await?;
 
     let sessions = Arc::new(SessionStore::default());
     let apps = Arc::new(

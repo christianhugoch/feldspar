@@ -5,7 +5,7 @@
 //! ```text
 //! <modules root>/package.json        # written here: private, no dependencies of its own
 //! <modules root>/node_modules/…      # what npm put there
-//! <modules root>/module-host.mjs     # the sidecar, written from the binary at boot
+//! <modules root>/module-host.mjs     # the host script, written from the binary
 //! ```
 //!
 //! **Where the root is** follows the same rule `sc_config_file` states for the

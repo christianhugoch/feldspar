@@ -1,19 +1,23 @@
-//! The Node sidecar: the protocol, the manifest, the stubs, and what a dead
-//! host does to the calls that were in flight.
+//! The module host through its own façade: the manifest, the stubs, the
+//! configuration, and what a dead worker does to the calls that were in flight.
+//!
+//! `npm` is still needed to *install* a module and these tests skip without it.
+//! `node` is not, and that is the milestone's whole claim: since the "Modules
+//! in-process" milestone's phase 2 every assertion here runs on a
+//! `deno_runtime` worker inside the test binary. The only edit these suites
+//! needed was that skip condition.
 
+#![cfg(feature = "deno-host")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 
-use common::{fixture, have_node, have_npm, installed, temp_root};
+use common::{fixture, have_npm, installed, temp_root};
 use sc_module::{Installer, ModuleHost, ModuleSource};
 use serde_json::json;
 
 #[tokio::test]
 async fn a_module_loads_and_reports_what_it_supplies() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) = installed("host-load", &["echo-module"]).await;
     let name = &names[0];
 
@@ -71,10 +75,7 @@ async fn a_module_loads_and_reports_what_it_supplies() {
 
 #[tokio::test]
 async fn an_action_runs_and_gets_v1s_argument_object() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) = installed("host-run", &["echo-module"]).await;
     let name = &names[0];
     host.load(
@@ -116,10 +117,7 @@ async fn an_action_runs_and_gets_v1s_argument_object() {
 
 #[tokio::test]
 async fn the_saltcorn_stubs_are_free_to_require_and_named_when_called() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) = installed("host-stubs", &["echo-module"]).await;
     let name = &names[0];
     // Loading at all is the first half of the assertion: the fixture requires
@@ -164,10 +162,7 @@ async fn the_saltcorn_stubs_are_free_to_require_and_named_when_called() {
 
 #[tokio::test]
 async fn a_module_that_throws_is_an_ordinary_failed_call() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) = installed("host-throw", &["echo-module"]).await;
     let name = &names[0];
     host.load(name, &installer.package_dir(name), &json!({}))
@@ -194,11 +189,8 @@ async fn a_module_that_throws_is_an_ordinary_failed_call() {
 }
 
 #[tokio::test]
-async fn a_module_that_kills_the_host_fails_its_call_and_the_next_one_works() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+async fn a_module_that_kills_its_worker_fails_its_call_and_the_next_one_works() {
+    skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) = installed("host-crash", &["echo-module"]).await;
     let name = &names[0];
     host.load(name, &installer.package_dir(name), &json!({}))
@@ -207,11 +199,11 @@ async fn a_module_that_kills_the_host_fails_its_call_and_the_next_one_works() {
 
     let err = host.run(name, "echo_exit", json!({})).await.unwrap_err();
     assert!(
-        err.to_string().contains("exited"),
-        "the caller should be told the host died: {err}"
+        err.to_string().contains("process.exit"),
+        "the caller should be told what happened: {err}"
     );
 
-    // The next call starts a new process and replays the load, so the module is
+    // The next call starts a new worker and replays the load, so the module is
     // back without anybody asking for it.
     let result = host
         .run(
@@ -229,10 +221,7 @@ async fn a_module_that_kills_the_host_fails_its_call_and_the_next_one_works() {
 
 #[tokio::test]
 async fn a_module_that_cannot_be_required_is_reported_and_the_host_stays_up() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) =
         installed("host-broken", &["broken-module", "echo-module"]).await;
     let broken = &names[0];
@@ -244,7 +233,7 @@ async fn a_module_that_cannot_be_required_is_reported_and_the_host_stays_up() {
         .unwrap_err();
     assert!(err.to_string().contains("cannot be loaded"), "{err}");
 
-    // The good module still loads in the same process.
+    // The good module still loads on the same worker.
     let manifest = host
         .load(echo, &installer.package_dir(echo), &json!({}))
         .await
@@ -257,9 +246,9 @@ async fn a_module_that_cannot_be_required_is_reported_and_the_host_stays_up() {
 
 #[tokio::test]
 async fn a_host_over_an_empty_root_still_answers_a_ping() {
-    skip_without!(have_node(), "node is not on the PATH");
-    // No npm, no install, no modules: the host script is written from the binary
-    // and `node` starts it. This is the check a diagnostics screen makes.
+    // No npm, no install, no modules, and nothing on the PATH: the host script
+    // is written from the binary and a worker in this process evaluates it. This
+    // is the check a diagnostics screen makes.
     let root = temp_root("host-ping");
     let host = ModuleHost::new(&root);
     let pong = host.ping().await.unwrap();
@@ -271,10 +260,7 @@ async fn a_host_over_an_empty_root_still_answers_a_ping() {
 
 #[tokio::test]
 async fn a_checkouts_own_dependencies_are_installed_and_its_v1_ones_are_not() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     // Two failures every real module hits, and both are about the *tree* rather
     // than about the module:
     //
@@ -353,10 +339,7 @@ async fn a_checkouts_own_dependencies_are_installed_and_its_v1_ones_are_not() {
 
 #[tokio::test]
 async fn a_module_whose_own_dependency_is_missing_says_which_one() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let root = temp_root("host-missing-dep");
     let installer = Installer::new(&root);
 
@@ -401,10 +384,7 @@ async fn a_module_whose_own_dependency_is_missing_says_which_one() {
 
 #[tokio::test]
 async fn reloading_a_module_picks_up_a_new_configuration() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let root = temp_root("host-reload");
     let installer = Installer::new(&root);
     let package = installer
@@ -449,10 +429,7 @@ async fn reloading_a_module_picks_up_a_new_configuration() {
 #[tokio::test]
 #[ignore = "reaches the npm registry"]
 async fn the_real_mqtt_module_installs_from_npm_and_supplies_its_action() {
-    skip_without!(
-        have_node() && have_npm(),
-        "node and npm are not both on the PATH"
-    );
+    skip_without!(have_npm(), "npm is not on the PATH");
     let root = temp_root("host-real-mqtt");
     let installer = Installer::new(&root);
 

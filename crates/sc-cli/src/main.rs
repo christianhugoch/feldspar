@@ -185,7 +185,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // do.
     let triggers = sc_server::install_triggers(&catalog, evaluator.clone(), &agents).await?;
 
-    // Modules: every installed v1 plugin loaded into the Node host, its actions
+    // Modules: every installed v1 plugin loaded onto the module worker pool, its actions
     // added to the registry the dispatcher just took, and the trigger set
     // reloaded against the result — which is what lets a trigger name
     // `mqtt_publish`. After the triggers because it *changes* what they were
@@ -197,6 +197,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         &triggers,
         &agents,
         config.modules_dir.clone(),
+        config.module_workers,
     )
     .await?;
 

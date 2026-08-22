@@ -50,11 +50,11 @@ pub const DEFAULT_MODULE_MAX_HEAP: usize = 256 * 1024 * 1024;
 
 /// How many worker threads the module pool runs by default.
 ///
-/// **One**, because that is what the sidecar already is: one process holding
-/// every module, not one per module. A module is long-lived state — a socket
-/// with a reconnect timer and live callbacks — so the reason to add a worker is
-/// blast radius, not throughput: a second worker is a second isolate for a
-/// module that must not share a watchdog with a co-resident. Throughput is not
+/// **One**, because that is what the `node` sidecar it replaced already was:
+/// one runtime holding every module, not one per module. A module is long-lived
+/// state — a socket with a reconnect timer and live callbacks — so the reason to
+/// add a worker is blast radius, not throughput: a second worker is a second
+/// isolate for a module that must not share a watchdog with a co-resident. Throughput is not
 /// among the reasons, because a module action is somebody else's network and the
 /// isolate is idle for all of it.
 pub const DEFAULT_MODULE_WORKERS: usize = 1;

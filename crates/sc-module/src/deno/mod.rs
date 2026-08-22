@@ -1,18 +1,15 @@
-//! **Modules in-process**: the Deno worker pool a module runs on, and the pool
-//! that owns it (TODO "Modules in-process", phase 1).
+//! **Modules in-process**: the Deno worker a module runs on, and the pool that
+//! owns it (TODO "Modules in-process", phases 1 and 2).
 //!
-//! A module runs in a `node` child process ([`crate::host`]). Here it is a
-//! worker thread instead, on the same V8 the rest of the server already links.
-//! The reason is not memory — phase 0 measured that saving at ~45 MB and one
+//! A module used to run in a `node` child process. Here it is a worker thread
+//! instead, on the same V8 the rest of the server already links. The reason is
+//! not memory — phase 0 measured that saving at ~45 MB and one
 //! process, which is real but small. The reasons are that `node` stops being a
 //! runtime requirement of a Saltcorn server, and that `deno_permissions` gives a
 //! module something `node` has no way to offer: a permission set (phase 3).
 //!
-//! **What holds which, today.** This pool is built, bounded and tested; the
-//! server's `ModuleServices` still holds the sidecar. Moving it across is phase
-//! 2, together with turning the protocol below into a function call — kept
-//! separate so that "the runtime changed" and "the protocol changed" are two
-//! bisectable steps.
+//! This is what every module call goes through. [`crate::host`]'s `ModuleHost`
+//! is the façade the rest of the server names, and it is a few lines over this.
 //!
 //! ## Why this is a second pool and not the code isolates
 //!
@@ -43,22 +40,21 @@
 //! on two workers would be two MQTT connections and two configurations, which is
 //! not a second copy of a module but a second module.
 //!
-//! ## The transport, and why it is still a pipe
+//! ## There is no transport
 //!
-//! [`crate::host`]'s newline-JSON protocol is kept verbatim in phase 1 and
-//! `module-host.mjs` is not edited: the script is *proven* portable (phase 0
-//! diffed its manifests byte-for-byte against `node`'s), and a milestone that
-//! changes the runtime and the protocol in one step cannot tell which half
-//! broke. So the worker is handed a pair of `std::io::pipe`s as its stdio and
-//! the protocol runs over them in-process — the sidecar with the process taken
-//! out. Phase 2 deletes the pipes and makes `load`/`run`/`unload` an exported
-//! entry point the Rust side calls directly.
+//! A call is `globalThis.__scModuleHost(id, request)` — one V8 function call,
+//! with the request converted straight into a V8 object — and the answer comes
+//! back through native functions on the isolate's global. No framing, no pipe,
+//! no reader thread, and no serialise-and-parse on the way in. What the ids buy
+//! is what they always bought: many calls in flight at once, so a slow module's
+//! action does not hold anybody else's. [`worker`] has the details, including
+//! why these are functions on the global rather than `deno_core` ops.
 //!
-//! That costs two helper threads per worker (a blocking reader and a blocking
-//! writer on the two pipe ends) and they exist only so the worker thread itself
-//! never blocks on a pipe: a large `run` argument that filled the pipe buffer
-//! while the thread that must drain it is the thread that is blocked writing
-//! would be a deadlock. Both threads go with the pipes in phase 2.
+//! Phase 1 ran the sidecar's newline-JSON protocol over a pair of in-process
+//! pipes, on purpose: `module-host.mjs`'s portability is what phase 0 proved,
+//! and a step that changed the runtime *and* the protocol could not say which
+//! half broke. Phase 2 is the second step, and the pipes and their two helper
+//! threads went with it.
 //!
 //! ## What a dead worker costs
 //!
@@ -77,13 +73,6 @@
 //! JavaScript, so a module that exits while the event loop is parked on an idle
 //! socket leaves the loop parked, and the host, not V8, is what must then drop
 //! the worker.
-
-// `std::io::pipe` is stable since 1.87 and this workspace declares 1.85. The
-// `deno-host` feature's real floor is higher than either — `deno_runtime` 0.263
-// and its 634-crate tree are not built by a 2025 compiler — so raising the
-// *workspace's* `rust-version` for an optional feature would misreport what
-// every other crate needs. Stated here instead, where the dependency is.
-#![allow(clippy::incompatible_msrv)]
 
 mod wiring;
 mod worker;
@@ -134,7 +123,7 @@ struct WorkerHandle {
 ///
 /// Nothing is constructed until the first call. A deployment with no modules
 /// pays for `n` parked OS threads and no isolates at all — the same bargain the
-/// sidecar makes by not spawning `node` until it is needed.
+/// sidecar made by not spawning `node` until it was needed.
 pub struct DenoModuleHost {
     root: PathBuf,
     bounds: PoolBounds,
@@ -285,9 +274,9 @@ impl DenoModuleHost {
 
     /// Stop every worker and wait for its thread.
     ///
-    /// Closing a worker's control channel closes the host's stdin, which is what
-    /// `module-host.mjs` treats as its own end — so a clean shutdown is the
-    /// module's own `lines.on("close")` rather than a kill.
+    /// Each worker is *asked*, and answers when its loop has ended and its
+    /// isolate has been dropped — so a shutdown that returns is a shutdown in
+    /// which no module's JavaScript is still running.
     pub async fn shutdown(&self) {
         let mut acks = Vec::new();
         for worker in &self.workers {

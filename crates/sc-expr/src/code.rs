@@ -509,6 +509,39 @@ pub(crate) const FS: &str = "fs";
 #[cfg(feature = "eval")]
 pub(crate) const TRIGGER: &str = "trigger";
 
+/// The Node globals a code body sees as `undefined`, shadowed as parameters of
+/// the wrapper it is compiled into (TODO "Modules in-process", §1a).
+///
+/// A **module** runs on a node-capable isolate and a code body does not, so
+/// nothing here is reachable from a body today. It is shadowed anyway, and the
+/// distinction is worth stating exactly because "fenced off" can mean two things
+/// and only one of them is available.
+///
+/// A *sound* fence would be a separate V8 context per tier — its own global
+/// object and its own intrinsics. V8 has them; `deno_core` 0.408 does not expose
+/// them, and deletion is no substitute (a shared `Object.prototype`,
+/// `Function("return globalThis")()`, closures held by loaded module code). So
+/// this is **hygiene, not privilege**, and it is honest about being that: a
+/// trigger's code body and a module install are behind the same admin check, and
+/// installing a module already runs arbitrary code as the server.
+///
+/// What it buys for one signature: `process.env.DATABASE_URL` in a code body is
+/// a mistake shaped like a `TypeError` on the line that made it, in every build,
+/// rather than something that works on one isolate and not another. Lexical, no
+/// deletion, no effect on module code, and escapable through `globalThis` — but
+/// not by accident, which is the whole of what is wanted.
+#[cfg(feature = "eval")]
+pub(crate) const SHADOWED_NODE_GLOBALS: [&str; 8] = [
+    "process",
+    "Deno",
+    "Buffer",
+    "require",
+    "module",
+    "exports",
+    "__dirname",
+    "global",
+];
+
 // ---------------------------------------------------------------------------
 // The prelude (the fluent surface, in JavaScript)
 // ---------------------------------------------------------------------------
@@ -3903,6 +3936,10 @@ struct RunScripts {
 /// body is handed the handle rather than the token, so there is nothing in its
 /// scope to pass to another run's host even if it could guess one.
 ///
+/// The parameter list also carries the node globals
+/// ([`SHADOWED_NODE_GLOBALS`]), which nobody passes — so naming one in a body is
+/// `undefined` rather than whatever the isolate happens to have.
+///
 /// The code itself is **not** escaped, and cannot be: it is the admin's own
 /// JavaScript, spliced in as source. That is not a hole — the wrapper is no
 /// privilege boundary, and the host re-validates every plan that comes back out
@@ -3969,6 +4006,15 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     }
     if wants_triggers {
         names.push(TRIGGER);
+    }
+    // §1a: the node globals, shadowed as parameters nobody passes. A binding of
+    // the same name wins — it is already a `const` in this function's body, and
+    // a parameter beside it would be a redeclaration and so a body that will not
+    // compile at all.
+    for name in SHADOWED_NODE_GLOBALS {
+        if !call.bindings.contains_key(name) && !names.contains(&name) {
+            names.push(name);
+        }
     }
     let params = names.join(", ");
     let code = &call.code;
@@ -4221,6 +4267,47 @@ mod tests {
             err.contains("JavaScript code failed") && err.contains("db"),
             "{err}"
         );
+    }
+
+    /// §1a: the node globals are shadowed as parameters of the wrapper, so a
+    /// body naming one sees `undefined` rather than whatever the isolate it
+    /// happens to run on has.
+    #[tokio::test]
+    async fn the_node_globals_are_shadowed_in_a_code_body() {
+        let rt = CodeRuntime::new();
+        // Every one of them, in one body, as the `typeof` the author would see.
+        let entries = SHADOWED_NODE_GLOBALS
+            .map(|name| format!("{name}: typeof {name}"))
+            .join(", ");
+        let out = rt
+            .run(call(&format!("return {{ {entries} }};")))
+            .await
+            .unwrap();
+        for name in SHADOWED_NODE_GLOBALS {
+            assert_eq!(out[name], json!("undefined"), "{name} is not shadowed");
+        }
+        // Reading through one is the mistake it should be, on the line that made
+        // it, rather than a value out of the runtime.
+        let err = rt
+            .run(call("return process.env.DATABASE_URL;"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("JavaScript code failed"), "{err}");
+
+        // The surfaces a body *is* given are untouched…
+        let host = FakeHost::rows(json!([{ "id": 1 }]));
+        assert_eq!(
+            rt.run(with_host("return await db.books.rows();", &*host))
+                .await
+                .unwrap(),
+            json!([{ "id": 1 }])
+        );
+        // …and a binding of a shadowed name still wins, because it is the
+        // author's own and the parameter is only a default of `undefined`.
+        let mut c = call("return module.answer;");
+        c.bindings.insert("module".into(), json!({ "answer": 42 }));
+        assert_eq!(rt.run(c).await.unwrap(), json!(42));
     }
 
     #[tokio::test]

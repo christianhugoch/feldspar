@@ -1,9 +1,10 @@
 //! Shared setup for the module tests: the fixture packages, a throwaway modules
-//! root, and the two toolchain checks.
+//! root, and the toolchain check.
 //!
-//! Every test here needs `node`, and most need `npm`. A Rust-only checkout must
-//! stay green, so a test that needs either **skips** rather than fails — the
-//! same contract the `tsc` type-check tests have.
+//! Most tests here need `npm`, which is what *installs* a module. None of them
+//! needs `node`: a module runs on a Deno worker inside the test binary. A
+//! Rust-only checkout must stay green, so a test that needs npm **skips** rather
+//! than fails — the same contract the `tsc` type-check tests have.
 
 #![allow(dead_code)]
 
@@ -11,11 +12,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sc_module::{Installer, ModuleHost, ModuleSource};
-
-/// Whether `node` is on the PATH.
-pub fn have_node() -> bool {
-    which("node")
-}
 
 /// Whether `npm` is on the PATH.
 pub fn have_npm() -> bool {
@@ -77,7 +73,9 @@ pub async fn installed(tag: &str, fixtures: &[&str]) -> (Installer, Arc<ModuleHo
     (installer, host, names)
 }
 
-/// The same, over the **in-process** Deno pool rather than the `node` sidecar.
+/// The same, but reaching the pool directly rather than through
+/// [`sc_module::ModuleHost`] — which is what a test that wants to say a bound
+/// needs.
 ///
 /// `bounds` is spelled out by the caller because the tests are what want to say
 /// a JS slice in milliseconds; `PoolBounds::default()` is what a server runs.

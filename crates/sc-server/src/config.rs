@@ -80,11 +80,6 @@ pub struct ServerConfig {
     /// one: it is a property of *this process's* machine and not of the
     /// installation every node shares.
     ///
-    /// **Parsed and validated here, and not yet read.** The module host still
-    /// runs in a `node` child process; the pool this sizes
-    /// (`sc_module::DenoModuleHost`) is built and tested but is not what
-    /// `ModuleServices` holds until the host switches over — phase 2 of the
-    /// "Modules in-process" milestone, which is one line at that call site.
     pub module_workers: usize,
     /// Where installed **modules** live: the npm project the server installs
     /// packages into and runs the module host in (TODO "Modules", §1).

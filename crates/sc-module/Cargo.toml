@@ -16,8 +16,8 @@ rust-version.workspace = true
 #
 # Turning it on also raises this crate's build requirements: a C toolchain with
 # `libclang` (set `LIBCLANG_PATH` if it is not on the default search path), and
-# a rustc new enough for `std::io::pipe` (1.87), which is what carries the host
-# protocol until phase 2 makes it a function call.
+# a rustc new enough for `deno_runtime` itself, which is well ahead of the
+# workspace's declared floor.
 [features]
 default = []
 deno-host = [
@@ -29,13 +29,6 @@ deno-host = [
     "dep:deno_error",
     "dep:sys_traits",
 ]
-
-[build-dependencies]
-# The runtime snapshot (specification §6): without it a worker evaluates *and
-# transpiles* the whole of `deno_runtime`'s JavaScript at every start — 159 ms
-# and 5 MB per worker, measured. Optional, and enabled by the same feature, so a
-# build without `deno-host` does not link it.
-deno_runtime = { workspace = true, features = ["snapshot"], optional = true }
 
 [dependencies]
 sc-error.workspace = true
@@ -58,9 +51,9 @@ async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 uuid.workspace = true
-# The installer (`npm`) and the host (`node`) are both child processes: awaited
-# without blocking a runtime thread, their stdio piped. `sync` carries the
-# in-flight call map's oneshots.
+# The installer runs `npm`, which is a child process: awaited without blocking a
+# runtime thread, its stdio piped. `sync` carries the in-flight call map's
+# oneshots — the host itself is no longer a process.
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt"] }
 
 # `deno-host` only. The four wirings of the in-process runtime: the worker and

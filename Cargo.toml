@@ -197,10 +197,12 @@ deno_core = "0.408"
 # `sc-module` upgrade in one step or not at all.
 #
 # `transpile` is not optional: the runtime's own extension sources are
-# TypeScript, and the residual ones a snapshot does not consume have to be
-# transpiled before V8 sees them. The `snapshot` feature is the build-script
-# half of the same story (`crates/sc-module/build.rs`), and is worth 150 ms of
-# every worker start.
+# TypeScript and a module worker carries **no startup snapshot** to hold the
+# transpiled form, so the transpiler has to be in the worker. There is no
+# snapshot because V8 shares one read-only heap per process and the first
+# isolate decides it — a snapshot-backed worker built after one of `sc-expr`'s
+# bare `deno_core` isolates aborts the process. `crates/sc-module/src/deno/wiring.rs`
+# has the measurement and the reasoning.
 #
 # It is a large dependency and the phase 0 gate measured it: +4.5 minutes of
 # clean build and +78 MB of stripped binary, and adding it here took this

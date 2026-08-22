@@ -8,10 +8,35 @@
 //! shim over node — it *is* node, as `deno_runtime` implements it.
 //!
 //! What is deliberately not here: a permission model. Every worker gets
-//! [`PermissionsContainer::allow_all`] for now, which is what the sidecar
-//! already is. The seam phase 3 narrows is
+//! [`PermissionsContainer::allow_all`] for now, which is what the `node`
+//! sidecar it replaced was. The seam phase 3 narrows is
 //! [`NodeRequireLoader::ensure_read_permission`], which is handed the module's
 //! own container on every read.
+//!
+//! ## And no startup snapshot, which is not the bargain phase 0 struck
+//!
+//! Phase 0 measured a build-time snapshot at 150 ms and ~5 MB per worker start
+//! and its gate withdrew "the first version may go without one". Phase 2 has to
+//! put it back, because of something the spike's process could not show:
+//!
+//! **V8 shares one read-only heap across every isolate in a process, and the
+//! first isolate built decides it.** A `deno_runtime` worker built from a custom
+//! startup snapshot *after* a bare `deno_core` isolate exists aborts the process
+//! in V8's own deserializer — `vector[] index out of bounds`, not an error a
+//! `Result` can carry. `sc_expr`'s code isolates are bare `deno_core` and carry
+//! no snapshot, so in the server the two pools cannot both have their way.
+//!
+//! The reverse order happens to work (a custom snapshot's read-only heap is the
+//! embedded one's, so a later bare isolate is content), and **that is not a
+//! fix**: both pools are lazy by design — a deployment with no modules never
+//! builds a module isolate, and a deployment with no code bodies never builds a
+//! code one — so "the module pool must go first" is an invariant nothing could
+//! keep. What is given up is 150 ms on the first module call after a start, once
+//! per worker, on a path that already waits on npm and somebody else's network.
+//!
+//! `deno_runtime`'s `transpile` feature is what makes going without one possible
+//! at all: the runtime's extension sources are TypeScript, and with no snapshot
+//! to hold the transpiled form there has to be a transpiler in the worker.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -24,7 +49,6 @@ use deno_resolver::npm::{
     ByonmInNpmPackageChecker, ByonmNpmResolver, ByonmNpmResolverCreateOptions,
 };
 use deno_runtime::deno_fs::RealFs;
-use deno_runtime::deno_io::{Stdio, StdioPipe};
 use deno_runtime::deno_node::{NodeExtInitServices, NodeRequireLoader, NodeResolver};
 use deno_runtime::deno_permissions::PermissionsContainer;
 use deno_runtime::deno_web::{BlobStore, InMemoryBroadcastChannel};
@@ -39,12 +63,6 @@ use sys_traits::impls::RealSys;
 /// The real filesystem and the real environment: this is a server, not a test
 /// harness for Deno.
 type Sys = RealSys;
-
-// §6: what `build.rs` produced. `RUNTIME_SNAPSHOT.bin` is the V8 startup blob;
-// the two tables are the runtime's own extension sources that did not fit in it,
-// already transpiled.
-include!(concat!(env!("OUT_DIR"), "/residual_lazy.rs"));
-static SNAPSHOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/RUNTIME_SNAPSHOT.bin"));
 
 // ---------------------------------------------------------------------------
 // Wiring 1: the module loader
@@ -94,7 +112,7 @@ impl ModuleLoader for HostModuleLoader {
 /// module's own [`PermissionsContainer`] on every read `require` performs, so a
 /// module denied the filesystem is denied it here, once, rather than by hoping
 /// each of its dependencies asks politely. It allows everything today, which is
-/// exactly what the sidecar does.
+/// exactly what the `node` sidecar it replaced did.
 #[derive(Debug)]
 struct ModuleRequireLoader {
     pkg_json_resolver: Arc<PackageJsonResolver<Sys>>,
@@ -193,8 +211,7 @@ fn node_services(
 // The worker
 // ---------------------------------------------------------------------------
 
-/// Build one module-host worker over `root`, with `host` as its main module and
-/// the two ends of the host protocol as its stdio.
+/// Build one module-host worker over `root`, with `host` as its main module.
 ///
 /// Must be called from inside a tokio context: `deno_core` registers the isolate
 /// against whatever runtime is current when it is created, and an isolate whose
@@ -203,16 +220,14 @@ fn node_services(
 /// drives the worker's event loop — the same arrangement `sc_expr`'s
 /// `build_isolate` documents for the code pool.
 ///
-/// `stderr` is inherited rather than piped: it is the modules' own logging, and
-/// giving it its own pipe is phase 2's business, where `console.log` goes to
-/// `sc-log` directly instead.
-pub(super) fn build_worker(
-    root: &Path,
-    host: &ModuleSpecifier,
-    stdin: std::fs::File,
-    stdout: std::fs::File,
-    max_heap: usize,
-) -> MainWorker {
+/// **The stdio is the server's own**, inherited, and that is a simplification
+/// rather than an oversight: until phase 2 a pair of pipes carried the host
+/// protocol and *anything a module wrote to stdout corrupted it*, which is why
+/// the host script used to rebind `console.log` to stderr. There is no protocol
+/// on those descriptors now — the calls are V8 function calls and the log goes
+/// to `sc-log` by name ([`super::worker`]) — so a module that writes to stdout
+/// writes to the server's stdout, and nothing is at risk if it does.
+pub(super) fn build_worker(root: &Path, host: &ModuleSpecifier, max_heap: usize) -> MainWorker {
     let parser = Arc::new(RuntimePermissionDescriptorParser::new(RealSys));
     let services = WorkerServiceOptions {
         blob_store: Arc::new(BlobStore::default()),
@@ -224,7 +239,7 @@ pub(super) fn build_worker(
         node_services: Some(node_services(root)),
         npm_process_state_provider: None,
         // Phase 3 replaces this with a container built from the module's own
-        // `_sc_modules` row. Until then a module has what it has in the sidecar,
+        // `_sc_modules` row. Until then a module has what it had in the sidecar,
         // which is everything.
         permissions: PermissionsContainer::allow_all(parser),
         root_cert_store_provider: None,
@@ -235,9 +250,9 @@ pub(super) fn build_worker(
         bundle_provider: None,
     };
     let options = WorkerOptions {
-        startup_snapshot: Some(SNAPSHOT),
-        residual_lazy_js_sources: RESIDUAL_LAZY_JS,
-        residual_lazy_esm_sources: RESIDUAL_LAZY_ESM,
+        // **No startup snapshot**, and that is a constraint rather than a
+        // choice — see this module's own doc.
+        startup_snapshot: None,
         // The heap this worker's modules share. Without a limit the isolate is
         // bounded only by the machine, and the failure mode of that is the
         // *server's* process rather than one module's worker.
@@ -250,11 +265,6 @@ pub(super) fn build_worker(
             has_node_modules_dir: true,
             mode: WorkerExecutionMode::Run,
             ..Default::default()
-        },
-        stdio: Stdio {
-            stdin: StdioPipe::file(stdin),
-            stdout: StdioPipe::file(stdout),
-            stderr: StdioPipe::inherit(),
         },
         ..Default::default()
     };
