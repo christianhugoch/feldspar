@@ -530,26 +530,89 @@ works, and the four bullets above are the answer to the next person who asks.
 
 ## Phase 1 — The runtime (`sc-module`, behind a feature)
 
-- [ ] `deno-host` feature on `sc-module`, off by default, turned on by `sc-server`. The crate
+- [x] `deno-host` feature on `sc-module`, off by default, turned on by `sc-server`. The crate
       must still build and test without it, because that is what keeps the dependency out of
       every other crate's test link.
-- [ ] `sc_module::deno`: the worker pool. One thread per worker, a current-thread tokio runtime
+- [x] `sc_module::deno`: the worker pool. One thread per worker, a current-thread tokio runtime
       and a Deno worker on each, `DEFAULT_CODE_WORKERS`-shaped sizing with its own admin
       setting, and a module pinned to a worker so its `require` cache and its module-level state
       live in one place — which is what the single sidecar gives it today.
-- [ ] `NodeRequireLoader`: `load_text_file_lossy`, `ensure_read_permission` against the module's
+- [x] `NodeRequireLoader`: `load_text_file_lossy`, `ensure_read_permission` against the module's
       own `PermissionsContainer`, and the two `is_maybe_cjs` questions answered from
       `package.json`'s `type` via `PackageJsonResolver`.
-- [ ] `ByonmNpmResolver` over `<modules root>/node_modules`, plus the `NodeResolver` and
+- [x] `ByonmNpmResolver` over `<modules root>/node_modules`, plus the `NodeResolver` and
       `PackageJsonResolver` it needs.
-- [ ] The exit handler (specification §4), and the restart-and-replay path from
+- [x] The exit handler (specification §4), and the restart-and-replay path from
       `sc_module::host` moved onto it: a dead worker fails its in-flight calls by name and the
       next call gets a fresh worker that replays every load.
-- [ ] The four bounds a module call is under, matching what `CodeRuntime` already does rather
+- [x] The four bounds a module call is under, matching what `CodeRuntime` already does rather
       than inventing a second vocabulary: the wall clock (`DEFAULT_CALL_TIMEOUT`, 120 s, and it
       stays 120 s — a Proxmox snapshot is not fast), a JS slice enforced with
       `terminate_execution`, a heap limit, and the worker restart as the backstop. A module that
       spins forever must cost its own worker and no one else's.
+
+### What was built, and three things the specification had wrong
+
+`crates/sc-module/src/deno/` — the pool (`mod.rs`), one worker's life (`worker.rs`) and the four
+wirings (`wiring.rs`) — plus `crates/sc-module/build.rs` for the snapshot and
+`crates/sc-module/src/bounds.rs` for the four bounds. `sc-server` turns the feature on and adds
+`--module-workers <n>`, defaulting to one. `ModuleServices` still holds the sidecar: switching
+it over is phase 2's first two bullets, and this phase deliberately stops short of them so that
+"the runtime changed" and "the protocol changed" are two bisectable commits.
+
+The transport is still the pipe, unedited on the JavaScript side: `module-host.mjs`'s
+portability is what phase 0 proved, and a phase that changed the runtime *and* the protocol
+could not say which half broke. In-process that costs two helper threads per worker — a
+blocking reader and a blocking writer on the two pipe ends — so that the thread which must drain
+the pipe is never the thread blocked on writing to it. Both go with the pipe in phase 2.
+
+**1. `deno_core` does not report a V8 termination through `run_event_loop`.** The list assumed a
+JS slice enforced with `terminate_execution` would surface as an error from the event loop, the
+way it surfaces to `sc_expr`'s worker. It does not: `do_js_event_loop_tick` sees
+`is_execution_terminating`, returns `Ok(false)` — "no ops" — and the loop goes back to sleep with
+a dead isolate under it, forever. This is the same shape as phase 0's finding about
+`WatcherExited` and has the same answer: **the watchdog's own flag is the evidence, and the host,
+not V8, ends the worker.** The worker thread reads both on one 50 ms tick.
+
+**2. A module's JS slice is 10 s, not the code pool's 1 s, and it is measured differently.**
+
+- *Differently*, because a code body is entered and left by the worker that runs it, so its
+  slice can be armed around the call. A module host is never "entered" — its JavaScript runs
+  whenever a socket says so. What is observable instead is the worker **thread**, which comes
+  round its loop every 50 ms unless a poll of the event loop has entered JavaScript and not come
+  back. So the thread stamps the watchdog each time round, and a stamp older than the slice means
+  uninterrupted JavaScript and nothing else.
+- *Ten seconds*, because of `require`. A module's `load` synchronously pulls a whole npm
+  dependency tree through V8's parser — `async-mqtt` and what it brings is tens of thousands of
+  lines with no `await` anywhere in it. A one-second slice would not be a watchdog; it would be
+  a rule that large modules may not be installed. Ten seconds is still an order of magnitude
+  inside the 120 s wall clock, so a runaway is stopped by the slice rather than waited out by
+  the caller.
+
+**3. A runaway must be written as one.** The `echo-module` fixture's runaway action *computes*
+rather than looping on nothing: `for(;;){}` is exactly the shape V8 is free to compile with no
+interrupt check in it, so a test asserting that an empty loop is stoppable would be asserting
+something V8 does not promise — while a module that hangs a server hangs it by computing.
+
+### What it cost this workspace, measured
+
+§5 said the build memory "must be measured, not assumed". Measured:
+
+- **The lock file goes 561 → 1005 packages (+444)**, against the +263 phase 0's bare-`deno_core`
+  control predicted — the control shared none of this workspace's own tree, so its delta was the
+  smaller one. §5's "+356" and the gate's "+263" are both estimates of this number; this is the
+  number.
+- **+10.6 MB per test binary, +5 %.** One `sc-server` integration test binary is 212.6 MB with
+  the feature off and 223.2 MB with it on (debug, `line-tables-only`). Far less than phase 0's
+  +78 MB stripped, and for a reason that expires: nothing in `sc-server` *calls* the pool yet, so
+  the linker drops most of `deno_runtime`, and V8 was already there for `sc-expr`. Phase 2 makes
+  the call real and this number will grow toward phase 0's.
+- **The 47-way link burst needs headroom.** `cargo test -p sc-server --no-run` under
+  `scripts/cargo-guarded.sh`'s **default** `SC_BUILD_MEM_HIGH=10G` and default `-j` made no
+  progress in 40 minutes on this machine: 48 concurrent links, each now mapping a much larger
+  set of rlibs, sat in continuous reclaim. With `-j 4` (or a raised `MemoryHigh`) it completes.
+  That is the root `Cargo.toml`'s profile note coming true again, and it belongs in README §10
+  in phase 5.
 
 ## Phase 2 — The host protocol becomes a function call
 

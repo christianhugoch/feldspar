@@ -76,3 +76,28 @@ pub async fn installed(tag: &str, fixtures: &[&str]) -> (Installer, Arc<ModuleHo
     let host = Arc::new(ModuleHost::new(&root));
     (installer, host, names)
 }
+
+/// The same, over the **in-process** Deno pool rather than the `node` sidecar.
+///
+/// `bounds` is spelled out by the caller because the tests are what want to say
+/// a JS slice in milliseconds; `PoolBounds::default()` is what a server runs.
+#[cfg(feature = "deno-host")]
+pub async fn installed_on_deno(
+    tag: &str,
+    fixtures: &[&str],
+    workers: usize,
+    bounds: sc_module::PoolBounds,
+) -> (Installer, Arc<sc_module::DenoModuleHost>, Vec<String>) {
+    let root = temp_root(tag);
+    let installer = Installer::new(&root);
+    let mut names = Vec::new();
+    for name in fixtures {
+        let package = installer
+            .install(ModuleSource::Local, &fixture(name).display().to_string())
+            .await
+            .unwrap_or_else(|e| panic!("installing the {name} fixture: {e}"));
+        names.push(package.name);
+    }
+    let host = Arc::new(sc_module::DenoModuleHost::build(root, workers, bounds));
+    (installer, host, names)
+}

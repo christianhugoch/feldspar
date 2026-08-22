@@ -2,6 +2,81 @@
 
 Changes in reverse chronological order.
 
+## Modules in-process, phase 1: the Deno worker pool
+
+The runtime half of the milestone. `sc-module` grows a second implementation of "where a module
+runs" — a `deno_runtime` worker **in the server's own process** — beside the `node` sidecar,
+which is still what `ModuleServices` holds. Nothing an operator does changes yet; what changed
+is that the pool exists, is bounded, and is tested against the same fixtures the sidecar is.
+
+- **`deno-host`, a feature of `sc-module`, off by default and turned on by `sc-server`.** Off is
+  what keeps `deno_runtime` — and a `libclang` build requirement — out of the test link of every
+  other crate, and the crate goes on building and testing without it. Measured against this
+  workspace rather than against phase 0's bare-`deno_core` control: the lock file goes from
+  **561 to 1005 packages (+444)**, which is more than the +263 that control predicted, because
+  the control shared none of this workspace's tree. One `sc-server` test binary grows
+  **212.6 MB → 223.2 MB (+5 %)** — small only because nothing *calls* the pool yet, so the linker
+  drops most of `deno_runtime` and V8 was already there for `sc-expr`; phase 2 makes the call
+  real and this will grow toward phase 0's +78 MB. And `cargo test -p sc-server`'s 47-way link
+  burst now wants headroom: under `scripts/cargo-guarded.sh`'s default `SC_BUILD_MEM_HIGH=10G`
+  and default `-j` it made no progress in 40 minutes on a 31 GB machine, and completes with
+  `-j 4`.
+- **`sc_module::deno`**: the pool. One OS thread per worker, a current-thread tokio runtime on
+  it (the isolate's anchor *and* what drives its event loop), and a `MainWorker` on that. A
+  module is **pinned to a worker** for its lifetime, because that is where its `require` cache
+  and its module-level state live; loading one module on two workers would be two MQTT
+  connections, not two copies of a module. Fewest-modules wins when a module is first loaded.
+  Nothing is constructed until the first call, so a deployment with no modules pays for parked
+  threads and no isolates.
+- **The four wirings**, as phase 0 measured them: a module loader that is `FsModuleLoader` plus a
+  `node:` branch, a `NodeRequireLoader` whose `ensure_read_permission` is the seam phase 3
+  narrows, `ByonmNpmResolver` over `<modules root>/node_modules` — npm remains the installer and
+  the directory on disk is unchanged — and `sys_traits`' `RealSys`.
+- **A build-script runtime snapshot** (`crates/sc-module/build.rs`). Phase 0 withdrew "the first
+  version may go without one": a worker start is 9.7 ms with a snapshot and 159 ms without, and
+  a worker start is on the restart path. The residual extension sources the snapshot does not
+  consume are transpiled by the build script and embedded, or the first `node:` import is a
+  `SyntaxError`.
+- **`process.exit()` closes a worker, not the server.** A `deno_os::WatcherExitHandle` in the
+  worker's `OpState` makes `op_exit` terminate that isolate and set a marker. The marker is what
+  the worker thread polls, because `terminate_execution` throws only out of *running* JavaScript
+  and a module that exits while the event loop is parked leaves it parked.
+- **The restart-and-replay path**, moved off the sidecar and onto the pool: a dead worker fails
+  every in-flight call **by name** rather than by the 120-second wall clock, and the next call
+  gets a fresh worker with every successful load replayed into it before it is served.
+- **Four bounds** (`sc_module::bounds`), deliberately the same four `sc_expr`'s `CodeRuntime` is
+  under rather than a second vocabulary: the 120 s wall clock (unchanged — a Proxmox snapshot is
+  not fast), a **10 s JS slice**, a 256 MB heap, and the worker restart behind all three. The
+  slice is ten seconds and not the code pool's one for a stated reason: a module's `load`
+  synchronously pulls a whole npm dependency tree through V8's parser, and that is one
+  uninterrupted slice of JavaScript with no `await` anywhere in it.
+- **`--module-workers <n>`** on `serve`, defaulting to one — what the sidecar already is, one
+  runtime holding every module. Parsed and validated now; read when the host switches over
+  (phase 2), which is one line at that call site.
+- **`libclang-dev` is now a build requirement** and README §2.1/§3 say so. It is needed only to
+  build.
+
+Two things phase 0 did not predict, found by building this:
+
+- **`deno_core` does not report a V8 termination through `run_event_loop`.** Its event-loop tick
+  sees `is_execution_terminating`, returns "no ops" and goes back to sleep, so a worker whose
+  isolate the watchdog just stopped sits there forever. The watchdog's own flag is the only
+  evidence there is, and the worker thread reads it on the same 50 ms tick it reads the exit
+  marker on.
+- **A JS slice cannot be armed around a module call the way it is around a code body**, because
+  a module host is never "entered" — its JavaScript runs whenever a socket says so. What is
+  observable is the worker *thread*, which comes round its loop every 50 ms unless a poll of the
+  event loop has entered JavaScript and not come back. So the thread stamps the watchdog each
+  time round, and a stale stamp means uninterrupted JavaScript and nothing else.
+
+Tests (`crates/sc-module/tests/deno_host.rs`, six, all requiring only `npm`): a fixture loads
+and runs in-process with the manifest the sidecar answers and the `@saltcorn/*` stubs still
+throwing by name; no process running `module-host.mjs` exists while a module is resident; a
+module calling `process.exit(3)` loses its call by name and the next call succeeds against a
+replayed worker; a module that computes without yielding is stopped by the slice, named, and
+its worker replaced; two modules on two workers do not share a fate; and an unloaded module is
+not resurrected by a co-resident's restart. `sc-module`'s existing suites pass unedited.
+
 ## Modules in-process: the phase 0 spike, and its gate
 
 No repository code changed. This entry records a **measurement**, because the next milestone —

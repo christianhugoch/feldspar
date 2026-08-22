@@ -31,18 +31,16 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 /// The host script, written into the modules root at every start.
-const HOST_SCRIPT: &str = include_str!("js/module-host.mjs");
+///
+/// `pub(crate)` because the in-process runtime ([`crate::deno`]) writes and runs
+/// the very same script, unedited: what phase 0 proved portable was this text,
+/// and a runtime change that also rewrote it could not say which half broke.
+pub(crate) const HOST_SCRIPT: &str = include_str!("js/module-host.mjs");
 
 /// What the host script is called on disk.
 pub const HOST_SCRIPT_NAME: &str = "module-host.mjs";
 
-/// How long one call may take before the caller gives up on it.
-///
-/// Generous, because a module's action is somebody else's network: an MQTT
-/// publish is milliseconds and a Proxmox snapshot is not. The action's own
-/// trigger is bounded by whatever fired it; this bound exists so a module that
-/// never answers is a failed call rather than a held request forever.
-pub const DEFAULT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub use crate::bounds::DEFAULT_CALL_TIMEOUT;
 
 /// One action, as the module declared it.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -417,7 +415,10 @@ impl ModuleHost {
 /// A module's throw is an **Application** error (§16): the fault is in the
 /// module or in how it was configured, not in Saltcorn, and the admin who
 /// installed it is the one who can act.
-fn reply_result(reply: &Json) -> Result<Json> {
+///
+/// `pub(crate)`: the in-process runtime speaks the same protocol and reads its
+/// replies the same way.
+pub(crate) fn reply_result(reply: &Json) -> Result<Json> {
     if reply.get("ok").and_then(Json::as_bool) == Some(true) {
         return Ok(reply.get("value").cloned().unwrap_or(Json::Null));
     }

@@ -45,11 +45,15 @@ domain applications will be served under.
 ```bash
 sudo apt update
 sudo apt install -y build-essential pkg-config git curl ca-certificates \
-                    postgresql postgresql-client nodejs npm
+                    libclang-dev postgresql postgresql-client nodejs npm
 ```
 
 - **`build-essential` / `pkg-config`** — a C toolchain and linker for the Rust build.
   No TLS libraries are needed: the server links rustls, not OpenSSL.
+- **`libclang-dev`** — a **build-time** requirement of the module runtime. The server
+  links `deno_runtime`, several of whose extensions reach `rusqlite`'s session feature
+  and so `bindgen`, which needs libclang. There is no feature knob that turns it off,
+  and it is needed only to build: the binary it produces does not use libclang.
 - **`postgresql`** on trixie is PostgreSQL 17; the package starts the server and
   enables it at boot for you.
 - **`nodejs` / `npm`** — trixie's packages are new enough (§3 asks for Node 18+).
@@ -305,6 +309,7 @@ database (§7).
 |---|---|---|
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `saltcorn` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
+| **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
 | **Node.js + npm** | Node 18+ | building the admin UI bundle (optional; see §6), **and** installing and running modules (Settings → Modules) |
 
 Install Rust via [rustup](https://rustup.rs/):

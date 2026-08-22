@@ -189,6 +189,39 @@ swc_ecma_parser = "42"
 # prebuilt static rusty_v8 lib on the big platforms; FreeBSD builds V8 from
 # source (upstream carries the ports patches but publishes no binary).
 deno_core = "0.408"
+# **Modules in-process** (TODO "Modules in-process", phase 1), behind
+# `sc-module`'s `deno-host` feature and linked by nothing else: `deno_runtime` is
+# `deno_core` plus Node — a module loader, `require`, `node:*`, and a permission
+# model `node` has none of. Pinned *together* with `deno_core` from here on:
+# every `deno_runtime` release bumps its `deno_core`, so `sc-expr` and
+# `sc-module` upgrade in one step or not at all.
+#
+# `transpile` is not optional: the runtime's own extension sources are
+# TypeScript, and the residual ones a snapshot does not consume have to be
+# transpiled before V8 sees them. The `snapshot` feature is the build-script
+# half of the same story (`crates/sc-module/build.rs`), and is worth 150 ms of
+# every worker start.
+#
+# It is a large dependency and the phase 0 gate measured it: +4.5 minutes of
+# clean build and +78 MB of stripped binary, and adding it here took this
+# workspace's lock file from 561 packages to 1005. Plus **`libclang` as a new
+# build-time requirement**, because four of the runtime's unconditional
+# extensions reach `rusqlite/session` → `buildtime_bindgen`.
+deno_runtime = { version = "0.263", features = ["transpile"] }
+# The three resolver crates `deno_runtime`'s node compatibility layer is wired
+# from. `ByonmNpmResolver` — "bring your own node_modules" — is the whole reason
+# the installer does not change: npm puts the directory there and this only
+# resolves out of it. No Deno npm cache, no lockfile, no registry client.
+deno_resolver = { version = "0.86", features = ["sync"] }
+node_resolver = { version = "0.93", features = ["sync"] }
+deno_path_util = "0.6.4"
+# `deno_error`'s version is pinned exactly because `JsErrorBox` crosses the
+# `NodeRequireLoader` trait boundary: a second copy of the crate in the tree is
+# a type mismatch, not a duplicate.
+deno_error = "=0.7.1"
+# The filesystem/environment abstraction `deno_node`'s `ExtNodeSys` is generic
+# over. The server uses the real one.
+sys_traits = { version = "0.1.28", features = ["real"] }
 # Regex engine for the `String` rich type's `regex` attribute (§2.2). `regex-lite`
 # rather than `regex`: a field-validation pattern needs correct matching, not the
 # full crate's SIMD/perf dependency tree (aho-corasick, memchr, regex-automata),

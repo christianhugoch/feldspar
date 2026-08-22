@@ -65,6 +65,27 @@ pub struct ServerConfig {
     ///
     /// [`code_workers`]: ServerConfig::code_workers
     pub code_max_inflight: usize,
+    /// How many Deno workers the **module** pool runs (`--module-workers`).
+    ///
+    /// One by default, because that is what the `node` sidecar it replaces
+    /// already is: one runtime holding every module, not one per module. A
+    /// module is pinned to a worker for its lifetime — its `require` cache and
+    /// its module-level state (an MQTT client with a reconnect timer, a
+    /// configured geocoder) live there — so the reason to run a second worker is
+    /// **blast radius** and not throughput: the JS-slice watchdog stops an
+    /// isolate and everything resident on it, so a module that must not share a
+    /// runaway's fate wants a worker to itself.
+    ///
+    /// A flag rather than a stored setting, for the reason `--code-workers` is
+    /// one: it is a property of *this process's* machine and not of the
+    /// installation every node shares.
+    ///
+    /// **Parsed and validated here, and not yet read.** The module host still
+    /// runs in a `node` child process; the pool this sizes
+    /// (`sc_module::DenoModuleHost`) is built and tested but is not what
+    /// `ModuleServices` holds until the host switches over — phase 2 of the
+    /// "Modules in-process" milestone, which is one line at that call site.
+    pub module_workers: usize,
     /// Where installed **modules** live: the npm project the server installs
     /// packages into and runs the module host in (TODO "Modules", §1).
     ///
@@ -99,6 +120,7 @@ impl Default for ServerConfig {
             base_domain: None,
             code_workers: sc_expr::DEFAULT_CODE_WORKERS,
             code_max_inflight: sc_expr::DEFAULT_MAX_INFLIGHT,
+            module_workers: sc_module::DEFAULT_MODULE_WORKERS,
             modules_dir: None,
             tls: TlsSettings::Off,
         }
@@ -110,8 +132,8 @@ impl ServerConfig {
     ///
     /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
     /// `--session-ttl-hours <n>`, `--secure-cookies`, `--base-domain <domain>`,
-    /// `--code-workers <n>`, `--code-max-inflight <n>` and `--modules-dir
-    /// <path>`. Unknown flags are an
+    /// `--code-workers <n>`, `--code-max-inflight <n>`, `--module-workers <n>`
+    /// and `--modules-dir <path>`. Unknown flags are an
     /// [`Error::Config`], so a typo fails loudly rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
     where
@@ -145,6 +167,12 @@ impl ServerConfig {
                     cfg.code_max_inflight = positive(
                         &next_value(&mut it, "--code-max-inflight")?,
                         "--code-max-inflight",
+                    )?;
+                }
+                "--module-workers" => {
+                    cfg.module_workers = positive(
+                        &next_value(&mut it, "--module-workers")?,
+                        "--module-workers",
                     )?;
                 }
                 "--modules-dir" => {
@@ -201,6 +229,9 @@ mod tests {
         // The code pool's defaults are the engine's own (design §10.1).
         assert_eq!(cfg.code_workers, sc_expr::DEFAULT_CODE_WORKERS);
         assert_eq!(cfg.code_max_inflight, sc_expr::DEFAULT_MAX_INFLIGHT);
+        // One module worker: the sidecar this replaced was one process holding
+        // every module.
+        assert_eq!(cfg.module_workers, sc_module::DEFAULT_MODULE_WORKERS);
         // Modules land in the platform's data directory unless this machine
         // says otherwise.
         assert!(cfg.modules_dir.is_none());
@@ -222,6 +253,8 @@ mod tests {
             "4",
             "--code-max-inflight",
             "64",
+            "--module-workers",
+            "3",
             "--modules-dir",
             "/srv/modules",
         ])
@@ -236,6 +269,7 @@ mod tests {
         assert_eq!(cfg.base_domain.as_deref(), Some("example.com"));
         assert_eq!(cfg.code_workers, 4);
         assert_eq!(cfg.code_max_inflight, 64);
+        assert_eq!(cfg.module_workers, 3);
         assert_eq!(
             cfg.modules_dir.as_deref(),
             Some(std::path::Path::new("/srv/modules"))
@@ -250,6 +284,7 @@ mod tests {
         assert!(ServerConfig::from_args(["--code-max-inflight", "0"]).is_err());
         assert!(ServerConfig::from_args(["--code-workers", "lots"]).is_err());
         assert!(ServerConfig::from_args(["--code-max-inflight"]).is_err());
+        assert!(ServerConfig::from_args(["--module-workers", "0"]).is_err());
     }
 
     /// The IDE is not configurable, and asking for it is a typo like any other.

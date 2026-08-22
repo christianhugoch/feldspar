@@ -67,6 +67,19 @@ module.exports = {
       description: "Take the host process down",
       run: async () => process.exit(3),
     },
+    echo_spin: {
+      description: "Never yield, so the JS-slice watchdog has something to stop",
+      run: async () => {
+        // Deliberately not `await`ing anything: the point is JavaScript that
+        // runs without ever giving the event loop a turn, which is the only
+        // thing the slice can see. Real work rather than `for(;;){}`, because
+        // an empty loop is exactly the shape V8 is free to compile into
+        // something with no interrupt check in it — and a module that hangs
+        // the server hangs it by computing, not by idling.
+        let n = 0;
+        for (;;) n = (n + JSON.parse('{"a":1}').a) % 1000000;
+      },
+    },
   }),
   // Two entity types this version does not load: the census reports them.
   viewtemplates: [{ name: "echo_list" }, { name: "echo_show" }],
