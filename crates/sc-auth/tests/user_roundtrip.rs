@@ -34,7 +34,7 @@ async fn user_row_round_trips_into_user() -> sc_error::Result<()> {
     let catalog = Catalog::init(driver.clone() as Arc<dyn DatabaseDriver>).await?;
 
     let users = bootstrap(&catalog).await?;
-    let provider = catalog.provider(&users);
+    let provider = catalog.provider(&users)?;
 
     // Insert an admin user (UUID generated in Rust, not by a DB default).
     let id = Uuid::new_v4();

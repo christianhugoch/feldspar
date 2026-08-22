@@ -25,10 +25,18 @@ import Modal from "react-bootstrap/Modal";
 import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
-import type { ListOrphanTableSettingsResponse, ListTablesResponse } from "../client";
+import type {
+  ListDatabaseConnectionsResponse,
+  ListOrphanTableSettingsResponse,
+  ListTablesResponse,
+} from "../client";
+import { navigate } from "../App";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import {
   EMPTY_NEW_TABLE_FORM,
+  PRIMARY_DATABASE,
+  creatableDatabases,
+  databaseLabel,
   importedMessage,
   newTableError,
   tableNameFromFile,
@@ -39,6 +47,7 @@ import { roleLabel, useRoles } from "../roles";
 export function Tables() {
   const [tables, setTables] = useState<ListTablesResponse | null>(null);
   const [orphans, setOrphans] = useState<ListOrphanTableSettingsResponse>([]);
+  const [connections, setConnections] = useState<ListDatabaseConnectionsResponse>([]);
   const [creating, setCreating] = useState<NewTableForm | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -52,6 +61,16 @@ export function Tables() {
       setOrphans(o);
     } catch {
       setError("Could not load tables.");
+    }
+    // The connections come along because the New table dialog needs them, and
+    // separately because they are not what this screen is *for*: an
+    // installation with none is the common one, and a failure here must leave
+    // the tables list working with the chooser absent rather than blanking the
+    // page it is a detail of.
+    try {
+      setConnections(await api.listDatabaseConnections());
+    } catch {
+      setConnections([]);
     }
   };
 
@@ -89,12 +108,13 @@ export function Tables() {
     setError(null);
     setNotice(null);
     try {
+      const database = creating.database;
       if (creating.source === "csv" && creating.file) {
         const csv = await creating.file.text();
-        const { table, inserted } = await api.createTableFromCsv({ name, csv });
+        const { table, inserted } = await api.createTableFromCsv({ name, csv, database });
         setNotice(importedMessage(table.name, inserted));
       } else {
-        await api.createTable({ name });
+        await api.createTable({ name, database });
       }
       setCreating(null);
       await load();
@@ -111,7 +131,12 @@ export function Tables() {
         pretitle="Data"
         title="Tables"
         actions={
-          <Button onClick={() => setCreating({ ...EMPTY_NEW_TABLE_FORM })}>+ New table</Button>
+          <>
+            <Button variant="outline-secondary" onClick={() => navigate("/db-connections")}>
+              Connections
+            </Button>
+            <Button onClick={() => setCreating({ ...EMPTY_NEW_TABLE_FORM })}>+ New table</Button>
+          </>
         }
       />
       <PageBody>
@@ -199,6 +224,20 @@ export function Tables() {
                         RLS
                       </StatusBadge>
                     )}
+                    {/* Which database it came from, whenever that is not
+                        Saltcorn's own. Unbadged means primary — the common case,
+                        and the one an installation with no connections is
+                        entirely made of, so badging it would put a mark on every
+                        row and tell nobody anything. */}
+                    {t.database !== PRIMARY_DATABASE && (
+                      <StatusBadge
+                        tone="blue"
+                        className="ms-2"
+                        title={`This table lives in the database connection "${t.database}". Saltcorn reads and writes its rows but does not change its schema.`}
+                      >
+                        {t.database}
+                      </StatusBadge>
+                    )}
                   </td>
                   <td>{roleLabel(t.min_role_read, roles)}</td>
                   <td>{roleLabel(t.min_role_write, roles)}</td>
@@ -220,6 +259,7 @@ export function Tables() {
 
       <NewTableModal
         form={creating}
+        databases={creatableDatabases(connections)}
         busy={busy}
         onChange={setCreating}
         onCancel={() => setCreating(null)}
@@ -239,12 +279,14 @@ export function Tables() {
  */
 function NewTableModal({
   form,
+  databases,
   busy,
   onChange,
   onCancel,
   onSubmit,
 }: {
   form: NewTableForm | null;
+  databases: string[];
   busy: boolean;
   onChange: (form: NewTableForm) => void;
   onCancel: () => void;
@@ -268,6 +310,32 @@ function NewTableModal({
                 onChange={(e) => onChange({ ...form, name: e.target.value })}
               />
             </Form.Group>
+
+            {/* Only when there is a choice. An installation with no
+                connections has exactly one database, and asking which one to
+                use would be a question with one answer — the same reason the
+                CSV file input appears only for the CSV choice. */}
+            {databases.length > 1 && (
+              <Form.Group className="mb-3" controlId="new-table-database">
+                <Form.Label>Database</Form.Label>
+                <Form.Select
+                  value={form.database}
+                  onChange={(e) => onChange({ ...form, database: e.target.value })}
+                >
+                  {databases.map((name) => (
+                    <option key={name} value={name}>
+                      {databaseLabel(name)}
+                    </option>
+                  ))}
+                </Form.Select>
+                {form.database !== PRIMARY_DATABASE && (
+                  <Form.Text className="text-muted">
+                    The table is created in the <code>{form.database}</code> connection&rsquo;s
+                    schema, in that database — not in Saltcorn&rsquo;s own.
+                  </Form.Text>
+                )}
+              </Form.Group>
+            )}
 
             <Form.Group className="mb-3" controlId="new-table-source">
               <Form.Label>Type</Form.Label>

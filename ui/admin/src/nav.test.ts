@@ -36,6 +36,14 @@ describe("the admin sidebar", () => {
     expect(activeLabels("/llm-providers")).toEqual(["Agents"]);
   });
 
+  it("keeps the same arrangement for tables and their database connections", () => {
+    // A connection exists to put tables in the tables list, so the list of them
+    // is reached from a button on that screen and lights that section up.
+    expect(NAV.map((item) => item.label)).not.toContain("Database connections");
+    expect(activeLabels("/db-connections")).toEqual(["Tables"]);
+    expect(activeLabels("/tables")).toEqual(["Tables"]);
+  });
+
   /** Settings is the installation's own section, so it *does* have an entry —
    * and one entry however many sections of settings the server declares. */
   it("has a single entry for settings", () => {

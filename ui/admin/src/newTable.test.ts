@@ -14,6 +14,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   EMPTY_NEW_TABLE_FORM,
+  PRIMARY_DATABASE,
+  creatableDatabases,
+  databaseLabel,
   importedMessage,
   newTableError,
   tableNameFromFile,
@@ -63,5 +66,42 @@ describe("importedMessage", () => {
   it("counts in the singular when there is one row", () => {
     expect(importedMessage("invoice", 1)).toBe("1 row imported into invoice.");
     expect(importedMessage("invoice", 12)).toBe("12 rows imported into invoice.");
+  });
+});
+
+describe("which database a new table goes in", () => {
+  it("defaults to Saltcorn's own, so an installation with no connections is unchanged", () => {
+    expect(EMPTY_NEW_TABLE_FORM.database).toBe(PRIMARY_DATABASE);
+    expect(creatableDatabases([])).toEqual([PRIMARY_DATABASE]);
+  });
+
+  it("offers every connected connection beside it", () => {
+    expect(
+      creatableDatabases([
+        { name: "reporting", connected: true },
+        { name: "warehouse", connected: true },
+      ]),
+    ).toEqual([PRIMARY_DATABASE, "reporting", "warehouse"]);
+  });
+
+  it("leaves out a connection that is not connected", () => {
+    // On the Connections screen a broken connection must be shown, because
+    // editing it is the repair. Here it would be a choice that can only fail —
+    // there is no driver to send the CREATE TABLE to.
+    expect(
+      creatableDatabases([
+        { name: "reporting", connected: false },
+        { name: "warehouse", connected: true },
+      ]),
+    ).toEqual([PRIMARY_DATABASE, "warehouse"]);
+  });
+
+  it("names the primary in words and a connection by its own name", () => {
+    expect(databaseLabel(PRIMARY_DATABASE)).toMatch(/Saltcorn/);
+    expect(databaseLabel("reporting")).toBe("reporting");
+  });
+
+  it("will not submit with no database chosen", () => {
+    expect(newTableError(form({ name: "invoice", database: "" }))).toMatch(/database/);
   });
 });

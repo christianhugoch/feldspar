@@ -536,6 +536,12 @@ fn parse_operation(item: &Json) -> Result<Operation> {
             };
             Ok(Operation::CreateTable {
                 name: table,
+                // The copilot builds Saltcorn's own schema. A table on a
+                // *connected* database is an admin's deliberate choice about
+                // somebody else's database, made in the New table dialog where
+                // the connection is named and visible — not something to infer
+                // from a sentence typed at an agent.
+                database: String::new(),
                 settings: parse_table_settings(obj)?,
                 fields,
             })

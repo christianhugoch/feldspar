@@ -135,6 +135,7 @@ graph TD
   auth --> catalog
   llm --> catalog
   catalog --> db["sc-db"]
+  catalog --> pg
   catalog --> expr["sc-expr"]
   catalog --> files["sc-files"]
   pg --> db
@@ -160,7 +161,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
 | `sc-expr` | `sc-error` `sc-query` |
 | `sc-files` | `sc-error` `sc-types` |
-| `sc-catalog` | `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-catalog` | `sc-db` `sc-db-postgres` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-email` | `sc-catalog` `sc-config` `sc-error` |
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
@@ -408,6 +409,47 @@ Design rules from GOALS:
 - **Migrations are arrays of Postgres SQL values** translated per-dialect by `dialect()`.
   Per GOALS, we **do not** run schema-changing migrations during early development — we
   evolve the initial setup instead until the metadata schema is stable.
+
+### 5.0 Secondary databases (Connections)
+
+The primary database is the one `saltcorn.toml` names: the one that hosts `users` and every
+`_sc_*` table, and the one the process must reach before it can read anything at all. It is not
+the only one. An admin adds a **connection** in Tables → Connections — host, port, database,
+user, password, schema — and that database's tables join the catalog beside the primary's, with
+the connection's name badged next to each in the tables list.
+
+- **A connection is a row** (`_sc_db_connections`, §9.2), not a line in the configuration file,
+  because it is added on a running server with immediate effect. It is stored as columns rather
+  than as a URL, so the password is a column that can be declared secret: it is redacted to
+  `SECRET_SENTINEL` on every read, restored when a save echoes the sentinel back, and never
+  appears in a log line or an error.
+- **One schema per connection**, applied as the connection's own `search_path` and as a filter
+  over `introspect()`. Applying it to the connection rather than to each rendered statement is
+  what lets every existing query path work unchanged — a select, an insert, a `RETURNING` all
+  name their table unqualified.
+- **The primary wins every name.** The catalog keys tables by name, so a foreign table whose
+  name is already taken is **not** adopted; it is recorded (`Catalog::shadowed_tables`) and
+  named on the Connections screen. Anything else would let a foreign `users` repoint
+  authentication at somebody else's database.
+- **Everything routes by `Table::database`.** `Catalog::provider` sends a table's reads and
+  writes to the driver of the database that hosts it, and so does every DDL path —
+  `create_field`, `drop_field`, `drop_table` and the schema editor's batch. A table is created
+  in a *named* database (`Catalog::create_table_in`, `Operation::CreateTable`'s `database`),
+  because a table that does not exist yet has nothing to infer it from; every later operation
+  reads the answer back off the table. The New table dialog shows the chooser only when there is
+  more than one connected database to choose from.
+- **One batch, one database.** A schema batch is one transaction, and a transaction cannot span
+  two Postgres servers, so `schema_edit::apply` pins the batch to the first database an operation
+  names and refuses a second. Splitting it silently into two transactions would mean a batch that
+  can leave one database changed and the other not.
+- **Row-level security stays primary-only.** Its policies are generated against the `users` table
+  and the role GUC, both of which live in Saltcorn's own database, so `rls_available` is false
+  for a foreign table and enabling it is refused.
+- **A connection that cannot be dialled is still a connection.** Connecting proves reachability
+  by introspecting once (building a pool succeeds against a host that does not exist); a failure
+  is recorded rather than fatal, the row stays listed with its reason, and editing it is the
+  repair. The same rule as a file store's (§14.1), and the same reason: a secondary database
+  that is down must not stop a server whose primary database is fine.
 
 ### 5.1 Table constraints
 
@@ -1120,6 +1162,18 @@ erDiagram
     text description
     text backend "openai_responses | anthropic"
     json config "api_key is a redacted secret"
+    json attributes
+  }
+  DBCONN["_sc_db_connections"] {
+    uuid id PK
+    text name UK "stamped onto every table it contributes"
+    text description
+    text host
+    int port
+    text database
+    text username
+    text password "a redacted secret"
+    text schema "the one schema it presents"
     json attributes
   }
   STORES["_sc_file_stores"] {

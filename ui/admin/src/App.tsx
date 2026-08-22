@@ -38,6 +38,7 @@ import { AgentForm } from "./screens/AgentForm";
 import { Agents } from "./screens/Agents";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
+import { DbConnections } from "./screens/DbConnections";
 import { FileManager } from "./screens/FileManager";
 import { FileStores } from "./screens/FileStores";
 import { FileStoreForm } from "./screens/FileStoreForm";
@@ -145,7 +146,15 @@ type NavItem = {
 };
 
 export const NAV: NavItem[] = [
-  { href: "#/tables", label: "Tables", icon: <IconTable />, matches: ["/tables"] },
+  {
+    href: "#/tables",
+    label: "Tables",
+    icon: <IconTable />,
+    // The database connections list is part of this section rather than one of
+    // its own, the way LLM providers hang off Agents: a connection exists to put
+    // tables in the tables list, and the way to it is a button on that screen.
+    matches: ["/tables", "/db-connections"],
+  },
   {
     href: "#/applications",
     label: "Applications",
@@ -459,6 +468,9 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   if (route.startsWith("/llm-providers")) {
     return <LlmProviders />;
+  }
+  if (route.startsWith("/db-connections")) {
+    return <DbConnections />;
   }
   if (route.startsWith("/users")) {
     return <Users />;

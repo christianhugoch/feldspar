@@ -19,7 +19,10 @@ pub use sc_config_file as config_file;
 
 use std::sync::Arc;
 
-use sc_catalog::{Catalog, FileStoreConnections, connect_all_file_stores};
+use sc_catalog::{
+    Catalog, DbConnections, FileStoreConnections, connect_all_db_connections,
+    connect_all_file_stores,
+};
 use sc_db::DatabaseDriver;
 use sc_error::{Context, Error, Result};
 use sc_files::{FileStoreDef, connect_from_def};
@@ -63,6 +66,9 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_catalog::bootstrap_file_stores(&catalog)
         .await
         .context("ensuring the file stores table exists")?;
+    sc_catalog::bootstrap_db_connections(&catalog)
+        .await
+        .context("ensuring the database connections table exists")?;
     sc_catalog::bootstrap_table_meta(&catalog)
         .await
         .context("ensuring the table overlay table exists")?;
@@ -125,6 +131,29 @@ pub async fn connect_stored_file_stores(catalog: &Catalog) -> Result<FileStoreCo
     }
     for (name, error) in &report.failed {
         eprintln!("saltcorn: file store `{name}` is defined but could not be connected: {error}");
+    }
+    Ok(report)
+}
+
+/// Connect every **stored** database connection, logging the outcome, and return
+/// the report.
+///
+/// The same rule as `connect_stored_file_stores`, and it matters more here: a
+/// secondary database that is unreachable must not stop a server whose *primary*
+/// database is fine. Its tables simply are not in the catalog, the reason is
+/// recorded for the admin API, and the Connections screen is where it gets
+/// fixed.
+///
+/// The catalog is reloaded inside [`connect_all_db_connections`] when anything
+/// connected, so the foreign tables are in the tables list by the time the
+/// server starts serving.
+pub async fn connect_stored_databases(catalog: &Catalog) -> Result<DbConnections> {
+    let report = connect_all_db_connections(catalog).await?;
+    for name in &report.connected {
+        eprintln!("saltcorn: connected database `{name}`");
+    }
+    for (name, error) in &report.failed {
+        eprintln!("saltcorn: database `{name}` is defined but could not be connected: {error}");
     }
     Ok(report)
 }

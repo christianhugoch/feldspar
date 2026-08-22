@@ -12,6 +12,12 @@ rust-version.workspace = true
 sc-error.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
+# The concrete Postgres backend, for one reason: a *database connection* an
+# admin adds in the UI (`db_connections`) is a row here, and turning that row
+# into a driver needs the backend that can dial it. `sc-files::connect_from_def`
+# names `LocalFileStore` for exactly the same reason — a definition and the
+# thing it becomes belong within one crate of each other.
+sc-db-postgres.workspace = true
 sc-types.workspace = true
 sc-files.workspace = true
 # Ownership formulas (§7.3): the catalog parses and validates a table's stored
@@ -26,7 +32,6 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
 tokio = { workspace = true }
 

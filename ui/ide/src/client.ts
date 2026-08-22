@@ -10,13 +10,13 @@ export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };
 export type LoginResponse = { id: string; email: string; role: number };
-export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean }>;
-export type CreateTableRequest = { name: string };
-export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean };
-export type CreateTableFromCsvRequest = { name: string; csv: string };
-export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean }; inserted: number };
+export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string }>;
+export type CreateTableRequest = { name: string; database?: string | null };
+export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string };
+export type CreateTableFromCsvRequest = { name: string; csv: string; database?: string | null };
+export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string }; inserted: number };
 export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean };
-export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean };
+export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string };
 export type DropTableResponse = { dropped: string };
 export type DeleteTableSettingsResponse = { deleted: boolean };
 export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean }>;
@@ -44,6 +44,14 @@ export type UpdateRowResponse = unknown;
 export type ExportTableCsvResponse = { filename: string; csv: string };
 export type ImportTableCsvRequest = { csv: string };
 export type ImportTableCsvResponse = { inserted: number; updated: number; errors: Array<string> };
+export type ListDatabaseConnectionsResponse = Array<{ id: string; name: string; description: string; host: string; port: number; database: string; username: string; password: string; schema: string; connected: boolean; error?: string | null; tables: number; shadowed: Array<string> }>;
+export type CreateDatabaseConnectionRequest = { name: string; description: string; host: string; port: number; database: string; username: string; password: string; schema: string };
+export type CreateDatabaseConnectionResponse = { id: string; name: string; description: string; host: string; port: number; database: string; username: string; password: string; schema: string; connected: boolean; error?: string | null; tables: number; shadowed: Array<string> };
+export type UpdateDatabaseConnectionRequest = { name: string; description: string; host: string; port: number; database: string; username: string; password: string; schema: string };
+export type UpdateDatabaseConnectionResponse = { id: string; name: string; description: string; host: string; port: number; database: string; username: string; password: string; schema: string; connected: boolean; error?: string | null; tables: number; shadowed: Array<string> };
+export type DeleteDatabaseConnectionResponse = { deleted: boolean };
+export type TestDatabaseConnectionRequest = { name: string; description: string; host: string; port: number; database: string; username: string; password: string; schema: string };
+export type TestDatabaseConnectionResponse = { connected: boolean; error?: string | null; tables: number };
 export type ListFileStoresResponse = Array<{ id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null }>;
 export type CreateFileStoreRequest = { name: string; description: string; backend: string; config: unknown; min_role?: number | null };
 export type CreateFileStoreResponse = { id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null };
@@ -173,6 +181,11 @@ export interface ApiClient {
   deleteRow(table: string, id: string): Promise<void>;
   exportTableCsv(table: string): Promise<ExportTableCsvResponse>;
   importTableCsv(table: string, body: ImportTableCsvRequest): Promise<ImportTableCsvResponse>;
+  listDatabaseConnections(): Promise<ListDatabaseConnectionsResponse>;
+  createDatabaseConnection(body: CreateDatabaseConnectionRequest): Promise<CreateDatabaseConnectionResponse>;
+  updateDatabaseConnection(id: string, body: UpdateDatabaseConnectionRequest): Promise<UpdateDatabaseConnectionResponse>;
+  deleteDatabaseConnection(id: string): Promise<DeleteDatabaseConnectionResponse>;
+  testDatabaseConnection(body: TestDatabaseConnectionRequest): Promise<TestDatabaseConnectionResponse>;
   listFileStores(): Promise<ListFileStoresResponse>;
   createFileStore(body: CreateFileStoreRequest): Promise<CreateFileStoreResponse>;
   updateFileStore(id: string, body: UpdateFileStoreRequest): Promise<UpdateFileStoreResponse>;
@@ -486,6 +499,49 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("importTableCsv", res);
       return (await res.json()) as ImportTableCsvResponse;
+    },
+    async listDatabaseConnections() {
+      const res = await doFetch(`${baseUrl}/api/db-connections`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listDatabaseConnections", res);
+      return (await res.json()) as ListDatabaseConnectionsResponse;
+    },
+    async createDatabaseConnection(body) {
+      const res = await doFetch(`${baseUrl}/api/db-connections`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createDatabaseConnection", res);
+      return (await res.json()) as CreateDatabaseConnectionResponse;
+    },
+    async updateDatabaseConnection(id, body) {
+      const res = await doFetch(`${baseUrl}/api/db-connections/${id}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateDatabaseConnection", res);
+      return (await res.json()) as UpdateDatabaseConnectionResponse;
+    },
+    async deleteDatabaseConnection(id) {
+      const res = await doFetch(`${baseUrl}/api/db-connections/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteDatabaseConnection", res);
+      return (await res.json()) as DeleteDatabaseConnectionResponse;
+    },
+    async testDatabaseConnection(body) {
+      const res = await doFetch(`${baseUrl}/api/db-connections/test`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("testDatabaseConnection", res);
+      return (await res.json()) as TestDatabaseConnectionResponse;
     },
     async listFileStores() {
       const res = await doFetch(`${baseUrl}/api/file-stores`, {

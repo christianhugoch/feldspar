@@ -46,10 +46,13 @@ use sc_auth::{
 };
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
-    FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId, Table, TableConstraint, TableId,
-    check_file_store_saveable, connect_file_store_def, delete_file_store, file_kind_config_spec,
-    key_kind_config_spec, list_field_meta_for_table, list_file_stores, load_file_store,
-    load_file_store_by_name, orphan_table_meta, resolve_options, save_file_store,
+    DbConnectionDef, DbConnectionId, FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId, Table,
+    TableConstraint, TableId, check_db_connection_saveable, check_file_store_saveable,
+    connect_db_connection, connect_file_store_def, delete_db_connection, delete_file_store,
+    file_kind_config_spec, key_kind_config_spec, list_db_connections, list_field_meta_for_table,
+    list_file_stores, load_db_connection, load_db_connection_by_name, load_file_store,
+    load_file_store_by_name, orphan_table_meta, resolve_options, save_db_connection,
+    save_file_store,
 };
 use sc_email::Mailer;
 use sc_error::{Error, Result};
@@ -65,7 +68,8 @@ use sc_llm::{
 use sc_module::{load_module, load_module_by_name, save_module};
 use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement, Value};
 use sc_types::{
-    FormField, Operation, OperationScope, registered_rich_types, rich_type_config_spec,
+    FormField, Operation, OperationScope, SECRET_SENTINEL, registered_rich_types,
+    rich_type_config_spec,
 };
 use serde_json::{Map, Value as Json, json};
 
@@ -201,6 +205,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let obj = require_object(&ctx.body)?;
                 let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+                let database = optional_str(obj, "database");
                 // One operation through the shared schema editor (§3.3): the
                 // identifier check and the live re-projection are its, so the
                 // admin API and an agent create a table the same way. With no
@@ -210,6 +215,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     &catalog,
                     &[schema_edit::Operation::CreateTable {
                         name: name.clone(),
+                        database,
                         settings: schema_edit::TableSettings::default(),
                         fields: Vec::new(),
                     }],
@@ -242,6 +248,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let (table, outcome) = csv_rows::create_table_from_csv(
                     &catalog,
                     &name,
+                    &optional_str(obj, "database"),
                     &document,
                     Some(&admin_caller(ctx.user.as_ref())),
                 )
@@ -781,6 +788,153 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     "updated": outcome.updated,
                     "errors": outcome.errors,
                 })))
+            }
+        }
+    });
+
+    // --- database connections ----------------------------------------------
+    // The other databases whose tables share the tables list. Every response
+    // goes through `db_connection_json`, which is where the password becomes the
+    // sentinel — the same discipline `llm_provider_json` keeps, and for the same
+    // reason: an endpoint added later would have to build the JSON by hand to
+    // leak one.
+
+    reg.register("listDatabaseConnections", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let defs = list_db_connections(&catalog).await?;
+                let out: Vec<Json> = defs
+                    .iter()
+                    .map(|def| db_connection_json(&catalog, def))
+                    .collect::<Result<_>>()?;
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createDatabaseConnection", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let def = db_connection_from_body(DbConnectionId::new(), &ctx.body, None)?;
+                // Checked before dialling so a clashing name fails fast, and
+                // dialled before saving so a create that could never work leaves
+                // no row behind — the same order, for the same reason, as
+                // `createFileStore`.
+                check_db_connection_saveable(&catalog, &def).await?;
+                save_db_connection(&catalog, &def).await?;
+                // A failure here is deliberately *not* an error: the connection
+                // was created, and the reason travels in the response so the UI
+                // can show "saved, but not connected: <why>".
+                let _ = connect_db_connection(&catalog, &def).await;
+                catalog.reload().await?;
+                Ok(HandlerResponse::ok(db_connection_json(&catalog, &def)?).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateDatabaseConnection", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_db_connection_id(ctx.path_param("id")?)?;
+                let existing = load_db_connection(&catalog, id).await?.ok_or_else(|| {
+                    Error::not_found(format!("no database connection with id {id:?}"))
+                })?;
+                // The id is the path's, not the body's. A password sent back as
+                // the sentinel is the sentinel the form was shown, not the
+                // password, so what is stored is restored (§11.1).
+                let def = db_connection_from_body(id, &ctx.body, Some(&existing))?;
+                // Attributes are server-managed and the edit form neither shows
+                // nor sends them, so they are carried across rather than reset.
+                let def = DbConnectionDef {
+                    attributes: existing.attributes.clone(),
+                    ..def
+                };
+                save_db_connection(&catalog, &def).await?;
+
+                // A rename leaves the old driver registered under the old name,
+                // still contributing tables stamped with a connection that no
+                // longer exists. This is the one place that knows both the
+                // before and the after, so it is where the old one goes.
+                if existing.name != def.name {
+                    catalog.disconnect_database(&existing.name)?;
+                }
+                // Re-dial under the current settings so an edited host takes
+                // effect immediately, with no restart.
+                catalog.disconnect_database(&def.name)?;
+                let _ = connect_db_connection(&catalog, &def).await;
+                catalog.reload().await?;
+                Ok(HandlerResponse::ok(db_connection_json(&catalog, &def)?))
+            }
+        }
+    });
+
+    reg.register("deleteDatabaseConnection", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_db_connection_id(ctx.path_param("id")?)?;
+                let existing = load_db_connection(&catalog, id).await?.ok_or_else(|| {
+                    Error::not_found(format!("no database connection with id {id:?}"))
+                })?;
+                let deleted = delete_db_connection(&catalog, id).await?;
+                // Removing the row is the definition's end; disconnecting and
+                // reloading is what takes its tables out of the catalog. Both
+                // are needed, or the tables list would go on offering tables
+                // from a connection the admin had just removed.
+                if deleted {
+                    catalog.disconnect_database(&existing.name)?;
+                    catalog.reload().await?;
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    reg.register("testDatabaseConnection", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // A test of an *existing* connection may carry the sentinel
+                // instead of the password — the form shows the sentinel — so the
+                // stored one is looked up by name and merged back in. Without
+                // this, Test would fail on every connection the admin had not
+                // retyped the password for.
+                let name = require_object(&ctx.body)?
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                let existing = if name.is_empty() {
+                    None
+                } else {
+                    load_db_connection_by_name(&catalog, &name).await?
+                };
+                let def =
+                    db_connection_from_body(DbConnectionId::new(), &ctx.body, existing.as_ref())?;
+                Ok(HandlerResponse::ok(match sc_catalog::dial(&def).await {
+                    Ok(driver) => json!({
+                        "connected": true,
+                        "error": Json::Null,
+                        "tables": driver.introspect().await?.len(),
+                    }),
+                    // A failed test is an answer, not a request that went wrong:
+                    // 200 with the reason, so the form shows it beside the
+                    // button rather than as a red banner about the API.
+                    Err(e) => json!({
+                        "connected": false,
+                        "error": sc_error::format_causes(&e),
+                        "tables": 0,
+                    }),
+                }))
             }
         }
     });
@@ -3798,6 +3952,127 @@ pub(crate) fn file_store_from_body(id: FileStoreDefId, body: &Json) -> Result<Fi
     })
 }
 
+/// A database connection as the API returns it (matching
+/// `db_connection_schema`), with the password replaced by the sentinel and the
+/// live state the running server knows added.
+///
+/// **The redaction is here and nowhere else**, for the reason
+/// [`llm_provider_json`] keeps its: every response carrying a connection goes
+/// through this, so an endpoint added later cannot return a password without
+/// building the JSON by hand.
+fn db_connection_json(catalog: &Catalog, def: &DbConnectionDef) -> Result<Json> {
+    let connected = catalog.database(&def.name)?.is_some();
+    let error = catalog.database_error(&def.name)?;
+    // How many of the catalog's tables this connection actually contributed —
+    // the number that answers "did it work", where `connected` only answers "did
+    // it dial".
+    let tables = catalog
+        .tables()?
+        .iter()
+        .filter(|t| t.database.0 == def.name)
+        .count();
+    Ok(json!({
+        "id": def.id.0,
+        "name": def.name,
+        "description": def.description,
+        "host": def.host,
+        "port": def.port,
+        "database": def.database,
+        "username": def.username,
+        // Never the stored password. An empty one stays empty rather than
+        // becoming the sentinel: "no password" is a real state, and showing dots
+        // for it would tell the admin a password exists that does not.
+        "password": if def.password.is_empty() { "" } else { SECRET_SENTINEL },
+        "schema": def.schema,
+        "connected": connected,
+        "error": error,
+        "tables": tables,
+        "shadowed": catalog.shadowed_tables(&def.name)?,
+    }))
+}
+
+/// Build a [`DbConnectionDef`] from a request body, restoring the stored
+/// password when the body echoes the sentinel back.
+///
+/// `existing` is the stored row on an update (and on a test of a saved
+/// connection), `None` on a create. Passing it is what makes "save the form
+/// without retyping the password" work, and passing `None` on a create is what
+/// makes a literal sentinel there mean itself rather than a lookup that would
+/// find nothing.
+fn db_connection_from_body(
+    id: DbConnectionId,
+    body: &Json,
+    existing: Option<&DbConnectionDef>,
+) -> Result<DbConnectionDef> {
+    let obj = require_object(body)?;
+    let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+    let str_field = |key: &str| -> String {
+        obj.get(key)
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+
+    // Absent, null or zero means "the Postgres default", which is what an admin
+    // who left the box alone meant. Anything outside the TCP range is rejected
+    // rather than clamped.
+    let port = match obj.get("port") {
+        None | Some(Json::Null) => sc_catalog::DEFAULT_PORT,
+        Some(value) => {
+            let raw = value
+                .as_i64()
+                .ok_or_else(|| Error::invalid("field `port` must be a number"))?;
+            if raw == 0 {
+                sc_catalog::DEFAULT_PORT
+            } else {
+                u16::try_from(raw).map_err(|_| {
+                    Error::invalid(format!("field `port` must be a TCP port, got {raw}"))
+                })?
+            }
+        }
+    };
+
+    let submitted = obj
+        .get("password")
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let password = match (submitted.as_str(), existing) {
+        (SECRET_SENTINEL, Some(existing)) => existing.password.clone(),
+        // A sentinel with nothing stored behind it is not a password anybody
+        // meant to set; it is a form that was shown one for a connection this
+        // request is not about. Empty is the safe reading.
+        (SECRET_SENTINEL, None) => String::new(),
+        (other, _) => other.to_owned(),
+    };
+
+    let schema = str_field("schema");
+    Ok(DbConnectionDef {
+        id,
+        name,
+        description: str_field("description"),
+        host: str_field("host"),
+        port,
+        database: str_field("database"),
+        username: str_field("username"),
+        password,
+        schema: if schema.is_empty() {
+            sc_catalog::DEFAULT_SCHEMA.to_owned()
+        } else {
+            schema
+        },
+        attributes: sc_types::Attrs::new(),
+    })
+}
+
+/// Parse a database connection id from a path segment.
+fn parse_db_connection_id(raw: &str) -> Result<DbConnectionId> {
+    uuid::Uuid::parse_str(raw)
+        .map(DbConnectionId)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid database connection id")))
+}
+
 fn parse_file_store_id(raw: &str) -> Result<FileStoreDefId> {
     uuid::Uuid::parse_str(raw)
         .map(FileStoreDefId)
@@ -4486,7 +4761,17 @@ pub(crate) fn table_json(table: &Table, rls_available: bool) -> Json {
             .unwrap_or_default(),
         "ownership_error": table.ownership_error,
         "rls_enabled": table.rls_enabled,
-        "rls_available": rls_available,
+        // The backend's capability *and* whose database this is: RLS is DDL
+        // against the primary driver, so it is never available on a table a
+        // connection contributed. The SPA renders the toggle from this, and a
+        // toggle that can only ever be refused is not a setting, it is a trap.
+        "rls_available": rls_available && table.database == sc_catalog::DbId::primary(),
+        // Which database hosts it: `primary` for Saltcorn's own, otherwise the
+        // name of the connection an admin added. The list screen shows anything
+        // that is not the primary as a badge beside the table's name, because a
+        // list mixing two databases and saying so nowhere would be a list an
+        // admin could act on wrongly.
+        "database": table.database.0,
     })
 }
 

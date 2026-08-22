@@ -57,7 +57,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sc_catalog::{
-    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
+    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind, DbId,
     FIELD_META_TABLE, FieldId, FieldMeta, SchemaChanged, SchemaProjection, SchemaStep, Table,
     TableConstraint, TableId, TableMeta, create_constraint_steps, disable_rls_sql,
     drop_constraint_steps, enable_rls_sql, formula_fields, load_field_meta_by_field,
@@ -328,6 +328,15 @@ pub enum Operation {
     CreateTable {
         /// The new table's name.
         name: String,
+        /// Which database to create it in: `primary` (or empty, which means the
+        /// same) for Saltcorn's own, otherwise the name of a connected database
+        /// connection (§5.0).
+        ///
+        /// Named rather than inferred, because a table that does not exist yet
+        /// has nothing to infer it from. Every later operation on the table —
+        /// add a field, drop a column, drop it — reads the answer back off the
+        /// table this created, so this is the only place the question is asked.
+        database: String,
         /// Its settings.
         settings: TableSettings,
         /// Its fields, beside the primary key it is given unasked.
@@ -487,7 +496,13 @@ pub async fn apply(
         return Ok(applied);
     }
 
-    catalog.apply_schema_batch(&steps).await?;
+    // The batch is one transaction against the one database it was pinned to
+    // (`Plan::target`). `None` cannot happen for a non-empty batch — every
+    // operation pins or is refused — but a plan that somehow named nothing is
+    // Saltcorn's own database, which is where a batch went before databases were
+    // a thing anyone could choose.
+    let database = plan.database.clone().unwrap_or_else(DbId::primary);
+    catalog.apply_schema_batch_in(&database, &steps).await?;
 
     // Past the commit. The columns are there; the overlay rows are not yet, and
     // cannot join the transaction that made them — so a failure here is reported
@@ -545,6 +560,18 @@ pub async fn forget_table_settings(catalog: &Catalog, table: &str) -> Result<boo
     // exposing it must pick that up now rather than at the next restart.
     catalog.notify_schema_changed(&SchemaChanged::TableChanged(table.to_owned()))?;
     Ok(true)
+}
+
+/// The database an operation named, read as a [`DbId`].
+///
+/// Empty means the primary, so a caller that does not care about databases —
+/// every caller that existed before connections did — writes nothing and gets
+/// Saltcorn's own database, which is what it always got.
+fn parse_database(name: &str) -> DbId {
+    match name.trim() {
+        "" => DbId::primary(),
+        other => DbId(other.to_owned()),
+    }
 }
 
 /// Prefix an operation's error with which operation it was, by index and by the
@@ -622,6 +649,13 @@ struct Plan {
     /// built against the schema the batch ends with.
     constraints: Vec<(String, ConstraintOp)>,
     changes: Vec<SchemaChanged>,
+    /// The database every operation in this batch touches.
+    ///
+    /// `None` until the first operation names one. A batch is **one
+    /// transaction**, and a transaction cannot span two Postgres servers, so a
+    /// batch that reaches into two databases is refused rather than silently
+    /// split into two that can half-fail (see [`Plan::target`]).
+    database: Option<DbId>,
     applied: Applied,
 }
 
@@ -645,8 +679,32 @@ impl Plan {
             deferred_constraints: Vec::new(),
             constraints: Vec::new(),
             changes: Vec::new(),
+            database: None,
             applied: Applied::default(),
         })
+    }
+
+    /// Pin this batch to `database`, or refuse it for reaching into a second
+    /// one.
+    ///
+    /// The refusal is the honest answer, not a limitation to route around: the
+    /// DDL runs in one transaction, two databases mean two transactions, and two
+    /// transactions mean a batch that can leave the first database changed and
+    /// the second not. A caller with work in two databases sends two batches and
+    /// knows that is what it did.
+    fn target(&mut self, database: &DbId, table: &str) -> Result<()> {
+        match &self.database {
+            Some(pinned) if pinned != database => Err(Error::invalid(format!(
+                "this batch already changes database `{}`, and `{table}` is in `{}`; \
+                 a batch of schema changes is one transaction, so it cannot span two databases",
+                pinned.0, database.0
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                self.database = Some(database.clone());
+                Ok(())
+            }
+        }
     }
 
     async fn push(
@@ -656,14 +714,30 @@ impl Plan {
         op: &Operation,
         grants: &Grants,
     ) -> Result<()> {
+        // Which database this operation lands in, pinned for the whole batch. A
+        // create says so itself; everything else reads it off the table it names,
+        // and an operation naming a table that is not there is left to its own
+        // handler, which reports it far better than this could.
+        match op {
+            Operation::CreateTable { database, .. } => {
+                self.target(&parse_database(database), op.table())?
+            }
+            other => {
+                if let Some(table) = self.projection.get(other.table()) {
+                    let database = table.database.clone();
+                    self.target(&database, other.table())?;
+                }
+            }
+        }
         match op {
             Operation::CreateTable {
                 name,
+                database,
                 settings,
                 fields,
             } => {
                 grants.check(grants.create, "create a table", GRANT_CREATE)?;
-                self.create_table(catalog, index, op, name, settings, fields)
+                self.create_table(catalog, index, op, name, database, settings, fields)
                     .await
             }
             Operation::AlterTable { table, settings } => {
@@ -719,12 +793,14 @@ impl Plan {
 
     // --- create ---------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_table(
         &mut self,
         catalog: &Catalog,
         index: usize,
         op: &Operation,
         name: &str,
+        database: &str,
         settings: &TableSettings,
         fields: &[FieldSpec],
     ) -> Result<()> {
@@ -744,7 +820,12 @@ impl Plan {
         // none. A table without one is a real state: the admin adds the key
         // field afterwards like any other field, and the field list says in red
         // that it is missing until they do.
-        let mut table = Table::projected(sc_catalog::DbId::primary(), name, Vec::new(), Vec::new());
+        // The database is checked here rather than at the DDL, so "there is no
+        // connection called `reporting`" is reported while the whole batch is
+        // still a plan and nothing has been applied.
+        let database = parse_database(database);
+        catalog.driver_named(&database)?;
+        let mut table = Table::projected(database, name, Vec::new(), Vec::new());
         // In the projection before the fields resolve, so a self-referencing key
         // (`employees.manager` → `employees`) finds its own primary key — which
         // is why the key columns go in as they are declared, below, rather than
@@ -882,6 +963,22 @@ impl Plan {
             meta.set_ownership_formula(Some(formula.trim()));
         }
         if let Some(enabled) = settings.rls_enabled {
+            // Row-level security is DDL — `CREATE POLICY` against the primary
+            // driver — so it is not available on a table a *connection*
+            // contributed. Refused here rather than left to fail as a puzzling
+            // Postgres error against a table of the same name in the wrong
+            // database. The rest of a foreign table's settings (its label, its
+            // roles) are the overlay's and work as they do anywhere.
+            if enabled
+                && let Some(projected) = self.projection.get(table)
+                && projected.database != sc_catalog::DbId::primary()
+            {
+                return Err(Error::invalid(format!(
+                    "table `{table}` lives in database connection `{}`; \
+                     row-level security applies to Saltcorn's own database only",
+                    projected.database.0
+                )));
+            }
             meta.set_rls_enabled(enabled);
         }
         let meta = meta.clone();

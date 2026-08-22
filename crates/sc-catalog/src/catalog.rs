@@ -33,6 +33,34 @@ pub struct Catalog {
     primary: Arc<dyn DatabaseDriver>,
     /// The primary database's id, stamped onto every [`Table`] it hosts.
     primary_db: DbId,
+    /// The **secondary** databases an admin has connected (§9's Connections
+    /// screen), keyed by the connection's name — which is also the [`DbId`]
+    /// stamped onto every table they contribute.
+    ///
+    /// They are held here, beside the primary, because that is what makes their
+    /// tables ordinary: [`reload`](Catalog::reload) introspects them into the
+    /// same cache, so a foreign table is found by
+    /// [`get`](Catalog::get) and served by [`provider`](Catalog::provider) with
+    /// nothing above this crate knowing which database it came from — except
+    /// where it should, which is the badge in the admin UI and the refusal to
+    /// run DDL against it.
+    databases: RwLock<HashMap<String, Arc<dyn DatabaseDriver>>>,
+    /// Why a *stored* connection is **not** in [`databases`], keyed by name —
+    /// the same arrangement, for the same reason, as
+    /// [`file_store_errors`](Catalog::file_store_errors).
+    database_errors: RwLock<HashMap<String, String>>,
+    /// Tables a connection offered that the catalog did **not** adopt, keyed by
+    /// connection name, because a table of that name was already there.
+    ///
+    /// The catalog keys tables by name, so two databases offering `orders` can
+    /// only produce one `orders`. The primary always wins and the loser is
+    /// **named** rather than dropped in silence: an admin who connects a
+    /// database and cannot find one of its tables has to be able to read why,
+    /// and "it clashed with a table you already had" is the whole answer.
+    ///
+    /// Rebuilt from scratch on every [`reload`](Catalog::reload), like
+    /// [`field_overlay_issues`](Catalog::field_overlay_issues).
+    shadowed_tables: RwLock<HashMap<String, Vec<String>>>,
     /// Cache of tables keyed by id, rebuilt from introspection.
     cache: RwLock<HashMap<TableId, Table>>,
     /// Connected file stores, keyed by their [`name`](FileStore::name). Only the
@@ -99,6 +127,9 @@ impl Catalog {
         let catalog = Catalog {
             primary,
             primary_db: DbId::primary(),
+            databases: RwLock::new(HashMap::new()),
+            database_errors: RwLock::new(HashMap::new()),
+            shadowed_tables: RwLock::new(HashMap::new()),
             cache: RwLock::new(HashMap::new()),
             file_stores: RwLock::new(HashMap::new()),
             file_store_errors: RwLock::new(HashMap::new()),
@@ -133,6 +164,49 @@ impl Catalog {
         for physical in &physicals {
             let table = Table::from_physical(self.primary_db.clone(), physical);
             map.insert(table.id.clone(), table);
+        }
+
+        // Then every secondary connection, on the same terms: introspection is
+        // what makes a table exist here too, so a connected database needs no
+        // registration step and a disconnected one contributes nothing.
+        //
+        // **The primary wins every name.** It hosts `users` and the `_sc_*`
+        // tables, and a foreign table quietly taking one of those names would
+        // repoint authentication at somebody else's database. So the insert is
+        // conditional and the losers are recorded (see `shadowed_tables`).
+        // Connections are read out of the lock first: introspection awaits, and
+        // the guard must not be held across it.
+        let mut shadowed: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, driver) in self.connected_databases()? {
+            let foreign = match driver.introspect().await {
+                Ok(tables) => {
+                    self.clear_database_error(&name)?;
+                    tables
+                }
+                // A database that was reachable when it was connected and is not
+                // now is exactly the file-store case: the connection stays
+                // defined, its tables drop out of the catalog, and the reason is
+                // recorded for the admin to read. Failing the whole reload would
+                // take the primary database's tables down with it.
+                Err(e) => {
+                    self.record_database_error(&name, e.to_string())?;
+                    continue;
+                }
+            };
+            for physical in &foreign {
+                let table = Table::from_physical(DbId(name.clone()), physical);
+                if map.contains_key(&table.id) {
+                    shadowed
+                        .entry(name.clone())
+                        .or_default()
+                        .push(table.name.clone());
+                    continue;
+                }
+                map.insert(table.id.clone(), table);
+            }
+        }
+        for names in shadowed.values_mut() {
+            names.sort();
         }
 
         // Only query the overlay when the database has one. Asking first is not
@@ -217,6 +291,12 @@ impl Catalog {
             .write()
             .map_err(|_| Error::msg("catalog field-overlay issue lock poisoned"))?;
         *issues = field_issues;
+        drop(issues);
+        let mut guard = self
+            .shadowed_tables
+            .write()
+            .map_err(|_| Error::msg("catalog shadowed-table lock poisoned"))?;
+        *guard = shadowed;
         Ok(())
     }
 
@@ -323,9 +403,39 @@ impl Catalog {
         self.create_table_inner(name.into(), fields, unlogged).await
     }
 
+    /// Create a table **in a named database** — the primary, or one of the
+    /// connections an admin has added — then reload and return it.
+    ///
+    /// The database is named rather than inferred, because at this moment there
+    /// is nothing to infer it from: the table does not exist yet, so there is no
+    /// row in the cache carrying a [`DbId`]. It is the one schema operation that
+    /// has to be told, and every later one — add a field, drop a column, drop the
+    /// table — reads the answer back off the table it created.
+    pub async fn create_table_in(
+        &self,
+        database: &DbId,
+        name: impl Into<String>,
+        fields: &[DataField],
+    ) -> Result<Table> {
+        self.create_table_in_inner(database, name.into(), fields, false)
+            .await
+    }
+
     /// The shared body of the two create-table entry points.
     async fn create_table_inner(
         &self,
+        name: String,
+        fields: &[DataField],
+        unlogged: bool,
+    ) -> Result<Table> {
+        self.create_table_in_inner(&self.primary_db.clone(), name, fields, unlogged)
+            .await
+    }
+
+    /// The shared body of every create-table entry point, database and all.
+    async fn create_table_in_inner(
+        &self,
+        database: &DbId,
         name: String,
         fields: &[DataField],
         unlogged: bool,
@@ -341,7 +451,7 @@ impl Catalog {
             .filter(|f| f.primary_key)
             .map(|f| f.base.name.clone())
             .collect();
-        self.primary
+        self.driver_named(database)?
             .apply_schema(&SchemaChange::CreateTable {
                 name: name.clone(),
                 columns,
@@ -353,10 +463,32 @@ impl Catalog {
         self.require(&name)
     }
 
+    /// The driver that DDL naming `table` must be sent to: the driver of the
+    /// database that hosts it.
+    ///
+    /// The whole reason schema changes are routed rather than sent to
+    /// [`primary`](Catalog::primary): a table an admin created on a connection
+    /// is theirs to alter and to drop, and the same `ALTER TABLE` sent to the
+    /// primary would either fail confusingly or — if a table of that name
+    /// existed there too — alter the wrong one, in the wrong database, with no
+    /// error to say so.
+    ///
+    /// A table that is **not in the catalog** routes to the primary, and that is
+    /// deliberate rather than a fallback: the callers that create one
+    /// legitimately name a table before it exists, and a create names its own
+    /// database (see [`create_table_in`](Catalog::create_table_in)) rather than
+    /// asking here.
+    fn driver_for_table(&self, name: &str) -> Result<Arc<dyn DatabaseDriver>> {
+        match self.get(name)? {
+            Some(table) => self.driver_for(&table),
+            None => Ok(self.primary.clone()),
+        }
+    }
+
     /// Add a field to an existing table, then reload the cache and return the
     /// updated [`Table`].
     pub async fn create_field(&self, table: &str, field: &DataField) -> Result<Table> {
-        self.primary
+        self.driver_for_table(table)?
             .apply_schema(&SchemaChange::AddColumn {
                 table: table.to_owned(),
                 column: field.to_column_def(),
@@ -382,8 +514,12 @@ impl Catalog {
     /// issued. A foreign-key violation out of Postgres is not something an agent
     /// or an admin can act on.
     pub async fn drop_table(&self, name: &str) -> Result<()> {
+        // The driver is resolved *before* the overlay is forgotten: after it,
+        // `_sc_tables` no longer says which database the table is in, and the
+        // cache lookup this needs would be gone with it.
+        let driver = self.driver_for_table(name)?;
         self.forget_table_meta(name).await?;
-        self.primary
+        driver
             .apply_schema(&SchemaChange::DropTable {
                 name: name.to_owned(),
                 if_exists: false,
@@ -398,13 +534,14 @@ impl Catalog {
     /// that introduces it — dropping the column that is not there would be an
     /// error naming a column the admin never created.
     pub async fn drop_field(&self, table: &str, field: &str) -> Result<Table> {
+        let driver = self.driver_for_table(table)?;
         let is_calc = self
             .get(table)?
             .and_then(|t| t.field(field).map(DataField::is_calc))
             .unwrap_or(false);
         self.forget_field_meta(table, field).await?;
         if !is_calc {
-            self.primary
+            driver
                 .apply_schema(&SchemaChange::DropColumn {
                     table: table.to_owned(),
                     column: field.to_owned(),
@@ -457,7 +594,21 @@ impl Catalog {
     /// **The catalog is not reloaded here**: a batch reloads once, when it is
     /// done, rather than once per operation.
     pub async fn apply_schema_batch(&self, steps: &[SchemaStep]) -> Result<()> {
-        let mut tx = self.primary.begin().await?;
+        self.apply_schema_batch_in(&self.primary_db.clone(), steps)
+            .await
+    }
+
+    /// [`apply_schema_batch`](Self::apply_schema_batch) against a **named**
+    /// database.
+    ///
+    /// One batch, one database, and that is a constraint rather than an
+    /// oversight: a batch is one transaction, and a transaction cannot span two
+    /// Postgres servers. A caller with operations for two databases issues two
+    /// batches and knows that the second failing does not undo the first —
+    /// `sc_api::schema_edit` refuses such a batch outright rather than pretending
+    /// otherwise.
+    pub async fn apply_schema_batch_in(&self, database: &DbId, steps: &[SchemaStep]) -> Result<()> {
+        let mut tx = self.driver_named(database)?.begin().await?;
         for step in steps {
             let outcome = match step {
                 SchemaStep::Change(change) => tx.apply_schema(change).await,
@@ -563,13 +714,170 @@ impl Catalog {
         Ok(table)
     }
 
-    /// A provider that serves the given table's rows. For a database-backed table
-    /// this is the trivial [`DriverTableProvider`] over the primary driver.
-    pub fn provider(&self, table: &Table) -> Arc<dyn TableProvider> {
-        Arc::new(DriverTableProvider::new(
-            self.primary.clone(),
+    /// A provider that serves the given table's rows: the trivial
+    /// [`DriverTableProvider`] over the driver of the database that **hosts**
+    /// it.
+    ///
+    /// It returns a `Result` for one reason, and it is the reason the whole
+    /// multi-database arrangement is safe: a table stamped with a connection
+    /// that is no longer connected has no driver, and the honest answer is to
+    /// say so. Falling back to the primary would run somebody's query against
+    /// the wrong database — the same table name, different rows — which is a
+    /// failure nobody would see until the data was wrong.
+    pub fn provider(&self, table: &Table) -> Result<Arc<dyn TableProvider>> {
+        Ok(Arc::new(DriverTableProvider::new(
+            self.driver_for(table)?,
             table.fields.clone(),
-        ))
+        )))
+    }
+
+    /// The driver of the database hosting `table` — the primary, or the
+    /// secondary connection whose name the table's [`DbId`] carries.
+    pub fn driver_for(&self, table: &Table) -> Result<Arc<dyn DatabaseDriver>> {
+        if table.database == self.primary_db {
+            return Ok(self.primary.clone());
+        }
+        self.database(&table.database.0)?.ok_or_else(|| {
+            Error::not_found(format!(
+                "table `{}` is served by database connection `{}`, which is not connected",
+                table.name, table.database.0
+            ))
+        })
+    }
+
+    /// The driver of the database with this id: the primary, or a connected
+    /// secondary.
+    pub fn driver_named(&self, database: &DbId) -> Result<Arc<dyn DatabaseDriver>> {
+        if *database == self.primary_db {
+            return Ok(self.primary.clone());
+        }
+        self.database(&database.0)?.ok_or_else(|| {
+            Error::not_found(format!(
+                "database connection `{}` is not connected",
+                database.0
+            ))
+        })
+    }
+
+    /// Register a secondary database under `name`, making its tables eligible
+    /// for the next [`reload`](Catalog::reload).
+    ///
+    /// Replaces any driver already connected under that name — re-connecting a
+    /// name re-points it, which is what editing a connection's host does — and
+    /// clears any recorded [`database_error`](Catalog::database_error), since
+    /// the connection demonstrably works now.
+    ///
+    /// `primary` is refused rather than shadowed: it is the [`DbId`] every table
+    /// of the primary database carries, and a second holder of that name would
+    /// make `driver_for` ambiguous in the one direction that matters.
+    pub fn connect_database(&self, name: &str, driver: Arc<dyn DatabaseDriver>) -> Result<()> {
+        if name == self.primary_db.0 {
+            return Err(Error::invalid(format!(
+                "`{name}` is the name of the primary database and cannot name a connection"
+            )));
+        }
+        let mut guard = self
+            .databases
+            .write()
+            .map_err(|_| Error::msg("catalog database registry lock poisoned"))?;
+        guard.insert(name.to_owned(), driver);
+        drop(guard);
+        self.clear_database_error(name)
+    }
+
+    /// Disconnect the secondary database named `name`, returning whether one was
+    /// connected. Also clears any recorded connection error for it.
+    ///
+    /// The caller reloads afterwards: this removes the driver, and it is the
+    /// reload that removes its tables from the cache.
+    pub fn disconnect_database(&self, name: &str) -> Result<bool> {
+        let mut guard = self
+            .databases
+            .write()
+            .map_err(|_| Error::msg("catalog database registry lock poisoned"))?;
+        let existed = guard.remove(name).is_some();
+        drop(guard);
+        self.clear_database_error(name)?;
+        Ok(existed)
+    }
+
+    /// The connected secondary database with the given name, if any.
+    pub fn database(&self, name: &str) -> Result<Option<Arc<dyn DatabaseDriver>>> {
+        let guard = self
+            .databases
+            .read()
+            .map_err(|_| Error::msg("catalog database registry lock poisoned"))?;
+        Ok(guard.get(name).cloned())
+    }
+
+    /// The names of every connected secondary database, sorted.
+    pub fn database_names(&self) -> Result<Vec<String>> {
+        let guard = self
+            .databases
+            .read()
+            .map_err(|_| Error::msg("catalog database registry lock poisoned"))?;
+        let mut names: Vec<String> = guard.keys().cloned().collect();
+        drop(guard);
+        names.sort();
+        Ok(names)
+    }
+
+    /// Every connected secondary database as `(name, driver)`, cloned out of the
+    /// lock so a caller may await between them.
+    fn connected_databases(&self) -> Result<Vec<(String, Arc<dyn DatabaseDriver>)>> {
+        let guard = self
+            .databases
+            .read()
+            .map_err(|_| Error::msg("catalog database registry lock poisoned"))?;
+        let mut pairs: Vec<(String, Arc<dyn DatabaseDriver>)> = guard
+            .iter()
+            .map(|(name, driver)| (name.clone(), driver.clone()))
+            .collect();
+        drop(guard);
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(pairs)
+    }
+
+    /// Record why the connection named `name` is not usable, so the admin UI can
+    /// show a connection that is defined but not connected, with the reason.
+    pub fn record_database_error(&self, name: &str, error: impl Into<String>) -> Result<()> {
+        let mut guard = self
+            .database_errors
+            .write()
+            .map_err(|_| Error::msg("catalog database error registry lock poisoned"))?;
+        guard.insert(name.to_owned(), error.into());
+        Ok(())
+    }
+
+    /// Why the connection named `name` is not usable, if it is not.
+    pub fn database_error(&self, name: &str) -> Result<Option<String>> {
+        let guard = self
+            .database_errors
+            .read()
+            .map_err(|_| Error::msg("catalog database error registry lock poisoned"))?;
+        Ok(guard.get(name).cloned())
+    }
+
+    /// Forget any recorded connection error for `name`.
+    fn clear_database_error(&self, name: &str) -> Result<()> {
+        let mut guard = self
+            .database_errors
+            .write()
+            .map_err(|_| Error::msg("catalog database error registry lock poisoned"))?;
+        guard.remove(name);
+        Ok(())
+    }
+
+    /// The tables the connection named `name` offered and the catalog did not
+    /// adopt, because something already held the name (see
+    /// [`shadowed_tables`](Catalog::shadowed_tables)). Sorted; empty is the
+    /// ordinary case.
+    pub fn shadowed_tables(&self, name: &str) -> Result<Vec<String>> {
+        let guard = self
+            .shadowed_tables
+            .read()
+            .map_err(|_| Error::msg("catalog shadowed-table lock poisoned"))?;
+        Ok(guard.get(name).cloned().unwrap_or_default())
     }
 
     /// Connect a named file store, making it resolvable by

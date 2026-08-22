@@ -20,7 +20,8 @@ use sc_app::{
 use sc_auth::SessionStore;
 use sc_cli::DbConfig;
 use sc_cli::{
-    connect_catalog, connect_file_stores, connect_stored_file_stores, extract_file_stores,
+    connect_catalog, connect_file_stores, connect_stored_databases, connect_stored_file_stores,
+    extract_file_stores,
 };
 use sc_error::Result;
 use sc_server::{AppMounts, ServerConfig, ServiceManager, admin_handlers, mount_all, serve};
@@ -147,6 +148,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // disk unmounted since it was defined — is logged and skipped, not fatal;
     // it stays listed and editable so the admin can repoint it.
     connect_stored_file_stores(&catalog).await?;
+    connect_stored_databases(&catalog).await?;
     // Then any requested with `--file-store NAME=PATH`, which are ephemeral and
     // must not silently shadow a configured store of the same name.
     connect_file_stores(&catalog, &file_store_specs)?;
@@ -359,6 +361,7 @@ async fn build_app_command(args: &[String]) -> Result<()> {
     // replace the server's answer with a placeholder.
     set_public_origin(&catalog, &db, base_domain.as_deref());
     connect_stored_file_stores(&catalog).await?;
+    connect_stored_databases(&catalog).await?;
     connect_file_stores(&catalog, &file_store_specs)?;
 
     let app = load_application_by_subdomain(&catalog, &subdomain)
@@ -439,6 +442,7 @@ async fn open_app(
     // need the URL for the same reason a build does.
     set_public_origin(&catalog, db, base_domain);
     connect_stored_file_stores(&catalog).await?;
+    connect_stored_databases(&catalog).await?;
     connect_file_stores(&catalog, file_stores)?;
     let app = load_application_by_subdomain(&catalog, subdomain)
         .await?

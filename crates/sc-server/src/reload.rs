@@ -28,12 +28,13 @@
 //! that has never been built has nothing to load and says so.
 //!
 //! What it does *not* reload, and still wants a restart: the trigger set, the
-//! agents, the LLM providers, and the file-store *connections* (a store's
-//! contents are read live, but a store definition added since boot is not
-//! connected here). Those are assembled once at boot and shared into the
-//! scheduler and the catalog's write path, so swapping them is a larger change
-//! than a reload — and each already has an admin API that updates the live set
-//! in place.
+//! agents, the LLM providers, the file-store *connections* (a store's contents
+//! are read live, but a store definition added since boot is not connected
+//! here), and the **database connections** (a connected database is
+//! re-introspected with the catalog, but one defined since boot is not dialled
+//! here). Those are assembled once at boot and shared into the scheduler and the
+//! catalog's write path, so swapping them is a larger change than a reload — and
+//! each already has an admin API that updates the live set in place.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

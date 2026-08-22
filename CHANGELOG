@@ -2,6 +2,80 @@
 
 Changes in reverse chronological order.
 
+## Database connections: other PostgreSQL databases in the tables list
+
+Saltcorn had exactly one database, and every `Table` in the catalog carried a `DbId` that had
+only ever held one value. **Tables → Connections** gives it a second one: an admin types a host,
+port, database, user, password and schema, presses Connect, and that database's tables are in
+the tables list beside Saltcorn's own — badged with the connection's name, opened, read and
+written like any other table, with no restart.
+
+**A connection is a row** (`_sc_db_connections`), for the reason a file store is one rather than
+a line in `saltcorn.toml`: the file names the *primary* connection, which the process needs
+before it can read anything at all, while a secondary connection is something an admin adds
+while the server is running. It is stored as columns rather than as a URL, so the password is a
+column that can be declared secret — it goes out as `••••••••` and comes back as `••••••••` when
+the admin did not retype it, and never appears in a log line or an error, which a password
+buried in a URL string would.
+
+**One schema per connection**, and the schema is applied to the connection itself as
+`search_path`, not bolted onto each rendered statement. That is what lets every existing query
+path work unchanged: a select, an insert, a `RETURNING` all name their table unqualified, and
+none of them has to learn that a particular connection is special. Introspection is filtered to
+the same schema, so nothing outside it is ever offered as a table.
+
+**The primary wins every name.** The catalog keys tables by name, so two databases offering
+`orders` can only produce one `orders` — and the one that survives is Saltcorn's, because a
+foreign table quietly taking `users` or `_sc_config` would repoint authentication at somebody
+else's database. The loser is *named* rather than dropped in silence: the Connections screen
+lists what a connection offered and could not contribute, so an admin who cannot find a table
+they know exists is told why.
+
+**New tables can be created on a connection.** The New table dialog grows a **Database** chooser
+— shown only when there is more than one connected database, since asking a question with one
+answer is not a question — and it applies to both kinds of table, blank and from a CSV: the
+`CREATE TABLE` and the imported rows both land in the chosen database, in that connection's
+schema. A connection that is defined but not connected is left out of the chooser, because it
+would be a choice that can only fail.
+
+**So every schema path routes by the table's own database**, not just the row paths:
+`create_field`, `drop_field`, `drop_table` and the schema editor's transaction all go to the
+driver that hosts the table. Creating is the one operation that has to be *told* which database
+(`Operation::CreateTable` carries a `database`, empty meaning Saltcorn's own) — a table that
+does not exist yet has nothing to infer it from, and every later operation reads the answer back
+off the table it created. A batch is pinned to one database and refuses a second: a batch is one
+transaction, a transaction cannot span two servers, and two transactions can half-fail.
+
+**Row-level security stays Saltcorn's own.** Its policies are generated against the `users` table
+and the role GUC, which live in the primary database, so enabling it on a foreign table is
+refused and the tables list reports `rls_available: false` — a toggle that can only ever be
+refused is not a setting, it is a trap. A foreign table's *overlay* settings — its label, its
+read and write roles — work exactly as they do anywhere.
+
+**A connection that cannot be dialled is still a connection.** Connecting proves reachability
+(it introspects once, since building a pool succeeds against a host that does not exist), and a
+failure is recorded rather than fatal: the row stays, the screen lists it with the reason, and
+editing it is the repair. The same rule the file stores follow, and it matters more here — a
+secondary database that is down must not stop a server whose primary database is fine. The
+dialog's **Test** button dials what is currently typed and saves nothing.
+
+### Where it landed
+
+- `sc-db-postgres`: `PgConnectParams` and `PgDriver::connect_params`, a driver scoped to one
+  schema (`search_path` + an introspection filter). A schema that is not a plain identifier is
+  refused rather than quoted, since it reaches the server interpolated into a connection option.
+- `sc-catalog`: `db_connections` (the table, the definition, save/load/delete, `dial`,
+  `connect_all_db_connections`); a secondary-driver registry on the `Catalog`; `reload` folds
+  every connected database's tables into the same cache; `provider` now routes by the table's
+  own `DbId` and returns a `Result`, because a table whose connection has gone has no driver and
+  falling back to the primary would silently query the wrong database.
+- `sc-api`/`sc-server`: the five `db-connections` endpoints, `database` on every table in the
+  admin API, and an optional `database` on `createTable` and `createTableFromCsv`.
+- `ui/admin`: the Connections screen and its dialog, the button beside **New table**, the
+  Database chooser inside that dialog, and the badge on every foreign table.
+- Boot (`saltcorn serve`) bootstraps the table and connects every stored connection, logging
+  each outcome.
+
 ## Modules: Saltcorn v1 plugins, supplying actions
 
 Everything this server could do, it could do because a Rust crate in this workspace implemented

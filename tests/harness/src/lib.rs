@@ -170,6 +170,38 @@ impl TestDb {
         connection_url(&self.base, &self.name)
     }
 
+    /// The connection as **parts** rather than a URL: host, port, user,
+    /// password, database.
+    ///
+    /// For the code paths that take the parts because an admin typed them into
+    /// six boxes — a database *connection* (`_sc_db_connections`), which is
+    /// stored as columns precisely so the password can be a column that redacts
+    /// itself. A test of that path cannot use [`url`](TestDb::url) without
+    /// re-parsing it, and re-parsing a URL the harness just rendered is a test of
+    /// the harness.
+    ///
+    /// A Unix-socket connection reports the socket directory as the host, which
+    /// is how libpq spells one and what the driver accepts.
+    pub fn parts(&self) -> ConnectionParts {
+        let host = match self.base.get_hosts().first() {
+            Some(Host::Tcp(host)) => host.clone(),
+            #[cfg(unix)]
+            Some(Host::Unix(path)) => path.display().to_string(),
+            _ => DEFAULT_HOST.to_owned(),
+        };
+        ConnectionParts {
+            host,
+            port: self.base.get_ports().first().copied().unwrap_or(5432),
+            user: self.base.get_user().unwrap_or("postgres").to_owned(),
+            password: self
+                .base
+                .get_password()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_default(),
+            database: self.name.clone(),
+        }
+    }
+
     /// Check out a pooled connection to the per-test database.
     pub async fn client(&self) -> Result<Object> {
         self.pool
@@ -177,6 +209,21 @@ impl TestDb {
             .await
             .map_err(|e| Error::database(format!("checkout connection: {e}")))
     }
+}
+
+/// A connection stated as its parts — what [`TestDb::parts`] returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionParts {
+    /// Host name, or a Unix socket directory.
+    pub host: String,
+    /// TCP port.
+    pub port: u16,
+    /// The role to connect as.
+    pub user: String,
+    /// That role's password; empty when the connection needs none.
+    pub password: String,
+    /// The per-test database's name.
+    pub database: String,
 }
 
 impl Drop for TestDb {

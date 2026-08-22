@@ -1153,7 +1153,7 @@ pub(crate) async fn run_read_in(
         }
         None => {
             catalog
-                .provider(table)
+                .provider(table)?
                 .query(select)
                 .await?
                 .try_collect()
@@ -1188,7 +1188,7 @@ async fn run_write_in(
         },
         _ => match in_context(table, context, false) {
             Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
-            None => match catalog.provider(table).write(&statement).await {
+            None => match catalog.provider(table)?.write(&statement).await {
                 Ok(stream) => stream.try_collect().await,
                 Err(e) => Err(e),
             },

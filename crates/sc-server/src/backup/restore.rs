@@ -320,6 +320,9 @@ async fn restore_table(catalog: &Catalog, entries: &Entries, name: &str) -> Resu
     } else {
         schema_edit::Operation::CreateTable {
             name: name.to_owned(),
+            // A backup carries Saltcorn's own schema; a table that lived on a
+            // connection is that connection's to restore, not this archive's.
+            database: String::new(),
             settings,
             // Deliberately none: the columns go in one at a time in the next
             // pass, so one column the schema editor refuses does not take the

@@ -19,5 +19,5 @@ mod transaction;
 mod value;
 
 pub use dialect::PgDialect;
-pub use driver::PgDriver;
+pub use driver::{PgConnectParams, PgDriver};
 pub use value::PgParam;

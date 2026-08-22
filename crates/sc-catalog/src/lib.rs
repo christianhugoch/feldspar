@@ -21,6 +21,7 @@ mod calc;
 mod caller;
 mod catalog;
 mod constraint;
+mod db_connections;
 mod events;
 mod field;
 mod field_meta;
@@ -40,6 +41,12 @@ pub use constraint::{
     ConstraintKind, META_KEY as CONSTRAINT_META_KEY, TableConstraint, constrained_fields,
     create_constraint_steps, drop_constraint_steps, formula_fields, full_text_expression,
     validate_formula, violated_constraint,
+};
+pub use db_connections::{
+    DB_CONNECTIONS_TABLE, DEFAULT_PORT, DEFAULT_SCHEMA, DbConnectionDef, DbConnectionId,
+    DbConnections, bootstrap_db_connections, check_db_connection_saveable,
+    connect_all_db_connections, connect_db_connection, delete_db_connection, dial,
+    list_db_connections, load_db_connection, load_db_connection_by_name, save_db_connection,
 };
 pub use events::{TableEvents, TableWrite, WriteOp};
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};

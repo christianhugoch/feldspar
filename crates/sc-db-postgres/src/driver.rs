@@ -28,15 +28,116 @@ use crate::dialect::PgDialect;
 pub struct PgDriver {
     pool: Pool,
     dialect: PgDialect,
+    /// The one schema this connection presents, when it is scoped to one.
+    ///
+    /// `None` is the primary database's shape: every non-system schema the
+    /// connection can see, which is what the zero-setup promise of §9 means by
+    /// "everything reachable through a connection". A *secondary* connection —
+    /// one an admin added in the Connections screen — names a schema instead,
+    /// because two schemas of a foreign database would contribute two tables
+    /// under one name and the catalog keys tables by name.
+    ///
+    /// It is enforced in two places, and both are needed: `search_path` on the
+    /// connection, so an unqualified name in a rendered statement resolves in
+    /// that schema and nowhere else, and a filter over
+    /// [`introspect`](PgDriver::introspect), so nothing outside it is ever
+    /// offered as a table.
+    schema: Option<String>,
+}
+
+/// What an admin types to reach another Postgres database (§9's Connections
+/// screen): the parts of a connection rather than a URL.
+///
+/// A URL would be one box and fewer types, and is deliberately not what this is.
+/// The parts are stored as columns, so the password is a column that can be
+/// declared secret and redacted on the way out; a URL would carry the password
+/// inside a text field that every reader would have to remember to scrub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgConnectParams {
+    /// Host name or, when it starts with `/`, a Unix socket directory.
+    pub host: String,
+    /// TCP port.
+    pub port: u16,
+    /// The database to connect to.
+    pub database: String,
+    /// The role to connect as.
+    pub user: String,
+    /// That role's password; empty for a connection that needs none (a Unix
+    /// socket with peer authentication, say).
+    pub password: String,
+    /// The one schema the connection presents (see [`PgDriver::schema`]).
+    pub schema: String,
 }
 
 impl PgDriver {
-    /// Wrap an already-built connection pool.
+    /// Wrap an already-built connection pool, presenting every schema it can
+    /// see.
     pub fn from_pool(pool: Pool) -> Self {
         PgDriver {
             pool,
             dialect: PgDialect::new(),
+            schema: None,
         }
+    }
+
+    /// The same driver scoped to one schema — see [`PgDriver::schema`].
+    ///
+    /// This alone does **not** set `search_path`: a pool that was built without
+    /// it would keep resolving unqualified names by the server's default. Use
+    /// [`connect_params`](PgDriver::connect_params), which does both.
+    pub fn scoped_to(mut self, schema: impl Into<String>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+
+    /// The schema this connection is scoped to, if it is scoped to one.
+    pub fn scope(&self) -> Option<&str> {
+        self.schema.as_deref()
+    }
+
+    /// Build a pooled driver from the parts an admin typed, scoped to one
+    /// schema.
+    ///
+    /// The scope is applied to the *connection* as `search_path`, not bolted
+    /// onto each rendered statement. That is the difference between a scope and
+    /// a prefix: every statement the query layer renders — a select, an insert,
+    /// a `RETURNING` — names a table unqualified, and none of them has to learn
+    /// that this particular connection is special.
+    pub fn connect_params(params: &PgConnectParams) -> Result<Self> {
+        let schema = params.schema.trim();
+        if schema.is_empty() {
+            return Err(Error::config("a database connection needs a schema"));
+        }
+        // `search_path` is a connection option, not a bind parameter, so it is
+        // interpolated — and therefore checked. A schema whose name needs
+        // quoting is refused rather than quoted, because the answer to "what
+        // does `-c search_path=a b` mean" is nothing anybody should have to
+        // know.
+        if !schema
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        {
+            return Err(Error::config(format!(
+                "schema `{schema}` is not a plain identifier; \
+                 letters, digits, `_` and `$` only"
+            )));
+        }
+
+        let mut config = Config::new();
+        config
+            .host(&params.host)
+            .port(params.port)
+            .dbname(&params.database)
+            .user(&params.user)
+            .options(format!("-c search_path={schema}"));
+        // An empty password is "no password", not the empty password: setting it
+        // makes libpq offer one, which a socket connection using peer
+        // authentication refuses.
+        if !params.password.is_empty() {
+            config.password(&params.password);
+        }
+
+        Ok(Self::from_config(&config)?.scoped_to(schema))
     }
 
     /// Build a pooled driver from a libpq/URL connection string, e.g.
@@ -86,7 +187,11 @@ impl PgDriver {
     /// connection (there is no discovery step — see [`crate::introspect`]).
     pub async fn introspect(&self) -> Result<Vec<PhysicalTable>> {
         let client = self.client().await?;
-        crate::introspect::introspect(&client).await
+        let mut tables = crate::introspect::introspect(&client).await?;
+        if let Some(schema) = &self.schema {
+            tables.retain(|t| t.schema.as_deref() == Some(schema.as_str()));
+        }
+        Ok(tables)
     }
 
     /// Render `stmt` to Postgres SQL, run it on a pooled connection, and return

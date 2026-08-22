@@ -68,10 +68,14 @@ pub fn admin_endpoints() -> EndpointSet {
 
     set.register(
         Endpoint::new("createTable", Method::Post, api().lit("tables"))
-            .input(TypeSchema::struct_of([StructField::new(
-                "name",
-                TypeSchema::text(),
-            )]))
+            .input(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                // Which database to create it in (§5.0). Optional, and empty
+                // means Saltcorn's own: an installation with no connections
+                // never has this question, and a client written before
+                // connections existed keeps working unchanged.
+                StructField::new("database", TypeSchema::optional(TypeSchema::text())),
+            ]))
             .output(table_schema())
             .auth(AuthRequirement::admin()),
     );
@@ -91,6 +95,8 @@ pub fn admin_endpoints() -> EndpointSet {
         .input(TypeSchema::struct_of([
             StructField::new("name", TypeSchema::text()),
             StructField::new("csv", TypeSchema::text()),
+            // As for `createTable`: optional, empty means the primary.
+            StructField::new("database", TypeSchema::optional(TypeSchema::text())),
         ]))
         .output(TypeSchema::struct_of([
             StructField::new("table", table_schema()),
@@ -474,6 +480,81 @@ pub fn admin_endpoints() -> EndpointSet {
             StructField::new("inserted", TypeSchema::int()),
             StructField::new("updated", TypeSchema::int()),
             StructField::new("errors", TypeSchema::array(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- database connections ----------------------------------------------
+    // The *other* databases an admin has connected (§5). Same four operations as
+    // a file store's, addressed by id for the same reason: the row's identity
+    // survives a rename, and the name is what tables are stamped with.
+    //
+    // Create and update **connect** as well as save, so an admin who typed a bad
+    // host is told at the keyboard rather than by an empty table list. A
+    // connection that saved but could not connect is still a row, still listed
+    // and still editable — editing it is the repair.
+
+    set.register(
+        Endpoint::new(
+            "listDatabaseConnections",
+            Method::Get,
+            api().lit("db-connections"),
+        )
+        .output(TypeSchema::array(db_connection_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createDatabaseConnection",
+            Method::Post,
+            api().lit("db-connections"),
+        )
+        .input(db_connection_input_schema())
+        .output(db_connection_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateDatabaseConnection",
+            Method::Put,
+            api().lit("db-connections").param("id", ValueType::Uuid),
+        )
+        .input(db_connection_input_schema())
+        .output(db_connection_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteDatabaseConnection",
+            Method::Delete,
+            api().lit("db-connections").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Dial what the form currently holds, without saving anything. The
+    // configure-scope counterpart of a file store's backend operations, and the
+    // thing that makes the form usable: a connection is four boxes that are
+    // either all right or silently wrong, and this is how an admin finds out
+    // which before committing to a name.
+    set.register(
+        Endpoint::new(
+            "testDatabaseConnection",
+            Method::Post,
+            api().lit("db-connections").lit("test"),
+        )
+        .input(db_connection_input_schema())
+        .output(TypeSchema::struct_of([
+            StructField::new("connected", TypeSchema::bool()),
+            StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("tables", TypeSchema::int()),
         ]))
         .auth(AuthRequirement::admin()),
     );
@@ -1663,6 +1744,10 @@ fn table_schema() -> TypeSchema {
     // renders the RLS toggle only when this is true — a toggle that can only
     // ever be refused is not a setting, it is a trap.
     fields.push(StructField::new("rls_available", TypeSchema::bool()));
+    // Which database hosts the table: `primary`, or the name of the connection
+    // it came from (§5's Connections). Reported on every table rather than only
+    // on foreign ones, so a client never has to read absence as "the primary".
+    fields.push(StructField::new("database", TypeSchema::text()));
     TypeSchema::Struct(fields)
 }
 
@@ -1874,6 +1959,57 @@ fn field_type_schema() -> TypeSchema {
         StructField::new("category", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
     ])
+}
+
+/// The fields of a database connection an admin sets (§5).
+///
+/// `password` is a **secret**: it goes out as the sentinel and comes back as
+/// the sentinel when the admin did not touch it, which is what
+/// `SECRET_SENTINEL` is for. The other five are the parts of a connection
+/// rather than a URL — see `DbConnectionDef` for why the parts.
+fn db_connection_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("host", TypeSchema::text()),
+        StructField::new("port", TypeSchema::int()),
+        StructField::new("database", TypeSchema::text()),
+        StructField::new("username", TypeSchema::text()),
+        StructField::new("password", TypeSchema::text()),
+        StructField::new("schema", TypeSchema::text()),
+    ]
+}
+
+/// A database connection as reported to the admin UI: its definition, plus the
+/// live state only the running server knows.
+///
+/// `connected` and `error` are here for the reason a file store's are: a
+/// definition can be perfectly valid and the host still down, and the UI has to
+/// show that state with its reason rather than omitting the connection or
+/// pretending it works.
+///
+/// `tables` and `shadowed` are the two halves of "what did this connection
+/// actually contribute". The first is how many of its tables are in the catalog;
+/// the second names the ones that are **not**, because a table of that name was
+/// already there — the primary database always wins a clash, and an admin who
+/// cannot find a table they know exists needs to be told that rather than left
+/// to guess.
+fn db_connection_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(db_connection_fields());
+    fields.extend([
+        StructField::new("connected", TypeSchema::bool()),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("tables", TypeSchema::int()),
+        StructField::new("shadowed", TypeSchema::array(TypeSchema::text())),
+    ]);
+    TypeSchema::Struct(fields)
+}
+
+/// The body accepted when creating, updating or testing a database connection:
+/// the definition's fields minus the id and minus the live state.
+fn db_connection_input_schema() -> TypeSchema {
+    TypeSchema::Struct(db_connection_fields())
 }
 
 /// The fields common to a file store on the wire — everything but its id.

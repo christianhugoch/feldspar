@@ -19,14 +19,43 @@ export type NewTableForm = {
   source: NewTableSource;
   /** The chosen CSV, for `source === "csv"`. */
   file: File | null;
+  /** Which database to create the table in: `primary` for Saltcorn's own, else
+   * the name of a connected database connection. */
+  database: string;
 };
+
+/** The `database` that means Saltcorn's own. */
+export const PRIMARY_DATABASE = "primary";
 
 /** A dialog just opened. */
 export const EMPTY_NEW_TABLE_FORM: NewTableForm = {
   name: "",
   source: "blank",
   file: null,
+  database: PRIMARY_DATABASE,
 };
+
+/**
+ * The databases a new table may be created in: Saltcorn's own, then every
+ * **connected** connection, in the order the list gives them.
+ *
+ * Connections that are not connected are left out, and that is the difference
+ * between this and the Connections screen's list. There, a connection that
+ * cannot be dialled must be shown, because editing it is the repair. Here it
+ * would be a choice that can only fail — the server has no driver to send the
+ * `CREATE TABLE` to — and a chooser whose entries are not all choosable is worse
+ * than one with fewer entries.
+ */
+export function creatableDatabases(
+  connections: Array<{ name: string; connected: boolean }>,
+): string[] {
+  return [PRIMARY_DATABASE, ...connections.filter((c) => c.connected).map((c) => c.name)];
+}
+
+/** How a database reads in the chooser. */
+export function databaseLabel(name: string): string {
+  return name === PRIMARY_DATABASE ? "Saltcorn's own database" : name;
+}
 
 /**
  * Why this form cannot be submitted yet, or `null` when it can.
@@ -38,6 +67,7 @@ export const EMPTY_NEW_TABLE_FORM: NewTableForm = {
 export function newTableError(form: NewTableForm): string | null {
   if (!form.name.trim()) return "The table needs a name.";
   if (form.source === "csv" && !form.file) return "Choose a CSV file to create the table from.";
+  if (!form.database.trim()) return "Choose which database to create the table in.";
   return null;
 }
 

@@ -175,7 +175,9 @@ pub async fn import_table(
     let mut outcome = ImportOutcome::default();
     let mut wrote_keys = false;
 
-    let mut tx = catalog.primary().begin().await?;
+    // On the database that hosts the table, not on the primary: a table created
+    // on a connection takes its rows in the same database its columns are in.
+    let mut tx = catalog.driver_for(table)?.begin().await?;
     // The caller travels with the transaction, not with each statement: `SET
     // LOCAL` is transaction-scoped, so an RLS table's policies would see no
     // caller at all (and deny everything) if this were left to the writes.
@@ -264,7 +266,7 @@ pub async fn import_table(
     // import placed — which would look like a bug in the row editor, not in the
     // import that caused it.
     if wrote_keys && let Some(pk) = pk.as_deref() {
-        advance_identity_sequence(catalog, &table.name, pk).await?;
+        advance_identity_sequence(catalog, table, pk).await?;
     }
     Ok(outcome)
 }
@@ -336,9 +338,14 @@ async fn write_row(
 /// rejected row here drops the whole table and reports the errors: the schema
 /// was deduced from this very file, so a row it refuses means the deduction was
 /// wrong, and a half-filled table nobody asked for is worse than no table.
+/// `database` names where to create it: empty (or `primary`) for Saltcorn's own
+/// database, otherwise a connected database connection (§5.0). The rows are
+/// imported through the table's own provider, which routes to the same database
+/// the create landed in, so nothing else here has to know which one it was.
 pub async fn create_table_from_csv(
     catalog: &Catalog,
     name: &str,
+    database: &str,
     document: &str,
     context: Option<&CallerContext>,
 ) -> Result<(Table, ImportOutcome)> {
@@ -361,6 +368,7 @@ pub async fn create_table_from_csv(
         catalog,
         &[schema_edit::Operation::CreateTable {
             name: name.trim().to_owned(),
+            database: database.trim().to_owned(),
             settings: schema_edit::TableSettings::default(),
             fields,
         }],
@@ -606,8 +614,8 @@ async fn row_exists(
 /// no sequence behind it (a key that is not an identity column) is left alone
 /// rather than being an error, which is what `pg_get_serial_sequence` returning
 /// null means.
-async fn advance_identity_sequence(catalog: &Catalog, table: &str, pk: &str) -> Result<()> {
-    let table_lit = table.replace('\'', "''").replace('"', "\"\"");
+async fn advance_identity_sequence(catalog: &Catalog, table: &Table, pk: &str) -> Result<()> {
+    let table_lit = table.name.replace('\'', "''").replace('"', "\"\"");
     let pk_lit = pk.replace('\'', "''");
     // The table name reaches `pg_get_serial_sequence` **quoted**: it parses its
     // argument as SQL would, so an unquoted `Invoice` would be folded to
@@ -622,7 +630,7 @@ async fn advance_identity_sequence(catalog: &Catalog, table: &str, pk: &str) -> 
          END $sc$;"
     );
     catalog
-        .apply_schema_batch(&[sc_catalog::SchemaStep::Sql(sql)])
+        .apply_schema_batch_in(&table.database, &[sc_catalog::SchemaStep::Sql(sql)])
         .await
 }
 
