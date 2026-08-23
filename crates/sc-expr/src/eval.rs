@@ -57,7 +57,7 @@ use crate::code::CodeCall;
 use crate::code::{CodeRuntime, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS, DEFAULT_MAX_INFLIGHT};
 use crate::formula::Formula;
 #[cfg(feature = "eval")]
-use crate::normalise::{is_join_ident, render_js};
+use crate::normalise::{is_join_ident, render_js_hoisted};
 use crate::translate::{AmbientValues, Operation};
 
 /// One formula evaluation: the formula, the operation, and the values in
@@ -542,7 +542,18 @@ fn build_script(call: &FormulaCall, value_mode: bool) -> Result<String> {
     let free = call.formula.free_vars();
     let mut bindings = serde_json::Map::new();
     let mut consts = String::new();
+    // The hoisted module calls (§4b), and the function names they consumed: a
+    // module function's own name is a free identifier of the formula and there
+    // is no value to bind it to, because what was resolved is the *call*.
+    let hoisted_keys = hoisted_call_keys(call.formula.ast(), &call.row);
+    let hoisted_fns: std::collections::BTreeSet<&str> = hoisted_keys
+        .iter()
+        .filter_map(|key| key.split('(').next())
+        .collect();
     for ident in &free.idents {
+        if hoisted_fns.contains(ident.as_str()) {
+            continue;
+        }
         let value = binding_for(call, ident)?;
         let Some(value) = value else {
             continue; // A global (Math, …): let the real one show through.
@@ -554,9 +565,26 @@ fn build_script(call: &FormulaCall, value_mode: bool) -> Result<String> {
         consts.push_str(&format!("const {ident} = __b[{key}];\n"));
         bindings.insert(ident.clone(), value);
     }
+    // The hoisted module calls (§4b), bound like any other prefetched value.
+    // Which call nodes these are is derived from the *row*, not from an
+    // analysis: `prefetch_bindings` keyed each result by the call's own key, so
+    // a call node whose key is present is one somebody resolved and a call node
+    // whose key is absent is an ordinary call. One rule, and both sides compute
+    // the key from the same AST.
+    let mut hoisted = BTreeMap::new();
+    for (index, key) in hoisted_keys.into_iter().enumerate() {
+        let binding = format!("__scmf{index}");
+        let quoted = serde_json::to_string(&key)
+            .map_err(|e| Error::msg(format!("encode module call key: {e}")))?;
+        consts.push_str(&format!("const {binding} = __b[{quoted}];\n"));
+        if let Some(value) = call.row.get(&key) {
+            bindings.insert(key.clone(), value_to_json(value));
+        }
+        hoisted.insert(key, binding);
+    }
     let args = serde_json::to_string(&serde_json::Value::Object(bindings))
         .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
-    let expr = render_js(call.formula.ast());
+    let expr = render_js_hoisted(call.formula.ast(), &hoisted);
     // Value mode returns the JSON text of the result (calc fields); bool mode
     // returns the `!!` verdict (ownership). `JSON.stringify(undefined)` is
     // `undefined`, which the reader maps to null.
@@ -568,6 +596,39 @@ fn build_script(call: &FormulaCall, value_mode: bool) -> Result<String> {
     Ok(format!(
         "(function(__b) {{ \"use strict\";\n{consts}return {ret};\n}})({args})"
     ))
+}
+
+#[cfg(feature = "eval")]
+/// Every hoisted module call in `ast`, in a stable order, as the keys their
+/// values are bound under.
+///
+/// "Hoisted" is decided by `row`: the prefetch put one entry per call it
+/// resolved, keyed by [`hoisted_call_key`](crate::analyze::hoisted_call_key)'s
+/// text, so this is a lookup rather than a second classification. Sorted and
+/// deduplicated so two runs of one formula generate the same script, which is
+/// what a `BodyCache`-shaped assumption elsewhere would want and what makes the
+/// generated names readable in a failure.
+fn hoisted_call_keys(ast: &crate::ast::Ast, row: &BTreeMap<String, Value>) -> Vec<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    collect_hoisted(ast, row, &mut keys);
+    keys.into_iter().collect()
+}
+
+#[cfg(feature = "eval")]
+fn collect_hoisted(
+    ast: &crate::ast::Ast,
+    row: &BTreeMap<String, Value>,
+    keys: &mut std::collections::BTreeSet<String>,
+) {
+    if let Some(key) = crate::analyze::hoisted_call_key(ast)
+        && row.contains_key(&key)
+    {
+        keys.insert(key);
+        return;
+    }
+    for child in crate::analyze::child_nodes(ast) {
+        collect_hoisted(child, row, keys);
+    }
 }
 
 #[cfg(feature = "eval")]
@@ -753,6 +814,65 @@ mod tests {
 
     async fn eval(c: FormulaCall) -> Result<bool> {
         DenoEvaluator::new().eval(c).await
+    }
+
+    #[tokio::test]
+    async fn a_hoisted_module_call_is_a_value_the_evaluator_reads() {
+        // What §4b promises: the formula isolate stays exactly as pure as it is
+        // — no op, no surface, no node compatibility — because the call was
+        // made before it started and its result is an ordinary scope entry,
+        // bound under the call's own key exactly as a Ⱶ-join value is.
+        let mut c = call("md_to_html(notes)", Operation::Read);
+        c.row = BTreeMap::from([
+            ("notes".to_owned(), Value::Text("# hi".to_owned())),
+            (
+                "md_to_html(notes)".to_owned(),
+                Value::Text("<h1>hi</h1>".to_owned()),
+            ),
+        ]);
+        let out = DenoEvaluator::new().eval_value(c).await.unwrap();
+        assert_eq!(out, serde_json::json!("<h1>hi</h1>"));
+    }
+
+    #[tokio::test]
+    async fn a_hoisted_call_composes_with_the_rest_of_the_formula() {
+        let mut c = call(
+            "md_to_html(notes).length > 4 && title !== ''",
+            Operation::Read,
+        );
+        c.row = BTreeMap::from([
+            ("notes".to_owned(), Value::Text("# hi".to_owned())),
+            ("title".to_owned(), Value::Text("a book".to_owned())),
+            (
+                "md_to_html(notes)".to_owned(),
+                Value::Text("<h1>hi</h1>".to_owned()),
+            ),
+        ]);
+        assert!(eval(c).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_call_nobody_prefetched_is_still_an_ordinary_call() {
+        // The rule on this side is presence in the row and nothing else, so a
+        // formula calling something the isolate really has is untouched.
+        let c = with_row(
+            call("Math.max(pages, 2) === 7", Operation::Read),
+            &[("pages", Value::Int(7))],
+        );
+        assert!(eval(c).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_hoisted_call_that_was_not_prefetched_fails_rather_than_reading_null() {
+        // `md_to_html` is not a function the isolate has: an unresolved hoist is
+        // a throw naming it, which is what the caller turns into a failed
+        // formula — never a null that would silently change the answer.
+        let c = with_row(
+            call("md_to_html(notes) === null", Operation::Read),
+            &[("notes", Value::Text("# hi".to_owned()))],
+        );
+        let err = eval(c).await.unwrap_err().to_string();
+        assert!(err.contains("md_to_html"), "{err}");
     }
 
     #[tokio::test]

@@ -50,14 +50,18 @@ mod template;
 mod translate;
 
 pub use agg::{AggUse, INVERSE};
-pub use analyze::{Ambient, AmbientUse, Analysis, FreeVars, JOIN, JoinPath, OpFlag};
+pub use analyze::{
+    Ambient, AmbientUse, Analysis, FreeVars, JOIN, JoinPath, ModuleArg, ModuleCall, OpFlag,
+    hoisted_call_key,
+};
 pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]
 pub use code::CodeRuntime;
 pub use code::{
     CodeCall, CodeHost, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS, DEFAULT_FETCH_TIMEOUT,
     DEFAULT_MAX_FETCHES, DEFAULT_MAX_FILE_OPS, DEFAULT_MAX_HOST_CALLS, DEFAULT_MAX_INFLIGHT,
-    DEFAULT_MAX_TRIGGER_RUNS, FetchHost, FileHost, MAX_CODE_TIMEOUT, TriggerHost,
+    DEFAULT_MAX_MODULE_CALLS, DEFAULT_MAX_TRIGGER_RUNS, FetchHost, FileHost, MAX_CODE_TIMEOUT,
+    ModuleFnArg, ModuleFnHost, ModuleFunction, TriggerHost,
 };
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;

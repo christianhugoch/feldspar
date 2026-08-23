@@ -27,7 +27,7 @@ use std::sync::{Arc, RwLock};
 use sc_action::TriggerDispatcher;
 use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
-use sc_module::{Installer, ModuleHost, ModuleSet, bootstrap_modules};
+use sc_module::{Installer, ModuleFunctions, ModuleHost, ModuleSet, bootstrap_modules};
 
 use crate::agents::AgentServices;
 
@@ -108,6 +108,13 @@ impl ModuleServices {
         let set =
             ModuleSet::load(&self.catalog, &self.host, &self.installer, &mut registry).await?;
         self.dispatcher.set_registry(Arc::new(registry))?;
+        // The functions the modules supply, on the catalog (§4a). Installed here
+        // rather than beside the registry because they are not actions and their
+        // callers are not the dispatcher: a formula hoists one through
+        // `prefetch_bindings` and a code body calls one through `modfn`, and
+        // what both of those hold is a `Catalog`.
+        self.catalog
+            .set_module_functions(Arc::new(ModuleFunctions::new(&self.host, &set)))?;
         // The trigger set is validated against the action registry, so a
         // trigger naming a module action was invalid until this moment.
         self.dispatcher

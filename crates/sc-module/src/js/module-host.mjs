@@ -250,7 +250,7 @@ const loading = new Map();
 /** The plugin keys this version reads. Everything else is counted and reported
  * (the Modules tab says "also supplies: 1 table provider"), never loaded, so an
  * admin knows what they are not getting. */
-const supportedKeys = new Set(["actions", "configuration_workflow"]);
+const supportedKeys = new Set(["actions", "configuration_workflow", "functions"]);
 
 /** Keys that are metadata rather than an entity type. */
 const metadataKeys = new Set([
@@ -310,6 +310,74 @@ async function configWorkflowFields(plugin) {
   return { fields, issues };
 }
 
+/** v1's `functions`: what a plugin supplies to formulas and code bodies.
+ *
+ * Three shapes exist in real plugins and all three are v1's, so all three are
+ * read here rather than one being declared canonical:
+ *
+ * ```js
+ * functions: { geocode_lat: { run: async (q) => …, isAsync: true,
+ *                             arguments: [{ name: "query", type: "Object" }] } }
+ * functions: { md_to_html: (m) => md.render(m || "") }      // bare, synchronous
+ * functions: (config) => ({ llm_generate: { run: async (p) => …, isAsync: true } })
+ * ```
+ *
+ * The third is why the module's configuration is passed: the function closes
+ * over it, exactly as `actions(cfg)` does, and it is *the module's* one
+ * configuration because a module is loaded once.
+ *
+ * A function that will not declare itself is reported and skipped rather than
+ * fatal, on `configFields`' grounds: a module with one odd function is a module
+ * with one odd function.
+ */
+async function evalFunctions(plugin, configuration) {
+  const exported = plugin.functions;
+  let raw = {};
+  const issues = [];
+  if (typeof exported === "function") {
+    // A *function of the configuration*, not a bare function: the top-level key
+    // is the module's own, and v1 reads it exactly as it reads `actions`.
+    try {
+      raw = (await exported(configuration || {})) || {};
+    } catch (e) {
+      issues.push(`its functions could not be built: ${e.message}`);
+      raw = {};
+    }
+  } else if (exported && typeof exported === "object") {
+    raw = exported;
+  }
+
+  const functions = [];
+  const set = {};
+  for (const [fnName, value] of Object.entries(raw)) {
+    const impl = typeof value === "function" ? { run: value } : value || {};
+    if (typeof impl.run !== "function") {
+      issues.push(
+        `the function "${fnName}" has no run function, so it is not available to ` +
+          `formulas or code bodies`,
+      );
+      continue;
+    }
+    set[fnName] = impl;
+    functions.push({
+      name: fnName,
+      description: impl.description || "",
+      // v1's own word for "this one is awaitable". A bare function is judged by
+      // what it is: an `async function` is one whether or not anybody said so.
+      isAsync: impl.isAsync === undefined
+        ? impl.run.constructor && impl.run.constructor.name === "AsyncFunction"
+        : !!impl.isAsync,
+      // `arguments: [{ name, type }]` is v1's own field vocabulary. Normalised
+      // to exactly that pair on the way out: what reads it is a code editor's
+      // signature line, and an argument with no name is nothing it can show.
+      arguments: (Array.isArray(impl.arguments) ? impl.arguments : [])
+        .filter((a) => a && typeof a.name === "string" && a.name !== "")
+        .map((a) => ({ name: a.name, type: typeof a.type === "string" ? a.type : null })),
+    });
+  }
+  return { functions, set, issues };
+}
+
 /** Load (or reload) one module, and report what it supplies. */
 async function loadModule({ module: name, dir, configuration }) {
   purgeCache(dir);
@@ -358,6 +426,12 @@ async function loadModule({ module: name, dir, configuration }) {
     });
   }
 
+  const { functions, set: functionSet, issues: functionIssues } = await evalFunctions(
+    plugin,
+    configuration,
+  );
+  issues.push(...functionIssues);
+
   const { fields: configFields, issues: configIssues } = await configWorkflowFields(plugin);
   issues.push(...configIssues);
 
@@ -367,13 +441,19 @@ async function loadModule({ module: name, dir, configuration }) {
     unsupported.push({ key, count: entityCount(value) });
   }
 
-  loaded.set(name, { plugin, actions: actionSet, configuration: configuration || {} });
+  loaded.set(name, {
+    plugin,
+    actions: actionSet,
+    functions: functionSet,
+    configuration: configuration || {},
+  });
 
   return {
     name,
     api_version: plugin.sc_plugin_api_version ?? null,
     plugin_name: plugin.plugin_name || null,
     actions,
+    functions,
     config_fields: configFields,
     unsupported,
     issues,
@@ -390,6 +470,26 @@ async function runAction({ module: name, action: actionName, args }) {
   if (typeof impl.run !== "function")
     throw new Error(`the action ${actionName} of module ${name} has no run function`);
   const result = await impl.run(args || {});
+  return result === undefined ? null : result;
+}
+
+/** Call one function of one module, with v1's positional arguments.
+ *
+ * The arguments are **positional** because v1's functions are: `geocode_lat(q)`
+ * is called with what the formula or the body passed, in order. They arrived as
+ * JSON, which is the whole of what crosses this seam — a callback or a stream
+ * is not an argument a module function can be given from here, and the caller
+ * is told so before the call rather than being handed a mangled value.
+ */
+async function callFunction({ module: name, function: fnName, args }) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const impl = entry.functions && entry.functions[fnName];
+  if (!impl) throw new Error(`the module ${name} has no function ${fnName}`);
+  // `await` regardless of `isAsync`: a synchronous function's value is its own
+  // value, and awaiting one costs a microtask. What `isAsync` decides is what
+  // the *manifest* says, which is what a code body's author reads.
+  const result = await impl.run(...(Array.isArray(args) ? args : []));
   return result === undefined ? null : result;
 }
 
@@ -417,6 +517,11 @@ async function handle(request) {
       const pending = loading.get(request.module);
       if (pending) await pending;
       return await runAction(request);
+    }
+    case "call": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await callFunction(request);
     }
     default:
       throw new Error(`unknown module-host operation ${request.op}`);

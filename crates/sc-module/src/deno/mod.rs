@@ -260,6 +260,28 @@ impl DenoModuleHost {
         .await
     }
 
+    /// Call one function of one module with v1's positional arguments (§4a).
+    ///
+    /// Routed like [`run`](DenoModuleHost::run), and for a sharper reason: a v1
+    /// function closes over what its module built at load time, so it has to
+    /// execute on the isolate that module was loaded on. That is what makes this
+    /// a hop at all — module state is a singleton, and no arrangement of pools
+    /// changes it.
+    pub async fn call(&self, module: &str, function: &str, args: Vec<Json>) -> Result<Json> {
+        let index = self.pinned.lock().await.get(module).copied().unwrap_or(0);
+        self.send(
+            index,
+            json!({
+                "op": "call",
+                "module": module,
+                "function": function,
+                "args": args,
+            }),
+            None,
+        )
+        .await
+    }
+
     /// Ask a worker to say hello — what a test and a diagnostics screen use to
     /// find out whether the pool starts at all.
     pub async fn ping(&self) -> Result<Json> {

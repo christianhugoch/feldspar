@@ -1892,9 +1892,24 @@ fn validate_ownership(
     let formula = sc_expr::Formula::parse(&source)
         .map_err(|e| Error::invalid(format!("table `{}`: {e}", table.name)))?;
     let shape = projection.shape();
-    formula
+    let analysis = formula
         .validate(&shape, &table.name)
         .map_err(|e| Error::invalid(format!("table `{}`: {e}", table.name)))?;
+    // An **ownership** formula may not call a module function at all, hoistable
+    // or not (§4b). `JsEvaluator`'s contract is that `Err` is deny, so a rule
+    // calling `geocode_lat` turns a Nominatim outage into "nobody may read
+    // anything" — and every row read would wait on a third party first. Every
+    // other formula use takes the hoist; the one that decides authorization
+    // does not.
+    if let Some(call) = analysis.first_module_call() {
+        return Err(Error::invalid(format!(
+            "table `{}`: an ownership formula may not call the module function `{}`. A rule \
+             that decides who may read a row must fail closed, so a module that is slow or \
+             down would deny every read of this table — and every read would wait on it. Use \
+             a calculated field or a trigger instead",
+            table.name, call.function
+        )));
+    }
     if !table.rls_enabled {
         return Ok(());
     }

@@ -696,35 +696,89 @@ milestone exists to make.
 
 ## Phase 2a — `functions`: what a module supplies besides actions
 
-- [ ] `module-host.mjs`: `functions` joins `supportedKeys`, resolved the three ways v1 allows
+- [x] `module-host.mjs`: `functions` joins `supportedKeys`, resolved the three ways v1 allows
       (bare function, `{ run, isAsync, description, arguments }`, and a function of the module's
       configuration), and reported in the manifest with its declared signature.
-- [ ] `ModuleFnHost` in `sc-expr` beside `TriggerHost`: one plan in, one JSON value out, its own
+- [x] `ModuleFnHost` in `sc-expr` beside `TriggerHost`: one plan in, one JSON value out, its own
       call budget, bound only when a host is present.
-- [ ] The prelude binds it under a reserved name, resolved per module so two modules may each
+- [x] The prelude binds it under a reserved name, resolved per module so two modules may each
       supply `geocode_lat` without one shadowing the other.
-- [ ] `sc-api` implements the host over `ModuleServices`, routing to the worker the named module
-      is loaded on — which is where its state is.
-- [ ] The generated code-editor types carry each function's `arguments` and `description`, so a
+- [x] `sc-api` implements the host over `ModuleServices`, routing to the worker the named module
+      is loaded on — which is where its state is. **Done in `sc-module` instead**, and installed
+      on the `Catalog`; see "the wiring that was not available" below.
+- [x] The generated code-editor types carry each function's `arguments` and `description`, so a
       body's author sees the signature (§12.2).
-- [ ] `sc-expr::analyze`: module-function calls collected beside `join_paths`, with the
+- [x] `sc-expr::analyze`: module-function calls collected beside `join_paths`, with the
       hoistable/not-hoistable classification of §4b decided there, at parse time.
-- [ ] `sc_catalog::prefetch_bindings` resolves them against the module pool and binds the results
+- [x] `sc_catalog::prefetch_bindings` resolves them against the module pool and binds the results
       into `FormulaCall::row`, with the call rewritten to name the binding. The evaluator gains
       nothing — no op, no surface, no node compatibility.
-- [ ] `Formula::validate` refuses, on save: a call that cannot be hoisted (naming it and why),
+- [x] `Formula::validate` refuses, on save: a call that cannot be hoisted (naming it and why),
       and any module function at all in an **ownership** formula (naming the fail-closed reason).
-- [ ] Test (`sc-expr` + `sc-catalog`): `md_to_html(notes)` in a calculated field producing the
+- [x] Test (`sc-expr` + `sc-catalog`): `md_to_html(notes)` in a calculated field producing the
       module's own output with the formula isolate still op-less; the same call inside a
       `.map()` refused on save; a module function in an ownership formula refused on save; and a
       hoisted call whose module is not loaded failing the formula rather than answering `null`.
-- [ ] The three refusals of specification §4a are refusals with sentences: a function used in a
+- [x] The three refusals of specification §4a are refusals with sentences: a function used in a
       **formula**, a non-JSON argument, and a result that will not serialise.
-- [ ] Test: `@saltcorn/markdown`'s `md_to_html` and `@saltcorn/nominatim-geocode`'s
+- [x] Test: `@saltcorn/markdown`'s `md_to_html` and `@saltcorn/nominatim-geocode`'s
       `geocode_lat` (against a stub HTTP server) called from a `run_js_code` body; a module
       function that closes over the module's configuration seeing the configured value; two
       modules supplying the same function name; and a body that forgets the `await` getting the
-      `DbPromise` error rather than a promise in a string.
+      `DbPromise` error rather than a promise in a string. **The two real packages are stood in
+      for by the `echo-module` fixture**, which supplies all three v1 shapes they exemplify —
+      including one that reaches a stub HTTP server through `node:http`. Installing them would
+      be the suite's first trip to the registry, which `install.rs` declines for the whole
+      milestone.
+
+### What was built, and what §4b's hoistable set turned out to be
+
+The five-surface shape of `sc-expr`'s code seam held: `ModuleFnHost` is `TriggerHost` with a
+different noun in it — one plan, one budget, one `Surface` on the bridge, one prelude minted per
+run — and the code-body half needed no new idea. Two things did.
+
+**1. `modfn` is a function *and* an object, because a function name is not unique.** `fs` and
+`trigger` take a name and answer a handle; a module function is reached by *two* names, its own
+and its module's. So `modfn.md_to_html(x)` is the short form and
+`modfn("@saltcorn/markdown").md_to_html(x)` is the exact one, and a name two modules supply has
+no working short form: it throws naming both and the spelling that works. Picking the module
+that loaded first would be a wrong answer inside somebody's trigger, which is the one outcome
+this system refuses everywhere else.
+
+**2. §4b's "or pure expressions over those" is refused rather than implemented**, and the
+narrowing is deliberate. A hoisted argument is computed by `prefetch_bindings`, which holds the
+row's values and no isolate; computing `notes + "!"` there would be a second implementation of
+this language's semantics in Rust, JavaScript's coercion included, and two implementations that
+can silently disagree are what the single Ⱶ-join prefetch exists to avoid. So **what hoists is
+what can be read** — a column, a Ⱶ-join value, a literal — and everything else is refused on
+save with a sentence naming the call. A refusal names the call; a disagreement would name
+nothing.
+
+The binding key is the call's own canonical text (`md_to_html(notes)`), computed from the AST by
+one function that both `analyze` and the renderer call — so "which call node is hoisted" is
+decided the same way on both sides by construction, and the rule at evaluation time is simply
+*is this call's key in the row*. Nothing rewrites the `Formula`.
+
+### The wiring that was not available
+
+The list puts the host in `sc-api`, over `ModuleServices`. Neither half is reachable: `sc-api`
+does not depend on `sc-module` (they are siblings above `sc-catalog` and `sc-action`), and
+`ModuleServices` is higher still, in `sc-server`. What the seam needs is a `ModuleHost` and a
+`ModuleSet`, so `ModuleFunctions` lives in `sc-module`.
+
+It is installed on the **`Catalog`**, beside `set_table_events` and `set_schema_observer` and for
+their reason: `prefetch_bindings` is called from three crates and `run_js_code` from a fourth,
+none of which can name `sc-module`, and a `Catalog` is what all four already hold. One line in
+`ModuleServices::reload` installs it, so the function set is rebuilt whole on every module change
+exactly as the action registry is — and `Catalog::schema_shape` declares the functions, so a
+formula naming one on a server with no modules is the unknown identifier it has always been.
+
+### Still to say on a screen
+
+§4a asks the Modules tab to say that a v1 synchronous function becomes awaitable in a code body.
+The generated editor types say it, in the signature's own doc comment, and the API now reports
+each module's functions — but the Modules tab itself does not render them yet. It belongs with
+phase 3's tab work, which is the next thing to touch that screen.
 
 ## Phase 3 — Permissions
 

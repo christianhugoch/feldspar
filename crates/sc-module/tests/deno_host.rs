@@ -80,6 +80,150 @@ async fn a_module_loads_and_runs_in_this_process() {
     let _ = std::fs::remove_dir_all(installer.root());
 }
 
+/// Phase 2a: v1's `functions`, in all three shapes v1 allows.
+///
+/// One `load` reports them with their declared signatures, and one `call` runs
+/// each on the isolate its module was loaded on — which is what makes the
+/// module's own configuration and its own state reachable from a formula and a
+/// code body at all.
+#[tokio::test]
+async fn a_modules_functions_are_reported_and_called() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-functions", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+
+    let manifest = host
+        .load(
+            name,
+            &installer.package_dir(name),
+            &json!({ "endpoint": "https://echo.example" }),
+        )
+        .await
+        .unwrap();
+
+    // Reported with v1's own vocabulary: `isAsync`, the description, and the
+    // declared `arguments` — which is what a code editor's signature reads.
+    let by_name = |wanted: &str| {
+        manifest
+            .functions
+            .iter()
+            .find(|f| f.name == wanted)
+            .unwrap_or_else(|| panic!("no function {wanted} in {:?}", manifest.functions))
+            .clone()
+    };
+    let upper = by_name("echo_upper");
+    // A bare function is judged by what it is rather than by what nobody said.
+    assert!(!upper.is_async);
+    assert!(upper.arguments.is_empty());
+    let join = by_name("echo_join");
+    assert_eq!(join.description, "Join what it was given");
+    let argument_names: Vec<&str> = join.arguments.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(argument_names, ["a", "b"]);
+    assert_eq!(join.arguments[0].type_name.as_deref(), Some("String"));
+    assert!(by_name("echo_endpoint").is_async);
+    // And `functions` is no longer among the entity types this version reports
+    // as unloaded, because it is loaded now.
+    let census: Vec<&str> = manifest
+        .unsupported
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
+    assert!(!census.contains(&"functions"), "{census:?}");
+    assert!(manifest.issues.is_empty(), "{:?}", manifest.issues);
+
+    // A synchronous v1 function, awaited across the seam (§4a's behaviour
+    // difference), with v1's positional arguments.
+    let value = host.call(name, "echo_upper", vec![json!("hi")]).await.unwrap();
+    assert_eq!(value, json!("HI"));
+    let value = host
+        .call(name, "echo_join", vec![json!("a"), json!("b")])
+        .await
+        .unwrap();
+    assert_eq!(value, json!("a-b"));
+
+    // The one that matters: a function closing over the module's own
+    // configuration sees the configured value, because it ran where the module
+    // was loaded.
+    let value = host
+        .call(name, "echo_endpoint", vec![json!("/v1")])
+        .await
+        .unwrap();
+    assert_eq!(value, json!("https://echo.example/v1"));
+
+    // A result JSON will not encode is a failure naming why, never a mangled
+    // value (§4a).
+    let err = host
+        .call(name, "echo_unserialisable", vec![])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not JSON"), "{err}");
+
+    // A name the module does not have says so rather than answering null.
+    let err = host
+        .call(name, "echo_nonesuch", vec![])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("echo_nonesuch"), "{err}");
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// A module function doing the **module's own network**, which is the shape
+/// `@saltcorn/nominatim-geocode`'s `geocode_lat` has and the reason a module
+/// runs on a node-capable isolate at all.
+///
+/// Against a stub HTTP server in this process rather than a real geocoder, for
+/// the reason `install.rs` gives about the registry: somebody else's network is
+/// not a thing a test suite should depend on.
+#[tokio::test]
+async fn a_module_function_reaches_a_stub_http_server() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let body = r#"{"lat":55.6761,"lon":12.5683}"#;
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+    });
+
+    let (installer, host, names) =
+        installed_on_deno("deno-fn-http", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+    host.load(name, &installer.package_dir(name), &json!({}))
+        .await
+        .unwrap();
+
+    let value = host
+        .call(
+            name,
+            "echo_fetch",
+            vec![json!(format!("http://127.0.0.1:{port}/search"))],
+        )
+        .await
+        .unwrap();
+    assert_eq!(value["lat"], json!(55.6761));
+
+    let _ = server.join();
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
 /// Phase 2: a module's `console.*` is the server's log, not a forwarded stderr.
 ///
 /// What is asserted here is the **seam**, which is what a test can see from

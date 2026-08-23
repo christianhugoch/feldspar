@@ -27,6 +27,17 @@ pub struct SchemaShape {
     /// special identifier at all, so an ownership formula naming `row` gets the
     /// unknown-identifier error it deserves.
     pub ambient: BTreeMap<Ambient, Option<BTreeSet<String>>>,
+    /// The **module functions** in scope (§4b), keyed by the function's own
+    /// name and carrying every module that supplies it.
+    ///
+    /// A `Vec` rather than a `String` because v1 lets two modules supply
+    /// `geocode_lat` and nothing here pretends otherwise: a formula has no
+    /// spelling for "the one from that module", so an ambiguous name is
+    /// **refused on save** naming both — which it can only do if both are here.
+    ///
+    /// Empty by default, which is a server with no modules: a formula naming
+    /// `md_to_html` there is the unknown identifier it has always been.
+    pub module_functions: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for SchemaShape {
@@ -35,6 +46,7 @@ impl Default for SchemaShape {
         SchemaShape {
             tables: BTreeMap::new(),
             ambient: BTreeMap::from([(Ambient::User, None)]),
+            module_functions: BTreeMap::new(),
         }
     }
 }
@@ -107,6 +119,30 @@ impl SchemaShape {
             fields.map(|f| f.into_iter().map(Into::into).collect()),
         );
         self
+    }
+
+    /// Declare that `module` supplies a function called `name`.
+    ///
+    /// Additive, and the order modules are declared in is the order an
+    /// ambiguity names them in — which is the module set's own order, so the
+    /// message an admin reads twice reads the same twice.
+    pub fn module_function(
+        mut self,
+        name: impl Into<String>,
+        module: impl Into<String>,
+    ) -> SchemaShape {
+        self.module_functions
+            .entry(name.into())
+            .or_default()
+            .push(module.into());
+        self
+    }
+
+    /// The modules supplying `name`, or an empty slice when nothing does.
+    pub fn modules_supplying(&self, name: &str) -> &[String] {
+        self.module_functions
+            .get(name)
+            .map_or(&[] as &[String], Vec::as_slice)
     }
 
     /// Whether `ambient` is in scope for a formula validated against this shape.

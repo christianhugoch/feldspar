@@ -29,7 +29,7 @@
 import { useEffect, useRef, useState } from "react";
 import Form from "react-bootstrap/Form";
 
-import { catalog, codeLibrary, type CodeScope } from "./codeTypes";
+import { catalog, codeLibrary, moduleFunctions, type CodeScope } from "./codeTypes";
 
 /** The subset of Monaco this file uses, named so the dynamic import has a type
  * without pulling the package into the main bundle's type graph. */
@@ -154,9 +154,11 @@ export function CodeEditor({
   const event = scope?.event;
   useEffect(() => {
     let cancelled = false;
-    void catalog()
-      .then((tables) => {
-        if (!cancelled) setLibrary(codeLibrary(tables, { table, event }));
+    // The tables and the module functions together: both are cached per page,
+    // and a body is worth typing into before either arrives.
+    void Promise.all([catalog(), moduleFunctions()])
+      .then(([tables, functions]) => {
+        if (!cancelled) setLibrary(codeLibrary(tables, { table, event }, functions));
       })
       // A catalog that cannot be read costs completions, not the editor.
       .catch(() => undefined);

@@ -23,7 +23,9 @@ use std::collections::BTreeMap;
 
 use sc_db::Row;
 use sc_error::{Error, Result};
-use sc_expr::{AggUse, Analysis, INVERSE, SchemaShape, value_to_json};
+use sc_expr::{
+    AggUse, Analysis, INVERSE, ModuleArg, ModuleCall, SchemaShape, value_from_json, value_to_json,
+};
 use sc_query::{Expr, Projection, Select, Source, Value};
 use serde_json::{Map, Value as Json};
 
@@ -52,6 +54,16 @@ pub async fn prefetch_bindings(
             values.insert(path.ident.clone(), value);
         }
     }
+    // Module function calls (§4b), resolved **after** the join paths because an
+    // argument may be one: `md_to_html(publisherⱵblurb)` reads a value the loop
+    // above just fetched. The same rule the whole of this function follows —
+    // the evaluator does no I/O, so whoever calls it does the I/O first.
+    for call in &analysis.module_calls {
+        if !values.contains_key(&call.key) {
+            let value = resolve_module_call(cat, call, values).await?;
+            values.insert(call.key.clone(), value);
+        }
+    }
     // Aggregations over incoming keys (Phase 7): the reified evaluator does no
     // I/O, so prefetch each relation's child rows and bind them under the
     // relation identifier (`childↃkey`) — the array the prelude aggregates.
@@ -63,6 +75,64 @@ pub async fn prefetch_bindings(
         }
     }
     Ok(())
+}
+
+/// How long a formula's hoisted module call may take.
+///
+/// **Not** the module pool's own 120 s, which is the bound a Proxmox snapshot
+/// fired from a trigger needs, and not the formula's 250 ms, which is the
+/// evaluator's alone and is not spent here. This is the bound on the *hoist*:
+/// what waits on it is a row being read or written, and a formula that holds a
+/// write open for two minutes because a geocoder is down is worse than one that
+/// fails saying so.
+const MODULE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Resolve one hoisted module function call to the value the evaluator will see.
+///
+/// The arguments are read, never computed — that is what
+/// [`ModuleArg`](sc_expr::ModuleArg) is narrow for, and the classification
+/// happened at parse time. A binding the caller did not supply reads as null,
+/// exactly as an unresolvable Ⱶ-join link does.
+///
+/// A server with no modules loaded is an **error naming the call**, not a null:
+/// a formula whose module went away computed a different answer, and the whole
+/// of this system's position on silent failure is that a different answer is
+/// worse than a failure.
+async fn resolve_module_call(
+    cat: &Catalog,
+    call: &ModuleCall,
+    values: &BTreeMap<String, Value>,
+) -> Result<Value> {
+    let Some(host) = cat.module_functions() else {
+        return Err(Error::invalid(format!(
+            "this formula calls the module function `{}`, and no module is loaded on this \
+             server to answer it",
+            call.function
+        )));
+    };
+    let mut args = Vec::with_capacity(call.args.len());
+    for arg in &call.args {
+        args.push(match arg {
+            ModuleArg::Literal(text) => serde_json::from_str(text).unwrap_or(Json::Null),
+            ModuleArg::Binding(name) => values.get(name).map_or(Json::Null, value_to_json),
+        });
+    }
+    let plan = serde_json::json!({
+        "module": call.module,
+        "function": call.function,
+        "args": args,
+        "timeout_ms": MODULE_CALL_TIMEOUT.as_millis() as u64,
+    });
+    let answered = tokio::time::timeout(MODULE_CALL_TIMEOUT, host.call(plan))
+        .await
+        .map_err(|_| {
+            Error::invalid(format!(
+                "the module function `{}` of `{}` took longer than {:?} and this formula was \
+                 not evaluated",
+                call.function, call.module, MODULE_CALL_TIMEOUT
+            ))
+        })??;
+    Ok(value_from_json(&answered))
 }
 
 /// Fetch the child rows an aggregation ranges over, as a JSON array bound under

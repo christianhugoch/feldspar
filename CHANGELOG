@@ -2,6 +2,102 @@
 
 Changes in reverse chronological order.
 
+## Modules in-process, phase 2a: `functions`, the fifth host surface
+
+A v1 plugin supplies `functions` beside `actions`, and v1 makes them "available to formulas and
+code actions". Nothing loaded that key until now. It loads it: a code body calls one through
+`modfn`, and a **formula** calls one by having the call hoisted out of it before the formula
+runs — which is the same answer this codebase already gives for a Ⱶ-join, arrived at the same
+way.
+
+- **`module-host.mjs` reads `functions`**, in all three shapes v1 allows and without preferring
+  one: a bare function (`@saltcorn/markdown`'s `md_to_html`), a
+  `{ run, isAsync, description, arguments }` object, and a function of the module's own
+  configuration (`@saltcorn/large-language-model`'s). The manifest reports each with v1's own
+  vocabulary — `isAsync`, and `arguments: [{ name, type }]` — so a signature can reach a screen
+  without anybody inventing a second way to say it. A function with no `run` is an **issue** on
+  the module rather than a load that fails, on the grounds `configFields` already has.
+- **`ModuleHost::call(module, function, args)`** is the fifth thing a module host does, routed
+  like `run`: to the worker the module was loaded on. That routing is the whole reason this is a
+  hop rather than an optimisation somebody skipped — every v1 function closes over what its
+  module built at load time, and a module is loaded **once**, with one configuration. Merging
+  the isolate pools would not remove the hop; it would mean N geocoders.
+- **`ModuleFnHost` in `sc-expr`**, beside `TriggerHost`: one JSON plan in, one JSON value out,
+  its own call budget (`DEFAULT_MAX_MODULE_CALLS`, 100), bound only when a host is present. The
+  plan always names a module as well as a function, because a function name is **not** unique.
+- **`modfn` in a code body**, in two spellings, because a name has two:
+  ```js
+  const html = await modfn.md_to_html(row.notes);                        // the short form
+  const lat = await modfn("@saltcorn/nominatim-geocode").geocode_lat(q); // the exact one
+  ```
+  A name two modules supply has no working short form: it **throws naming both** and the
+  spelling that works, rather than picking whichever loaded first — which would be a wrong
+  answer inside somebody's trigger. Everything is awaited, including the v1 functions that are
+  synchronous, and a forgotten `await` gets the `DbPromise` treatment in this surface's own
+  words instead of `[object Promise]` in a column. An argument that is a function or a symbol is
+  refused **before** the call, because `JSON.stringify` drops one silently.
+- **A formula's call is hoisted, exactly as a Ⱶ-join is.** `md_to_html(notes)` is a static fact
+  of the syntax, so `analyze` collects it beside `join_paths`, `sc_catalog::prefetch_bindings`
+  resolves it against the module pool, and the result is bound into `FormulaCall::row` under the
+  call's own key. The **formula isolate is untouched**: no op, no module surface, no node
+  compatibility, and none of its 250 ms spent waiting on anybody. The renderer finds the binding
+  by computing the same key from the same AST node, so the two sides agree by construction
+  rather than by convention.
+- **Ownership formulas refuse a module function outright**, hoistable or not, on save *and* on
+  catalog load — the second because a module can be installed after a formula was stored.
+  `JsEvaluator`'s contract is that `Err` is deny, so a rule calling `geocode_lat` would turn a
+  Nominatim outage into "nobody may read anything", with every row read waiting on a third
+  party. Calculated fields, `only_if` and the rest take the hoist.
+- **The code editor's generated types carry the signatures** (§12.2): one interface per module,
+  the short form for every unambiguous name, each with the module's own `description` and v1's
+  declared `arguments`. An ambiguous short name is deliberately **left out** — completing it
+  would be offering a mistake.
+
+### What hoists, and the one place this is narrower than the plan
+
+§4b's hoistable set is "columns, literals, Ⱶ-join identifiers, or pure expressions over those".
+The last clause is **refused on save** rather than implemented, with a sentence naming the call
+and what would have worked, and the reason is worth writing down: a hoisted argument is computed
+*outside the evaluator*, by `prefetch_bindings`, which has the row's values and no isolate.
+Computing `notes + "!"` there would mean a second implementation of this language's semantics in
+Rust — JavaScript's own coercion included — and two implementations that can silently disagree
+are exactly what the single Ⱶ-join prefetch exists to avoid. So what hoists is what can be
+**read**, not what can be computed. A refusal names the call; a disagreement would name nothing.
+
+The other refusals are §4b's own: a call inside a lambda (`items.map(x => md_to_html(x))`, where
+the argument does not exist until the formula runs), a module function passed as a value
+(`items.map(md_to_html)`, which has nothing to hoist), and a name two modules supply (a formula
+has no spelling for "the one from that module"; a body has).
+
+### Two places the list's wiring was not available, and what was done instead
+
+- **The host is implemented in `sc-module`, not `sc-api`.** `sc-api` does not depend on
+  `sc-module` — they are siblings above `sc-catalog` and `sc-action` — and `ModuleServices` is
+  higher still, in `sc-server`. What the seam needs is a `ModuleHost` and a `ModuleSet`, and both
+  are in `sc-module`, so `ModuleFunctions` lives there.
+- **It is installed on the `Catalog`**, beside `set_table_events` and `set_schema_observer` and
+  for their reason. `prefetch_bindings` is called from three crates and `run_js_code` from a
+  fourth, none of which can name `sc-module`; a `Catalog` is what all four already hold. One
+  line in `ModuleServices::reload` installs it, so the function set is rebuilt whole on every
+  module change exactly as the action registry is.
+
+### Tests
+
+`sc-expr` covers the code-body surface end to end against a fake host — both spellings, two
+modules supplying one name, the configuration closure, an unknown name naming what exists, a
+non-JSON argument, a caught failure, the forgotten `await`, and the budget — and the formula
+half in `analyze` (what hoists, and each refusal by its sentence) and `eval` (a hoisted value
+read by an op-less isolate, and an unresolved hoist failing rather than reading null).
+
+`sc-module`'s `deno_host` suite loads the `echo-module` fixture's `functions` and calls them: a
+synchronous v1 function awaited across the seam, a declared-async one closing over the module's
+configuration, a result JSON will not encode, and a name the module does not have. A second test
+stands up a stub HTTP server in-process and has a module function `GET` it through `node:http` —
+which is `geocode_lat`'s shape honestly reproduced. The real `@saltcorn/markdown` and
+`@saltcorn/nominatim-geocode` are **not** installed by the suite, for the reason `install.rs`
+already gives about the registry: somebody else's network is not a thing a test suite should
+depend on. The fixture exercises all three v1 shapes those two exemplify.
+
 ## Modules in-process, phase 2: the protocol becomes a function call
 
 The `node` child process is gone. A module now runs on a `deno_runtime` worker in the server's

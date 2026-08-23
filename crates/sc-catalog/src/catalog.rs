@@ -97,6 +97,17 @@ pub struct Catalog {
     /// the schema editor (layer 8) and the mount registry (layer 10) cannot name
     /// each other, and the catalog is what they both already hold.
     schema_observer: RwLock<Option<Arc<dyn crate::observer::SchemaObserver>>>,
+    /// The **module functions** a formula may hoist and a code body may call
+    /// (TODO "Modules in-process", §4a) — `None` in a process with no modules
+    /// installed, or none at all.
+    ///
+    /// Held here for the reason [`table_events`](Catalog::set_table_events) is,
+    /// and it is the same inversion. What implements it is `sc-module`'s worker
+    /// pool; what needs it is [`prefetch_bindings`](crate::prefetch_bindings)
+    /// — which resolves a formula's hoisted calls and is called from three
+    /// crates, none of which can name `sc-module` — and `run_js_code`, in a
+    /// fourth. The catalog is what all four already hold.
+    module_functions: RwLock<Option<Arc<dyn sc_expr::ModuleFnHost>>>,
     /// Where this deployment's applications are reachable in a browser
     /// (`crate::origin`), set once at boot by the process that knows — the
     /// server from its command line, a command-line build from its
@@ -135,6 +146,7 @@ impl Catalog {
             file_store_errors: RwLock::new(HashMap::new()),
             field_overlay_issues: RwLock::new(Vec::new()),
             schema_observer: RwLock::new(None),
+            module_functions: RwLock::new(None),
             public_origin: RwLock::new(None),
             table_events: RwLock::new(None),
         };
@@ -253,7 +265,7 @@ impl Catalog {
         // must have settled first. Invalid ones are dropped (fail closed) and
         // reported like any other field-overlay issue. The shape passed in still
         // contains them, so a calc field reading another resolves.
-        let calc_shape = schema_shape_of(&map);
+        let calc_shape = self.with_module_functions(schema_shape_of(&map));
         field_issues.extend(crate::calc::merge_calc_fields(&mut map, &calc_shape));
 
         // Ownership formulas were *parsed* by `apply_overlay`; validation needs
@@ -262,13 +274,30 @@ impl Catalog {
         // it **grants nothing** (fail closed) — and the reason is left on the
         // table for the admin UI, exactly like a field-overlay issue: reported,
         // never fatal, the table stays usable at its `min_role`s.
-        let shape = schema_shape_of(&map);
+        let shape = self.with_module_functions(schema_shape_of(&map));
         let mut ownership_errors: Vec<(TableId, String)> = Vec::new();
         for (id, table) in &map {
-            if let Some(formula) = &table.ownership
-                && let Err(e) = formula.validate(&shape, &table.name)
-            {
-                ownership_errors.push((id.clone(), e.to_string()));
+            let Some(formula) = &table.ownership else {
+                continue;
+            };
+            match formula.validate(&shape, &table.name) {
+                Err(e) => ownership_errors.push((id.clone(), e.to_string())),
+                // An ownership formula may not call a module function (§4b),
+                // and the check is here as well as on save because a module can
+                // be *installed* after a formula was stored: the same source
+                // that validated yesterday would start calling a module today.
+                // Cleared, like any other invalid rule, so it grants nothing.
+                Ok(analysis) => {
+                    if let Some(call) = analysis.first_module_call() {
+                        ownership_errors.push((
+                            id.clone(),
+                            format!(
+                                "an ownership formula may not call the module function `{}`: a                                  rule that decides who may read a row must fail closed, so a                                  module that is down would deny every read of this table",
+                                call.function
+                            ),
+                        ));
+                    }
+                }
             }
         }
         for (id, message) in ownership_errors {
@@ -322,7 +351,28 @@ impl Catalog {
             .cache
             .read()
             .map_err(|_| Error::msg("catalog cache lock poisoned"))?;
-        Ok(schema_shape_of(&guard))
+        Ok(self.with_module_functions(schema_shape_of(&guard)))
+    }
+
+    /// The module functions installed on this catalog, as `(function, module)`
+    /// pairs — what a [`SchemaShape`](sc_expr::SchemaShape) declares so a
+    /// formula may call one (§4b). Empty on a server with no modules.
+    pub fn module_function_names(&self) -> Vec<(String, String)> {
+        self.module_functions().map_or_else(Vec::new, |host| {
+            host.functions()
+                .into_iter()
+                .map(|function| (function.name, function.module))
+                .collect()
+        })
+    }
+
+    /// `shape`, with this catalog's module functions declared on it.
+    fn with_module_functions(&self, shape: sc_expr::SchemaShape) -> sc_expr::SchemaShape {
+        let mut shape = shape;
+        for (name, module) in self.module_function_names() {
+            shape = shape.module_function(name, module);
+        }
+        shape
     }
 
     /// Each user field mapped to its SQL type — what the GUC translation
@@ -964,6 +1014,32 @@ impl Catalog {
             .map_err(|_| Error::msg("catalog table-events lock poisoned"))?;
         *guard = Some(events);
         Ok(())
+    }
+
+    /// Install the module functions — `sc-server`'s `ModuleServices`, at boot
+    /// and again after every module change (install, configure, delete, Reload).
+    ///
+    /// Replaces any previous one rather than refusing, for
+    /// [`set_table_events`](Catalog::set_table_events)' reason: the module set
+    /// is rebuilt whole on every change, so the second install *is* the answer.
+    pub fn set_module_functions(&self, functions: Arc<dyn sc_expr::ModuleFnHost>) -> Result<()> {
+        let mut guard = self
+            .module_functions
+            .write()
+            .map_err(|_| Error::msg("catalog module-functions lock poisoned"))?;
+        *guard = Some(functions);
+        Ok(())
+    }
+
+    /// The installed module functions, cloned out of the lock — `None` where
+    /// nobody installed any, which is what makes `modfn` unbound in a code body
+    /// and a module function in a formula an unknown identifier.
+    ///
+    /// A poisoned lock reads as "there are none": this is asked on the read and
+    /// write paths, where the honest answer to "is the module registry broken"
+    /// is a formula that fails naming its call rather than every query failing.
+    pub fn module_functions(&self) -> Option<Arc<dyn sc_expr::ModuleFnHost>> {
+        self.module_functions.read().ok()?.clone()
     }
 
     /// Whether anything listens for `op` on `table` — the question the row layer

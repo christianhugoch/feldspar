@@ -2157,6 +2157,10 @@ fn module_schema() -> TypeSchema {
         // generic.
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
         StructField::new("actions", TypeSchema::array(module_action_schema())),
+        // The functions it supplies (§4a): what a code body calls through
+        // `modfn` and what a formula hoists, with the signature v1 declared —
+        // which is what the code editor's generated types read.
+        StructField::new("functions", TypeSchema::array(module_function_schema())),
         // What it also supplies and this version does not load: `{key, count}`,
         // so the tab can say "also supplies 1 table provider (not yet
         // supported)".
@@ -2172,6 +2176,28 @@ fn module_schema() -> TypeSchema {
         // supplies nothing and its `issues` say why.
         StructField::new("loaded", TypeSchema::bool()),
         StructField::new("api_version", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// One function a module supplies, with the signature v1 declared for it.
+///
+/// `is_async` is v1's own `isAsync` and decides nothing about how the function
+/// is called — everything crosses the host seam awaited. It is here because it
+/// is what a signature in the code editor says, and it is v1's word.
+fn module_function_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("is_async", TypeSchema::bool()),
+        StructField::new(
+            "arguments",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                // v1's type name (`String`, `Integer`, `Object`), absent when
+                // the module declared none — a guess would read as a promise.
+                StructField::new("type", TypeSchema::optional(TypeSchema::text())),
+            ])),
+        ),
     ])
 }
 

@@ -41,6 +41,22 @@ export type ColumnInfo = {
 /** One table: its name and its columns. */
 export type TableInfo = { name: string; columns: ColumnInfo[] };
 
+/** One function a module supplies, as `listModules` describes it. */
+export type ModuleFunctionInfo = {
+  /** The package that supplies it. */
+  module: string;
+  /** The function's own name, v1's and unqualified. */
+  name: string;
+  /** The module's one-line description, or "". */
+  description: string;
+  /** v1's own `isAsync`. It decides nothing about the call — everything crosses
+   * the host seam awaited — but it is what the module said, and a signature
+   * that says otherwise would be a lie about the module. */
+  isAsync: boolean;
+  /** The declared signature, when the module declared one. */
+  arguments: { name: string; type: string | null }[];
+};
+
 /** What the screen knows about the event a body will run in.
  *
  * `table` is the trigger's table (a row event) and `undefined` for every kind
@@ -523,6 +539,104 @@ interface ScTriggers {
 `;
 }
 
+/** The TypeScript type one of v1's declared argument types arrives as.
+ *
+ * v1's own type names, which is the vocabulary `sc_module::spec` already
+ * translates for a setting. An undeclared or unrecognised one is `unknown`
+ * rather than a confident `string`, for {@link columnType}'s reason. */
+function moduleArgType(declared: string | null): string {
+  switch (declared) {
+    case "String":
+    case "string":
+      return "string";
+    case "Integer":
+    case "Float":
+    case "Number":
+      return "number";
+    case "Bool":
+    case "Boolean":
+      return "boolean";
+    default:
+      return "unknown";
+  }
+}
+
+/** One function's parameter list, as TypeScript.
+ *
+ * A function that declared nothing takes anything: v1 does not require
+ * `arguments`, and an empty list here would refuse a call the sandbox accepts. */
+function moduleParams(fn: ModuleFunctionInfo): string {
+  if (fn.arguments.length === 0) return "...args: unknown[]";
+  return fn.arguments
+    .map((arg, index) => {
+      const name = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(arg.name) ? arg.name : `arg${index + 1}`;
+      return `${name}?: ${moduleArgType(arg.type)}`;
+    })
+    .join(", ");
+}
+
+/** One function's doc comment: what the module said, and which module said it. */
+function moduleFnDoc(fn: ModuleFunctionInfo): string {
+  const said = fn.description.trim() === "" ? "" : `${fn.description.trim()}\n *\n * `;
+  const sync = fn.isAsync
+    ? ""
+    : " It is a synchronous function in the module, and awaited here because it\n * runs on the module's own isolate.";
+  return `/** ${said}From \`${fn.module}\`.${sync} */`;
+}
+
+/** The declarations for `modfn`: the functions this server's modules supply.
+ *
+ * A transcription of `sc-expr`'s `MODULE_FNS_PRELUDE`, on the same terms as
+ * {@link triggerDeclarations} — and the one place in this file where the
+ * declarations are exact rather than approximate, because the function list is
+ * the *same list* the run is handed.
+ *
+ * Two spellings, as the prelude has: `modfn(module).fn(…)` always works, and
+ * `modfn.fn(…)` is the short form for a name only one module supplies. A name
+ * two modules supply is deliberately **left out of the short form**, because
+ * calling it there throws: completing it would be offering a mistake. */
+export function moduleFunctionDeclarations(functions: ModuleFunctionInfo[]): string {
+  if (functions.length === 0) return "";
+  const modules = [...new Set(functions.map((f) => f.module))].sort();
+  const parts: string[] = [];
+  const overloads: string[] = [];
+  modules.forEach((module, index) => {
+    const iface = `ScModuleFns${index}`;
+    const members = functions
+      .filter((f) => f.module === module)
+      .map((f) => `  ${moduleFnDoc(f)}\n  ${propertyKey(f.name)}(${moduleParams(f)}): Promise<any>;`)
+      .join("\n");
+    parts.push(`/** The functions \`${module}\` supplies. */\ninterface ${iface} {\n${members}\n}`);
+    overloads.push(`  (module: ${literal(module)}): ${iface};`);
+  });
+
+  // The short form: one entry per name exactly one module supplies.
+  const byName = new Map<string, ModuleFunctionInfo[]>();
+  for (const fn of functions) {
+    const supplying = byName.get(fn.name) ?? [];
+    supplying.push(fn);
+    byName.set(fn.name, supplying);
+  }
+  const short = [...byName.entries()]
+    .filter(([, supplying]) => supplying.length === 1)
+    .map(
+      ([, [fn]]) =>
+        `  ${moduleFnDoc(fn)}\n  ${propertyKey(fn.name)}(${moduleParams(fn)}): Promise<any>;`,
+    )
+    .join("\n");
+
+  parts.push(
+    `/** This server's module functions. */\ninterface ScModuleFns {\n${overloads.join("\n")}\n` +
+      `${short}\n` +
+      `  /** Every function this server's modules supply. */\n` +
+      `  readonly functions: readonly {\n` +
+      `    readonly module: string;\n    readonly name: string;\n` +
+      `    readonly isAsync: boolean;\n    readonly description: string;\n` +
+      `  }[];\n}`,
+  );
+  return `\n${parts.join("\n\n")}\n`;
+}
+
 /** The declarations for this server's tables: a row interface and a column union
  * per table, and the `db` handle carrying one property per table. */
 export function tableDeclarations(tables: TableInfo[]): string {
@@ -589,7 +703,11 @@ export function tableDeclarations(tables: TableInfo[]): string {
  * Presence is the whole point: a binding this event does not have is left out,
  * because naming it in the sandbox is a `ReferenceError` and an editor that
  * completed it would be promising something the run refuses. */
-export function scopeDeclarations(scope: CodeScope, tables: TableInfo[]): string {
+export function scopeDeclarations(
+  scope: CodeScope,
+  tables: TableInfo[],
+  functions: ModuleFunctionInfo[] = [],
+): string {
   const parts: string[] = [];
   const table = tables.find((t) => t.name === scope.table);
   if (table) {
@@ -675,11 +793,37 @@ export function scopeDeclarations(scope: CodeScope, tables: TableInfo[]): string
       ` * clamped to what is left of this code's \`timeout_ms\`. Only a code body\n` +
       ` * has it — a formula evaluates without it. */\ndeclare const trigger: ScTriggers;`,
   );
+  // Declared only when this server's modules supply something: a handle with
+  // nothing on it completes nothing, and would only suggest that a module
+  // function exists somewhere.
+  if (functions.length > 0) {
+    parts.push(
+      `/** The functions this server's installed modules supply.\n` +
+        ` *\n` +
+        ` * \`\`\`js\n` +
+        ` * const html = await modfn.md_to_html(row.notes);\n` +
+        ` * const lat = await modfn("@saltcorn/nominatim-geocode").geocode_lat(q);\n` +
+        ` * \`\`\`\n` +
+        ` *\n` +
+        ` * **Everything is awaited**, including the functions that are\n` +
+        ` * synchronous inside the module: the call crosses to the isolate that\n` +
+        ` * module was loaded on, which is where its state is. A name two\n` +
+        ` * modules supply has no short form — say which with \`modfn(name)\`.\n` +
+        ` * Bounded like everything else a body reaches: 100 calls per run, each\n` +
+        ` * clamped to what is left of this code's \`timeout_ms\`. A formula may\n` +
+        ` * call one too, but only with columns, Ⱶ-join values and literals as\n` +
+        ` * arguments. */\ndeclare const modfn: ScModuleFns;`,
+    );
+  }
   return `${parts.join("\n\n")}\n`;
 }
 
 /** The whole ambient library handed to the editor. */
-export function codeLibrary(tables: TableInfo[], scope: CodeScope): string {
+export function codeLibrary(
+  tables: TableInfo[],
+  scope: CodeScope,
+  functions: ModuleFunctionInfo[] = [],
+): string {
   return [
     "// The Saltcorn code sandbox, as types. Generated by the admin UI from this",
     "// server's tables; not a file in any project.",
@@ -687,8 +831,9 @@ export function codeLibrary(tables: TableInfo[], scope: CodeScope): string {
     chainDeclarations(),
     fileDeclarations(),
     triggerDeclarations(),
+    moduleFunctionDeclarations(functions),
     tableDeclarations(tables),
-    scopeDeclarations(scope, tables),
+    scopeDeclarations(scope, tables, functions),
   ].join("\n");
 }
 
@@ -737,4 +882,40 @@ export async function loadCatalog(): Promise<TableInfo[]> {
 export function catalog(): Promise<TableInfo[]> {
   catalogCache ??= loadCatalog();
   return catalogCache;
+}
+
+/** The module functions, cached like the catalog and for its reasons.
+ *
+ * Read from `listModules`, which is the API this server already has for the
+ * Modules tab: a module that loaded reports what it supplies, and one that did
+ * not supplies nothing — which is exactly what should be completed. */
+let moduleFunctionCache: Promise<ModuleFunctionInfo[]> | null = null;
+
+/** Every function every loaded module supplies. */
+export async function loadModuleFunctions(): Promise<ModuleFunctionInfo[]> {
+  try {
+    const listed = await api.listModules();
+    return listed.modules.flatMap((module) =>
+      module.functions.map((fn) => ({
+        module: module.name,
+        name: fn.name,
+        description: fn.description,
+        isAsync: fn.is_async,
+        arguments: fn.arguments.map((argument) => ({
+          name: argument.name,
+          type: argument.type ?? null,
+        })),
+      })),
+    );
+  } catch {
+    // A server built without module support answers this with a configuration
+    // error, and an admin editing a body should still get their completions.
+    return [];
+  }
+}
+
+/** [`loadModuleFunctions`] once per page. */
+export function moduleFunctions(): Promise<ModuleFunctionInfo[]> {
+  moduleFunctionCache ??= loadModuleFunctions();
+  return moduleFunctionCache;
 }

@@ -32,6 +32,9 @@ async-trait.workspace = true
 # The `_sc_file_stores` JSON columns (a backend's settings, sparse attributes).
 serde_json.workspace = true
 # UUID row identities for the `_sc_*` tables this crate stores (§9).
+# The hoist of a formula's module function call is bounded here (§4b), which
+# is the one thing in this crate that needs a clock.
+tokio = { workspace = true }
 uuid.workspace = true
 
 [dev-dependencies]

@@ -41,6 +41,7 @@ function module_(overrides: Partial<Module> = {}): Module {
     configuration: { broker_url: "mqtt://localhost", password: "•••••" },
     config_spec: [],
     actions: [{ name: "mqtt_publish", description: "Publish a message", config_spec: [] }],
+    functions: [],
     unsupported: [],
     issues: [],
     loaded: true,

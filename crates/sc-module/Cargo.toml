@@ -47,6 +47,9 @@ sc-db.workspace = true
 # registers into the same `ActionRegistry` the built-ins live in — the seam that
 # crate documents as the one a plugin uses.
 sc-action.workspace = true
+# The fifth host surface's trait (`ModuleFnHost`) lives in sc-expr, and
+# `functions.rs` implements it: the seam is defined where the guest is.
+sc-expr.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

@@ -27,17 +27,36 @@ use crate::table::Table;
 #[derive(Debug, Clone, Default)]
 pub struct SchemaProjection {
     tables: Vec<Table>,
+    /// The module functions in scope, as `(function, module)` pairs (§4b) —
+    /// empty for a projection nobody built from a live catalog.
+    module_functions: Vec<(String, String)>,
 }
 
 impl SchemaProjection {
-    /// A projection over exactly these tables.
+    /// A projection over exactly these tables, and no module functions.
+    ///
+    /// No module functions because nothing here can know of any: a projection
+    /// built from a list of tables is what a test and the GraphQL name planner
+    /// build, and neither has a server behind it. A projection that must
+    /// validate a formula calling one comes from [`live`](Self::live).
     pub fn new(tables: Vec<Table>) -> SchemaProjection {
-        SchemaProjection { tables }
+        SchemaProjection {
+            tables,
+            module_functions: Vec::new(),
+        }
     }
 
     /// The catalog's current tables — the projection that changes nothing.
+    ///
+    /// Carries the catalog's module functions (§4b), so a calc field saved
+    /// through the schema editor may call one: what an edit is validated
+    /// against is the schema it will leave behind, and the modules it will
+    /// leave behind are the ones installed now.
     pub fn live(catalog: &Catalog) -> Result<SchemaProjection> {
-        Ok(SchemaProjection::new(catalog.tables()?))
+        Ok(SchemaProjection {
+            tables: catalog.tables()?,
+            module_functions: catalog.module_function_names(),
+        })
     }
 
     /// Every table in the projection, in the order it was built.
@@ -74,7 +93,11 @@ impl SchemaProjection {
     /// validation and translation consume — the same projection
     /// [`Catalog::schema_shape`] makes of the live cache.
     pub fn shape(&self) -> sc_expr::SchemaShape {
-        schema_shape_of_tables(self.tables.iter())
+        let mut shape = schema_shape_of_tables(self.tables.iter());
+        for (name, module) in &self.module_functions {
+            shape = shape.module_function(name, module);
+        }
+        shape
     }
 
     /// Each user field mapped to its SQL type, as

@@ -38,6 +38,7 @@
 //! - [`deno`] — the in-process worker pool (feature `deno-host`).
 //! - [`spec`] — v1's `configFields` translated into this system's `FormField`.
 //! - [`action`] — a module's action as an `Action`.
+//! - [`functions`] — a module's functions, as `sc-expr`'s fifth host surface.
 //! - [`modules`] — the loaded set: every stored module, its actions, its issues.
 //!
 //! ## What is *not* here
@@ -50,6 +51,7 @@ pub mod action;
 pub mod bounds;
 #[cfg(feature = "deno-host")]
 pub mod deno;
+pub mod functions;
 pub mod host;
 pub mod install;
 pub mod module;
@@ -64,7 +66,10 @@ pub use bounds::{
 };
 #[cfg(feature = "deno-host")]
 pub use deno::{DenoModuleHost, PoolBounds};
-pub use host::{ActionManifest, ModuleHost, ModuleManifest, UnsupportedEntity};
+pub use functions::ModuleFunctions;
+pub use host::{
+    ActionManifest, FunctionArg, FunctionManifest, ModuleHost, ModuleManifest, UnsupportedEntity,
+};
 pub use install::{InstalledPackage, Installer, have_node, have_npm};
 pub use module::{MODULE_SOURCES, Module, ModuleId, ModuleSource};
 pub use modules::{LoadedModule, ModuleIssue, ModuleSet, redacted_configuration, unsupported_json};

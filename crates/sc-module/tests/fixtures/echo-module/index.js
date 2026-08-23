@@ -102,6 +102,58 @@ module.exports = {
       },
     },
   }),
+  // v1's `functions`, in all three shapes v1 allows — a function of the
+  // module's own configuration at the top (which is `@saltcorn/large-language-
+  // model`'s shape), a bare synchronous function inside it (`@saltcorn/markdown`
+  // 's `md_to_html`), and a declared async one over the module's own state
+  // (`@saltcorn/nominatim-geocode`'s `geocode_lat`).
+  functions: (cfg) => ({
+    // Synchronous in v1, and awaitable across the seam: the behaviour
+    // difference §4a names.
+    echo_upper: (s) => String(s === undefined || s === null ? "" : s).toUpperCase(),
+    echo_join: {
+      description: "Join what it was given",
+      arguments: [
+        { name: "a", type: "String" },
+        { name: "b", type: "String" },
+      ],
+      run: (a, b) => `${a}-${b}`,
+    },
+    echo_endpoint: {
+      description: "The module's own configured endpoint",
+      isAsync: true,
+      arguments: [{ name: "suffix", type: "String" }],
+      // Closes over the module's configuration, which is what makes a module a
+      // singleton and this call a hop onto the isolate it was loaded on.
+      run: async (suffix) => `${(cfg || {}).endpoint || "none"}${suffix || ""}`,
+    },
+    echo_fetch: {
+      description: "Do the module's own network, the way a geocoder does",
+      isAsync: true,
+      arguments: [{ name: "url", type: "String" }],
+      run: (url) =>
+        new Promise((resolve, reject) => {
+          const http = require("node:http");
+          http
+            .get(url, (res) => {
+              let body = "";
+              res.on("data", (chunk) => {
+                body += chunk;
+              });
+              res.on("end", () => resolve(JSON.parse(body)));
+            })
+            .on("error", reject);
+        }),
+    },
+    echo_unserialisable: {
+      description: "Answer with a value JSON cannot encode",
+      run: () => {
+        const loop = { name: "echo" };
+        loop.self = loop;
+        return loop;
+      },
+    },
+  }),
   // Two entity types this version does not load: the census reports them.
   viewtemplates: [{ name: "echo_list" }, { name: "echo_show" }],
   table_providers: { echo_provider: {} },

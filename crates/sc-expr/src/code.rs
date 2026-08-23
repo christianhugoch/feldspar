@@ -175,6 +175,16 @@ pub const DEFAULT_MAX_FILE_OPS: u32 = 100;
 /// (a trigger's chain, in `sc-action`), and this is the *width*.
 pub const DEFAULT_MAX_TRIGGER_RUNS: u32 = 20;
 
+/// How many **module function calls** one run may make (§4a).
+///
+/// Its own budget, on the grounds every surface here has its own: a module
+/// function is neither a pooled query nor a request that leaves the building —
+/// it is a hop onto another isolate, into somebody else's npm package, and what
+/// it bounds is the N+1 §4a names. A body looping `geocode_lat` over a thousand
+/// rows is a thousand round trips and a thousand Nominatim requests; this is
+/// what stops it and says so.
+pub const DEFAULT_MAX_MODULE_CALLS: u32 = 100;
+
 /// What one `fetch` gets when the body names no `timeout_ms` of its own.
 ///
 /// Always clamped to what is left of the run's wall clock, which is the bound
@@ -209,6 +219,19 @@ const TRIGGER_MARGIN: Duration = Duration::from_millis(250);
 /// The least time worth starting another trigger with.
 #[cfg(feature = "eval")]
 const MIN_TRIGGER_WINDOW: Duration = Duration::from_millis(50);
+
+/// How much of the run's remaining time a **module function call** is not
+/// given, for [`TRIGGER_MARGIN`]'s reason: what runs at the other end is
+/// somebody else's package doing somebody else's network, and a call clamped to
+/// the whole of what is left expires at the instant its caller does — so what
+/// the admin reads is "this code exceeded its time limit" rather than the
+/// sentence naming the module function that hung.
+#[cfg(feature = "eval")]
+const MODULE_FN_MARGIN: Duration = Duration::from_millis(250);
+
+/// The least time worth starting a module function call with.
+#[cfg(feature = "eval")]
+const MIN_MODULE_FN_WINDOW: Duration = Duration::from_millis(50);
 
 /// The **JS slice**: how long a body may run without yielding.
 ///
@@ -380,6 +403,90 @@ pub trait TriggerHost: Send + Sync {
     }
 }
 
+/// One argument of a module function, as v1 declared it.
+///
+/// v1's own `arguments: [{ name, type }]` vocabulary, carried rather than
+/// reinvented — it is what lets a function's signature reach the code editor's
+/// generated types (§12.2) without anybody inventing a second way to say it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleFnArg {
+    /// The argument's name, as the signature shows it.
+    pub name: String,
+    /// The v1 type name (`String`, `Integer`, `Object`), when declared.
+    pub type_name: Option<String>,
+}
+
+/// One function a module supplies, as the guest needs to know it.
+///
+/// The name is **not** unique: two modules may each supply `geocode_lat`, and
+/// nothing here pretends otherwise — which is exactly why the module is part of
+/// the identity and why `modfn("@saltcorn/nominatim-geocode").geocode_lat` is
+/// the spelling that always works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleFunction {
+    /// The package that supplies it.
+    pub module: String,
+    /// The function's own name, v1's and unqualified.
+    pub name: String,
+    /// The module's one-line description, if it gave one.
+    pub description: String,
+    /// Whether v1 itself treated it as awaitable. It decides nothing about how
+    /// the call is made — everything crosses this seam awaited — only what a
+    /// signature says.
+    pub is_async: bool,
+    /// The declared signature, when the module declared one.
+    pub arguments: Vec<ModuleFnArg>,
+}
+
+/// The **fifth** host surface: one module function call in, one JSON value out
+/// (§4a).
+///
+/// Separate from the other four for the reasons they are separate from each
+/// other — it is a different capability (a body may have tables and no modules
+/// installed), it is implemented somewhere else (over the module worker pool, in
+/// `sc-module`), and it spends a budget of its own. What crosses is plain JSON,
+/// so §15's other guest languages inherit `modfn` the way they inherit `db`:
+///
+/// ```json
+/// { "module": "@saltcorn/nominatim-geocode", "function": "geocode_lat",
+///   "args": [ { "street": "…", "city": "…" } ], "timeout_ms": 4750 }
+/// ```
+///
+/// The plan always names a **module** as well as a function, because a function
+/// name is not unique and the caller is the one who knows which it meant.
+/// `timeout_ms` is filled in by the op from what is left of the run's wall
+/// clock, so an implementation may take it as given.
+///
+/// **Why this is a hop at all**, since it is the question the seam invites: not
+/// the isolate split. Every v1 function closes over something its module built
+/// at load time — a `markdown-it`, a `Nominatim`, the module's own configuration
+/// — and a module is loaded **once**, with one configuration, holding one set of
+/// state, while code bodies run on a pool. So the function has to execute where
+/// its module was loaded however the pools are arranged; merging them would mean
+/// N geocoders, N configurations and N MQTT connections.
+///
+/// An `Err` is thrown into the guest as an ordinary `Error` at the call site —
+/// a module that is not loaded, a function that threw, a result that will not
+/// serialise — so a body may catch it and carry on.
+#[async_trait]
+pub trait ModuleFnHost: Send + Sync {
+    /// Call one module function and answer what it returned.
+    async fn call(&self, request: Json) -> Result<Json>;
+
+    /// The functions to bind into the run's `modfn`, so `modfn.geocode_lat`
+    /// resolves to one module **at once** rather than deferring the question to
+    /// the call.
+    ///
+    /// Synchronous, for [`FileHost::store_names`]' reason: the guest's
+    /// `modfn.x(…)` is one expression with nothing to await in the middle of it.
+    /// A host that cannot enumerate without I/O answers with the default — an
+    /// empty list, which the guest reads as "this server has no module
+    /// functions" and refuses every name by saying so.
+    fn functions(&self) -> Vec<ModuleFunction> {
+        Vec::new()
+    }
+}
+
 /// One run of a JavaScript **code body**: the source, the values in scope, and
 /// what it is allowed to reach and for how long.
 ///
@@ -429,6 +536,12 @@ pub struct CodeCall<'a> {
     ///
     /// Borrowed for the same reason `host` is, and bridged the same way.
     pub triggers: Option<&'a dyn TriggerHost>,
+    /// The module functions, or `None` for a body that cannot call one — in
+    /// which case `modfn` is not bound at all, so naming it is a
+    /// `ReferenceError` rather than a call that fails.
+    ///
+    /// Borrowed for the same reason `host` is, and bridged the same way.
+    pub module_fns: Option<&'a dyn ModuleFnHost>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
@@ -442,6 +555,9 @@ pub struct CodeCall<'a> {
     /// How many other triggers this run may run
     /// ([`DEFAULT_MAX_TRIGGER_RUNS`]).
     pub max_trigger_runs: u32,
+    /// How many module functions this run may call
+    /// ([`DEFAULT_MAX_MODULE_CALLS`]).
+    pub max_module_calls: u32,
 }
 
 impl Default for CodeCall<'_> {
@@ -453,11 +569,13 @@ impl Default for CodeCall<'_> {
             fetch: None,
             files: None,
             triggers: None,
+            module_fns: None,
             timeout: None,
             max_calls: DEFAULT_MAX_HOST_CALLS,
             max_fetches: DEFAULT_MAX_FETCHES,
             max_file_ops: DEFAULT_MAX_FILE_OPS,
             max_trigger_runs: DEFAULT_MAX_TRIGGER_RUNS,
+            max_module_calls: DEFAULT_MAX_MODULE_CALLS,
         }
     }
 }
@@ -471,11 +589,13 @@ impl std::fmt::Debug for CodeCall<'_> {
             .field("fetch", &self.fetch.is_some())
             .field("files", &self.files.is_some())
             .field("triggers", &self.triggers.is_some())
+            .field("module_fns", &self.module_fns.is_some())
             .field("timeout", &self.timeout)
             .field("max_calls", &self.max_calls)
             .field("max_fetches", &self.max_fetches)
             .field("max_file_ops", &self.max_file_ops)
             .field("max_trigger_runs", &self.max_trigger_runs)
+            .field("max_module_calls", &self.max_module_calls)
             .finish()
     }
 }
@@ -508,6 +628,18 @@ pub(crate) const FS: &str = "fs";
 /// since a trigger's name is the admin's sentence and need not be an identifier.
 #[cfg(feature = "eval")]
 pub(crate) const TRIGGER: &str = "trigger";
+
+/// The name the module-function surface binds under, reserved when a module
+/// host is present for the reason [`DB`] is.
+///
+/// `modfn` rather than `module` or `functions`: it is a *module function*, and
+/// the abbreviation is short enough to write a hundred times and specific
+/// enough that nothing else in a body is plausibly called it. Both a function
+/// and an object — `modfn("@saltcorn/markdown").md_to_html(x)` names a module
+/// and `modfn.md_to_html(x)` is the short form for a name only one module
+/// supplies.
+#[cfg(feature = "eval")]
+pub(crate) const MODFN: &str = "modfn";
 
 /// The Node globals a code body sees as `undefined`, shadowed as parameters of
 /// the wrapper it is compiled into (TODO "Modules in-process", §1a).
@@ -1751,6 +1883,158 @@ pub(crate) const TRIGGERS_PRELUDE: &str = r#"
 })();
 "#;
 
+/// The `modfn` surface: the functions this server's modules supply (§4a).
+///
+/// Compiled **once per isolate**, like the four preludes before it, and minted
+/// per run by `__scMakeModFn(token, functions)` — so a resident body holds a
+/// handle closed over *its* token and *its* list of functions, and cannot spend
+/// another run's budget.
+///
+/// # The shape
+///
+/// A function *and* an object, because a module function has two names and both
+/// are wanted:
+///
+/// ```js
+/// const html = await modfn.md_to_html(row.notes);                     // the short form
+/// const lat = await modfn("@saltcorn/nominatim-geocode").geocode_lat(q); // the exact one
+/// ```
+///
+/// The short form is what an author writes; the long form is what they write
+/// when two modules each supply `geocode_lat`, which v1 allows and nothing here
+/// prevents. An ambiguous short name does not pick one — it **throws naming
+/// both modules and the spelling that would work**, because silently choosing
+/// the module that happened to load first is a wrong answer inside somebody's
+/// trigger.
+///
+/// # Everything is awaited
+///
+/// `md_to_html` is synchronous in v1 and cannot be over a seam, so in a body it
+/// is `await modfn.md_to_html(x)`. That is a real v1 behaviour difference and
+/// the Modules tab says so; what it costs an author who forgets is a named
+/// error rather than `[object Promise]`, because the promise this answers is
+/// [`SETUP`]'s `DbPromise` treatment applied once more. In a **formula** they
+/// stay synchronous, by §4b — the call is hoisted out and the evaluator sees a
+/// value.
+#[cfg(feature = "eval")]
+pub(crate) const MODULE_FNS_PRELUDE: &str = r#"
+(() => {
+  const fixed = (name, value) =>
+    Object.defineProperty(globalThis, name, {
+      value: value, writable: false, configurable: false, enumerable: false,
+    });
+
+  // What must answer `undefined` rather than a thrower: `then` above all, since
+  // a `modfn` that answered a callable `then` would turn `await modfn` into a
+  // call. The rest are the runtime's own probes.
+  const probes = new Set(["then", "catch", "finally", "toJSON", "inspect"]);
+
+  fixed("__scMakeModFn", (__scTok, functions) => {
+    const list = Array.isArray(functions) ? functions : [];
+    const byName = new Map();
+    const byModule = new Map();
+    for (const f of list) {
+      if (!f || typeof f.name !== "string" || typeof f.module !== "string") continue;
+      if (!byName.has(f.name)) byName.set(f.name, []);
+      byName.get(f.name).push(f);
+      if (!byModule.has(f.module)) byModule.set(f.module, []);
+      byModule.get(f.module).push(f);
+    }
+
+    // One function, bound to one module. The arguments are checked here rather
+    // than left to `JSON.stringify`, which drops a function or a symbol
+    // *silently* — and an argument that vanished is the mangled value §4a
+    // refuses.
+    const bind = (entry) => (...args) => {
+      for (let i = 0; i < args.length; i++) {
+        const kind = typeof args[i];
+        if (kind === "function" || kind === "symbol") {
+          throw new TypeError(
+            "argument " + (i + 1) + " of `" + entry.name + "` is a " + kind +
+            ", which cannot cross to a module: a module function takes JSON"
+          );
+        }
+      }
+      return __scModFnCall(__scTok, {
+        module: entry.module, function: entry.name, args: args,
+      });
+    };
+
+    const modules = () => Array.from(byModule.keys()).join(", ");
+
+    const modfn = (module) => {
+      if (typeof module !== "string" || module === "") {
+        throw new TypeError(
+          "modfn() takes a module's package name, as in modfn(\"@saltcorn/markdown\")"
+        );
+      }
+      const entries = byModule.get(module);
+      if (entries === undefined) {
+        throw new Error(
+          "no module named `" + module + "` supplies functions to this server" +
+          (byModule.size === 0 ? "" : "; these do: " + modules())
+        );
+      }
+      const out = {};
+      for (const entry of entries) out[entry.name] = bind(entry);
+      return Object.freeze(out);
+    };
+
+    // The short form. A name only one module supplies binds straight through; a
+    // name two supply binds a thrower that names both, so the ambiguity is
+    // reported at the call rather than resolved by luck.
+    for (const [name, entries] of byName) {
+      const value = entries.length === 1
+        ? bind(entries[0])
+        : () => {
+            const supplying = entries.map((e) => e.module);
+            throw new Error(
+              "`" + name + "` is supplied by " + supplying.join(" and ") +
+              "; say which module you mean, as in modfn(\"" + supplying[0] +
+              "\")." + name + "(…)"
+            );
+          };
+      try {
+        Object.defineProperty(modfn, name, { value: value, enumerable: true });
+      } catch (_) {
+        // A function name that collides with something a Function object will
+        // not give up (`length`, in some engines). Reachable through the long
+        // form, which is what that error will say.
+      }
+    }
+
+    // What this run can reach, for a body that discovers rather than knows.
+    Object.defineProperty(modfn, "functions", {
+      value: Object.freeze(list.map((f) => Object.freeze({
+        module: f.module, name: f.name,
+        isAsync: !!f.isAsync, description: f.description || "",
+      }))),
+      enumerable: true,
+    });
+
+    // A name nothing supplies is a sentence rather than `undefined is not a
+    // function`, which is the same courtesy `trigger("typo")` and `fs("typo")`
+    // already do.
+    return new Proxy(modfn, {
+      get(target, prop, receiver) {
+        if (typeof prop === "symbol" || prop in target || probes.has(prop)) {
+          return Reflect.get(target, prop, receiver);
+        }
+        return () => {
+          const known = Array.from(byName.keys());
+          throw new Error(
+            "there is no module function named `" + String(prop) + "`" +
+            (known.length === 0
+              ? "; no installed module supplies one"
+              : "; this server has: " + known.join(", "))
+          );
+        };
+      },
+    });
+  });
+})();
+"#;
+
 /// Installed once per isolate: the op handles, the promise a database call
 /// answers, and the run wrapper — as globals that a code body **cannot
 /// replace**.
@@ -1822,6 +2106,7 @@ const SETUP: &str = r#"
   const send = Deno.core.ops.op_sc_fetch;
   const disk = Deno.core.ops.op_sc_files;
   const runs = Deno.core.ops.op_sc_trigger;
+  const mods = Deno.core.ops.op_sc_modfn;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
   const mark = Deno.core.ops.op_sc_mark;
@@ -1961,6 +2246,40 @@ const SETUP: &str = r#"
       else resolve(reply.ok);
     }, reject);
   }));
+  // And once more, in the module surface's words: `md_to_html` is synchronous
+  // in v1 and a forgotten `await` would put `[object Promise]` in a column.
+  const notAwaitedModFn = () =>
+    new Error(
+      "this module function call was not awaited — write " +
+      "`await modfn.md_to_html(text)`"
+    );
+  class ModFnPromise extends Promise {
+    toJSON() { throw notAwaitedModFn(); }
+    [Symbol.toPrimitive]() { throw notAwaitedModFn(); }
+    [Symbol.iterator]() { throw notAwaitedModFn(); }
+  }
+  // One module function call. The same envelope every other surface uses, and
+  // the same resumption mark. An argument `JSON.stringify` will not encode
+  // fails **here**, naming the function: a cycle or a `toJSON` that throws is
+  // the caller's mistake and it belongs at the call site.
+  fixed("__scModFnCall", (token, plan) => new ModFnPromise((resolve, reject) => {
+    let request;
+    try {
+      request = JSON.stringify(plan);
+    } catch (e) {
+      reject(new Error(
+        "`" + plan.function + "` was given an argument that is not JSON: " +
+        ((e && e.message) || e)
+      ));
+      return;
+    }
+    mods(token, request).then((answer) => {
+      mark(token);
+      const reply = JSON.parse(answer);
+      if (reply.error !== undefined) reject(new Error(reply.error));
+      else resolve(reply.ok);
+    }, reject);
+  }));
   // What an admin should be shown: the stack when there is one, because a body
   // of any size wants the line, and the value itself when there is not.
   const describe = (e) => {
@@ -1972,10 +2291,10 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, body) => {
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, body) => {
     bodies.set(key, {
       body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
-      wantsTrigger: wantsTrigger,
+      wantsTrigger: wantsTrigger, wantsModFn: wantsModFn,
     });
   });
   // Dropped when the cache is full and this body is the one least recently run.
@@ -1993,7 +2312,7 @@ const SETUP: &str = r#"
   // this run's alone. A body with no host is defined to take one argument, so
   // there is no `db` in its scope to name — a ReferenceError, as it has always
   // been, rather than a handle that fails on use.
-  fixed("__scInvoke", (token, key, bindings, stores, triggers) => {
+  fixed("__scInvoke", (token, key, bindings, stores, triggers, functions) => {
     const entry = bodies.get(key);
     if (entry === undefined) {
       // Unreachable while the Rust side and this map agree, which they do
@@ -2019,6 +2338,10 @@ const SETUP: &str = r#"
       // names do: one compiled body serves every run, and the trigger set is
       // reloaded whenever an admin saves one.
       if (entry.wantsTrigger) handles.push(__scMakeTrigger(token, triggers));
+      // The module functions travel with the invocation for the reason the
+      // trigger names do: one compiled body serves every run, and installing or
+      // configuring a module reloads the set between two of them.
+      if (entry.wantsModFn) handles.push(__scMakeModFn(token, functions));
       running = entry.body(...handles);
     } catch (e) {
       fail(token, describe(e));
@@ -2080,6 +2403,12 @@ struct RunState {
     /// building.
     file_ops_left: u32,
     max_file_ops: u32,
+    /// The module functions this run may call, when it may call any.
+    module_fns: Option<Arc<dyn ModuleFnHost>>,
+    /// The module-call budget, counted apart from all the others because what
+    /// it bounds is a hop onto another isolate and into somebody else's package.
+    module_calls_left: u32,
+    max_module_calls: u32,
     /// The other triggers this run may run, when it may run any.
     triggers: Option<Arc<dyn TriggerHost>>,
     /// The trigger-run budget, counted apart from all three of the others
@@ -2297,6 +2626,94 @@ async fn op_sc_trigger(
     serde_json::to_string(&reply).unwrap_or_else(|_| {
         r#"{"error":"the trigger reply could not be encoded as JSON"}"#.to_owned()
     })
+}
+
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+async fn op_sc_modfn(
+    state: Rc<RefCell<OpState>>,
+    #[string] token: String,
+    #[string] request: String,
+) -> String {
+    let reply = module_fn_call(&state, &token, &request).await;
+    serde_json::to_string(&reply).unwrap_or_else(|_| {
+        r#"{"error":"the module function reply could not be encoded as JSON"}"#.to_owned()
+    })
+}
+
+/// One **module function call** (§4a). [`trigger_call`]'s twin, and its own
+/// function for the same reasons: its own budget, its own capability, and
+/// refusals that have to name the module function to be worth reading.
+///
+/// Like a trigger run and unlike a file operation, it **fills in the clock**:
+/// what runs at the other end is a v1 function inside somebody else's npm
+/// package — a geocoder, an LLM — which has no idea anything is waiting on it.
+/// Clamping it to what is left of this run's wall clock (less
+/// [`MODULE_FN_MARGIN`]) is what keeps a slow module inside the body that
+/// called it, where the `catch` its author wrote can see it.
+#[cfg(feature = "eval")]
+async fn module_fn_call(state: &Rc<RefCell<OpState>>, token: &str, request: &str) -> Json {
+    let mut plan: Json = match serde_json::from_str(request) {
+        Ok(plan) => plan,
+        Err(e) => return refuse(format!("the module function request is not JSON: {e}")),
+    };
+
+    let (host, remaining, run_timeout) = {
+        let mut state = state.borrow_mut();
+        let Some(table) = state.try_borrow_mut::<RunTable>() else {
+            return refuse("this code body cannot call module functions");
+        };
+        let Some(run) = table.runs.get_mut(token) else {
+            return refuse(
+                "this module function call belongs to a code run that has already finished",
+            );
+        };
+        if run.module_calls_left == 0 {
+            let max = run.max_module_calls;
+            return refuse(format!(
+                "this code called more than {max} module functions in one run; \
+                 the bound exists so a loop over rows cannot become a call per row"
+            ));
+        }
+        let now = Instant::now();
+        if now >= run.deadline {
+            let ms = run.timeout.as_millis();
+            return refuse(format!("this code exceeded its {ms} ms time limit"));
+        }
+        let Some(host) = run.module_fns.clone() else {
+            return refuse("this code body cannot call module functions");
+        };
+        run.module_calls_left -= 1;
+        // Past this point the run has called into a module, which may have
+        // published, written or charged somebody: re-running this body could no
+        // longer be said to repeat nothing.
+        run.retry = None;
+        (
+            host,
+            run.deadline.saturating_duration_since(now),
+            run.timeout,
+        )
+    };
+
+    let usable = remaining.saturating_sub(MODULE_FN_MARGIN);
+    if usable < MIN_MODULE_FN_WINDOW {
+        let ms = run_timeout.as_millis();
+        return refuse(format!(
+            "this code has too little of its {ms} ms time limit left to call a module function"
+        ));
+    }
+    if let Some(object) = plan.as_object_mut() {
+        object.insert(
+            "timeout_ms".to_owned(),
+            Json::from(u64::try_from(usable.as_millis()).unwrap_or(u64::MAX)),
+        );
+    }
+
+    match host.call(plan).await {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(e) => refuse(e.to_string()),
+    }
 }
 
 /// One **trigger run**. [`host_call`]'s third twin, its own function for
@@ -2630,6 +3047,7 @@ deno_core::extension!(
         op_sc_fetch,
         op_sc_files,
         op_sc_trigger,
+        op_sc_modfn,
         op_sc_done,
         op_sc_fail,
         op_sc_mark
@@ -2808,12 +3226,18 @@ struct CodeRun {
     /// The names of the triggers this run may run, resolved from the trigger
     /// host before the job crosses, for [`CodeRun::file_stores`]' reason.
     trigger_names: Vec<String>,
+    module_fns: Option<Arc<dyn ModuleFnHost>>,
+    /// The module functions this run may call, resolved from the module host
+    /// before the job crosses, for [`CodeRun::file_stores`]' reason: the guest's
+    /// `modfn.x` is a property access and cannot await an answer.
+    module_functions: Vec<ModuleFunction>,
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
     max_fetches: u32,
     max_file_ops: u32,
     max_trigger_runs: u32,
+    max_module_calls: u32,
     /// When the wall clock this run is being measured against started — set only
     /// on a run that is being **re-queued** after its isolate was terminated
     /// under it. A second start is not a second timeout: the caller is still
@@ -2849,6 +3273,7 @@ enum Surface {
     Fetch,
     Files,
     Triggers,
+    ModuleFns,
 }
 
 /// The `'static` stand-in a **borrowed** host crosses to the isolate thread as.
@@ -2953,6 +3378,23 @@ impl TriggerHost for BridgeHost {
 
     // The default, for `FileHost::store_names`' reason: the names are read from
     // the real host in `CodeRuntime::run`, while it is still borrowed.
+}
+
+#[cfg(feature = "eval")]
+#[async_trait]
+impl ModuleFnHost for BridgeHost {
+    async fn call(&self, request: Json) -> Result<Json> {
+        self.bridged(
+            Surface::ModuleFns,
+            request,
+            "this code body's module functions have gone away",
+            "this module function call was dropped without an answer",
+        )
+        .await
+    }
+
+    // The default, for `FileHost::store_names`' reason: the functions are read
+    // from the real host in `CodeRuntime::run`, while it is still borrowed.
 }
 
 /// One isolate thread, from the dispatcher's side: where to send it work, and
@@ -3095,6 +3537,9 @@ impl CodeRuntime {
         let runner: Option<Arc<dyn TriggerHost>> = call
             .triggers
             .map(|_| Arc::clone(&bridge) as Arc<dyn TriggerHost>);
+        let mods: Option<Arc<dyn ModuleFnHost>> = call
+            .module_fns
+            .map(|_| Arc::clone(&bridge) as Arc<dyn ModuleFnHost>);
         // Asked of the **real** hosts, here, while they are still borrowed: the
         // guest's `fs(name)` and `trigger(name)` are synchronous, so the names
         // have to travel with the job rather than be a call away.
@@ -3103,13 +3548,25 @@ impl CodeRuntime {
             .triggers
             .map(TriggerHost::trigger_names)
             .unwrap_or_default();
+        let module_functions = call
+            .module_fns
+            .map(ModuleFnHost::functions)
+            .unwrap_or_default();
         // Whatever the run did not get a proxy for, nothing can ask for.
         drop(bridge);
         let bridged = (call.host.is_some()
             || call.fetch.is_some()
             || call.files.is_some()
-            || call.triggers.is_some())
-        .then_some((call.host, call.fetch, call.files, call.triggers, incoming));
+            || call.triggers.is_some()
+            || call.module_fns.is_some())
+        .then_some((
+            call.host,
+            call.fetch,
+            call.files,
+            call.triggers,
+            call.module_fns,
+            incoming,
+        ));
         let timeout = call
             .timeout
             .unwrap_or(self.default_timeout)
@@ -3135,11 +3592,14 @@ impl CodeRuntime {
                     file_stores: stores,
                     triggers: runner,
                     trigger_names,
+                    module_fns: mods,
+                    module_functions,
                     timeout,
                     max_calls: call.max_calls,
                     max_fetches: call.max_fetches,
                     max_file_ops: call.max_file_ops,
                     max_trigger_runs: call.max_trigger_runs,
+                    max_module_calls: call.max_module_calls,
                     started: None,
                 }),
                 reply,
@@ -3167,7 +3627,7 @@ impl CodeRuntime {
             ))
         };
 
-        let Some((host, fetcher, disk, runner, mut incoming)) = bridged else {
+        let Some((host, fetcher, disk, runner, modules, mut incoming)) = bridged else {
             // A pure body asks for nothing; there is nothing to serve.
             return tokio::select! {
                 outcome = answer => outcome.map_err(|_| dropped())?,
@@ -3209,6 +3669,12 @@ impl CodeRuntime {
                                 None => {
                                     Err(Error::msg("this code body cannot run other triggers"))
                                 }
+                            },
+                            Surface::ModuleFns => match modules {
+                                Some(modules) => modules.call(plan).await,
+                                None => Err(Error::msg(
+                                    "this code body cannot call module functions",
+                                )),
                             },
                         };
                         let _ = reply.send(answer);
@@ -3332,6 +3798,10 @@ fn worker_thread(
     // The `trigger` factory, on the same terms as the three above it.
     if let Err(e) = runtime.execute_script("sc_triggers.js", TRIGGERS_PRELUDE) {
         debug_assert!(false, "the triggers prelude failed to compile: {e}");
+    }
+    // The `modfn` factory, on the same terms as the four above it.
+    if let Err(e) = runtime.execute_script("sc_module_fns.js", MODULE_FNS_PRELUDE) {
+        debug_assert!(false, "the module functions prelude failed to compile: {e}");
     }
     // Code bodies get the aggregation prelude too, so `rows().sum("qty")` means
     // in a body what it means in a formula.
@@ -3788,7 +4258,10 @@ fn start_run(
     // The trigger names, on the same terms as the store names: per run, because
     // an admin's save reloads the trigger set between two runs of one body.
     let triggers = serde_json::to_string(&run.trigger_names).unwrap_or_else(|_| "[]".to_owned());
-    let script = build_script(&scripts, &token, key, held, &stores, &triggers);
+    // The module functions, on the same terms again: installing or configuring
+    // a module reloads the set, and one compiled body serves every run.
+    let functions = module_functions_json(&run.module_functions);
+    let script = build_script(&scripts, &token, key, held, &stores, &triggers, &functions);
     // A re-queued run carries the clock it was first admitted with: its caller
     // has been waiting since then, and a retry with a fresh deadline would
     // outlive the future that is going to answer with it.
@@ -3820,6 +4293,9 @@ fn start_run(
                 triggers: run.triggers.clone(),
                 trigger_runs_left: run.max_trigger_runs,
                 max_trigger_runs: run.max_trigger_runs,
+                module_fns: run.module_fns.clone(),
+                module_calls_left: run.max_module_calls,
+                max_module_calls: run.max_module_calls,
                 slice: DEFAULT_JS_SLICE.min(run.timeout),
                 // Kept until the first host call, which is exactly as long as
                 // re-running this body would provably repeat nothing.
@@ -3924,6 +4400,8 @@ struct RunScripts {
     wants_files: bool,
     /// Whether it takes `trigger`, on exactly the same terms.
     wants_triggers: bool,
+    /// Whether it takes `modfn`, on exactly the same terms.
+    wants_module_fns: bool,
 }
 
 /// Build one code body's definition and one run's arguments: the bindings as
@@ -3975,6 +4453,11 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
                 "code binding `trigger` collides with the trigger surface bound in a code body",
             ));
         }
+        if call.module_fns.is_some() && name == MODFN {
+            return Err(Error::msg(
+                "code binding `modfn` collides with the module functions bound in a code body",
+            ));
+        }
         // `const x = __b["x"];` — the name was checked as an identifier; the key
         // lookup quotes via JSON escaping.
         let key =
@@ -3988,6 +4471,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     let wants_fetch = call.fetch.is_some();
     let wants_files = call.files.is_some();
     let wants_triggers = call.triggers.is_some();
+    let wants_module_fns = call.module_fns.is_some();
     // The parameter list is the only difference a capability makes: no `fetch`
     // parameter is no `fetch` in scope, which is a ReferenceError naming it
     // rather than a call that fails somewhere in the host. It also means a body
@@ -4006,6 +4490,9 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     }
     if wants_triggers {
         names.push(TRIGGER);
+    }
+    if wants_module_fns {
+        names.push(MODFN);
     }
     // §1a: the node globals, shadowed as parameters nobody passes. A binding of
     // the same name wins — it is already a `const` in this function's body, and
@@ -4031,7 +4518,31 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_fetch,
         wants_files,
         wants_triggers,
+        wants_module_fns,
     })
+}
+
+/// The module functions a run may call, as the array the guest's `modfn` closes
+/// over.
+///
+/// Built here rather than derived from a `Serialize` impl, because this crate
+/// carries no `serde` derive and the shape is four fields — and because what
+/// crosses is exactly what the prelude reads, which is worth being able to see
+/// in one place.
+#[cfg(feature = "eval")]
+fn module_functions_json(functions: &[ModuleFunction]) -> String {
+    let list: Vec<Json> = functions
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "module": f.module,
+                "name": f.name,
+                "description": f.description,
+                "isAsync": f.is_async,
+            })
+        })
+        .collect();
+    serde_json::to_string(&Json::Array(list)).unwrap_or_else(|_| "[]".to_owned())
 }
 
 /// The compiled bodies one isolate holds, and the keys the isolate knows them
@@ -4140,6 +4651,7 @@ fn build_script(
     held: bool,
     stores: &str,
     triggers: &str,
+    functions: &str,
 ) -> String {
     let RunScripts {
         definition,
@@ -4148,18 +4660,19 @@ fn build_script(
         wants_fetch,
         wants_files,
         wants_triggers,
+        wants_module_fns,
     } = scripts;
     let mut script = String::new();
     if !held {
         script.push_str(&format!(
             "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
-             {wants_triggers}, {definition});\n"
+             {wants_triggers}, {wants_module_fns}, {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
     // one made; quoting them is belt and braces rather than escaping.
     script.push_str(&format!(
-        "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores}, {triggers});"
+        "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores}, {triggers}, {functions});"
     ));
     script
 }
@@ -5703,11 +6216,14 @@ mod tests {
             file_stores: Vec::new(),
             triggers: None,
             trigger_names: Vec::new(),
+            module_fns: None,
+            module_functions: Vec::new(),
             timeout: Duration::from_secs(1),
             max_calls: 10,
             max_fetches: 10,
             max_file_ops: 10,
             max_trigger_runs: 10,
+            max_module_calls: 10,
             started: None,
         };
         for (name, value) in bindings {
@@ -5729,7 +6245,7 @@ mod tests {
             "nothing is warm yet"
         );
 
-        let miss = build_script(&scripts, "aa", key, false, "[]", "[]");
+        let miss = build_script(&scripts, "aa", key, false, "[]", "[]", "[]");
         assert!(miss.contains("__scDefine"), "{miss}");
         assert!(miss.contains("return secret + 1;"), "{miss}");
         assert!(miss.contains("__scInvoke"), "{miss}");
@@ -5739,7 +6255,7 @@ mod tests {
             cache.holds(key, &scripts.definition),
             "the isolate has it now"
         );
-        let hit = build_script(&scripts, "bb", key, true, "[]", "[]");
+        let hit = build_script(&scripts, "bb", key, true, "[]", "[]", "[]");
         assert!(!hit.contains("__scDefine"), "{hit}");
         assert!(
             !hit.contains("return secret + 1;"),
@@ -7192,5 +7708,284 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("trigger is not defined"), "{error}");
+    }
+
+    // ---------------------------------------------------------------------
+    // The fifth surface: the modules' own functions
+    // ---------------------------------------------------------------------
+
+    /// A module-function host that records every plan and answers from a
+    /// closure, over a declared function list — the seam again: this crate can
+    /// be tested against `@saltcorn/markdown`'s shape without npm, a worker or
+    /// a module.
+    struct FakeModuleFns {
+        asked: Mutex<Vec<Json>>,
+        functions: Vec<ModuleFunction>,
+        answer: Answer,
+    }
+
+    impl FakeModuleFns {
+        /// A host supplying `(module, function)` pairs, answering every call
+        /// with the arguments it was given.
+        fn new(pairs: &[(&str, &str)]) -> Arc<FakeModuleFns> {
+            Arc::new(FakeModuleFns {
+                asked: Mutex::new(Vec::new()),
+                functions: pairs
+                    .iter()
+                    .map(|(module, name)| ModuleFunction {
+                        module: (*module).to_owned(),
+                        name: (*name).to_owned(),
+                        description: format!("{name}, from {module}"),
+                        is_async: false,
+                        arguments: Vec::new(),
+                    })
+                    .collect(),
+                answer: Box::new(|plan| Ok(plan["args"].clone())),
+            })
+        }
+
+        fn answering(
+            self: Arc<FakeModuleFns>,
+            answer: impl Fn(&Json) -> Result<Json> + Send + Sync + 'static,
+        ) -> Arc<FakeModuleFns> {
+            Arc::new(FakeModuleFns {
+                asked: Mutex::new(Vec::new()),
+                functions: self.functions.clone(),
+                answer: Box::new(answer),
+            })
+        }
+
+        fn asked(&self) -> Vec<Json> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ModuleFnHost for FakeModuleFns {
+        async fn call(&self, request: Json) -> Result<Json> {
+            self.asked.lock().unwrap().push(request.clone());
+            (self.answer)(&request)
+        }
+
+        fn functions(&self) -> Vec<ModuleFunction> {
+            self.functions.clone()
+        }
+    }
+
+    /// A call that can reach the module functions and nothing else.
+    fn with_module_fns<'a>(code: &str, module_fns: &'a dyn ModuleFnHost) -> CodeCall<'a> {
+        CodeCall {
+            code: code.to_owned(),
+            module_fns: Some(module_fns),
+            ..CodeCall::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_calls_a_module_function_by_its_short_name_and_by_its_module() {
+        let mods = FakeModuleFns::new(&[("@saltcorn/markdown", "md_to_html")])
+            .answering(|plan| Ok(json!(format!("<p>{}</p>", plan["args"][0].as_str().unwrap()))));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_module_fns(
+                r#"const short = await modfn.md_to_html("hi");
+                   const exact = await modfn("@saltcorn/markdown").md_to_html("there");
+                   return { short: short, exact: exact,
+                            supplies: modfn.functions.map(f => f.module + ":" + f.name) };"#,
+                &*mods,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["short"], json!("<p>hi</p>"));
+        assert_eq!(out["exact"], json!("<p>there</p>"));
+        assert_eq!(out["supplies"], json!(["@saltcorn/markdown:md_to_html"]));
+        // Both spellings send the same plan: a module, a function, positional
+        // arguments, and the clock the op filled in.
+        let asked = mods.asked();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert_eq!(asked[0]["module"], json!("@saltcorn/markdown"));
+        assert_eq!(asked[0]["function"], json!("md_to_html"));
+        assert_eq!(asked[0]["args"], json!(["hi"]));
+        assert!(asked[0]["timeout_ms"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn two_modules_supplying_one_name_neither_shadows_the_other() {
+        let mods = FakeModuleFns::new(&[
+            ("@saltcorn/nominatim-geocode", "geocode_lat"),
+            ("@saltcorn/other-geocode", "geocode_lat"),
+        ])
+        .answering(|plan| Ok(plan["module"].clone()));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_module_fns(
+                r#"let ambiguous = null;
+                   try { await modfn.geocode_lat("here"); }
+                   catch (e) { ambiguous = e.message; }
+                   return {
+                     ambiguous: ambiguous,
+                     first: await modfn("@saltcorn/nominatim-geocode").geocode_lat("here"),
+                     second: await modfn("@saltcorn/other-geocode").geocode_lat("here"),
+                   };"#,
+                &*mods,
+            ))
+            .await
+            .unwrap();
+        // The short form does not pick one — it names both and the spelling
+        // that works, because choosing by load order is a wrong answer.
+        let ambiguous = out["ambiguous"].as_str().unwrap();
+        assert!(ambiguous.contains("@saltcorn/nominatim-geocode"), "{ambiguous}");
+        assert!(ambiguous.contains("@saltcorn/other-geocode"), "{ambiguous}");
+        assert!(ambiguous.contains("say which module"), "{ambiguous}");
+        assert_eq!(out["first"], json!("@saltcorn/nominatim-geocode"));
+        assert_eq!(out["second"], json!("@saltcorn/other-geocode"));
+    }
+
+    #[tokio::test]
+    async fn a_module_function_that_closes_over_its_configuration_sees_the_configured_value() {
+        // The host stands in for the module's own state: what is asserted here
+        // is that one configured value answers every call, which is what makes
+        // a module a singleton and this seam a hop.
+        let mods = FakeModuleFns::new(&[("@saltcorn/large-language-model", "llm_generate")])
+            .answering(|plan| {
+                Ok(json!(format!(
+                    "gpt-9 says: {}",
+                    plan["args"][0].as_str().unwrap_or("")
+                )))
+            });
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_module_fns(
+                r#"return await modfn.llm_generate("hello");"#,
+                &*mods,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!("gpt-9 says: hello"));
+    }
+
+    #[tokio::test]
+    async fn a_name_no_module_supplies_names_the_ones_that_exist() {
+        let mods = FakeModuleFns::new(&[("@saltcorn/markdown", "md_to_html")]);
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(with_module_fns(
+                r#"return await modfn.md_to_htmll("x");"#,
+                &*mods,
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("md_to_htmll"), "{error}");
+        assert!(error.contains("md_to_html"), "{error}");
+        // And a module nobody installed says the same kind of thing.
+        let error = rt
+            .run(with_module_fns(
+                r#"return await modfn("@saltcorn/nope").md_to_html("x");"#,
+                &*mods,
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("@saltcorn/nope"), "{error}");
+        assert!(error.contains("@saltcorn/markdown"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_argument_that_is_not_json_fails_naming_the_function() {
+        let mods = FakeModuleFns::new(&[("@saltcorn/markdown", "md_to_html")]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_module_fns(
+                r#"const results = [];
+                   try { await modfn.md_to_html((x) => x); }
+                   catch (e) { results.push(e.message); }
+                   const cycle = {}; cycle.self = cycle;
+                   try { await modfn.md_to_html(cycle); }
+                   catch (e) { results.push(e.message); }
+                   return results;"#,
+                &*mods,
+            ))
+            .await
+            .unwrap();
+        // A function argument is dropped *silently* by JSON.stringify, which is
+        // the mangled value §4a refuses; a cycle throws inside it.
+        assert!(out[0].as_str().unwrap().contains("md_to_html"), "{out}");
+        assert!(out[0].as_str().unwrap().contains("function"), "{out}");
+        assert!(out[1].as_str().unwrap().contains("md_to_html"), "{out}");
+        assert!(out[1].as_str().unwrap().contains("not JSON"), "{out}");
+        // Neither reached the host.
+        assert!(mods.asked().is_empty(), "{:?}", mods.asked());
+    }
+
+    #[tokio::test]
+    async fn a_module_function_that_failed_is_an_error_the_body_can_catch() {
+        let mods = FakeModuleFns::new(&[("@saltcorn/nominatim-geocode", "geocode_lat")])
+            .answering(|_| Err(Error::invalid("nominatim: connect ECONNREFUSED")));
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_module_fns(
+                r#"try {
+                     await modfn.geocode_lat("here");
+                     return "no throw";
+                   } catch (e) { return "caught: " + e.message; }"#,
+                &*mods,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, json!("caught: invalid: nominatim: connect ECONNREFUSED"));
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_await_on_a_module_function_says_so() {
+        let mods = FakeModuleFns::new(&[("@saltcorn/markdown", "md_to_html")]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_module_fns(
+                r#"const pending = modfn.md_to_html("hi");
+                   try { return JSON.stringify({ html: pending }); }
+                   catch (e) { return e.message; }"#,
+                &*mods,
+            ))
+            .await
+            .unwrap();
+        // Not `[object Promise]` in a column: the same treatment `db`'s promise
+        // gets, in this surface's own words.
+        assert!(out.as_str().unwrap().contains("was not awaited"), "{out}");
+        assert!(out.as_str().unwrap().contains("modfn"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn the_module_call_budget_stops_a_call_per_row() {
+        let mods = FakeModuleFns::new(&[("@saltcorn/markdown", "md_to_html")]);
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(CodeCall {
+                code: r#"for (let i = 0; i < 10; i++) await modfn.md_to_html("row " + i);
+                         return "done";"#
+                    .to_owned(),
+                module_fns: Some(&*mods),
+                max_module_calls: 3,
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than 3 module functions"), "{error}");
+        assert_eq!(mods.asked().len(), 3, "{:?}", mods.asked());
+    }
+
+    #[tokio::test]
+    async fn a_body_without_the_module_host_cannot_name_modfn() {
+        let rt = CodeRuntime::new();
+        let error = rt
+            .run(CodeCall {
+                code: r#"return await modfn.md_to_html("x");"#.to_owned(),
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("modfn is not defined"), "{error}");
     }
 }

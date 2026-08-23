@@ -21,7 +21,9 @@ import {
   codeLibrary,
   columnNames,
   columnType,
+  moduleFunctionDeclarations,
   typeName,
+  type ModuleFunctionInfo,
   type TableInfo,
 } from "./codeTypes";
 
@@ -68,6 +70,26 @@ const OPTIONS: ts.CompilerOptions = {
   types: [],
 };
 
+/** Two modules' functions, in the shapes v1 allows: a bare synchronous one
+ * (`@saltcorn/markdown`) and a declared async one over the module's own state
+ * (`@saltcorn/nominatim-geocode`). */
+const MODULE_FUNCTIONS: ModuleFunctionInfo[] = [
+  {
+    module: "@saltcorn/markdown",
+    name: "md_to_html",
+    description: "Turn markdown into HTML.",
+    isAsync: false,
+    arguments: [],
+  },
+  {
+    module: "@saltcorn/nominatim-geocode",
+    name: "geocode_lat",
+    description: "The latitude of an address.",
+    isAsync: true,
+    arguments: [{ name: "query", type: "Object" }],
+  },
+];
+
 /** Compile one code body against the generated declarations, and return the
  * errors as their messages.
  *
@@ -80,9 +102,13 @@ const OPTIONS: ts.CompilerOptions = {
  * pull `node:fs` into a suite whose only other dependency is the code under
  * test, and the compiler takes a host, so there is no reason to.
  */
-function sandboxFiles(body: string, tables: TableInfo[]): Record<string, string> {
+function sandboxFiles(
+  body: string,
+  tables: TableInfo[],
+  functions: ModuleFunctionInfo[] = [],
+): Record<string, string> {
   return {
-    "sandbox.d.ts": codeLibrary(tables, { table: "invoices", event: "insert" }),
+    "sandbox.d.ts": codeLibrary(tables, { table: "invoices", event: "insert" }, functions),
     // A code body is the inside of an **async** function: `return` at the top
     // level is what the action runs and `await` at it is legal, so it is wrapped
     // for the compiler exactly as the runtime wraps it.
@@ -90,8 +116,12 @@ function sandboxFiles(body: string, tables: TableInfo[]): Record<string, string>
   };
 }
 
-function check(body: string, tables: TableInfo[] = TABLES): string[] {
-  const files = sandboxFiles(body, tables);
+function check(
+  body: string,
+  tables: TableInfo[] = TABLES,
+  functions: ModuleFunctionInfo[] = [],
+): string[] {
+  const files = sandboxFiles(body, tables, functions);
   // The installed TypeScript's own library files, by the absolute path it
   // reports for them.
   const defaultLib = ts.getDefaultLibFilePath(OPTIONS);
@@ -411,6 +441,62 @@ describe("the types the code editor loads", () => {
         return { amount, who, sent: payload.sent };
       `),
     ).toEqual([]);
+  });
+
+  it("declare the module functions, in both spellings, with v1's signatures", () => {
+    // A body written the way §4a writes one: the short form for a name only one
+    // module supplies, and the exact form naming the module.
+    expect(
+      check(
+        `
+        const html = await modfn.md_to_html(String(row.amount));
+        const lat = await modfn("@saltcorn/nominatim-geocode").geocode_lat({ city: "Kbh" });
+        const also = await modfn("@saltcorn/markdown").md_to_html("# hi");
+        return { html, lat, also, supplies: modfn.functions.length };
+      `,
+        TABLES,
+        MODULE_FUNCTIONS,
+      ),
+    ).toEqual([]);
+    // The description and the module reach the signature, which is the whole
+    // point of carrying v1's own `arguments` and `description` across.
+    const library = moduleFunctionDeclarations(MODULE_FUNCTIONS);
+    expect(library).toContain("Turn markdown into HTML");
+    expect(library).toContain("@saltcorn/nominatim-geocode");
+    expect(library).toContain("query?: unknown");
+    // A synchronous v1 function is still awaited here, and the declarations say
+    // why rather than leaving an admin to wonder.
+    expect(library).toContain("synchronous function in the module");
+  });
+
+  it("leave an ambiguous short name out, because calling it throws", () => {
+    const both: ModuleFunctionInfo[] = [
+      ...MODULE_FUNCTIONS,
+      {
+        module: "@saltcorn/other-geocode",
+        name: "geocode_lat",
+        description: "",
+        isAsync: true,
+        arguments: [],
+      },
+    ];
+    // Both modules keep their own entry…
+    const library = moduleFunctionDeclarations(both);
+    expect(library).toContain("@saltcorn/other-geocode");
+    // …and the short form offers `md_to_html` but not `geocode_lat`, because
+    // the prelude throws on the ambiguous one rather than picking a module.
+    expect(check(`return await modfn.md_to_html("x");`, TABLES, both)).toEqual([]);
+    expect(check(`return await modfn.geocode_lat({});`, TABLES, both).join(" ")).toMatch(
+      /geocode_lat/,
+    );
+  });
+
+  it("declare no modfn on a server whose modules supply no functions", () => {
+    const library = codeLibrary(TABLES, { event: "login" });
+    expect(library).not.toContain("declare const modfn");
+    expect(codeLibrary(TABLES, { event: "login" }, MODULE_FUNCTIONS)).toContain(
+      "declare const modfn",
+    );
   });
 
   it("declare no row where the event has none", () => {

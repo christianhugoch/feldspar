@@ -244,6 +244,7 @@ mod tests {
                 require_row: false,
                 config_fields: Vec::new(),
             }],
+            functions: Vec::new(),
             config_fields: Vec::new(),
             unsupported: vec![UnsupportedEntity {
                 key: "eventTypes".into(),

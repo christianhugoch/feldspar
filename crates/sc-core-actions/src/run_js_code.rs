@@ -45,9 +45,20 @@ const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
 /// called with, the formula language has no way to reach it, and a `none`
 /// trigger's code is exactly what wants it.
 ///
-/// And four host surfaces: `db`, the **tables**, read and written from the body
-/// (§10.1's `db`); `fetch`, an **HTTP request**; `fs`, the **file stores**; and
-/// `trigger`, this server's **other triggers** (all below).
+/// And five host surfaces: `db`, the **tables**, read and written from the body
+/// (§10.1's `db`); `fetch`, an **HTTP request**; `fs`, the **file stores**;
+/// `trigger`, this server's **other triggers**; and `modfn`, the **functions
+/// this server's modules supply** (all below).
+///
+/// ```js
+/// const html = await modfn.md_to_html(row.notes);
+/// const lat = await modfn("@saltcorn/nominatim-geocode").geocode_lat({ city: row.city });
+/// ```
+///
+/// A module function is v1's own, and it runs on the isolate its module was
+/// loaded on — which is where the `markdown-it`, the geocoder and the module's
+/// configuration are. Everything is awaited, including the ones that are
+/// synchronous in v1, and `modfn` is bound only where this server has modules.
 ///
 /// ```js
 /// const overdue = await db.invoices
@@ -355,6 +366,12 @@ impl Action for RunJsCode {
                 .caused_by(ctx.event.role, ctx.event.user.clone())
                 .chained(ctx.chain.clone())
         });
+        // The module functions, when this server has modules installed and
+        // loaded — and nothing at all when it does not, so a body that names
+        // `modfn` on a server with no modules says so by name rather than
+        // finding an empty handle. The catalog is where they are because a
+        // formula's hoisted call needs them too, from three other crates.
+        let module_fns = ctx.catalog.module_functions();
         let call = CodeCall {
             code,
             bindings: bindings(ctx.event),
@@ -362,6 +379,7 @@ impl Action for RunJsCode {
             fetch: Some(&net),
             files: Some(&files),
             triggers: runner.as_ref().map(|r| r as &dyn TriggerHost),
+            module_fns: module_fns.as_deref(),
             timeout,
             ..CodeCall::default()
         };

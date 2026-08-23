@@ -4194,6 +4194,31 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
                 .collect()
         })
         .unwrap_or_default();
+    let functions: Vec<Json> = loaded
+        .manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .functions
+                .iter()
+                .map(|function| {
+                    json!({
+                        "name": function.name,
+                        "description": function.description,
+                        "is_async": function.is_async,
+                        "arguments": function
+                            .arguments
+                            .iter()
+                            .map(|argument| json!({
+                                "name": argument.name,
+                                "type": argument.type_name,
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     json!({
         "id": module.id.0,
         "name": module.name,
@@ -4207,6 +4232,7 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
             .map(form_field_json)
             .collect::<Vec<_>>(),
         "actions": actions,
+        "functions": functions,
         "unsupported": sc_module::unsupported_json(loaded),
         "issues": loaded.issues,
         "loaded": loaded.is_loaded(),

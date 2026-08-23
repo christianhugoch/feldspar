@@ -60,6 +60,48 @@ pub struct ActionManifest {
     pub config_fields: Vec<Json>,
 }
 
+/// One argument of a module function, as v1 declares it.
+///
+/// v1's own `arguments: [{ name, type }]` vocabulary, kept rather than
+/// reinvented: `type` is a v1 field type name (`String`, `Integer`, `Object`),
+/// which is the same vocabulary [`crate::spec`] already translates. Absent when
+/// the module did not say — a v1 function may declare nothing at all, and
+/// `null` is the honest answer rather than a guess.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FunctionArg {
+    /// The argument's name, as the signature shows it.
+    pub name: String,
+    /// The v1 type name, when the module declared one.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+}
+
+/// One function, as the module declared it (§4a).
+///
+/// A v1 plugin supplies `functions` beside `actions`, and v1 makes them
+/// "available to formulas and code actions". The three shapes v1 allows — a bare
+/// function, a `{ run, isAsync, description, arguments }` object, and a function
+/// of the module's own configuration — are resolved in the host script; what
+/// arrives here is the one shape.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FunctionManifest {
+    /// The name the function is registered under — v1's own, unqualified. Two
+    /// modules may each supply the same one; nothing here disambiguates them,
+    /// because which module is meant is the *caller's* question.
+    pub name: String,
+    /// The module's one-line description, if it gave one.
+    #[serde(default)]
+    pub description: String,
+    /// Whether v1 itself treated this function as awaitable. It does not decide
+    /// how the function is *called* — everything crosses the seam awaited — but
+    /// it is what a signature in the code editor says, and it is v1's word.
+    #[serde(default, rename = "isAsync")]
+    pub is_async: bool,
+    /// The declared signature, when the module declared one.
+    #[serde(default)]
+    pub arguments: Vec<FunctionArg>,
+}
+
 /// An entity type the module exports and this version does not load.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnsupportedEntity {
@@ -85,6 +127,10 @@ pub struct ModuleManifest {
     /// The actions it supplies.
     #[serde(default)]
     pub actions: Vec<ActionManifest>,
+    /// The functions it supplies (§4a) — what a code body calls through
+    /// `modfn` and what a formula hoists.
+    #[serde(default)]
+    pub functions: Vec<FunctionManifest>,
     /// The fields of its `configuration_workflow`'s forms, flattened (§5).
     #[serde(default)]
     pub config_fields: Vec<Json>,
@@ -220,6 +266,26 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, action, args);
+            Err(no_runtime())
+        }
+    }
+
+    /// Call one **function** of one module with v1's positional arguments
+    /// (§4a).
+    ///
+    /// The fifth host surface, and routed exactly as [`run`](ModuleHost::run)
+    /// is: to the worker the module was loaded on, because a v1 function closes
+    /// over what its module built at load time — a `markdown-it`, a
+    /// `Nominatim`, the module's own configuration — and that lives in one
+    /// place because a module is loaded once.
+    pub async fn call(&self, module: &str, function: &str, args: Vec<Json>) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool.call(module, function, args).await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, function, args);
             Err(no_runtime())
         }
     }

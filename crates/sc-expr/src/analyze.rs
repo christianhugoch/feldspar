@@ -216,6 +216,121 @@ fn walk(ast: &Ast, locals: &mut Vec<String>, out: &mut FreeVars) {
     }
 }
 
+/// One argument of a **hoisted module function call** (§4b).
+///
+/// Only two shapes, and the narrowness is the design rather than an unfinished
+/// edge. A hoisted call is resolved *before the formula runs*, by
+/// `sc_catalog::prefetch_bindings`, which has the row's values and no evaluator
+/// — so what an argument may be is what can be **read** there, not what can be
+/// computed. §4b's "or pure expressions over those" is refused instead, for a
+/// reason worth stating plainly: computing `notes + "!"` outside the evaluator
+/// would mean a second implementation of this language's semantics in Rust,
+/// with JavaScript's own coercion in it, and two implementations that can
+/// silently disagree is exactly what the Ⱶ-join prefetch exists as one copy to
+/// avoid. A refusal names the call; a disagreement would name nothing.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ModuleArg {
+    /// A literal, as its JSON text (`"hi"`, `3`, `true`, `null`).
+    Literal(String),
+    /// A value in the formula's own row scope: a column, or a Ⱶ-join
+    /// identifier that the same prefetch resolved a moment earlier.
+    Binding(String),
+}
+
+impl ModuleArg {
+    /// The text this argument contributes to a call's key.
+    pub fn text(&self) -> &str {
+        match self {
+            ModuleArg::Literal(text) | ModuleArg::Binding(text) => text,
+        }
+    }
+}
+
+/// One module function call a formula makes, hoisted out of it (§4b).
+///
+/// A static fact of the syntax, exactly as a Ⱶ-join path is: collected here at
+/// validation, resolved by the caller before the formula runs, and bound into
+/// the evaluator's scope as an ordinary value. The evaluator does no I/O and
+/// gains nothing from this.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModuleCall {
+    /// What the value binds under — [`hoisted_call_key`]'s text, which the
+    /// renderer computes again from the same AST node, so the two sides agree
+    /// by construction rather than by convention.
+    pub key: String,
+    /// The package that supplies the function. Resolved here, because a
+    /// formula has no spelling for "the one from that module" and an ambiguous
+    /// name is refused on save.
+    pub module: String,
+    /// The function's own name, as the formula wrote it.
+    pub function: String,
+    /// The arguments, in order.
+    pub args: Vec<ModuleArg>,
+}
+
+/// The key a hoistable call node binds under, or `None` when the node is not
+/// one.
+///
+/// Computed from the **AST alone**, which is what lets the renderer
+/// ([`crate::normalise`]) find the binding without knowing what a module is:
+/// `md_to_html(notes)` and `pad("x",3)`, spelled from the canonical forms of
+/// the callee and each argument. A column cannot collide with one — a column
+/// name is an identifier and this text is not.
+pub fn hoisted_call_key(ast: &Ast) -> Option<String> {
+    let Ast::Call { callee, args, .. } = ast else {
+        return None;
+    };
+    let Ast::Ident(function) = &**callee else {
+        return None;
+    };
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        parts.push(literal_or_binding(arg)?.text().to_owned());
+    }
+    Some(module_call_key(function, &parts))
+}
+
+/// The key text for a call, from its function name and its rendered arguments.
+fn module_call_key(function: &str, args: &[String]) -> String {
+    format!("{function}({})", args.join(","))
+}
+
+/// Classify one argument expression, or `None` when it is not hoistable.
+///
+/// Deliberately syntax and nothing else: an identifier is a binding whatever it
+/// turns out to name, and whether it is really a column, a Ⱶ-join or an arrow
+/// parameter is decided by the caller, which has the shape and the local scope.
+fn literal_or_binding(ast: &Ast) -> Option<ModuleArg> {
+    Some(match ast {
+        Ast::Str(text) => ModuleArg::Literal(
+            serde_json::to_string(text).unwrap_or_else(|_| "null".to_owned()),
+        ),
+        // Spelled the way `crate::normalise` spells a number, so `3` is `3`
+        // rather than `3.0` — the key is read by a person when a call is
+        // refused, and it is still valid JSON either way.
+        Ast::Num(n) => ModuleArg::Literal(number_literal(*n)),
+        Ast::Bool(b) => ModuleArg::Literal(if *b { "true" } else { "false" }.to_owned()),
+        Ast::Null => ModuleArg::Literal("null".to_owned()),
+        Ast::Ident(name) => ModuleArg::Binding(name.clone()),
+        _ => return None,
+    })
+}
+
+/// A numeric literal as JSON text, integral where it can be.
+fn number_literal(n: f64) -> String {
+    const MAX_EXACT_INT: f64 = 9_007_199_254_740_992.0; // 2^53
+    if !n.is_finite() {
+        // Not reachable from a parsed literal, and `null` rather than a token
+        // JSON cannot read if it ever is.
+        return "null".to_owned();
+    }
+    if n.fract() == 0.0 && n.abs() <= MAX_EXACT_INT {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
 /// A Ⱶ-join path, resolved link by link through Key fields.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct JoinPath {
@@ -246,6 +361,10 @@ pub struct Analysis {
     /// shape — the prefetch plan now, the stored-calc trigger dependencies
     /// later.
     pub agg_uses: BTreeSet<AggUse>,
+    /// Every **module function call** the formula makes (§4b), resolved against
+    /// the shape and hoistable by construction: a call that could not be
+    /// hoisted was refused on save rather than recorded here.
+    pub module_calls: BTreeSet<ModuleCall>,
 }
 
 /// What a formula reads from one ambient object.
@@ -272,6 +391,19 @@ impl Analysis {
             .get(&ambient)
             .into_iter()
             .flat_map(|use_| use_.props.iter().map(String::as_str))
+    }
+
+    /// The first module function the formula calls, for a caller that allows
+    /// none.
+    ///
+    /// **Ownership formulas allow none** (§4b), and the reason is
+    /// [`JsEvaluator`](crate::JsEvaluator)'s contract that `Err` is deny: a rule
+    /// calling `geocode_lat` turns a Nominatim outage into "nobody may read
+    /// anything", and every row read waits on a third party. Calculated fields,
+    /// `only_if` and the rest take the hoist; the one that decides
+    /// authorization does not.
+    pub fn first_module_call(&self) -> Option<&ModuleCall> {
+        self.module_calls.first()
     }
 
     /// The first ambient object used that is **not** in `allowed` — what a caller
@@ -321,6 +453,21 @@ impl Formula {
         // as the root of a curated chain, so the whole chain is validated here
         // and its relation identifier is *skipped* in the free-variable loop.
         walk_aggregations(self.ast(), shape, table, &mut analysis)?;
+        // Module function calls (§4b), collected beside the join paths and
+        // classified here at parse time: a call that cannot be hoisted is
+        // **refused on save**, naming the call and why, rather than silently
+        // evaluating to something else. `called` is what the identifier loop
+        // below needs — a module function's own name is a free identifier, and
+        // it is a legitimate one exactly where it was called.
+        let mut called = BTreeSet::new();
+        walk_module_calls(
+            self.ast(),
+            shape,
+            table,
+            &mut Vec::new(),
+            &mut called,
+            &mut analysis,
+        )?;
         for ident in &free.idents {
             if let Some(flag) = OpFlag::from_ident(ident) {
                 analysis.flags.insert(flag);
@@ -340,6 +487,22 @@ impl Formula {
                     .insert(resolve_join_path(shape, table, ident)?);
             } else if GLOBALS.contains(&ident.as_str()) {
                 // Fine reified, untranslatable symbolically; nothing to record.
+            } else if !shape.modules_supplying(ident).is_empty() {
+                // A module function named but not *called* here: passed as a
+                // value (`items.map(md_to_html)`), where the arity is not known
+                // until the formula runs and there is nothing to hoist. Refused
+                // by name rather than resolving to a function the evaluator does
+                // not have.
+                if !called.contains(ident) {
+                    return Err(invalid(
+                        table,
+                        format_args!(
+                            "`{ident}` is a module function, and a formula may only call one \
+                             directly with its arguments — as `{ident}(a_column)`. Passing it as \
+                             a value has nothing to hoist; use a code body instead"
+                        ),
+                    ));
+                }
             } else {
                 return Err(invalid(table, format_args!("unknown identifier `{ident}`")));
             }
@@ -363,6 +526,109 @@ impl Formula {
         }
         Ok(analysis)
     }
+}
+
+/// Walk `ast` collecting and validating every **module function call** (§4b).
+///
+/// `locals` is the arrow-parameter scope, and it is the whole of what
+/// distinguishes the two refusals: `md_to_html(notes)` hoists because `notes` is
+/// a column of the row, and `items.map(x => md_to_html(x))` cannot because `x`
+/// does not exist until the formula runs.
+///
+/// A call inside a conditional hoists like any other — both branches are
+/// resolved, which is wasted work for a pure function and never a wrong answer.
+fn walk_module_calls(
+    ast: &Ast,
+    shape: &SchemaShape,
+    table: &str,
+    locals: &mut Vec<String>,
+    called: &mut BTreeSet<String>,
+    analysis: &mut Analysis,
+) -> Result<()> {
+    if let Ast::Call { callee, args, .. } = ast
+        && let Ast::Ident(function) = &**callee
+        && !locals.iter().any(|l| l == function)
+        // A column of this table wins, exactly as it wins over a global: the
+        // scope rule is one rule.
+        && !shape
+            .tables
+            .get(table)
+            .is_some_and(|t| t.fields.contains_key(function))
+    {
+        let modules = shape.modules_supplying(function);
+        if let Some(module) = modules.first() {
+            if modules.len() > 1 {
+                return Err(invalid(
+                    table,
+                    format_args!(
+                        "`{function}` is supplied by more than one module ({}), and a formula \
+                         has no way to say which one it means. Call it from a code body, where \
+                         `modfn(\"{module}\").{function}(…)` names the module",
+                        modules.join(", ")
+                    ),
+                ));
+            }
+            let mut classified = Vec::with_capacity(args.len());
+            for (index, arg) in args.iter().enumerate() {
+                let position = index + 1;
+                let Some(argument) = literal_or_binding(arg) else {
+                    return Err(invalid(
+                        table,
+                        format_args!(
+                            "`{function}` is a module function, so it is called before this \
+                             formula runs and its arguments must be values that can be read \
+                             then — a column, a Ⱶ-join value or a literal. Argument {position} \
+                             is computed by the formula itself; compute it in a code body \
+                             instead"
+                        ),
+                    ));
+                };
+                if let ModuleArg::Binding(name) = &argument
+                    && locals.iter().any(|l| l == name)
+                {
+                    return Err(invalid(
+                        table,
+                        format_args!(
+                            "`{function}` is called inside a `=>` function, where argument \
+                             {position} (`{name}`) does not exist until the formula runs. A \
+                             module function in a formula is called before it starts, so there \
+                             is nothing to hoist; use a code body instead"
+                        ),
+                    ));
+                }
+                classified.push(argument);
+            }
+            let key = module_call_key(
+                function,
+                &classified
+                    .iter()
+                    .map(|a| a.text().to_owned())
+                    .collect::<Vec<_>>(),
+            );
+            called.insert(function.clone());
+            analysis.module_calls.insert(ModuleCall {
+                key,
+                module: module.clone(),
+                function: function.clone(),
+                args: classified,
+            });
+            // The arguments are literals and identifiers; the identifiers are
+            // free variables the loop above classifies as columns or Ⱶ-paths,
+            // and there is nothing under them to descend into.
+            return Ok(());
+        }
+    }
+    if let Ast::Arrow { params, body } = ast {
+        let depth = locals.len();
+        locals.extend(params.iter().cloned());
+        walk_module_calls(body, shape, table, locals, called, analysis)?;
+        locals.truncate(depth);
+        return Ok(());
+    }
+    for child in child_nodes(ast) {
+        walk_module_calls(child, shape, table, locals, called, analysis)?;
+    }
+    Ok(())
 }
 
 /// Walk `ast` collecting and validating every aggregation chain. At each node
@@ -395,7 +661,7 @@ fn walk_aggregations(
 }
 
 /// The direct sub-expressions of a node, for the aggregation walk.
-fn child_nodes(ast: &Ast) -> Vec<&Ast> {
+pub(crate) fn child_nodes(ast: &Ast) -> Vec<&Ast> {
     match ast {
         Ast::Ident(_) | Ast::Str(_) | Ast::Num(_) | Ast::Bool(_) | Ast::Null => Vec::new(),
         Ast::Member { obj, prop, .. } => {
@@ -719,6 +985,135 @@ mod tests {
             err.to_string().contains("unknown identifier `g`"),
             "got: {err}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Module functions in a formula (§4b)
+    // ---------------------------------------------------------------------
+
+    /// The books shape, with `@saltcorn/markdown` installed.
+    fn with_markdown() -> SchemaShape {
+        shape().module_function("md_to_html", "@saltcorn/markdown")
+    }
+
+    fn validate_with_modules(shape: &SchemaShape, src: &str) -> Result<Analysis> {
+        Formula::parse(src).unwrap().validate(shape, "books")
+    }
+
+    #[test]
+    fn a_hoistable_module_call_is_collected_with_its_module_and_its_arguments() {
+        let a = validate_with_modules(&with_markdown(), "md_to_html(title) !== ''").unwrap();
+        let call = a.module_calls.first().unwrap();
+        assert_eq!(call.function, "md_to_html");
+        assert_eq!(call.module, "@saltcorn/markdown");
+        assert_eq!(call.args, vec![ModuleArg::Binding("title".to_owned())]);
+        assert_eq!(call.key, "md_to_html(title)");
+        // The argument is still a field of the formula's own table, classified
+        // as one — the prefetch reads it from the row it was given.
+        assert!(a.fields.contains("title"));
+        // And the same key comes back out of the AST alone, which is what lets
+        // the renderer find the binding without knowing what a module is.
+        let ast = Formula::parse("md_to_html(title)").unwrap();
+        assert_eq!(hoisted_call_key(ast.ast()).as_deref(), Some("md_to_html(title)"));
+    }
+
+    #[test]
+    fn literals_and_join_values_hoist_and_a_computed_argument_does_not() {
+        let shape = with_markdown().module_function("pad", "@saltcorn/text");
+        // A literal, a Ⱶ-join value and a column all hoist.
+        let a = validate_with_modules(&shape, "pad(publisherⱵname, 3) !== ''").unwrap();
+        let call = a.module_calls.first().unwrap();
+        assert_eq!(
+            call.args,
+            vec![
+                ModuleArg::Binding("publisherⱵname".to_owned()),
+                ModuleArg::Literal("3".to_owned()),
+            ]
+        );
+        // The join path is resolved beside it, so the prefetch has the value the
+        // argument reads before it makes the call.
+        assert_eq!(a.join_paths.first().unwrap().ident, "publisherⱵname");
+
+        // An argument the formula itself computes is refused, naming the call
+        // and what would have worked.
+        let err = validate_with_modules(&shape, "md_to_html(title + '!') !== ''")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("md_to_html"), "{err}");
+        assert!(err.contains("Ⱶ-join value or a literal"), "{err}");
+        assert!(err.contains("code body"), "{err}");
+    }
+
+    #[test]
+    fn a_call_inside_a_lambda_is_refused_and_a_conditional_one_is_not() {
+        let shape = with_markdown().table(
+            "books",
+            TableShape::new()
+                .field("id")
+                .field("title")
+                .field("owner")
+                .field("notes")
+                .field("chapters")
+                .key_field("publisher", "publishers", "id"),
+        );
+        // §4b: the arity is not known until the formula runs.
+        let err = validate_with_modules(&shape, "chapters.map(c => md_to_html(c)).length > 0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("inside a `=>` function"), "{err}");
+        assert!(err.contains("md_to_html"), "{err}");
+        // Passing it as a value has nothing to hoist either, and says so rather
+        // than reading as an unknown identifier.
+        let err = validate_with_modules(&shape, "chapters.map(md_to_html).length > 0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a module function"), "{err}");
+        // A call inside a conditional hoists: both branches are resolved, which
+        // is wasted work for a pure function and never a wrong answer.
+        let a =
+            validate_with_modules(&shape, "owner === null ? md_to_html(notes) : title").unwrap();
+        assert_eq!(a.module_calls.len(), 1);
+    }
+
+    #[test]
+    fn a_name_two_modules_supply_is_refused_in_a_formula_naming_both() {
+        let shape = shape()
+            .module_function("geocode_lat", "@saltcorn/nominatim-geocode")
+            .module_function("geocode_lat", "@saltcorn/other-geocode");
+        let err = validate_with_modules(&shape, "geocode_lat(title) > 0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("@saltcorn/nominatim-geocode"), "{err}");
+        assert!(err.contains("@saltcorn/other-geocode"), "{err}");
+        // A formula has no spelling for "the one from that module"; a body has.
+        assert!(err.contains("modfn("), "{err}");
+    }
+
+    #[test]
+    fn a_column_of_that_name_still_wins_and_no_modules_is_the_old_error() {
+        // The scope rule is one rule: a field shadows a module function exactly
+        // as it shadows a global.
+        let shaded = SchemaShape::new()
+            .table("t", TableShape::new().field("md_to_html"))
+            .module_function("md_to_html", "@saltcorn/markdown");
+        let a = Formula::parse("md_to_html === 1")
+            .unwrap()
+            .validate(&shaded, "t")
+            .unwrap();
+        assert!(a.fields.contains("md_to_html") && a.module_calls.is_empty());
+        // And on a server with no modules the name is what it has always been.
+        let err = validate("md_to_html(title) !== ''").unwrap_err().to_string();
+        assert!(err.contains("unknown identifier `md_to_html`"), "{err}");
+    }
+
+    #[test]
+    fn an_ownership_formula_is_told_about_the_call_it_may_not_make() {
+        // Validation itself does not refuse it — a calc field and an `only_if`
+        // both may — so the caller that must fail closed is handed the call by
+        // name, exactly as `ambient_outside` hands it an ambient object.
+        let a = validate_with_modules(&with_markdown(), "md_to_html(title) !== ''").unwrap();
+        assert_eq!(a.first_module_call().unwrap().function, "md_to_html");
+        assert!(validate("owner === user.id").unwrap().first_module_call().is_none());
     }
 
     #[test]

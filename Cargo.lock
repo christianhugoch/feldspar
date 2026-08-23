@@ -8242,6 +8242,7 @@ dependencies = [
  "sc-db",
  "sc-db-postgres",
  "sc-error",
+ "sc-expr",
  "sc-log",
  "sc-query",
  "sc-test-harness",

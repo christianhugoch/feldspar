@@ -31,20 +31,48 @@
 //! Everything else renders as written. The renderer is a pure function of the
 //! AST, unit-testable without V8 in the loop.
 
-use crate::analyze::{Ambient, JOIN};
+use std::collections::BTreeMap;
+
+use crate::analyze::{Ambient, JOIN, hoisted_call_key};
 use crate::ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 
 /// Render the normalised JavaScript for `ast`. The result is an expression
 /// (always parenthesised at the top level where it matters), suitable for
 /// embedding in the evaluator's script template.
 pub(crate) fn render_js(ast: &Ast) -> String {
+    render_js_hoisted(ast, &BTreeMap::new())
+}
+
+/// The same rendering, with the **hoisted module calls** of §4b resolved.
+///
+/// `hoisted` maps a call's key ([`hoisted_call_key`]) to the identifier its
+/// prefetched result is bound under, and a call node whose key is in it renders
+/// as that identifier instead of as a call. That is the whole of the hoist on
+/// this side: the evaluator sees a value and never knows there was a module —
+/// no op, no surface, no node compatibility — exactly as it never knows there
+/// was a Ⱶ-join query.
+pub(crate) fn render_js_hoisted(ast: &Ast, hoisted: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     let mut locals: Vec<String> = Vec::new();
-    render(ast, &mut locals, &mut out);
+    render(ast, &mut locals, hoisted, &mut out);
     out
 }
 
-fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
+fn render(
+    ast: &Ast,
+    locals: &mut Vec<String>,
+    hoisted: &BTreeMap<String, String>,
+    out: &mut String,
+) {
+    // A hoisted module call: its value was fetched before the formula started
+    // and bound under a generated name, so what renders here is the name.
+    if !hoisted.is_empty()
+        && let Some(key) = hoisted_call_key(ast)
+        && let Some(binding) = hoisted.get(&key)
+    {
+        out.push_str(binding);
+        return;
+    }
     match ast {
         Ast::Ident(name) => out.push_str(name),
         Ast::Str(s) => render_str(s, out),
@@ -67,7 +95,7 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
                 }
                 MemberProp::Computed(e) => {
                     out.push('[');
-                    render(e, locals, out);
+                    render(e, locals, hoisted, out);
                     out.push(']');
                 }
             }
@@ -87,12 +115,12 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
                 }
                 MemberProp::Computed(e) => {
                     out.push('[');
-                    render(e, locals, out);
+                    render(e, locals, hoisted, out);
                     out.push(']');
                 }
             }
             out.push_str(")(");
-            render(obj, locals, out);
+            render(obj, locals, hoisted, out);
             out.push(')');
         }
         Ast::Member {
@@ -100,7 +128,7 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
             prop,
             optional,
         } => {
-            render(obj, locals, out);
+            render(obj, locals, hoisted, out);
             match prop {
                 MemberProp::Static(p) => {
                     out.push_str(if *optional { "?." } else { "." });
@@ -108,7 +136,7 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
                 }
                 MemberProp::Computed(e) => {
                     out.push_str(if *optional { "?.[" } else { "[" });
-                    render(e, locals, out);
+                    render(e, locals, hoisted, out);
                     out.push(']');
                 }
             }
@@ -118,52 +146,52 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
             args,
             optional,
         } => {
-            render(callee, locals, out);
+            render(callee, locals, hoisted, out);
             out.push_str(if *optional { "?.(" } else { "(" });
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                render(a, locals, out);
+                render(a, locals, hoisted, out);
             }
             out.push(')');
         }
         Ast::Unary { op, expr } => match op {
             // `!` is native: JS two-valued logic is the specified semantics
             // (the translator's `IS DISTINCT FROM TRUE` side of the bargain).
-            UnaryOp::Not => wrap_unary("!", expr, locals, out),
+            UnaryOp::Not => wrap_unary("!", expr, locals, hoisted, out),
             // Negation is arithmetic: null-guarded like the binary operators.
             UnaryOp::Neg => {
                 out.push_str("((x => x === null ? null : -x)(");
-                render(expr, locals, out);
+                render(expr, locals, hoisted, out);
                 out.push_str("))");
             }
-            UnaryOp::Pos => wrap_unary("+", expr, locals, out),
-            UnaryOp::TypeOf => wrap_unary("typeof ", expr, locals, out),
+            UnaryOp::Pos => wrap_unary("+", expr, locals, hoisted, out),
+            UnaryOp::TypeOf => wrap_unary("typeof ", expr, locals, hoisted, out),
         },
         Ast::Binary { op, l, r } => match op {
-            BinaryOp::Eq | BinaryOp::StrictEq => infix("===", l, r, locals, out),
-            BinaryOp::NotEq | BinaryOp::StrictNotEq => infix("!==", l, r, locals, out),
-            BinaryOp::And => infix("&&", l, r, locals, out),
-            BinaryOp::Or => infix("||", l, r, locals, out),
-            BinaryOp::Nullish => infix("??", l, r, locals, out),
-            BinaryOp::Lt => guarded("<", l, r, locals, out),
-            BinaryOp::LtEq => guarded("<=", l, r, locals, out),
-            BinaryOp::Gt => guarded(">", l, r, locals, out),
-            BinaryOp::GtEq => guarded(">=", l, r, locals, out),
-            BinaryOp::Add => guarded("+", l, r, locals, out),
-            BinaryOp::Sub => guarded("-", l, r, locals, out),
-            BinaryOp::Mul => guarded("*", l, r, locals, out),
-            BinaryOp::Div => guarded("/", l, r, locals, out),
-            BinaryOp::Mod => guarded("%", l, r, locals, out),
+            BinaryOp::Eq | BinaryOp::StrictEq => infix("===", l, r, locals, hoisted, out),
+            BinaryOp::NotEq | BinaryOp::StrictNotEq => infix("!==", l, r, locals, hoisted, out),
+            BinaryOp::And => infix("&&", l, r, locals, hoisted, out),
+            BinaryOp::Or => infix("||", l, r, locals, hoisted, out),
+            BinaryOp::Nullish => infix("??", l, r, locals, hoisted, out),
+            BinaryOp::Lt => guarded("<", l, r, locals, hoisted, out),
+            BinaryOp::LtEq => guarded("<=", l, r, locals, hoisted, out),
+            BinaryOp::Gt => guarded(">", l, r, locals, hoisted, out),
+            BinaryOp::GtEq => guarded(">=", l, r, locals, hoisted, out),
+            BinaryOp::Add => guarded("+", l, r, locals, hoisted, out),
+            BinaryOp::Sub => guarded("-", l, r, locals, hoisted, out),
+            BinaryOp::Mul => guarded("*", l, r, locals, hoisted, out),
+            BinaryOp::Div => guarded("/", l, r, locals, hoisted, out),
+            BinaryOp::Mod => guarded("%", l, r, locals, hoisted, out),
         },
         Ast::Cond { test, cons, alt } => {
             out.push('(');
-            render(test, locals, out);
+            render(test, locals, hoisted, out);
             out.push_str(" ? ");
-            render(cons, locals, out);
+            render(cons, locals, hoisted, out);
             out.push_str(" : ");
-            render(alt, locals, out);
+            render(alt, locals, hoisted, out);
             out.push(')');
         }
         Ast::Array(elems) => {
@@ -172,7 +200,7 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                render(e, locals, out);
+                render(e, locals, hoisted, out);
             }
             out.push(']');
         }
@@ -182,7 +210,7 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
                 render_quasi(quasi, out);
                 if let Some(e) = exprs.get(i) {
                     out.push_str("${");
-                    render(e, locals, out);
+                    render(e, locals, hoisted, out);
                     out.push('}');
                 }
             }
@@ -194,7 +222,7 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
             out.push_str(") => ");
             let depth = locals.len();
             locals.extend(params.iter().cloned());
-            render(body, locals, out);
+            render(body, locals, hoisted, out);
             locals.truncate(depth);
             out.push(')');
         }
@@ -202,22 +230,26 @@ fn render(ast: &Ast, locals: &mut Vec<String>, out: &mut String) {
 }
 
 /// A native unary operator, parenthesised.
-fn wrap_unary(op: &str, expr: &Ast, locals: &mut Vec<String>, out: &mut String) {
+fn wrap_unary(op: &str, expr: &Ast, locals: &mut Vec<String>,
+    hoisted: &BTreeMap<String, String>,
+    out: &mut String) {
     out.push('(');
     out.push_str(op);
     out.push('(');
-    render(expr, locals, out);
+    render(expr, locals, hoisted, out);
     out.push_str("))");
 }
 
 /// A native infix operator, parenthesised.
-fn infix(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>, out: &mut String) {
+fn infix(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>,
+    hoisted: &BTreeMap<String, String>,
+    out: &mut String) {
     out.push('(');
-    render(l, locals, out);
+    render(l, locals, hoisted, out);
     out.push(' ');
     out.push_str(op);
     out.push(' ');
-    render(r, locals, out);
+    render(r, locals, hoisted, out);
     out.push(')');
 }
 
@@ -225,13 +257,15 @@ fn infix(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>, out: &mut String)
 /// comparison and arithmetic, in JS. The IIFE evaluates each operand exactly
 /// once (a textual guard would re-render them and blow up nested expressions
 /// exponentially).
-fn guarded(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>, out: &mut String) {
+fn guarded(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>,
+    hoisted: &BTreeMap<String, String>,
+    out: &mut String) {
     out.push_str("(((x, y) => x === null || y === null ? null : x ");
     out.push_str(op);
     out.push_str(" y)(");
-    render(l, locals, out);
+    render(l, locals, hoisted, out);
     out.push_str(", ");
-    render(r, locals, out);
+    render(r, locals, hoisted, out);
     out.push_str("))");
 }
 
