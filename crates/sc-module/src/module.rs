@@ -9,6 +9,8 @@ use sc_error::{Error, Result};
 use sc_types::Attrs;
 use uuid::Uuid;
 
+use crate::permissions::ModulePermissions;
+
 /// A module's stable identity — the primary key of its `_sc_modules` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(pub Uuid);
@@ -94,6 +96,14 @@ pub struct Module {
     /// The module's own configuration — v1's plugin configuration, the object
     /// handed to `actions(cfg)` (§5).
     pub configuration: Attrs,
+    /// What the module's worker may reach: a net allow-list, readable and
+    /// writable paths, and the environment variables it may see (§2).
+    ///
+    /// **Closed on install** and widened only by an admin. It is stored on the
+    /// row rather than read from the package because it is the *server's*
+    /// decision and not the module's: what a package declares is a request, and
+    /// a request that granted itself would be no permission model at all.
+    pub permissions: ModulePermissions,
     /// The sparse per-module values column (§9).
     pub attributes: Attrs,
 }
@@ -117,6 +127,7 @@ impl Module {
             location: location.into(),
             version: None,
             configuration: Attrs::new(),
+            permissions: ModulePermissions::closed(),
             attributes: Attrs::new(),
         }
     }
@@ -145,5 +156,7 @@ mod tests {
         let module = Module::new("@saltcorn/mqtt", ModuleSource::Npm, "@saltcorn/mqtt");
         assert!(module.version.is_none());
         assert!(module.configuration.is_empty());
+        // And it reaches nothing until an admin says otherwise (§2).
+        assert!(module.permissions.is_closed());
     }
 }

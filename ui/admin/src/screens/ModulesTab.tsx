@@ -12,9 +12,12 @@
 // reads — is in `modules.ts`, tested without a browser. What is here is the
 // flow: install, configure, reload, delete, and the busy states between.
 //
-// Installing a module runs `npm install` and then somebody else's JavaScript in
-// a Node process with this server's privileges. That is said once, on the
-// screen, rather than assumed: there is no sandbox in this version.
+// **Two different privileges, and the screen has to keep them apart.** Installing
+// a module runs `npm install` — somebody else's install scripts, as the server,
+// before anything is sandboxed. *Running* one does not: a module's worker gets
+// the permission set on this screen, closed unless an admin granted something.
+// Both sentences are on the screen, because the presence of a permissions form
+// would otherwise imply the first one had been solved too.
 
 import { useCallback, useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -25,16 +28,24 @@ import { api, errorMessage } from "../api";
 import { AlertBody, StatusBadge } from "../layout";
 import {
   EMPTY_INSTALL,
+  PERMISSION_KINDS,
   configValues,
   installBlocked,
+  isClosed,
   isConfigurable,
   locationLabel,
   locationPlaceholder,
+  modulePermissions,
   moduleStatus,
   moduleSubtitle,
+  parsePermissionText,
+  permissionProblems,
+  permissionSummary,
+  permissionText,
   unsupportedSentence,
   type InstallForm,
   type Module,
+  type ModulePermissionSet,
   type ModuleSource,
 } from "../modules";
 import { SettingField, buildConfig, initialValues, type FieldSpec } from "../settings";
@@ -137,6 +148,25 @@ export function ModulesTab() {
     }
   };
 
+  const grant = async (module: Module, permissions: ModulePermissionSet) => {
+    setBusy("Saving…");
+    setError(null);
+    setNote(null);
+    try {
+      await api.updateModule(module.id, { permissions });
+      setNote(
+        isClosed(permissions)
+          ? `${module.name} may now reach nothing.`
+          : `${module.name}'s permissions saved. It runs on its own worker while its permissions differ from the other modules'.`,
+      );
+      await load();
+    } catch (e) {
+      setError(errorMessage(e, "The module's permissions could not be saved."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const blocked = installBlocked(form, npm);
 
   return (
@@ -154,8 +184,9 @@ export function ModulesTab() {
       {!node && (
         <Alert variant="warning">
           <AlertBody>
-            This server has no Node.js on its PATH. Modules run in a Node process, so an
-            installed module cannot load until Node.js is installed and Saltcorn is restarted.
+            This server has no Node.js on its PATH. Modules <em>run</em> inside Saltcorn and do
+            not need it — but <code>npm</code> is what installs one, so nothing new can be
+            installed until Node.js is.
           </AlertBody>
         </Alert>
       )}
@@ -172,9 +203,13 @@ export function ModulesTab() {
         <div className="card-body">
           <p className="text-secondary">
             A module is a Saltcorn plugin: an npm package that supplies actions your triggers
-            can run. Installing one runs <code>npm install</code> and then the module's own
-            code, with this server's privileges and its network — so install modules you
-            trust. Packages are installed under <code>{root}</code>.
+            can run, and functions your formulas and code bodies can call. It runs inside
+            Saltcorn, on a worker that reaches only what you grant it under
+            <strong> Permissions</strong> — nothing, until you do.{" "}
+            <strong>Installing</strong> one is a different matter and is not sandboxed:{" "}
+            <code>npm install</code> runs the package&apos;s own install scripts with this
+            server&apos;s privileges, so install modules you trust. Packages are installed under{" "}
+            <code>{root}</code>.
           </p>
           <div className="row g-2 align-items-end">
             <div className="col-md-3">
@@ -234,6 +269,7 @@ export function ModulesTab() {
             busy={!!busy}
             onRemove={() => void remove(module)}
             onConfigure={(values) => void configure(module, values)}
+            onGrant={(permissions) => void grant(module, permissions)}
           />
         ))
       )}
@@ -248,11 +284,13 @@ function ModuleCard({
   busy,
   onRemove,
   onConfigure,
+  onGrant,
 }: {
   module: Module;
   busy: boolean;
   onRemove: () => void;
   onConfigure: (values: Record<string, string>) => void;
+  onGrant: (permissions: ModulePermissionSet) => void;
 }) {
   const status = moduleStatus(module);
   const census = unsupportedSentence(module);
@@ -260,6 +298,8 @@ function ModuleCard({
     initialValues(module.config_spec as FieldSpec[], configValues(module)),
   );
   const [open, setOpen] = useState(false);
+  const [showPermissions, setShowPermissions] = useState(false);
+  const permissions = modulePermissions(module);
 
   return (
     <div className="card mb-3">
@@ -280,6 +320,13 @@ function ModuleCard({
               {open ? "Close settings" : "Settings"}
             </Button>
           )}
+          <Button
+            variant="outline-secondary"
+            size="sm"
+            onClick={() => setShowPermissions((showing) => !showing)}
+          >
+            {showPermissions ? "Close permissions" : "Permissions"}
+          </Button>
           <Button variant="outline-danger" size="sm" disabled={busy} onClick={onRemove}>
             Remove
           </Button>
@@ -312,7 +359,39 @@ function ModuleCard({
           </>
         )}
 
+        {module.functions.length > 0 && (
+          <>
+            <div className="text-secondary mb-1">Functions</div>
+            <ul className="list-unstyled mb-2">
+              {module.functions.map((fn) => (
+                <li key={fn.name}>
+                  <code>
+                    {fn.name}({fn.arguments.map((argument) => argument.name).join(", ")})
+                  </code>
+                  {fn.description && <span className="text-secondary"> — {fn.description}</span>}
+                </li>
+              ))}
+            </ul>
+            <div className="text-secondary mb-2">
+              A code body calls these with <code>await</code>, including the ones this module
+              wrote synchronously; a formula calls them by name, and the call is resolved before
+              the formula runs.
+            </div>
+          </>
+        )}
+
         {census && <div className="text-secondary">{census}</div>}
+
+        <div className="text-secondary mt-2">{permissionSummary(permissions)}</div>
+
+        {showPermissions && (
+          <PermissionsForm
+            module={module}
+            busy={busy}
+            permissions={permissions}
+            onGrant={onGrant}
+          />
+        )}
 
         {open && isConfigurable(module) && (
           <form
@@ -340,5 +419,83 @@ function ModuleCard({
         )}
       </div>
     </div>
+  );
+}
+
+/** What one module's worker may reach, edited.
+ *
+ * Four textareas, one entry per line, because the entries are hosts and absolute
+ * paths and both may contain a comma. The sentence about `npm install` is here
+ * rather than only at the top of the tab, and it is here **because** this form
+ * exists: a screen that grants permissions invites the reading that installing
+ * one is sandboxed too, and it is not.
+ */
+function PermissionsForm({
+  module,
+  busy,
+  permissions,
+  onGrant,
+}: {
+  module: Module;
+  busy: boolean;
+  permissions: ModulePermissionSet;
+  onGrant: (permissions: ModulePermissionSet) => void;
+}) {
+  const [text, setText] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      PERMISSION_KINDS.map(({ key }) => [key, permissionText(permissions[key])]),
+    ),
+  );
+  const edited: ModulePermissionSet = {
+    net: parsePermissionText(text.net ?? ""),
+    read: parsePermissionText(text.read ?? ""),
+    write: parsePermissionText(text.write ?? ""),
+    env: parsePermissionText(text.env ?? ""),
+  };
+  const problems = permissionProblems(edited);
+
+  return (
+    <form
+      className="mt-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onGrant(edited);
+      }}
+    >
+      <p className="text-secondary">
+        A module reaches nothing it is not granted here — no host, no file, no environment
+        variable — and it always runs on a worker of its own while its permissions differ from
+        the other modules&apos;. <strong>Installing</strong> a module is not sandboxed:{" "}
+        <code>npm install</code> and the package&apos;s own install scripts run as this server,
+        before any of this applies.
+      </p>
+      {PERMISSION_KINDS.map((kind) => (
+        <Form.Group className="mb-2" controlId={`module-${module.id}-${kind.key}`} key={kind.key}>
+          <Form.Label>{kind.label}</Form.Label>
+          <Form.Control
+            as="textarea"
+            rows={2}
+            value={text[kind.key] ?? ""}
+            placeholder={kind.placeholder}
+            onChange={(e) => setText((current) => ({ ...current, [kind.key]: e.target.value }))}
+          />
+          <Form.Text className="text-secondary">{kind.help}</Form.Text>
+        </Form.Group>
+      ))}
+      {problems.length > 0 && (
+        <Alert variant="warning">
+          <AlertBody>
+            <ul className="mb-0">
+              {problems.map((problem) => (
+                <li key={problem}>{problem}</li>
+              ))}
+            </ul>
+          </AlertBody>
+        </Alert>
+      )}
+      <Button type="submit" size="sm" disabled={busy || problems.length > 0}>
+        Save permissions
+      </Button>
+    </form>
   );
 }

@@ -12,7 +12,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{have_npm, installed_on_deno};
+use common::{closed, have_npm, installed_on_deno};
 use sc_module::PoolBounds;
 use serde_json::json;
 
@@ -33,6 +33,7 @@ async fn a_module_loads_and_runs_in_this_process() {
             name,
             &installer.package_dir(name),
             &json!({ "endpoint": "e" }),
+            &closed(),
         )
         .await
         .unwrap();
@@ -98,6 +99,7 @@ async fn a_modules_functions_are_reported_and_called() {
             name,
             &installer.package_dir(name),
             &json!({ "endpoint": "https://echo.example" }),
+            &closed(),
         )
         .await
         .unwrap();
@@ -134,7 +136,10 @@ async fn a_modules_functions_are_reported_and_called() {
 
     // A synchronous v1 function, awaited across the seam (§4a's behaviour
     // difference), with v1's positional arguments.
-    let value = host.call(name, "echo_upper", vec![json!("hi")]).await.unwrap();
+    let value = host
+        .call(name, "echo_upper", vec![json!("hi")])
+        .await
+        .unwrap();
     assert_eq!(value, json!("HI"));
     let value = host
         .call(name, "echo_join", vec![json!("a"), json!("b")])
@@ -179,35 +184,25 @@ async fn a_modules_functions_are_reported_and_called() {
 /// Against a stub HTTP server in this process rather than a real geocoder, for
 /// the reason `install.rs` gives about the registry: somebody else's network is
 /// not a thing a test suite should depend on.
+///
+/// Phase 3: the module is **granted that one host**, because a module that was
+/// granted nothing reaches nothing — which the next test is about.
 #[tokio::test]
 async fn a_module_function_reaches_a_stub_http_server() {
     skip_without!(have_npm(), "npm is not on the PATH");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        let Ok((mut stream, _)) = listener.accept() else {
-            return;
-        };
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer);
-        let body = r#"{"lat":55.6761,"lon":12.5683}"#;
-        let _ = stream.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
-                 connection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        );
-    });
+    let (port, server) = stub_http_server();
 
     let (installer, host, names) =
         installed_on_deno("deno-fn-http", &["echo-module"], 1, default_bounds()).await;
     let name = &names[0];
-    host.load(name, &installer.package_dir(name), &json!({}))
-        .await
-        .unwrap();
+    host.load(
+        name,
+        &installer.package_dir(name),
+        &json!({}),
+        &allowing_net(&[&format!("127.0.0.1:{port}")]),
+    )
+    .await
+    .unwrap();
 
     let value = host
         .call(
@@ -220,6 +215,251 @@ async fn a_module_function_reaches_a_stub_http_server() {
     assert_eq!(value["lat"], json!(55.6761));
 
     let _ = server.join();
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// Phase 3, specification §2: **a module granted one host reaches that host and
+/// no other.**
+///
+/// The one the sidecar could not do at all — `node` has no permission model to
+/// ask for, so a module that published to a broker could also have reached the
+/// database, the metadata service and the admin's home directory.
+#[tokio::test]
+async fn a_module_granted_one_host_cannot_reach_a_second() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (allowed, first) = stub_http_server();
+    let (denied, second) = stub_http_server();
+
+    let (installer, host, names) =
+        installed_on_deno("deno-perm-net", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+    host.load(
+        name,
+        &installer.package_dir(name),
+        &json!({}),
+        &allowing_net(&[&format!("127.0.0.1:{allowed}")]),
+    )
+    .await
+    .unwrap();
+
+    let value = host
+        .call(
+            name,
+            "echo_fetch",
+            vec![json!(format!("http://127.0.0.1:{allowed}/"))],
+        )
+        .await
+        .unwrap();
+    assert_eq!(value["lat"], json!(55.6761));
+
+    // The same host on a different port is a different permission, and this is
+    // the assertion that says the allow-list is an allow-list rather than a
+    // switch that "network" turns on.
+    let err = host
+        .call(
+            name,
+            "echo_fetch",
+            vec![json!(format!("http://127.0.0.1:{denied}/"))],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&denied.to_string()), "{err}");
+    assert!(
+        err.contains(name),
+        "the denial should name the module: {err}"
+    );
+    assert!(
+        err.contains("Settings → Modules"),
+        "the denial should name where to allow it: {err}"
+    );
+    assert!(
+        !err.contains("--allow-net"),
+        "an admin has no command line to run that on: {err}"
+    );
+    // And the worker is untouched by a denial: it is the module's error, not the
+    // host's.
+    assert_eq!(host.ping().await.unwrap()["pong"], json!(true));
+
+    let _ = first.join();
+    drop(second);
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// Phase 3: **denied the filesystem, and still able to be its own code.**
+///
+/// The two halves of the fence, in one test. `require` walked the modules root
+/// to load the module at all — so the module is running — and `node:fs` reading
+/// that same root is denied, because the code a module is made of is not a
+/// capability and the filesystem it sits on is.
+#[tokio::test]
+async fn a_module_denied_the_filesystem_cannot_read_the_modules_root() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-perm-fs", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+    // Loading proves `require` read the root: a closed module is not a module
+    // that cannot start.
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
+        .await
+        .unwrap();
+    assert_eq!(
+        host.call(name, "echo_upper", vec![json!("hi")])
+            .await
+            .unwrap(),
+        json!("HI")
+    );
+
+    let script = installer
+        .root()
+        .join(sc_module::host::HOST_SCRIPT_NAME)
+        .display()
+        .to_string();
+    let err = host
+        .call(name, "echo_read", vec![json!(script.clone())])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(name), "{err}");
+    assert!(err.contains("Settings → Modules"), "{err}");
+
+    // Granted, it reads — the same call, the same path, one row edited.
+    host.load(
+        name,
+        &installer.package_dir(name),
+        &json!({}),
+        &sc_module::ModulePermissions {
+            read: vec![installer.root().display().to_string()],
+            ..sc_module::ModulePermissions::closed()
+        },
+    )
+    .await
+    .unwrap();
+    let text = host
+        .call(name, "echo_read", vec![json!(script)])
+        .await
+        .unwrap();
+    assert!(
+        text.as_str().unwrap_or_default().contains("module"),
+        "{text:?}"
+    );
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// Phase 3: an environment variable nobody granted is **not there**, rather than
+/// an exception.
+///
+/// The one deliberate softness in the fence, and it is node compatibility rather
+/// than generosity: half of npm reads `process.env.NODE_ENV` at load time, and a
+/// throw there would be a rule that most modules may not be installed. Net and
+/// filesystem denials are errors, because there is something for an admin to do
+/// about each of them.
+#[tokio::test]
+async fn an_ungranted_environment_variable_is_invisible_rather_than_fatal() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-perm-env", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
+        .await
+        .unwrap();
+    // `PATH` is set in every process this could run in, and the module cannot
+    // see it.
+    assert_eq!(
+        host.call(name, "echo_env", vec![json!("PATH")])
+            .await
+            .unwrap(),
+        json!(null)
+    );
+
+    host.load(
+        name,
+        &installer.package_dir(name),
+        &json!({}),
+        &sc_module::ModulePermissions {
+            env: vec!["PATH".into()],
+            ..sc_module::ModulePermissions::closed()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        host.call(name, "echo_env", vec![json!("PATH")])
+            .await
+            .unwrap(),
+        json!(true)
+    );
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// Phase 3: two permission sets are two isolates, even in a pool of one.
+///
+/// A `PermissionsContainer` is handed to a worker when its isolate is built, and
+/// there is no per-module fence inside one — so a module granted a host must not
+/// be resident beside a module that was granted nothing.
+#[tokio::test]
+async fn modules_with_different_permissions_do_not_share_a_worker() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) = installed_on_deno(
+        "deno-perm-pin",
+        &["echo-module", "clash-module"],
+        1,
+        default_bounds(),
+    )
+    .await;
+    let echo = names
+        .iter()
+        .find(|n| n.contains("echo"))
+        .expect("the echo fixture")
+        .clone();
+    let other = names
+        .iter()
+        .find(|n| **n != echo)
+        .expect("the other fixture")
+        .clone();
+
+    host.load(&echo, &installer.package_dir(&echo), &json!({}), &closed())
+        .await
+        .unwrap();
+    host.load(
+        &other,
+        &installer.package_dir(&other),
+        &json!({}),
+        &allowing_net(&["broker.example:1883"]),
+    )
+    .await
+    .unwrap();
+    assert_ne!(host.worker_of(&echo).await, host.worker_of(&other).await);
+    assert_eq!(host.workers().await, 2, "one worker per permission set");
+
+    // Granting the closed one the *same* host brings them together: the pool
+    // pins by set, not by module.
+    host.load(
+        &echo,
+        &installer.package_dir(&echo),
+        &json!({}),
+        &allowing_net(&["broker.example:1883"]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(host.worker_of(&echo).await, host.worker_of(&other).await);
+    // And the worker the module left is stopped rather than kept running with an
+    // isolate nobody is on.
+    assert_eq!(host.workers().await, 1);
+    // The moved module still answers, on its new isolate.
+    assert_eq!(
+        host.call(&echo, "echo_upper", vec![json!("moved")])
+            .await
+            .unwrap(),
+        json!("MOVED")
+    );
+
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());
 }
@@ -240,7 +480,7 @@ async fn a_modules_console_log_goes_to_the_log_and_not_to_a_pipe() {
     let (installer, host, names) =
         installed_on_deno("deno-log", &["echo-module"], 1, default_bounds()).await;
     let name = &names[0];
-    host.load(name, &installer.package_dir(name), &json!({}))
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
 
@@ -271,7 +511,7 @@ async fn a_result_that_is_not_json_fails_with_a_sentence() {
     let (installer, host, names) =
         installed_on_deno("deno-cycle", &["echo-module"], 1, default_bounds()).await;
     let name = &names[0];
-    host.load(name, &installer.package_dir(name), &json!({}))
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
 
@@ -301,7 +541,7 @@ async fn no_node_process_is_involved() {
     let (installer, host, names) =
         installed_on_deno("deno-nonode", &["echo-module"], 1, default_bounds()).await;
     let name = &names[0];
-    host.load(name, &installer.package_dir(name), &json!({}))
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
 
@@ -336,6 +576,7 @@ async fn a_module_that_exits_loses_its_call_and_leaves_the_server_up() {
         name,
         &installer.package_dir(name),
         &json!({ "endpoint": "e" }),
+        &closed(),
     )
     .await
     .unwrap();
@@ -385,7 +626,7 @@ async fn a_runaway_module_is_stopped_by_the_js_slice() {
         installed_on_deno("deno-spin", &["echo-module"], 1, bounds).await;
     let name = &names[0];
     let manifest = host
-        .load(name, &installer.package_dir(name), &json!({}))
+        .load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
     let actions: Vec<&str> = manifest.actions.iter().map(|a| a.name.as_str()).collect();
@@ -427,7 +668,7 @@ async fn a_module_on_another_worker_does_not_notice() {
     )
     .await;
     for name in &names {
-        host.load(name, &installer.package_dir(name), &json!({}))
+        host.load(name, &installer.package_dir(name), &json!({}), &closed())
             .await
             .unwrap();
     }
@@ -471,7 +712,7 @@ async fn an_unloaded_module_is_not_replayed() {
     )
     .await;
     for name in &names {
-        host.load(name, &installer.package_dir(name), &json!({}))
+        host.load(name, &installer.package_dir(name), &json!({}), &closed())
             .await
             .unwrap();
     }
@@ -501,6 +742,42 @@ async fn an_unloaded_module_is_not_replayed() {
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// A set granting exactly these hosts and nothing else.
+fn allowing_net(hosts: &[&str]) -> sc_module::ModulePermissions {
+    sc_module::ModulePermissions {
+        net: hosts.iter().map(|host| (*host).to_owned()).collect(),
+        ..sc_module::ModulePermissions::closed()
+    }
+}
+
+/// A one-shot HTTP server on a free port: its port, and the thread serving it.
+///
+/// One request and one canned geocoder answer, which is all any caller here
+/// wants. The thread ends on its own when nobody connects, so a test that
+/// asserts a *denial* simply never joins it.
+fn stub_http_server() -> (u16, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let body = r#"{"lat":55.6761,"lon":12.5683}"#;
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+    });
+    (port, server)
 }
 
 /// This process's children, as their full command lines, read out of `/proc`.

@@ -11,7 +11,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 
-use common::{fixture, have_npm, installed, temp_root};
+use common::{closed, fixture, have_npm, installed, temp_root};
 use sc_module::{Installer, ModuleHost, ModuleSource};
 use serde_json::json;
 
@@ -22,7 +22,7 @@ async fn a_module_loads_and_reports_what_it_supplies() {
     let name = &names[0];
 
     let manifest = host
-        .load(name, &installer.package_dir(name), &json!({}))
+        .load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
 
@@ -82,6 +82,7 @@ async fn an_action_runs_and_gets_v1s_argument_object() {
         name,
         &installer.package_dir(name),
         &json!({ "endpoint": "https://example.com" }),
+        &closed(),
     )
     .await
     .unwrap();
@@ -122,7 +123,7 @@ async fn the_saltcorn_stubs_are_free_to_require_and_named_when_called() {
     let name = &names[0];
     // Loading at all is the first half of the assertion: the fixture requires
     // `@saltcorn/data/models/table` and `@saltcorn/data/db/state` at its top.
-    host.load(name, &installer.package_dir(name), &json!({}))
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
 
@@ -165,7 +166,7 @@ async fn a_module_that_throws_is_an_ordinary_failed_call() {
     skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) = installed("host-throw", &["echo-module"]).await;
     let name = &names[0];
-    host.load(name, &installer.package_dir(name), &json!({}))
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
 
@@ -193,7 +194,7 @@ async fn a_module_that_kills_its_worker_fails_its_call_and_the_next_one_works() 
     skip_without!(have_npm(), "npm is not on the PATH");
     let (installer, host, names) = installed("host-crash", &["echo-module"]).await;
     let name = &names[0];
-    host.load(name, &installer.package_dir(name), &json!({}))
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
 
@@ -228,14 +229,19 @@ async fn a_module_that_cannot_be_required_is_reported_and_the_host_stays_up() {
     let echo = &names[1];
 
     let err = host
-        .load(broken, &installer.package_dir(broken), &json!({}))
+        .load(
+            broken,
+            &installer.package_dir(broken),
+            &json!({}),
+            &closed(),
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("cannot be loaded"), "{err}");
 
     // The good module still loads on the same worker.
     let manifest = host
-        .load(echo, &installer.package_dir(echo), &json!({}))
+        .load(echo, &installer.package_dir(echo), &json!({}), &closed())
         .await
         .unwrap();
     assert!(!manifest.actions.is_empty());
@@ -322,7 +328,9 @@ async fn a_checkouts_own_dependencies_are_installed_and_its_v1_ones_are_not() {
 
     let host = ModuleHost::new(&root);
     let dir = installer.package_dir(&package.name);
-    host.load(&package.name, &dir, &json!({})).await.unwrap();
+    host.load(&package.name, &dir, &json!({}), &closed())
+        .await
+        .unwrap();
     let shouted = host
         .run(
             &package.name,
@@ -370,6 +378,7 @@ async fn a_module_whose_own_dependency_is_missing_says_which_one() {
             &package.name,
             &installer.package_dir(&package.name),
             &json!({}),
+            &closed(),
         )
         .await
         .unwrap_err();
@@ -397,12 +406,22 @@ async fn reloading_a_module_picks_up_a_new_configuration() {
     let host = ModuleHost::new(&root);
     let dir = installer.package_dir(&package.name);
 
-    host.load(&package.name, &dir, &json!({ "endpoint": "first" }))
-        .await
-        .unwrap();
-    host.load(&package.name, &dir, &json!({ "endpoint": "second" }))
-        .await
-        .unwrap();
+    host.load(
+        &package.name,
+        &dir,
+        &json!({ "endpoint": "first" }),
+        &closed(),
+    )
+    .await
+    .unwrap();
+    host.load(
+        &package.name,
+        &dir,
+        &json!({ "endpoint": "second" }),
+        &closed(),
+    )
+    .await
+    .unwrap();
 
     let result = host
         .run(
@@ -445,6 +464,7 @@ async fn the_real_mqtt_module_installs_from_npm_and_supplies_its_action() {
             &package.name,
             &installer.package_dir(&package.name),
             &json!({ "broker_url": "mqtt://localhost" }),
+            &closed(),
         )
         .await
         .unwrap();

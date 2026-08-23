@@ -328,6 +328,90 @@ async fn a_module_is_installed_listed_configured_and_deleted() -> sc_error::Resu
     Ok(())
 }
 
+/// Phase 3: a module's **permissions** through the API — installed closed,
+/// granted one host, and a grant nobody could apply refused in front of the
+/// admin rather than discovered as a module that stopped working.
+#[tokio::test]
+async fn a_modules_permissions_are_closed_on_install_and_granted_by_an_admin()
+-> sc_error::Result<()> {
+    skip_without_node!();
+    let mut server = setup("permissions").await?;
+    let client = &mut server.client;
+
+    let installed = install_echo(client).await;
+    let id = installed["id"].as_str().unwrap().to_owned();
+    // **Closed on install**, and reported so the tab can say so: every list
+    // present and every one empty, rather than an absent field that would read
+    // as "unknown".
+    assert_eq!(
+        installed["permissions"],
+        json!({ "net": [], "read": [], "write": [], "env": [] }),
+        "a module reaches nothing until an admin says otherwise"
+    );
+
+    // Configure it, and the permissions are untouched: the settings form and the
+    // permissions form are two saves of two different things.
+    let (status, saved) = client
+        .send(
+            "PUT",
+            &format!("/api/modules/{id}"),
+            Some(json!({ "configuration": { "endpoint": "https://example.test" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["permissions"]["net"], json!([]));
+
+    // Grant one host, and the configuration is untouched by *that*.
+    let (status, saved) = client
+        .send(
+            "PUT",
+            &format!("/api/modules/{id}"),
+            Some(json!({ "permissions": { "net": ["broker.example:1883"] } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["permissions"]["net"], json!(["broker.example:1883"]));
+    assert_eq!(
+        saved["configuration"]["endpoint"],
+        json!("https://example.test")
+    );
+    // The module is still loaded after the move onto a worker built with the new
+    // set — a permission change is a reload, not a breakage.
+    assert_eq!(saved["loaded"], json!(true));
+    let stored = sc_module::load_module_by_name(&server.catalog, "@saltcorn-test/echo")
+        .await?
+        .unwrap();
+    assert_eq!(
+        stored.permissions.net,
+        vec!["broker.example:1883".to_owned()]
+    );
+
+    // A URL where a host belongs is refused with the reason, and nothing is
+    // saved: the alternative is an allow-list entry that silently matches
+    // nothing, which reads as a grant and is not one.
+    let (status, refused) = client
+        .send(
+            "PUT",
+            &format!("/api/modules/{id}"),
+            Some(json!({ "permissions": { "net": ["https://broker.example"] } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused.to_string().contains("host:port"),
+        "the refusal should say what would have worked: {refused}"
+    );
+    let stored = sc_module::load_module_by_name(&server.catalog, "@saltcorn-test/echo")
+        .await?
+        .unwrap();
+    assert_eq!(
+        stored.permissions.net,
+        vec!["broker.example:1883".to_owned()]
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_modules_action_becomes_available_to_a_trigger_with_no_restart() -> sc_error::Result<()> {
     skip_without_node!();

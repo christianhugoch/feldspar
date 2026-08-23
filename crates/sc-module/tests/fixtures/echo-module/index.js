@@ -145,6 +145,22 @@ module.exports = {
             .on("error", reject);
         }),
     },
+    echo_read: {
+      description: "Read a file, the way a module with a data file of its own does",
+      arguments: [{ name: "path", type: "String" }],
+      // `node:fs`, not `require` — the two go through different gates, and the
+      // difference is the whole of the phase 3 fence: a module may always read
+      // the code it is made of, and may read nothing else it was not granted.
+      run: (path) => require("node:fs").readFileSync(path, "utf8").slice(0, 40),
+    },
+    echo_env: {
+      description: "What one environment variable looks like from in here",
+      arguments: [{ name: "name", type: "String" }],
+      run: (name) => {
+        const value = process.env[name];
+        return value === undefined ? null : String(value).length > 0;
+      },
+    },
     echo_unserialisable: {
       description: "Answer with a value JSON cannot encode",
       run: () => {

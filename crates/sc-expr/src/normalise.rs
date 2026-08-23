@@ -230,9 +230,13 @@ fn render(
 }
 
 /// A native unary operator, parenthesised.
-fn wrap_unary(op: &str, expr: &Ast, locals: &mut Vec<String>,
+fn wrap_unary(
+    op: &str,
+    expr: &Ast,
+    locals: &mut Vec<String>,
     hoisted: &BTreeMap<String, String>,
-    out: &mut String) {
+    out: &mut String,
+) {
     out.push('(');
     out.push_str(op);
     out.push('(');
@@ -241,9 +245,14 @@ fn wrap_unary(op: &str, expr: &Ast, locals: &mut Vec<String>,
 }
 
 /// A native infix operator, parenthesised.
-fn infix(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>,
+fn infix(
+    op: &str,
+    l: &Ast,
+    r: &Ast,
+    locals: &mut Vec<String>,
     hoisted: &BTreeMap<String, String>,
-    out: &mut String) {
+    out: &mut String,
+) {
     out.push('(');
     render(l, locals, hoisted, out);
     out.push(' ');
@@ -257,9 +266,14 @@ fn infix(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>,
 /// comparison and arithmetic, in JS. The IIFE evaluates each operand exactly
 /// once (a textual guard would re-render them and blow up nested expressions
 /// exponentially).
-fn guarded(op: &str, l: &Ast, r: &Ast, locals: &mut Vec<String>,
+fn guarded(
+    op: &str,
+    l: &Ast,
+    r: &Ast,
+    locals: &mut Vec<String>,
     hoisted: &BTreeMap<String, String>,
-    out: &mut String) {
+    out: &mut String,
+) {
     out.push_str("(((x, y) => x === null || y === null ? null : x ");
     out.push_str(op);
     out.push_str(" y)(");

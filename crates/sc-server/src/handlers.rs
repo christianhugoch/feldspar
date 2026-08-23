@@ -1436,25 +1436,40 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let id = parse_module_id(ctx.path_param("id")?)?;
                 let mut module = sc_module::require_module(&catalog, id).await?;
                 let obj = require_object(&ctx.body)?;
-                let submitted = object_field(obj, "configuration")?;
 
-                // A module's `password` setting is a secret like any other: what
-                // the form was shown is the sentinel, and submitting it back
-                // unchanged keeps what is stored.
-                let set = services.modules();
-                module.configuration = match set.get(&module.name) {
-                    Some(loaded) => sc_types::merge_secrets(
-                        &loaded.config_spec,
-                        &module.configuration,
-                        &submitted,
-                    ),
-                    None => submitted,
-                };
-                drop(set);
+                // Two independent edits behind one endpoint, and each takes
+                // effect only when it was **sent**: the settings form and the
+                // permissions form are separate saves, and a save of one must
+                // not clear the other.
+                if let Some(submitted) = obj.get("configuration").filter(|v| !v.is_null()) {
+                    let Json::Object(submitted) = submitted.clone() else {
+                        return Err(Error::invalid("field `configuration` must be an object"));
+                    };
+                    // A module's `password` setting is a secret like any other:
+                    // what the form was shown is the sentinel, and submitting it
+                    // back unchanged keeps what is stored.
+                    let set = services.modules();
+                    module.configuration = match set.get(&module.name) {
+                        Some(loaded) => sc_types::merge_secrets(
+                            &loaded.config_spec,
+                            &module.configuration,
+                            &submitted,
+                        ),
+                        None => submitted,
+                    };
+                }
+                if let Some(submitted) = obj.get("permissions").filter(|v| !v.is_null()) {
+                    // Checked here rather than at the worker: a permission an
+                    // admin typed wrong should be refused in front of the form,
+                    // not discovered as a module that stopped working.
+                    module.permissions = sc_module::ModulePermissions::from_json(submitted)?;
+                }
                 save_module(&catalog, &module).await?;
 
                 // The configuration is what v1's `actions(cfg)` is called with,
-                // so it only takes effect when the module is loaded again.
+                // so it only takes effect when the module is loaded again — and
+                // a permission change moves the module onto a worker built with
+                // the new set, which the same reload does.
                 services.reload().await?;
                 let set = services.modules();
                 let loaded = set
@@ -4226,6 +4241,9 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
         "location": module.location,
         "version": module.version,
         "configuration": Json::Object(sc_module::redacted_configuration(loaded)),
+        // Not redacted, and nothing here is a secret: a permission set is what
+        // an admin granted, and the point of the screen is that it can be read.
+        "permissions": Json::Object(module.permissions.to_json()),
         "config_spec": loaded
             .config_spec
             .iter()

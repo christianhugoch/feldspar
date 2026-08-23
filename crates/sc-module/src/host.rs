@@ -8,6 +8,11 @@
 //! `node` had no way to offer. This module is what the rest of the server sees
 //! of that: the same four calls, the same manifest, and none of the change.
 //!
+//! **Sandboxed**: a module's worker is built with the permission set on its
+//! `_sc_modules` row — closed unless an admin granted something — and modules
+//! are pinned to workers by that set, because a `PermissionsContainer` belongs
+//! to an isolate (§2).
+//!
 //! **Lazily started**: a deployment with no modules never builds an isolate.
 //! **Restarted on death**: a module that calls `process.exit()`, spins past its
 //! JS slice or exhausts the heap ends *its own worker*; every call in flight on
@@ -25,6 +30,8 @@ use std::path::{Path, PathBuf};
 use sc_error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
+
+use crate::permissions::ModulePermissions;
 
 /// The host script, written into the modules root at every worker start.
 ///
@@ -222,24 +229,29 @@ impl ModuleHost {
     }
 
     /// Load (or reload) a module from `dir`, with `configuration` as the object
-    /// handed to v1's `actions(cfg)`.
+    /// handed to v1's `actions(cfg)` and `permissions` as what its worker may
+    /// reach (§2).
     ///
     /// Idempotent, and idempotent **on the same worker**: a reload after a
     /// configuration change replaces the module where its state already is,
-    /// rather than leaving a second copy of it somewhere else.
+    /// rather than leaving a second copy of it somewhere else. A change to the
+    /// *permissions* is the exception, and has to be: the set belongs to the
+    /// isolate, so the module moves to a worker that grants it — losing whatever
+    /// it was holding, exactly as a restart would.
     pub async fn load(
         &self,
         name: &str,
         dir: &Path,
         configuration: &Json,
+        permissions: &ModulePermissions,
     ) -> Result<ModuleManifest> {
         #[cfg(feature = "deno-host")]
         {
-            self.pool.load(name, dir, configuration).await
+            self.pool.load(name, dir, configuration, permissions).await
         }
         #[cfg(not(feature = "deno-host"))]
         {
-            let _ = (name, dir, configuration);
+            let _ = (name, dir, configuration, permissions);
             Err(no_runtime())
         }
     }

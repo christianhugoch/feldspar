@@ -19,6 +19,7 @@ use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
 
 use crate::module::{Module, ModuleId, ModuleSource};
+use crate::permissions::ModulePermissions;
 
 /// Name of the modules table in the primary database.
 pub const MODULES_TABLE: &str = "_sc_modules";
@@ -35,6 +36,8 @@ pub const COL_LOCATION: &str = "location";
 pub const COL_VERSION: &str = "version";
 /// The module's own configuration (JSON object) — v1's plugin configuration.
 pub const COL_CONFIGURATION: &str = "configuration";
+/// What the module's worker may reach (§2) — JSON, an object of allow-lists.
+pub const COL_PERMISSIONS: &str = "permissions";
 /// The sparse per-module values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
@@ -56,6 +59,12 @@ fn module_fields() -> Vec<DataField> {
         DataField::plain(COL_LOCATION, text()).required(),
         DataField::plain(COL_VERSION, text()),
         DataField::plain(COL_CONFIGURATION, json()).required(),
+        // Not required, and that is the one thing to know about this column: a
+        // module installed before it existed has NULL here, and NULL reads as
+        // the **closed** set. A permission column that defaulted to anything
+        // else on a row nobody had thought about would be the failure §2 warns
+        // against.
+        DataField::plain(COL_PERMISSIONS, json()),
         DataField::plain(COL_ATTRIBUTES, json()).required(),
     ]
 }
@@ -172,6 +181,7 @@ fn module_columns() -> Vec<String> {
         COL_LOCATION,
         COL_VERSION,
         COL_CONFIGURATION,
+        COL_PERMISSIONS,
         COL_ATTRIBUTES,
     ]
     .iter()
@@ -191,6 +201,7 @@ fn module_values(module: &Module) -> Vec<Value> {
             None => Value::Null,
         },
         Value::Json(Json::Object(module.configuration.clone())),
+        Value::Json(Json::Object(module.permissions.to_json())),
         Value::Json(Json::Object(module.attributes.clone())),
     ]
 }
@@ -219,6 +230,7 @@ fn module_from_row(row: &Row) -> Result<Module> {
         location: text(row, COL_LOCATION)?,
         version,
         configuration: object(row, COL_CONFIGURATION)?,
+        permissions: permissions(row)?,
         attributes: object(row, COL_ATTRIBUTES)?,
     })
 }
@@ -239,6 +251,20 @@ fn object(row: &Row, column: &str) -> Result<Attrs> {
             "{MODULES_TABLE}.{column} should be a json object"
         ))),
         other => Err(bad_column(column, "json", other)),
+    }
+}
+
+/// The permission set, or the closed one when the row has never had it written.
+///
+/// The one lenient read in this file, and only about NULL: the *shape* is still
+/// checked entry by entry by [`ModulePermissions::from_json`], and a set that
+/// will not parse is an error naming the module rather than a module that
+/// quietly reaches something.
+fn permissions(row: &Row) -> Result<ModulePermissions> {
+    match row.get(COL_PERMISSIONS) {
+        Some(Value::Json(value)) => ModulePermissions::from_json(value),
+        Some(Value::Null) | None => Ok(ModulePermissions::closed()),
+        other => Err(bad_column(COL_PERMISSIONS, "json", other)),
     }
 }
 

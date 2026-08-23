@@ -778,18 +778,64 @@ formula naming one on a server with no modules is the unknown identifier it has 
 §4a asks the Modules tab to say that a v1 synchronous function becomes awaitable in a code body.
 The generated editor types say it, in the signature's own doc comment, and the API now reports
 each module's functions — but the Modules tab itself does not render them yet. It belongs with
-phase 3's tab work, which is the next thing to touch that screen.
+phase 3's tab work, which is the next thing to touch that screen. **Done there**: the card lists
+each function with its declared arguments and description, and says in a sentence that a code
+body awaits them all and a formula resolves the call before it runs.
 
 ## Phase 3 — Permissions
 
-- [ ] `_sc_modules` gains the module's permission set: a net allow-list, a read/write path
+- [x] `_sc_modules` gains the module's permission set: a net allow-list, a read/write path
       allow-list, and the environment variables it may see. Closed by default (specification
       §2).
-- [ ] `PermissionsContainer` per module, built from that row, handed to the module's worker.
-- [ ] `ui/admin` Modules tab: the permissions a module has, editable, with the sentence about
+- [x] `PermissionsContainer` per module, built from that row, handed to the module's worker.
+      **Per permission *set*, not per module** — see below.
+- [x] `ui/admin` Modules tab: the permissions a module has, editable, with the sentence about
       `npm install` still running as the server kept and kept accurate.
-- [ ] A denied permission is an error that names what was denied and what to allow, not an
+- [x] A denied permission is an error that names what was denied and what to allow, not an
       `EACCES` from inside somebody's dependency.
+
+### What was built, and the one thing "per module" could not mean
+
+`crates/sc-module/src/permissions.rs` is the set — four allow-lists (`net`, `read`, `write`,
+`env`), every empty one meaning *nothing* — stored in a new nullable `_sc_modules.permissions`
+column where NULL reads as closed, checked entry by entry when it is read, and turned into a
+`PermissionsContainer` in `deno/wiring.rs`. `run`, `ffi` and `import` have no entry because
+there is no allow-list to put them on.
+
+**A container belongs to an isolate, so "per module" had to become "per permission set".**
+There is no fence inside one isolate, so two modules may share a worker only when they may
+reach the same things. The pool therefore pins by set: a module joins a worker whose set equals
+its own and starts one when none does, `--module-workers` becomes how many workers modules
+*sharing* a set may spread over, and a worker whose last module leaves is stopped. A server
+whose modules are all closed — the default — still runs exactly the one worker it ran before.
+The alternative, widening a worker to the union of its modules' sets, is a module quietly
+acquiring somebody else's grant, which is the failure §2 is about. Editing a module's
+permissions therefore **moves** it: unloaded from the worker it was on, loaded on one that
+grants what it now has, losing its sockets exactly as a restart would.
+
+Three findings worth keeping:
+
+- **`require` is not the container's business, and must not be.** A module that may not read
+  the package it is made of cannot exist, so the modules root is allowed by
+  `ensure_read_permission` itself and `node:fs` reading the same directory is denied by the
+  container. The code a module is made of is not a capability; the filesystem it sits on is.
+  Phase 4's "a module denied the filesystem cannot read the modules root" is that distinction,
+  and it is a test now.
+- **A denied environment variable is `undefined`, not a throw** (Deno's `ignore_env`), and this
+  is the one deliberate softness in the fence. Half of npm reads `process.env.NODE_ENV`
+  speculatively at load, and a throw there would be a rule that most modules may not be
+  installed. Net, read and write denials *are* errors, because there is something for an admin
+  to do about each of them.
+- **The denial an admin sees is not Deno's.** Deno words one for somebody holding a command
+  line — *"Requires net access to \"broker:1883\", run again with the --allow-net flag"* — so
+  `explain_denial` rewrites it into the module's name, what was denied, and the list on the
+  Modules tab to put it on. It runs over the `Error`'s own `Display`, which has already put its
+  kind in front of the module's words; recognising only the raw form would have meant every
+  real denial reaching the admin as a flag they cannot pass.
+
+`updateModule` now takes `configuration` and `permissions` **independently** — each takes effect
+only when it was sent — because the settings form and the permissions form are two saves, and a
+save of one must not clear the other.
 
 ## Phase 4 — Tests
 

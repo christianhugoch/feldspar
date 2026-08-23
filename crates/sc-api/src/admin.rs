@@ -847,18 +847,23 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // **Configure**: the module's own settings, the object v1's `actions(cfg)`
-    // is called with. A save reloads the module, so the next run of any of its
-    // actions uses the new value.
+    // is called with, and its **permissions** — what its worker may reach (§2).
+    // A save reloads the module, so the next run of any of its actions uses the
+    // new value; a permissions save also *moves* it, onto a worker built with
+    // the new set, because a permission set belongs to an isolate.
     set.register(
         Endpoint::new(
             "updateModule",
             Method::Put,
             api().lit("modules").param("id", ValueType::Uuid),
         )
-        .input(TypeSchema::struct_of([StructField::new(
-            "configuration",
-            TypeSchema::json(),
-        )]))
+        .input(TypeSchema::struct_of([
+            StructField::new("configuration", TypeSchema::optional(TypeSchema::json())),
+            // Present only when the admin edited them, so the settings form and
+            // the permissions form are two saves rather than one form that has
+            // to carry the other's fields to avoid clearing them.
+            StructField::new("permissions", TypeSchema::optional(TypeSchema::json())),
+        ]))
         .output(module_schema())
         .auth(AuthRequirement::admin()),
     );
@@ -2152,6 +2157,11 @@ fn module_schema() -> TypeSchema {
         StructField::new("location", TypeSchema::text()),
         StructField::new("version", TypeSchema::optional(TypeSchema::text())),
         StructField::new("configuration", TypeSchema::json()),
+        // What its worker may reach (§2): `{ net, read, write, env }`, every
+        // one an allow-list and every empty one meaning *nothing*. Closed
+        // unless an admin granted something, and reported here so the tab can
+        // say what a module can do as well as what it supplies.
+        StructField::new("permissions", TypeSchema::json()),
         // The module's own settings, from its `configuration_workflow` — the
         // same declaration a file store's backend sends, so the form is
         // generic.

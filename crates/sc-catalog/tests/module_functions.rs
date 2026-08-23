@@ -23,9 +23,7 @@ use sc_catalog::{
 };
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
-use sc_expr::{
-    Formula, ModuleFnHost, ModuleFunction, SchemaShape, TableShape, value_to_json,
-};
+use sc_expr::{Formula, ModuleFnHost, ModuleFunction, SchemaShape, TableShape, value_to_json};
 use sc_query::Value;
 use sc_test_harness::TestDb;
 use sc_types::{BasicType, TypeRef};
@@ -83,7 +81,10 @@ fn shape() -> SchemaShape {
     SchemaShape::new()
         .table(
             "article",
-            TableShape::new().field("id").field("notes").primary_key("id"),
+            TableShape::new()
+                .field("id")
+                .field("notes")
+                .primary_key("id"),
         )
         .module_function("md_to_html", "@saltcorn/markdown")
 }
@@ -119,7 +120,10 @@ async fn a_calc_fields_module_call_is_resolved_before_the_formula_runs() -> Resu
     // v1's positional arguments, with a clock on it.
     let asked = host.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 1, "{asked:?}");
-    assert_eq!(asked[0]["module"], Json::String("@saltcorn/markdown".into()));
+    assert_eq!(
+        asked[0]["module"],
+        Json::String("@saltcorn/markdown".into())
+    );
     assert_eq!(asked[0]["function"], Json::String("md_to_html".into()));
     assert_eq!(asked[0]["args"], serde_json::json!(["hello"]));
     assert!(asked[0]["timeout_ms"].as_u64().unwrap() > 0);

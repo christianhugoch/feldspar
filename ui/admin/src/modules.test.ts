@@ -17,6 +17,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CLOSED_PERMISSIONS,
   EMPTY_INSTALL,
   actionNames,
   configValues,
@@ -26,6 +27,13 @@ import {
   locationPlaceholder,
   moduleStatus,
   moduleSubtitle,
+  isClosed,
+  modulePermissions,
+  parsePermissionText,
+  permissionProblem,
+  permissionProblems,
+  permissionSummary,
+  permissionText,
   unsupportedSentence,
   type Module,
 } from "./modules";
@@ -39,6 +47,7 @@ function module_(overrides: Partial<Module> = {}): Module {
     location: "@saltcorn/mqtt",
     version: "0.2.0",
     configuration: { broker_url: "mqtt://localhost", password: "•••••" },
+    permissions: { net: [], read: [], write: [], env: [] },
     config_spec: [],
     actions: [{ name: "mqtt_publish", description: "Publish a message", config_spec: [] }],
     functions: [],
@@ -165,5 +174,54 @@ describe("how an installed module reads", () => {
     // Nothing configured, or something that is not an object at all.
     expect(configValues(module_({ configuration: {} }))).toEqual({});
     expect(configValues(module_({ configuration: null }))).toEqual({});
+  });
+});
+
+describe("a module's permissions", () => {
+  it("reads a set off the wire, and reads anything it cannot understand as closed", () => {
+    expect(modulePermissions(module_({ permissions: { net: ["broker:1883"] } }))).toEqual({
+      net: ["broker:1883"],
+      read: [],
+      write: [],
+      env: [],
+    });
+    // The direction that cannot mislead: a screen that could not parse what it
+    // was sent must not draw a module as *less* able to reach things than a
+    // reader would then assume. Closed is what it shows, and closed is what the
+    // server defaults to.
+    expect(modulePermissions(module_({ permissions: null }))).toEqual(CLOSED_PERMISSIONS);
+    expect(modulePermissions(module_({ permissions: "everything" }))).toEqual(CLOSED_PERMISSIONS);
+    expect(modulePermissions(module_({ permissions: { net: [1, "a"] } })).net).toEqual(["a"]);
+  });
+
+  it("says out loud that an empty set means nothing rather than everything", () => {
+    expect(isClosed(CLOSED_PERMISSIONS)).toBe(true);
+    expect(permissionSummary(CLOSED_PERMISSIONS)).toMatch(/reaches nothing/i);
+    expect(
+      permissionSummary({ net: ["broker:1883"], read: ["/srv/data"], write: [], env: [] }),
+    ).toBe("Reaches only these: connects to broker:1883; reads /srv/data.");
+  });
+
+  it("round-trips a list through the textarea an admin types it in", () => {
+    expect(permissionText(["a", "b"])).toBe("a\nb");
+    // Blank lines and stray spaces are what typing produces, and neither is an
+    // entry.
+    expect(parsePermissionText("  a \n\n b\n")).toEqual(["a", "b"]);
+    expect(parsePermissionText("")).toEqual([]);
+  });
+
+  it("names what the server would refuse, before the save rather than after it", () => {
+    expect(permissionProblem("net", "broker.example")).toBeNull();
+    expect(permissionProblem("net", "broker.example:1883")).toBeNull();
+    expect(permissionProblem("net", "https://broker.example")).toMatch(/URL/);
+    expect(permissionProblem("net", "broker:eighteen")).toMatch(/port/);
+    expect(permissionProblem("read", "/srv/data")).toBeNull();
+    expect(permissionProblem("read", "data")).toMatch(/absolute/);
+    expect(permissionProblem("env", "MQTT_PASSWORD")).toBeNull();
+    expect(permissionProblem("env", "A=B")).toMatch(/variable name/);
+    expect(
+      permissionProblems({ net: ["https://x"], read: ["rel"], write: [], env: [] }),
+    ).toHaveLength(2);
+    expect(permissionProblems(CLOSED_PERMISSIONS)).toEqual([]);
   });
 });

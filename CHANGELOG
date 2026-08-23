@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## Modules in-process, phase 3: permissions
+
+§15.1 used to end "Installing a module runs arbitrary code as the server … There is no
+sandbox". That sentence was a consequence of `node`, which has no permission model to ask for.
+Deno has one, and a module's worker now gets it: **a module reaches nothing it was not
+granted** — no host, no file, no environment variable — and granting is an admin action on the
+Modules tab, one entry at a time.
+
+- **The set is on the row.** `_sc_modules` gains a nullable `permissions` column holding four
+  allow-lists — `net`, `read`, `write`, `env` — and **every empty list means *nothing*, never
+  *everything***, which is the one place this could have gone wrong. NULL (a module installed
+  before the column existed) reads as the closed set. Every entry is checked when the row is
+  read: a URL where a host belongs, a relative path, a name with an `=` in it are each refused
+  naming the entry, because a permission set nobody can read exactly is one that would be
+  applied approximately. `run`, `ffi` and `import` have no entry at all — Saltcorn does not
+  grant a module a subprocess, and there is nothing to configure about that.
+- **Stored is not declared.** What a package asks for is a request; what an admin granted is on
+  the row. Nothing is read out of `package.json`, because a request that granted itself would
+  be no permission model.
+- **A worker is per permission set, which is what "per module" had to become.** A
+  `PermissionsContainer` is handed to an isolate and there is no fence inside one, so two
+  modules share a worker only when they may reach the same things. The pool pins by set,
+  `--module-workers` becomes how many workers modules *sharing* a set may spread over, and a
+  worker whose last module leaves is stopped. A server whose modules are all closed — the
+  default — runs the one worker it ran before. Editing a module's permissions **moves** it: it
+  is unloaded from the worker it was on and loaded on one that grants what it now has, losing
+  its sockets exactly as a restart would, because there is nowhere else for that state to go.
+- **`require` may read the modules root; the module may not.** A module that cannot read the
+  package it is made of cannot exist, so that read is allowed by the require loader itself, and
+  `node:fs` reading the same directory is denied by the container. The code a module is made of
+  is not a capability; the filesystem it is sitting on is.
+- **A denied environment variable is `undefined`, not a throw** — Deno's `ignore` state, and
+  the one deliberate softness here. Half of npm reads `process.env.NODE_ENV` speculatively at
+  load time, and a throw there would be a rule that most modules may not be installed. A listed
+  variable still reads normally. Net, read and write denials *are* errors, because there is
+  something for an admin to do about each of them.
+- **The denial says what to do, not what flag to pass.** Deno words one for somebody holding a
+  command line ("run again with the --allow-net flag"); what an admin sees instead names the
+  module, what was denied, and the list on the Modules tab to put it on. It arrives from
+  wherever inside somebody's dependency tree the socket was reached for, which is exactly the
+  `EACCES` this replaces.
+- **The Modules tab has the form**, four textareas with the server's own rules checked in front
+  of the save, a one-line summary that says "reaches nothing" out loud rather than drawing four
+  empty boxes, and the module's functions listed beside its actions. The sentence about
+  `npm install` is on it **because** the form is: installing a module is still not sandboxed —
+  install scripts run as the server, before any worker exists — and a permissions screen would
+  otherwise imply that half had been solved too. `updateModule` takes `configuration` and
+  `permissions` independently, so a save of one cannot clear the other.
+
+Tests: a module granted one host reaches it and is refused a second port, naming the module and
+the screen; a module denied the filesystem loads (its `require` read the root) and cannot
+`readFileSync` that same root, then reads it once granted; an ungranted variable is invisible
+rather than fatal; two permission sets are two workers in a pool of one, and the emptied worker
+is stopped; the row round-trips, NULL is closed and an unparseable set is an error; and the API
+installs closed, grants, and refuses a URL where a host belongs.
+
 ## Modules in-process, phase 2a: `functions`, the fifth host surface
 
 A v1 plugin supplies `functions` beside `actions`, and v1 makes them "available to formulas and

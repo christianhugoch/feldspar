@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use sc_module::{Installer, ModuleHost, ModuleSource};
+use sc_module::{Installer, ModuleHost, ModulePermissions, ModuleSource};
 
 /// Whether `npm` is on the PATH.
 pub fn have_npm() -> bool {
@@ -37,6 +37,13 @@ macro_rules! skip_without {
             return;
         }
     };
+}
+
+/// The permission set every module has until an admin grants it something, and
+/// what most of these tests load with: the point of the fixtures is the host,
+/// not the sandbox, and the sandbox has tests of its own.
+pub fn closed() -> ModulePermissions {
+    ModulePermissions::closed()
 }
 
 /// One of the fixture packages under `tests/fixtures`.

@@ -7783,8 +7783,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_body_calls_a_module_function_by_its_short_name_and_by_its_module() {
-        let mods = FakeModuleFns::new(&[("@saltcorn/markdown", "md_to_html")])
-            .answering(|plan| Ok(json!(format!("<p>{}</p>", plan["args"][0].as_str().unwrap()))));
+        let mods = FakeModuleFns::new(&[("@saltcorn/markdown", "md_to_html")]).answering(|plan| {
+            Ok(json!(format!(
+                "<p>{}</p>",
+                plan["args"][0].as_str().unwrap()
+            )))
+        });
         let rt = CodeRuntime::new();
         let out = rt
             .run(with_module_fns(
@@ -7834,7 +7838,10 @@ mod tests {
         // The short form does not pick one — it names both and the spelling
         // that works, because choosing by load order is a wrong answer.
         let ambiguous = out["ambiguous"].as_str().unwrap();
-        assert!(ambiguous.contains("@saltcorn/nominatim-geocode"), "{ambiguous}");
+        assert!(
+            ambiguous.contains("@saltcorn/nominatim-geocode"),
+            "{ambiguous}"
+        );
         assert!(ambiguous.contains("@saltcorn/other-geocode"), "{ambiguous}");
         assert!(ambiguous.contains("say which module"), "{ambiguous}");
         assert_eq!(out["first"], json!("@saltcorn/nominatim-geocode"));
@@ -7933,7 +7940,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(out, json!("caught: invalid: nominatim: connect ECONNREFUSED"));
+        assert_eq!(
+            out,
+            json!("caught: invalid: nominatim: connect ECONNREFUSED")
+        );
     }
 
     #[tokio::test]

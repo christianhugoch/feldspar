@@ -302,9 +302,9 @@ fn module_call_key(function: &str, args: &[String]) -> String {
 /// parameter is decided by the caller, which has the shape and the local scope.
 fn literal_or_binding(ast: &Ast) -> Option<ModuleArg> {
     Some(match ast {
-        Ast::Str(text) => ModuleArg::Literal(
-            serde_json::to_string(text).unwrap_or_else(|_| "null".to_owned()),
-        ),
+        Ast::Str(text) => {
+            ModuleArg::Literal(serde_json::to_string(text).unwrap_or_else(|_| "null".to_owned()))
+        }
         // Spelled the way `crate::normalise` spells a number, so `3` is `3`
         // rather than `3.0` — the key is read by a person when a call is
         // refused, and it is still valid JSON either way.
@@ -1014,7 +1014,10 @@ mod tests {
         // And the same key comes back out of the AST alone, which is what lets
         // the renderer find the binding without knowing what a module is.
         let ast = Formula::parse("md_to_html(title)").unwrap();
-        assert_eq!(hoisted_call_key(ast.ast()).as_deref(), Some("md_to_html(title)"));
+        assert_eq!(
+            hoisted_call_key(ast.ast()).as_deref(),
+            Some("md_to_html(title)")
+        );
     }
 
     #[test]
@@ -1102,7 +1105,9 @@ mod tests {
             .unwrap();
         assert!(a.fields.contains("md_to_html") && a.module_calls.is_empty());
         // And on a server with no modules the name is what it has always been.
-        let err = validate("md_to_html(title) !== ''").unwrap_err().to_string();
+        let err = validate("md_to_html(title) !== ''")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown identifier `md_to_html`"), "{err}");
     }
 
@@ -1113,7 +1118,12 @@ mod tests {
         // name, exactly as `ambient_outside` hands it an ambient object.
         let a = validate_with_modules(&with_markdown(), "md_to_html(title) !== ''").unwrap();
         assert_eq!(a.first_module_call().unwrap().function, "md_to_html");
-        assert!(validate("owner === user.id").unwrap().first_module_call().is_none());
+        assert!(
+            validate("owner === user.id")
+                .unwrap()
+                .first_module_call()
+                .is_none()
+        );
     }
 
     #[test]

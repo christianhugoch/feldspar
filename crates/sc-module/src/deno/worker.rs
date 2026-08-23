@@ -52,6 +52,7 @@ use serde_json::{Value as Json, json};
 use tokio::sync::oneshot;
 
 use crate::host::{HOST_SCRIPT, HOST_SCRIPT_NAME, module_error};
+use crate::permissions::ModulePermissions;
 
 /// How often the worker thread comes round its loop when nothing else wakes it.
 ///
@@ -109,6 +110,13 @@ pub struct WorkerConfig {
     pub js_slice: Duration,
     /// The isolate's heap ceiling.
     pub max_heap: usize,
+    /// What the modules on this worker may reach (§2).
+    ///
+    /// A property of the **worker** and not of one module, because a
+    /// `PermissionsContainer` is per-isolate: there is no per-module fence
+    /// inside one. That is why the pool pins a module to a worker whose set
+    /// matches its own, and starts a worker when none does.
+    pub permissions: ModulePermissions,
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +387,8 @@ impl Host {
         let url = deno_core::resolve_path(script.to_string_lossy().as_ref(), &cwd)
             .map_err(|e| Error::config(format!("{}: {e}", script.display())))?;
 
-        let mut worker = super::wiring::build_worker(&config.root, &url, config.max_heap);
+        let mut worker =
+            super::wiring::build_worker(&config.root, &url, config.max_heap, &config.permissions);
         let op_state = worker.js_runtime.op_state();
         let handle = worker.js_runtime.v8_isolate().thread_safe_handle();
 

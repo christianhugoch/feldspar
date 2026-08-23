@@ -147,7 +147,10 @@ async fn load_one(
     }
 
     let configuration = Json::Object(module.configuration.clone());
-    let manifest = match host.load(&module.name, &dir, &configuration).await {
+    let manifest = match host
+        .load(&module.name, &dir, &configuration, &module.permissions)
+        .await
+    {
         Ok(manifest) => manifest,
         Err(e) => {
             issues.push(format!("it did not load: {}", sc_error::format_chain(&e)));

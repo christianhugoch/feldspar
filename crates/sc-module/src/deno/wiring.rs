@@ -7,11 +7,32 @@
 //! one line of `sys_traits`. Nothing needed a workaround and nothing here is a
 //! shim over node — it *is* node, as `deno_runtime` implements it.
 //!
-//! What is deliberately not here: a permission model. Every worker gets
-//! [`PermissionsContainer::allow_all`] for now, which is what the `node`
-//! sidecar it replaced was. The seam phase 3 narrows is
-//! [`NodeRequireLoader::ensure_read_permission`], which is handed the module's
-//! own container on every read.
+//! ## The permission set (phase 3, specification §2)
+//!
+//! A worker is built with a [`PermissionsContainer`] made from one
+//! [`ModulePermissions`] — the row's allow-lists — and **closed is the default**,
+//! so a module reaches no host, no path and no variable until an admin grants
+//! it one. This is the capability the `node` sidecar had no way to offer: its
+//! modules ran with the server's own privileges because `node` has no permission
+//! model to ask for.
+//!
+//! Two details of the shape, both deliberate:
+//!
+//! - **`require` may read the modules root, the container may not.** A module
+//!   that cannot read the package it is made of cannot exist, so the read
+//!   `require` performs is allowed by [`ModuleRequireLoader`] itself, against
+//!   the root and nothing else. `node:fs` reading the same directory goes
+//!   through the container and is denied. The code a module is made of is not a
+//!   capability; the filesystem it is sitting on is.
+//! - **A denied environment variable is `undefined`, not a throw.** Deno's
+//!   `ignore` state does it, and the reason is node compatibility: half of npm
+//!   reads `process.env.NODE_ENV` speculatively at load, and a throw there would
+//!   be a rule that most modules may not be installed. Net, read and write
+//!   denials *are* errors, because there is something for an admin to do about
+//!   each of them.
+//!
+//! What is never granted, because there is no allow-list for it: subprocesses,
+//! FFI, and `import` off the disk.
 //!
 //! ## And no startup snapshot, which is not the bargain phase 0 struck
 //!
@@ -39,7 +60,7 @@
 //! to hold the transpiled form there has to be a transpiler in the worker.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -50,7 +71,9 @@ use deno_resolver::npm::{
 };
 use deno_runtime::deno_fs::RealFs;
 use deno_runtime::deno_node::{NodeExtInitServices, NodeRequireLoader, NodeResolver};
-use deno_runtime::deno_permissions::PermissionsContainer;
+use deno_runtime::deno_permissions::{
+    OpenAccessKind, Permissions, PermissionsContainer, PermissionsOptions,
+};
 use deno_runtime::deno_web::{BlobStore, InMemoryBroadcastChannel};
 use deno_runtime::permissions::RuntimePermissionDescriptorParser;
 use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
@@ -59,6 +82,8 @@ use node_resolver::cache::NodeResolutionSys;
 use node_resolver::errors::PackageJsonLoadError;
 use node_resolver::{DenoIsBuiltInNodeModuleChecker, PackageJsonResolver};
 use sys_traits::impls::RealSys;
+
+use crate::permissions::ModulePermissions;
 
 /// The real filesystem and the real environment: this is a server, not a test
 /// harness for Deno.
@@ -108,14 +133,24 @@ impl ModuleLoader for HostModuleLoader {
 /// What `require()` reads a file with, and what decides whether that file is
 /// CommonJS.
 ///
-/// **This is where phase 3 goes.** `ensure_read_permission` is handed the
-/// module's own [`PermissionsContainer`] on every read `require` performs, so a
-/// module denied the filesystem is denied it here, once, rather than by hoping
-/// each of its dependencies asks politely. It allows everything today, which is
-/// exactly what the `node` sidecar it replaced did.
+/// `ensure_read_permission` is handed the module's own [`PermissionsContainer`]
+/// on every read `require` performs, so a module denied the filesystem is denied
+/// it **here**, once, rather than by hoping each of its dependencies asks
+/// politely.
+///
+/// It is not a plain "ask the container", because of the one read that must
+/// always work: the modules root itself. `require("async-mqtt")` walks
+/// `<root>/node_modules`, and a module denied that is not a sandboxed module but
+/// a module that cannot load at all. So the root is allowed here and nowhere
+/// else — a granted path still works (an admin who grants `/srv/plugins` may
+/// `require` out of it), and everything else is a denial that names the path and
+/// the screen rather than an `EACCES` from inside somebody's dependency.
 #[derive(Debug)]
 struct ModuleRequireLoader {
     pkg_json_resolver: Arc<PackageJsonResolver<Sys>>,
+    /// The modules root, canonicalised once: what `require` may read whatever
+    /// the module was granted.
+    root: PathBuf,
 }
 
 impl ModuleRequireLoader {
@@ -141,10 +176,16 @@ impl ModuleRequireLoader {
 impl NodeRequireLoader for ModuleRequireLoader {
     fn ensure_read_permission<'a>(
         &self,
-        _permissions: &mut PermissionsContainer,
+        permissions: &mut PermissionsContainer,
         path: Cow<'a, Path>,
     ) -> Result<Cow<'a, Path>, JsErrorBox> {
-        Ok(path)
+        if path.starts_with(&self.root) {
+            return Ok(path);
+        }
+        permissions
+            .check_open(path, OpenAccessKind::Read, Some("require"))
+            .map(|checked| checked.into_path())
+            .map_err(|e| JsErrorBox::generic(e.to_string()))
     }
 
     fn load_text_file_lossy(&self, path: &Path) -> Result<FastString, JsErrorBox> {
@@ -200,10 +241,73 @@ fn node_services(
     NodeExtInitServices {
         node_require_loader: Rc::new(ModuleRequireLoader {
             pkg_json_resolver: pkg_json_resolver.clone(),
+            // Canonicalised, because `require` resolves symlinks and a modules
+            // root reached through one would otherwise fail its own reads. An
+            // unresolvable root (it is created before a worker starts, so this
+            // is a race with an admin deleting it) falls back to the path as
+            // given rather than to allowing everything.
+            root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
         }),
         node_resolver,
         pkg_json_resolver,
         sys,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The permission set
+// ---------------------------------------------------------------------------
+
+/// One module's [`PermissionsContainer`], built from its row's allow-lists.
+///
+/// Everything not named is denied, and nothing here is `Some(vec![])` — which in
+/// Deno's vocabulary means *allow all of this kind* and is exactly the mistake
+/// §2 warns against. The one deliberate global is `ignore_env`, whose meaning is
+/// "an unlisted variable is not there" rather than "every variable is
+/// readable"; a listed one is still granted, because an exact match is checked
+/// before the ignore state.
+///
+/// A malformed entry cannot reach here — [`ModulePermissions`] checks every one
+/// when the row is read — but Deno parses them again, and if it disagrees the
+/// module gets the **closed** set with a line in the log. Failing open on a
+/// descriptor nobody could parse would be the one failure this whole file exists
+/// to prevent.
+fn container(permissions: &ModulePermissions) -> PermissionsContainer {
+    let parser = Arc::new(RuntimePermissionDescriptorParser::new(RealSys));
+    let options = PermissionsOptions {
+        allow_net: some_if_any(&permissions.net),
+        allow_read: some_if_any(&permissions.read),
+        allow_write: some_if_any(&permissions.write),
+        allow_env: some_if_any(&permissions.env),
+        // The node-compatibility concession, and the only one: an unlisted
+        // variable reads as `undefined` instead of throwing.
+        ignore_env: Some(Vec::new()),
+        // No prompting: there is no terminal to answer one, and a module host
+        // that blocked on a question nobody could see would hang the worker.
+        prompt: false,
+        ..Default::default()
+    };
+    match Permissions::from_options(parser.as_ref(), &options) {
+        Ok(permissions) => PermissionsContainer::new(parser, permissions),
+        Err(e) => {
+            sc_log::log_error!(
+                "saltcorn: a module's permissions could not be applied ({e}); it will run with \
+                 none of them"
+            );
+            PermissionsContainer::new(parser, Permissions::none_without_prompt())
+        }
+    }
+}
+
+/// An allow-list, or `None` for "nothing of this kind".
+///
+/// The distinction that matters: `Some(vec![])` is Deno's spelling of
+/// `--allow-net` with no argument, which allows **everything**.
+fn some_if_any(list: &[String]) -> Option<Vec<String>> {
+    if list.is_empty() {
+        None
+    } else {
+        Some(list.to_vec())
     }
 }
 
@@ -227,8 +331,12 @@ fn node_services(
 /// on those descriptors now — the calls are V8 function calls and the log goes
 /// to `sc-log` by name ([`super::worker`]) — so a module that writes to stdout
 /// writes to the server's stdout, and nothing is at risk if it does.
-pub(super) fn build_worker(root: &Path, host: &ModuleSpecifier, max_heap: usize) -> MainWorker {
-    let parser = Arc::new(RuntimePermissionDescriptorParser::new(RealSys));
+pub(super) fn build_worker(
+    root: &Path,
+    host: &ModuleSpecifier,
+    max_heap: usize,
+    permissions: &ModulePermissions,
+) -> MainWorker {
     let services = WorkerServiceOptions {
         blob_store: Arc::new(BlobStore::default()),
         broadcast_channel: InMemoryBroadcastChannel::default(),
@@ -238,10 +346,10 @@ pub(super) fn build_worker(root: &Path, host: &ModuleSpecifier, max_heap: usize)
         module_loader: Rc::new(HostModuleLoader(FsModuleLoader)),
         node_services: Some(node_services(root)),
         npm_process_state_provider: None,
-        // Phase 3 replaces this with a container built from the module's own
-        // `_sc_modules` row. Until then a module has what it had in the sidecar,
-        // which is everything.
-        permissions: PermissionsContainer::allow_all(parser),
+        // Built from the `_sc_modules` rows of the modules pinned to this
+        // worker — which all share one set, because that is what the pool pins
+        // by. Closed unless an admin granted something.
+        permissions: container(permissions),
         root_cert_store_provider: None,
         fetch_dns_resolver: Default::default(),
         shared_array_buffer_store: None,

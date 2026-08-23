@@ -9,8 +9,8 @@ use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::Result;
 use sc_module::{
-    MODULES_TABLE, Module, ModuleSource, bootstrap_modules, delete_module, list_modules,
-    load_module, load_module_by_name, save_module,
+    COL_PERMISSIONS, MODULES_TABLE, Module, ModulePermissions, ModuleSource, bootstrap_modules,
+    delete_module, list_modules, load_module, load_module_by_name, save_module,
 };
 use sc_test_harness::TestDb;
 use serde_json::json;
@@ -141,4 +141,72 @@ async fn a_module_needs_a_name_and_a_location() {
             .to_string()
             .contains("location")
     );
+}
+
+/// Phase 3: a module's permission set is on its row, and a row that has never
+/// had one reaches nothing.
+#[tokio::test]
+async fn a_permission_set_round_trips_and_a_row_without_one_is_closed() {
+    let db = TestDb::new().await.unwrap();
+    let cat = catalog(&db).await.unwrap();
+    bootstrap_modules(&cat).await.unwrap();
+
+    let mut module = Module::new("@saltcorn/mqtt", ModuleSource::Npm, "@saltcorn/mqtt");
+    // Installed with nothing granted, which is the whole default (§2).
+    save_module(&cat, &module).await.unwrap();
+    assert!(
+        load_module(&cat, module.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permissions
+            .is_closed()
+    );
+
+    module.permissions = ModulePermissions {
+        net: vec!["broker.example:1883".into()],
+        env: vec!["MQTT_PASSWORD".into()],
+        ..ModulePermissions::closed()
+    };
+    save_module(&cat, &module).await.unwrap();
+    let read = load_module_by_name(&cat, "@saltcorn/mqtt")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.permissions, module.permissions);
+
+    // A module installed before the column existed has NULL there, and NULL is
+    // the closed set rather than a row nobody can read — the one lenient read in
+    // the store, and it fails in the safe direction.
+    db.client()
+        .await
+        .unwrap()
+        .execute(
+            &format!("update {MODULES_TABLE} set {COL_PERMISSIONS} = NULL"),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(
+        load_module(&cat, module.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permissions
+            .is_closed()
+    );
+
+    // But a set nobody can *parse* is an error, not a guess: the shape is still
+    // strict, and a stored `net: "everything"` must not become a grant.
+    db.client()
+        .await
+        .unwrap()
+        .execute(
+            &format!("update {MODULES_TABLE} set {COL_PERMISSIONS} = '{{\"net\": \"all\"}}'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let err = list_modules(&cat).await.unwrap_err().to_string();
+    assert!(err.contains("net"), "{err}");
 }

@@ -34,6 +34,7 @@
 //! - [`paths`] — where packages are installed.
 //! - [`install`] — npm, and what it turned out to have installed.
 //! - [`bounds`] — the four bounds a module call is under, and the pool's size.
+//! - [`permissions`] — what a module's worker may reach, and what it may not.
 //! - [`host`] — the module host as the rest of the server sees it.
 //! - [`deno`] — the in-process worker pool (feature `deno-host`).
 //! - [`spec`] — v1's `configFields` translated into this system's `FormField`.
@@ -57,6 +58,7 @@ pub mod install;
 pub mod module;
 pub mod modules;
 pub mod paths;
+pub mod permissions;
 pub mod spec;
 pub mod store;
 
@@ -74,8 +76,9 @@ pub use install::{InstalledPackage, Installer, have_node, have_npm};
 pub use module::{MODULE_SOURCES, Module, ModuleId, ModuleSource};
 pub use modules::{LoadedModule, ModuleIssue, ModuleSet, redacted_configuration, unsupported_json};
 pub use paths::default_modules_root;
+pub use permissions::{ModulePermissions, PERM_ENV, PERM_NET, PERM_READ, PERM_WRITE};
 pub use spec::config_fields_to_form_fields;
 pub use store::{
-    MODULES_TABLE, bootstrap_modules, delete_module, list_modules, load_module,
+    COL_PERMISSIONS, MODULES_TABLE, bootstrap_modules, delete_module, list_modules, load_module,
     load_module_by_name, require_module, save_module,
 };
