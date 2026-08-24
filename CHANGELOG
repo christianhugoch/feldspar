@@ -2,6 +2,94 @@
 
 Changes in reverse chronological order.
 
+## Writable table providers
+
+The last milestone ended with a sentence — "`write()` fails … saying that writable providers are
+not implemented yet" — and this is that sentence. v1's `get_table(cfg)` may answer
+`insertRow`, `updateRow` and `deleteRows` beside `getRows`; all three are now called, and a
+provided table is edited from the row editor, the REST endpoints, an action or a code body
+exactly as a table in a database is.
+
+**The milestone's definition of done is a test.** `crates/sc-module/tests/pg_provider.rs`
+creates a table in a throwaway PostgreSQL database, installs a module that reaches it with
+**npm's `pg`**, loads that module on a `deno_runtime` worker in this process granted exactly the
+one socket the database is on, makes a `_sc_tables` row in *Saltcorn's own* database out of it,
+and then runs the `INSERT`/`UPDATE`/`DELETE` statements `sc-api` builds — `RETURNING *` and all
+— through `Catalog::provider`, checking the remote database afterwards to see that they landed.
+A second test does the same with the provider configured read-only and gets three refusals and
+an untouched database. A third does the whole thing over HTTP against the fixture module
+(`a_writable_provided_table_is_edited_through_the_ordinary_row_endpoints`).
+
+- **`pg` runs under Deno.** This milestone was gated on that and it is settled empirically:
+  nothing was shimmed and no branch of `pg` was avoided. `@saltcorn/postgres-tables` *itself*
+  still does not load, and the reason is not `pg` — its first line is
+  `require("@saltcorn/data/db")`, so it is a client of v1's own internals rather than a thin
+  wrapper over an npm library, and v1's package does not survive being required on a worker with
+  no v1 server around it (the observed failure is `isNode is not a function`, inside
+  `@saltcorn/data`\'s own module graph). It is therefore this milestone's **specification** — the three method
+  signatures and the `read_only` flag that withholds them — and the test fixture
+  (`tests/fixtures/pg-module`) is a self-contained provider written against `pg` directly, doing
+  what that plugin does for the same reasons: `fields(cfg)` out of `information_schema`, the
+  `where`/`options` pair turned into SQL rather than ignored, and the writing three withheld
+  entirely when `read_only` is set.
+- **Writability is a property of the configuration, not of the provider.** v1 has no declaration
+  of it: `get_table(cfg)` either puts the three methods on the object it returns or it does not.
+  So `TableProviderHost::writes` asks the module with the configuration in hand, once per catalog
+  reload beside the question about the columns, and the answer is carried on the table as
+  `TableSource::Provider { writes }` (`ProvidedWrites { insert, update, delete }`). The admin UI
+  draws its buttons from it — a screen that offers "Add row" on a feed is a screen that lies —
+  and the write path checks again on the far side, because a module can be reconfigured between a
+  reload and a write. A provider that cannot be reached answers `NONE`: a table whose module went
+  away is read-only rather than writable-but-broken, which is the fail-closed rule a broken
+  ownership formula already gets.
+- **A `Statement` is *narrowed* into v1's three calls, and every narrowing that cannot be made is
+  refused by name.** The read path interprets a `Select` over whatever JSON came back because a
+  provider may ignore the query; the write path has the opposite problem, in that v1's methods
+  are not a query language at all. `insertRow` takes a record, `updateRow` takes a record and one
+  primary key, `deleteRows` takes a `where` object — so an `UPDATE … WHERE votes > 5` is run as a
+  `SELECT` first and each matching row changed by its own key, and a `DELETE` is handed
+  `{ pk: { in: [ids] } }` rather than a filter it might not understand. Never `{}`: a provider
+  handed an empty `where` deletes the table, and the host script refuses one before it reaches a
+  module.
+- **Reading first is not an optimisation to skip.** Every write this system issues carries
+  `RETURNING` (`rows.rs` asks for `*` on all three), `updateRow` answers nothing and `insertRow`
+  answers only a key, so the row that comes back is read either way — and a `DELETE` must read
+  *before* it deletes, since afterwards there is nothing left to read. An insert reads the row
+  back through the key the provider answered, which is how a serial key and a remote default show
+  up in the row editor without anybody typing them; a provider that answers no key (v1 allows it)
+  gets the record as written, which is not an error.
+- **Two refusals, both by name.** A provider that declares no single primary-key column cannot be
+  updated or deleted from — there is no way to say which row a change applies to — while reads
+  and inserts are unaffected. And a non-literal expression in a `SET` or a `VALUES` (`votes =
+  votes + 1`, `now()`) is refused naming the column, because there is no database behind a
+  provided table to evaluate it in and guessing a value would write the wrong one silently.
+- **Four ops on the module half**, `provider_writes`/`provider_insert`/`provider_update`/
+  `provider_delete`, each calling `get_table(cfg, table)` afresh as `provider_rows` does and for
+  its reason, and each routed to the worker the module is loaded on — which is what the fixture's
+  module-scope row store proves. `ModuleTableProviders` re-checks the provider's name on this
+  side exactly as the read methods do.
+- **A Unix socket is a network permission.** `unix:/var/run/postgresql/.s.PGSQL.5432` is now a
+  valid `net` entry, because that is where Deno checks it and because a local Postgres a table
+  provider points at is reached through one. Granting the socket *directory* for reading would
+  have granted far more.
+- **The screens follow the answer.** The table page's data strip says **Edit** rather than
+  **View** when anything is writable and offers the CSV import tile exactly when `insert` is
+  answered; the row editor hides its form when neither `insert` nor `update` is, and gates the
+  per-row Edit and Delete buttons on their own capability. A read-only provided table says which
+  provider decided that, rather than showing buttons the server will refuse. `table_json`'s
+  `provider` object carries `writes: { insert, update, delete }` for all of it.
+- Fixed two error messages whose line continuations had been collapsed into runs of spaces (the
+  provided-list refusal in `sc-module`, the module-function-in-an-ownership-formula refusal in
+  `sc-catalog`).
+- Tests: `sc-catalog`'s `provided_writes.rs` drives a writable in-memory fake host through the
+  three translations, the `RETURNING` read-back, both refusals and the "a delete matching nothing
+  sends nothing" case; the echo fixture gains a writable provider and a `deno_host` test asserts
+  the four ops and both refusals; `sc-module`'s `pg_provider.rs` is the definition of done above;
+  `sc-server`'s `provided_tables_api.rs` gains the HTTP round trip and the read-only refusal.
+  Documentation: `docs/tutorial-table-providers.md` gains "A provider you *can* write to", and
+  §8.3 of the design document gains the narrowing table and what does and does not run on a
+  module worker.
+
 ## Table providers: a table whose rows come from a module
 
 `sc-catalog`'s `TableProvider` trait has had exactly one implementation since the MVP —

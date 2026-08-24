@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use sc_catalog::{
-    Attrs, Catalog, DataField, ProvidedTableDef, TableMeta, TableProviderHost, TableProviderKind,
-    TableSource, bootstrap_table_meta, save_table_meta,
+    Attrs, Catalog, DataField, ProvidedTableDef, ProvidedWrites, TableMeta, TableProviderHost,
+    TableProviderKind, TableSource, bootstrap_table_meta, save_table_meta,
 };
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
@@ -102,6 +102,52 @@ impl TableProviderHost for FakeFeed {
             json!({ "title": "gamma", "link": "/c" }),
         ])
     }
+
+    /// A feed is read-only, which is what `@saltcorn/rss` is: `get_table`
+    /// answers `getRows` and nothing else.
+    async fn writes(
+        &self,
+        _module: &str,
+        _provider: &str,
+        _table: &str,
+        _config: &Json,
+    ) -> Result<ProvidedWrites> {
+        Ok(ProvidedWrites::NONE)
+    }
+
+    async fn insert(
+        &self,
+        _module: &str,
+        _provider: &str,
+        _table: &str,
+        _config: &Json,
+        _record: &Json,
+    ) -> Result<Json> {
+        panic!("a read-only provider must be refused before the host is reached")
+    }
+
+    async fn update(
+        &self,
+        _module: &str,
+        _provider: &str,
+        _table: &str,
+        _config: &Json,
+        _id: &Json,
+        _record: &Json,
+    ) -> Result<()> {
+        panic!("a read-only provider must be refused before the host is reached")
+    }
+
+    async fn delete(
+        &self,
+        _module: &str,
+        _provider: &str,
+        _table: &str,
+        _config: &Json,
+        _filter: &Json,
+    ) -> Result<()> {
+        panic!("a read-only provider must be refused before the host is reached")
+    }
 }
 
 /// A catalog over a throwaway database with `_sc_tables` bootstrapped.
@@ -140,7 +186,8 @@ async fn a_row_with_a_provider_is_a_table_the_database_never_had() -> Result<()>
         table.source,
         TableSource::Provider {
             module: "@saltcorn/rss".into(),
-            provider: "RSS feed".into()
+            provider: "RSS feed".into(),
+            writes: ProvidedWrites::NONE,
         }
     );
     assert_eq!(table.provider(), Some(("@saltcorn/rss", "RSS feed")));
@@ -216,8 +263,11 @@ async fn the_catalogs_provider_serves_its_rows_through_the_ordinary_read_path() 
     Ok(())
 }
 
+/// A provider that answers no write method is read-only, and the refusal names
+/// the method a module author would have to add rather than talking about
+/// drivers or about this version of Saltcorn.
 #[tokio::test]
-async fn a_provided_table_is_read_only_and_says_which_provider_refused() -> Result<()> {
+async fn a_read_only_provider_refuses_a_write_and_says_which_method_is_missing() -> Result<()> {
     let db = TestDb::new().await?;
     let catalog = catalog(&db).await?;
     catalog.set_table_providers(FakeFeed::new(true) as Arc<dyn TableProviderHost>)?;
@@ -235,7 +285,8 @@ async fn a_provided_table_is_read_only_and_says_which_provider_refused() -> Resu
     let err = err.to_string();
     assert!(err.contains("RSS feed"), "{err}");
     assert!(err.contains("@saltcorn/rss"), "{err}");
-    assert!(err.contains("does not write"), "{err}");
+    assert!(err.contains("read-only"), "{err}");
+    assert!(err.contains("insertRow"), "{err}");
     Ok(())
 }
 

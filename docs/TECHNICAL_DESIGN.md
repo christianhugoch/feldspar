@@ -1042,8 +1042,7 @@ pub trait TableProvider: Send + Sync {
 A `DatabaseDriver`-backed table is just the trivial provider (`DriverTableProvider`). The
 non-trivial one is `ProvidedTableProvider`: a table whose rows come from a **module**'s v1
 `table_providers` export — `@saltcorn/rss`'s `RSS feed`, `@saltcorn/proxmox`'s cluster
-listings, `@saltcorn/postgres-tables`' remote tables. Materialisation is still deferred, and so
-is a **writable** provider (v1's `insertRow`/`updateRow`/`deleteRows`).
+listings, `@saltcorn/postgres-tables`' remote tables. Materialisation is still deferred.
 
 **A provided table's `_sc_tables` row is not an overlay, it is the table's only definition.**
 That is the one exception to §9's rule, and it is exactly the `_sc_triggers` relationship
@@ -1078,10 +1077,47 @@ table's rows are not in a database, so there is nothing for a join to reach, and
 silently dropped one would answer a different question inside somebody's view. Un-grouped
 aggregates are supported, because `count(*)` is what the tables page shows beside every table.
 
+**Writing is a narrowing, and writability belongs to the configuration.** v1's `get_table(cfg)`
+either puts `insertRow`/`updateRow`/`deleteRows` on the object it returns or it does not —
+`@saltcorn/postgres-tables` omits all three behind its `read_only` flag — so writability is a
+property of *this table's settings*, not of the provider, and it is asked
+(`TableProviderHost::writes`) once per reload beside the columns and carried on the table as
+`TableSource::Provider { writes }`. The admin UI draws its buttons from it, because a button
+with nothing behind it is a screen that lies; the write path checks again on the far side,
+because a module can be reconfigured between a reload and a write.
+
+The three methods are **not a query language** — `insertRow` takes a record, `updateRow` takes a
+record and one primary key, `deleteRows` takes v1's `where` object — so `ProvidedTableProvider::
+write` narrows a `Statement` into them and refuses, by name, every narrowing it cannot make:
+
+| Statement | v1 call | How the address is found |
+|---|---|---|
+| `INSERT` | `insertRow(rec)` per row | — |
+| `UPDATE` | `updateRow(rec, id)` per row | the filter is run as a `SELECT` first; its rows' primary keys are the ids |
+| `DELETE` | `deleteRows(where)` | the filter is run as a `SELECT` first; the `where` sent is `{ pk: { in: [ids] } }`, never `{}` |
+
+Reading first is not optional: every write this system issues carries `RETURNING` (`rows.rs`
+asks for `*` on all three), `updateRow` answers nothing and `insertRow` answers only a key, so
+the row that comes back is read either way — and a `DELETE` must read *before* it deletes,
+since afterwards there is nothing left to read. What is refused rather than approximated: a
+provider that declares no single primary key (there is no way to name one row — reads and
+inserts are unaffected), and a non-literal expression in a `SET` or a `VALUES` (there is no
+database behind the table to evaluate it in).
+
 The seam is inverted the way `sc-expr`'s `ModuleFnHost` is — `TableProviderHost` is declared in
 `sc-catalog` (layer 4), implemented in `sc-module` (layer 6) as `ModuleTableProviders`, and
 installed on the catalog by `sc-server` after every module change, which also reloads the
-catalog because a module change can change a provided table's columns.
+catalog because a module change can change a provided table's columns *or* whether it can be
+written.
+
+**What runs on a module worker, and what does not.** npm's `pg` runs under `deno_runtime`
+unchanged — a table provider over a remote PostgreSQL opens a real connection from a worker
+granted that one socket, TCP or Unix (`unix:/var/run/postgresql/.s.PGSQL.5432` is a net
+permission, because that is where Deno checks it). `@saltcorn/postgres-tables` *itself* does not
+load, and the reason is not `pg`: it begins `require("@saltcorn/data/db")`, so it is a client of
+v1's own internals rather than a thin wrapper over an npm library, and that package fails inside
+its own module graph (`isNode is not a function`) on a worker with no v1 server around it. A v1
+plugin of the second kind (`@saltcorn/rss`) loads here; one of the first does not.
 
 ---
 

@@ -29,6 +29,11 @@ const configuration_workflow = () =>
 // and its one action would throw without it, which is why the host calls it.
 let loadedWith = "onLoad was never called";
 
+/** The writable provider's rows, in this module's own scope — which is where a
+ * v1 provider keeps a connection pool, and what makes "the call goes to the
+ * worker the module is loaded on" a claim with something behind it. */
+const store = { rows: [{ id: 1, name: "one" }], nextId: 2, calls: [] };
+
 module.exports = {
   sc_plugin_api_version: 1,
   plugin_name: "echo",
@@ -229,6 +234,70 @@ module.exports = {
             });
           return rows;
         },
+      }),
+    },
+    // A **writable** provider, which is the other half of v1's `get_table`:
+    // `insertRow`, `updateRow` and `deleteRows` beside `getRows`, offered or
+    // withheld according to the configuration exactly as
+    // `@saltcorn/postgres-tables`'s `read_only` flag does it. The rows live in
+    // this module's own scope, which is also what proves the call reached the
+    // one worker the module is loaded on.
+    echo_writable: {
+      configuration_workflow: () =>
+        new Workflow({
+          steps: [
+            {
+              name: "Table",
+              form: () =>
+                new Form({
+                  fields: [{ name: "read_only", label: "Read-only", type: "Bool" }],
+                }),
+            },
+          ],
+        }),
+      fields: [
+        { name: "id", label: "ID", type: "Integer", primary_key: true },
+        { name: "name", label: "Name", type: "String" },
+      ],
+      get_table: (cfg) => {
+        const readOnly = Boolean((cfg || {}).read_only);
+        return {
+          getRows: async (where, opts) => {
+            store.calls.push({ op: "getRows", where, opts });
+            return store.rows.slice();
+          },
+          ...(readOnly
+            ? {}
+            : {
+                insertRow: async (rec) => {
+                  store.calls.push({ op: "insertRow", rec });
+                  const id = store.nextId++;
+                  // A default the caller never sent, so a test can tell "the row
+                  // as the provider has it" from "the record as written".
+                  store.rows.push({ id, name: rec.name || "", note: "stored" });
+                  return id;
+                },
+                updateRow: async (rec, id) => {
+                  store.calls.push({ op: "updateRow", rec, id });
+                  for (const row of store.rows)
+                    if (row.id === id) Object.assign(row, rec);
+                },
+                deleteRows: async (where) => {
+                  store.calls.push({ op: "deleteRows", where });
+                  const ids = ((where || {}).id || {}).in || [];
+                  store.rows = store.rows.filter((row) => !ids.includes(row.id));
+                },
+              }),
+        };
+      },
+    },
+    // The provider a test reads the recorded calls back through: a table
+    // provider is the only surface this fixture has for answering a question,
+    // so "what was I asked?" is one too.
+    echo_calls: {
+      fields: [{ name: "op", type: "String" }],
+      get_table: () => ({
+        getRows: async () => store.calls.map((call) => ({ op: JSON.stringify(call) })),
       }),
     },
   },

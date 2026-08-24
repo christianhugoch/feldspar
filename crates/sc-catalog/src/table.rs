@@ -16,6 +16,7 @@ use sc_types::{BaseField, BasicType, RichTypeRef, TypeRef};
 use crate::constraint::TableConstraint;
 use crate::field::{Attrs, DataField, DataFieldKind, DbId, FieldId, TableId};
 use crate::field_meta::FieldMeta;
+use crate::provider::ProvidedWrites;
 use crate::table_meta::{TableMeta, TableMetaId};
 
 /// A way in which a stored `_sc_fields` overlay row did **not** cleanly apply to
@@ -54,15 +55,34 @@ pub enum TableSource {
         module: String,
         /// The provider's own name within it — `RSS feed`.
         provider: String,
+        /// Which of v1's three write methods `get_table` answered for *this*
+        /// table's configuration, asked at the last catalog reload.
+        ///
+        /// Carried on the table rather than asked at write time because the
+        /// admin UI draws its buttons from it, and a button with nothing behind
+        /// it is a screen that lies. The write path checks again on the far
+        /// side; see [`ProvidedWrites`](crate::ProvidedWrites).
+        writes: ProvidedWrites,
     },
 }
 
 impl TableSource {
+    /// Which writes the provider serving this table answers — none at all for a
+    /// database table, whose writes do not go through a provider's methods.
+    pub fn provided_writes(&self) -> ProvidedWrites {
+        match self {
+            TableSource::Database => ProvidedWrites::NONE,
+            TableSource::Provider { writes, .. } => *writes,
+        }
+    }
+
     /// The provider serving this table, or `None` for a database table.
     pub fn provider(&self) -> Option<(&str, &str)> {
         match self {
             TableSource::Database => None,
-            TableSource::Provider { module, provider } => Some((module, provider)),
+            TableSource::Provider {
+                module, provider, ..
+            } => Some((module, provider)),
         }
     }
 }
@@ -253,6 +273,7 @@ impl Table {
         module: impl Into<String>,
         provider: impl Into<String>,
         fields: Vec<DataField>,
+        writes: ProvidedWrites,
     ) -> Table {
         let name = name.into();
         let primary_key = fields
@@ -268,6 +289,7 @@ impl Table {
             source: TableSource::Provider {
                 module: module.into(),
                 provider: provider.into(),
+                writes,
             },
             fields,
             primary_key,
@@ -286,6 +308,13 @@ impl Table {
     /// database does.
     pub fn provider(&self) -> Option<(&str, &str)> {
         self.source.provider()
+    }
+
+    /// Which of v1's three write methods this table's provider answers.
+    /// [`NONE`](ProvidedWrites::NONE) for a table in a database — its writes are
+    /// the driver's, not a provider's.
+    pub fn provided_writes(&self) -> ProvidedWrites {
+        self.source.provided_writes()
     }
 
     /// Apply an overlay row to this table (technical design §9, TODO §1.2).

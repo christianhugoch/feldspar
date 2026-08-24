@@ -30,18 +30,23 @@
 //! copy of it on another isolate would be a second pool. A module is loaded once,
 //! on one worker, so the call goes there.
 //!
-//! # What is **not** here: writing
+//! # Writing
 //!
-//! v1's `get_table` may also answer `insertRow`, `updateRow` and `deleteRows`.
-//! This milestone reads. The refusal is worded in
-//! [`ProvidedTableProvider::write`](sc_catalog::ProvidedTableProvider), which is
-//! where a write arrives; there is nothing to route here because nothing calls
-//! it yet.
+//! v1's `get_table` may also answer `insertRow`, `updateRow` and `deleteRows`,
+//! and whether it does is a property of the **configuration** rather than of the
+//! provider — `@saltcorn/postgres-tables` omits all three when its `read_only`
+//! flag is set. So [`writes`](TableProviderHost::writes) asks the module,
+//! `get_table(cfg)` in hand, and the three write methods route exactly as the
+//! read ones do.
+//!
+//! The narrowing from this system's `Statement` into those three signatures is
+//! `sc_catalog`'s, not this crate's: what crosses here is already v1's
+//! vocabulary — a record, an id, a `where` object.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sc_catalog::{DataField, TableProviderHost, TableProviderKind};
+use sc_catalog::{DataField, ProvidedWrites, TableProviderHost, TableProviderKind};
 use sc_error::{Error, Result};
 use sc_types::{BasicType, TypeRef};
 use serde_json::Value as Json;
@@ -151,6 +156,70 @@ impl TableProviderHost for ModuleTableProviders {
         self.host
             .provider_rows(module, provider, config, table, filter, options)
             .await
+    }
+
+    async fn writes(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+    ) -> Result<ProvidedWrites> {
+        self.require(module, provider)?;
+        let answer = self
+            .host
+            .provider_writes(module, provider, config, table)
+            .await?;
+        Ok(ProvidedWrites::from_json(&answer))
+    }
+
+    async fn insert(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+        record: &Json,
+    ) -> Result<Json> {
+        self.require(module, provider)?;
+        let answer = self
+            .host
+            .provider_insert(module, provider, config, table, record)
+            .await?;
+        // v1 lets `insertRow` answer nothing, so a missing key is `null` rather
+        // than an error: the caller reads the row back through what it wrote.
+        Ok(answer.get("key").cloned().unwrap_or(Json::Null))
+    }
+
+    async fn update(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+        id: &Json,
+        record: &Json,
+    ) -> Result<()> {
+        self.require(module, provider)?;
+        self.host
+            .provider_update(module, provider, config, table, id, record)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+        filter: &Json,
+    ) -> Result<()> {
+        self.require(module, provider)?;
+        self.host
+            .provider_delete(module, provider, config, table, filter)
+            .await?;
+        Ok(())
     }
 }
 

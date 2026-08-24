@@ -78,7 +78,11 @@ async fn a_module_loads_and_reports_what_it_supplies() {
         .iter()
         .map(|p| p.name.as_str())
         .collect();
-    assert_eq!(providers, ["echo_rows"], "{providers:?}");
+    assert_eq!(
+        providers,
+        ["echo_rows", "echo_writable", "echo_calls"],
+        "{providers:?}"
+    );
     assert!(manifest.issues.is_empty(), "{:?}", manifest.issues);
 
     host.shutdown().await;

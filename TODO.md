@@ -1,6 +1,6 @@
-# Saltcorn v2 — Table providers: a table whose rows come from a module
+# Saltcorn v2 — Writable table providers
 
-Ordered, checkable task list for the sixteenth milestone after the MVP. Earlier lists are
+Ordered, checkable task list for the seventeenth milestone after the MVP. Earlier lists are
 archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
 [docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
 [docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
@@ -16,38 +16,38 @@ and indexes), [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email),
 [docs/TODO-post-mvp-11.md](./docs/TODO-post-mvp-11.md) (tables in code),
 [docs/TODO-post-mvp-12.md](./docs/TODO-post-mvp-12.md) (concurrent code bodies),
 [docs/TODO-post-mvp-13.md](./docs/TODO-post-mvp-13.md) (modules),
-[docs/TODO-post-mvp-14.md](./docs/TODO-post-mvp-14.md) (SQLite) and
-[docs/TODO-post-mvp-15.md](./docs/TODO-post-mvp-15.md) (modules in-process). Scope and
-rationale remain in [docs/GOALS.md](./docs/GOALS.md) and
+[docs/TODO-post-mvp-14.md](./docs/TODO-post-mvp-14.md) (SQLite),
+[docs/TODO-post-mvp-15.md](./docs/TODO-post-mvp-15.md) (modules in-process) and
+[docs/TODO-post-mvp-16.md](./docs/TODO-post-mvp-16.md) (table providers). Scope and rationale
+remain in [docs/GOALS.md](./docs/GOALS.md) and
 [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md).
 
-`sc-catalog`'s `TableProvider` trait has existed since the MVP with exactly one implementation
-— `DriverTableProvider`, which forwards a `Select` to a `DatabaseDriver` — and a doc comment
-saying "non-trivial providers (RSS/IMAP/search/…) are post-MVP". This milestone is that
-sentence: a **second** implementation, whose rows come from JavaScript a module supplies.
+The last milestone ended with a sentence, and this one is that sentence:
 
-The design was settled in v1 and is not reopened here. A v1 plugin exports
+> `write()` fails with a sentence naming the provider and saying that writable providers are
+> not implemented yet.
+
+v1's `get_table(cfg)` may answer three more methods beside `getRows`:
 
 ```js
-table_providers: {
-  "RSS feed": {
-    configuration_workflow,                       // this provider's own settings
-    fields: [{ name: "title", type: "String" }],  // or a function of the configuration
-    get_table: (cfg) => ({ getRows: async (where, opts) => [...] }),
-  },
-}
+get_table: (cfg) => ({
+  getRows:    async (where, opts)  => [...],
+  insertRow:  async (rec, user)    => newId,   //  ⎫
+  updateRow:  async (rec, id, user) => {},     //  ⎬ this milestone
+  deleteRows: async (where, user)  => {},      //  ⎭
+})
 ```
 
-and this milestone loads that key, on the same terms the previous one loaded `actions` and
-`functions`: the manifest reports it, the admin configures it, and the call goes to the worker
-the module was loaded on. **Read-only.** `get_table` may also return `insertRow`, `updateRow`
-and `deleteRows` — `@saltcorn/postgres-tables` does, behind a config flag — and a writable
-provided table is the next milestone, not this one.
+`@saltcorn/postgres-tables` is the reference implementation of all three: it answers them when
+its `read_only` flag is off and omits them when it is on, which is the whole of v1's
+writability model — **a capability of the configuration, not of the provider**, and known only
+by calling `get_table`.
 
-**Milestone definition of done:** with `@saltcorn/rss` installed and granted one host, an
-admin creates a table whose provider is `RSS feed`, types a feed URL into the form the module
-declared, and the table's Data tab lists the feed's items with the columns the module named.
-Nothing above `sc-catalog::provider` knows the table is not in a database.
+**Milestone definition of done:** a table whose provider is a remote PostgreSQL table is
+edited from the admin UI's row editor — a row added, a field changed, a row deleted — and the
+change is visible in the remote database. Nothing above `sc-catalog::provider` knows the table
+is not in a database, and a provider configured read-only refuses each of the three with a
+sentence naming itself.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -55,134 +55,107 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## The specification
 
-### 1. Where a provided table comes from
+### 0. `pg` under Deno, and what `@saltcorn/postgres-tables` can and cannot be here
 
-A database table exists because introspection found it. A **provided** table exists because
-somebody wrote a row saying so — there is nothing to introspect, and no DDL was ever issued.
-That is a real departure from the rule written on `_sc_tables` ("everything here *adds* to what
-introspection already yields"), and it is made deliberately and in one place:
+This milestone was gated on a question with an empirical answer: **does the npm `pg` module run
+on a `deno_runtime` worker?** It does. A fixture requiring `pg`, loaded on a module worker in
+this process and granted one socket, opens a connection and returns rows — see
+`crates/sc-module/tests/pg_provider.rs`. Nothing was shimmed and no branch of `pg` was avoided.
 
-> `_sc_tables` holds two kinds of row. Without a provider it is an **overlay**: the table
-> exists whether or not the row does, and the row adds access rules, a label, a description.
-> With a provider it is a **definition**: the row *is* the table, like `_sc_triggers`' row is
-> the trigger, and deleting it deletes the table.
+What *cannot* be run here is `@saltcorn/postgres-tables` itself, and the reason is not `pg`:
+its first line is `require("@saltcorn/data/db")`, which pulls v1's entire `@saltcorn/data`
+package into the worker. That package loads far enough to fail inside itself — the observed
+error is `isNode is not a function`, a CommonJS interop difference in v1's own module graph
+that has nothing to do with table providers. A v1 plugin that is a *thin* wrapper over an npm
+library (`@saltcorn/rss`) loads here; one that is a client of v1's own internals does not, and
+no amount of table-provider work changes that.
 
-§9 of the design already anticipated this — the `_sc_tables` line reads "access rules,
-label/description, attributes, **provided-table defs**".
+So `@saltcorn/postgres-tables` is this milestone's **specification** — the three method
+signatures, the `read_only` flag that withholds them, and the `where`/`options` pair honoured in
+SQL — and the test fixture is a self-contained provider written against `pg` directly, doing
+what it does for the same reasons.
 
-The definition is three values, and they live in `attributes` rather than in columns because
-§9's own rule says so — a value present on a handful of rows out of every table in the database
-is sparse, and `ownership_formula` and `rls_enabled` are already there:
+- [x] 0.1 A `pg`-backed fixture module (`tests/fixtures/pg-module`), modelled on
+  `@saltcorn/postgres-tables`: a `configuration_workflow` asking for the connection and the
+  table, `fields(cfg)` reporting the columns, and a `get_table(cfg)` whose four methods are
+  SQL against the remote database, with `read_only` omitting the writing three.
 
-| Attribute | Holds |
+### 1. Writability is a property of the configuration
+
+v1 asks `get_table(cfg)` and looks at what came back. Here the same question is asked once per
+catalog reload, beside the one that asks for the columns, and the answer is carried on the
+table:
+
+| | |
 |---|---|
-| `provider_module` | the package name — `@saltcorn/rss` |
-| `provider_name` | the provider's own name within it — `RSS feed` |
-| `provider_config` | the object the admin filled in, handed to `fields(cfg)` and `get_table(cfg)` |
+| `TableSource::Provider { module, provider, writes }` | which of the three the provider answers |
+| `ProvidedWrites { insert, update, delete }` | three booleans; `NONE` for a read-only one |
 
-**The module is stored as well as the provider.** v1 keys `table_providers` globally, so
-`provider_name` alone is its whole identity; here a call has to reach *the worker the module
-was loaded on*, and two modules may each supply a provider called `Table`. Which module was
-meant is the admin's answer at creation time, not a lookup.
+Asked at reload rather than at write time for the reason the columns are: the admin UI has to
+know *before* it draws a button whether there is anything behind it, and a screen that offers
+"Add row" on a feed is a screen that lies. The write path checks again on the far side anyway,
+because a module can be reconfigured between a reload and a write.
 
-- [x] 1.1 `ProvidedTableDef { module, provider, configuration }` in `sc-catalog`, read from and
-  written to a `TableMeta`'s attributes. Round-trips.
-- [x] 1.2 `TableSource::Provider { module, provider }` beside `TableSource::Database`, and
-  `Table::provided(...)` — the constructor `Table::from_physical` is not, because there is no
-  physical table.
-- [x] 1.3 `Catalog::reload` builds them: after the overlay pass, every `_sc_tables` row
-  carrying a provider becomes a table in the map. A name that introspection already produced
-  **loses** — the database wins, exactly as the primary wins a name a secondary connection
-  offers — and the loss is recorded, not silent.
+- [x] 1.1 `ProvidedWrites` in `sc-catalog`, the third field of `TableSource::Provider`, and
+  `Table::provided_writes()`. `Table::provided` takes it.
+- [x] 1.2 `TableProviderHost::writes(module, provider, table, config)`, and
+  `Catalog::reload` asking it beside `provided_fields` — a provider that cannot be reached
+  answers `NONE`, which is the same fail-closed rule a broken ownership formula gets.
 
-### 2. The seam: `TableProviderHost`
+### 2. `Statement` → v1's three calls
 
-`sc-catalog` may not name `sc-module` (layer 4 cannot name layer 6), and the shape of the
-inversion is already in the crate: `ModuleFnHost` is a trait `sc-expr` declares, `sc-module`
-implements and `sc-server` installs on the catalog. This is the same seam for a different
-capability.
+The read path interprets a `Select` over JSON rows because a provider may ignore the `where`
+object. The write path has the opposite shape: **v1's write methods are not a query language**,
+they address one row by its primary key, so the translation is a *narrowing* and every
+narrowing that cannot be made is refused by name.
 
-```rust
-#[async_trait]
-pub trait TableProviderHost: Send + Sync {
-    /// Every provider every loaded module supplies, for the "new table" screen.
-    fn providers(&self) -> Vec<TableProviderKind>;
-    /// The fields this provider presents for this configuration.
-    async fn fields(&self, module: &str, provider: &str, cfg: &Json) -> Result<Vec<DataField>>;
-    /// Its rows, as JSON objects, for one v1 `where`/`options` pair.
-    async fn rows(&self, module: &str, provider: &str, cfg: &Json,
-                  filter: &Json, options: &Json) -> Result<Vec<Json>>;
-}
-```
+| Statement | v1 call | How the address is found |
+|---|---|---|
+| `INSERT` | `insertRow(rec)` per row | — |
+| `UPDATE` | `updateRow(rec, id)` per row | the filter is run as a `SELECT` first, and its rows' primary keys are the ids |
+| `DELETE` | `deleteRows(where)` | the filter is run as a `SELECT` first; the `where` handed over is `{ pk: { in: [ids] } }` |
 
-- [x] 2.1 The trait, `TableProviderKind { module, provider, config_spec }`, and the slot on the
-  `Catalog` (`set_table_providers`, `table_providers`) — `None` in a process with no modules,
-  which is what a `sc-catalog` test and a server with nothing installed both are.
-- [x] 2.2 `ProvidedTableProvider`: the `TableProvider` implementation. `fields()` are the
-  table's; `query()` runs §3; `write()` fails with a sentence naming the provider and saying
-  that writable providers are not implemented yet.
+Reading first is not an optimisation to skip: `RETURNING` is on every write this system issues
+(`rows.rs` asks for `*` on all three), v1's `updateRow` returns nothing and its `insertRow`
+returns only an id, so the row that comes back is read either way. `DELETE` must read *before*
+it deletes, since afterwards there is nothing to read.
 
-### 3. Interpreting a `Select` over JSON rows
+- [x] 2.1 `ProvidedTableProvider::write` dispatching the three, and the `RETURNING` rows read
+  back through the same `rows()`/`run_select_over` pair a `SELECT` uses.
+- [x] 2.2 What it refuses, by name: a table whose provider declares no primary key (there is
+  no way to address a row); a non-literal expression in a `SET` or in a `VALUES` (there is no
+  database to evaluate it in); a write the provider does not answer, naming which of the three
+  and saying that the provider's configuration decides it.
+- [x] 2.3 `insertRow`'s answer is v1's: the new primary key, or nothing. Nothing is not an
+  error — a provider whose key is generated remotely may not know it — and the row that comes
+  back is then the record as written, so `RETURNING *` still answers.
 
-v1 does this in JavaScript, in `json_list_to_external_table`: it hands the plugin the `where`
-object, and unless the plugin sets `disableFiltering` it *re-filters, re-sorts and re-slices the
-answer itself*. The same arrangement is right here and for the same reason — a provider is
-allowed to ignore everything it was passed — but the language is this system's `Select`, not
-v1's `where` object, so the interpreter is Rust and lives beside the provider.
+### 3. The module half
 
-- [x] 3.1 `run_select_over` in `sc-catalog`: a `Select` and a list of JSON rows in, `Row`s out.
-  `WHERE` (the full `Expr` tree this system's reads actually build), `ORDER BY`, `LIMIT`,
-  `OFFSET`, the projection list, and un-grouped aggregates — `count(*)` is not an optional
-  extra, it is what the tables page shows beside every table's name.
-- [x] 3.2 What it **refuses**, by name rather than by wrong answer: a `JOIN`, a `GROUP BY`, a
-  `HAVING`, a subquery source, a correlated subquery in an expression. A provided table is not
-  in the database, so nothing can join to it; saying so is the whole of the difference between
-  a limitation and a bug.
-- [x] 3.3 Pushdown: the `Select`'s filter is translated into v1's `where` object when it is
-  wholly expressible in it (`{ col: value }`, `{ col: { gt } }`, `in`, `or`), and the
-  ordering/limit/offset into v1's `options`, so `@saltcorn/postgres-tables` can do the work in
-  the remote database. Anything else is passed as `{}`, and §3.1 runs regardless — a provider
-  that ignored the hint still gets the right answer.
+- [x] 3.1 Four ops on the host script — `provider_writes`, `provider_insert`, `provider_update`,
+  `provider_delete` — each calling `get_table(cfg, table)` afresh, as `provider_rows` does and
+  for its reason.
+- [x] 3.2 The same four on `DenoModuleHost`/`ModuleHost`, routed to the worker the module is
+  loaded on.
+- [x] 3.3 `ModuleTableProviders` implements the four new trait methods, re-checking the
+  provider's name on this side exactly as the read methods do.
 
-### 4. The module half
+### 4. The admin API and the UI
 
-- [x] 4.1 `module-host.mjs` reads `table_providers` (an object, or a function of the module's
-  own configuration, which is v1's `withCfg`). It moves out of the unsupported census.
-- [x] 4.2 The manifest gains `table_providers: [{ name, config_fields }]`, where the fields are
-  the provider's own `configuration_workflow` flattened exactly as a module's own settings are
-  (§5 of the last milestone) and translated by `spec.rs` into `FormField`s.
-- [x] 4.3 Two ops, `provider_fields` and `provider_rows`, on the host script and on
-  `DenoModuleHost`/`ModuleHost`. Routed to the worker the module is loaded on, for `run` and
-  `call`'s reason: `get_table(cfg)` closes over what the module built at load time.
-- [x] 4.4 `ModuleTableProviders`, the `TableProviderHost` implementation, and v1's field
-  declarations (`{ name, label, type, primary_key, required }`) translated into `DataField`s.
-- [x] 4.5 `sc-server` installs it on the catalog beside `ModuleFunctions`, and reloads the
-  catalog afterwards — a module that has just been installed, configured or deleted changes
-  what a provided table's fields are.
+- [x] 4.1 `table_json`'s `provider` object gains `writes: { insert, update, delete }`.
+- [x] 4.2 The table page's data strip reads it: "Edit" rather than "View" when anything is
+  writable, the CSV import tile offered when `insert` is, and the row editor's own controls
+  (add, save, delete) each gated on their own capability.
+- [x] 4.3 The row editor refuses nothing it can do and offers nothing it cannot, and the
+  server's own sentence is what a refusal says.
 
-### 5. The admin API and the UI
+### 5. Tests and documentation
 
-- [x] 5.1 `listTableProviders` — every provider every loaded module supplies, with the config
-  spec the "new table" form renders.
-- [x] 5.2 `createProvidedTable` — a name, a module, a provider, and the configuration.
-  `updateProvidedTable` — the configuration alone, on the table's settings page, secrets
-  merged the way a module's own settings are.
-- [x] 5.3 `dropTable` on a provided table forgets the row and issues no DDL; the schema editor
-  refuses `add_field`, `alter_field`, `drop_field` and the constraint operations on one, naming
-  the provider that decides the columns. `alter_table` (label, description, access rules,
-  ownership) is allowed: those are the overlay's, and a provided table has them too.
-- [x] 5.4 The New table dialog offers the providers as a third source beside blank and CSV, and
-  the table page shows the provider, its configuration form and its issues.
-
-### 6. Tests and documentation
-
-- [x] 6.1 `sc-catalog`: the in-memory `Select` interpreter, the round-trip of a provided-table
-  definition through `_sc_tables`, and a fake `TableProviderHost` proving the catalog builds a
-  table out of a row and serves its rows through `Catalog::provider`.
-- [x] 6.2 `sc-module`: the echo fixture gains a real table provider (its `table_providers` key
-  is already there as census filler), and the Deno host test asserts the manifest, the fields
-  and the rows.
-- [x] 6.3 **`@saltcorn/rss` itself**, installed from the checkout by npm, loaded on a Deno
-  worker granted one host, and pointed at a feed served by the test over `127.0.0.1` — the
-  milestone's definition of done, minus the browser.
-- [x] 6.4 `docs/tutorial-table-providers.md`, the design doc's §8.3, and the CHANGELOG.
+- [x] 5.1 `sc-catalog`: a fake `TableProviderHost` recording what it was asked, proving the
+  three translations, the read-back of `RETURNING`, and each refusal in §2.2.
+- [x] 5.2 `sc-module`: the echo fixture gains a writable in-memory provider, and the Deno host
+  test asserts the four ops.
+- [x] 5.3 `crates/sc-module/tests/pg_provider.rs`: the `pg` fixture against a real database
+  from the test harness — the milestone's definition of done, minus the browser — including a
+  read-only configuration refusing all three.
+- [x] 5.4 `docs/tutorial-table-providers.md`, the design doc's §8.3, and the CHANGELOG.

@@ -75,7 +75,8 @@ pub use origin::PublicOrigin;
 pub use prefetch::prefetch_bindings;
 pub use projection::SchemaProjection;
 pub use provider::{
-    DriverTableProvider, ProvidedTableProvider, TableProvider, TableProviderHost, TableProviderKind,
+    DriverTableProvider, ProvidedTableProvider, ProvidedWrites, TableProvider, TableProviderHost,
+    TableProviderKind,
 };
 pub use rls::{
     Access, ROLE_GUC, disable_rls, disable_rls_sql, enable_rls, enable_rls_sql, run_in_context,

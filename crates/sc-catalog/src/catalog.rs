@@ -302,8 +302,21 @@ impl Catalog {
                         });
                         continue;
                     }
-                    let (fields, issue) = self.provided_fields(&meta.table_name, &def).await;
-                    if let Some(problem) = issue {
+                    let (fields, fields_issue) = self.provided_fields(&meta.table_name, &def).await;
+                    // And what it may be *written* through: v1 decides that
+                    // inside `get_table(cfg)`, so it is a second question with
+                    // the same shape as the first, and a provider that could not
+                    // be reached answers "nothing" rather than blocking the
+                    // reload.
+                    //
+                    // Asked only when the first was answered: a module that is
+                    // gone fails both, and one table with one thing wrong with
+                    // it should put one sentence in front of the admin.
+                    let (writes, writes_issue) = match fields_issue.is_some() {
+                        true => (crate::provider::ProvidedWrites::NONE, None),
+                        false => self.provided_writes(&meta.table_name, &def).await,
+                    };
+                    for problem in fields_issue.into_iter().chain(writes_issue) {
                         provided_issues.push(ProvidedTableIssue {
                             table: meta.table_name.clone(),
                             problem,
@@ -315,6 +328,7 @@ impl Catalog {
                         &def.module,
                         &def.provider,
                         fields,
+                        writes,
                     );
                     table.apply_overlay(&meta);
                     map.insert(id, table);
@@ -385,7 +399,9 @@ impl Catalog {
                         ownership_errors.push((
                             id.clone(),
                             format!(
-                                "an ownership formula may not call the module function `{}`: a                                  rule that decides who may read a row must fail closed, so a                                  module that is down would deny every read of this table",
+                                "an ownership formula may not call the module function `{}`: a \
+                                 rule that decides who may read a row must fail closed, so \
+                                 a module that is down would deny every read of this table",
                                 call.function
                             ),
                         ));
@@ -889,6 +905,7 @@ impl Catalog {
                 provider,
                 config,
                 table.fields.clone(),
+                table.provided_writes(),
             )));
         }
         Ok(Arc::new(DriverTableProvider::new(
@@ -929,6 +946,44 @@ impl Catalog {
                 Vec::new(),
                 Some(format!(
                     "the table provider `{}` of `{}` could not say what columns `{name}` has: {}",
+                    def.provider,
+                    def.module,
+                    sc_error::format_chain(&e)
+                )),
+            ),
+        }
+    }
+
+    /// Which writes a provided table's provider answers, and what went wrong
+    /// asking.
+    ///
+    /// The same never-fatal contract [`provided_fields`](Self::provided_fields)
+    /// has, with the fail-closed answer: a provider that cannot be reached is
+    /// [`ProvidedWrites::NONE`], so a table whose module went away becomes
+    /// read-only rather than writable-but-broken.
+    ///
+    /// **No issue is recorded when the host has none.** A process with no module
+    /// host already reports that on the fields, and saying the same thing twice
+    /// on one table would put two sentences in front of an admin with one thing
+    /// to fix.
+    async fn provided_writes(
+        &self,
+        name: &str,
+        def: &crate::table_meta::ProvidedTableDef,
+    ) -> (crate::provider::ProvidedWrites, Option<String>) {
+        let Some(host) = self.table_providers() else {
+            return (crate::provider::ProvidedWrites::NONE, None);
+        };
+        match host
+            .writes(&def.module, &def.provider, name, &def.configuration_json())
+            .await
+        {
+            Ok(writes) => (writes, None),
+            Err(e) => (
+                crate::provider::ProvidedWrites::NONE,
+                Some(format!(
+                    "the table provider `{}` of `{}` could not say whether `{name}` can be \
+                     written, so it is read-only here: {}",
                     def.provider,
                     def.module,
                     sc_error::format_chain(&e)

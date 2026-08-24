@@ -89,17 +89,7 @@ pub fn run_select_over(select: &Select, table: &str, rows: Vec<ValueRow>) -> Res
 
     // WHERE, then ORDER BY, then OFFSET/LIMIT — SQL's own order, which is the
     // only one that gives the same answer as the database would.
-    let mut kept = Vec::with_capacity(rows.len());
-    for row in rows {
-        match &select.filter {
-            None => kept.push(row),
-            Some(filter) => {
-                if truthy(&eval(filter, &row, table)?) {
-                    kept.push(row);
-                }
-            }
-        }
-    }
+    let mut kept = filter_rows(select.filter.as_ref(), table, rows)?;
 
     if !select.order.is_empty() {
         sort_rows(&mut kept, &select.order, table)?;
@@ -130,6 +120,30 @@ pub fn run_select_over(select: &Select, table: &str, rows: Vec<ValueRow>) -> Res
         out.push(Row::new(columns, values)?);
     }
     Ok(out)
+}
+
+/// The rows one `WHERE` keeps, in the order they arrived.
+///
+/// Split out of [`run_select_over`] because the **write** path needs exactly
+/// this and nothing else: v1's `updateRow`/`deleteRows` address rows by primary
+/// key, so a provided-table write begins by asking which rows the statement's
+/// filter matches (`crate::provider`). A `None` filter keeps everything, which
+/// is what an unfiltered `UPDATE` or `DELETE` means.
+pub fn filter_rows(
+    filter: Option<&Expr>,
+    table: &str,
+    rows: Vec<ValueRow>,
+) -> Result<Vec<ValueRow>> {
+    let Some(filter) = filter else {
+        return Ok(rows);
+    };
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        if truthy(&eval(filter, &row, table)?) {
+            kept.push(row);
+        }
+    }
+    Ok(kept)
 }
 
 /// The values of one JSON object as the table's fields type them.

@@ -374,6 +374,123 @@ impl DenoModuleHost {
         provided_list(module, provider, value, "rows")
     }
 
+    /// Which of v1's three write methods `get_table(config)` answers.
+    pub async fn provider_writes(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+    ) -> Result<Json> {
+        self.provider_op(
+            module,
+            provider,
+            json!({
+                "op": "provider_writes",
+                "module": module,
+                "provider": provider,
+                "configuration": configuration,
+                "table": table,
+            }),
+        )
+        .await
+    }
+
+    /// v1's `insertRow(record)`.
+    pub async fn provider_insert(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        record: &Json,
+    ) -> Result<Json> {
+        self.provider_op(
+            module,
+            provider,
+            json!({
+                "op": "provider_insert",
+                "module": module,
+                "provider": provider,
+                "configuration": configuration,
+                "table": table,
+                "record": record,
+            }),
+        )
+        .await
+    }
+
+    /// v1's `updateRow(record, id)`.
+    pub async fn provider_update(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        id: &Json,
+        record: &Json,
+    ) -> Result<Json> {
+        self.provider_op(
+            module,
+            provider,
+            json!({
+                "op": "provider_update",
+                "module": module,
+                "provider": provider,
+                "configuration": configuration,
+                "table": table,
+                "id": id,
+                "record": record,
+            }),
+        )
+        .await
+    }
+
+    /// v1's `deleteRows(where)`.
+    pub async fn provider_delete(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        filter: &Json,
+    ) -> Result<Json> {
+        self.provider_op(
+            module,
+            provider,
+            json!({
+                "op": "provider_delete",
+                "module": module,
+                "provider": provider,
+                "configuration": configuration,
+                "table": table,
+                "where": filter,
+            }),
+        )
+        .await
+    }
+
+    /// One provider request, on the worker its module is loaded on, with a
+    /// denial translated into the sentence an admin can act on.
+    async fn provider_op(&self, module: &str, provider: &str, request: Json) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        let value = self
+            .send(index, request, None)
+            .await
+            .map_err(|e| denial(module, e))?;
+        match value {
+            Json::Object(_) => Ok(value),
+            // Every write op answers an object. Anything else means the host
+            // script and this file disagree about the protocol, which is a bug
+            // here rather than in somebody's module — so it says so instead of
+            // being read as a silent success.
+            other => Err(Error::msg(format!(
+                "the table provider `{provider}` of `{module}` answered a write with {other}, \
+                 which is not the object this host asked for"
+            ))),
+        }
+    }
+
     /// Ask a worker to say hello — what a test and a diagnostics screen use to
     /// find out whether the pool starts at all.
     pub async fn ping(&self) -> Result<Json> {
@@ -667,7 +784,8 @@ fn provided_list(module: &str, provider: &str, value: Json, what: &str) -> Resul
     match value {
         Json::Array(items) => Ok(items),
         other => Err(Error::config(format!(
-            "the table provider `{provider}` of `{module}` answered its {what} with              {}, not a list",
+            "the table provider `{provider}` of `{module}` answered its {what} with \
+             {}, not a list",
             match other {
                 Json::Null => "nothing".to_owned(),
                 other => other.to_string(),

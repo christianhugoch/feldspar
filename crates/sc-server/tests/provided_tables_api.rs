@@ -240,13 +240,16 @@ async fn a_table_is_created_from_a_providers_form_and_read_through_the_rows_endp
     let module = install_echo(client).await;
     let package = module["name"].as_str().unwrap().to_owned();
     // The Modules tab says what installing it got them.
-    assert_eq!(module["table_providers"], json!(["echo_rows"]));
+    assert_eq!(
+        module["table_providers"],
+        json!(["echo_rows", "echo_writable", "echo_calls"])
+    );
 
     // Now the provider is offerable, with the settings form its own v1
     // `configuration_workflow` declares.
     let (_, body) = client.send("GET", "/api/table-providers", None).await;
     let providers = body.as_array().unwrap();
-    assert_eq!(providers.len(), 1, "{body}");
+    assert_eq!(providers.len(), 3, "{body}");
     assert_eq!(providers[0]["module"], json!(package));
     assert_eq!(providers[0]["provider"], json!("echo_rows"));
     let settings: Vec<&str> = providers[0]["config_spec"]
@@ -274,6 +277,14 @@ async fn a_table_is_created_from_a_providers_form_and_read_through_the_rows_endp
     assert_eq!(status, StatusCode::CREATED, "{table}");
     assert_eq!(table["provider"]["provider"], json!("echo_rows"));
     assert_eq!(table["provider"]["module"], json!(package));
+    // `echo_rows` answers `getRows` and nothing else, so the table reports that
+    // nothing can be written — which is what the screens draw their buttons
+    // from (§8.3).
+    assert_eq!(
+        table["provider"]["writes"],
+        json!({ "insert": false, "update": false, "delete": false }),
+        "{table}"
+    );
     assert!(
         table["provider"]["issues"].as_array().unwrap().is_empty(),
         "{table}"
@@ -379,8 +390,9 @@ async fn a_provided_table_refuses_a_write_and_a_column_change_by_name() -> sc_er
         )
         .await;
 
-    // Writing: this version reads a provided table and does not write one, and
-    // the refusal names the provider rather than something about a driver.
+    // Writing: `echo_rows` supplies no `insertRow` for these settings, and the
+    // refusal names the provider and the method rather than something about a
+    // driver.
     let (status, body) = client
         .send(
             "POST",
@@ -391,6 +403,7 @@ async fn a_provided_table_refuses_a_write_and_a_column_change_by_name() -> sc_er
     assert!(status.is_client_error(), "{status} {body}");
     let message = body.to_string();
     assert!(message.contains("echo_rows"), "{message}");
+    assert!(message.contains("insertRow"), "{message}");
 
     // Changing a column: there is no column in any database to change, and the
     // message says where the columns actually come from.
@@ -444,6 +457,113 @@ async fn a_provided_table_refuses_a_write_and_a_column_change_by_name() -> sc_er
     assert!(status.is_client_error(), "{status} {body}");
     assert!(body.to_string().contains("delete the table"), "{body}");
     assert!(server.catalog.get("headlines")?.is_some());
+
+    Ok(())
+}
+
+/// A **writable** provided table over the REST row endpoints: the same three
+/// requests any other table's rows are edited with, reaching a module's
+/// `insertRow`/`updateRow`/`deleteRows` (§8.3).
+///
+/// The fixture's `echo_writable` keeps its rows in the module's own scope, so
+/// this is also the proof that all three reached the one worker the module is
+/// loaded on.
+#[tokio::test]
+async fn a_writable_provided_table_is_edited_through_the_ordinary_row_endpoints()
+-> sc_error::Result<()> {
+    skip_without_npm!();
+    let mut server = setup("write").await?;
+    let client = &mut server.client;
+    let module = install_echo(client).await;
+    let package = module["name"].as_str().unwrap().to_owned();
+
+    let (status, table) = client
+        .send(
+            "POST",
+            "/api/tables/provided",
+            Some(json!({
+                "name": "people",
+                "module": package,
+                "provider": "echo_writable",
+                "configuration": {},
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{table}");
+    // All three, because this configuration is not read-only.
+    assert_eq!(
+        table["provider"]["writes"],
+        json!({ "insert": true, "update": true, "delete": true }),
+        "{table}"
+    );
+
+    // Add a row. What comes back is the row **as the provider has it**,
+    // including the column it filled in and the key it assigned.
+    let (status, row) = client
+        .send(
+            "POST",
+            "/api/tables/people/rows",
+            Some(json!({ "name": "two" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert_eq!(row["id"], json!(2), "{row}");
+    assert_eq!(row["name"], json!("two"), "{row}");
+
+    // Change one.
+    let (status, row) = client
+        .send(
+            "PUT",
+            "/api/tables/people/rows/1",
+            Some(json!({ "name": "edited" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    assert_eq!(row["name"], json!("edited"), "{row}");
+
+    // Delete one.
+    let (status, body) = client
+        .send("DELETE", "/api/tables/people/rows/2", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // And the module holds what those three requests said.
+    let (status, rows) = client.send("GET", "/api/tables/people/rows", None).await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], json!(1), "{rows:?}");
+    assert_eq!(rows[0]["name"], json!("edited"), "{rows:?}");
+
+    // The same provider, configured read-only, is a different table's answer:
+    // writability is a property of the configuration, not of the provider.
+    let (status, table) = client
+        .send(
+            "POST",
+            "/api/tables/provided",
+            Some(json!({
+                "name": "people_ro",
+                "module": package,
+                "provider": "echo_writable",
+                "configuration": { "read_only": true },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{table}");
+    assert_eq!(
+        table["provider"]["writes"],
+        json!({ "insert": false, "update": false, "delete": false }),
+        "{table}"
+    );
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/people_ro/rows",
+            Some(json!({ "name": "refused" })),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.to_string().contains("read-only"), "{body}");
 
     Ok(())
 }

@@ -64,8 +64,9 @@ pub const PERM_ENV: &str = "env";
 /// the reason [`ModulePermissions::closed`] is what [`Default`] answers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModulePermissions {
-    /// Hosts the module may open a socket to: `broker.example` (any port) or
-    /// `broker.example:1883` (that port only).
+    /// Hosts the module may open a socket to: `broker.example` (any port),
+    /// `broker.example:1883` (that port only), or `unix:/var/run/postgresql/
+    /// .s.PGSQL.5432` (that Unix socket).
     pub net: Vec<String>,
     /// Absolute paths the module may read. A directory allows what is under it.
     pub read: Vec<String>,
@@ -200,6 +201,21 @@ fn entries(
 fn check_host(entry: &str) -> Result<String> {
     if entry.is_empty() {
         return Err(Error::invalid("a network permission needs a host"));
+    }
+    // A **Unix socket**, which Deno spells `unix:/path/to/socket` and which is
+    // how a client on the same machine reaches a local server: `pg` connecting
+    // to a Postgres on `/var/run/postgresql` opens one, and a table provider
+    // over a local database is a real configuration (§8.3). It is a network
+    // permission and not a filesystem one because that is where Deno checks it
+    // — granting the *directory* for reading would grant far more.
+    if let Some(path) = entry.strip_prefix("unix:") {
+        if !std::path::Path::new(path).is_absolute() {
+            return Err(Error::invalid(format!(
+                "`{entry}` is not an absolute socket path, so it would mean a different socket \
+                 depending on where the server was started"
+            )));
+        }
+        return Ok(entry.to_owned());
     }
     if entry.contains("://") || entry.contains('/') {
         return Err(Error::invalid(format!(
@@ -358,6 +374,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("host:port"), "{err}");
+    }
+
+    /// A Unix socket is a network permission, because that is where Deno checks
+    /// it — and a local Postgres a table provider points at is reached through
+    /// one (§8.3).
+    #[test]
+    fn a_unix_socket_is_a_network_permission() {
+        let permissions = ModulePermissions::from_json(
+            &json!({ "net": ["unix:/var/run/postgresql/.s.PGSQL.5432"] }),
+        )
+        .unwrap();
+        assert_eq!(permissions.net, ["unix:/var/run/postgresql/.s.PGSQL.5432"]);
+        // …and it round-trips, so an admin who typed it once still has it.
+        let stored = Json::Object(permissions.to_json());
+        assert_eq!(ModulePermissions::from_json(&stored).unwrap(), permissions);
+
+        // A relative socket path means a different socket depending on where the
+        // server started, exactly as a relative file path does.
+        let err = ModulePermissions::from_json(&json!({ "net": ["unix:run/pg.sock"] }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absolute"), "{err}");
     }
 
     #[test]

@@ -27,6 +27,13 @@ import { api } from "../api";
 import { navigate } from "../App";
 import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
+import {
+  ALL_WRITES,
+  canSubmit,
+  formOffered,
+  writesOf,
+  type TableWrites,
+} from "../tableWrites";
 import type { BrowseFilesResponse, ListFieldsResponse, ListTablesResponse } from "../client";
 
 /** One merged field as `listFields` reports it. */
@@ -75,6 +82,10 @@ export function TableData({ table }: { table: string }) {
   const [fields, setFields] = useState<ListFieldsResponse | null>(null);
   const [rows, setRows] = useState<RowRecord[] | null>(null);
   const [label, setLabel] = useState<string>(table);
+  // What may be written to it: all three for a table in a database, and
+  // whatever its module answered for a provided one (§8.3).
+  const [writes, setWrites] = useState<TableWrites>(ALL_WRITES);
+  const [provider, setProvider] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = async () => {
@@ -87,9 +98,10 @@ export function TableData({ table }: { table: string }) {
       ]);
       setFields(f);
       setRows(r as RowRecord[]);
-      setLabel(
-        (t as ListTablesResponse).find((candidate) => candidate.name === table)?.label || table,
-      );
+      const summary = (t as ListTablesResponse).find((c) => c.name === table);
+      setLabel(summary?.label || table);
+      setWrites(writesOf(summary?.provider));
+      setProvider(summary?.provider ? summary.provider.provider : null);
     } catch {
       setError("Could not load the rows.");
     }
@@ -117,7 +129,14 @@ export function TableData({ table }: { table: string }) {
       />
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
-        <Rows table={table} fields={fields} rows={rows} onChange={load} />
+        <Rows
+          table={table}
+          fields={fields}
+          rows={rows}
+          writes={writes}
+          provider={provider}
+          onChange={load}
+        />
       </PageBody>
     </>
   );
@@ -128,11 +147,18 @@ function Rows({
   table,
   fields,
   rows,
+  writes,
+  provider,
   onChange,
 }: {
   table: string;
   fields: ListFieldsResponse | null;
   rows: RowRecord[] | null;
+  /** Which writes this table allows — all three for a table in a database. */
+  writes: TableWrites;
+  /** The table provider serving the rows, when one does: named in the sentence
+   * that explains why there is nothing here to press. */
+  provider: string | null;
   onChange: () => void;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
@@ -219,11 +245,26 @@ function Rows({
     }
   };
 
+  // The form is offered when there is anything it could do — add a row, or
+  // change one. A provider that answers only `deleteRows` gets a table of rows
+  // with Delete buttons and no form, which is exactly what it can do.
+  const showForm = formOffered(writes);
+  const submittable = canSubmit(writes, editingId !== null);
+
   return (
     <Card>
-      <Card.Header>{editingId !== null ? "Edit row" : "New row"}</Card.Header>
+      <Card.Header>
+        {showForm ? (editingId !== null ? "Edit row" : "New row") : "Rows"}
+      </Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
+        {provider !== null && !showForm && !writes.delete && (
+          <Alert variant="secondary">
+            These rows come from the table provider <strong>{provider}</strong>, which is
+            read-only for the settings this table has. Change them on the table page if the
+            provider can be configured to write.
+          </Alert>
+        )}
         {pk === null && (fields?.length ?? 0) > 0 && (
           <Alert variant="warning">
             This table has no single-column primary key, so a row cannot be picked out to
@@ -232,7 +273,7 @@ function Rows({
           </Alert>
         )}
 
-        <Form onSubmit={submit} className="mb-4">
+        <Form onSubmit={submit} className={showForm ? "mb-4" : "d-none"}>
           {editable.length === 0 && (
             <p className="text-muted">Add a field before creating rows.</p>
           )}
@@ -266,7 +307,7 @@ function Rows({
           })}
           {editable.length > 0 && (
             <div className="d-flex gap-2">
-              <Button type="submit" size="sm" disabled={busy}>
+              <Button type="submit" size="sm" disabled={busy || !submittable}>
                 {editingId !== null ? "Save changes" : "Add row"}
               </Button>
               {editingId !== null && (
@@ -301,20 +342,20 @@ function Rows({
                   <td key={c}>{display(row[c])}</td>
                 ))}
                 <td className="text-end">
-                  {keyOf(row) !== null && (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="outline-secondary"
-                        className="me-2"
-                        onClick={() => edit(row)}
-                      >
-                        Edit
-                      </Button>
-                      <Button size="sm" variant="outline-danger" onClick={() => remove(row)}>
-                        Delete
-                      </Button>
-                    </>
+                  {keyOf(row) !== null && writes.update && (
+                    <Button
+                      size="sm"
+                      variant="outline-secondary"
+                      className="me-2"
+                      onClick={() => edit(row)}
+                    >
+                      Edit
+                    </Button>
+                  )}
+                  {keyOf(row) !== null && writes.delete && (
+                    <Button size="sm" variant="outline-danger" onClick={() => remove(row)}>
+                      Delete
+                    </Button>
                   )}
                 </td>
               </tr>

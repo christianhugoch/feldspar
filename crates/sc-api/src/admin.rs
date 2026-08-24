@@ -1829,6 +1829,20 @@ fn table_schema() -> TypeSchema {
             // page needs both and one round trip is what it has.
             StructField::new("configuration", TypeSchema::json()),
             StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+            // Which of v1's three write methods `get_table` answers for these
+            // settings (§8.3). Reported because writability is a property of
+            // the *configuration* — the same provider, configured read-only,
+            // answers none of them — so a client cannot infer it from the
+            // provider's name, and a button with nothing behind it is a screen
+            // that lies.
+            StructField::new(
+                "writes",
+                TypeSchema::struct_of([
+                    StructField::new("insert", TypeSchema::bool()),
+                    StructField::new("update", TypeSchema::bool()),
+                    StructField::new("delete", TypeSchema::bool()),
+                ]),
+            ),
             // Why this table has no columns, when it has none: the module is not
             // installed, the provider is not one it supplies, `fields(cfg)`
             // threw. Empty when all is well.

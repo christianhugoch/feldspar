@@ -942,7 +942,16 @@ async fn a_table_provider_declares_its_settings_its_columns_and_its_rows() {
     // The manifest names the provider and the form its own
     // `configuration_workflow` declares — flattened exactly as the module's own
     // settings are.
-    assert_eq!(manifest.table_providers.len(), 1);
+    let provider_names: Vec<&str> = manifest
+        .table_providers
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(
+        provider_names,
+        ["echo_rows", "echo_writable", "echo_calls"],
+        "{provider_names:?}"
+    );
     let provider = &manifest.table_providers[0];
     assert_eq!(provider.name, "echo_rows");
     let settings: Vec<&str> = provider
@@ -1005,6 +1014,148 @@ async fn a_table_provider_declares_its_settings_its_columns_and_its_rows() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("no_such_provider"), "{err}");
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// The four write ops, against the fixture's writable provider.
+///
+/// What is asserted here is the **module half**: that `get_table(cfg)` is asked
+/// afresh for each one, that what reaches the plugin is v1's own vocabulary (a
+/// record, an id, a `where` object), and that a configuration which withholds
+/// the three methods is refused by name. The narrowing from a `Statement` into
+/// those three is `sc-catalog`'s and is tested there.
+#[tokio::test]
+async fn a_writable_table_provider_answers_v1s_three_write_methods() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-provider-write", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+    host.load(name, &installer.package_dir(name), &json!({}), &closed())
+        .await
+        .unwrap();
+
+    let writable = json!({});
+    let read_only = json!({ "read_only": true });
+
+    // Writability is a property of the *configuration*: the same provider
+    // answers all three for one and none for the other.
+    let writes = host
+        .provider_writes(name, "echo_writable", &writable, "t")
+        .await
+        .unwrap();
+    assert_eq!(
+        writes,
+        json!({ "insert": true, "update": true, "delete": true })
+    );
+    let writes = host
+        .provider_writes(name, "echo_writable", &read_only, "t")
+        .await
+        .unwrap();
+    assert_eq!(
+        writes,
+        json!({ "insert": false, "update": false, "delete": false })
+    );
+
+    // `insertRow` answers the new key.
+    let answer = host
+        .provider_insert(
+            name,
+            "echo_writable",
+            &writable,
+            "t",
+            &json!({ "name": "two" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["key"], json!(2));
+
+    host.provider_update(
+        name,
+        "echo_writable",
+        &writable,
+        "t",
+        &json!(1),
+        &json!({ "name": "edited" }),
+    )
+    .await
+    .unwrap();
+
+    host.provider_delete(
+        name,
+        "echo_writable",
+        &writable,
+        "t",
+        &json!({ "id": { "in": [2] } }),
+    )
+    .await
+    .unwrap();
+
+    // The rows the module now holds: row 1 renamed, row 2 gone. Module-scope
+    // state, so this is also the proof that all four calls reached the one
+    // worker the module is loaded on.
+    let rows = host
+        .provider_rows(
+            name,
+            "echo_writable",
+            &writable,
+            "t",
+            &json!({}),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], json!(1));
+    assert_eq!(rows[0]["name"], json!("edited"));
+
+    // And what the plugin was handed is v1's vocabulary, unchanged.
+    let calls = host
+        .provider_rows(name, "echo_calls", &json!({}), "t", &json!({}), &json!({}))
+        .await
+        .unwrap();
+    let calls: Vec<String> = calls
+        .iter()
+        .map(|c| c["op"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains(r#""op":"insertRow""#) && c.contains(r#""rec":{"name":"two"}"#)),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains(r#""op":"updateRow""#) && c.contains(r#""id":1"#)),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains(r#""op":"deleteRows""#) && c.contains(r#""in":[2]"#)),
+        "{calls:?}"
+    );
+
+    // A write the configuration withholds names the method a module author
+    // would have to add.
+    let err = host
+        .provider_insert(name, "echo_writable", &read_only, "t", &json!({}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("insertRow"), "{err}");
+    assert!(err.contains("echo_writable"), "{err}");
+
+    // A delete naming no rows is refused rather than sent: a provider handed an
+    // empty `where` deletes everything.
+    let err = host
+        .provider_delete(name, "echo_writable", &writable, "t", &json!({}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("deletes everything"), "{err}");
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());

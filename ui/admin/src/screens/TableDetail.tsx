@@ -45,6 +45,7 @@ import {
   IconUpload,
 } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
+import { anyWrite, writesOf, type TableWrites } from "../tableWrites";
 import type {
   ListConstraintsResponse,
   ListFieldsResponse,
@@ -203,6 +204,7 @@ export function TableDetail({ table }: { table: string }) {
           rowCount={rowCount}
           configured={settings?.configured ?? false}
           provided={Boolean(settings?.provider)}
+          writes={settings?.provider?.writes ?? null}
           onChange={load}
         />
 
@@ -237,13 +239,18 @@ function TableData({
   rowCount,
   configured,
   provided,
+  writes,
   onChange,
 }: {
   table: string;
   rowCount: number | null;
-  /** Whether a module's table provider serves the rows (§8.3): read-only, so
-   * the two ways of *writing* rows are not offered. */
+  /** Whether a module's table provider serves the rows (§8.3). */
   provided?: boolean;
+  /** Which writes that provider answers **for the settings this table has**
+   * (§8.3) — `null` on a table in a database, where writing is the driver's.
+   * The same provider configured read-only answers none of them, so it is read
+   * off the table rather than inferred from the provider's name. */
+  writes?: TableWrites | null;
   configured: boolean;
   onChange: () => void;
 }) {
@@ -252,6 +259,9 @@ function TableData({
   const [notice, setNotice] = useState<string | null>(null);
   /** One message per row an import refused, each naming its line. */
   const [rejected, setRejected] = useState<string[]>([]);
+  // A table in a database writes through its driver and has no `writes` object;
+  // a provided one writes only through what its provider answered.
+  const allowed = writesOf(writes ? { writes } : null);
 
   /**
    * Save the table's rows as a CSV file.
@@ -391,7 +401,7 @@ function TableData({
           </div>
 
           <Tile
-            label={provided ? "View" : "Edit"}
+            label={anyWrite(allowed) ? "Edit" : "View"}
             icon={<IconPencil />}
             onClick={() => navigate(`/tables/${encodeURIComponent(table)}/data`)}
           />
@@ -403,10 +413,11 @@ function TableData({
             onClick={() => void download()}
           />
 
-          {/* A provided table is read-only in this version, so importing into
-              one is not a thing that can be done — and a disabled tile beside a
-              working one is a question that should not have been asked. */}
-          {!provided && <UploadTile disabled={busy} onFile={(file) => void upload(file)} />}
+          {/* Importing is inserting, so it is offered exactly when inserting is:
+              never on a feed, and on a writable provided table (§8.3) as readily
+              as on a table in a database. A disabled tile beside a working one is
+              a question that should not have been asked. */}
+          {allowed.insert && <UploadTile disabled={busy} onFile={(file) => void upload(file)} />}
 
           <Dropdown align="end">
             <Dropdown.Toggle

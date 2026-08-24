@@ -153,17 +153,78 @@ This provider is not answering
 no installed module supplies that provider. That is deliberate: the fix is to reinstall the
 module, and a table that had vanished from the admin UI would be a table you could not fix.
 
-**You tried to write to it.** This version of Saltcorn **reads** a provided table and does not
-write one. A row editor's save, an `insert_row` action or a `POST` to its REST endpoint is
-refused by name:
+**You tried to write to it.** A feed is read-only, and the refusal says which method the
+provider does not supply:
 
-> `headlines` is served by the table provider `RSS feed` of `@saltcorn/rss`, and this version of
-> Saltcorn reads a provided table but does not write one.
+> `headlines` is read-only: the table provider `RSS feed` of `@saltcorn/rss` supplies no
+> `insertRow` for the settings it is configured with.
 
-v1 has writable providers — `@saltcorn/postgres-tables` will insert, update and delete into the
-remote table when you untick its **Read-only** box — and they are a later milestone here.
+Not every provider is. See step 7.
 
-## Step 7 — Getting rid of it
+## Step 7 — A provider you *can* write to
+
+`@saltcorn/rss` reads a feed, and there is nothing on the far side of a feed to write. Other
+providers have a far side that writes back — `@saltcorn/postgres-tables` presents a table in
+somebody else's PostgreSQL, and it will insert, update and delete into it when its **Read-only**
+box is unticked.
+
+**Whether a provided table can be written is a property of the settings, not of the provider.**
+The same `PostgreSQL remote table` provider, pointed at the same table with **Read-only** ticked,
+is a table you can only read. That is v1's own model: a provider decides, when it is handed the
+configuration, which of `insertRow`, `updateRow` and `deleteRows` it offers, and Saltcorn asks it
+each time the catalog reloads.
+
+So the screens follow the answer rather than the provider's name:
+
+| The provider offers | The table page | The data screen |
+|---|---|---|
+| nothing | **View** | rows, no form, no Edit or Delete |
+| `insertRow` only | **Edit**, and the CSV import tile | the New row form, no Edit or Delete |
+| all three | **Edit**, and the CSV import tile | everything a database table has |
+
+Untick **Read-only** in the provider's settings on the table page, press **Save provider
+settings**, and the buttons appear. Nothing else about the table changes — the columns are the
+same columns, the views are the same views.
+
+### What a write actually does
+
+v1's three methods are not a query language: `insertRow` takes a record, `updateRow` takes a
+record and **one primary key**, and `deleteRows` takes v1's `where` object. Saltcorn narrows
+what you did into them:
+
+- **Adding a row** is one `insertRow`. The provider answers the new row's key, and Saltcorn reads
+  the row back through it — which is how a column the remote database filled in (a serial key, a
+  default, a trigger's value) shows up in the row editor without you typing it.
+- **Changing rows** is a read and then one `updateRow` per row. `UPDATE … WHERE votes > 5` has no
+  key in it, so the matching rows are fetched first and each is changed by its own key.
+- **Deleting rows** is a read and then one `deleteRows`, handed `{ id: { in: [...] } }` — the
+  exact rows, never an empty condition, which a provider would read as "the whole table".
+
+Two things follow, and both are refusals rather than surprises:
+
+- **A provider that declares no primary key cannot be updated or deleted from.** There is no way
+  to name one row. It can still be read, and inserted into.
+- **A value has to be a value.** There is no database behind the table to evaluate `votes + 1` or
+  `now()` in, so an expression in a write is refused naming the column.
+
+### A note on `@saltcorn/postgres-tables` specifically
+
+It is the plugin this was written against, and at the time of writing it does not *load* here —
+not because of anything to do with table providers, and not because of `pg`, which runs on a
+module worker perfectly well. Its first line is `require("@saltcorn/data/db")`: it is a client
+of v1's own internals rather than a thin wrapper over an npm library, and v1's package does not
+survive being required on a worker with no v1 server around it — it fails inside its own module
+graph with `isNode is not a function`. A v1 plugin of the second kind (`@saltcorn/rss`) loads;
+one of the first does not.
+
+Two things follow. If what you want is a table in another PostgreSQL, **add it as a database
+connection** instead — Saltcorn v2 connects to secondary databases directly, and their tables
+are ordinary tables with no module in the path. And if you are writing a provider of your own,
+write it against the npm library you need rather than against `@saltcorn/data`;
+`crates/sc-module/tests/fixtures/pg-module` in this repository is a complete, writable one
+in about two hundred lines.
+
+## Step 8 — Getting rid of it
 
 **Delete table** on the table's page. For a provided table that is not a `DROP TABLE` — there is
 nothing in any database to drop — it forgets the definition, and the confirmation says so:
@@ -183,7 +244,6 @@ formulas, a code body's `db.headlines` — is unaware of any of it.
 
 ## What this is not, yet
 
-- **Read-only.** v1's `insertRow`, `updateRow` and `deleteRows` are not called.
 - **No joins.** A provided table cannot be joined to, and a key field pointing at one will not
   resolve through a join.
 - **No materialisation.** v1 can snapshot an external table into a real one on a schedule; here

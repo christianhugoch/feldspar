@@ -416,6 +416,85 @@ async function providerRows({ module: name, provider: providerName, configuratio
   return Array.isArray(rows) ? rows : [];
 }
 
+/** One provider's table object, built afresh for this request.
+ *
+ * `get_table(cfg, table)` per request rather than once, which is v1's own
+ * arrangement (`Table.to_provided_table` does the same) and what
+ * [`providerRows`] does: a provider that wants to cache caches in its own module
+ * scope, and one that holds a connection pool holds it there too. */
+async function providedTable({ module: name, provider: providerName, configuration, table }) {
+  const impl = requireProvider(name, providerName);
+  const provided = await impl.get_table(configuration || {}, { name: table || "" });
+  if (!provided || typeof provided !== "object")
+    throw new Error(
+      `the table provider ${providerName} of module ${name} supplied no table for these settings`,
+    );
+  return provided;
+}
+
+/** Which of v1's three write methods this configuration answers.
+ *
+ * v1 has no declaration of writability: `get_table(cfg)` either puts the methods
+ * on the object it returns or it does not, which is how
+ * `@saltcorn/postgres-tables`'s `read_only` flag works. So the answer is read
+ * off the object, and the object is built with the configuration in hand. */
+async function providerWrites(request) {
+  const provided = await providedTable(request);
+  return {
+    insert: typeof provided.insertRow === "function",
+    update: typeof provided.updateRow === "function",
+    delete: typeof provided.deleteRows === "function",
+  };
+}
+
+/** v1's `insertRow(record, user)`: the new row's primary key, or `null`.
+ *
+ * v1 lets a provider answer nothing — a key generated remotely may not come back
+ * — so nothing is `null` here rather than an error, and the caller reads the row
+ * back through what it wrote instead. */
+async function providerInsert(request) {
+  const provided = await providedTable(request);
+  requireMethod(provided, "insertRow", request);
+  const key = await provided.insertRow(request.record || {}, request.user);
+  return { key: key === undefined ? null : key };
+}
+
+/** v1's `updateRow(record, id, user)`, which answers nothing. */
+async function providerUpdate(request) {
+  const provided = await providedTable(request);
+  requireMethod(provided, "updateRow", request);
+  await provided.updateRow(request.record || {}, request.id, request.user);
+  return { updated: true };
+}
+
+/** v1's `deleteRows(where, user)`.
+ *
+ * The `where` is not optional the way `getRows`' is: a provider handed `{}` here
+ * deletes the table, so an absent one is refused rather than defaulted. The
+ * caller (`sc_catalog::provider`) always sends `{ pk: { in: [...] } }`. */
+async function providerDelete(request) {
+  const provided = await providedTable(request);
+  requireMethod(provided, "deleteRows", request);
+  const where = request.where;
+  if (!where || typeof where !== "object" || Array.isArray(where) || !Object.keys(where).length)
+    throw new Error(
+      `a delete on the table provider ${request.provider} of module ${request.module} arrived ` +
+        `with no rows named, and a provider handed an empty where deletes everything`,
+    );
+  await provided.deleteRows(where, request.user);
+  return { deleted: true };
+}
+
+/** Refuse a write this configuration does not answer, naming the method a
+ * module author would have to add. */
+function requireMethod(provided, method, { module: name, provider: providerName }) {
+  if (typeof provided[method] !== "function")
+    throw new Error(
+      `the table provider ${providerName} of module ${name} supplies no ${method} for these ` +
+        `settings, so it cannot be written`,
+    );
+}
+
 /** The loaded provider, or a sentence naming what is missing. */
 function requireProvider(name, providerName) {
   const entry = loaded.get(name);
@@ -680,6 +759,26 @@ async function handle(request) {
       const pending = loading.get(request.module);
       if (pending) await pending;
       return await providerRows(request);
+    }
+    case "provider_writes": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await providerWrites(request);
+    }
+    case "provider_insert": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await providerInsert(request);
+    }
+    case "provider_update": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await providerUpdate(request);
+    }
+    case "provider_delete": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await providerDelete(request);
     }
     default:
       throw new Error(`unknown module-host operation ${request.op}`);

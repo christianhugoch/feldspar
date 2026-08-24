@@ -4978,6 +4978,15 @@ fn provided_json(catalog: &Catalog, table: &Table) -> Json {
     json!({
         "module": module,
         "provider": provider,
+        // Which of v1's three write methods `get_table` answered for these
+        // settings (§8.3). The data screens draw their buttons from it: a
+        // provider configured read-only offers a viewer, and one that answers
+        // `insertRow` and nothing else offers "Add row" without "Delete".
+        "writes": {
+            "insert": table.provided_writes().insert,
+            "update": table.provided_writes().update,
+            "delete": table.provided_writes().delete,
+        },
         // Redacted the way every other secret is: a provider's `password` field
         // comes back as the sentinel, and submitting it unchanged keeps what is
         // stored (`sc_types::merge_secrets`, applied on the way in).

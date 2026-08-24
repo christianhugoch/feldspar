@@ -1,0 +1,11 @@
+{
+  "name": "@saltcorn-test/pg",
+  "version": "1.0.0",
+  "description": "A writable table provider over a remote PostgreSQL table, modelled on @saltcorn/postgres-tables.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT",
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

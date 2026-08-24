@@ -375,6 +375,99 @@ impl ModuleHost {
         }
     }
 
+    /// Which of v1's three write methods `get_table(configuration)` answers.
+    ///
+    /// v1 has no declaration of writability: the object `get_table` returns
+    /// carries `insertRow`/`updateRow`/`deleteRows` or it does not, which is how
+    /// `@saltcorn/postgres-tables`'s `read_only` flag works. So this is a
+    /// property of the *configuration*, asked once per catalog reload.
+    pub async fn provider_writes(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .provider_writes(module, provider, configuration, table)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration, table);
+            Err(no_runtime())
+        }
+    }
+
+    /// v1's `insertRow(record)`: `{ key }`, the new row's primary key or null.
+    pub async fn provider_insert(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        record: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .provider_insert(module, provider, configuration, table, record)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration, table, record);
+            Err(no_runtime())
+        }
+    }
+
+    /// v1's `updateRow(record, id)`.
+    pub async fn provider_update(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        id: &Json,
+        record: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .provider_update(module, provider, configuration, table, id, record)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration, table, id, record);
+            Err(no_runtime())
+        }
+    }
+
+    /// v1's `deleteRows(where)`.
+    pub async fn provider_delete(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        filter: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .provider_delete(module, provider, configuration, table, filter)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration, table, filter);
+            Err(no_runtime())
+        }
+    }
+
     /// Ask the host to say hello — what a test and a diagnostics screen use to
     /// find out whether the pool starts at all.
     pub async fn ping(&self) -> Result<Json> {
