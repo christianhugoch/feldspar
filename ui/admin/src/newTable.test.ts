@@ -19,6 +19,9 @@ import {
   databaseLabel,
   importedMessage,
   newTableError,
+  providerKey,
+  providerLabel,
+  splitProviderKey,
   tableNameFromFile,
   type NewTableForm,
 } from "./newTable";
@@ -103,5 +106,54 @@ describe("which database a new table goes in", () => {
 
   it("will not submit with no database chosen", () => {
     expect(newTableError(form({ name: "invoice", database: "" }))).toMatch(/database/);
+  });
+});
+
+describe("the table-provider choice", () => {
+  it("will not create a provided table until a provider is chosen", () => {
+    expect(newTableError(form({ name: "headlines", source: "provider" }))).toMatch(/provider/);
+    expect(
+      newTableError(
+        form({
+          name: "headlines",
+          source: "provider",
+          provider: providerKey("@saltcorn/rss", "RSS feed"),
+        }),
+      ),
+    ).toBe(null);
+  });
+
+  it("does not ask a provided table which database it is in, because it is in none", () => {
+    // A blank `database` blocks a database table and must not block this one:
+    // the rows come from a module, and there is nothing to create anywhere.
+    expect(
+      newTableError(
+        form({
+          name: "headlines",
+          source: "provider",
+          provider: providerKey("@saltcorn/rss", "RSS feed"),
+          database: "",
+        }),
+      ),
+    ).toBe(null);
+    expect(newTableError(form({ name: "invoice", database: "" }))).toMatch(/database/);
+  });
+
+  it("round-trips the (module, provider) pair the select holds as one value", () => {
+    const key = providerKey("@saltcorn/rss", "RSS feed");
+    expect(splitProviderKey(key)).toEqual({
+      module: "@saltcorn/rss",
+      provider: "RSS feed",
+    });
+    // Nothing chosen is not half a pair.
+    expect(splitProviderKey("")).toBe(null);
+    // A provider name containing the kind of punctuation a plugin author uses
+    // survives, which is why the separator is a NUL and not a slash or a colon.
+    const odd = providerKey("@acme/db", "Table: remote/primary");
+    expect(splitProviderKey(odd)?.provider).toBe("Table: remote/primary");
+  });
+
+  it("names the module beside the provider, because two modules may both supply a `Table`", () => {
+    expect(providerLabel("@saltcorn/rss", "RSS feed")).toBe("RSS feed (@saltcorn/rss)");
   });
 });

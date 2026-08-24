@@ -317,6 +317,63 @@ impl DenoModuleHost {
         .map_err(|e| denial(module, e))
     }
 
+    /// The fields one **table provider** presents for one configuration (§8.3).
+    ///
+    /// Routed like [`run`](DenoModuleHost::run): `fields(cfg)` is a closure the
+    /// module built at load time, so it runs where the module is.
+    pub async fn provider_fields(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+    ) -> Result<Vec<Json>> {
+        let index = self.worker_for(module).await;
+        let value = self
+            .send(
+                index,
+                json!({
+                    "op": "provider_fields",
+                    "module": module,
+                    "provider": provider,
+                    "configuration": configuration,
+                }),
+                None,
+            )
+            .await
+            .map_err(|e| denial(module, e))?;
+        provided_list(module, provider, value, "columns")
+    }
+
+    /// One table provider's rows, for v1's `where`/`options` pair.
+    pub async fn provider_rows(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        filter: &Json,
+        options: &Json,
+    ) -> Result<Vec<Json>> {
+        let index = self.worker_for(module).await;
+        let value = self
+            .send(
+                index,
+                json!({
+                    "op": "provider_rows",
+                    "module": module,
+                    "provider": provider,
+                    "configuration": configuration,
+                    "table": table,
+                    "where": filter,
+                    "options": options,
+                }),
+                None,
+            )
+            .await
+            .map_err(|e| denial(module, e))?;
+        provided_list(module, provider, value, "rows")
+    }
+
     /// Ask a worker to say hello — what a test and a diagnostics screen use to
     /// find out whether the pool starts at all.
     pub async fn ping(&self) -> Result<Json> {
@@ -597,6 +654,25 @@ fn denial(module: &str, error: Error) -> Error {
     match crate::permissions::explain_denial(module, &error.to_string()) {
         Some(sentence) => Error::config(sentence),
         None => error,
+    }
+}
+
+/// A table provider's answer as the list it has to be.
+///
+/// A provider that answers something other than an array — `null`, an object, a
+/// number — is a module bug, and the honest reading is a sentence naming the
+/// provider rather than an empty table. An empty table is a *legitimate* answer
+/// (a feed with no items), and the two must not look the same.
+fn provided_list(module: &str, provider: &str, value: Json, what: &str) -> Result<Vec<Json>> {
+    match value {
+        Json::Array(items) => Ok(items),
+        other => Err(Error::config(format!(
+            "the table provider `{provider}` of `{module}` answered its {what} with              {}, not a list",
+            match other {
+                Json::Null => "nothing".to_owned(),
+                other => other.to_string(),
+            }
+        ))),
     }
 }
 

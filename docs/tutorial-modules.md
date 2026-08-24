@@ -29,17 +29,19 @@ module.exports = {
     mqtt_publish: { configFields: [...], run: async ({ row, configuration }) => { … } },
   }),
   functions: { md_to_html: (m) => … },  // also loaded — callable from formulas and code
+  table_providers: { "RSS feed": … },   // also loaded — a table whose rows the module serves
   eventTypes: () => ({ … }),            // reported, not loaded (yet)
 };
 ```
 
-Three of those keys are read: `actions`, whose entries become actions your triggers can run;
-`functions`, whose entries become callable from a code body and a formula (step 5); and
-`configuration_workflow`, whose form becomes the module's own settings. `onLoad` is called too —
-that is where a plugin opens its connection, and `@saltcorn/mqtt`'s action would have nothing to
-publish through without it. Everything else — view templates, types, field views, table
-providers, event types — is **counted and named** in the tab so you can see what you are not
-getting, and is a later milestone.
+Four of those keys are read: `actions`, whose entries become actions your triggers can run;
+`functions`, whose entries become callable from a code body and a formula (step 5);
+`table_providers`, each of which becomes a kind of table you can create
+([tutorial-table-providers.md](tutorial-table-providers.md)); and `configuration_workflow`,
+whose form becomes the module's own settings. `onLoad` is called too — that is where a plugin
+opens its connection, and `@saltcorn/mqtt`'s action would have nothing to publish through
+without it. Everything else — view templates, types, field views, event types — is **counted
+and named** in the tab so you can see what you are not getting, and is a later milestone.
 
 ## Step 1 — Install one
 
@@ -239,8 +241,9 @@ quietly doing nothing.
 
 ## What this is not, yet
 
-- **Only actions and functions.** Views, types, field views, table providers and event types are
-  named in the tab and not loaded.
+- **Only actions, functions and table providers.** Views, types, field views and event types are
+  named in the tab and not loaded. A table provider is **read-only**: v1's
+  `insertRow`/`updateRow`/`deleteRows` are not called yet.
 - **Only JavaScript.** The install form has a Type dropdown because Python and the rest come
   later; today it has one language and two sources.
 - **No sandboxed install, and no store.** A module that is *running* is fenced (step 3); the

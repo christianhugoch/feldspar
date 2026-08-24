@@ -40,6 +40,7 @@
 //! - [`spec`] — v1's `configFields` translated into this system's `FormField`.
 //! - [`action`] — a module's action as an `Action`.
 //! - [`functions`] — a module's functions, as `sc-expr`'s fifth host surface.
+//! - [`table_providers`] — a module's table providers, as `sc-catalog`'s seam.
 //! - [`modules`] — the loaded set: every stored module, its actions, its issues.
 //!
 //! ## What is *not* here
@@ -61,6 +62,7 @@ pub mod paths;
 pub mod permissions;
 pub mod spec;
 pub mod store;
+pub mod table_providers;
 
 pub use action::ModuleAction;
 pub use bounds::{
@@ -70,7 +72,8 @@ pub use bounds::{
 pub use deno::{DenoModuleHost, PoolBounds};
 pub use functions::ModuleFunctions;
 pub use host::{
-    ActionManifest, FunctionArg, FunctionManifest, ModuleHost, ModuleManifest, UnsupportedEntity,
+    ActionManifest, FunctionArg, FunctionManifest, ModuleHost, ModuleManifest,
+    TableProviderManifest, UnsupportedEntity,
 };
 pub use install::{InstalledPackage, Installer, have_node, have_npm};
 pub use module::{MODULE_SOURCES, Module, ModuleId, ModuleSource};
@@ -82,3 +85,4 @@ pub use store::{
     COL_PERMISSIONS, MODULES_TABLE, bootstrap_modules, delete_module, list_modules, load_module,
     load_module_by_name, require_module, save_module,
 };
+pub use table_providers::ModuleTableProviders;

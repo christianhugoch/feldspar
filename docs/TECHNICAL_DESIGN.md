@@ -171,7 +171,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-module` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-module` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
@@ -1034,14 +1034,54 @@ pub struct Table {
 pub trait TableProvider: Send + Sync {
     fn fields(&self) -> Vec<DataField>;
     async fn query(&self, select: &Select) -> Result<RowStream>;
-    async fn write(&self, change: &RowChange) -> Result<WriteOutcome>; // if writable
-    fn materialisation(&self) -> Materialisation;   // None | Snapshot | Synced { … }
+    async fn write(&self, change: &Statement) -> Result<RowStream>; // if writable
+    fn materialisation(&self) -> Materialisation;   // None | Snapshot | Synced { … } — deferred
 }
 ```
 
-A `DatabaseDriver`-backed table is just the trivial provider. RSS/IMAP/search/etc. are
-non-trivial providers. Any provider MAY be materialised into a real table with a sync
-policy.
+A `DatabaseDriver`-backed table is just the trivial provider (`DriverTableProvider`). The
+non-trivial one is `ProvidedTableProvider`: a table whose rows come from a **module**'s v1
+`table_providers` export — `@saltcorn/rss`'s `RSS feed`, `@saltcorn/proxmox`'s cluster
+listings, `@saltcorn/postgres-tables`' remote tables. Materialisation is still deferred, and so
+is a **writable** provider (v1's `insertRow`/`updateRow`/`deleteRows`).
+
+**A provided table's `_sc_tables` row is not an overlay, it is the table's only definition.**
+That is the one exception to §9's rule, and it is exactly the `_sc_triggers` relationship
+appearing inside a table whose other rows have the opposite one: the table exists because the
+row does, there is nothing in any database to introspect, and deleting the row deletes the
+table. It does not weaken "legacy databases just work", because a provided table is not a
+database table and so there is no fact of the database for its row to contradict. The
+definition is three sparse attributes — `provider_module`, `provider_name`, `provider_config`
+— by §9's own column-or-attribute rule. **The module is stored as well as the provider**, which
+v1 does not do: v1 keys `table_providers` globally in one process's state, while here a call
+must reach the worker *that module* was loaded on.
+
+**The columns are asked for, not stored.** `Catalog::reload` calls the provider's `fields(cfg)`
+on every reload, which is v1's arrangement and the right one — the columns are the module's
+answer, so an upgraded package presents what it presents now and nothing Saltcorn wrote down
+can disagree with the code serving the rows. A module that is not installed, will not load, or
+whose `fields(cfg)` throws leaves the table **in the catalog with no columns and a sentence**
+(`Catalog::provided_table_issues`): the admin UI is the only place it can be fixed from, so it
+must still be listed there.
+
+**The `Select` is interpreted twice, on purpose.** `sc_catalog::inmem::pushdown` translates the
+filter, the ordering and the bound into v1's `where`/`options` pair — all or nothing, because a
+provider that honoured half a condition would return the rows matching half a condition and
+nothing downstream could tell that from a provider that ignored the hint — and
+`run_select_over` then applies the whole `Select` to whatever came back. This is
+`json_list_to_external_table`'s arrangement, moved from JavaScript to Rust and from v1's `where`
+object to this system's AST, and the reason is v1's: a provider is *allowed* to ignore
+everything it was passed (`@saltcorn/rss` answers the whole feed whatever you ask), so the
+caller cannot treat the answer as already-filtered. What the interpreter **refuses by name** is
+a `JOIN`, a `GROUP BY`, a `HAVING`, a subquery source and a correlated subquery: a provided
+table's rows are not in a database, so there is nothing for a join to reach, and a query that
+silently dropped one would answer a different question inside somebody's view. Un-grouped
+aggregates are supported, because `count(*)` is what the tables page shows beside every table.
+
+The seam is inverted the way `sc-expr`'s `ModuleFnHost` is — `TableProviderHost` is declared in
+`sc-catalog` (layer 4), implemented in `sc-module` (layer 6) as `ModuleTableProviders`, and
+installed on the catalog by `sc-server` after every module change, which also reloads the
+catalog because a module change can change a provided table's columns.
 
 ---
 
@@ -1055,7 +1095,7 @@ a sparse value goes into `attributes`.**
 
 | Table | Holds | Notes |
 |---|---|---|
-| `_sc_tables` | overlay metadata for tables | access rules, label/description, attributes, provided-table defs; the DB's own tables need no row to be usable (§9.1) |
+| `_sc_tables` | overlay metadata for tables **and** provided-table definitions | access rules, label/description, attributes; the DB's own tables need no row to be usable (§9.1). A row carrying `provider_module`/`provider_name`/`provider_config` in `attributes` is **not** an overlay — it is a virtual table's only definition (§8.3) |
 | `_sc_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
 | `_sc_triggers` | triggers (later: workflows, agents) | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, action + configuration, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. Workflows will be **versioned** so a suspended run finishes on its own version |
 | `_sc_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps |

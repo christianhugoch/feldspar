@@ -66,7 +66,19 @@ async fn a_module_loads_and_reports_what_it_supplies() {
         .map(|e| (e.key.as_str(), e.count))
         .collect();
     assert!(census.contains(&("viewtemplates", Some(2))), "{census:?}");
-    assert!(census.contains(&("table_providers", Some(1))), "{census:?}");
+    // `table_providers` left the census when it started being loaded (§8.3), so
+    // its absence here is the assertion that it is no longer "what you are not
+    // getting".
+    assert!(
+        !census.iter().any(|(key, _)| *key == "table_providers"),
+        "{census:?}"
+    );
+    let providers: Vec<&str> = manifest
+        .table_providers
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(providers, ["echo_rows"], "{providers:?}");
     assert!(manifest.issues.is_empty(), "{:?}", manifest.issues);
 
     host.shutdown().await;
@@ -709,4 +721,36 @@ fn read_packet(stream: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
     let mut body = vec![0u8; remaining];
     stream.read_exact(&mut body).expect("the broker hung up");
     (kind, body)
+}
+
+#[tokio::test]
+async fn a_table_provider_that_cannot_serve_a_table_is_reported_and_skipped() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) = installed("host-no-rows", &["no-rows-module"]).await;
+    let name = &names[0];
+
+    let manifest = host
+        .load(name, &installer.package_dir(name), &json!({}), &closed())
+        .await
+        .unwrap();
+
+    // `get_table` is the one method that produces rows, so a provider without it
+    // is a table nobody could read. Reported and skipped — never offered, and
+    // never fatal: the module loaded, and its action is there.
+    assert!(manifest.table_providers.is_empty());
+    assert_eq!(manifest.issues.len(), 1, "{:?}", manifest.issues);
+    assert!(
+        manifest.issues[0].contains("no_rows"),
+        "{:?}",
+        manifest.issues
+    );
+    assert!(
+        manifest.issues[0].contains("get_table"),
+        "{:?}",
+        manifest.issues
+    );
+    assert_eq!(manifest.actions.len(), 1);
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
 }

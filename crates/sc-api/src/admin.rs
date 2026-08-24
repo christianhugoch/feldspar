@@ -143,6 +143,69 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- table providers (§8.3) ---------------------------------------------
+    //
+    // A **provided** table is one whose rows come from a module rather than from
+    // a database: `@saltcorn/rss`'s `RSS feed`, `@saltcorn/proxmox`'s cluster
+    // listings. Three endpoints, and the shape of them is the whole design in
+    // miniature — nothing here issues DDL, because there is no table in any
+    // database to issue it against:
+    //
+    // - listing what is available, which is a property of the *installed
+    //   modules* and not of any table;
+    // - creating one, which writes a definition row;
+    // - configuring one, which rewrites that row's configuration and may change
+    //   the table's columns, because the columns are the module's answer.
+    //
+    // Dropping one is `dropTable`, which reads the table and forgets the
+    // definition instead of dropping a table nothing has.
+
+    set.register(
+        Endpoint::new(
+            "listTableProviders",
+            Method::Get,
+            api().lit("table-providers"),
+        )
+        .output(TypeSchema::array(table_provider_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createProvidedTable",
+            Method::Post,
+            api().lit("tables").lit("provided"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("name", TypeSchema::text()),
+            StructField::new("module", TypeSchema::text()),
+            StructField::new("provider", TypeSchema::text()),
+            // What the provider's own configuration form was filled in with.
+            // Optional because a provider may ask for nothing, and because the
+            // dialog may create the table first and configure it after.
+            StructField::new("configuration", TypeSchema::optional(TypeSchema::json())),
+        ]))
+        .output(table_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateProvidedTable",
+            Method::Put,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("provider"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "configuration",
+            TypeSchema::json(),
+        )]))
+        .output(table_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // Forget a table's configuration, returning it to the closed default. Also
     // the way an *orphan* row — one whose table is gone (§1.1) — is cleaned up,
     // which is why the path is addressed by name and does not require the table
@@ -1753,7 +1816,40 @@ fn table_schema() -> TypeSchema {
     // it came from (§5's Connections). Reported on every table rather than only
     // on foreign ones, so a client never has to read absence as "the primary".
     fields.push(StructField::new("database", TypeSchema::text()));
+    // The table provider serving its rows, or null for a table in a database
+    // (§8.3). Present on every table rather than only on provided ones, so a
+    // client never has to read absence as "it is in a database".
+    fields.push(StructField::new(
+        "provider",
+        TypeSchema::optional(TypeSchema::struct_of([
+            StructField::new("module", TypeSchema::text()),
+            StructField::new("provider", TypeSchema::text()),
+            // What the admin filled in, and what to fill in — the values and the
+            // declaration together, because the settings form on the table's own
+            // page needs both and one round trip is what it has.
+            StructField::new("configuration", TypeSchema::json()),
+            StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+            // Why this table has no columns, when it has none: the module is not
+            // installed, the provider is not one it supplies, `fields(cfg)`
+            // threw. Empty when all is well.
+            StructField::new("issues", TypeSchema::array(TypeSchema::text())),
+        ])),
+    ));
     TypeSchema::Struct(fields)
+}
+
+/// One table provider an installed module supplies (§8.3), as the "new table"
+/// screen offers it.
+///
+/// `config_spec` is the same [`FormField`](sc_types::FormField) declaration a
+/// file store's backend and an LLM provider send, so the dialog renders it with
+/// no code that knows what a table provider is.
+fn table_provider_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("module", TypeSchema::text()),
+        StructField::new("provider", TypeSchema::text()),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+    ])
 }
 
 /// The overlay fields of a table — everything an admin may set, and nothing the
@@ -2171,6 +2267,10 @@ fn module_schema() -> TypeSchema {
         // `modfn` and what a formula hoists, with the signature v1 declared —
         // which is what the code editor's generated types read.
         StructField::new("functions", TypeSchema::array(module_function_schema())),
+        // The table providers it supplies (§8.3) — names only, because what a
+        // provider *asks for* belongs to the table being created and is on
+        // `listTableProviders`.
+        StructField::new("table_providers", TypeSchema::array(TypeSchema::text())),
         // What it also supplies and this version does not load: `{key, count}`,
         // so the tab can say "also supplies 1 table provider (not yet
         // supported)".

@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/no-rows",
+  "version": "0.1.0",
+  "description": "A Saltcorn v1-shaped module whose one table provider cannot serve a table, for the host's reported-not-fatal contract.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

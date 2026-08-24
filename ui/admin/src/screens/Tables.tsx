@@ -28,6 +28,7 @@ import { api, errorMessage } from "../api";
 import type {
   ListDatabaseConnectionsResponse,
   ListOrphanTableSettingsResponse,
+  ListTableProvidersResponse,
   ListTablesResponse,
 } from "../client";
 import { navigate } from "../App";
@@ -39,15 +40,20 @@ import {
   databaseLabel,
   importedMessage,
   newTableError,
+  providerKey,
+  providerLabel,
+  splitProviderKey,
   tableNameFromFile,
   type NewTableForm,
 } from "../newTable";
 import { roleLabel, useRoles } from "../roles";
+import { SettingsFields, buildConfig, initialValues } from "../settings";
 
 export function Tables() {
   const [tables, setTables] = useState<ListTablesResponse | null>(null);
   const [orphans, setOrphans] = useState<ListOrphanTableSettingsResponse>([]);
   const [connections, setConnections] = useState<ListDatabaseConnectionsResponse>([]);
+  const [providers, setProviders] = useState<ListTableProvidersResponse>([]);
   const [creating, setCreating] = useState<NewTableForm | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -71,6 +77,14 @@ export function Tables() {
       setConnections(await api.listDatabaseConnections());
     } catch {
       setConnections([]);
+    }
+    // The table providers, for the same reason and on the same terms: a server
+    // with no modules supplies none, the dialog then offers only the two kinds
+    // it always had, and a failure here must not blank the list.
+    try {
+      setProviders(await api.listTableProviders());
+    } catch {
+      setProviders([]);
     }
   };
 
@@ -109,7 +123,22 @@ export function Tables() {
     setNotice(null);
     try {
       const database = creating.database;
-      if (creating.source === "csv" && creating.file) {
+      const chosen = splitProviderKey(creating.provider);
+      if (creating.source === "provider" && chosen) {
+        // No database and no DDL: this writes the table's definition, and the
+        // module is asked for its columns as part of creating it.
+        await api.createProvidedTable({
+          name,
+          module: chosen.module,
+          provider: chosen.provider,
+          configuration: buildConfig(
+            providers.find(
+              (p) => p.module === chosen.module && p.provider === chosen.provider,
+            )?.config_spec ?? [],
+            creating.providerConfig,
+          ),
+        });
+      } else if (creating.source === "csv" && creating.file) {
         const csv = await creating.file.text();
         const { table, inserted } = await api.createTableFromCsv({ name, csv, database });
         setNotice(importedMessage(table.name, inserted));
@@ -260,6 +289,7 @@ export function Tables() {
       <NewTableModal
         form={creating}
         databases={creatableDatabases(connections)}
+        providers={providers}
         busy={busy}
         onChange={setCreating}
         onCancel={() => setCreating(null)}
@@ -280,6 +310,7 @@ export function Tables() {
 function NewTableModal({
   form,
   databases,
+  providers,
   busy,
   onChange,
   onCancel,
@@ -287,12 +318,17 @@ function NewTableModal({
 }: {
   form: NewTableForm | null;
   databases: string[];
+  providers: ListTableProvidersResponse;
   busy: boolean;
   onChange: (form: NewTableForm) => void;
   onCancel: () => void;
   onSubmit: (e: FormEvent) => void;
 }) {
   const problem = form ? newTableError(form) : null;
+  const chosen = form ? splitProviderKey(form.provider) : null;
+  const spec =
+    providers.find((p) => p.module === chosen?.module && p.provider === chosen?.provider)
+      ?.config_spec ?? [];
   return (
     <Modal show={form !== null} onHide={onCancel}>
       {form && (
@@ -315,7 +351,7 @@ function NewTableModal({
                 connections has exactly one database, and asking which one to
                 use would be a question with one answer — the same reason the
                 CSV file input appears only for the CSV choice. */}
-            {databases.length > 1 && (
+            {databases.length > 1 && form.source !== "provider" && (
               <Form.Group className="mb-3" controlId="new-table-database">
                 <Form.Label>Database</Form.Label>
                 <Form.Select
@@ -347,8 +383,69 @@ function NewTableModal({
               >
                 <option value="blank">New database table</option>
                 <option value="csv">Create from CSV</option>
+                {/* Offered only when a module supplies one. A chooser whose one
+                    entry is "there are none" is a question with no answer, and
+                    an installation with no modules is most of them. */}
+                {providers.length > 0 && <option value="provider">From a table provider</option>}
               </Form.Select>
             </Form.Group>
+
+            {form.source === "provider" && (
+              <>
+                <Form.Group className="mb-3" controlId="new-table-provider">
+                  <Form.Label>Table provider</Form.Label>
+                  <Form.Select
+                    value={form.provider}
+                    onChange={(e) =>
+                      // The settings belong to the provider that declared them,
+                      // so changing the provider starts its own form from its own
+                      // defaults rather than carrying the last one's values into
+                      // fields that happen to share a name.
+                      onChange({
+                        ...form,
+                        provider: e.target.value,
+                        providerConfig: initialValues(
+                          providers.find(
+                            (p) => providerKey(p.module, p.provider) === e.target.value,
+                          )?.config_spec ?? [],
+                          {},
+                        ),
+                      })
+                    }
+                  >
+                    <option value="">Choose a provider…</option>
+                    {providers.map((p) => (
+                      <option
+                        key={providerKey(p.module, p.provider)}
+                        value={providerKey(p.module, p.provider)}
+                      >
+                        {providerLabel(p.module, p.provider)}
+                      </option>
+                    ))}
+                  </Form.Select>
+                  <Form.Text className="text-muted">
+                    The rows come from the module, not from a database. Saltcorn reads them; it
+                    does not create, change or delete them, and the columns are the
+                    provider&rsquo;s to decide.
+                  </Form.Text>
+                </Form.Group>
+
+                {/* The provider's own settings form, declared by the module and
+                    rendered by the same component every other configurable thing
+                    here uses. */}
+                <SettingsFields
+                  spec={spec}
+                  values={form.providerConfig}
+                  idPrefix="new-table-provider-cfg"
+                  onChange={(name, value) =>
+                    onChange({
+                      ...form,
+                      providerConfig: { ...form.providerConfig, [name]: value },
+                    })
+                  }
+                />
+              </>
+            )}
 
             {form.source === "csv" && (
               <Form.Group controlId="new-table-csv">

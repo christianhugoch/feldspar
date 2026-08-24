@@ -27,7 +27,9 @@ use std::sync::{Arc, RwLock};
 use sc_action::TriggerDispatcher;
 use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
-use sc_module::{Installer, ModuleFunctions, ModuleHost, ModuleSet, bootstrap_modules};
+use sc_module::{
+    Installer, ModuleFunctions, ModuleHost, ModuleSet, ModuleTableProviders, bootstrap_modules,
+};
 
 use crate::agents::AgentServices;
 
@@ -115,6 +117,23 @@ impl ModuleServices {
         // what both of those hold is a `Catalog`.
         self.catalog
             .set_module_functions(Arc::new(ModuleFunctions::new(&self.host, &set)))?;
+        // And the **table providers** (§8.3), on the same catalog and for the
+        // same kind of reason: what needs them is `Catalog::reload`, which builds
+        // a provided table out of its `_sc_tables` row, and `Catalog::provider`,
+        // which serves its rows.
+        self.catalog
+            .set_table_providers(Arc::new(ModuleTableProviders::new(&self.host, &set)))?;
+        // Then reload the catalog, because that is what *applies* the line
+        // above: a provided table's columns are the module's answer, so
+        // installing, configuring or deleting a module can change them — and a
+        // module that has just been deleted leaves a table that must stop
+        // claiming columns nothing can serve. The reload also costs nothing on a
+        // server with no provided tables, which is why it is unconditional
+        // rather than guarded by a comparison nobody could keep correct.
+        self.catalog
+            .reload()
+            .await
+            .context("reloading the catalog after a module change")?;
         // The trigger set is validated against the action registry, so a
         // trigger naming a module action was invalid until this moment.
         self.dispatcher

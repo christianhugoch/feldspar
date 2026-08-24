@@ -13,9 +13,15 @@
 //! is exactly as usable as it was before the overlay existed, which is what
 //! keeps the zero-setup promise true (§9).
 //!
-//! Deferred (see the design): `FormField` and calculated fields, rich types, the
-//! `_sc_fields` overlay, virtual and materialised providers, and cross-process
-//! cache invalidation over a bus.
+//! A **provided** table (§8.3) is the one thing here that introspection does not
+//! produce: its `_sc_tables` row is its whole definition, its fields are what a
+//! module's table provider answers, and [`ProvidedTableProvider`] serves its
+//! rows by asking that module and applying the [`Select`](sc_query::Select) to
+//! the answer ([`inmem`]).
+//!
+//! Deferred (see the design): materialised providers (`Snapshot`/`Synced`),
+//! **writable** table providers, and cross-process cache invalidation over a
+//! bus.
 
 mod calc;
 mod caller;
@@ -26,6 +32,7 @@ mod events;
 mod field;
 mod field_meta;
 mod file_stores;
+pub mod inmem;
 mod observer;
 mod origin;
 mod prefetch;
@@ -36,7 +43,7 @@ mod table;
 mod table_meta;
 
 pub use caller::CallerContext;
-pub use catalog::{Catalog, SchemaStep};
+pub use catalog::{Catalog, ProvidedTableIssue, SchemaStep};
 pub use constraint::{
     ConstraintKind, META_KEY as CONSTRAINT_META_KEY, TableConstraint, constrained_fields,
     create_constraint_steps, drop_constraint_steps, formula_fields, full_text_expression,
@@ -67,14 +74,17 @@ pub use observer::{SchemaChanged, SchemaObserver};
 pub use origin::PublicOrigin;
 pub use prefetch::prefetch_bindings;
 pub use projection::SchemaProjection;
-pub use provider::{DriverTableProvider, TableProvider};
+pub use provider::{
+    DriverTableProvider, ProvidedTableProvider, TableProvider, TableProviderHost, TableProviderKind,
+};
 pub use rls::{
     Access, ROLE_GUC, disable_rls, disable_rls_sql, enable_rls, enable_rls_sql, run_in_context,
     run_in_context_read_only, set_caller_context,
 };
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
-    ATTR_OWNERSHIP_FORMULA, ATTR_RLS_ENABLED, TABLE_META_TABLE, TableMeta, TableMetaId,
+    ATTR_OWNERSHIP_FORMULA, ATTR_PROVIDER_CONFIG, ATTR_PROVIDER_MODULE, ATTR_PROVIDER_NAME,
+    ATTR_RLS_ENABLED, ProvidedTableDef, TABLE_META_TABLE, TableMeta, TableMetaId,
     bootstrap_table_meta, delete_table_meta, list_table_meta, load_table_meta,
     load_table_meta_by_name, orphan_table_meta, save_table_meta, save_table_meta_row,
 };

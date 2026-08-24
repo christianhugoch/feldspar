@@ -29,6 +29,11 @@ sc-files.workspace = true
 # only ever parses, validates and describes; evaluation happens in the server.
 sc-expr = { workspace = true }
 async-trait.workspace = true
+# A provided table's rows arrive as JSON, and a date among them is a string in
+# whichever spelling the source uses — an RSS `pubDate` is RFC 2822. Reading it
+# back as a `Value::Timestamp` is what makes ordering by it sort by date
+# (`inmem`).
+chrono.workspace = true
 # The `_sc_file_stores` JSON columns (a backend's settings, sparse attributes).
 serde_json.workspace = true
 # UUID row identities for the `_sc_*` tables this crate stores (§9).

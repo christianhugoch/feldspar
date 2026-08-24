@@ -35,6 +35,24 @@
 //! - **A system (`_sc_*`) table may not have a row.** System tables are hidden
 //!   from users (§9) and their access is not the admin's to widen; the check is
 //!   here, on save, rather than only in the merge, so the state never exists.
+//!
+//! ## The one exception: a **provided** table's row is not an overlay
+//!
+//! `_sc_tables` holds two kinds of row, and the paragraphs above are about the
+//! first. A row carrying a [`ProvidedTableDef`] — a module, a provider within
+//! it, and that provider's configuration — is a **definition**: the table it
+//! names exists *because the row does*, there is nothing in the database to
+//! introspect, and deleting the row deletes the table. That is the same
+//! relationship `_sc_triggers` has to a trigger, in a table whose other rows
+//! have the opposite one.
+//!
+//! It is stated here rather than left implicit because the rule above ("nothing
+//! here may restate a fact the database already knows") is what keeps §9's
+//! "legacy databases just work" true, and a reader has to be able to see that
+//! this does not weaken it: a provided table is not a database table, so there
+//! is no fact of the database for its row to contradict. The design anticipated
+//! it — §9's `_sc_tables` line reads "access rules, label/description,
+//! attributes, **provided-table defs**".
 
 use sc_db::Row;
 use sc_error::{Error, Result};
@@ -70,6 +88,64 @@ pub const COL_ATTRIBUTES: &str = "attributes";
 pub const ATTR_OWNERSHIP_FORMULA: &str = "ownership_formula";
 /// Attribute key holding the RLS flag (GOALS: attributes, not a column).
 pub const ATTR_RLS_ENABLED: &str = "rls_enabled";
+
+/// Attribute key holding the package name of the module whose **table
+/// provider** serves this table's rows (§8.3).
+pub const ATTR_PROVIDER_MODULE: &str = "provider_module";
+/// Attribute key holding the provider's own name within that module.
+pub const ATTR_PROVIDER_NAME: &str = "provider_name";
+/// Attribute key holding the provider's configuration — the object handed to
+/// v1's `fields(cfg)` and `get_table(cfg)`.
+pub const ATTR_PROVIDER_CONFIG: &str = "provider_config";
+
+/// What makes a `_sc_tables` row a **definition** rather than an overlay: the
+/// module, the provider within it, and the configuration an admin filled in.
+///
+/// Three attributes rather than three columns, on §9's own rule: a value present
+/// on a handful of rows out of every table in the database is sparse, and it
+/// keeps company with `ownership_formula` and `rls_enabled`, which are there for
+/// the same reason.
+///
+/// **The module is stored as well as the provider**, which v1 does not do. v1
+/// keys `table_providers` globally in one process's state, so the provider's
+/// name is its whole identity; here the call has to reach the worker *that
+/// module* was loaded on, and two modules may each supply a provider called
+/// `Table`. Which one was meant is the admin's answer when the table is created,
+/// never a lookup that could start resolving elsewhere when a second module is
+/// installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvidedTableDef {
+    /// The package name — `@saltcorn/rss`.
+    pub module: String,
+    /// The provider's own name within that package — `RSS feed`.
+    pub provider: String,
+    /// The configuration the admin filled in, as the module's own
+    /// `configuration_workflow` declared it.
+    pub configuration: Attrs,
+}
+
+impl ProvidedTableDef {
+    /// A definition with no configuration yet — what "create a table with this
+    /// provider" starts from, before the settings form has been filled in.
+    pub fn new(module: impl Into<String>, provider: impl Into<String>) -> ProvidedTableDef {
+        ProvidedTableDef {
+            module: module.into(),
+            provider: provider.into(),
+            configuration: Attrs::new(),
+        }
+    }
+
+    /// Set the configuration.
+    pub fn configuration(mut self, configuration: Attrs) -> ProvidedTableDef {
+        self.configuration = configuration;
+        self
+    }
+
+    /// The configuration as the JSON object a module is handed.
+    pub fn configuration_json(&self) -> Json {
+        Json::Object(self.configuration.clone())
+    }
+}
 
 /// Identifies a stored table-overlay row.
 ///
@@ -212,6 +288,66 @@ impl TableMeta {
             self.attributes.remove(ATTR_RLS_ENABLED);
         }
     }
+
+    // --- provided tables (§8.3) ---------------------------------------------
+
+    /// The table provider that serves this table's rows, when the row is a
+    /// **definition** rather than an overlay.
+    ///
+    /// Both names are required for the row to count as a definition: a row
+    /// carrying a module and no provider (or the other way round) names nothing
+    /// that can be called, and reading it as a provided table would produce a
+    /// table nobody can serve. Such a row reads as an ordinary overlay, which is
+    /// what it is.
+    pub fn provider(&self) -> Option<ProvidedTableDef> {
+        let module = non_empty(self.attributes.get(ATTR_PROVIDER_MODULE))?;
+        let provider = non_empty(self.attributes.get(ATTR_PROVIDER_NAME))?;
+        let configuration = match self.attributes.get(ATTR_PROVIDER_CONFIG) {
+            Some(Json::Object(map)) => map.clone(),
+            _ => Attrs::new(),
+        };
+        Some(ProvidedTableDef {
+            module,
+            provider,
+            configuration,
+        })
+    }
+
+    /// Set or clear the table provider. `None` removes all three keys, turning
+    /// the definition back into a plain overlay.
+    pub fn set_provider(&mut self, def: Option<&ProvidedTableDef>) {
+        match def {
+            Some(def) => {
+                self.attributes.insert(
+                    ATTR_PROVIDER_MODULE.into(),
+                    Json::String(def.module.clone()),
+                );
+                self.attributes.insert(
+                    ATTR_PROVIDER_NAME.into(),
+                    Json::String(def.provider.clone()),
+                );
+                self.attributes.insert(
+                    ATTR_PROVIDER_CONFIG.into(),
+                    Json::Object(def.configuration.clone()),
+                );
+            }
+            None => {
+                self.attributes.remove(ATTR_PROVIDER_MODULE);
+                self.attributes.remove(ATTR_PROVIDER_NAME);
+                self.attributes.remove(ATTR_PROVIDER_CONFIG);
+            }
+        }
+    }
+}
+
+/// A non-empty string attribute, or `None` — the shape both provider names have
+/// to be for the row to name a provider at all.
+fn non_empty(value: Option<&Json>) -> Option<String> {
+    value
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 /// The fields of the `_sc_tables` table, in declaration order.
@@ -676,6 +812,50 @@ mod tests {
         meta.set_ownership_formula(Some("   "));
         assert_eq!(meta.ownership_formula(), None);
         assert!(meta.attributes.is_empty());
+    }
+
+    #[test]
+    fn a_provided_table_definition_round_trips_through_the_row() {
+        let mut meta = TableMeta::new("headlines");
+        // No provider is the ordinary case: a `_sc_tables` row is an overlay
+        // unless it says otherwise.
+        assert_eq!(meta.provider(), None);
+
+        let mut configuration = Attrs::new();
+        configuration.insert(
+            "url".into(),
+            Json::String("https://example.org/feed".into()),
+        );
+        let def = ProvidedTableDef::new("@saltcorn/rss", "RSS feed").configuration(configuration);
+        meta.set_provider(Some(&def));
+        assert_eq!(meta.provider().as_ref(), Some(&def));
+        assert_eq!(
+            meta.provider().unwrap().configuration_json(),
+            serde_json::json!({ "url": "https://example.org/feed" })
+        );
+
+        // Clearing takes all three keys with it, so a table that stopped being
+        // provided leaves no residue an admin would have to explain.
+        meta.set_provider(None);
+        assert_eq!(meta.provider(), None);
+        assert!(meta.attributes.is_empty(), "{:?}", meta.attributes);
+    }
+
+    #[test]
+    fn half_a_provider_is_no_provider_rather_than_a_table_nobody_can_serve() {
+        // A row naming a module and no provider names nothing that can be
+        // called. Reading it as a provided table would put a table in the
+        // catalog whose rows can never be fetched; reading it as an overlay is
+        // what it is.
+        let mut meta = TableMeta::new("headlines");
+        meta.attributes.insert(
+            ATTR_PROVIDER_MODULE.into(),
+            Json::String("@saltcorn/rss".into()),
+        );
+        assert_eq!(meta.provider(), None);
+        meta.attributes
+            .insert(ATTR_PROVIDER_NAME.into(), Json::String("  ".into()));
+        assert_eq!(meta.provider(), None);
     }
 
     #[test]

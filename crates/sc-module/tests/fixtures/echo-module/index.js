@@ -182,7 +182,56 @@ module.exports = {
       },
     },
   }),
-  // Two entity types this version does not load: the census reports them.
+  // v1's `table_providers`: a virtual table whose rows this module supplies.
+  // Two of them, because a module may supply more than one and the manifest has
+  // to name each — and the second is the shape a broken plugin has, so the host
+  // has something to report rather than something to crash on.
+  table_providers: {
+    echo_rows: {
+      configuration_workflow: () =>
+        new Workflow({
+          steps: [
+            {
+              name: "Rows",
+              form: () =>
+                new Form({
+                  fields: [
+                    { name: "prefix", label: "Prefix", type: "String", required: true },
+                    { name: "count", label: "How many", type: "Integer", default: 3 },
+                  ],
+                }),
+            },
+          ],
+        }),
+      // A *function* of the configuration, which is one of v1's two shapes and
+      // the one `@saltcorn/postgres-tables` uses: the columns depend on what the
+      // admin configured.
+      fields: (cfg) => [
+        { name: "id", label: "ID", type: "Integer", primary_key: true },
+        { name: "name", label: "Name", type: "String" },
+        ...((cfg || {}).count ? [{ name: "n", label: "N", type: "Integer" }] : []),
+      ],
+      get_table: (cfg, table) => ({
+        getRows: async (where, opts) => {
+          const rows = [];
+          const count = (cfg || {}).count || 3;
+          for (let i = 1; i <= count; i++)
+            rows.push({
+              id: i,
+              name: `${(cfg || {}).prefix || ""}${i}`,
+              n: count,
+              // Not a declared column: the host must not smuggle it into the
+              // table, and the test asserts it does not.
+              table_was: (table || {}).name || null,
+              // What the caller pushed down, echoed back so a test can see that
+              // the hint reached the provider in v1's own vocabulary.
+              asked: { where, opts },
+            });
+          return rows;
+        },
+      }),
+    },
+  },
+  // One entity type this version does not load: the census reports it.
   viewtemplates: [{ name: "echo_list" }, { name: "echo_show" }],
-  table_providers: { echo_provider: {} },
 };

@@ -191,7 +191,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let out: Vec<Json> = tables
                     .iter()
                     .filter(|t| !t.is_system())
-                    .map(|t| table_json(t, rls))
+                    .map(|t| table_json(&catalog, t, rls))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -223,7 +223,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 )
                 .await?;
                 let rls = catalog.primary().capabilities().row_level_security;
-                Ok(HandlerResponse::ok(table_json(&catalog.require(&name)?, rls)).with_status(201))
+                Ok(
+                    HandlerResponse::ok(table_json(&catalog, &catalog.require(&name)?, rls))
+                        .with_status(201),
+                )
             }
         }
     });
@@ -255,7 +258,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 .await?;
                 let rls = catalog.primary().capabilities().row_level_security;
                 Ok(HandlerResponse::ok(json!({
-                    "table": table_json(&table, rls),
+                    "table": table_json(&catalog, &table, rls),
                     "inserted": outcome.inserted,
                 }))
                 .with_status(201))
@@ -274,6 +277,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // DDL, and only this one refuses by name what another table's
                 // key still points at.
                 let table = ctx.path_param("table")?.to_owned();
+                // A **provided** table (§8.3) is deleted, not dropped: there is
+                // no table in any database to issue DDL against, and its
+                // `_sc_tables` row is its whole definition. One verb in the UI,
+                // because "delete this table" is one thing an admin means.
+                if catalog.get(&table)?.is_some_and(|t| t.provider().is_some()) {
+                    sc_api::provided_tables::forget(&catalog, &table).await?;
+                    return Ok(HandlerResponse::ok(json!({ "dropped": table })));
+                }
                 schema_edit::apply(
                     &catalog,
                     &[schema_edit::Operation::DropTable {
@@ -317,9 +328,102 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 .await?;
                 let rls = catalog.primary().capabilities().row_level_security;
                 Ok(HandlerResponse::ok(table_json(
+                    &catalog,
                     &catalog.require(&table.name)?,
                     rls,
                 )))
+            }
+        }
+    });
+
+    // --- table providers (§8.3) ---------------------------------------------
+
+    reg.register("listTableProviders", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // A property of the **installed modules**, not of any table, and
+                // the empty list is the ordinary answer: a server with no
+                // modules supplies no providers, and the New table dialog offers
+                // the option only when there is one.
+                let out: Vec<Json> = catalog
+                    .table_provider_kinds()
+                    .iter()
+                    .map(|kind| {
+                        json!({
+                            "module": kind.module,
+                            "provider": kind.provider,
+                            "config_spec": kind.config_spec
+                                .iter()
+                                .map(form_field_json)
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createProvidedTable", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+                let module = non_empty_str_field(obj, "module")?.to_owned();
+                let provider = non_empty_str_field(obj, "provider")?.to_owned();
+                // No DDL: this writes the definition row and reloads, which is
+                // what makes the table exist and what asks the module for its
+                // columns.
+                let table = sc_api::provided_tables::create(
+                    &catalog,
+                    &name,
+                    &module,
+                    &provider,
+                    object_field(obj, "configuration")?,
+                )
+                .await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(table_json(&catalog, &table, rls)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateProvidedTable", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("table")?.to_owned();
+                let table = catalog.require(&name)?;
+                let obj = require_object(&ctx.body)?;
+                let submitted = object_field(obj, "configuration")?;
+                // A provider's `password` setting is a secret like any other:
+                // the form was shown the sentinel, and submitting it back
+                // unchanged keeps what is stored — the same merge a module's own
+                // settings go through, against the spec the provider declared.
+                let spec = table
+                    .provider()
+                    .and_then(|(module, provider)| {
+                        catalog
+                            .table_provider_kinds()
+                            .into_iter()
+                            .find(|k| k.module == module && k.provider == provider)
+                    })
+                    .map(|kind| kind.config_spec)
+                    .unwrap_or_default();
+                let stored = match table.attributes.get(sc_catalog::ATTR_PROVIDER_CONFIG) {
+                    Some(Json::Object(map)) => map.clone(),
+                    _ => sc_types::Attrs::new(),
+                };
+                let configuration = sc_types::merge_secrets(&spec, &stored, &submitted);
+                let table =
+                    sc_api::provided_tables::configure(&catalog, &name, configuration).await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(table_json(&catalog, &table, rls)))
             }
         }
     });
@@ -4251,6 +4355,10 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
             .collect::<Vec<_>>(),
         "actions": actions,
         "functions": functions,
+        // The table providers it supplies (§8.3): what the "new table" screen
+        // offers, listed here too because the Modules tab is where an admin
+        // finds out what installing a module got them.
+        "table_providers": loaded.table_provider_names(),
         "unsupported": sc_module::unsupported_json(loaded),
         "issues": loaded.issues,
         "loaded": loaded.is_loaded(),
@@ -4804,7 +4912,7 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
 /// `configured` is the overlay's *presence*, not its content. A table an admin
 /// deliberately set to admin-only and one nobody has ever opened both report
 /// `1`/`1`; only the first has a row, and only the first can be "forgotten".
-pub(crate) fn table_json(table: &Table, rls_available: bool) -> Json {
+pub(crate) fn table_json(catalog: &Catalog, table: &Table, rls_available: bool) -> Json {
     json!({
         "name": table.name,
         "label": table.label,
@@ -4824,16 +4932,70 @@ pub(crate) fn table_json(table: &Table, rls_available: bool) -> Json {
         "rls_enabled": table.rls_enabled,
         // The backend's capability *and* whose database this is: RLS is DDL
         // against the primary driver, so it is never available on a table a
-        // connection contributed. The SPA renders the toggle from this, and a
+        // connection contributed, nor on a **provided** table, whose rows are
+        // not in any database. The SPA renders the toggle from this, and a
         // toggle that can only ever be refused is not a setting, it is a trap.
-        "rls_available": rls_available && table.database == sc_catalog::DbId::primary(),
+        "rls_available": rls_available
+            && table.database == sc_catalog::DbId::primary()
+            && table.provider().is_none(),
         // Which database hosts it: `primary` for Saltcorn's own, otherwise the
         // name of the connection an admin added. The list screen shows anything
         // that is not the primary as a badge beside the table's name, because a
         // list mixing two databases and saying so nowhere would be a list an
         // admin could act on wrongly.
         "database": table.database.0,
+        // The table provider serving its rows, or null (§8.3).
+        "provider": provided_json(catalog, table),
     })
+}
+
+/// A provided table's definition as the table page reads it: which provider,
+/// what it was configured with, what it asks for, and what is wrong.
+///
+/// `null` for a table in a database, which is most of them.
+///
+/// The **declaration travels with the values** because the settings form on the
+/// table's own page needs both and one round trip is what it has — and because
+/// the declaration is not stored anywhere: it is read from the package at load,
+/// so a module upgraded this morning asks for what it asks for now rather than
+/// for what it asked for when the table was made.
+fn provided_json(catalog: &Catalog, table: &Table) -> Json {
+    let Some((module, provider)) = table.provider() else {
+        return Json::Null;
+    };
+    let config_spec = catalog
+        .table_provider_kinds()
+        .into_iter()
+        .find(|k| k.module == module && k.provider == provider)
+        .map(|k| k.config_spec)
+        .unwrap_or_default();
+    let issues: Vec<String> = catalog
+        .provided_table_issues()
+        .into_iter()
+        .filter(|issue| issue.table == table.name)
+        .map(|issue| issue.problem)
+        .collect();
+    json!({
+        "module": module,
+        "provider": provider,
+        // Redacted the way every other secret is: a provider's `password` field
+        // comes back as the sentinel, and submitting it unchanged keeps what is
+        // stored (`sc_types::merge_secrets`, applied on the way in).
+        "configuration": Json::Object(sc_types::redact_attrs(
+            &config_spec,
+            &provided_configuration(table),
+        )),
+        "config_spec": config_spec.iter().map(form_field_json).collect::<Vec<_>>(),
+        "issues": issues,
+    })
+}
+
+/// The configuration stored on a provided table's row.
+fn provided_configuration(table: &Table) -> sc_types::Attrs {
+    match table.attributes.get(sc_catalog::ATTR_PROVIDER_CONFIG) {
+        Some(Json::Object(map)) => map.clone(),
+        _ => sc_types::Attrs::new(),
+    }
 }
 
 /// The caller an admin row endpoint runs as: **role 1** — which clears every

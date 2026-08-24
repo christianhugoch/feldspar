@@ -2,6 +2,86 @@
 
 Changes in reverse chronological order.
 
+## Table providers: a table whose rows come from a module
+
+`sc-catalog`'s `TableProvider` trait has had exactly one implementation since the MVP —
+`DriverTableProvider`, which forwards a `Select` to a `DatabaseDriver` — under a doc comment
+saying "non-trivial providers (RSS/IMAP/search/…) are post-MVP". This is that sentence. A v1
+plugin's `table_providers` export is now loaded, and a table can be created from one instead of
+from a database.
+
+**The milestone's definition of done is a test.** `@saltcorn/rss` — a real v1 plugin, installed
+from npm, whose whole content is one table provider — is loaded on a Deno worker in this
+process, granted exactly one `host:port`, and asked for its settings, its columns and its rows
+against a feed the test serves over `127.0.0.1`. A second test grants it nothing and gets the
+denial sentence rather than an empty table. Five more do the same thing through the HTTP admin
+API against the fixture module: install, offer, create, read, count, configure, refuse, delete.
+
+- **A provided table's `_sc_tables` row is not an overlay — it is the table's only
+  definition.** That is the one exception to the rule written on that table, and it is made in
+  one place with the reason on it: a provided table is not a database table, so there is no fact
+  of the database for its row to contradict, and §9's "legacy databases just work" is untouched.
+  The definition is three sparse attributes (`provider_module`, `provider_name`,
+  `provider_config`) by §9's own column-or-attribute rule. **The module is stored as well as the
+  provider**, which v1 does not do: v1 keys `table_providers` globally in one process's state,
+  while here the call has to reach the worker *that module* was loaded on, and two modules may
+  each supply a provider called `Table`.
+- **The columns are asked for on every reload, not stored.** That is v1's arrangement and the
+  right one — the columns are the module's answer, so an upgraded package presents what it
+  presents now and nothing Saltcorn wrote down can disagree with the code serving the rows. A
+  module that is not installed, will not load, or whose `fields(cfg)` throws leaves the table
+  **in the catalog with no columns and a sentence** (`Catalog::provided_table_issues`), because
+  the admin UI is the only place it can be fixed from.
+- **The `Select` is interpreted twice, on purpose.** `inmem::pushdown` translates the filter,
+  ordering and bound into v1's `where`/`options` pair — **all or nothing**, because a provider
+  that honoured half a condition would return the rows matching half a condition and nothing
+  downstream could tell that from a provider that ignored the hint — and `run_select_over` then
+  applies the whole `Select` to whatever came back. This is `json_list_to_external_table`'s
+  arrangement moved from JavaScript to Rust, and the reason is v1's: `@saltcorn/rss` answers the
+  whole feed whatever you ask. What the interpreter **refuses by name** is a `JOIN`, a
+  `GROUP BY`, a `HAVING`, a subquery source and a correlated subquery — a provided table's rows
+  are not in a database, so there is nothing for a join to reach, and a query that silently
+  dropped one would answer a different question inside somebody's view. Un-grouped aggregates
+  *are* supported, because `count(*)` is what the tables page shows beside every table's name.
+- **A date the provider wrote as a string sorts as a date.** The rows arrive as JSON and the
+  fields are typed, so `inmem` coerces through the field: an RSS `pubDate` is RFC 2822, and
+  comparing two of those as text puts "Mon" before "Sun". A column the provider answered but did
+  not declare is left where it is rather than smuggled through as text.
+- **The seam is inverted the way `ModuleFnHost` is.** `TableProviderHost` is declared in
+  `sc-catalog` (layer 4), implemented in `sc-module` (layer 6) as `ModuleTableProviders`, and
+  installed on the catalog by `sc-server` after every module change — which now also reloads the
+  catalog, because installing, configuring or deleting a module can change a provided table's
+  columns.
+- **`table_providers` left the unsupported census**, which is the assertion that it is no longer
+  "what you are not getting". A provider with no `get_table` is reported and skipped rather than
+  offered as a table nobody could read; the new `no-rows-module` fixture is that case, and the
+  echo fixture's placeholder provider became a real one.
+- **Read-only, and it says so where a write arrives.** v1's `get_table` may also answer
+  `insertRow`/`updateRow`/`deleteRows` — `@saltcorn/postgres-tables` does, behind a config flag
+  — and that is the next milestone. A write is refused naming the provider and the module; the
+  schema editor refuses `add_field`, `alter_field`, `drop_field` and the constraint operations
+  on a provided table naming where the columns actually come from; `alter_table` is allowed,
+  because a label, roles and an ownership formula are the overlay's and a provided table has one.
+  `dropTable` on one **forgets the definition** and issues no DDL. Two neighbouring refusals
+  fell out of writing that: **row-level security** is refused on a provided table (it is
+  enforced by `CREATE POLICY`, and there is no table to name — the ownership *formula* still
+  applies, because that is a filter this system applies to a provider's rows like any other),
+  and **"forget settings"** is refused too, because a provided table's row is not settings added
+  to a table, it *is* the table, and forgetting it would be deleting it under a verb that
+  promises not to.
+- **The admin UI.** The New table dialog gains a third source beside blank and CSV, offered only
+  when a module supplies a provider, with the provider's own declared form under the chooser. The
+  table page gains a provider card above the fields — because it is what decides them — with the
+  settings, the issues and a save that reloads the catalog. Fields on a provided table are shown
+  and not editable; CSV import is not offered; the destructive menu item reads *Delete table* and
+  warns that Saltcorn forgets it rather than that rows are lost. The Modules tab lists a module's
+  table providers, and its badge counts what a module actually supplies — `@saltcorn/rss` has no
+  actions at all, and "0 actions" would read as "this module does nothing".
+- **Documentation**: `docs/tutorial-table-providers.md` (install, grant, create, filter, fail,
+  delete), the design doc's §8.3 rewritten around the two implementations and the two-pass query,
+  its `_sc_tables` row in §9, and `tutorial-modules.md` catching up with the fourth key a module
+  now supplies.
+
 ## Modules in-process, phases 4 and 5: the tests, and the documentation
 
 The milestone's definition of done, asserted rather than asserted about: **a server with

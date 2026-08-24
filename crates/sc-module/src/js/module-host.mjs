@@ -250,7 +250,12 @@ const loading = new Map();
 /** The plugin keys this version reads. Everything else is counted and reported
  * (the Modules tab says "also supplies: 1 table provider"), never loaded, so an
  * admin knows what they are not getting. */
-const supportedKeys = new Set(["actions", "configuration_workflow", "functions"]);
+const supportedKeys = new Set([
+  "actions",
+  "configuration_workflow",
+  "functions",
+  "table_providers",
+]);
 
 /** Keys that are metadata rather than an entity type — including `onLoad`,
  * which is not an entity but a hook, and is called by `loadModule`. */
@@ -289,15 +294,19 @@ async function evalConfigFields(fields, context) {
  * v1 configures a plugin with a wizard and v2 has no wizard vocabulary, so the
  * forms are flattened into one settings form. A step whose form cannot be built
  * without context is skipped rather than fatal: the module still loads, and its
- * actions still run. */
-async function configWorkflowFields(plugin) {
-  if (typeof plugin.configuration_workflow !== "function") return { fields: [], issues: [] };
+ * actions still run.
+ *
+ * `subject` names whose workflow it is ("its", "the table provider \"RSS
+ * feed\"") so an issue reads as a sentence: a module's own settings and each of
+ * its table providers' settings go through this same function. */
+async function workflowFields(makeWorkflow, subject) {
+  if (typeof makeWorkflow !== "function") return { fields: [], issues: [] };
   const issues = [];
   let workflow;
   try {
-    workflow = await plugin.configuration_workflow({});
+    workflow = await makeWorkflow({});
   } catch (e) {
-    return { fields: [], issues: [`its configuration form could not be built: ${e.message}`] };
+    return { fields: [], issues: [`${subject} configuration form could not be built: ${e.message}`] };
   }
   const fields = [];
   for (const step of (workflow && workflow.steps) || []) {
@@ -305,10 +314,115 @@ async function configWorkflowFields(plugin) {
       const form = typeof step.form === "function" ? await step.form({}) : step.form;
       for (const field of (form && form.fields) || []) fields.push(field);
     } catch (e) {
-      issues.push(`its configuration step "${step.name || "?"}" could not be built: ${e.message}`);
+      issues.push(
+        `${subject} configuration step "${step.name || "?"}" could not be built: ${e.message}`,
+      );
     }
   }
   return { fields, issues };
+}
+
+/** v1's `table_providers`: a virtual table whose rows the module supplies.
+ *
+ * ```js
+ * table_providers: {
+ *   "RSS feed": {
+ *     configuration_workflow,                      // this provider's settings
+ *     fields: [{ name: "title", type: "String" }], // or a function of the config
+ *     get_table: (cfg) => ({ getRows: async (where, opts) => [...] }),
+ *   },
+ * }
+ * ```
+ *
+ * Two shapes, both v1's: a plain object, and a function of the module's own
+ * configuration — which is v1's `withCfg`, the rule that every facility key of a
+ * plugin *with* a `configuration_workflow` is called with that configuration.
+ * `actions` and `functions` are read the same way, so this is not new
+ * vocabulary.
+ *
+ * A provider with no `get_table` is reported and skipped: it is the one method
+ * that produces rows, and a table that cannot produce rows is not a table.
+ */
+async function evalTableProviders(plugin, configuration) {
+  const exported = plugin.table_providers;
+  let raw = {};
+  const issues = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || {};
+    } catch (e) {
+      issues.push(`its table providers could not be built: ${e.message}`);
+      raw = {};
+    }
+  } else if (exported && typeof exported === "object") {
+    raw = exported;
+  }
+
+  const providers = [];
+  const set = {};
+  for (const [providerName, value] of Object.entries(raw)) {
+    const impl = value || {};
+    if (typeof impl.get_table !== "function") {
+      issues.push(
+        `the table provider "${providerName}" has no get_table function, so no table can be ` +
+          `served by it`,
+      );
+      continue;
+    }
+    const { fields, issues: workflowIssues } = await workflowFields(
+      impl.configuration_workflow,
+      `the table provider "${providerName}"'s`,
+    );
+    issues.push(...workflowIssues);
+    set[providerName] = impl;
+    providers.push({ name: providerName, config_fields: fields });
+  }
+  return { providers, set, issues };
+}
+
+/** The fields one provider presents for one configuration.
+ *
+ * v1 writes `fields` two ways — an array, and a function of the configuration
+ * (possibly async), which is how `@saltcorn/postgres-tables` reports the columns
+ * an admin picked in its second workflow step. Both are read. */
+async function providerFields({ module: name, provider: providerName, configuration }) {
+  const impl = requireProvider(name, providerName);
+  const declared =
+    typeof impl.fields === "function" ? await impl.fields(configuration || {}) : impl.fields;
+  return Array.isArray(declared) ? declared : [];
+}
+
+/** One provider's rows, for one v1 `where`/`options` pair.
+ *
+ * `get_table(cfg, table)` is called per request rather than once, which is v1's
+ * own arrangement (`Table.to_provided_table` does the same): a provider that
+ * wants to cache caches in its own module scope, as `@saltcorn/rss` does, and
+ * one that holds a connection pool holds it there too. Caching the returned
+ * object here would instead pin whatever it closed over to a configuration that
+ * may since have been edited.
+ *
+ * The second argument is v1's table row. What a v1 provider reads off it is its
+ * name, so its name is what it gets — this host has no `Table` to hand over, and
+ * a stub would throw on the first property. */
+async function providerRows({ module: name, provider: providerName, configuration, table, where, options }) {
+  const impl = requireProvider(name, providerName);
+  const provided = await impl.get_table(configuration || {}, { name: table || "" });
+  if (!provided || typeof provided.getRows !== "function")
+    throw new Error(
+      `the table provider ${providerName} of module ${name} supplies no getRows, so it cannot ` +
+        `be read`,
+    );
+  const rows = await provided.getRows(where || {}, options || {});
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** The loaded provider, or a sentence naming what is missing. */
+function requireProvider(name, providerName) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const impl = entry.providers && entry.providers[providerName];
+  if (!impl) throw new Error(`the module ${name} has no table provider ${providerName}`);
+  return impl;
 }
 
 /** v1's `functions`: what a plugin supplies to formulas and code bodies.
@@ -454,8 +568,18 @@ async function loadModule({ module: name, dir, configuration }) {
   );
   issues.push(...functionIssues);
 
-  const { fields: configFields, issues: configIssues } = await configWorkflowFields(plugin);
+  const { fields: configFields, issues: configIssues } = await workflowFields(
+    plugin.configuration_workflow,
+    "its",
+  );
   issues.push(...configIssues);
+
+  const {
+    providers,
+    set: providerSet,
+    issues: providerIssues,
+  } = await evalTableProviders(plugin, configuration);
+  issues.push(...providerIssues);
 
   const unsupported = [];
   for (const [key, value] of Object.entries(plugin)) {
@@ -467,6 +591,7 @@ async function loadModule({ module: name, dir, configuration }) {
     plugin,
     actions: actionSet,
     functions: functionSet,
+    providers: providerSet,
     configuration: configuration || {},
   });
 
@@ -476,6 +601,7 @@ async function loadModule({ module: name, dir, configuration }) {
     plugin_name: plugin.plugin_name || null,
     actions,
     functions,
+    table_providers: providers,
     config_fields: configFields,
     unsupported,
     issues,
@@ -544,6 +670,16 @@ async function handle(request) {
       const pending = loading.get(request.module);
       if (pending) await pending;
       return await callFunction(request);
+    }
+    case "provider_fields": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await providerFields(request);
+    }
+    case "provider_rows": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await providerRows(request);
     }
     default:
       throw new Error(`unknown module-host operation ${request.op}`);

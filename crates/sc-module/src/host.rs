@@ -109,6 +109,24 @@ pub struct FunctionManifest {
     pub arguments: Vec<FunctionArg>,
 }
 
+/// One **table provider** a module supplies (§8.3).
+///
+/// v1's `table_providers` key: a virtual table whose rows the module produces.
+/// What arrives here is its name and the fields of its own
+/// `configuration_workflow`, flattened by the host script exactly as a module's
+/// own settings are — the provider that serves the rows stays in the worker, and
+/// what crosses is what the admin has to fill in.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TableProviderManifest {
+    /// The provider's own name — `RSS feed`. v1's, unqualified; the module it
+    /// came from is what disambiguates it.
+    pub name: String,
+    /// v1 `configFields`, as the provider's configuration workflow declared
+    /// them — translated by [`crate::spec`], never interpreted here.
+    #[serde(default)]
+    pub config_fields: Vec<Json>,
+}
+
 /// An entity type the module exports and this version does not load.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnsupportedEntity {
@@ -138,6 +156,10 @@ pub struct ModuleManifest {
     /// `modfn` and what a formula hoists.
     #[serde(default)]
     pub functions: Vec<FunctionManifest>,
+    /// The table providers it supplies (§8.3) — what the "new table" screen
+    /// offers as a source beside a database.
+    #[serde(default)]
+    pub table_providers: Vec<TableProviderManifest>,
     /// The fields of its `configuration_workflow`'s forms, flattened (§5).
     #[serde(default)]
     pub config_fields: Vec<Json>,
@@ -298,6 +320,57 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, function, args);
+            Err(no_runtime())
+        }
+    }
+
+    /// The fields one **table provider** presents for one configuration (§8.3).
+    ///
+    /// Asked on every catalog reload rather than stored: the columns are the
+    /// module's answer, so an upgraded package that presents a new column
+    /// presents it. Routed like [`run`](ModuleHost::run) and for the same
+    /// reason — `fields(cfg)` is a closure the module built at load time.
+    pub async fn provider_fields(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+    ) -> Result<Vec<Json>> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .provider_fields(module, provider, configuration)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration);
+            Err(no_runtime())
+        }
+    }
+
+    /// One table provider's rows, for v1's `where`/`options` pair.
+    ///
+    /// The pair is a hint the provider may honour or ignore; the caller applies
+    /// the query to the answer either way (`sc_catalog::inmem`).
+    pub async fn provider_rows(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        table: &str,
+        filter: &Json,
+        options: &Json,
+    ) -> Result<Vec<Json>> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .provider_rows(module, provider, configuration, table, filter, options)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration, table, filter, options);
             Err(no_runtime())
         }
     }

@@ -77,7 +77,7 @@ import {
 import { keyStorage, reconcileKey, type KeyKind } from "../keyField";
 import { RoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
-import { SettingsFields } from "../settings";
+import { SettingsFields, buildConfig, initialValues } from "../settings";
 
 /** A one-line description of a field's kind for the fields table. */
 function kindLabel(kind: unknown): string {
@@ -181,11 +181,20 @@ export function TableDetail({ table }: { table: string }) {
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
 
+        {/* A **provided** table's settings come first, above its fields, because
+            they are what *decides* the fields: the columns below are the
+            module's answer to the form above, and reading them the other way
+            round would suggest they could be edited. */}
+        {settings?.provider && (
+          <ProviderSettings table={table} settings={settings} onChange={load} />
+        )}
+
         <Fields
           table={table}
           fields={fields}
           fieldTypes={fieldTypes}
           tables={tables}
+          provided={Boolean(settings?.provider)}
           onChange={load}
         />
 
@@ -193,15 +202,18 @@ export function TableDetail({ table }: { table: string }) {
           table={table}
           rowCount={rowCount}
           configured={settings?.configured ?? false}
+          provided={Boolean(settings?.provider)}
           onChange={load}
         />
 
-        <Constraints
-          table={table}
-          fields={fields}
-          constraints={constraints}
-          onChange={load}
-        />
+        {!settings?.provider && (
+          <Constraints
+            table={table}
+            fields={fields}
+            constraints={constraints}
+            onChange={load}
+          />
+        )}
 
         <Triggers table={table} triggers={triggers} onChange={load} />
 
@@ -224,10 +236,14 @@ function TableData({
   table,
   rowCount,
   configured,
+  provided,
   onChange,
 }: {
   table: string;
   rowCount: number | null;
+  /** Whether a module's table provider serves the rows (§8.3): read-only, so
+   * the two ways of *writing* rows are not offered. */
+  provided?: boolean;
   configured: boolean;
   onChange: () => void;
 }) {
@@ -309,7 +325,14 @@ function TableData({
    * here) is shown as it came, since it names the fields to remove first.
    */
   const dropTable = async () => {
-    if (!window.confirm(`Drop the table "${table}" and every row in it? This cannot be undone.`)) {
+    // A provided table has no rows of Saltcorn's to lose — deleting it forgets
+    // the definition and leaves the feed, the remote database or whatever else
+    // is behind it exactly where it was — so the warning says what actually
+    // happens rather than the one a database table gets.
+    const question = provided
+      ? `Delete the table "${table}"? Saltcorn forgets it. The data it was reading is not touched.`
+      : `Drop the table "${table}" and every row in it? This cannot be undone.`;
+    if (!window.confirm(question)) {
       return;
     }
     try {
@@ -368,7 +391,7 @@ function TableData({
           </div>
 
           <Tile
-            label="Edit"
+            label={provided ? "View" : "Edit"}
             icon={<IconPencil />}
             onClick={() => navigate(`/tables/${encodeURIComponent(table)}/data`)}
           />
@@ -380,7 +403,10 @@ function TableData({
             onClick={() => void download()}
           />
 
-          <UploadTile disabled={busy} onFile={(file) => void upload(file)} />
+          {/* A provided table is read-only in this version, so importing into
+              one is not a thing that can be done — and a disabled tile beside a
+              working one is a question that should not have been asked. */}
+          {!provided && <UploadTile disabled={busy} onFile={(file) => void upload(file)} />}
 
           <Dropdown align="end">
             <Dropdown.Toggle
@@ -393,11 +419,15 @@ function TableData({
               <IconDots className="icon-2" />
             </Dropdown.Toggle>
             <Dropdown.Menu>
-              {configured && (
+              {/* Not for a provided table: its stored row is not settings added
+                  to a table, it *is* the table, so forgetting it would be
+                  deleting it — which is the item below, with the confirmation
+                  that says so. */}
+              {configured && !provided && (
                 <Dropdown.Item onClick={() => void forget()}>Forget settings</Dropdown.Item>
               )}
               <Dropdown.Item className="text-danger" onClick={() => void dropTable()}>
-                Drop table
+                {provided ? "Delete table" : "Drop table"}
               </Dropdown.Item>
             </Dropdown.Menu>
           </Dropdown>
@@ -898,6 +928,116 @@ function Triggers({
 }
 
 /**
+ * A **provided** table's provider: which one serves it, what it was configured
+ * with, and what is wrong (design §8.3).
+ *
+ * Above the fields, because it is what decides them: the columns below this card
+ * are the module's answer to the form on it, and a save that changes the answer
+ * changes them. Saving reloads the catalog, which is what asks the module again.
+ *
+ * The form is the module's own — declared by the provider's v1
+ * `configuration_workflow` and rendered by `SettingsFields`, the same component
+ * a file store's backend and an agent's provider use — so **no code here knows
+ * what an RSS feed is**.
+ */
+function ProviderSettings({
+  table,
+  settings,
+  onChange,
+}: {
+  table: string;
+  settings: TableSummary;
+  onChange: () => void;
+}) {
+  const provider = settings.provider;
+  const spec = provider?.config_spec ?? [];
+  const stored = (provider?.configuration ?? {}) as Record<string, string>;
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Re-seeded whenever the stored configuration changes — after a save, and
+  // after a module reload changed what the provider asks for.
+  useEffect(() => {
+    setValues(initialValues(spec, stored));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(stored), JSON.stringify(spec.map((f) => f.name))]);
+
+  if (!provider) return null;
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await api.updateProvidedTable(table, { configuration: buildConfig(spec, values) });
+      setSaved(true);
+      onChange();
+    } catch (err) {
+      setError(errorMessage(err, "Could not save the provider settings."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="mb-4">
+      <Card.Header>
+        Table provider
+        <StatusBadge tone="blue" className="ms-2">
+          {provider.provider}
+        </StatusBadge>
+        <span className="text-muted small ms-2">{provider.module}</span>
+      </Card.Header>
+      <Card.Body>
+        {error && <Alert variant="danger">{error}</Alert>}
+        {saved && (
+          <Alert variant="success" dismissible onClose={() => setSaved(false)}>
+            Saved. The columns below are what the provider reports for these settings.
+          </Alert>
+        )}
+        {/* Why this table has no columns, when it has none. The module may be
+            uninstalled, its provider renamed, its `fields(cfg)` throwing — all
+            of which leave the table listed and fixable, which is the point. */}
+        {provider.issues.length > 0 && (
+          <Alert variant="warning">
+            <AlertBody>
+              <Alert.Heading className="h6">This provider is not answering</Alert.Heading>
+              <ul className="mb-0">
+                {provider.issues.map((issue) => (
+                  <li key={issue}>{issue}</li>
+                ))}
+              </ul>
+            </AlertBody>
+          </Alert>
+        )}
+        <p className="text-muted">
+          The rows of this table come from <code>{provider.module}</code>, not from a database.
+          Saltcorn reads them; it does not create, change or delete them.
+        </p>
+        <Form onSubmit={save}>
+          {spec.length === 0 ? (
+            <p className="text-muted mb-3">This provider asks for no settings.</p>
+          ) : (
+            <SettingsFields
+              spec={spec}
+              values={values}
+              idPrefix="table-provider"
+              onChange={(name, value) => setValues((v) => ({ ...v, [name]: value }))}
+            />
+          )}
+          <Button type="submit" disabled={busy || spec.length === 0}>
+            Save provider settings
+          </Button>
+        </Form>
+      </Card.Body>
+    </Card>
+  );
+}
+
+/**
  * The table's settings: the `_sc_tables` overlay (design §9).
  *
  * Everything here is *added* to what the database already says about the table —
@@ -1099,12 +1239,17 @@ function Fields({
   fields,
   fieldTypes,
   tables,
+  provided,
   onChange,
 }: {
   table: string;
   fields: ListFieldsResponse | null;
   fieldTypes: ListFieldTypesResponse | null;
   tables: ListTablesResponse | null;
+  /** Whether a module's table provider decides the columns (§8.3). They are
+   * shown, because they are what the table *is*; they are not editable, because
+   * there is no column in any database to edit. */
+  provided?: boolean;
   onChange: () => void;
 }) {
   /** What the modal is open on, or `null` when it is closed. */
@@ -1312,33 +1457,42 @@ function Fields({
                   )}
                 </td>
                 <td className="text-end">
-                  <div className="btn-list justify-content-end flex-nowrap">
-                    <Button
-                      size="sm"
-                      variant="outline-secondary"
-                      disabled={busy}
-                      onClick={() => openEdit(f)}
-                    >
-                      Edit
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline-danger"
-                      disabled={busy}
-                      onClick={() => void drop(f.name)}
-                    >
-                      Delete
-                    </Button>
-                  </div>
+                  {!provided && (
+                    <div className="btn-list justify-content-end flex-nowrap">
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        disabled={busy}
+                        onClick={() => openEdit(f)}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        disabled={busy}
+                        onClick={() => void drop(f.name)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  )}
                 </td>
               </tr>
             ))}
           </tbody>
         </Table>
-        <Button size="sm" onClick={openAdd}>
-          <IconPlus className="icon-2" />
-          Add field
-        </Button>
+        {provided ? (
+          <div className="text-muted small">
+            These columns are the table provider&rsquo;s. Change what it presents in its settings
+            above, or in the module itself.
+          </div>
+        ) : (
+          <Button size="sm" onClick={openAdd}>
+            <IconPlus className="icon-2" />
+            Add field
+          </Button>
+        )}
 
         <Modal show={editing !== null} onHide={() => setEditing(null)} size="lg" scrollable>
           {/* The form wraps the whole modal so that the footer's button is the

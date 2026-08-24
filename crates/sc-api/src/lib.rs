@@ -32,6 +32,7 @@ pub mod convert;
 // the crate of the same name is reached as `::csv`.
 pub mod csv;
 pub mod filter;
+pub mod provided_tables;
 pub mod rows;
 pub mod schema_edit;
 

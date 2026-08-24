@@ -1,17 +1,20 @@
 // The model behind the "New table" dialog — the half of it that is not React.
 //
-// One dialog, two ways to make a table: an empty one (a name, and the identity
-// primary key the server gives it), or one deduced from a CSV file (its fields
+// One dialog, three ways to make a table: an empty one (a name, and the identity
+// primary key the server gives it), one deduced from a CSV file (its fields
 // named and typed by the file's header and contents, and every row in it
-// imported). They are one dialog because they answer one question — "what table
-// do you want?" — and because the *name* is asked for in both cases, so two
-// buttons on the list page would have been two places to ask it.
+// imported), or one served by a **table provider** a module supplies (§8.3) —
+// an RSS feed, a remote PostgreSQL table — whose columns and rows are the
+// module's and whose settings are the form that module declared. They are one
+// dialog because they answer one question — "what table do you want?" — and
+// because the *name* is asked for in all three cases, so three buttons on the
+// list page would have been three places to ask it.
 //
 // The rules here are the ones a test can pin without a browser: when the Create
 // button may be pressed, and what a chosen file suggests the table be called.
 
-/** Which of the two things the dialog is making. */
-export type NewTableSource = "blank" | "csv";
+/** Which of the three things the dialog is making. */
+export type NewTableSource = "blank" | "csv" | "provider";
 
 /** What the dialog holds while it is open. */
 export type NewTableForm = {
@@ -22,6 +25,16 @@ export type NewTableForm = {
   /** Which database to create the table in: `primary` for Saltcorn's own, else
    * the name of a connected database connection. */
   database: string;
+  /** For `source === "provider"`: which provider, as `"module\u0000provider"`.
+   *
+   * One string rather than two fields because it is one `<select>`, and because
+   * a provider is only ever chosen as a pair — the module is what routes the
+   * call and the name is what it is called there. The separator is a NUL, which
+   * cannot occur in a package name or a provider name. */
+  provider: string;
+  /** The values typed into the provider's own settings form, keyed by setting
+   * name, as `SettingsFields` holds them. */
+  providerConfig: Record<string, string>;
 };
 
 /** The `database` that means Saltcorn's own. */
@@ -33,7 +46,31 @@ export const EMPTY_NEW_TABLE_FORM: NewTableForm = {
   source: "blank",
   file: null,
   database: PRIMARY_DATABASE,
+  provider: "",
+  providerConfig: {},
 };
+
+/** The separator inside a `NewTableForm["provider"]` — see the field. */
+const PROVIDER_SEPARATOR = "\u0000";
+
+/** A provider's `(module, provider)` pair as the one value a `<select>` holds. */
+export function providerKey(module: string, provider: string): string {
+  return `${module}${PROVIDER_SEPARATOR}${provider}`;
+}
+
+/** The pair back out, or `null` when nothing is chosen. */
+export function splitProviderKey(key: string): { module: string; provider: string } | null {
+  const at = key.indexOf(PROVIDER_SEPARATOR);
+  if (at < 0) return null;
+  return { module: key.slice(0, at), provider: key.slice(at + 1) };
+}
+
+/** How a provider reads in the chooser: its own name, with the package that
+ * supplies it beside it — because two modules may each supply a provider called
+ * `Table`, and the module is half of what the admin is choosing. */
+export function providerLabel(module: string, provider: string): string {
+  return `${provider} (${module})`;
+}
 
 /**
  * The databases a new table may be created in: Saltcorn's own, then every
@@ -67,7 +104,12 @@ export function databaseLabel(name: string): string {
 export function newTableError(form: NewTableForm): string | null {
   if (!form.name.trim()) return "The table needs a name.";
   if (form.source === "csv" && !form.file) return "Choose a CSV file to create the table from.";
-  if (!form.database.trim()) return "Choose which database to create the table in.";
+  if (form.source === "provider" && !splitProviderKey(form.provider))
+    return "Choose the table provider that will serve this table's rows.";
+  // The database question does not apply to a provided table — its rows are not
+  // in one — so it is not asked and not checked.
+  if (form.source !== "provider" && !form.database.trim())
+    return "Choose which database to create the table in.";
   return null;
 }
 

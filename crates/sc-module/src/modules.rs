@@ -56,6 +56,15 @@ impl LoadedModule {
             .unwrap_or_default()
     }
 
+    /// The table providers this module supplies (§8.3) — what the Modules tab
+    /// lists beside its actions, and what the "new table" screen offers.
+    pub fn table_provider_names(&self) -> Vec<String> {
+        self.manifest
+            .as_ref()
+            .map(|m| m.table_providers.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Whether the module is loaded and contributing.
     pub fn is_loaded(&self) -> bool {
         self.manifest.is_some()
@@ -248,6 +257,7 @@ mod tests {
                 config_fields: Vec::new(),
             }],
             functions: Vec::new(),
+            table_providers: Vec::new(),
             config_fields: Vec::new(),
             unsupported: vec![UnsupportedEntity {
                 key: "eventTypes".into(),

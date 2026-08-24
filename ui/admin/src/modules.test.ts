@@ -51,6 +51,7 @@ function module_(overrides: Partial<Module> = {}): Module {
     config_spec: [],
     actions: [{ name: "mqtt_publish", description: "Publish a message", config_spec: [] }],
     functions: [],
+    table_providers: [],
     unsupported: [],
     issues: [],
     loaded: true,
@@ -111,6 +112,18 @@ describe("how an installed module reads", () => {
       ],
     });
     expect(moduleStatus(two).label).toBe("2 actions");
+  });
+
+  it("counts the table providers it supplies, and a module that only has those", () => {
+    // `@saltcorn/rss` has no actions at all, and "0 actions" would read as "this
+    // module does nothing" about a module that serves a whole table.
+    const rss = module_({ actions: [], table_providers: ["RSS feed"] });
+    expect(moduleStatus(rss)).toEqual({ label: "1 table provider", tone: "green" });
+    const both = module_({ table_providers: ["RSS feed", "Atom feed"] });
+    expect(moduleStatus(both).label).toBe("1 action, 2 table providers");
+    // And a module that loaded and supplies nothing this version reads still
+    // says it loaded, rather than claiming a count of nothing.
+    expect(moduleStatus(module_({ actions: [] })).label).toBe("Loaded");
   });
 
   it("marks a module that did not load, and one that loaded with a complaint", () => {

@@ -37,13 +37,34 @@ pub struct FieldMergeIssue {
     pub message: String,
 }
 
-/// Which kind of provider serves a table's rows (technical design §8.3). The MVP
-/// only has database-backed tables; virtual providers (RSS, IMAP, search, …) add
-/// variants here later.
+/// Which kind of provider serves a table's rows (technical design §8.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableSource {
     /// Backed directly by a table in the connected database `database`.
     Database,
+    /// Served by a **table provider** a module supplies: the rows come from
+    /// JavaScript rather than from a database, and the table exists because a
+    /// `_sc_tables` row says so rather than because introspection found it
+    /// (see [`ProvidedTableDef`](crate::ProvidedTableDef)).
+    ///
+    /// Both names are carried because a call has to reach the worker that
+    /// *module* was loaded on; the provider name alone is not an address.
+    Provider {
+        /// The package name — `@saltcorn/rss`.
+        module: String,
+        /// The provider's own name within it — `RSS feed`.
+        provider: String,
+    },
+}
+
+impl TableSource {
+    /// The provider serving this table, or `None` for a database table.
+    pub fn provider(&self) -> Option<(&str, &str)> {
+        match self {
+            TableSource::Database => None,
+            TableSource::Provider { module, provider } => Some((module, provider)),
+        }
+    }
 }
 
 /// Per-CRUD access control for a table (technical design §8.2). Roles run 1–100
@@ -210,6 +231,61 @@ impl Table {
             rls_enabled: false,
             constraints: Vec::new(),
         }
+    }
+
+    /// A **provided** table: one whose rows come from a module's table provider
+    /// rather than from a database (§8.3).
+    ///
+    /// There is no `from_physical` for one of these, because there is no
+    /// physical table — the `_sc_tables` row *is* the table, and the fields are
+    /// whatever the provider answered when it was asked. `database` is still
+    /// the primary: a provided table is not in any database, but every
+    /// [`DbId`](crate::DbId) in the system names a connection an admin
+    /// configured, and inventing a fictional one would put a name in the
+    /// tables list that no Connections screen could explain.
+    ///
+    /// The caller applies the overlay afterwards, exactly as it does to an
+    /// introspected table — the same row carries the label, the description and
+    /// the access rules.
+    pub fn provided(
+        database: DbId,
+        name: impl Into<String>,
+        module: impl Into<String>,
+        provider: impl Into<String>,
+        fields: Vec<DataField>,
+    ) -> Table {
+        let name = name.into();
+        let primary_key = fields
+            .iter()
+            .filter(|f| f.primary_key)
+            .map(|f| f.base.name.clone())
+            .collect();
+        Table {
+            id: TableId(name.clone()),
+            label: name.clone(),
+            name,
+            database,
+            source: TableSource::Provider {
+                module: module.into(),
+                provider: provider.into(),
+            },
+            fields,
+            primary_key,
+            description: String::new(),
+            access: AccessRules::default(),
+            attributes: Attrs::new(),
+            overlay: None,
+            ownership: None,
+            ownership_error: None,
+            rls_enabled: false,
+            constraints: Vec::new(),
+        }
+    }
+
+    /// The module and provider serving this table's rows, or `None` when a
+    /// database does.
+    pub fn provider(&self) -> Option<(&str, &str)> {
+        self.source.provider()
     }
 
     /// Apply an overlay row to this table (technical design §9, TODO §1.2).

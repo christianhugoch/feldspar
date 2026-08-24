@@ -108,12 +108,59 @@ pub struct Catalog {
     /// crates, none of which can name `sc-module` — and `run_js_code`, in a
     /// fourth. The catalog is what all four already hold.
     module_functions: RwLock<Option<Arc<dyn sc_expr::ModuleFnHost>>>,
+    /// What supplies **table providers** (§8.3) — `None` in a process with no
+    /// modules, which is what a `sc-catalog` test and a server with nothing
+    /// installed both are.
+    ///
+    /// Held here for [`module_functions`](Catalog::set_module_functions)'
+    /// reason: the implementation is `sc-module`'s worker pool (layer 6) and
+    /// what needs it is [`reload`](Catalog::reload) and
+    /// [`provider`](Catalog::provider) (layer 4), so the trait is declared here
+    /// and installed from above.
+    table_providers: RwLock<Option<Arc<dyn crate::provider::TableProviderHost>>>,
+    /// Why a stored provided table is not the table an admin expected, keyed by
+    /// table name: a module that is not installed, a provider it does not
+    /// supply, a `fields(cfg)` that threw.
+    ///
+    /// The same arrangement as [`field_overlay_issues`] and for the same reason:
+    /// a provided table whose module is down must still be *in* the tables list,
+    /// with no fields and a sentence saying why, rather than vanishing from the
+    /// admin UI that is the only place it can be fixed from.
+    ///
+    /// [`field_overlay_issues`]: Catalog::field_overlay_issues
+    provided_table_issues: RwLock<Vec<ProvidedTableIssue>>,
     /// Where this deployment's applications are reachable in a browser
     /// (`crate::origin`), set once at boot by the process that knows — the
     /// server from its command line, a command-line build from its
     /// `saltcorn.toml` environment. `None` where nobody said, which is a normal
     /// state: a server with no base domain serves no applications.
     public_origin: RwLock<Option<crate::PublicOrigin>>,
+}
+
+/// Why a **provided** table (§8.3) is not the table an admin expected.
+///
+/// Reported rather than thrown, on [`FieldMergeIssue`]'s grounds: the table is
+/// still in the catalog, still in the list, and still the thing the admin has to
+/// open to fix it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvidedTableIssue {
+    /// The table it is about.
+    pub table: String,
+    /// What is wrong, in a sentence an admin can act on.
+    pub problem: String,
+}
+
+/// The configuration a provided table's provider is called with — the
+/// `provider_config` attribute the `_sc_tables` row carries, as the JSON object
+/// v1 hands to `fields(cfg)` and `get_table(cfg)`.
+fn provided_config(table: &Table) -> serde_json::Value {
+    match table
+        .attributes
+        .get(crate::table_meta::ATTR_PROVIDER_CONFIG)
+    {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map.clone()),
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
 }
 
 /// One step of a transactional schema batch ([`Catalog::apply_schema_batch`]).
@@ -147,6 +194,8 @@ impl Catalog {
             field_overlay_issues: RwLock::new(Vec::new()),
             schema_observer: RwLock::new(None),
             module_functions: RwLock::new(None),
+            table_providers: RwLock::new(None),
+            provided_table_issues: RwLock::new(Vec::new()),
             public_origin: RwLock::new(None),
             table_events: RwLock::new(None),
         };
@@ -226,8 +275,51 @@ impl Catalog {
         // table *through* `create_table`, which reloads, so this runs at least
         // once on a database where `_sc_tables` genuinely does not exist yet.
         // Selecting from it there would make bootstrapping impossible.
+        let mut provided_issues: Vec<ProvidedTableIssue> = Vec::new();
         if map.contains_key(&TableId(TABLE_META_TABLE.to_owned())) {
             for meta in list_table_meta(self).await? {
+                // A row carrying a provider is a **definition**, not an overlay:
+                // it is what makes the table exist, so the table is built here
+                // rather than looked up. Everything else about the row — the
+                // label, the description, the access rules — then applies to it
+                // exactly as it would to an introspected table.
+                if let Some(def) = meta.provider() {
+                    let id = TableId(meta.table_name.clone());
+                    if map.contains_key(&id) {
+                        // The database wins the name, exactly as the primary wins
+                        // a name a secondary connection offers, and for the same
+                        // reason: the rows that are already there are somebody's
+                        // data, and shadowing them would repoint every read of
+                        // that name at a feed. Recorded rather than silent.
+                        provided_issues.push(ProvidedTableIssue {
+                            table: meta.table_name.clone(),
+                            problem: format!(
+                                "a table called `{}` already exists in the database, so the \
+                                 provided table of that name is not served; rename or delete one \
+                                 of them",
+                                meta.table_name
+                            ),
+                        });
+                        continue;
+                    }
+                    let (fields, issue) = self.provided_fields(&meta.table_name, &def).await;
+                    if let Some(problem) = issue {
+                        provided_issues.push(ProvidedTableIssue {
+                            table: meta.table_name.clone(),
+                            problem,
+                        });
+                    }
+                    let mut table = Table::provided(
+                        self.primary_db.clone(),
+                        &meta.table_name,
+                        &def.module,
+                        &def.provider,
+                        fields,
+                    );
+                    table.apply_overlay(&meta);
+                    map.insert(id, table);
+                    continue;
+                }
                 // An overlay for a table that is not here is not an error and is
                 // not dropped; see `orphan_table_meta` for why it is kept.
                 if let Some(table) = map.get_mut(&TableId(meta.table_name.clone())) {
@@ -235,6 +327,7 @@ impl Catalog {
                 }
             }
         }
+        self.set_provided_table_issues(provided_issues)?;
 
         // Then the `_sc_fields` overlay, onto the fields the table now has. Same
         // "only when the table exists" guard and same bootstrapping reason as
@@ -775,10 +868,120 @@ impl Catalog {
     /// the wrong database — the same table name, different rows — which is a
     /// failure nobody would see until the data was wrong.
     pub fn provider(&self, table: &Table) -> Result<Arc<dyn TableProvider>> {
+        // A **provided** table has no driver at all: its rows come from a
+        // module. The dispatch is here rather than in the caller because that is
+        // the whole point of the trait — `rows.rs`, the REST provider, a view and
+        // an agent all read through `Catalog::provider`, and none of them should
+        // learn what a table provider is.
+        if let Some((module, provider)) = table.provider() {
+            let host = self.table_providers().ok_or_else(|| {
+                Error::not_found(format!(
+                    "`{}` is served by the table provider `{provider}` of `{module}`, and this \
+                     process has no module host: it was started without modules",
+                    table.name
+                ))
+            })?;
+            let config = provided_config(table);
+            return Ok(Arc::new(crate::provider::ProvidedTableProvider::new(
+                host,
+                &table.name,
+                module,
+                provider,
+                config,
+                table.fields.clone(),
+            )));
+        }
         Ok(Arc::new(DriverTableProvider::new(
             self.driver_for(table)?,
             table.fields.clone(),
         )))
+    }
+
+    /// The fields a provided table presents, and what went wrong asking for
+    /// them.
+    ///
+    /// Never fatal: a module that is not installed, will not load, or whose
+    /// `fields(cfg)` threw leaves the table in the catalog with **no** fields and
+    /// a sentence. That is v1's behaviour (`table.fields = []`) and it is the
+    /// only one that leaves the admin able to fix it — a reload that failed here
+    /// would take every other table down with it.
+    async fn provided_fields(
+        &self,
+        name: &str,
+        def: &crate::table_meta::ProvidedTableDef,
+    ) -> (Vec<DataField>, Option<String>) {
+        let Some(host) = self.table_providers() else {
+            return (
+                Vec::new(),
+                Some(format!(
+                    "`{name}` is served by the table provider `{}` of `{}`, and this process has \
+                     no module host, so its columns are not known here",
+                    def.provider, def.module
+                )),
+            );
+        };
+        match host
+            .fields(&def.module, &def.provider, &def.configuration_json())
+            .await
+        {
+            Ok(fields) => (fields, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!(
+                    "the table provider `{}` of `{}` could not say what columns `{name}` has: {}",
+                    def.provider,
+                    def.module,
+                    sc_error::format_chain(&e)
+                )),
+            ),
+        }
+    }
+
+    /// Install what supplies table providers (§8.3) — `sc-server`'s
+    /// `ModuleServices`, at boot and again after every module change.
+    ///
+    /// Installing it does **not** reload: the caller does that, because a module
+    /// change reloads the catalog once at the end of a sequence that also swaps
+    /// the action registry and the module functions.
+    pub fn set_table_providers(
+        &self,
+        providers: Arc<dyn crate::provider::TableProviderHost>,
+    ) -> Result<()> {
+        *self
+            .table_providers
+            .write()
+            .map_err(|_| Error::msg("catalog table-providers lock poisoned"))? = Some(providers);
+        Ok(())
+    }
+
+    /// What supplies table providers, or `None` where nothing does.
+    pub fn table_providers(&self) -> Option<Arc<dyn crate::provider::TableProviderHost>> {
+        self.table_providers.read().ok()?.clone()
+    }
+
+    /// Every provider every loaded module supplies — what the "new table" screen
+    /// offers. Empty on a server with no modules.
+    pub fn table_provider_kinds(&self) -> Vec<crate::provider::TableProviderKind> {
+        self.table_providers()
+            .map_or_else(Vec::new, |host| host.providers())
+    }
+
+    /// What went wrong building the provided tables on the last
+    /// [`reload`](Self::reload), for the admin UI to show on the table it is
+    /// about.
+    pub fn provided_table_issues(&self) -> Vec<ProvidedTableIssue> {
+        self.provided_table_issues
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_provided_table_issues(&self, issues: Vec<ProvidedTableIssue>) -> Result<()> {
+        *self
+            .provided_table_issues
+            .write()
+            .map_err(|_| Error::msg("catalog provided-table issues lock poisoned"))? = issues;
+        Ok(())
     }
 
     /// The driver of the database hosting `table` — the primary, or the

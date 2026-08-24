@@ -477,6 +477,7 @@ pub async fn apply(
     }
     let mut plan = Plan::new(catalog).await?;
     for (index, op) in operations.iter().enumerate() {
+        refuse_on_provided(catalog, op).map_err(|e| at(index, op, e))?;
         plan.push(catalog, index, op, &options.grants)
             .await
             .map_err(|e| at(index, op, e))?;
@@ -533,6 +534,56 @@ pub async fn apply(
     Ok(applied)
 }
 
+/// Refuse a DDL operation on a **provided** table (§8.3), naming the provider
+/// that decides its columns.
+///
+/// A provided table has no columns in any database: what it has is a module that
+/// answers `fields(cfg)`, and there is nothing for `ALTER TABLE` to alter. So
+/// every operation that would emit DDL is refused *before* the batch is planned,
+/// and refused with the sentence that says where the columns actually come from
+/// — an admin who wants a different column edits the provider's settings, or the
+/// module.
+///
+/// Three are **not** refused:
+///
+/// - `alter_table`, because a label, a description, access rules and an
+///   ownership formula are the overlay's, and a provided table has an overlay
+///   row like any other table (it *is* that row).
+/// - `create_table`, which cannot name a provided table: a name already in the
+///   catalog is refused by the planner as a name already in the catalog.
+/// - `drop_table`, which is handled by the caller: dropping a provided table is
+///   deleting its row, and `provided_tables::forget` is what does it. Reaching
+///   here with one is a caller that did not check, so it is refused rather than
+///   allowed to issue a `DROP TABLE` for a table no database has.
+fn refuse_on_provided(catalog: &Catalog, op: &Operation) -> Result<()> {
+    if matches!(
+        op,
+        Operation::AlterTable { .. } | Operation::CreateTable { .. }
+    ) {
+        return Ok(());
+    }
+    let Some(table) = catalog.get(op.table())? else {
+        return Ok(());
+    };
+    let Some((module, provider)) = table.provider() else {
+        return Ok(());
+    };
+    Err(Error::invalid(format!(
+        "`{}` is served by the table provider `{provider}` of `{module}`, so its columns are the \
+         module's and not the database's: there is no column here to {}. Change what it presents \
+         in the table provider's own settings.",
+        table.name,
+        match op {
+            Operation::DropTable { .. } =>
+                "drop — delete the table instead, which forgets its definition",
+            Operation::AddField { .. } => "add",
+            Operation::AlterField { .. } => "alter",
+            Operation::DropField { .. } => "drop",
+            _ => "constrain",
+        }
+    )))
+}
+
 /// Forget a table's stored settings: delete its `_sc_tables` row, drop the
 /// row-level-security policies if the row was what turned them on, and notify
 /// the observers.
@@ -550,6 +601,18 @@ pub async fn forget_table_settings(catalog: &Catalog, table: &str) -> Result<boo
     let Some(meta) = load_table_meta_by_name(catalog, table).await? else {
         return Ok(false);
     };
+    // A **provided** table's row is not settings, it is the table (§8.3), so
+    // "forget the settings" would delete the table — which is a different verb
+    // with a different confirmation, and is `provided_tables::forget`. Refused
+    // by name rather than obeyed.
+    if let Some(def) = meta.provider() {
+        return Err(Error::invalid(format!(
+            "`{table}` is served by the table provider `{}` of `{}`, and its stored row is the \
+             table's whole definition rather than settings added to it: forgetting it would \
+             delete the table. Delete the table instead if that is what you meant.",
+            def.provider, def.module
+        )));
+    }
     if !sc_catalog::delete_table_meta(catalog, meta.id).await? {
         return Ok(false);
     }
@@ -977,6 +1040,22 @@ impl Plan {
                     "table `{table}` lives in database connection `{}`; \
                      row-level security applies to Saltcorn's own database only",
                     projected.database.0
+                )));
+            }
+            // And not on a **provided** table (§8.3), for the sharper version of
+            // the same reason: there is no table in any database for
+            // `CREATE POLICY` to name. Its ownership *formula* still works —
+            // that is a filter this system applies, and it applies to a
+            // provider's rows like any other — so only the database's own
+            // enforcement is refused.
+            if enabled
+                && let Some(projected) = self.projection.get(table)
+                && let Some((module, provider)) = projected.provider()
+            {
+                return Err(Error::invalid(format!(
+                    "table `{table}` is served by the table provider `{provider}` of \
+                     `{module}`; row-level security is enforced by the database, and this \
+                     table's rows are not in one. Its ownership formula still applies."
                 )));
             }
             meta.set_rls_enabled(enabled);
@@ -2027,7 +2106,7 @@ pub fn resolve_field_type(name: &str) -> Result<(TypeRef, Option<String>)> {
 /// Stricter than "not empty" on purpose: these names end up in DDL, in generated
 /// TypeScript, in REST paths and in a model's tool arguments, and a name that
 /// needs quoting in one of those is a bug waiting somewhere else.
-fn check_identifier(name: &str, what: &str) -> Result<()> {
+pub(crate) fn check_identifier(name: &str, what: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::invalid(format!("a {what} needs a name")));
     }

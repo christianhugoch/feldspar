@@ -333,7 +333,9 @@ server already links for code bodies. A server whose modules are already install
 JavaScript toolchain on its `PATH` at all. What that worker may reach is a
 permission set an admin grants on the Modules tab, closed until they do; the
 `npm install` that put the package there is not sandboxed. See
-[`docs/tutorial-modules.md`](docs/tutorial-modules.md).
+[`docs/tutorial-modules.md`](docs/tutorial-modules.md), and
+[`docs/tutorial-table-providers.md`](docs/tutorial-table-providers.md) for a module
+that supplies a **table** rather than an action.
 
 ---
 

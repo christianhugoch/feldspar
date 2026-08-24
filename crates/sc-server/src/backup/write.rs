@@ -129,7 +129,7 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
         zip.json(
             &format!("tables/{name}/table.json"),
             &json!({
-                "table": table_json(&table, rls),
+                "table": table_json(catalog, &table, rls),
                 "fields": fields,
                 "constraints": constraints,
             }),

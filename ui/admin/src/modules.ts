@@ -86,15 +86,29 @@ export function unsupportedSentence(module: Module): string | null {
   return `Also supplies ${parts.join(", ")}, which this version of Saltcorn does not load yet.`;
 }
 
-/** How a module's state reads in a badge: what it is, and the tone to use. */
+/** How a module's state reads in a badge: what it is, and the tone to use.
+ *
+ * A module may supply actions, table providers, or both, and the badge counts
+ * what it actually has: `@saltcorn/rss` is a plugin with no actions at all, and
+ * "0 actions" would read as "this module does nothing" about a module that
+ * serves a table. */
 export function moduleStatus(module: Module): {
   label: string;
   tone: "green" | "yellow" | "red";
 } {
   if (!module.loaded) return { label: "Not loaded", tone: "red" };
   if (module.issues.length > 0) return { label: "Loaded with issues", tone: "yellow" };
-  const count = module.actions.length;
-  return { label: count === 1 ? "1 action" : `${count} actions`, tone: "green" };
+  const parts: string[] = [];
+  const actions = module.actions.length;
+  const providers = module.table_providers.length;
+  if (actions > 0) parts.push(actions === 1 ? "1 action" : `${actions} actions`);
+  if (providers > 0) {
+    parts.push(providers === 1 ? "1 table provider" : `${providers} table providers`);
+  }
+  return {
+    label: parts.length === 0 ? "Loaded" : parts.join(", "),
+    tone: "green",
+  };
 }
 
 /** Whether a module has settings of its own to configure. */

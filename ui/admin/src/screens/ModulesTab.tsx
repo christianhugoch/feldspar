@@ -380,6 +380,23 @@ function ModuleCard({
           </>
         )}
 
+        {module.table_providers.length > 0 && (
+          <>
+            <div className="text-secondary mb-1">Table providers</div>
+            <ul className="list-unstyled mb-2">
+              {module.table_providers.map((provider) => (
+                <li key={provider}>
+                  <code>{provider}</code>
+                </li>
+              ))}
+            </ul>
+            <div className="text-secondary mb-2">
+              Create a table from one under Data → Tables → New table. Saltcorn reads its rows;
+              it does not write them.
+            </div>
+          </>
+        )}
+
         {census && <div className="text-secondary">{census}</div>}
 
         <div className="text-secondary mt-2">{permissionSummary(permissions)}</div>

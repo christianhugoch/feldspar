@@ -927,6 +927,89 @@ fn stub_http_server() -> (u16, std::thread::JoinHandle<()>) {
     (port, server)
 }
 
+#[tokio::test]
+async fn a_table_provider_declares_its_settings_its_columns_and_its_rows() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-provider", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+
+    let manifest = host
+        .load(name, &installer.package_dir(name), &json!({}), &closed())
+        .await
+        .unwrap();
+
+    // The manifest names the provider and the form its own
+    // `configuration_workflow` declares — flattened exactly as the module's own
+    // settings are.
+    assert_eq!(manifest.table_providers.len(), 1);
+    let provider = &manifest.table_providers[0];
+    assert_eq!(provider.name, "echo_rows");
+    let settings: Vec<&str> = provider
+        .config_fields
+        .iter()
+        .map(|f| f["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(settings, ["prefix", "count"], "{settings:?}");
+
+    // The columns are a *function* of the configuration, which is v1's second
+    // shape: with `count` set the provider presents a third column, and without
+    // it, two.
+    let bare = host
+        .provider_fields(name, "echo_rows", &json!({}))
+        .await
+        .unwrap();
+    let names_of = |fields: &[serde_json::Value]| -> Vec<String> {
+        fields
+            .iter()
+            .map(|f| f["name"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    assert_eq!(names_of(&bare), ["id", "name"]);
+    let configured = host
+        .provider_fields(name, "echo_rows", &json!({ "prefix": "row-", "count": 2 }))
+        .await
+        .unwrap();
+    assert_eq!(names_of(&configured), ["id", "name", "n"]);
+
+    // And the rows, with v1's `where`/`options` pair and the table's own name
+    // reaching `get_table`'s second argument.
+    let rows = host
+        .provider_rows(
+            name,
+            "echo_rows",
+            &json!({ "prefix": "row-", "count": 2 }),
+            "headlines",
+            &json!({ "id": 1 }),
+            &json!({ "limit": 5 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["name"], json!("row-1"));
+    assert_eq!(rows[0]["table_was"], json!("headlines"));
+    assert_eq!(rows[0]["asked"]["where"], json!({ "id": 1 }));
+    assert_eq!(rows[0]["asked"]["opts"], json!({ "limit": 5 }));
+
+    // A provider nobody supplies is a sentence naming it, not a silence.
+    let err = host
+        .provider_rows(
+            name,
+            "no_such_provider",
+            &json!({}),
+            "t",
+            &json!({}),
+            &json!({}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no_such_provider"), "{err}");
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
 /// This process's children, as their full command lines, read out of `/proc`.
 #[cfg(target_os = "linux")]
 fn children_of_this_process() -> Vec<String> {

@@ -10,14 +10,19 @@ export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };
 export type LoginResponse = { id: string; email: string; role: number };
-export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string }>;
+export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; issues: Array<string> } | null }>;
 export type CreateTableRequest = { name: string; database?: string | null };
-export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string };
+export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; issues: Array<string> } | null };
 export type CreateTableFromCsvRequest = { name: string; csv: string; database?: string | null };
-export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string }; inserted: number };
+export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; issues: Array<string> } | null }; inserted: number };
 export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean };
-export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string };
+export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; issues: Array<string> } | null };
 export type DropTableResponse = { dropped: string };
+export type ListTableProvidersResponse = Array<{ module: string; provider: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
+export type CreateProvidedTableRequest = { name: string; module: string; provider: string; configuration?: unknown | null };
+export type CreateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; issues: Array<string> } | null };
+export type UpdateProvidedTableRequest = { configuration: unknown };
+export type UpdateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; issues: Array<string> } | null };
 export type DeleteTableSettingsResponse = { deleted: boolean };
 export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean }>;
 export type ListRolesResponse = Array<{ role: number; name: string; description: string; builtin: boolean }>;
@@ -72,11 +77,11 @@ export type DeleteLlmProviderResponse = { deleted: boolean };
 export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
 export type TestLlmProviderRequest = { id?: string | null; backend: string; config: unknown; model?: string | null };
 export type TestLlmProviderResponse = { ok: boolean; message: string; model: string };
-export type ListModulesResponse = { modules: Array<{ id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; node: boolean };
+export type ListModulesResponse = { modules: Array<{ id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; node: boolean };
 export type InstallModuleRequest = { source: string; location: string };
-export type InstallModuleResponse = { id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type InstallModuleResponse = { id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type UpdateModuleRequest = { configuration?: unknown | null; permissions?: unknown | null };
-export type UpdateModuleResponse = { id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type UpdateModuleResponse = { id: string; name: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type DeleteModuleResponse = { deleted: boolean };
 export type ReloadModulesResponse = { modules: number };
 export type ListAgentsResponse = Array<{ id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null }>;
@@ -161,6 +166,9 @@ export interface ApiClient {
   createTableFromCsv(body: CreateTableFromCsvRequest): Promise<CreateTableFromCsvResponse>;
   updateTable(table: string, body: UpdateTableRequest): Promise<UpdateTableResponse>;
   dropTable(table: string): Promise<DropTableResponse>;
+  listTableProviders(): Promise<ListTableProvidersResponse>;
+  createProvidedTable(body: CreateProvidedTableRequest): Promise<CreateProvidedTableResponse>;
+  updateProvidedTable(table: string, body: UpdateProvidedTableRequest): Promise<UpdateProvidedTableResponse>;
   deleteTableSettings(table: string): Promise<DeleteTableSettingsResponse>;
   listOrphanTableSettings(): Promise<ListOrphanTableSettingsResponse>;
   listRoles(): Promise<ListRolesResponse>;
@@ -332,6 +340,32 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("dropTable", res);
       return (await res.json()) as DropTableResponse;
+    },
+    async listTableProviders() {
+      const res = await doFetch(`${baseUrl}/api/table-providers`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listTableProviders", res);
+      return (await res.json()) as ListTableProvidersResponse;
+    },
+    async createProvidedTable(body) {
+      const res = await doFetch(`${baseUrl}/api/tables/provided`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createProvidedTable", res);
+      return (await res.json()) as CreateProvidedTableResponse;
+    },
+    async updateProvidedTable(table, body) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/provider`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateProvidedTable", res);
+      return (await res.json()) as UpdateProvidedTableResponse;
     },
     async deleteTableSettings(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/settings`, {
