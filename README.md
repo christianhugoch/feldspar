@@ -60,7 +60,9 @@ sudo apt install -y build-essential pkg-config git curl ca-certificates \
   They are needed **twice**: once at build time, for the two front-end bundles (§6),
   and again at run time — the server itself runs `npm` whenever an application is
   installed or built, from the admin UI's **Build** button or from
-  `saltcorn build-app` (§7).
+  `saltcorn build-app` (§7), and whenever a module is installed. It never runs
+  `node`: an application's bundle is built by npm, and a module runs on a
+  JavaScript worker inside the `saltcorn` process.
 
 The build needs outbound network for cargo's crates and a prebuilt V8, but nothing
 listens on the internet until §2.7.
@@ -310,7 +312,7 @@ database (§7).
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `saltcorn` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
-| **Node.js + npm** | Node 18+ | building the admin UI bundle (optional; see §6), **and** installing and running modules (Settings → Modules) |
+| **npm** (and the Node.js it ships with) | Node 18+ | building the admin UI bundle (optional; see §6), **and** *installing* modules (Settings → Modules) |
 
 Install Rust via [rustup](https://rustup.rs/):
 
@@ -319,11 +321,19 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustc --version   # must be >= 1.85
 ```
 
-Node is required for two things, both optional. Without it the server still runs
+npm is required for two things, both optional. Without it the server still runs
 and its JSON API works, but the browser UI will be a blank bootstrap page (see §6
 and §10 Troubleshooting), and **modules** — Saltcorn v1 plugins, which are npm
-packages that run in a Node process beside the server — cannot be installed or
-loaded. A deployment that installs no module never starts that process.
+packages — cannot be installed.
+
+**`node` is not a runtime requirement.** npm is the *installer*; a module then runs
+on a JavaScript worker inside the `saltcorn` process itself, on the same V8 the
+server already links for code bodies. A server whose modules are already installed
+— a container image built elsewhere, a deployment that never adds one — needs no
+JavaScript toolchain on its `PATH` at all. What that worker may reach is a
+permission set an admin grants on the Modules tab, closed until they do; the
+`npm install` that put the package there is not sandboxed. See
+[`docs/tutorial-modules.md`](docs/tutorial-modules.md).
 
 ---
 
@@ -880,6 +890,17 @@ things keep that from taking the machine with it:
   taking the scrollback that would have explained it. The wrapper gives the build
   its own cgroup so only the build can be killed. It falls back to plain `cargo`
   where systemd is not available.
+
+- **`-j 4` for `sc-server`'s test build.** Since the module runtime landed, each of
+  `sc-server`'s ~47 test binaries maps a much larger set of rlibs at link time, and
+  the default parallelism under the wrapper's 10 GB `MemoryHigh` puts all of them in
+  continuous reclaim — a build that makes no progress rather than one that fails.
+  Either cap the jobs or raise the ceiling:
+
+  ```bash
+  ./scripts/cargo-guarded.sh test -p sc-server --no-run -j 4
+  SC_BUILD_MEM_HIGH=16G ./scripts/cargo-guarded.sh test -p sc-server --no-run
+  ```
 
 Note also that `target/` is not garbage-collected by cargo: every rebuild leaves
 the previous hashed test binaries behind, and at ~150 MB each across ~110 targets

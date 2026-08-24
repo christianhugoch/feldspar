@@ -4,12 +4,14 @@
 //! What is asserted here and nowhere else is the **live** part: installing a
 //! module through the API makes its action available to a trigger *on the server
 //! that is already running*, with no restart, and deleting the module takes it
-//! away again. That claim spans the installer, the Node host, the action
+//! away again. That claim spans the installer, the module host, the action
 //! registry, the dispatcher and the row layer, so the HTTP boundary is the only
 //! place it can be pinned.
 //!
-//! Everything here needs `node` and `npm`, and skips without them — a Rust-only
-//! checkout stays green, as it does for the `tsc` tests.
+//! Everything here needs `npm`, which is what *installs* a module, and skips
+//! without it — a Rust-only checkout stays green, as it does for the `tsc`
+//! tests. `node` is not needed: a module runs on a Deno worker in this process,
+//! and `modules_no_node.rs` is the test that says so with the `PATH` stripped.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
@@ -50,10 +52,10 @@ fn have(program: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-macro_rules! skip_without_node {
+macro_rules! skip_without_npm {
     () => {
-        if !have("node") || !have("npm") {
-            eprintln!("skipping: node and npm are not both on the PATH");
+        if !have("npm") {
+            eprintln!("skipping: npm is not on the PATH");
             return Ok(());
         }
     };
@@ -224,7 +226,7 @@ async fn install_echo(client: &mut Client) -> Value {
 
 #[tokio::test]
 async fn a_module_is_installed_listed_configured_and_deleted() -> sc_error::Result<()> {
-    skip_without_node!();
+    skip_without_npm!();
     let mut server = setup("crud").await?;
     let client = &mut server.client;
 
@@ -334,7 +336,7 @@ async fn a_module_is_installed_listed_configured_and_deleted() -> sc_error::Resu
 #[tokio::test]
 async fn a_modules_permissions_are_closed_on_install_and_granted_by_an_admin()
 -> sc_error::Result<()> {
-    skip_without_node!();
+    skip_without_npm!();
     let mut server = setup("permissions").await?;
     let client = &mut server.client;
 
@@ -414,7 +416,7 @@ async fn a_modules_permissions_are_closed_on_install_and_granted_by_an_admin()
 
 #[tokio::test]
 async fn a_modules_action_becomes_available_to_a_trigger_with_no_restart() -> sc_error::Result<()> {
-    skip_without_node!();
+    skip_without_npm!();
     let mut server = setup("trigger").await?;
 
     // Before the module is installed, its action is not one a trigger may name.
@@ -493,7 +495,7 @@ async fn a_modules_action_becomes_available_to_a_trigger_with_no_restart() -> sc
 #[tokio::test]
 async fn a_module_that_claims_a_built_ins_name_is_reported_and_does_not_take_it()
 -> sc_error::Result<()> {
-    skip_without_node!();
+    skip_without_npm!();
     let mut server = setup("clash").await?;
 
     let (status, installed) = server
@@ -533,7 +535,7 @@ async fn a_module_that_claims_a_built_ins_name_is_reported_and_does_not_take_it(
 
 #[tokio::test]
 async fn installing_a_module_is_admin_only() -> sc_error::Result<()> {
-    skip_without_node!();
+    skip_without_npm!();
     let server = setup("auth").await?;
     // A fresh client with no session: every module endpoint is configuration,
     // and configuration is admin-only.
@@ -549,5 +551,114 @@ async fn installing_a_module_is_admin_only() -> sc_error::Result<()> {
             "{method} {path} answered {status}"
         );
     }
+    Ok(())
+}
+
+/// Specification §1, asserted where both pools actually exist: **a runaway
+/// module costs its own worker and nobody else's.**
+///
+/// This is the whole reason the module pool is a second pool rather than the
+/// `CodeRuntime` isolates. The JS-slice watchdog is the only instrument that
+/// stops JavaScript and a blunt one — it stops the isolate and everything
+/// resident on it — so a module spinning on a shared pool would be a trigger's
+/// code body waiting behind it, or worse, being stopped with it.
+///
+/// A module action that never yields is fired and left running. While it is
+/// still running, code bodies are fired through the same server and every one of
+/// them is answered. Then the runaway is collected: the slice stopped it, by
+/// name, and it outlived every body that overtook it — which is what says the
+/// bodies were not simply quick enough to have finished first.
+#[tokio::test]
+async fn a_runaway_module_does_not_delay_a_code_body() -> sc_error::Result<()> {
+    skip_without_npm!();
+    let mut server = setup("pools").await?;
+    install_echo(&mut server.client).await;
+
+    // A table for the triggers to hang off, as the trigger test does.
+    server
+        .catalog
+        .create_table(
+            "books",
+            &[
+                DataField::plain("id", TypeRef::Basic(BasicType::Int))
+                    .required()
+                    .primary_key(),
+                DataField::plain("title", TypeRef::Basic(BasicType::Text)),
+            ],
+        )
+        .await?;
+
+    let mut spin = Trigger::new("spin", EventKind::Insert, "echo_spin");
+    spin.channel = Some("books".into());
+    sc_action::save_trigger(&server.catalog, &server.dispatcher.registry(), &spin).await?;
+    let mut body = Trigger::new("compute", EventKind::Insert, "run_js_code");
+    body.channel = Some("books".into());
+    body.configuration
+        .insert("code".into(), json!("return payload.n * 2;"));
+    sc_action::save_trigger(&server.catalog, &server.dispatcher.registry(), &body).await?;
+    server.dispatcher.reload(&server.catalog).await?;
+
+    // Off it goes, and it will not come back until the module pool's JS slice
+    // stops it — ten seconds, which is a bound the server sets and this test
+    // deliberately does not turn down: what is under test is the *default*
+    // arrangement.
+    let dispatcher = Arc::clone(&server.dispatcher);
+    let catalog = Arc::clone(&server.catalog);
+    let runaway = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let err = dispatcher
+            .run_trigger(&catalog, "spin", json!({}), None)
+            .await
+            .unwrap_err();
+        (started.elapsed(), err.to_string())
+    });
+    // Long enough that the module's JavaScript is certainly running rather than
+    // still being dispatched: what follows has to overtake a *running* isolate.
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+
+    let started = std::time::Instant::now();
+    for n in 0..5 {
+        let value = server
+            .dispatcher
+            .run_trigger(&server.catalog, "compute", json!({ "n": n }), None)
+            .await?;
+        assert_eq!(value, json!(n * 2));
+    }
+    let bodies_took = started.elapsed();
+    // A code body's own wall clock is five seconds and five of them ran in
+    // series, so anything near that would mean they had queued behind something.
+    assert!(
+        bodies_took < std::time::Duration::from_secs(3),
+        "five code bodies took {bodies_took:?} while a module was spinning"
+    );
+
+    let (runaway_took, err) = runaway.await.expect("the runaway task");
+    assert!(err.contains("without yielding"), "{err}");
+    assert!(
+        runaway_took > bodies_took,
+        "the module stopped after {runaway_took:?} and the bodies took {bodies_took:?}: \
+         they did not overlap, so this proves nothing"
+    );
+
+    // Both pools are still serving afterwards: the runaway cost its own worker,
+    // which was replaced, and the code pool never noticed.
+    assert_eq!(
+        server
+            .dispatcher
+            .run_trigger(&server.catalog, "compute", json!({ "n": 21 }), None)
+            .await?,
+        json!(42)
+    );
+    let value = server
+        .modules
+        .host()
+        .run(
+            "@saltcorn-test/echo",
+            "echo_row",
+            json!({ "row": {}, "configuration": { "greeting": "still here" } }),
+        )
+        .await?;
+    assert_eq!(value["greeting"], json!("still here"));
+
     Ok(())
 }

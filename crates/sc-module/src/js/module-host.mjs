@@ -252,7 +252,8 @@ const loading = new Map();
  * admin knows what they are not getting. */
 const supportedKeys = new Set(["actions", "configuration_workflow", "functions"]);
 
-/** Keys that are metadata rather than an entity type. */
+/** Keys that are metadata rather than an entity type — including `onLoad`,
+ * which is not an entity but a hook, and is called by `loadModule`. */
 const metadataKeys = new Set([
   "sc_plugin_api_version",
   "plugin_name",
@@ -400,6 +401,27 @@ async function loadModule({ module: name, dir, configuration }) {
     throw e;
   }
   const issues = [];
+
+  // v1's `onLoad(configuration)`, which is where a plugin builds the state its
+  // actions close over. `@saltcorn/mqtt` is the whole argument for calling it:
+  // its `mqtt_publish` publishes through a module-level `client` that **only**
+  // `onLoad` ever assigns, so a host that skips this has a module whose one
+  // action always throws. Awaited, so a module that connects at load has
+  // started connecting before the first action runs.
+  //
+  // A failure here is an **issue**, not a refusal: the rest of the module is
+  // already readable, and the Modules tab saying "its onLoad failed, and here
+  // is what it said" is more use to an admin than a module that will not
+  // install. This is also the one place a module's own network is reached
+  // without a call behind it, so a permission denial is what an admin most
+  // often sees here — and it arrives with the module's name on it either way.
+  if (typeof plugin.onLoad === "function") {
+    try {
+      await plugin.onLoad(configuration || {});
+    } catch (e) {
+      issues.push(`the module's onLoad() failed: ${e.message}`);
+    }
+  }
 
   const actionsExport = plugin.actions;
   let actionSet = {};

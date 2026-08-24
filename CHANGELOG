@@ -2,6 +2,66 @@
 
 Changes in reverse chronological order.
 
+## Modules in-process, phases 4 and 5: the tests, and the documentation
+
+The milestone's definition of done, asserted rather than asserted about: **a server with
+`@saltcorn/mqtt` installed has no `node` process, `node` is not on its `PATH`, and a trigger
+wired to `mqtt_publish` publishes.** Every clause of that sentence is now a test.
+
+- **`@saltcorn/mqtt` publishes to a real broker, and the test watches it arrive.** npm installs
+  the package from the registry, `require("async-mqtt")` resolves out of the modules root
+  through byonm, the module opens a socket from inside a Deno worker that was granted exactly
+  one `host:port`, and the action publishes — while a subscriber in the test, thirty lines of
+  MQTT 3.1.1 over a `TcpStream` rather than a crate, reads the message off the wire. Skipped
+  unless `SC_TEST_MQTT_BROKER` names a broker: a test suite does not get to require one.
+- **`onLoad` is called, which it was not, and the definition of done needed it.** Writing that
+  test found the gap: `@saltcorn/mqtt`'s `mqtt_publish` publishes through a module-level
+  `client` that **only** v1's `onLoad(configuration)` hook ever assigns, so a host that skipped
+  the hook had a module whose one action always threw. `loadModule` now calls it, awaited,
+  before the actions are collected, and a reload calls it again with what changed — which is
+  what a module holding a connection has to be told. A failure there is an issue on the card,
+  not a refusal: the rest of the module is already readable, and "its onLoad failed, and here
+  is what it said" is more use to an admin than a module that will not install.
+- **The server serves a module with `node` off the `PATH`.** Its own test binary, because
+  `PATH` is process-wide: npm installs the package, the `PATH` is then emptied — `node` and
+  `npm` both unreachable, asserted — and only *then* does the server's module machinery come
+  up and a trigger fire into the module. The claim `sc-module`'s suite makes from the inside
+  ("no sidecar process is running") now has the outside half to go with it.
+- **A runaway module does not delay a code body**, asserted where both pools exist. A module
+  action that never yields is left running; while it is, five code bodies are fired through the
+  same server and every one is answered in well under the time the runaway takes to be stopped.
+  The test compares the two durations rather than trusting them separately, so "they did not
+  overlap" fails it. This is §1's whole argument for a second pool, and it was the one claim in
+  the milestone with no test on it.
+- **A co-resident module survives its neighbour's exit.** Two modules on one worker because
+  they were granted the same things; one calls `process.exit()`. The exiting call fails by name
+  rather than waiting out the 120-second clock, the co-resident answers on a worker rebuilt
+  underneath it, the exiting module comes back with the configuration it was loaded with, and
+  the pool is still one worker. What the co-resident does *not* keep is its module-level state —
+  it was on the isolate that died — and that is the price of sharing a worker, stated rather
+  than discovered.
+- **The existing suites pass unchanged.** `host.rs`, `install.rs`, `module_actions.rs` and
+  `module_store.rs` needed no edit against the new runtime, which is what they were for.
+  `modules_api.rs` needed one: it skipped without `node && npm` and now skips without `npm`
+  alone, because that is the behaviour change this milestone exists to make.
+
+The documentation catches up with all five phases:
+
+- **§15.1 is rewritten.** It argued *for* the sidecar and named `deno_runtime` as the thing it
+  was not; it now describes what the module runtime is — a second pool beside the code
+  isolates, and the coupling argument rather than the memory one, because phase 0 measured the
+  saving at ~45 MB and one process — what `process.exit()` costs, what `functions` are and how
+  a formula hoists one, and, in place of the paragraph that said there is no sandbox, one that
+  says precisely which half is sandboxed and which half is not.
+- **`docs/tutorial-modules.md`** gains a permissions step (the four lists, that a port is part
+  of the permission, that editing them restarts the module, and what a denial reads like) and a
+  functions step (`await modfn.md_to_html(x)` in a code body, `md_to_html(notes)` in a formula,
+  what will not hoist, and why an ownership formula refuses outright). `node` is no longer named
+  as something the server needs.
+- **`README.md`** stops asking for Node as a runtime requirement — npm installs, the server
+  runs — and §10 records the `-j 4` that `sc-server`'s test build has needed since
+  `deno_runtime` landed.
+
 ## Modules in-process, phase 3: permissions
 
 §15.1 used to end "Installing a module runs arbitrary code as the server … There is no

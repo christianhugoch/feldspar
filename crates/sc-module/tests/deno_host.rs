@@ -81,6 +81,68 @@ async fn a_module_loads_and_runs_in_this_process() {
     let _ = std::fs::remove_dir_all(installer.root());
 }
 
+/// v1's `onLoad(configuration)`, which is called and which the milestone's
+/// definition of done depends on.
+///
+/// `@saltcorn/mqtt` is the reason: its `mqtt_publish` publishes through a
+/// module-level `client` that only `onLoad` assigns, so "a trigger wired to
+/// `mqtt_publish` publishes" is false in any host that does not call it. The
+/// fixture stands in for it here — the real module has a test of its own,
+/// against a real broker, and it needs one to be running.
+#[tokio::test]
+async fn a_modules_on_load_hook_runs_with_its_configuration() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (installer, host, names) =
+        installed_on_deno("deno-onload", &["echo-module"], 1, default_bounds()).await;
+    let name = &names[0];
+
+    let manifest = host
+        .load(
+            name,
+            &installer.package_dir(name),
+            &json!({ "endpoint": "https://echo.example" }),
+            &closed(),
+        )
+        .await
+        .unwrap();
+    // A hook is not an entity type, so it is not in the census of what this
+    // version does not load — it is loaded.
+    let census: Vec<&str> = manifest
+        .unsupported
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
+    assert!(!census.contains(&"onLoad"), "{census:?}");
+    assert!(manifest.issues.is_empty(), "{:?}", manifest.issues);
+
+    // It ran, before any action did, and it was handed the module's own stored
+    // configuration rather than an empty object.
+    let value = host.run(name, "echo_loaded", json!({})).await.unwrap();
+    assert_eq!(
+        value["loaded_with"]["endpoint"],
+        json!("https://echo.example")
+    );
+
+    // And a reload runs it again with what changed, because that is what a
+    // module holding a connection has to be told.
+    host.load(
+        name,
+        &installer.package_dir(name),
+        &json!({ "endpoint": "https://elsewhere.example" }),
+        &closed(),
+    )
+    .await
+    .unwrap();
+    let value = host.run(name, "echo_loaded", json!({})).await.unwrap();
+    assert_eq!(
+        value["loaded_with"]["endpoint"],
+        json!("https://elsewhere.example")
+    );
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
 /// Phase 2a: v1's `functions`, in all three shapes v1 allows.
 ///
 /// One `load` reports them with their declared signatures, and one `call` runs
@@ -650,6 +712,91 @@ async fn a_runaway_module_is_stopped_by_the_js_slice() {
         .await
         .unwrap();
     assert_eq!(value["greeting"], json!("still here"));
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
+/// Phase 4: `echo_exit` with a **co-resident**, which is the case the sidecar
+/// used to handle and the one most easily lost by moving in-process.
+///
+/// Two modules on one worker, because they were granted the same thing: one of
+/// them calls `process.exit()`. What has to happen is four things at once — the
+/// exiting call is failed **by name** rather than waiting out the wall clock,
+/// the co-resident module still answers, the module that exited answers again
+/// on a worker whose loads have been replayed, and the process running all of
+/// this is still here to be asked.
+///
+/// What the co-resident does *not* keep is its module-level state: it was
+/// resident on the isolate that died, and a replay is a fresh `require`. That
+/// is the price of sharing a worker, it is the sidecar's price too — where the
+/// unit was the whole process rather than one worker — and it is why a module
+/// worth isolating is isolated by giving it a permission set of its own.
+#[tokio::test]
+async fn a_co_resident_module_survives_its_neighbours_exit() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    // One worker per permission set and both sets closed, so the two fixtures
+    // are co-resident by construction rather than by luck.
+    let (installer, host, names) = installed_on_deno(
+        "deno-exit-shared",
+        &["echo-module", "clash-module"],
+        1,
+        default_bounds(),
+    )
+    .await;
+    let echo = names
+        .iter()
+        .find(|n| n.contains("echo"))
+        .expect("the echo fixture")
+        .clone();
+    let other = names
+        .iter()
+        .find(|n| **n != echo)
+        .expect("the other fixture")
+        .clone();
+    for name in [&echo, &other] {
+        host.load(
+            name,
+            &installer.package_dir(name),
+            &json!({ "endpoint": "shared" }),
+            &closed(),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(host.worker_of(&echo).await, host.worker_of(&other).await);
+    assert_eq!(host.workers().await, 1);
+
+    // The exiting call is lost, by name.
+    let err = host.run(&echo, "echo_exit", json!({})).await.unwrap_err();
+    assert!(
+        err.to_string().contains("process.exit"),
+        "the failure should name what happened: {err}"
+    );
+
+    // The co-resident answers — on a worker that was rebuilt underneath it, with
+    // its load replayed, which is what makes this an interruption rather than an
+    // uninstall.
+    assert_eq!(
+        host.run(&other, "clash_ok", json!({})).await.unwrap(),
+        json!("fine")
+    );
+    // And so does the module that exited, still carrying the configuration it
+    // was loaded with.
+    let value = host
+        .run(
+            &echo,
+            "echo_row",
+            json!({ "row": {}, "configuration": { "greeting": "back" } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value["greeting"], json!("back"));
+    assert_eq!(value["module_config"]["endpoint"], json!("shared"));
+
+    // One worker still, not one per restart, and the pool answers.
+    assert_eq!(host.workers().await, 1);
+    assert_eq!(host.ping().await.unwrap()["pong"], json!(true));
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());

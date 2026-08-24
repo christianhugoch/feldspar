@@ -839,33 +839,112 @@ save of one must not clear the other.
 
 ## Phase 4 — Tests
 
-- [ ] `sc-module`'s existing suites (`host.rs`, `install.rs`, `module_actions.rs`,
+- [x] `sc-module`'s existing suites (`host.rs`, `install.rs`, `module_actions.rs`,
       `module_store.rs`) pass unchanged against the new runtime. They are the specification of
       what a module host does and they should not need editing; anything that does need editing
       is a behaviour change that has to be justified here.
-- [ ] A test that no `node` process exists while a module runs, and that the server starts and
+- [x] A test that no `node` process exists while a module runs, and that the server starts and
       serves a module with `node` removed from `PATH` (npm is still needed to *install*).
-- [ ] `echo_exit`: the worker dies, its in-flight call is failed by name, the co-resident
+- [x] `echo_exit`: the worker dies, its in-flight call is failed by name, the co-resident
       module's call is answered, the next call succeeds against a replayed worker, and the
       server is still up.
-- [ ] A runaway module (a `while(true)`) is stopped by the JS slice, costs its own worker, and
+- [x] A runaway module (a `while(true)`) is stopped by the JS slice, costs its own worker, and
       does not delay a code body on the `CodeRuntime` pool — the two pools are independent and a
       test should say so.
-- [ ] A permission test: a module denied the filesystem cannot read the modules root; a module
+- [x] A permission test: a module denied the filesystem cannot read the modules root; a module
       allowed one host cannot reach a second.
-- [ ] An integration test against a real broker for `@saltcorn/mqtt` (the spike proves this
+- [x] An integration test against a real broker for `@saltcorn/mqtt` (the spike proves this
       works; the suite should keep it working), skipped when no broker is configured.
+
+### What the tests found, which is the point of writing them
+
+**`onLoad` was never called, and the milestone's definition of done needed it.** The list has
+said since its first line that the milestone is done when "a trigger wired to `mqtt_publish`
+publishes". It did not. `@saltcorn/mqtt`'s one action publishes through a module-level `client`
+that **only** v1's `onLoad(configuration)` hook ever assigns, and `module-host.mjs` had `onLoad`
+in `metadataKeys` — counted as "not an entity type", which is true, and then never called, which
+was the gap. Phase 0 saw the symptom and read it as something else: its note that "a `run`
+request against `mqtt_publish` produced the same error … under both" is *this*, and it was the
+same under `node` because the host, not the runtime, is what skips the hook.
+
+`loadModule` now awaits it before the actions are collected, and a reload calls it again — which
+is what a module holding a connection has to be told; `@saltcorn/mqtt`'s own hook ends the old
+client first. A failure is an **issue** on the card rather than a refusal, for the reason every
+other step in the load path reports rather than fails.
+
+**The broker test verifies a message, not a call that returned.** `mqtt_publish` does not await
+its own publish, so "the action succeeded" says nothing. The test subscribes first, over a raw
+`TcpStream` speaking MQTT 3.1.1 by hand — a CONNECT, a SUBSCRIBE and a read — and asserts the
+bytes arrived. Thirty lines, and no dependency the workspace carries for a test that is skipped
+by default. Verified here against `aedes`: the module connected, subscribed, published, and the
+subscriber read `{"id":7,"title":"Dune"}` off the wire.
+
+Two things it also settles, which the fixtures cannot:
+
+- `cluster.isMaster` is **truthy** under Deno's `node:cluster`, so `@saltcorn/mqtt` takes the
+  branch that subscribes and registers a `message` handler. Nothing depends on it here, but a
+  module that reads `cluster` gets the primary's behaviour and should be expected to.
+- A module that receives a message hands it to the `Trigger.emitEvent` stub, which throws by
+  design — the third tier, doing exactly what it exists to do. The test points the module's
+  `subscribe_channels` at a channel nobody publishes on, because what is under test is the
+  publish.
+
+**The `node`-off-the-`PATH` test is its own binary**, because `PATH` is process-wide and
+`modules_api.rs`'s tests run `npm`. It installs first, empties the `PATH` (asserting both `node`
+and `npm` are then unreachable), and only then brings the server's module machinery up and fires
+a trigger into the module.
+
+**The two-pool test compares durations rather than trusting them.** A runaway module action is
+left running and five code bodies are fired past it; asserting only that the bodies were quick
+would pass if the runaway had already finished, so the test also asserts the runaway outlived
+them. It runs against the **default** bounds — a ten-second slice, not one turned down for the
+test — because what is under test is the arrangement a server actually runs.
+
+**"Co-resident" is honest about what it costs.** Two modules on one worker, one exits: the
+exiting call fails by name, the neighbour answers, and both come back. What the neighbour does
+not keep is its module-level state, because it was on the isolate that died. That is the price
+of sharing a worker, it is the price the single sidecar charged for the whole process, and it is
+why a module worth isolating is isolated by granting it a permission set of its own.
+
+**One edit to an existing suite, and it is the milestone's own behaviour change.**
+`modules_api.rs` skipped without `node && npm` and now skips without `npm`. The `sc-module`
+suites needed none.
 
 ## Phase 5 — Documentation
 
-- [ ] `docs/TECHNICAL_DESIGN.md` §15.1: rewritten. The section currently argues *for* the
+- [x] `docs/TECHNICAL_DESIGN.md` §15.1: rewritten. The section currently argues *for* the
       sidecar and names `deno_runtime` as the thing it is not; both halves change, and the
       paragraph that says there is no sandbox is replaced by one that says precisely what is
       sandboxed and what is not.
-- [ ] `docs/tutorial-modules.md`: `node` is no longer a runtime requirement, npm still is, and
+- [x] `docs/tutorial-modules.md`: `node` is no longer a runtime requirement, npm still is, and
       the permissions screen.
-- [ ] `README.md`: the requirements table.
-- [ ] CHANGELOG entry.
+- [x] `README.md`: the requirements table.
+- [x] CHANGELOG entry.
+
+### What was written
+
+§15.1's title was "v1 plugins, in a Node sidecar" and is now "on a Deno worker in this process".
+The rewrite carries **the coupling argument rather than the memory one**, as the phase 0 gate's
+first amendment required: merging the pools is still wrong because a module is long-lived state
+and a code isolate is disposable, and the measured saving is ~45 MB and one process, which is
+not an argument for anything. It also gains what phases 2a and 3 added — `functions` as the
+fifth host surface, the formula hoist, `process.exit()`, byonm, `onLoad` — and the paragraph
+that said "There is no sandbox" is now two bullets: running a module is sandboxed, installing
+one is not.
+
+The tutorial gains a **permissions step** (the four lists; that a port is part of the
+permission; that editing them restarts the module and costs it its sockets; that a denial is a
+sentence naming the module, what it wanted and where to allow it; and that an ungranted
+environment variable reads as `undefined` rather than throwing) and a **functions step**
+(`await modfn.md_to_html(x)` in a code body — including the `await` on a function v1 wrote
+synchronously — `md_to_html(notes)` in a formula, what will not hoist and is refused on save,
+and why an ownership formula refuses outright). Its quoted screens and error text are copied
+from what the code actually produces rather than invented.
+
+`README.md`'s prerequisites now ask for **npm** rather than Node: npm installs a module, the
+server runs it, and a deployment whose modules are already installed needs no JavaScript
+toolchain on its `PATH`. §10 records the `-j 4` that `sc-server`'s test build has needed since
+`deno_runtime` landed, which phase 1 measured and left for this phase.
 
 ---
 

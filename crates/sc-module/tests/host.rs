@@ -501,3 +501,212 @@ async fn the_real_mqtt_module_installs_from_npm_and_supplies_its_action() {
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The milestone's **definition of done**, against a real broker: a wired
+/// `mqtt_publish` publishes, and a subscriber sees the message.
+///
+/// Skipped unless a broker is configured, because a test suite does not get to
+/// require a message broker. Point `SC_TEST_MQTT_BROKER` at one — for example
+/// `SC_TEST_MQTT_BROKER=mqtt://127.0.0.1:1883` — and this runs; it reaches the
+/// npm registry too, which is the same opt-in.
+///
+/// What it pins that the fixtures cannot is the whole road at once: npm
+/// installs a v1 plugin written years ago, `require("async-mqtt")` resolves out
+/// of the modules root through byonm, `onLoad` opens a **real socket** from
+/// inside a Deno worker that was granted exactly that one host and nothing
+/// else, and the action publishes through the client `onLoad` left behind. With
+/// no `node` running any of it.
+///
+/// The subscriber is thirty lines of MQTT 3.1.1 over a `TcpStream` rather than a
+/// crate: the assertion is that a byte arrived at a broker, and a dependency
+/// that only a skipped test would use is a dependency the workspace should not
+/// carry.
+#[tokio::test]
+async fn the_real_mqtt_module_publishes_to_a_real_broker() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let Ok(broker) = std::env::var("SC_TEST_MQTT_BROKER") else {
+        eprintln!("skipping: SC_TEST_MQTT_BROKER names no broker");
+        return;
+    };
+    let (broker_host, broker_port) = split_broker(&broker);
+    let topic = format!("saltcorn/test/{}", std::process::id());
+
+    // Subscribed *before* the module publishes, because a QoS 0 message nobody
+    // is listening for is a message that never existed.
+    let mut subscriber = mqtt_subscriber(&broker_host, broker_port, &topic);
+
+    let root = temp_root("host-mqtt-broker");
+    let installer = Installer::new(&root);
+    let package = installer
+        .install(ModuleSource::Npm, "@saltcorn/mqtt")
+        .await
+        .unwrap();
+
+    let host = ModuleHost::new(&root);
+    let manifest = host
+        .load(
+            &package.name,
+            &installer.package_dir(&package.name),
+            &json!({
+                "broker_url": broker_host.clone(),
+                "protocol": "mqtt",
+                "port": broker_port,
+                // A channel nobody publishes on. `subscribe_channels` is
+                // required by the module's own settings form, and pointing it
+                // at the topic under test would have the module receive its own
+                // message and hand it to the `Trigger.emitEvent` stub, which
+                // throws by design (§15.1's third tier). What is under test is
+                // the publish.
+                "subscribe_channels": format!("{topic}/inbox"),
+            }),
+            // The one thing it may reach. Everything else — the filesystem, the
+            // environment, a second broker — is closed, and this is the module
+            // the sidecar could never have said that about.
+            &sc_module::ModulePermissions {
+                net: vec![format!("{broker_host}:{broker_port}")],
+                ..sc_module::ModulePermissions::closed()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        manifest.issues.is_empty(),
+        "onLoad connected without complaint: {:?}",
+        manifest.issues
+    );
+
+    // The client connects asynchronously; mqtt.js queues a publish made before
+    // it is up, but the broker cannot deliver one that has not been sent.
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    host.run(
+        &package.name,
+        "mqtt_publish",
+        json!({
+            "row": { "id": 7, "title": "Dune" },
+            "configuration": { "channel": topic.clone() },
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (seen_topic, payload) = read_publish(&mut subscriber);
+    assert_eq!(seen_topic, topic);
+    let row: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(row["title"], json!("Dune"));
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `mqtt://host:port`, `host:port` or `host` — the host and the port a broker is
+/// on, defaulting to MQTT's own 1883.
+fn split_broker(url: &str) -> (String, u16) {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    match rest.rsplit_once(':') {
+        Some((host, port)) => (host.to_owned(), port.parse().unwrap_or(1883)),
+        None => (rest.to_owned(), 1883),
+    }
+}
+
+/// A connected MQTT 3.1.1 subscriber to one topic, at QoS 0.
+fn mqtt_subscriber(host: &str, port: u16, topic: &str) -> std::net::TcpStream {
+    use std::io::Write;
+
+    let mut stream = std::net::TcpStream::connect((host, port))
+        .unwrap_or_else(|e| panic!("connecting to the broker at {host}:{port}: {e}"));
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+
+    // CONNECT: protocol name, level 4, clean session, a 60-second keepalive and
+    // a client id nobody else on the broker will be using.
+    let client_id = format!("saltcorn-test-{}", std::process::id());
+    let mut body = vec![0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x3C];
+    put_string(&mut body, &client_id);
+    stream.write_all(&packet(0x10, &body)).unwrap();
+    let (kind, connack) = read_packet(&mut stream);
+    assert_eq!(kind & 0xF0, 0x20, "the broker did not answer CONNACK");
+    assert_eq!(
+        connack.get(1),
+        Some(&0),
+        "the broker refused the connection"
+    );
+
+    // SUBSCRIBE, packet id 1, QoS 0.
+    let mut body = vec![0x00, 0x01];
+    put_string(&mut body, topic);
+    body.push(0x00);
+    stream.write_all(&packet(0x82, &body)).unwrap();
+    let (kind, _) = read_packet(&mut stream);
+    assert_eq!(kind & 0xF0, 0x90, "the broker did not answer SUBACK");
+    stream
+}
+
+/// The next PUBLISH the broker sends: its topic and its payload as text.
+///
+/// Anything else the broker says on the way — a PINGRESP, a retained message on
+/// another topic — is skipped rather than mistaken for the answer.
+fn read_publish(stream: &mut std::net::TcpStream) -> (String, String) {
+    for _ in 0..8 {
+        let (kind, body) = read_packet(stream);
+        if kind & 0xF0 != 0x30 {
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([body[0], body[1]]));
+        let topic = String::from_utf8_lossy(&body[2..2 + length]).into_owned();
+        // QoS 0 only, so there is no packet identifier between the two.
+        let payload = String::from_utf8_lossy(&body[2 + length..]).into_owned();
+        return (topic, payload);
+    }
+    panic!("the broker sent no PUBLISH for the module's message");
+}
+
+/// A length-prefixed UTF-8 string, as every MQTT string is.
+fn put_string(into: &mut Vec<u8>, text: &str) {
+    let bytes = text.as_bytes();
+    let length = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+    into.extend_from_slice(&length.to_be_bytes());
+    into.extend_from_slice(bytes);
+}
+
+/// A whole packet: the type byte, the remaining length as a varint, the body.
+fn packet(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![kind];
+    let mut remaining = body.len();
+    loop {
+        let mut byte = u8::try_from(remaining % 128).unwrap_or(0);
+        remaining /= 128;
+        if remaining > 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if remaining == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+/// The next whole packet off the wire: its type byte and its body.
+fn read_packet(stream: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
+    use std::io::Read;
+
+    let mut one = [0u8; 1];
+    stream.read_exact(&mut one).expect("the broker hung up");
+    let kind = one[0];
+    let mut remaining = 0usize;
+    let mut shift = 1usize;
+    loop {
+        stream.read_exact(&mut one).expect("the broker hung up");
+        remaining += usize::from(one[0] & 0x7F) * shift;
+        if one[0] & 0x80 == 0 {
+            break;
+        }
+        shift *= 128;
+    }
+    let mut body = vec![0u8; remaining];
+    stream.read_exact(&mut body).expect("the broker hung up");
+    (kind, body)
+}

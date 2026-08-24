@@ -24,10 +24,18 @@ const configuration_workflow = () =>
     ],
   });
 
+// What v1's `onLoad` hook was handed, kept at module level so an action can say
+// whether it ran and with what. `@saltcorn/mqtt` builds its broker client here
+// and its one action would throw without it, which is why the host calls it.
+let loadedWith = "onLoad was never called";
+
 module.exports = {
   sc_plugin_api_version: 1,
   plugin_name: "echo",
   configuration_workflow,
+  onLoad: async (cfg) => {
+    loadedWith = cfg;
+  },
   actions: (cfg) => ({
     echo_row: {
       description: "Echo what the action was given",
@@ -83,6 +91,10 @@ module.exports = {
         loop.self = loop;
         return loop;
       },
+    },
+    echo_loaded: {
+      description: "What onLoad was handed, and whether it ran at all",
+      run: async () => ({ loaded_with: loadedWith }),
     },
     echo_exit: {
       description: "Take the host worker down",

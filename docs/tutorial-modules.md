@@ -4,14 +4,17 @@ Saltcorn's built-in actions are deliberately few. When you want a trigger that p
 MQTT broker, snapshots a Proxmox VM or talks to whatever else your building runs on, the answer
 is a **module**: a Saltcorn plugin, installed from the admin UI, live on a running server. The
 modules are the ones written for Saltcorn v1 — there are dozens of them, they are ordinary npm
-packages, and this version of Saltcorn loads the **actions** they supply.
+packages, and this version of Saltcorn loads the **actions** and the **functions** they supply.
 
 This continues from [tutorial-triggers.md](tutorial-triggers.md): you have a server, an admin
 login, and you know how a trigger binds an event to a configured action. Nothing here needs a
 table you do not already have.
 
-**Before you start**, the server needs Node.js and npm on its `PATH` — a module is JavaScript
-and it runs in a Node process beside the server. The Modules tab says so if they are missing.
+**Before you start**, the server needs **npm** on its `PATH`. That is what *installs* a module,
+and it is the only toolchain involved: a module **runs inside the Saltcorn process**, on a
+JavaScript worker the server already has, so there is no `node` process beside the server and
+`node` is not a runtime requirement. The Modules tab says as much when the toolchain is missing
+— nothing new can be installed, and whatever is already installed goes on running.
 
 ## What a module is
 
@@ -21,17 +24,22 @@ An npm package whose main file exports v1's plugin object:
 module.exports = {
   sc_plugin_api_version: 1,
   configuration_workflow,               // the module's own settings
+  onLoad: async (cfg) => { … },         // called, once, with the module's settings
   actions: (cfg) => ({                  // what this version loads
     mqtt_publish: { configFields: [...], run: async ({ row, configuration }) => { … } },
   }),
+  functions: { md_to_html: (m) => … },  // also loaded — callable from formulas and code
   eventTypes: () => ({ … }),            // reported, not loaded (yet)
 };
 ```
 
-Two of those keys are read: `actions`, whose entries become actions your triggers can run, and
-`configuration_workflow`, whose form becomes the module's own settings. Everything else — view
-templates, types, field views, table providers, event types — is **counted and named** in the
-tab so you can see what you are not getting, and is a later milestone.
+Three of those keys are read: `actions`, whose entries become actions your triggers can run;
+`functions`, whose entries become callable from a code body and a formula (step 5); and
+`configuration_workflow`, whose form becomes the module's own settings. `onLoad` is called too —
+that is where a plugin opens its connection, and `@saltcorn/mqtt`'s action would have nothing to
+publish through without it. Everything else — view templates, types, field views, table
+providers, event types — is **counted and named** in the tab so you can see what you are not
+getting, and is a later milestone.
 
 ## Step 1 — Install one
 
@@ -54,15 +62,19 @@ Actions
   mqtt_publish
 
 Also supplies eventTypes, which this version of Saltcorn does not load yet.
+
+Reaches nothing: no host, no file, no environment variable.
 ```
 
-That last line is the honest part: `@saltcorn/mqtt` also raises an `MqttReceive` event in v1,
-and here it does not. You get the action.
+Two honest lines there. `@saltcorn/mqtt` also raises an `MqttReceive` event in v1 and here it
+does not — you get the action. And it cannot reach your broker yet, which is step 3.
 
-> **Installing a module runs somebody else's code as your server.** `npm install` runs install
-> scripts, and the module itself runs in a Node process with the server's privileges and its
-> network. There is no sandbox in this version. Install modules you trust; the endpoints are
-> admin-only for the same reason.
+> **Installing a module runs somebody else's code as your server.** `npm install` runs the
+> package's install scripts with the server's privileges and its network, before anything is
+> sandboxed — that half has no fence and this version does not pretend otherwise. Install
+> modules you trust; the endpoints are admin-only for the same reason.
+>
+> What the module does *afterwards* is fenced: see step 3.
 
 ## Step 2 — Configure it
 
@@ -77,7 +89,55 @@ leaves them untouched keeps what is stored.
 
 Saving reloads the module, so the next run of any of its actions uses the new settings.
 
-## Step 3 — Use its action in a trigger
+## Step 3 — Grant it what it needs
+
+A module runs on a worker of its own that **reaches nothing you have not granted it**. Straight
+after an install its card says so:
+
+```
+Reaches nothing: no host, no file, no environment variable.
+```
+
+That is not a warning, it is the default, and it is why `@saltcorn/mqtt` will not connect yet.
+Press **Permissions** on the card and you get four lists, all empty, all meaning *nothing* —
+never *everything*:
+
+| List | What goes in it |
+|---|---|
+| Hosts it may connect to | `broker.example` or `broker.example:1883`, one per line |
+| Paths it may read | absolute paths; a directory allows everything under it |
+| Paths it may write | absolute paths |
+| Environment variables it may read | variable names |
+
+Put your broker's `host:port` in the first list and save. The card now says what it may reach,
+and the module reconnects.
+
+Three things worth knowing before you use this in anger:
+
+- **A port is part of the permission.** `broker.example:1883` does not allow
+  `broker.example:8883`. That is the point of an allow-list.
+- **Editing permissions restarts the module.** It moves to a worker that grants what it now
+  has, which costs it whatever it was holding — an open socket, a cache — exactly as a restart
+  would. Modules that were granted the same things share a worker; a module you grant something
+  unique gets one of its own.
+- **A denial is a sentence, not an `EACCES`.** If the module reaches for something it was not
+  granted you get its name, what it wanted and where to allow it:
+
+  ```
+  the module `@saltcorn/mqtt` was denied net access to "broker.example:8883": add
+  "broker.example:8883" to its network allow-list in Settings → Modules →
+  @saltcorn/mqtt → Permissions
+  ```
+
+  With one exception: an environment variable nobody granted reads as `undefined` rather than
+  failing, because half of npm reads `process.env.NODE_ENV` on the way in and a module that
+  cannot be loaded is not a module you can grant anything to.
+
+And the honest limit, which is the same sentence the tab carries: **`npm install` is not
+sandboxed.** The fence is around a module that is *running*. The install that put it there ran
+as your server.
+
+## Step 4 — Use its action in a trigger
 
 Go to **Triggers → New trigger**. `mqtt_publish` is in the action picker, and choosing it gives
 you the **Channel** setting the module declared:
@@ -97,6 +157,41 @@ sees exactly what it expects.
 Nothing was restarted. Installing a module rebuilds the action set the trigger dispatcher runs
 from and revalidates every stored trigger against it, so a trigger you saved *before* installing
 the module (and which was refused as "unknown action") starts working the moment it is there.
+
+## Step 5 — Call its functions
+
+A v1 plugin can supply **functions** as well as actions — `@saltcorn/markdown`'s `md_to_html`,
+`@saltcorn/nominatim-geocode`'s `geocode_lat` — and the module's card lists them with the
+arguments they declared. They are reachable from two places:
+
+- **A code body**, through `modfn`:
+
+  ```js
+  const html = await modfn.md_to_html(row.notes);
+  ```
+
+  Note the `await`, even for a function v1 wrote as synchronous: the call hops onto the worker
+  the module was loaded on, because that is where the module's state is — its configuration, its
+  parser, its connection. The editor's completions carry each function's declared signature, and
+  a forgotten `await` is a named error rather than `[object Promise]` in your data. If two
+  modules supply the same function name there is no short form; name the module:
+  `await modfn("@saltcorn/markdown").md_to_html(x)`.
+
+- **A formula** — a calculated field, an `only_if` — written as an ordinary call:
+
+  ```
+  md_to_html(notes)
+  ```
+
+  Formulas do no I/O, so this is resolved *before* the formula runs, in the same way a Ⱶ-join is.
+  That has a consequence worth knowing at the point you write it: what may be passed is what can
+  be **read** — a column, a Ⱶ-join value, a literal. `md_to_html(notes + "!")` and
+  `items.map(md_to_html)` are refused when you save the formula, naming the call and why, rather
+  than quietly evaluating to something else.
+
+  **Ownership formulas refuse module functions outright.** An ownership rule that fails means
+  nobody may read anything, and a rule that called a geocoder would turn somebody else's outage
+  into exactly that.
 
 ## Developing a module against a running server
 
@@ -132,6 +227,10 @@ Only `Workflow`, `Form` and `utils.interpolate` are real so far. A module whose 
 touch v1's models — which is most modules that talk to something outside Saltcorn — never meets
 that message.
 
+And one more that is neither: a module that calls `process.exit()`. In v1 that took the server
+down. Here it costs the module's own worker — the call in flight fails saying so, the next call
+gets a fresh worker with every module reloaded into it, and nothing else on the server notices.
+
 ## Removing one
 
 **Remove** on the card unloads the module, uninstalls the package and deletes the row, and the
@@ -140,8 +239,10 @@ quietly doing nothing.
 
 ## What this is not, yet
 
-- **Only actions.** Views, types, field views, table providers and event types are named in the
-  tab and not loaded.
+- **Only actions and functions.** Views, types, field views, table providers and event types are
+  named in the tab and not loaded.
 - **Only JavaScript.** The install form has a Type dropdown because Python and the rest come
   later; today it has one language and two sources.
-- **No sandbox, no store.** You type a package name; nothing browses or rates modules for you.
+- **No sandboxed install, and no store.** A module that is *running* is fenced (step 3); the
+  `npm install` that put it there is not. And you type a package name — nothing browses or rates
+  modules for you.

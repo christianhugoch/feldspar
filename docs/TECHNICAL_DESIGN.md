@@ -4404,32 +4404,59 @@ authorization decision in the process behind whatever a guest is doing, and woul
 moment a delegated read's own formula needed the evaluator. Any adapter that blocks a thread on
 a host call inherits that constraint, and pays for it in threads per concurrent run.
 
-### 15.1 Modules: v1 plugins, in a Node sidecar (`sc-module`)
+### 15.1 Modules: v1 plugins, on a Deno worker in this process (`sc-module`)
 
-A **module** is a Saltcorn v1 plugin — an npm package exporting `{ actions, viewtemplates,
-configuration_workflow, … }` — installed from the admin UI and live without a restart. It is
-the first half of the JavaScript adapter above, and the half that is about *compatibility*
-rather than about the host seam: the entity types it supplies are v1's, and the API its code
-calls is v1's.
+A **module** is a Saltcorn v1 plugin — an npm package exporting `{ actions, functions,
+viewtemplates, configuration_workflow, … }` — installed from the admin UI and live without a
+restart. It is the first half of the JavaScript adapter above, and the half that is about
+*compatibility* rather than about the host seam: the entity types it supplies are v1's, and the
+API its code calls is v1's.
 
 **It does not run in `CodeRuntime`, and cannot.** A v1 plugin is a CommonJS Node package whose
 dependencies are the point of it: `@saltcorn/mqtt` is a wrapper over `async-mqtt` (a TCP/TLS
 socket), `@saltcorn/proxmox` over `proxmox-api` (HTTPS). `CodeRuntime` is a bare V8 with four
 ops and no module loader — no `require`, no `net`, no `fs` — so running a v1 plugin there is
-not a shim but an implementation of Node, which is what `deno_runtime` is and why it is not
-`deno_core`. A module therefore runs where its dependencies already run: in one long-lived
-`node` child process, reached over a newline-delimited JSON protocol (`sc_module::host`), each
-request carrying an id so many calls are in flight at once. The process is started lazily — a
-deployment with no modules never needs Node — and restarted on death, replaying its loads, so a
-module that calls `process.exit()` costs the calls in flight and nothing else.
+not a shim but an implementation of Node. That implementation exists: `deno_runtime`, which is
+what a module runs on. **In this process, on a worker thread**, on the same V8 the code
+isolates already link. `node` is not a runtime requirement of a Saltcorn server; npm is still
+the installer.
+
+**A second pool beside the code isolates, not the same one.** The reason is not memory — the
+measured saving over the `node` process this replaced is ~45 MB and one process, which is real
+and small. The reason is coupling. A module is **long-lived state**: `@saltcorn/mqtt` holds a
+module-level client, a socket with a reconnect timer and live callbacks that must survive
+between calls. A code-body isolate is **disposable by design**, and the JS-slice watchdog is
+the only instrument that stops JavaScript and a blunt one — it stops the isolate and everything
+resident on it. On a merged pool one runaway `while(true)` in a trigger would have a coin-flip
+chance of terminating a broker subscription. The bounds differ by an order of magnitude for the
+same reason: a module call has 120 s of wall clock because a Proxmox snapshot is slow, and a
+10 s JS slice because a `load` pulls a whole npm dependency tree through V8's parser with no
+`await` in it anywhere.
+
+A module is pinned to one worker for its lifetime, because that is where its `require` cache
+and its module-level state are; the pool defaults to **one** worker, which is what the process
+it replaced already was — one runtime holding every module, not one per module.
+
+**`process.exit()` closes a worker, not the server.** `deno_os`'s `op_exit` would otherwise be
+`std::process::exit`, which here is the server. A `WatcherExitHandle` in the worker's `OpState`
+turns it into a termination of that isolate and a marker the host polls — because
+`terminate_execution` only throws out of *running* JavaScript, so a module that exits while the
+event loop is parked leaves it parked and the host, not V8, must drop the worker. A dead worker
+fails its in-flight calls **by name** and the next call gets a fresh one with every load
+replayed, which is the behaviour the separate process had and the thing most easily lost by
+moving in-process.
 
 **npm is the installer**, into one project the server owns (`--modules-dir`, else the
-platform's data directory). Two npm behaviours shape it, both found against real modules: a
-local directory is installed with `--install-links` (a copy, not a symlink), because npm
-neither installs a symlinked package's dependencies nor honours the project's `overrides` for
-them; and every `@saltcorn/*` dependency is redirected by an npm `override` to a local stub
-package of the same name, because those are v1's server — the program this one replaces — and
-the host answers every `@saltcorn/*` require itself.
+platform's data directory), and none of it changed when the runtime did. Two npm behaviours
+shape it, both found against real modules: a local directory is installed with
+`--install-links` (a copy, not a symlink), because npm neither installs a symlinked package's
+dependencies nor honours the project's `overrides` for them; and every `@saltcorn/*` dependency
+is redirected by an npm `override` to a local stub package of the same name, because those are
+v1's server — the program this one replaces — and the host answers every `@saltcorn/*` require
+itself. What resolves a `require("async-mqtt")` at run time is
+`deno_resolver::npm::ByonmNpmResolver` — "bring your own node_modules", the mode Deno uses
+against a directory somebody else installed. No Deno npm cache, no lockfile and no registry
+client inside the server: the modules directory on disk is the npm project it always was.
 
 **The `@saltcorn` API is stubbed in three tiers** (`sc_module`'s `module-host.mjs`): `Workflow`
 and `Form` are real, because a v1 `configuration_workflow` is written in them and its first
@@ -4442,23 +4469,59 @@ inside somebody's trigger. Replacing that tier with the real thing is the same `
 the `db` surface already speaks, in the other direction, and is a later milestone.
 
 **What a module supplies arrives as data.** A load answers a manifest — the actions, their v1
-`configFields`, the `configuration_workflow`'s fields, and a census of the entity types this
-version does not load — and `sc_module::spec` translates v1's field vocabulary into
-`FormField`, which is the vocabulary every configurable thing here already speaks (§6.2). So a
-module's action is rendered by the trigger form, validated on save and run by the dispatcher
-with no code anywhere that knows what a module is: `ModuleAction` is an ordinary `Action`
-whose `run` marshals the `ActionContext` into v1's argument object.
+`configFields`, the functions with their declared `arguments` and `isAsync`, the
+`configuration_workflow`'s fields, and a census of the entity types this version does not load —
+and `sc_module::spec` translates v1's field vocabulary into `FormField`, which is the vocabulary
+every configurable thing here already speaks (§6.2). So a module's action is rendered by the
+trigger form, validated on save and run by the dispatcher with no code anywhere that knows what
+a module is: `ModuleAction` is an ordinary `Action` whose `run` marshals the `ActionContext`
+into v1's argument object. v1's `onLoad(configuration)` hook is called at load, because a plugin
+builds there the state its actions close over — `@saltcorn/mqtt`'s one action publishes through
+a client only `onLoad` ever assigns.
+
+**`functions` are the fifth host surface.** v1 makes a plugin's `functions` available to
+formulas and code actions, and they close over what the module built at load time — a
+`markdown-it`, a geocoder, the module's own configuration — so a call has to execute on the
+isolate that module was loaded on. That is a hop no arrangement of pools removes, and it is
+`ModuleFnHost`, the same shape as `db`, `fetch`, `fs` and `trigger`: one JSON plan in, one JSON
+value out, its own call budget, bound only when a host is present. In a code body they are
+reached through `modfn` and are **awaitable even when v1 made them synchronous**. In a
+**formula** they are neither: a call is a static fact of the syntax, so it is collected by
+`analyze`, resolved by `sc_catalog::prefetch_bindings` before the formula runs and bound as an
+ordinary scope entry — exactly as a Ⱶ-join is, and for the same reason. The formula isolate
+stays op-less and does no I/O. A call that cannot be hoisted (inside a lambda, or over the
+formula's own computation) is refused on save naming the call, and an **ownership** formula
+refuses module functions outright: `Err` is deny, so a rule calling a geocoder would turn a
+third party's outage into "nobody may read anything".
 
 **Installing changes a running server.** The registry the dispatcher runs from is rebuilt from
 the built-ins plus every loaded module and swapped in whole
 (`TriggerDispatcher::set_registry`), then the trigger set is reloaded against it — which is
-what turns a trigger that was broken ("unknown action `mqtt_publish`") into a working one. A
-module that will not install, will not load, or claims a name a built-in already has is
-reported in the Modules tab and stops nothing else.
+what turns a trigger that was broken ("unknown action `mqtt_publish`") into a working one, and
+the module functions are installed on the `Catalog` in the same act. A module that will not
+install, will not load, or claims a name a built-in already has is reported in the Modules tab
+and stops nothing else.
 
-**Installing a module runs arbitrary code as the server**: npm install scripts, and then the
-module itself, with this server's privileges and its network. There is no sandbox, the
-endpoints are admin-only, and the screen says so.
+**What is sandboxed, and what is not.** These are two different moments and only one of them
+has a sandbox:
+
+- **Running a module is sandboxed.** `deno_permissions::PermissionsContainer` is a per-worker
+  argument, so a module's worker is given exactly what an admin granted it and nothing else:
+  four allow-lists on `_sc_modules.permissions` — `net`, `read`, `write`, `env` — where **every
+  empty list means nothing, never everything**, and a module installed with nothing declared
+  gets the closed set. A container belongs to an isolate and there is no fence inside one, so
+  the pool pins **by permission set**: two modules share a worker only when they may reach the
+  same things, and editing a module's permissions moves it to a worker that grants what it now
+  has, losing its sockets as a restart would. A denial is rewritten into the module's name, what
+  was denied and where to allow it, rather than an `EACCES` from inside somebody's dependency —
+  except a denied environment variable, which reads as `undefined`, because half of npm reads
+  `process.env.NODE_ENV` speculatively at load and a throw there would be a rule that most
+  modules may not be installed. `require` is not the container's business: a module that may not
+  read the package it is made of cannot exist, so the modules root is allowed by the require
+  loader and `node:fs` reading the same directory is denied by the container.
+- **Installing a module is not.** `npm install` runs install scripts as the server, before any
+  worker exists, and nothing in this design changes that. The endpoints are admin-only, and the
+  screen says so rather than implying the permission set covers it.
 
 ---
 
