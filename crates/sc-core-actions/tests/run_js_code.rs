@@ -425,7 +425,7 @@ async fn the_configured_timeout_bounds_the_run_and_is_checked_on_save() -> Resul
     let trigger = |cfg: Attrs| {
         Trigger::new("compute", EventKind::Insert, "run_js_code")
             .on("books")
-            .configuration(cfg)
+            .with_configuration(cfg)
     };
     for bad in [json!(300_000), json!(0), json!(-1), json!("soon")] {
         let cfg = config_with("return 1;", &[("timeout_ms", bad.clone())]);
@@ -530,7 +530,7 @@ async fn a_body_with_no_code_in_it_is_refused_on_save() -> Result<()> {
     let trigger = |cfg: Attrs| {
         Trigger::new("compute", EventKind::Insert, "run_js_code")
             .on("books")
-            .configuration(cfg)
+            .with_configuration(cfg)
     };
 
     // Absent (the generic spec check) and blank (the action's own): both are a
@@ -549,7 +549,7 @@ async fn a_body_with_no_code_in_it_is_refused_on_save() -> Result<()> {
     // since only the engine can say what a body means.
     validate_trigger(&catalog, &registry, &trigger(config("return row.id;"))).await?;
     let login = Trigger::new("compute", EventKind::Login, "run_js_code")
-        .configuration(config("return user.email;"));
+        .with_configuration(config("return user.email;"));
     validate_trigger(&catalog, &registry, &login).await?;
     Ok(())
 }

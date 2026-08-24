@@ -8,6 +8,12 @@
 //! the built-in actions are registered, the stored triggers are loaded and
 //! validated against them, and the dispatcher is installed into the catalog.
 //!
+//! The same call brings up the **workflow** half of a trigger body (§10.3): the
+//! `_sc_workflow_versions` a run pins itself to and the `_sc_run_traces` a traced
+//! workflow writes. They belong here rather than in a boot step of their own
+//! because a workflow is not a second kind of thing to start — it is what one of
+//! these triggers *is*.
+//!
 //! Until that call, a write is simply unobserved. That is what makes a build
 //! tool, a test, or an admin script safe to run against the same catalog without
 //! firing anything.
@@ -46,6 +52,16 @@ pub async fn install_triggers(
     bootstrap_triggers(catalog)
         .await
         .context("ensuring the triggers table exists")?;
+    // A workflow is a trigger body (§10.3), so its storage comes up with the
+    // triggers': the versions a run is pinned to, and the per-step traces a
+    // traced workflow writes. Both are needed by the time a trigger is loaded,
+    // because loading one may be loading a workflow.
+    sc_workflow::bootstrap_workflow_versions(catalog)
+        .await
+        .context("ensuring the workflow versions table exists")?;
+    sc_workflow::bootstrap_run_traces(catalog)
+        .await
+        .context("ensuring the run traces table exists")?;
     let registry = base_action_registry(agents)?;
     // The mail transport is the **settings-backed** one, not a transport built
     // here from the settings as they are now: an admin who fixes an SMTP

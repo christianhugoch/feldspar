@@ -310,6 +310,71 @@ async fn the_cache_drops_what_cannot_fire_and_says_why() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_workflow_bodied_trigger_round_trips_and_stays_a_workflow() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = setup(&db).await?;
+    let reg = registry()?;
+
+    // A workflow inherits everything a trigger is — its event, its table, its
+    // `only_if`, its floor, its enabled flag — and differs in exactly one thing:
+    // there is no action and no configuration, because its steps are a version
+    // of their own (§10.3).
+    let trigger = Trigger::workflow("approve_orders", EventKind::Insert)
+        .on("books")
+        .only_if("pages > 100")
+        .min_role(40)
+        .description("the order approval workflow");
+    save_trigger(&cat, &reg, &trigger).await?;
+
+    let loaded = load_trigger_by_name(&cat, "approve_orders")
+        .await?
+        .expect("by name");
+    assert_eq!(loaded, trigger);
+    assert!(loaded.is_workflow());
+    assert_eq!(loaded.action(), None);
+    assert_eq!(loaded.configuration(), None);
+    assert_eq!(loaded.only_if.as_deref(), Some("pages > 100"));
+    assert_eq!(loaded.min_role, Some(40));
+
+    // It is in the live set like any other trigger: validation has no action to
+    // check, and everything the two bodies share is checked the same way.
+    let live = Triggers::load(&cat, &reg).await?;
+    assert!(live.issues().is_empty(), "{:?}", live.issues());
+    assert_eq!(live.matching(EventKind::Insert, Some("books")).count(), 1);
+
+    // The two bodies are stored side by side and read back as what they are.
+    save_trigger(&cat, &reg, &books_trigger("plain")).await?;
+    let listed = list_triggers(&cat).await?;
+    let bodies: Vec<&str> = listed.iter().map(|t| t.body.as_str()).collect();
+    assert_eq!(bodies, vec!["workflow", "action"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_row_whose_body_and_action_disagree_is_refused_by_name() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = setup(&db).await?;
+    let reg = registry()?;
+    let trigger = Trigger::workflow("approve_orders", EventKind::Insert).on("books");
+    save_trigger(&cat, &reg, &trigger).await?;
+
+    // A hand-edited row, or half a downgrade: a workflow body still naming an
+    // action. Running that action would run the thing the admin replaced, so it
+    // is reported naming the trigger rather than read as either half.
+    let update = Update::new(
+        TRIGGERS_TABLE,
+        vec![Assignment::new("action".to_owned(), Expr::lit("notify"))],
+    )
+    .filter(Expr::col("id").eq(Expr::Lit(Value::Uuid(trigger.id.0))));
+    cat.primary().query(&Statement::from(update)).await?;
+
+    let err = list_triggers(&cat).await.err().unwrap().to_string();
+    assert!(err.contains("approve_orders"), "{err}");
+    assert!(err.contains("has no action"), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_catalog_with_no_triggers_table_has_no_triggers() -> Result<()> {
     let db = TestDb::new().await?;
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));

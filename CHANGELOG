@@ -2,6 +2,70 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 1: the model, the storage, and the trigger body
+
+The first phase of the workflow milestone (§10.3): everything a durable workflow *is*, before
+anything runs one. A new crate `sc-workflow` at layer 7, the two tables a workflow's history and
+a run's trace live in, the four columns the queue will claim runs by, and — the change that
+reaches every other crate — a trigger's **body** becoming an enum.
+
+- **A workflow is a trigger body, not a new entity.** `TriggerBody` is `Action { action,
+  configuration }` or `Workflow`, and `_sc_triggers` gains a `body` column as the discriminator
+  while `action` becomes nullable. So a workflow inherits its event, its `only_if`, its
+  `min_role`, its enabled flag, its periodic timing, its exposure through an application and the
+  admin's Run button with no second copy of any of them to keep in step. Reading is strict in
+  both directions: a `workflow` row still naming an action is refused naming the trigger, exactly
+  as an `action` row with no action is — running the action a workflow replaced is not a repair.
+  `Trigger::action()` and `Trigger::configuration()` answer `Option`, and every caller — dispatch,
+  validation, the live set, the admin API, the trigger-editing agent tool — went through the
+  enum rather than around it.
+- **`WorkflowEngine`, a seam `sc-action` holds and layer 7 fills.** Dispatch is layer 6 and the
+  engine is layer 7, so `TriggerDispatcher` cannot name `sc-workflow`; it holds a one-method trait
+  instead — *start a run of this workflow for this event, and answer what happened* — the same
+  shape, and the same reason, as `TableEvents`. What comes back is the run's id and state rather
+  than a result, because a workflow body does not return a value at the end of `run`: it may
+  suspend for a day. A process with **no** engine (a build tool, a unit test) refuses a workflow
+  trigger by name rather than reporting success for a run nobody started.
+- **Control flow is data, with one escape hatch.** v1 spells `next_step` as a JavaScript
+  expression over the step names, which is expressive and impossible to *draw*. `Next` is
+  therefore an enum — `Step` · `Branch { arms, otherwise }` · `Formula` · `End` — where the first
+  two are exactly what a canvas draws and edits and the third keeps v1's power for the case that
+  needs it. All four lower to one question: given this context, which step is next?
+- **Five step kinds, and the count is the decision.** `Action` runs any registered action, which
+  is how `run_js_code`, `send_email`, the row actions and `run_agent` are all already workflow
+  steps; `Set`, `ForEach`, `Wait` and `UserForm` are the four things no action can be. Everything
+  else an admin could want is an action, and adding an action is not adding a step kind.
+- **Versions are rows, and the table is append-only.** `_sc_workflow_versions` holds
+  `(workflow, version, steps, …)` with the pair jointly unique **in the database** — because
+  `save_workflow` reads the maximum and inserts the next, which is correct for one writer and a
+  race for two. Saving an edited workflow mints `version + 1` and rewrites nothing, which is the
+  whole implementation of GOALS' "a suspended run can finish with its version of the workflow":
+  the integration test edits a workflow twice and loads version 1 back unchanged. The stored
+  JSON is the whole `Workflow` document — the API's shape and the editor's shape, with no third
+  spelling — and a row whose columns and document disagree is refused rather than read as either.
+- **`_sc_run_traces`** (named by §9 with the agent milestone, created here): one row per
+  completed step attempt — when it ran, which attempt it was, how it came out, and the context
+  *after* it. Insert-only, and written only when the workflow's `trace` flag is on, because a
+  trace row carries a copy of the whole context.
+- **`_sc_runs` grew the queue's four columns** through the additive bootstrap — `subject_version`
+  (what a run is pinned to), `wake_at` (when it next wants the engine; NULL for one waiting on a
+  person), `lease_until` and `claimed_by` — and `RunState` gained `Waiting`. `is_live` now means
+  "has not finished", which is deliberately not "is runnable now": a run waiting on a human is
+  live for a week and runnable at no point in it.
+- **`Ambient::Context`.** A step's formulas read the run context through a new fieldless ambient
+  object beside `row`, `old`, `user` and `payload`, in scope only where there *is* a run.
+  Not bare identifiers: those already mean "the row this formula ranges over", and quietly
+  redefining them inside a workflow would make one language mean two things. `workflow_shape` is
+  the only place a step's scope is decided, and it is `action_shape` plus that one object.
+
+Tests: the serde round-trip over a workflow using every step kind and every `Next` variant, the
+append-only guarantee and the database's refusal of a forked version, a pinned version surviving
+two edits, a version whose document names another workflow being refused, trace rows coming back
+as the attempts they recorded, a workflow-bodied trigger round-tripping through `_sc_triggers`
+and staying in the live set, dispatch reaching the engine seam with the event and the chain,
+dispatch refusing when there is no engine, the run row's new columns round-tripping, and
+`context` being in scope inside a workflow and an unknown identifier outside one.
+
 ## Writable table providers
 
 The last milestone ended with a sentence — "`write()` fails … saying that writable providers are

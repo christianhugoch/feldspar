@@ -32,6 +32,10 @@ async-trait.workspace = true
 # about one error's own handling, which is one task's.
 tokio.workspace = true
 serde_json.workspace = true
+# `TriggerId` is `Serialize`/`Deserialize`, and only for that: a workflow's
+# stored JSON names the trigger it is the body of (§10.3), and that document is
+# the API's shape and the editor's shape as well as the row's.
+serde = { workspace = true }
 # UTC instants: a periodic trigger's due-time arithmetic and its `last_run_at`
 # (§10.2, decision 6). No timezone database — everything is UTC by decision.
 chrono.workspace = true

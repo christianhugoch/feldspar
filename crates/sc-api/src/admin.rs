@@ -2707,8 +2707,15 @@ fn trigger_fields() -> Vec<StructField> {
         // The table, for a table event; null for every other kind.
         StructField::new("channel", TypeSchema::optional(TypeSchema::text())),
         StructField::new("only_if", TypeSchema::optional(TypeSchema::text())),
-        StructField::new("action", TypeSchema::text()),
-        StructField::new("configuration", TypeSchema::json()),
+        // Which engine runs it: `action` or `workflow` (§10.3). Absent on input
+        // means `action`, which is what every trigger was before workflows and
+        // what a client that has not heard of them sends.
+        StructField::new("body", TypeSchema::optional(TypeSchema::text())),
+        // Both are the **action** body's, and both are null for a workflow —
+        // whose steps are a version of their own, read and written through the
+        // workflow endpoints rather than as a field of the trigger.
+        StructField::new("action", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("configuration", TypeSchema::optional(TypeSchema::json())),
         StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
         StructField::new("enabled", TypeSchema::bool()),
         // The periodic timing (§10.2), null on the kinds that have none. Three

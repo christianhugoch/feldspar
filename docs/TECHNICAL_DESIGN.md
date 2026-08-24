@@ -74,7 +74,9 @@ saltcorn/
 │  ├─ sc-llm/                     # 6. object-safe LlmProvider seam over a provider crate
 │  │                              #    (OpenAI Responses + Anthropic), `_sc_llm_providers` (§11.1)
 │  ├─ sc-email/                   # 6. Email, the Mailer transport seam, SMTP over lettre (§18.2)
-│  ├─ sc-workflow/               # 7. durable workflow engine (steps, runs, traces, recovery)
+│  ├─ sc-workflow/                # 7. durable workflows: the program a trigger body can be,
+│  │                              #    `_sc_workflow_versions`, `_sc_run_traces`, the engine
+│  │                              #    that advances a run of it (§10.3)
 │  ├─ sc-agent/                   # 7. Agent record + AgentTrait trait + registry + inference
 │  │                              #    loop + `_sc_agents`/`_sc_runs` storage (§11.2)
 │  ├─ sc-model/                   # 7. ModelProvider trait, model instances, inference
@@ -122,6 +124,8 @@ graph TD
   coretraits --> app["sc-app"]
   coreact --> api["sc-api"]
   server --> module["sc-module"]
+  server --> workflow["sc-workflow"]
+  workflow --> action
   module --> action["sc-action"]
   app --> api
   agent --> action
@@ -173,11 +177,12 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
+| `sc-workflow` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-module` `sc-query` `sc-types` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-module` `sc-query` `sc-types` `sc-workflow` |
 | `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` |
 
 Three things the graph is worth reading for:
@@ -1133,11 +1138,12 @@ a sparse value goes into `attributes`.**
 |---|---|---|
 | `_sc_tables` | overlay metadata for tables **and** provided-table definitions | access rules, label/description, attributes; the DB's own tables need no row to be usable (§9.1). A row carrying `provider_module`/`provider_name`/`provider_config` in `attributes` is **not** an overlay — it is a virtual table's only definition (§8.3) |
 | `_sc_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
-| `_sc_triggers` | triggers (later: workflows, agents) | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, action + configuration, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. Workflows will be **versioned** so a suspended run finishes on its own version |
+| `_sc_triggers` | triggers, whose body is an action **or a workflow** | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, `body` (`action` \| `workflow`), the action + configuration an `action` body carries, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. A workflow body's steps are **not** here: they are versioned in `_sc_workflow_versions`, so a suspended run finishes on its own version (§10.3) |
+| `_sc_workflow_versions` | one row per saved version of a workflow | `(workflow, version)` is unique and the table is **append-only**: saving an edited workflow mints `version + 1`, and a run records the version it started on and loads that one for its whole life (§10.3). `steps` holds the whole workflow document — the same JSON the API answers and the editor round-trips |
 | `_sc_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps |
 | `_sc_llm_providers` | LLM connections | name + backend (`openai_responses` \| `anthropic`) + config (§11.1); the same shape as `_sc_file_stores`, and the API key is a `secret` field, redacted on read |
 | `_sc_runs` | workflow & agent runs | current context + state, updated after each step; `kind` discriminates `agent` from `workflow`, so a chat session and a durable run are one mechanism (§11.4) |
-| `_sc_run_traces` | per-step context + timing | only when tracing is enabled for that workflow |
+| `_sc_run_traces` | per-step context + timing | one row per completed step attempt: when it ran, which attempt it was, how it came out, and the context **after** it. Written only when tracing is enabled for that workflow, and in the same batch as the run's own advance (§10.3) |
 | `_sc_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
 | `_sc_config` | configuration | key + JSON value, one row per setting. Every key is **declared** as a `FormField` in `sc-config` (§6.2's vocabulary), which is what types it: a write is validated against the declaration and an undeclared key is refused, so the admin UI renders the settings screen from the declarations and knows nothing about any particular setting. Per-application scope is not built yet — today's keys are all installation-wide (§13.5) |
 | `_sc_acme_cache` | ACME account + issued certificates | not configuration and not admin-visible: opaque bytes keyed by the digest of the domain list and the CA directory URL (§13.5), in the database so a renewal survives a restart and a second node does not order its own |
@@ -1284,7 +1290,8 @@ erDiagram
     text event
     text channel "table name for table events"
     text only_if
-    text action
+    text body "action | workflow -- which engine runs it"
+    text action "nullable: a workflow body names none"
     json configuration
     int min_role
     json attributes "enabled, periodic timing"
@@ -1348,9 +1355,36 @@ erDiagram
     text error
     json context
     uuid user_id "nullable, NOT a foreign key"
+    int subject_version "the workflow version this run is pinned to"
+    timestamp wake_at "when it next wants the engine; null = waiting on a person"
+    timestamp lease_until "a node's claim on it"
+    text claimed_by
     json attributes
     timestamp created_at
     timestamp updated_at
+  }
+  WFVERSIONS["_sc_workflow_versions"] {
+    uuid id PK
+    uuid workflow "the trigger, by value"
+    int version "UNIQUE (workflow, version); append-only"
+    text description "why this version was saved"
+    json steps "the whole workflow document"
+    json attributes
+    timestamp created_at
+    uuid created_by "nullable, NOT a foreign key"
+  }
+  TRACES["_sc_run_traces"] {
+    uuid id PK
+    uuid run "the run, by value"
+    int seq "its position in the run"
+    text step
+    timestamp started_at
+    timestamp finished_at
+    int attempt "1 for the first try"
+    text outcome "ok | error | suspended"
+    text error
+    json context "the context AFTER the step"
+    json attributes
   }
   APPS["_sc_applications"] {
     uuid id PK
@@ -1392,6 +1426,9 @@ erDiagram
   FIELDS }o--o| TABLES : "attributes.target_table -- Key fields"
   LLM ||--o{ AGENTS : "provider -- by name"
   AGENTS ||--o{ RUNS : "subject -- by name, when kind = agent"
+  TRIGGERS ||--o{ WFVERSIONS : "workflow -- by value, append-only"
+  WFVERSIONS ||--o{ RUNS : "version -- a run is pinned to the one it started on"
+  RUNS ||--o{ TRACES : "run -- by value, when tracing is on"
   TRIGGERS }o--o| TABLES : "channel -- by name, table events"
   AGENTS }o--o{ TRIGGERS : "traits -- run_trigger tool config"
   APPS }o--o{ TABLES : "tables[] -- by name"
@@ -1435,7 +1472,7 @@ is no per-file table: file metadata lives in xattrs on disk. And `_sc_config`/`_
 deliberately relationship-free key/value stores — every `_sc_config` key gets its meaning from a
 `FormField` declaration in `sc-config`, not from a row pointing anywhere.
 
-Tables named in §9 that are **not yet created**: `_sc_run_traces`, `_sc_errors`, `_sc_models`,
+Tables named in §9 that are **not yet created**: `_sc_errors`, `_sc_models`,
 `_sc_model_instances`.
 
 ---

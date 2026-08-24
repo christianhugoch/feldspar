@@ -135,11 +135,9 @@ async fn the_server_serves_a_module_with_node_off_the_path() -> sc_error::Result
             ],
         )
         .await?;
-    let mut trigger = Trigger::new("echo it", EventKind::Insert, "echo_row");
+    let mut trigger =
+        Trigger::new("echo it", EventKind::Insert, "echo_row").config("greeting", "hello");
     trigger.channel = Some("books".into());
-    trigger
-        .configuration
-        .insert("greeting".into(), json!("hello"));
     sc_action::save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
     dispatcher.reload(&catalog).await?;
 

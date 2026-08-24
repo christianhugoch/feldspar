@@ -74,12 +74,16 @@ function lastRun(trigger: TriggerItem): string {
 }
 
 function targetSummary(trigger: TriggerItem): string {
+  // A workflow body runs a program rather than an action, and has no
+  // configuration to read a table out of (§10.3).
+  const action = trigger.action ?? "";
+  if (trigger.body === "workflow") return "workflow";
   const config = trigger.configuration;
-  if (!config || typeof config !== "object") return trigger.action;
+  if (!config || typeof config !== "object") return action;
   const table = (config as Record<string, unknown>).table;
   return typeof table === "string" && table !== ""
-    ? `${trigger.action} → ${table}`
-    : trigger.action;
+    ? `${action} → ${table}`
+    : action;
 }
 
 export function Triggers() {

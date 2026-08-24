@@ -384,7 +384,7 @@ async fn a_broken_configuration_is_refused_on_save_by_name() -> Result<()> {
     for (action, entries, expected) in cases {
         let trigger = Trigger::new("on-books-update", EventKind::Update, *action)
             .on("books")
-            .configuration(config(entries));
+            .with_configuration(config(entries));
         let err = validate_trigger(&catalog, &registry, &trigger)
             .await
             .unwrap_err();
@@ -416,11 +416,12 @@ async fn the_events_scope_decides_whether_a_formula_resolves() -> Result<()> {
 
     let on_insert = Trigger::new("audit-books", EventKind::Insert, "insert_row")
         .on("books")
-        .configuration(cfg.clone());
+        .with_configuration(cfg.clone());
     validate_trigger(&catalog, &registry, &on_insert).await?;
 
     // The same action, the same configuration, an event with no row.
-    let on_login = Trigger::new("audit-logins", EventKind::Login, "insert_row").configuration(cfg);
+    let on_login =
+        Trigger::new("audit-logins", EventKind::Login, "insert_row").with_configuration(cfg);
     let msg = validate_trigger(&catalog, &registry, &on_login)
         .await
         .unwrap_err()
@@ -431,7 +432,7 @@ async fn the_events_scope_decides_whether_a_formula_resolves() -> Result<()> {
     // A field of the event's row that does not exist is caught the same way.
     let typo = Trigger::new("audit-books", EventKind::Insert, "insert_row")
         .on("books")
-        .configuration(config(&[
+        .with_configuration(config(&[
             ("table", json!("audit")),
             ("values", json!({ "what": "row.titel" })),
         ]));

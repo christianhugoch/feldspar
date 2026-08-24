@@ -23,6 +23,11 @@
 //! - **An action is one elementary step.** Control flow is the workflow engine's
 //!   (§10.3), which is why [`Action::run`] returns a value and takes no branch:
 //!   the small built-in set GOALS asks for is a consequence of that split.
+//! - **A workflow is a trigger body, not a new entity.** [`TriggerBody`] is
+//!   `Action { action, configuration }` or `Workflow`, so a workflow inherits
+//!   this crate's event, `only_if`, role floor, enabled flag, timing and
+//!   exposure with no second copy of any of them. What runs one is
+//!   [`WorkflowEngine`], a seam the dispatcher holds and layer 7 implements.
 //! - **Configuration is data.** An action declares its settings as
 //!   [`FormField`](sc_types::FormField)s, so the admin UI renders a form for an
 //!   action it has never heard of and save-time validation checks the values
@@ -45,6 +50,7 @@
 
 mod action;
 mod dispatch;
+mod engine;
 mod event;
 mod observer;
 mod registry;
@@ -58,6 +64,7 @@ mod validate;
 
 pub use action::{Action, ActionContext, ConfigCheck};
 pub use dispatch::{ActionServices, TriggerDispatcher, TriggerRun, fire_trigger};
+pub use engine::{WorkflowEngine, WorkflowStarted};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use observer::TriggerObserver;
 pub use registry::ActionRegistry;
@@ -69,9 +76,9 @@ pub use scope::{
     render_event_template, required_formula, required_template, template_scope, typed_value,
 };
 pub use store::{
-    TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers, load_trigger,
-    load_trigger_by_name, record_trigger_run, save_trigger,
+    COL_ACTION, COL_BODY, TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers,
+    load_trigger, load_trigger_by_name, record_trigger_run, save_trigger,
 };
-pub use trigger::{ATTR_ENABLED, Trigger, TriggerId};
+pub use trigger::{ATTR_ENABLED, Trigger, TriggerBody, TriggerId};
 pub use triggers::{TriggerIssue, Triggers};
 pub use validate::{trigger_shape, validate_trigger};

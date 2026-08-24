@@ -172,8 +172,11 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           setWhen(existing.when);
           setChannel(existing.channel ?? "");
           setOnlyIf(existing.only_if ?? "");
-          setActionName(existing.action);
-          setConfig(readConfig(existing.configuration));
+          // Both are the action body's, and both come back null for a
+          // workflow (§10.3), whose steps are edited on their own screen —
+          // this form fills in the fields the two bodies share either way.
+          setActionName(existing.action ?? "");
+          setConfig(readConfig(existing.configuration ?? {}));
           setMinRole(existing.min_role ?? null);
           setEnabled(existing.enabled);
           setTiming({

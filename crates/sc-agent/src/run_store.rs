@@ -34,7 +34,7 @@ pub const COL_KIND: &str = "kind";
 pub const COL_SUBJECT: &str = "subject";
 /// The human-readable description column (§9).
 pub const COL_DESCRIPTION: &str = "description";
-/// Where the run got to: `running` | `done` | `failed` | `aborted`.
+/// Where the run got to: `running` | `waiting` | `done` | `failed` | `aborted`.
 pub const COL_STATE: &str = "state";
 /// Why a failed run failed, NULL otherwise.
 pub const COL_ERROR: &str = "error";
@@ -42,6 +42,14 @@ pub const COL_ERROR: &str = "error";
 pub const COL_CONTEXT: &str = "context";
 /// The user the run is on behalf of, NULL for one a trigger started.
 pub const COL_USER: &str = "user_id";
+/// The workflow version this run is pinned to, NULL for an agent run (§10.3).
+pub const COL_SUBJECT_VERSION: &str = "subject_version";
+/// When this run next wants the engine, NULL for one waiting on a person.
+pub const COL_WAKE_AT: &str = "wake_at";
+/// Until when a node has claimed this run, NULL for one nothing is working on.
+pub const COL_LEASE_UNTIL: &str = "lease_until";
+/// Which node holds that lease, NULL for one nothing is working on.
+pub const COL_CLAIMED_BY: &str = "claimed_by";
 /// The sparse per-run values column (§9).
 pub const COL_ATTRIBUTES: &str = "attributes";
 /// When the run was created.
@@ -54,6 +62,7 @@ fn run_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
     let uuid = || TypeRef::Basic(BasicType::Uuid);
+    let int = || TypeRef::Basic(BasicType::Int);
     let ts = || TypeRef::Basic(BasicType::Timestamp);
     vec![
         DataField::plain(COL_ID, uuid()).required().primary_key(),
@@ -67,6 +76,15 @@ fn run_fields() -> Vec<DataField> {
         // and deleting the user who chatted must not delete the evidence or be
         // blocked by it.
         DataField::plain(COL_USER, uuid()),
+        // The workflow engine's four (§10.3), every one of them nullable and
+        // meaningless for an agent run: what version this run is pinned to, when
+        // it next wants the engine, and the lease that says a node is working on
+        // it. They reach a database that already has runs in it through the
+        // additive bootstrap, exactly as `_sc_triggers.last_run_at` did.
+        DataField::plain(COL_SUBJECT_VERSION, int()),
+        DataField::plain(COL_WAKE_AT, ts()),
+        DataField::plain(COL_LEASE_UNTIL, ts()),
+        DataField::plain(COL_CLAIMED_BY, text()),
         DataField::plain(COL_ATTRIBUTES, json()).required(),
         DataField::plain(COL_CREATED_AT, ts()).required(),
         DataField::plain(COL_UPDATED_AT, ts()).required(),
@@ -160,6 +178,10 @@ fn run_columns() -> Vec<String> {
         COL_ERROR,
         COL_CONTEXT,
         COL_USER,
+        COL_SUBJECT_VERSION,
+        COL_WAKE_AT,
+        COL_LEASE_UNTIL,
+        COL_CLAIMED_BY,
         COL_ATTRIBUTES,
         COL_CREATED_AT,
         COL_UPDATED_AT,
@@ -184,6 +206,16 @@ fn run_values(run: &Run) -> Vec<Value> {
         Value::Json(run.context.clone()),
         match run.user {
             Some(user) => Value::Uuid(user),
+            None => Value::Null,
+        },
+        match run.subject_version {
+            Some(version) => Value::Int(i64::from(version)),
+            None => Value::Null,
+        },
+        timestamp_or_null(run.wake_at),
+        timestamp_or_null(run.lease_until),
+        match &run.claimed_by {
+            Some(node) => Value::Text(node.clone()),
             None => Value::Null,
         },
         Value::Json(Json::Object(run.attributes.clone())),
@@ -220,6 +252,18 @@ fn run_from_row(row: &Row) -> Result<Run> {
             Some(Value::Null) | None => None,
             other => return Err(bad_column(COL_USER, "a uuid", other)),
         },
+        subject_version: match row.get(COL_SUBJECT_VERSION) {
+            Some(Value::Int(i)) => Some(u32::try_from(*i).map_err(|_| {
+                Error::invalid(format!(
+                    "{RUNS_TABLE}.{COL_SUBJECT_VERSION} should be a version number, got {i}"
+                ))
+            })?),
+            Some(Value::Null) | None => None,
+            other => return Err(bad_column(COL_SUBJECT_VERSION, "a version number", other)),
+        },
+        wake_at: optional_timestamp(row, COL_WAKE_AT)?,
+        lease_until: optional_timestamp(row, COL_LEASE_UNTIL)?,
+        claimed_by: optional_text(row, COL_CLAIMED_BY)?,
         attributes: object(row, COL_ATTRIBUTES)?,
         created_at: timestamp(row, COL_CREATED_AT)?,
         updated_at: timestamp(row, COL_UPDATED_AT)?,
@@ -249,6 +293,24 @@ fn object(row: &Row, column: &str) -> Result<Attrs> {
             "{RUNS_TABLE}.{column} should be a json object"
         ))),
         other => Err(bad_column(column, "json", other)),
+    }
+}
+
+/// A nullable timestamp column. A column the additive bootstrap has not added
+/// yet reads as absent, which is the same "nothing to say" a NULL is.
+fn optional_timestamp(row: &Row, column: &str) -> Result<Option<DateTime<Utc>>> {
+    match row.get(column) {
+        Some(Value::Timestamp(t)) => Ok(Some(*t)),
+        Some(Value::Null) | None => Ok(None),
+        other => Err(bad_column(column, "a timestamp", other)),
+    }
+}
+
+/// An optional instant as a value.
+fn timestamp_or_null(at: Option<DateTime<Utc>>) -> Value {
+    match at {
+        Some(at) => Value::Timestamp(at),
+        None => Value::Null,
     }
 }
 
@@ -306,8 +368,18 @@ mod tests {
         // Both instants are required: a run that cannot say when it last moved
         // is one nothing can decide is stuck.
         assert!(by_name(COL_CREATED_AT).required && by_name(COL_UPDATED_AT).required);
-        // The user and the error are the two honest nulls.
+        // The user and the error are honest nulls, and so is every one of the
+        // engine's four: an agent run is pinned to no version, wants the engine
+        // at no time and is leased by nobody.
         assert!(!by_name(COL_USER).required && !by_name(COL_ERROR).required);
+        for column in [
+            COL_SUBJECT_VERSION,
+            COL_WAKE_AT,
+            COL_LEASE_UNTIL,
+            COL_CLAIMED_BY,
+        ] {
+            assert!(!by_name(column).required, "{column} should be nullable");
+        }
         // A run has no name; see the module docs.
         assert!(fields.iter().all(|f| f.base.name != "name"));
     }
@@ -323,9 +395,26 @@ mod tests {
     #[test]
     fn a_system_run_stores_a_null_user_and_a_live_run_a_null_error() {
         let run = Run::new("a", &RunCaller::system(), &AgentLoop::new(20));
+        let columns = run_columns();
         let values = run_values(&run);
-        assert_eq!(values[5], Value::Null); // error
-        assert_eq!(values[7], Value::Null); // user
-        assert_eq!(values[4], Value::Text("running".to_owned()));
+        let at = |column: &str| {
+            columns
+                .iter()
+                .position(|c| c == column)
+                .map(|i| values[i].clone())
+                .unwrap()
+        };
+        assert_eq!(at(COL_ERROR), Value::Null);
+        assert_eq!(at(COL_USER), Value::Null);
+        assert_eq!(at(COL_STATE), Value::Text("running".to_owned()));
+        // An agent run leaves every one of the engine's columns null.
+        for column in [
+            COL_SUBJECT_VERSION,
+            COL_WAKE_AT,
+            COL_LEASE_UNTIL,
+            COL_CLAIMED_BY,
+        ] {
+            assert_eq!(at(column), Value::Null, "{column}");
+        }
     }
 }

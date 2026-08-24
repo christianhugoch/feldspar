@@ -430,7 +430,7 @@ async fn a_broken_fetch_configuration_is_refused_on_save() -> Result<()> {
     for (entries, expected) in cases {
         let trigger = Trigger::new("notify", EventKind::Insert, "fetch")
             .on("books")
-            .configuration(config(entries));
+            .with_configuration(config(entries));
         let err = validate_trigger(&catalog, &registry, &trigger)
             .await
             .unwrap_err();
@@ -445,7 +445,7 @@ async fn a_broken_fetch_configuration_is_refused_on_save() -> Result<()> {
     // The valid configuration the refusals are measured against.
     let ok = Trigger::new("notify", EventKind::Insert, "fetch")
         .on("books")
-        .configuration(config(&[
+        .with_configuration(config(&[
             ("url", json!("https://x.test/hook")),
             ("method", json!("POST")),
             ("headers", json!({ "x-token": "abc" })),

@@ -29,6 +29,11 @@ members = [
     "crates/sc-email",
     # Layer 7 — agents: the agent record, the trait extension point, the loop
     "crates/sc-agent",
+    # Layer 7 — workflows: the program a trigger body can be, its versions, and
+    # the engine that advances a run of it durably (§10.3). Beside the agents
+    # rather than above them: both are things that *run*, both persist their
+    # state to `_sc_runs` after every step, and neither knows about the other.
+    "crates/sc-workflow",
     # Layer 8 — applications & API
     "crates/sc-api",
     "crates/sc-app",
@@ -81,6 +86,7 @@ sc-module = { path = "crates/sc-module" }
 sc-llm = { path = "crates/sc-llm" }
 sc-email = { path = "crates/sc-email" }
 sc-agent = { path = "crates/sc-agent" }
+sc-workflow = { path = "crates/sc-workflow" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
 sc-core-actions = { path = "crates/sc-core-actions" }

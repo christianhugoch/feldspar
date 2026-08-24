@@ -97,6 +97,16 @@ impl std::fmt::Display for RunKind {
 pub enum RunState {
     /// Still going, or waiting for its next step.
     Running,
+    /// **Suspended**: a workflow run waiting for a time to come round or for a
+    /// person to answer (§10.3). Live, but not runnable until
+    /// [`wake_at`](Run::wake_at) arrives — or, for a run waiting on a human,
+    /// until somebody resumes it.
+    ///
+    /// A state of its own rather than `Running` with something null, because the
+    /// difference is what the queue's runnable set is defined by and what an
+    /// admin looking at a stuck run needs to see: "waiting for approval since
+    /// Tuesday" and "running" are not the same report.
+    Waiting,
     /// Finished: the model answered, or the budget stopped it.
     Done,
     /// Something outside the conversation went wrong — see [`Run::error`].
@@ -110,6 +120,7 @@ impl RunState {
     pub fn as_str(&self) -> &'static str {
         match self {
             RunState::Running => "running",
+            RunState::Waiting => "waiting",
             RunState::Done => "done",
             RunState::Failed => "failed",
             RunState::Aborted => "aborted",
@@ -120,19 +131,25 @@ impl RunState {
     pub fn parse(s: &str) -> Result<RunState> {
         match s {
             "running" => Ok(RunState::Running),
+            "waiting" => Ok(RunState::Waiting),
             "done" => Ok(RunState::Done),
             "failed" => Ok(RunState::Failed),
             "aborted" => Ok(RunState::Aborted),
             other => Err(Error::invalid(format!(
                 "unknown run state `{other}`; expected \
-                 `running`, `done`, `failed` or `aborted`"
+                 `running`, `waiting`, `done`, `failed` or `aborted`"
             ))),
         }
     }
 
-    /// Whether a run in this state can still be advanced.
+    /// Whether a run in this state has **not finished** — it is running, or
+    /// waiting for a time or a person.
+    ///
+    /// Not the same question as "is it runnable *now*", which the queue asks
+    /// with a clock in hand (live *and* `wake_at` past): a run waiting on a
+    /// human is live for a week and runnable at no point in it.
     pub fn is_live(&self) -> bool {
-        matches!(self, RunState::Running)
+        matches!(self, RunState::Running | RunState::Waiting)
     }
 }
 
@@ -166,6 +183,26 @@ pub struct Run {
     /// (decision 5). This is the authority every tool in the run executed with,
     /// recorded so an audit can answer "as whom?".
     pub user: Option<Uuid>,
+    /// The version of its subject this run is **pinned** to: the workflow
+    /// version it started on (§10.3, decision 2), or `None` for an agent run.
+    ///
+    /// A run loads that version for its whole life, which is what "a suspended
+    /// run finishes on its own version of the workflow" means: the workflow may
+    /// be edited twice while the run waits, and the run is not retro-fitted to
+    /// steps it never started.
+    pub subject_version: Option<u32>,
+    /// When this run next wants the engine: now for one that is runnable, a
+    /// retry's deadline, a `Wait`'s end — and `None` for a run waiting on a
+    /// **person**, which no clock will make runnable.
+    pub wake_at: Option<DateTime<Utc>>,
+    /// Until when a node has claimed this run (§10.3, decision 5). A lease in the
+    /// past, or none at all, means nothing is working on it — which is how a
+    /// crashed node's runs are recovered without anybody having to detect the
+    /// crash.
+    pub lease_until: Option<DateTime<Utc>>,
+    /// Who holds that lease: a node identifier, for the operator reading a run
+    /// that is not moving. Never authority — the lease is.
+    pub claimed_by: Option<String>,
     /// Sparse per-run values (§9).
     pub attributes: Attrs,
     /// When the run was created.
@@ -192,6 +229,13 @@ impl Run {
             error: None,
             context: serde_json::to_value(state).unwrap_or(Json::Null),
             user: caller.user.as_ref().map(|u| u.id),
+            // An agent run is pinned to nothing, is always runnable, and is
+            // never leased: the loop is driven by whoever started it, not by the
+            // workflow queue.
+            subject_version: None,
+            wake_at: None,
+            lease_until: None,
+            claimed_by: None,
             attributes: Attrs::new(),
             created_at: now,
             updated_at: now,
@@ -325,6 +369,7 @@ mod tests {
         assert!(RunKind::parse("copilot").is_err());
         for state in [
             RunState::Running,
+            RunState::Waiting,
             RunState::Done,
             RunState::Failed,
             RunState::Aborted,
@@ -332,5 +377,8 @@ mod tests {
             assert_eq!(RunState::parse(state.as_str()).unwrap(), state);
         }
         assert!(RunState::parse("paused").is_err());
+        // Waiting is live — the run has not finished — and nothing else is.
+        assert!(RunState::Waiting.is_live() && RunState::Running.is_live());
+        assert!(!RunState::Done.is_live() && !RunState::Failed.is_live());
     }
 }

@@ -891,7 +891,8 @@ function Triggers({
                       </div>
                     )}
                   </td>
-                  <td className="text-break">{trigger.action}</td>
+                  {/* A workflow body runs a program, not an action (§10.3). */}
+                  <td className="text-break">{trigger.action ?? "workflow"}</td>
                   <td>
                     {trigger.error ? (
                       <StatusBadge tone="red" title={trigger.error}>

@@ -178,7 +178,10 @@ fn trigger_json(
     out.insert("when".to_owned(), json!(trigger.when.as_str()));
     out.insert("table".to_owned(), json!(trigger.channel));
     out.insert("only_if".to_owned(), json!(trigger.only_if));
-    out.insert("action".to_owned(), json!(trigger.action));
+    // What the trigger *is*: an action with settings, or a workflow whose steps
+    // are edited on the canvas rather than here (§10.3).
+    out.insert("body".to_owned(), json!(trigger.body.as_str()));
+    out.insert("action".to_owned(), json!(trigger.action()));
     out.insert(
         "configuration".to_owned(),
         Json::Object(
@@ -217,15 +220,19 @@ fn trigger_json(
 /// been copied somewhere nobody thought about. [`save`] merges the stored value
 /// back when the mask is sent in again, which is what makes the masking safe.
 fn visible_config(catalog: &Catalog, registry: &ActionRegistry, trigger: &Trigger) -> Attrs {
-    match registry.get(trigger.action.trim()) {
+    // A workflow body has no configuration at all: its steps carry their own.
+    let Some(configuration) = trigger.configuration() else {
+        return Attrs::new();
+    };
+    match trigger.action().and_then(|a| registry.get(a)) {
         Some(action) => redact_attrs(
             &action.config_spec_for(catalog, trigger.channel.as_deref()),
-            &trigger.configuration,
+            configuration,
         ),
         // An action nothing implements has no spec to mask against. The
         // configuration is shown as stored, because the agent's job here is to
         // fix a trigger naming an action that is gone.
-        None => trigger.configuration.clone(),
+        None => configuration.clone(),
     }
 }
 
@@ -615,18 +622,31 @@ fn build(
             .filter(|f| !f.is_empty());
     }
 
+    // A workflow's body is its steps, and those are not this tool's to edit: a
+    // model that "fixed" a workflow by naming an action would delete the program
+    // without deleting it. Refused by name, before anything else is applied.
+    if trigger.is_workflow()
+        && (args.contains_key(ARG_ACTION) || args.contains_key(ARG_CONFIGURATION))
+    {
+        return Err(Error::invalid(format!(
+            "trigger `{name}` is a workflow: its steps are edited as a workflow, \
+             so `{ARG_ACTION}` and `{ARG_CONFIGURATION}` do not apply to it"
+        )));
+    }
+
     // The action, and with it the meaning of every stored setting. Changing one
     // without the other is refused rather than half-applied: `send_email`'s
     // `subject` is not `insert_row`'s anything, and validation's "unknown setting"
     // would report the symptom rather than what happened.
-    let action_before = trigger.action.clone();
+    let action_before = trigger.action().unwrap_or_default().to_owned();
     if let Some(action) = optional_string(args, ARG_ACTION)?
         .map(|a| a.trim().to_owned())
         .filter(|a| !a.is_empty())
     {
-        trigger.action = action;
+        trigger.set_action(action)?;
     }
-    let action_changed = trigger.action != action_before;
+    let action_now = trigger.action().unwrap_or_default().to_owned();
+    let action_changed = action_now != action_before;
     let given_config = match args.get(ARG_CONFIGURATION) {
         None | Some(Json::Null) => None,
         Some(Json::Object(map)) => Some(map.clone().into_iter().collect::<Attrs>()),
@@ -639,25 +659,27 @@ fn build(
     };
     if action_changed && given_config.is_none() {
         return Err(Error::invalid(format!(
-            "changing the action from `{action_before}` to `{}` also needs a new \
+            "changing the action from `{action_before}` to `{action_now}` also needs a new \
              `{ARG_CONFIGURATION}`: the settings are that action's own, and \
              `{action_before}`'s do not carry over. Call `{TOOL_DESCRIBE_ACTION}` \
-             for `{}` and send its settings.",
-            trigger.action, trigger.action
+             for `{action_now}` and send its settings."
         )));
     }
     if let Some(config) = given_config {
         // The mask sent back unchanged means "leave the stored value", which is
         // what makes `visible_config`'s redaction safe rather than destructive
         // (§11.1's other half).
-        trigger.configuration = match dispatcher.registry().get(trigger.action.trim()) {
+        let stored = trigger.configuration().cloned().unwrap_or_default();
+        let registry = dispatcher.registry();
+        let merged = match trigger.action().and_then(|a| registry.get(a)) {
             Some(action) => merge_secrets(
                 &action.config_spec_for(catalog, trigger.channel.as_deref()),
-                &trigger.configuration,
+                &stored,
                 &config,
             ),
             None => config,
         };
+        trigger.set_configuration(merged)?;
     }
 
     if let Some(role) = optional_role(args, ARG_MIN_ROLE)? {
@@ -723,7 +745,7 @@ fn build(
 /// than substituted — the validation's own sentence names the setting and says
 /// what is wrong with it, and no summary of mine improves on that.
 fn explain(catalog: &Catalog, registry: &ActionRegistry, trigger: &Trigger, error: Error) -> Error {
-    let Some(action) = registry.get(trigger.action.trim()) else {
+    let Some(action) = trigger.action().and_then(|a| registry.get(a)) else {
         return error;
     };
     let spec = action.config_spec_for(catalog, trigger.channel.as_deref());

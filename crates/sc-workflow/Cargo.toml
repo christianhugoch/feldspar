@@ -1,0 +1,43 @@
+[package]
+name = "sc-workflow"
+description = "Durable workflows: the program a trigger body can be, its versions, and the runs of it (layer 7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# `FormField` for a `UserForm` step's declared fields and `Attrs` for an action
+# step's settings — the "settings as data" vocabulary every configurable
+# extension point in the tree speaks (§6.2).
+sc-types.workspace = true
+# `_sc_workflow_versions` and `_sc_run_traces` are stored metadata, so this crate
+# speaks the query language and reads rows back out of the driver, exactly as
+# `_sc_triggers` does.
+sc-catalog.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+# The formula language a `Set` value, a `Branch` arm, a `ForEach` collection and
+# a `Wait` deadline are written in — and `Ambient::Context`, which is the one
+# thing a workflow adds to the scope an action already has (decision 8).
+sc-expr.workspace = true
+# The trigger a workflow is the **body** of: its record, its event, the scope its
+# formulas are read in (`action_shape`), the registry a step's action resolves
+# through, and the `WorkflowEngine` seam the engine will install itself into
+# once there is an engine (§10.3, phase 3). Layer 6.
+sc-action.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -23,8 +23,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use sc_action::{
-    ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, EventKind, Trigger, TriggerId, delete_trigger,
-    list_triggers, load_trigger, save_trigger,
+    ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, EventKind, Trigger, TriggerBody, TriggerId,
+    delete_trigger, list_triggers, load_trigger, save_trigger,
 };
 use sc_api::auth::{credentials, user_row_json, user_summary_json};
 use sc_api::csv as csv_rows;
@@ -4593,8 +4593,12 @@ pub(crate) fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
         "when": trigger.when.as_str(),
         "channel": trigger.channel,
         "only_if": trigger.only_if,
-        "action": trigger.action,
-        "configuration": Json::Object(trigger.configuration.clone().into_iter().collect()),
+        // Which engine runs it, and — for an action body — what it runs with.
+        // A workflow answers `null` for both: its steps are a version of their
+        // own, fetched with `getWorkflow` (§10.3).
+        "body": trigger.body.as_str(),
+        "action": trigger.action(),
+        "configuration": trigger.configuration().map(|c| Json::Object(c.clone().into_iter().collect())),
         "min_role": trigger.min_role,
         "enabled": trigger.is_enabled(),
         // The timing, read back the way it was posted: absent is null, not 0, so
@@ -4619,13 +4623,30 @@ pub(crate) fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
 pub(crate) fn trigger_from_body(id: TriggerId, body: &Json) -> Result<Trigger> {
     let obj = require_object(body)?;
     let when = EventKind::parse(non_empty_str_field(obj, "when")?)?;
-    let mut trigger = Trigger::with_id(
-        id,
-        non_empty_str_field(obj, "name")?,
-        when,
-        non_empty_str_field(obj, "action")?,
-    )
-    .description(optional_str(obj, "description"));
+    // The body decides what the rest of the request means: an `action` body
+    // needs an action name and may carry a configuration, and a `workflow` body
+    // has neither. Absent is `action`, because that is what every trigger was
+    // before §10.3 and what a client that has not heard of workflows sends.
+    let kind = obj
+        .get("body")
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .unwrap_or(TriggerBody::ACTION);
+    let action = match kind {
+        TriggerBody::WORKFLOW => None,
+        _ => Some(non_empty_str_field(obj, "action")?.to_owned()),
+    };
+    let configuration = match obj.get("configuration").filter(|v| !v.is_null()) {
+        Some(Json::Object(config)) => config.clone().into_iter().collect(),
+        Some(_) => return Err(Error::invalid("field `configuration` must be an object")),
+        None => sc_types::Attrs::new(),
+    };
+    // One reading of the three, the same one the stored row goes through, so the
+    // API refuses exactly what the loader refuses.
+    let body = TriggerBody::parse(kind, action.as_deref(), configuration)?;
+    let mut trigger = Trigger::with_body(id, non_empty_str_field(obj, "name")?, when, body)
+        .description(optional_str(obj, "description"));
     // Absent, null, or blank are all "no channel" — a form posts the empty
     // string for a picker it did not show.
     if let Some(channel) = obj.get("channel").and_then(Json::as_str)
@@ -4637,12 +4658,6 @@ pub(crate) fn trigger_from_body(id: TriggerId, body: &Json) -> Result<Trigger> {
         && !only_if.trim().is_empty()
     {
         trigger = trigger.only_if(only_if.trim());
-    }
-    if let Some(config) = obj.get("configuration") {
-        let Json::Object(config) = config else {
-            return Err(Error::invalid("field `configuration` must be an object"));
-        };
-        trigger = trigger.configuration(config.clone().into_iter().collect());
     }
     if let Some(min_role) = obj.get("min_role").filter(|v| !v.is_null()) {
         let raw = min_role

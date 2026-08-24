@@ -524,7 +524,7 @@ async fn the_ways_a_configuration_can_be_wrong_are_refused_on_save() -> Result<(
     for (entries, expected) in cases {
         let trigger = Trigger::new("receipt", EventKind::Insert, "send_email")
             .on("orders")
-            .configuration(config(entries));
+            .with_configuration(config(entries));
         let err = validate_trigger(&catalog, &registry, &trigger)
             .await
             .unwrap_err();
@@ -540,7 +540,7 @@ async fn the_ways_a_configuration_can_be_wrong_are_refused_on_save() -> Result<(
     // MJML body, which is compiled on save because it has to compile at send.
     let ok = Trigger::new("receipt", EventKind::Insert, "send_email")
         .on("orders")
-        .configuration(config(&[
+        .with_configuration(config(&[
             ("to", json!("{{ customerⱵemail }}")),
             ("bcc", json!("audit@example.com")),
             ("subject", json!("Receipt for order {{ id }}")),

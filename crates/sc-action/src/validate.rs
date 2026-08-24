@@ -7,6 +7,11 @@
 //! those when the event fires means a trigger that silently does nothing (or the
 //! wrong thing) at the worst possible moment.
 //!
+//! A **workflow** body has no action and no configuration to check here. Its
+//! steps are checked by `sc-workflow`, where the version that holds them is read
+//! (§10.3); what is checked here is everything the two bodies share — the name,
+//! the event, the channel, the role floor, the timing and the `only_if`.
+//!
 //! The same function runs at **load** ([`Triggers`](crate::Triggers)), where a
 //! trigger that no longer validates — a table was dropped, a plugin that provided
 //! its action is gone, a restored dump — is dropped from the live set with its
@@ -47,10 +52,18 @@ pub async fn validate_trigger(
     let problem = |msg: String| Error::invalid(format!("trigger `{name}`: {msg}"));
 
     // The action must exist *and* be configured the way it declares. The registry
-    // error already lists the alternatives.
-    let action = registry
-        .require(trigger.action.trim())
-        .map_err(|e| problem(e.to_string()))?;
+    // error already lists the alternatives. A **workflow** body has neither, and
+    // what is checked instead is its steps — which live in a version row rather
+    // than on the trigger, so `sc-workflow` checks them where it reads them
+    // (decision 11) and everything below is what the two bodies share.
+    let action = match trigger.action() {
+        Some(action) => Some(
+            registry
+                .require(action)
+                .map_err(|e| problem(e.to_string()))?,
+        ),
+        None => None,
+    };
     // The values are checked against the declaration below, once the channel has
     // been resolved: an action's *spec* can depend on the table
     // ([`Action::config_spec_for`] — `send_email`'s attachment checkboxes are the
@@ -100,29 +113,29 @@ pub async fn validate_trigger(
     // computes cannot disagree.
     crate::Schedule::of(trigger).map_err(|e| problem(e.to_string()))?;
 
-    // The settings are of the shapes the action declares **for this channel**,
-    // and there are no others: an unknown setting is a typo or a stale config,
-    // and one that is stale precisely because the table changed (a File field
-    // renamed out from under an `attach_…`) is the case this ordering catches.
-    validate_attrs(
-        &action.config_spec_for(catalog, channel),
-        &trigger.configuration,
-    )
-    .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
+    if let (Some(action), Some(configuration)) = (&action, trigger.configuration()) {
+        // The settings are of the shapes the action declares **for this
+        // channel**, and there are no others: an unknown setting is a typo or a
+        // stale config, and one that is stale precisely because the table
+        // changed (a File field renamed out from under an `attach_…`) is the
+        // case this ordering catches.
+        validate_attrs(&action.config_spec_for(catalog, channel), configuration)
+            .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
 
-    // Everything the spec cannot express: that a named table exists and can be
-    // addressed by primary key, that a configured formula parses and resolves in
-    // the scope this event gives it. Only the action knows what its own settings
-    // mean, so only the action can check them — and it is checked *here*, on
-    // save and on load, rather than at fire time.
-    action
-        .validate_config(&ConfigCheck {
-            catalog,
-            config: &trigger.configuration,
-            channel,
-        })
-        .await
-        .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
+        // Everything the spec cannot express: that a named table exists and can
+        // be addressed by primary key, that a configured formula parses and
+        // resolves in the scope this event gives it. Only the action knows what
+        // its own settings mean, so only the action can check them — and it is
+        // checked *here*, on save and on load, rather than at fire time.
+        action
+            .validate_config(&ConfigCheck {
+                catalog,
+                config: configuration,
+                channel,
+            })
+            .await
+            .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
+    }
 
     if let Some(source) = trigger
         .only_if

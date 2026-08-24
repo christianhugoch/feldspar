@@ -459,11 +459,9 @@ async fn a_modules_action_becomes_available_to_a_trigger_with_no_restart() -> sc
         .await?;
     let _ = books;
 
-    let mut trigger = Trigger::new("echo a book", EventKind::Insert, "echo_row");
+    let mut trigger =
+        Trigger::new("echo a book", EventKind::Insert, "echo_row").config("greeting", "hello");
     trigger.channel = Some("books".into());
-    trigger
-        .configuration
-        .insert("greeting".into(), json!("hello"));
     sc_action::save_trigger(&server.catalog, &server.dispatcher.registry(), &trigger).await?;
     server.dispatcher.reload(&server.catalog).await?;
 
@@ -591,10 +589,9 @@ async fn a_runaway_module_does_not_delay_a_code_body() -> sc_error::Result<()> {
     let mut spin = Trigger::new("spin", EventKind::Insert, "echo_spin");
     spin.channel = Some("books".into());
     sc_action::save_trigger(&server.catalog, &server.dispatcher.registry(), &spin).await?;
-    let mut body = Trigger::new("compute", EventKind::Insert, "run_js_code");
+    let mut body = Trigger::new("compute", EventKind::Insert, "run_js_code")
+        .config("code", "return payload.n * 2;");
     body.channel = Some("books".into());
-    body.configuration
-        .insert("code".into(), json!("return payload.n * 2;"));
     sc_action::save_trigger(&server.catalog, &server.dispatcher.registry(), &body).await?;
     server.dispatcher.reload(&server.catalog).await?;
 

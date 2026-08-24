@@ -23,7 +23,7 @@ use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
 
 use crate::event::EventKind;
-use crate::trigger::{Trigger, TriggerId};
+use crate::trigger::{Trigger, TriggerBody, TriggerId};
 
 /// Name of the triggers table in the primary database.
 pub const TRIGGERS_TABLE: &str = "_sc_triggers";
@@ -44,7 +44,15 @@ pub const COL_EVENT: &str = "event";
 pub const COL_CHANNEL: &str = "channel";
 /// The "only if" formula, or NULL for "always".
 pub const COL_ONLY_IF: &str = "only_if";
-/// The registered action name.
+/// Which engine runs this trigger: `action` or `workflow`
+/// ([`TriggerBody::as_str`]).
+///
+/// The discriminator is a column of its own rather than "an action name means an
+/// action": a workflow body has nothing to put in `action`, and inferring the
+/// body from the absence of a value would make a half-written row read as a
+/// workflow.
+pub const COL_BODY: &str = "body";
+/// The registered action name — NULL for a workflow body.
 pub const COL_ACTION: &str = "action";
 /// The action's configuration (JSON object).
 pub const COL_CONFIGURATION: &str = "configuration";
@@ -85,7 +93,10 @@ fn trigger_fields() -> Vec<DataField> {
         // rather than an empty string.
         DataField::plain(COL_CHANNEL, text()),
         DataField::plain(COL_ONLY_IF, text()),
-        DataField::plain(COL_ACTION, text()).required(),
+        DataField::plain(COL_BODY, text()).required(),
+        // Nullable since §10.3: a workflow's body is its steps, which live in
+        // `_sc_workflow_versions`, so there is no action to name here.
+        DataField::plain(COL_ACTION, text()),
         DataField::plain(COL_CONFIGURATION, json()).required(),
         DataField::plain(COL_MIN_ROLE, int()),
         DataField::plain(COL_ATTRIBUTES, json()).required(),
@@ -235,6 +246,7 @@ fn trigger_columns() -> Vec<String> {
         COL_EVENT,
         COL_CHANNEL,
         COL_ONLY_IF,
+        COL_BODY,
         COL_ACTION,
         COL_CONFIGURATION,
         COL_MIN_ROLE,
@@ -254,8 +266,11 @@ fn trigger_values(trigger: &Trigger) -> Vec<Value> {
         Value::Text(trigger.when.as_str().to_owned()),
         text_or_null(trigger.channel.as_deref()),
         text_or_null(trigger.only_if.as_deref()),
-        Value::Text(trigger.action.trim().to_owned()),
-        Value::Json(Json::Object(trigger.configuration.clone())),
+        Value::Text(trigger.body.as_str().to_owned()),
+        text_or_null(trigger.action()),
+        Value::Json(Json::Object(
+            trigger.configuration().cloned().unwrap_or_default(),
+        )),
         match trigger.min_role {
             Some(role) => Value::Int(i64::from(role)),
             None => Value::Null,
@@ -314,6 +329,17 @@ fn trigger_from_row(row: &Row) -> Result<Trigger> {
         other => return Err(bad_column(COL_MIN_ROLE, "an integer role", other)),
     };
 
+    // Strict in both directions (`TriggerBody::parse`): the discriminator, the
+    // action name and the configuration have to agree, and a row where they do
+    // not is reported naming the trigger rather than run as whichever half was
+    // read first.
+    let body = TriggerBody::parse(
+        &text(row, COL_BODY)?,
+        optional_text(row, COL_ACTION)?.as_deref(),
+        object(row, COL_CONFIGURATION)?,
+    )
+    .map_err(|e| Error::invalid(format!("trigger `{name}`: {e}")))?;
+
     Ok(Trigger {
         id,
         name,
@@ -321,8 +347,7 @@ fn trigger_from_row(row: &Row) -> Result<Trigger> {
         when,
         channel: optional_text(row, COL_CHANNEL)?,
         only_if: optional_text(row, COL_ONLY_IF)?,
-        action: text(row, COL_ACTION)?,
-        configuration: object(row, COL_CONFIGURATION)?,
+        body,
         min_role,
         attributes: object(row, COL_ATTRIBUTES)?,
         last_run_at: last_run_at(row)?,
@@ -429,8 +454,10 @@ mod tests {
         );
         // A description is optional; NULL reads back as "".
         assert!(!by_name(COL_DESCRIPTION).required);
-        // The event and the action are what a trigger *is*; neither is optional.
-        assert!(by_name(COL_EVENT).required && by_name(COL_ACTION).required);
+        // The event and the body are what a trigger *is*; neither is optional.
+        assert!(by_name(COL_EVENT).required && by_name(COL_BODY).required);
+        // The action is not: a workflow body has none (§10.3).
+        assert!(!by_name(COL_ACTION).required);
         // A channel-less event and an always-run trigger are real states.
         assert!(!by_name(COL_CHANNEL).required && !by_name(COL_ONLY_IF).required);
     }
@@ -452,6 +479,39 @@ mod tests {
         for column in &written {
             assert!(declared.contains(column), "{column} is not a column");
         }
+    }
+
+    #[test]
+    fn a_workflow_body_stores_its_discriminator_and_a_null_action() {
+        let workflow = Trigger::workflow("approve", EventKind::Insert).on("orders");
+        let values = trigger_values(&workflow);
+        let at = |col: &str| {
+            trigger_columns()
+                .iter()
+                .position(|c| c == col)
+                .map(|i| values[i].clone())
+                .unwrap()
+        };
+        assert_eq!(at(COL_BODY), Value::Text("workflow".to_owned()));
+        assert_eq!(at(COL_ACTION), Value::Null);
+        // The configuration column is NOT NULL, and an empty object is the
+        // honest value for a body that has none.
+        assert_eq!(
+            at(COL_CONFIGURATION),
+            Value::Json(Json::Object(Attrs::new()))
+        );
+
+        let action = Trigger::new("audit", EventKind::Insert, "insert_row").on("books");
+        let values = trigger_values(&action);
+        let at = |col: &str| {
+            trigger_columns()
+                .iter()
+                .position(|c| c == col)
+                .map(|i| values[i].clone())
+                .unwrap()
+        };
+        assert_eq!(at(COL_BODY), Value::Text("action".to_owned()));
+        assert_eq!(at(COL_ACTION), Value::Text("insert_row".to_owned()));
     }
 
     #[test]

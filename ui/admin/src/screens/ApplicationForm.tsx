@@ -428,7 +428,8 @@ export function ApplicationForm({ appId }: { appId?: string }) {
                     <>
                       <span className="fw-semibold">{t.name}</span>
                       <div className="text-muted small">
-                        {t.action} · on {t.when} ·{" "}
+                        {/* A workflow body has no action to name (§10.3). */}
+                        {t.action ?? "workflow"} · on {t.when} ·{" "}
                         {/* Same vocabulary the trigger form uses: 1 is admin,
                             100 is public, and no role set means admins only. */}
                         {t.min_role == null

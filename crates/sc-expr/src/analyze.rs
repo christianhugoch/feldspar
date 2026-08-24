@@ -2,8 +2,9 @@
 //!
 //! Collection is pure syntax and happens once at parse time: every identifier
 //! not bound by an arrow parameter is free, and member accesses on an **ambient
-//! object** ([`Ambient`] — `user`, `row`, `old`, `payload`) are recorded so `user.x` can be
-//! checked against the user table and `row.x` against the triggering table.
+//! object** ([`Ambient`] — `user`, `row`, `old`, `payload`, `context`) are
+//! recorded so `user.x` can be checked against the user table and `row.x`
+//! against the triggering table.
 //! Classification — is this identifier a field, a Ⱶ-join path, an ambient
 //! object, an operation flag, a whitelisted global, or a mistake — needs a
 //! shape, so it happens in [`Formula::validate`], which the admin API calls on
@@ -71,11 +72,29 @@ pub enum Ambient {
     /// none, and **fieldless**: unlike `row` and `user`, nothing declares what is
     /// in it, so `payload.anything` resolves and reads null when it is not there.
     Payload,
+    /// `context` — a **workflow run's** accumulated context (§10.3): what the
+    /// steps before this one returned, keyed by their names, plus whatever a
+    /// `Set` step wrote.
+    ///
+    /// In scope only where there *is* a run, which is what makes it a new
+    /// ambient object rather than a redefinition of the bare scope: bare
+    /// identifiers already mean "the row this formula ranges over", and quietly
+    /// making them mean the context inside a workflow would make one language
+    /// mean two things. Fieldless like `payload`, and for the same reason —
+    /// nothing declares what a run has accumulated, so `context.x` resolves and
+    /// reads null before the step that writes it has run.
+    Context,
 }
 
 impl Ambient {
     /// Every ambient object, in scope-declaration order.
-    pub const ALL: [Ambient; 4] = [Ambient::User, Ambient::Row, Ambient::Old, Ambient::Payload];
+    pub const ALL: [Ambient; 5] = [
+        Ambient::User,
+        Ambient::Row,
+        Ambient::Old,
+        Ambient::Payload,
+        Ambient::Context,
+    ];
 
     /// The identifier this object is spelled with.
     pub fn as_str(self) -> &'static str {
@@ -84,6 +103,7 @@ impl Ambient {
             Ambient::Row => "row",
             Ambient::Old => "old",
             Ambient::Payload => "payload",
+            Ambient::Context => "context",
         }
     }
 
@@ -795,6 +815,37 @@ mod tests {
         let err = validate("row.owner === user.id").unwrap_err().to_string();
         assert!(err.contains("unknown identifier `row`"), "got: {err}");
         assert!(!validate("old !== null").is_ok());
+    }
+
+    #[test]
+    fn context_is_in_scope_only_inside_a_run_and_has_no_declared_fields() {
+        // A workflow step's scope (§10.3, decision 8): the trigger's scope plus
+        // `context`, declared with no fields because nothing knows what a run
+        // has accumulated.
+        let workflow_shape = trigger_shape().ambient_fields(Ambient::Context, None::<Vec<String>>);
+        let a = Formula::parse("context.total > 100 && row.owner === user.id")
+            .unwrap()
+            .validate(&workflow_shape, "books")
+            .unwrap();
+        assert!(a.uses(Ambient::Context));
+        assert_eq!(
+            a.ambient_props(Ambient::Context).collect::<Vec<_>>(),
+            ["total"]
+        );
+        // Fieldless: a key the step before this one has not written yet
+        // resolves, and reads null, rather than being refused on save.
+        assert!(
+            Formula::parse("context.nothing_yet")
+                .unwrap()
+                .validate(&workflow_shape, "books")
+                .is_ok()
+        );
+        // And outside a run it is the unknown identifier it should be — a
+        // trigger's `only_if` has no context to read.
+        let err = validate_trigger("context.total > 100")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown identifier `context`"), "got: {err}");
     }
 
     #[test]

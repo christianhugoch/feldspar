@@ -31,9 +31,13 @@
 //!    error means the trigger does **not** run — the same fail-closed contract an
 //!    ownership formula has, for the same reason: a predicate that could not be
 //!    decided has not said yes.
-//! 3. **Run the action**, with the chain [`firing`](Event::firing) returned, so
+//! 3. **Run the body**, with the chain [`firing`](Event::firing) returned, so
 //!    any write *it* makes carries what led there and the next level down knows
-//!    how deep it is.
+//!    how deep it is. An `Action` body runs its action here and answers what it
+//!    returned; a `Workflow` body starts a durable run through the
+//!    [`WorkflowEngine`](crate::WorkflowEngine) seam and answers the run's id and
+//!    state, because a workflow may still be going long after this call is over
+//!    (§10.3).
 //!
 //! ## One trigger's failure is one trigger's failure
 //!
@@ -110,6 +114,14 @@ pub struct TriggerDispatcher {
     triggers: RwLock<Arc<Triggers>>,
     services: ActionServices,
     observer: RwLock<Option<Arc<dyn crate::TriggerObserver>>>,
+    /// The engine a **workflow** body is run by (§10.3), installed by whoever
+    /// built one. `None` in a process that has none, where a workflow trigger
+    /// refuses by name rather than doing nothing.
+    ///
+    /// An `RwLock` for the reason the registry is one: the engine is started
+    /// after the dispatcher exists (the dispatcher is what it is installed
+    /// *on*), so it arrives on a handle that is already shared.
+    engine: RwLock<Option<Arc<dyn crate::WorkflowEngine>>>,
 }
 
 impl TriggerDispatcher {
@@ -121,6 +133,7 @@ impl TriggerDispatcher {
             triggers: RwLock::new(Arc::new(Triggers::empty())),
             services: ActionServices::default(),
             observer: RwLock::new(None),
+            engine: RwLock::new(None),
         }
     }
 
@@ -204,6 +217,26 @@ impl TriggerDispatcher {
     pub fn set_observer(&self, observer: Arc<dyn crate::TriggerObserver>) {
         if let Ok(mut guard) = self.observer.write() {
             *guard = Some(observer);
+        }
+    }
+
+    /// Install the engine that runs a **workflow** body (§10.3) — what
+    /// `WorkflowEngineTask` does when `serve` starts it.
+    ///
+    /// Takes `&self`, as [`set_observer`](TriggerDispatcher::set_observer) does
+    /// and for the same reason: the engine is built after the dispatcher is
+    /// already shared behind an `Arc`, because the engine holds the dispatcher.
+    pub fn set_workflow_engine(&self, engine: Arc<dyn crate::WorkflowEngine>) {
+        if let Ok(mut guard) = self.engine.write() {
+            *guard = Some(engine);
+        }
+    }
+
+    /// The workflow engine, if this process has one.
+    pub fn workflow_engine(&self) -> Option<Arc<dyn crate::WorkflowEngine>> {
+        match self.engine.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         }
     }
 
@@ -455,9 +488,29 @@ pub async fn fire_trigger(
     if !only_if_selects(catalog, services.evaluator.as_ref(), trigger, event).await? {
         return Ok(None);
     }
+    // Which engine runs it is the body's question, and the only one dispatch
+    // asks about it (§10.3): an action runs here and now, a workflow starts a
+    // run that outlives this call.
+    let (action, configuration) = match &trigger.body {
+        crate::TriggerBody::Action {
+            action,
+            configuration,
+        } => (action, configuration),
+        crate::TriggerBody::Workflow => {
+            let engine = dispatcher.workflow_engine().ok_or_else(|| {
+                Error::config(format!(
+                    "trigger `{}` is a workflow, but no workflow engine is \
+                     available in this context",
+                    trigger.name
+                ))
+            })?;
+            let started = engine.start(catalog, trigger, event, chain).await?;
+            return Ok(Some(started.to_json()));
+        }
+    };
     let registry = dispatcher.registry();
-    let action = registry.require(trigger.action.trim())?;
-    let mut ctx = ActionContext::new(catalog, event, &trigger.configuration, &trigger.name)
+    let action = registry.require(action.trim())?;
+    let mut ctx = ActionContext::new(catalog, event, configuration, &trigger.name)
         .with_chain(chain)
         .with_triggers(dispatcher);
     if let Some(evaluator) = &services.evaluator {
@@ -509,7 +562,7 @@ async fn only_if_selects(
             // Neither the caller nor the payload is typed here: neither ever
             // correlates a prefetch (and the payload has no columns to be typed
             // against at all).
-            Ambient::User | Ambient::Payload => value_from_json(json),
+            Ambient::User | Ambient::Payload | Ambient::Context => value_from_json(json),
             Ambient::Row | Ambient::Old => typed_value(Some(&table), field, json),
         }
     });

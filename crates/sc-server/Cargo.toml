@@ -45,6 +45,10 @@ sc-llm.workspace = true
 # the trigger dispatcher, and for the same reason: this crate is where the
 # registry meets the catalog, because it is the one that serves requests.
 sc-agent.workspace = true
+# The workflow half of a trigger body (§10.3): the tables a workflow's versions
+# and a run's trace live in, bootstrapped beside `_sc_triggers`, and — from the
+# next phase — the engine this server installs on the dispatcher.
+sc-workflow.workspace = true
 sc-core-traits.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true

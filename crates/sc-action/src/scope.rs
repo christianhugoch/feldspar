@@ -19,6 +19,9 @@
 //!   directly-run trigger was posted and what an error event carries, and it has
 //!   no declared fields because nothing declares what a sender put in it — so
 //!   `payload.x` resolves and reads null where there is none.
+//! - `context` is ambient in a **workflow run** and nowhere else (§10.3): what
+//!   the steps before this one left behind, put in scope by the engine through
+//!   [`EventBindings::with_context`].
 //! - **Bare identifiers are the row the formula ranges over**, which for a
 //!   formula that only reads the event is *nothing*: those are validated against
 //!   [`EVENT_SCOPE`], an empty table, so `title` where `row.title` was meant is
@@ -248,6 +251,29 @@ impl EventBindings {
         EventBindings::with_values(event, |_, _, json| value_from_json(json))
     }
 
+    /// Put a **workflow run's** context in scope as `context` (§10.3, decision 8).
+    ///
+    /// Only the engine calls this, and only where there *is* a run: presence is
+    /// scope here as it is for `row`, so an ordinary trigger's formula naming
+    /// `context` is the unknown identifier it should be rather than a null that
+    /// reads as "nothing has happened yet".
+    ///
+    /// The values are read as their own JSON shapes, because that is what a run
+    /// context is: what the steps before this one returned, under no column's
+    /// type.
+    pub fn with_context(mut self, context: &Attrs) -> EventBindings {
+        self.ambient.insert(
+            Ambient::Context,
+            Some(
+                context
+                    .iter()
+                    .map(|(name, json)| (name.clone(), value_from_json(json)))
+                    .collect(),
+            ),
+        );
+        self
+    }
+
     /// The event's values with a caller-supplied reading of each field, given the
     /// object it belongs to (`row`/`old` are the event's table, `user` the users
     /// table) — how `sc-api` types them against real columns so an inlined
@@ -422,7 +448,7 @@ pub async fn render_event_template(
     // correlates on has to agree with the database (a uuid compared as text is
     // a SQL error, not a mismatch).
     let bindings = EventBindings::with_values(ctx.event, |ambient, field, json| match ambient {
-        Ambient::User | Ambient::Payload => value_from_json(json),
+        Ambient::User | Ambient::Payload | Ambient::Context => value_from_json(json),
         Ambient::Row | Ambient::Old => typed_value(table.as_ref(), field, json),
     });
     // The bare scope is the event's row, so `{{ id }}` is the row this template
@@ -454,6 +480,41 @@ mod tests {
     use super::*;
     use crate::event::EventKind;
     use serde_json::json;
+
+    #[test]
+    fn a_run_context_is_bound_only_when_a_run_puts_it_there() {
+        let event = Event::new(EventKind::Insert)
+            .on("orders")
+            .row(json!({ "id": 1 }));
+        // Outside a run there is no `context` in the map at all, so naming it is
+        // an unknown identifier rather than a null that reads as "nothing has
+        // happened yet".
+        assert!(
+            !EventBindings::of(&event)
+                .ambient
+                .contains_key(&Ambient::Context)
+        );
+
+        let context: Attrs = [
+            ("total".to_owned(), json!(120)),
+            ("approval".to_owned(), json!({ "approved": true })),
+        ]
+        .into_iter()
+        .collect();
+        let bindings = EventBindings::of(&event).with_context(&context);
+        let bound = bindings.ambient[&Ambient::Context]
+            .as_ref()
+            .expect("in scope, with values");
+        assert_eq!(bound.get("total"), Some(&Value::Int(120)));
+        // A step's whole result travels as its own JSON shape: no column types
+        // it out, because a run context has no columns behind it.
+        assert_eq!(
+            bound.get("approval"),
+            Some(&Value::Json(json!({ "approved": true })))
+        );
+        // And what the event already bound is untouched.
+        assert!(bindings.ambient.contains_key(&Ambient::Row));
+    }
 
     #[test]
     fn presence_is_scope_for_the_ambient_objects() {

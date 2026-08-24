@@ -402,7 +402,7 @@ async fn the_action_declares_the_settings_the_form_renders() -> Result<()> {
 async fn an_empty_configuration_names_the_setting_it_wants() -> Result<()> {
     let (env, _providers) = setup([]).await?;
     let empty: Attrs = config(&[]);
-    let trigger = Trigger::new("t", EventKind::None, "run_agent").configuration(empty);
+    let trigger = Trigger::new("t", EventKind::None, "run_agent").with_configuration(empty);
     let err = save_trigger(&env.catalog, &registry(&env), &trigger)
         .await
         .unwrap_err();

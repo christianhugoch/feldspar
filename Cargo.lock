@@ -7855,6 +7855,7 @@ dependencies = [
  "sc-query",
  "sc-test-harness",
  "sc-types",
+ "serde",
  "serde_json",
  "tokio",
  "uuid",
@@ -8309,6 +8310,7 @@ dependencies = [
  "sc-query",
  "sc-test-harness",
  "sc-types",
+ "sc-workflow",
  "serde",
  "serde_json",
  "tokio",
@@ -8342,6 +8344,26 @@ dependencies = [
  "sc-query",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "sc-workflow"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "sc-action",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-error",
+ "sc-expr",
+ "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 
