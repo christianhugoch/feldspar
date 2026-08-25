@@ -317,20 +317,20 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ### 7. Tests
 
-- [ ] 7.1 `sc-workflow` unit tests: the machine synchronously (§2's rules, one test each), the
+- [x] 7.1 `sc-workflow` unit tests: the machine synchronously (§2's rules, one test each), the
   serde round-trip, and validation's refusals by message.
-- [ ] 7.2 The driver against a fake clock, a recording action registry and an in-memory queue:
+- [x] 7.2 The driver against a fake clock, a recording action registry and an in-memory queue:
   retries with backoff, the handler jump, the budget, a `ForEach` over a hundred items, and a
   step that fails on its first attempt and succeeds on its second.
-- [ ] 7.3 Real Postgres: version pinning (edit the workflow twice while a run is suspended; the
+- [x] 7.3 Real Postgres: version pinning (edit the workflow twice while a run is suspended; the
   run finishes on version 1), recovery (a run row with an expired lease is picked up and finishes
   correctly, and its step runs **once more**, not twice from the start), the append-only
   guarantee, and the trace rows.
-- [ ] 7.4 An end-to-end integration test over HTTP: create the trigger, save the workflow, insert
+- [x] 7.4 An end-to-end integration test over HTTP: create the trigger, save the workflow, insert
   a row, watch the run suspend, resume it with a form value, and read the finished context and
   its trace — the milestone's definition of done, minus the browser.
 - [x] 7.5 `vitest` for `workflowGraph.ts` and the run-path projection.
-- [ ] 7.6 A test that the depth bound still holds when the cascade goes through a workflow.
+- [x] 7.6 A test that the depth bound still holds when the cascade goes through a workflow.
 
 ### 8. Documentation
 

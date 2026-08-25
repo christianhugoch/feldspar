@@ -2,6 +2,61 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 7: the tests
+
+The milestone's test plan, closed. Most of §7 was written as the phases landed — that is what
+"write at least one test to assert that the changes work" adds up to over six phases — so this
+phase is first an **audit** of the plan against what exists, and then the three tests the audit
+found missing. The counts, for the record: 74 synchronous cases over the machine, the validator
+and the stored shapes in `sc-workflow`'s own `src/`; 21 against real Postgres over the driver,
+the queue and the engine task, and 7 more over the versions store and the trace rows; 11 over
+suspension, resumption, cancellation and retry; 10 over the admin API through the assembled
+router; and 25 `vitest` cases over the editor's graph model. All green.
+
+- **The queue seam is now exercised by something that is not the database**
+  (`tests/queue_seam.rs`, TODO 7.2). Decision 5's claim — *nothing above the seam knows which
+  queue it is talking to* — was, until this phase, untestable in the way that matters: the only
+  `WorkQueue` in the tree was `DatabaseQueue`, so the whole suite would have passed just as well
+  if the engine had reached for the runs table directly and the trait had been decoration. The
+  new file drives the real `WorkflowEngineTask` over an in-memory queue that shares no code and
+  no storage with the shipping one — a `Vec` of runs, a lease in a `Mutex`, and a `wake` that is
+  a `Notify` rather than a sleep, which is the shape `sc-bus` will have. Three things fall out of
+  that and none of them could be said before: the engine drives a run claimed from a queue that
+  is not a database and the advance still lands **in** the database; the task loop advances a run
+  the moment the queue rings, with no poll interval anywhere in the test; and a step that outlives
+  half its lease has that lease **renewed through the seam** — written as an action that moves the
+  manual clock forty seconds, so the renewal rule is tested at full speed.
+- **A run that waited across a restart is finished by the process that comes after**
+  (`tests/driver.rs`, TODO 7.3). The definition of done says the server is restarted while the run
+  waits, and nothing tested it: the recovery test writes a stale lease, which is a crash *during*
+  a step, not a process that went away between them. The new test puts the whole first process
+  inside a block — its catalog, its pool handle, its registry, its dispatcher, its clock and the
+  run value — and lets a **UUID** be the only thing that crosses the line. The second process
+  opens the same database, keeps its own recording (so "the step ran" is its own observation and
+  not a leftover), and drives the run to the end. The step the first process never reached runs
+  exactly once, and one trace spans both lives of the run — which is decision 4's point made
+  concrete: resuming is a load, not a reconstruction.
+- **A workflow that starts a workflow is bounded where everything else is** (`tests/driver.rs`,
+  TODO 7.6). The cascade test that existed covers a step that fires a trigger whose body is an
+  *action*. The sentence §3.5 actually makes is about a run that starts a run, which is a
+  different path — dispatch reaches for the `WorkflowEngine` seam rather than the registry — and
+  it is now tested in both directions: a child **run** is created, walks its own step, and the
+  chain that step's writes carry is the whole descent (`parent → onwards → child → childstep`);
+  and at depth, `MAX_DEPTH` refuses the child before any run row exists, so a workflow that keeps
+  starting workflows is stopped exactly where an action that keeps writing rows is.
+- **What the audit found already covered**, listed here because "the tests were written as we
+  went" is only worth anything if somebody checks: §2's advance and error rules, one synchronous
+  test each, including the four `Next` variants, an empty `ForEach`, nested loops, the per-workflow
+  step budget, a retry's backoff and its cap, a handler jump, and a per-step policy beating the
+  workflow's (7.1); retries, the handler jump, the budget, a hundred iterations and a step that
+  fails once and succeeds on the second attempt, all against a recording registry and a manual
+  clock (7.2); version pinning across two edits while a run is suspended, an expired lease picked
+  up by the next poll with its step running **once more** rather than the run restarting, the
+  append-only unique key refusing a second row for one version, and the trace rows (7.3); and the
+  HTTP end-to-end path — create the trigger, save the program, insert a row, watch the run suspend,
+  answer the form, read the finished context and its trace — which is the milestone's definition
+  of done minus the browser (7.4).
+
 ## Workflows, phase 6: the visual editor
 
 The browser half of the milestone. An admin now draws a workflow — steps as nodes, control flow

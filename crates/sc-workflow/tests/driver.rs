@@ -227,6 +227,15 @@ async fn catalog(db: &TestDb) -> Result<Arc<Catalog>> {
     Ok(Arc::new(catalog))
 }
 
+/// The same catalog opened again over a database that already has all of that —
+/// the process that comes after a restart.
+async fn reopen(db: &TestDb) -> Result<Arc<Catalog>> {
+    let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
+    Ok(Arc::new(
+        Catalog::init(driver as Arc<dyn DatabaseDriver>).await?,
+    ))
+}
+
 /// A dispatcher with the recording action registered and a real isolate — what a
 /// step actually runs through.
 fn dispatcher(recorder: Recorder) -> Result<Arc<TriggerDispatcher>> {
@@ -645,6 +654,82 @@ async fn a_run_finishes_on_the_version_it_started_with() -> Result<()> {
         require_run(&catalog, run.id).await?.subject_version,
         Some(1)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_run_that_waited_across_a_restart_is_finished_by_the_process_that_comes_after()
+-> Result<()> {
+    let db = TestDb::new().await?;
+    let started = Utc::now();
+
+    // --- the process that starts the run ------------------------------------
+    //
+    // Everything it holds is inside this block: its catalog and pool handle, its
+    // action registry, its dispatcher, its clock and the run value itself. What
+    // crosses the line is a UUID, which is what "the server is restarted while
+    // the run waits" amounts to.
+    let id = {
+        let catalog = catalog(&db).await?;
+        let (recorder, recording) = Recorder::new("record");
+        let dispatcher = dispatcher(recorder)?;
+        let trigger = trigger("restarted");
+        let workflow = Workflow::of(
+            trigger.id,
+            1,
+            vec![
+                Step::new(
+                    "hold",
+                    StepKind::Wait {
+                        until: "1000 * 60 * 60".to_owned(),
+                    },
+                )
+                .then(Next::step("after")),
+                action_step("after").then(Next::End),
+            ],
+        )
+        .traced();
+        save_workflow(&catalog, &workflow, "v1", None).await?;
+        let clock = ManualClock::new(started);
+        let run = start_run(
+            &catalog,
+            &dispatcher,
+            &clock,
+            &trigger,
+            &insert_event(),
+            vec!["restarted".to_owned()],
+        )
+        .await?;
+        assert_eq!(run.state, RunState::Waiting);
+        assert_eq!(run.wake_at, Some(started + Duration::hours(1)));
+        assert_eq!(recording.count("after"), 0, "it has not got there yet");
+        run.id
+    };
+
+    // --- the process that comes after ---------------------------------------
+    //
+    // A fresh catalog over the same database, a fresh registry, and a **fresh
+    // recording** — so "the step ran" below is this process's observation and
+    // not a leftover of the one that is gone.
+    let catalog = reopen(&db).await?;
+    let (recorder, recording) = Recorder::new("record");
+    let dispatcher = dispatcher(recorder)?;
+    let clock = ManualClock::new(started + Duration::hours(2));
+
+    let mut run = require_run(&catalog, id).await?;
+    assert_eq!(run.state, RunState::Waiting);
+    assert_eq!(run.subject_version, Some(1));
+    let driver = Driver::new(&catalog, &dispatcher, &clock);
+    assert_eq!(driver.drive(&mut run).await?, Advanced::Finished);
+
+    // The step the first process never reached ran here, exactly once, and the
+    // whole path is in one trace across the two lives of the run: the state was
+    // in the database, so resuming is a load and not a reconstruction.
+    assert_eq!(recording.steps(), vec!["after".to_owned()]);
+    let traces = list_run_traces(&catalog, id.0).await?;
+    let steps: Vec<&str> = traces.iter().map(|t| t.step.as_str()).collect();
+    assert_eq!(steps, vec!["hold", "after"]);
+    assert_eq!(require_run(&catalog, id).await?.state, RunState::Done);
     Ok(())
 }
 
@@ -1142,6 +1227,142 @@ async fn claiming_is_exclusive_and_the_run_that_waited_longest_goes_first() -> R
             .claim(now, now + Duration::seconds(60), 10)
             .await?
             .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_workflow_that_starts_a_workflow_carries_the_chain_and_is_bounded_by_it() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = catalog(&db).await?;
+    sc_action::bootstrap_triggers(&catalog).await?;
+    let (recorder, recording) = Recorder::new("record");
+
+    let mut registry = ActionRegistry::new();
+    registry.register(Arc::new(recorder))?;
+    registry.register(Arc::new(Firer {
+        trigger: "child".to_owned(),
+    }))?;
+    let registry = Arc::new(registry);
+    let evaluator: Arc<dyn JsEvaluator> = Arc::new(DenoEvaluator::new());
+    let dispatcher =
+        Arc::new(TriggerDispatcher::new(Arc::clone(&registry)).with_evaluator(evaluator));
+
+    // The other direction of §3.5: not a workflow whose step runs an action, but
+    // a workflow whose step starts **another run**. The engine has to be
+    // installed for that to be possible at all — dispatch reaches for the
+    // `WorkflowEngine` seam and refuses by name when there is none.
+    let clock = Arc::new(ManualClock::new(Utc::now()));
+    let queue = Arc::new(DatabaseQueue::new(
+        Arc::clone(&catalog),
+        "node-a",
+        std::time::Duration::from_millis(1),
+    ));
+    let engine = Arc::new(WorkflowEngineTask::with_queue(
+        Arc::clone(&catalog),
+        Arc::clone(&dispatcher),
+        queue,
+        Arc::clone(&clock) as Arc<dyn sc_workflow::Clock>,
+    ));
+    dispatcher.set_workflow_engine(Arc::clone(&engine) as Arc<dyn sc_action::WorkflowEngine>);
+
+    // The child: a trigger nothing fires but another trigger, whose body is a
+    // workflow of one recording step.
+    let child = Trigger::with_body(
+        TriggerId::new(),
+        "child",
+        EventKind::None,
+        TriggerBody::Workflow,
+    );
+    save_workflow(
+        &catalog,
+        &Workflow::of(
+            child.id,
+            1,
+            vec![action_step("childstep").then(Next::End)],
+        ),
+        "v1",
+        None,
+    )
+    .await?;
+    sc_action::save_trigger(&catalog, &registry, &child).await?;
+    dispatcher.reload(&catalog).await?;
+
+    // The parent: one step, which fires the child.
+    let parent = trigger("parent");
+    save_workflow(
+        &catalog,
+        &Workflow::of(
+            parent.id,
+            1,
+            vec![
+                Step::new(
+                    "onwards",
+                    StepKind::Action {
+                        action: "fire".to_owned(),
+                        configuration: Attrs::new(),
+                    },
+                )
+                .then(Next::End),
+            ],
+        ),
+        "v1",
+        None,
+    )
+    .await?;
+
+    // Shallow: the parent's step starts a child **run**, which walks its own
+    // step. Two runs, and the chain the child's step writes shows the whole
+    // descent — the parent's chain, the step that fired, the child trigger, and
+    // the child's own step.
+    let run = start_run(
+        &catalog,
+        &dispatcher,
+        clock.as_ref(),
+        &parent,
+        &insert_event(),
+        vec!["parent".to_owned()],
+    )
+    .await?;
+    assert_eq!(run.state, RunState::Done, "{:?}", run.error);
+    assert_eq!(recording.count("childstep"), 1);
+    let chain = run_state(&require_run(&catalog, run.id).await?)?.context()["onwards"].clone();
+    assert!(chain["run"].is_string(), "the step got the child run's id");
+    let child_runs = sc_workflow::list_workflow_runs(&catalog, "child", None, 10, 0).await?;
+    assert_eq!(child_runs.len(), 1);
+    assert_eq!(child_runs[0].state, RunState::Done);
+    assert_eq!(
+        run_state(&child_runs[0])?.context()["chain_at_childstep"],
+        json!(["parent", "onwards", "child", "childstep"])
+    );
+
+    // Deep: four triggers already, so the step is the fifth and starting the
+    // child would be the sixth. The bound refuses it before any run is created —
+    // a workflow that starts a workflow is stopped exactly where an action that
+    // writes a row is.
+    let deep: Vec<String> = (1..=4).map(|n| format!("t{n}")).collect();
+    let run = start_run(
+        &catalog,
+        &dispatcher,
+        clock.as_ref(),
+        &parent,
+        &insert_event(),
+        deep,
+    )
+    .await?;
+    assert_eq!(run.state, RunState::Failed);
+    let error = run.error.unwrap_or_default();
+    assert!(error.contains("child"), "{error}");
+    assert!(
+        error.contains(&format!("{}", sc_action::MAX_DEPTH)),
+        "{error}"
+    );
+    assert_eq!(recording.count("childstep"), 1, "no second child run");
+    assert_eq!(
+        sc_workflow::list_workflow_runs(&catalog, "child", None, 10, 0)
+            .await?
+            .len(),
+        1
     );
     Ok(())
 }
