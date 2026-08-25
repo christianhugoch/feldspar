@@ -2,6 +2,74 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 2: the machine
+
+The engine's decisions, as a value. `WorkflowRun` in `sc-workflow` is the whole resumable state
+of one run — the context, the loop frames, the cursor, the attempt count, the budget and the
+trace sequence — and it performs **no IO at all**: it is asked what to do, told what happened,
+and asked again. Every rule §10.3 promises is therefore tested synchronously in this phase, with
+no database, no runtime and no clock; the driver that does the IO is phase 3.
+
+- **Sans-IO, exactly as the agent loop is** (decision 4). `next_step(workflow, now)` answers a
+  `Decision` — `RunAction { step, action, configuration }` · `Evaluate { formulas }` ·
+  `Suspend { until, awaiting_input }` · `Done { context }` · `Failed { step, error }` — fed back
+  through `step_succeeded`, `step_failed`, `evaluated` and `resumed`. It is **idempotent**:
+  asking twice without answering asks for the same thing twice and spends no more of the budget,
+  which is what makes "at least once per step" a property rather than a hope — a node that died
+  between being told to run an action and running it comes back and is told again.
+- **The state is what `_sc_runs.context` holds.** `Serialize + Deserialize`, so resuming is a
+  deserialise rather than a reconstruction. The test does not merely round-trip a run: it
+  round-trips one *in flight* — inside a loop, suspended on a form — and then carries the
+  restored copy on to the next item.
+- **The workflow is not in the state.** A run is pinned to its version (decision 2), so every
+  method takes the `Workflow` as an argument and reads the steps back out of it. Copying the
+  program into the run row would store the same document twice and invite the two to disagree.
+- **The clock is a parameter.** `now` is passed to every method that could want one, so a retry's
+  backoff, a three-day approval timeout and an hour-long `Wait` are all tested by moving the
+  clock. No test sleeps.
+- **One `Evaluate` decision for four jobs** — a `Set`'s value, a `ForEach`'s collection, a
+  `Wait`'s deadline, a `Branch`'s guards, a computed `next` — because the driver's part in all of
+  them is identical and which one it is, is the machine's business. `Set` assignments are asked
+  for **one at a time and in order**, which is the only way a later one can read what an earlier
+  one wrote.
+- **The frame stack is what makes a loop drawable.** There is one flat list of steps: a `ForEach`
+  pushes a frame holding the collection and the cursor, binds the item under `var`, and runs the
+  body; `Next::End` inside a loop means the *iteration* ends, and outside one means the run does.
+  Which it is, is a question the stack answers, so loops nest without nesting the step list. An
+  empty collection runs the body zero times; a collection that is not a list is a **failure**
+  rather than an empty loop, because running the body zero times would hide a formula naming
+  something the run never wrote.
+- **A step failing and a workflow being wrong are different endings.** A step that returns an
+  error goes through the error policy — `Retry` counts attempts and suspends until an
+  exponential, capped, jittered deadline before re-running *the same step*; `Handler` jumps to
+  the named step with the failure in the context under the reserved `error` key; `Fail` stops.
+  Exhausting a step's own retries falls through to the workflow's policy — and a workflow-level
+  retry that runs out **fails** rather than starting again, because a policy falling through to
+  itself would retry forever. A `Next` naming a step that does not exist is the *program* being
+  wrong: it ends the run directly, without consulting a policy, because retrying it would never
+  help and a handler written for a failing HTTP call is not an answer to it.
+- **Jitter without a random number generator.** Equal jitter — half the delay plus a spread over
+  the other half — derived from the step, the attempt and the sub-second part of the failure's
+  instant. Retries without it synchronise, and a hundred runs that failed on the same outage
+  retrying together is the outage's second wave; a generator would have made the machine
+  non-deterministic and this phase's tests unrepeatable.
+- **Suspension has one shape and two reasons.** `Suspend { until, awaiting_input }` carries both
+  fields rather than being two variants, because a `UserForm` with a timeout is genuinely both: a
+  person may answer it and the clock may give up on them. A form with no timeout suspends with
+  `until: None`, which is what a NULL `wake_at` means — no clock will make it runnable. `resumed`
+  merges the answers under the step's `assign_to`, whole, so two forms with a `note` field cannot
+  overwrite each other.
+- **The step budget** (default 1000, per workflow, copied into the run when it starts) stops a
+  loop with no exit, naming the step it stopped at and the number that stopped it.
+
+Tests: 30 synchronous ones over a fake driver that answers formulas from a table and actions from
+a queue — the four `Next` variants, a result stored under its step's name, assignments that read
+each other, a loop that binds and leaves by its own `next`, an empty one, a nested one, the
+budget, three retries with doubling waits, both fall-through rules, the handler jump and its
+reserved key, a missing handler, a `Wait` written as a duration and as an instant, an approval
+resumed a day later, one abandoned past its timeout, feedback fed back out of turn, and a run in
+flight surviving a serde round-trip and carrying on.
+
 ## Workflows, phase 1: the model, the storage, and the trigger body
 
 The first phase of the workflow milestone (§10.3): everything a durable workflow *is*, before

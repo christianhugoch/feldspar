@@ -195,23 +195,23 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ### 2. The machine
 
-- [ ] 2.1 `WorkflowRun`: the whole resumable state as one serialisable value — `context`, the
+- [x] 2.1 `WorkflowRun`: the whole resumable state as one serialisable value — `context`, the
   **frame stack** (a `ForEach` needs somewhere to keep its cursor and its collection, and nesting
   means a stack rather than a field), the current step, the attempt count for it, the step budget
   and the accumulated trace sequence. `Serialize`/`Deserialize` round-trip tested; this is what
   `_sc_runs.context` holds.
-- [ ] 2.2 `next_step()` → `Decision`: `RunAction { step, action, configuration }` ·
+- [x] 2.2 `next_step()` → `Decision`: `RunAction { step, action, configuration }` ·
   `Evaluate { formulas }` (a `Set`, a `Branch`, a `ForEach`'s collection — everything needing the
   JS evaluator, which the machine does not hold) · `Suspend { until | awaiting_input }` ·
   `Done { context }` · `Failed { step, error }`. Fed back through `step_succeeded(value)`,
   `step_failed(error)`, `evaluated(values)` and `resumed(input)`.
-- [ ] 2.3 The advance rules, each with a synchronous test: an action's return value is stored in
+- [x] 2.3 The advance rules, each with a synchronous test: an action's return value is stored in
   the context under the step's name (and a `Set`'s assignments merge into it); `Next` resolves
   through all four variants; `End` and "no next" both finish; a `ForEach` pushes a frame, binds
   the loop variable under `var`, and pops to its own `next` when the collection is exhausted;
   an empty collection runs the body zero times; the step budget (default 1000, configurable per
   workflow) ends a run as `MaxSteps`-like rather than looping forever.
-- [ ] 2.4 The error rules, likewise: `Retry` counts attempts and asks for a `Suspend` until the
+- [x] 2.4 The error rules, likewise: `Retry` counts attempts and asks for a `Suspend` until the
   backoff deadline, then re-runs *the same step*; exhausting `max` falls through to the
   workflow-level policy; `Handler` jumps to the named step with the error in the context under a
   reserved key; `Fail` ends the run as failed with the reason. A per-step policy overrides the

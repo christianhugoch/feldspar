@@ -19,11 +19,15 @@
 //!   attempt, written only when the workflow asks for it.
 //! - The **scope** ([`scope`]): [`workflow_shape`], the one place a step's
 //!   formulas' scope is decided.
+//! - The **machine** ([`machine`]): [`WorkflowRun`], the whole resumable state of
+//!   one run as a single serialisable value, and the [`Decision`] it hands a
+//!   driver. Sans-IO — it owns every decision and performs none of the work — so
+//!   the engine's rules are testable synchronously, with no database, no runtime
+//!   and no clock.
 //!
-//! The machine that decides what a run does next, the driver that does the IO,
-//! and the queue that claims runnable runs are the next phases of §10.3; the
-//! [`WorkflowEngine`](sc_action::WorkflowEngine) seam they install themselves
-//! into already exists in `sc-action`.
+//! The driver that does the IO and the queue that claims runnable runs are the
+//! next phases of §10.3; the [`WorkflowEngine`](sc_action::WorkflowEngine) seam
+//! they install themselves into already exists in `sc-action`.
 //!
 //! ## The two decisions worth knowing before reading
 //!
@@ -36,11 +40,13 @@
 //! rewritten. That is the whole implementation of "a suspended run finishes with
 //! its version of the workflow".
 
+pub mod machine;
 pub mod scope;
 pub mod traces;
 pub mod versions;
 pub mod workflow;
 
+pub use machine::{Conclusion, Decision, PendingForm, WorkflowRun};
 pub use scope::{WORKFLOW_SCOPE, workflow_shape};
 pub use traces::{
     RunTrace, TRACES_TABLE, TraceOutcome, bootstrap_run_traces, delete_run_traces, list_run_traces,
