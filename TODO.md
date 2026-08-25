@@ -344,25 +344,26 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ---
 
-## Found while documenting, not yet fixed
+## Found while documenting, and fixed
 
-- [ ] 9.1 **An action step's settings cannot read `context`** — decision 8 says they should. A
-  `Set`, a branch guard, a `ForEach`'s collection and a form's timeout are evaluated by the
-  driver in `workflow_shape` and see the run; an action's settings are evaluated by the action
-  in `action_shape` and do not, so `context.total` in an `insert_row` step is refused on save
-  with *unknown identifier `context`*, and a `run_js_code` body is handed no context either. The
-  fix: let an action know it is configured for a run — the shape on `ConfigCheck`, the context on
-  the bindings `ActionContext` builds — and take it through every action that evaluates a
-  setting (`rows_scope`'s three, `send_email`, `fetch`, `run_js_code`, `run_agent`). Pinned by
-  `an_action_steps_settings_cannot_read_the_context_and_the_tutorial_says_so`, which fails when
-  it is fixed; §10.3 and `docs/tutorial-workflows.md` have paragraphs that change with it.
-- [ ] 9.2 **A loop body of one step is serviced in one advance.** The driver continues while the
-  machine keeps asking about the same step *name*, which is right for a `Set`'s assignments and
-  wrong for a `ForEach` whose body is a single step: its iterations share one write and one trace
-  row, so the durability granularity of that loop is the loop rather than the item. The fix is to
-  compare the step *entry* rather than its name (`steps_taken()` moves on every entry), in
-  `Driver::advance_on` and `stop_at`, with a test that a hundred-item loop with a one-step body
-  writes a hundred times.
+- [x] 9.1 **An action step's settings read `context`** — decision 8's rule, now whole. The
+  scope is decided by the caller and handed to the action on both sides of the seam:
+  `ConfigCheck::shape` for the save-time check (`action_shape` for a trigger,
+  `sc_action::step_shape` — the same plus the ambient `context` — for a step), and
+  `ActionContext::with_run_context` / `shape` / `bindings` at run time. `sc-workflow`'s
+  `workflow_shape` *is* `step_shape` rather than a second implementation. Every action that
+  evaluates a setting goes through those calls (`rows_scope`'s three, `send_email` and `fetch`
+  through `render_event_template`, `run_agent` through `event_formula_value`, `run_js_code`,
+  whose body is bound `context` as an object). Presence is scope on both sides, so the same
+  action outside a workflow still gets *unknown identifier `context`*. Pinned by
+  `a_step_of_a_run_reads_the_context_and_a_trigger_body_does_not` and
+  `an_action_steps_settings_read_the_run_context_and_the_tutorial_says_so`; §10.3, §10.1, the
+  tutorial, the step inspector's hint and the code editor's declarations changed with it.
+- [x] 9.2 **Each iteration of a loop is its own advance.** `Driver::advance_on` and `stop_at`
+  compare the step *entry* (`steps_taken`) rather than its name, so a `Set`'s assignments are
+  still one step and one write while a `ForEach` with a one-step body gets one write and one
+  trace row per item. `each_iteration_of_a_one_step_loop_body_is_its_own_advance` drives a
+  hundred-item loop one advance at a time.
 
 ## Carried past this milestone
 

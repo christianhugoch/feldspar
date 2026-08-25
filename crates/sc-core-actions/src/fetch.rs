@@ -8,9 +8,9 @@ use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
 use sc_action::{
-    Action, ActionContext, ConfigCheck, EVENT_SCOPE, Event, action_shape, check_formula,
-    check_template, event_formula_value, optional_formula, render_event_template,
-    required_template, template_scope,
+    Action, ActionContext, ConfigCheck, EVENT_SCOPE, Event, check_formula, check_template,
+    event_formula_value, optional_formula, render_event_template, required_template,
+    template_scope,
 };
 
 /// The `url` setting — a template, so a request can be addressed to the row it
@@ -109,7 +109,6 @@ impl Action for Fetch {
         // cannot be built is a message on the form rather than a firing that
         // fails. Each of these is the *same* function `run` uses, so there is no
         // second parser to disagree with the first.
-        let shape = action_shape(check.catalog, check.channel)?;
         let url = url_template(check.config)?;
         if url.is_literal() {
             // No tokens: the URL is what it will be at every firing, and it is
@@ -121,7 +120,7 @@ impl Action for Fetch {
             // every token resolves in the event's scope. The parse happens at
             // send, with the same "not a valid URL" message.
             check_template(
-                &shape,
+                check.shape,
                 template_scope(check.channel),
                 &url,
                 &format!("`{CFG_URL}`"),
@@ -140,7 +139,7 @@ impl Action for Fetch {
                     "a `{method}` request sends no body, but a `{CFG_BODY}` formula was given"
                 )));
             }
-            check_formula(&shape, EVENT_SCOPE, &formula, &format!("`{CFG_BODY}`"))?;
+            check_formula(check.shape, EVENT_SCOPE, &formula, &format!("`{CFG_BODY}`"))?;
         }
         Ok(())
     }

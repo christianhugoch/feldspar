@@ -6,24 +6,27 @@
 //! workflow engine (§10.3), which is what keeps the built-in action set as small
 //! as GOALS asks for.
 //!
-//! The shape is chosen so that a workflow step can reuse it unchanged: the
+//! The shape is chosen so that a workflow step reuses it unchanged: the
 //! `context` an action reads and writes *is* the run context a workflow
-//! accumulates, and the returned value is what a step contributes to it. Today
-//! there is exactly one caller (a trigger firing once), so the context starts
-//! empty and is dropped afterwards; nothing about the trait has to change when
-//! it starts persisting between steps.
+//! accumulates, and the returned value is what a step contributes to it. A
+//! trigger firing once starts with an empty context and drops it afterwards; a
+//! step is handed the run's ([`ActionContext::with_run_context`]), which is also
+//! what puts `context` in scope for the action's own settings — decision 8, and
+//! the one thing an action has to know about the difference.
 
 use std::sync::Arc;
 
 use sc_catalog::Catalog;
 use sc_email::Mailer;
 use sc_error::{Error, Result};
-use sc_expr::JsEvaluator;
+use sc_expr::{Ambient, JsEvaluator, SchemaShape, value_from_json};
+use sc_query::Value;
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
 
 use crate::dispatch::TriggerDispatcher;
 use crate::event::Event;
+use crate::scope::{EventBindings, action_shape, step_shape};
 
 /// One elementary step: configurable, run against an event.
 ///
@@ -110,6 +113,17 @@ pub struct ConfigCheck<'a> {
     /// The table the trigger's event fires on, or `None` for an event with no
     /// row (validation has already refused the mismatched combinations).
     pub channel: Option<&'a str>,
+    /// The scope this configuration's formulas and templates are read in —
+    /// [`action_shape`](crate::action_shape) for a trigger's own action body,
+    /// [`step_shape`](crate::step_shape) for a **workflow step**, which is the
+    /// same thing plus the ambient `context` (§10.3, decision 8).
+    ///
+    /// It is handed to the action rather than rebuilt by it because only the
+    /// caller knows which of the two this is, and because an action that built
+    /// its own would be free to build a different one from the scope its
+    /// formulas are then *evaluated* in — which is exactly the drift
+    /// [`ActionContext::shape`] exists to prevent on the other side.
+    pub shape: &'a SchemaShape,
 }
 
 /// Everything one action run has access to.
@@ -157,9 +171,19 @@ pub struct ActionContext<'a> {
     /// `None` where a context has none (client generation, a unit test), and an
     /// action that needs it says so by name rather than doing nothing.
     triggers: Option<&'a TriggerDispatcher>,
-    /// The run context: a JSON object the action may read and write. The seam the
-    /// workflow engine's durable context grows into.
+    /// The run context: a JSON object the action may read and write — what the
+    /// steps before this one left behind, and what this one contributes to.
     pub context: Attrs,
+    /// Whether this action is a **workflow step** rather than a trigger's own
+    /// body, which is what puts [`context`](ActionContext::context) in scope for
+    /// its settings.
+    ///
+    /// A flag rather than "the context is not empty", because presence is scope
+    /// (the rule `row` already follows): the first step of a run has an empty
+    /// context and must still be able to name it, and an ordinary trigger's
+    /// formula naming `context` must be the unknown identifier it is rather than
+    /// a null that reads as "nothing has happened yet".
+    in_run: bool,
 }
 
 impl<'a> ActionContext<'a> {
@@ -184,6 +208,7 @@ impl<'a> ActionContext<'a> {
             mailer: None,
             triggers: None,
             context: Attrs::new(),
+            in_run: false,
         }
     }
 
@@ -204,6 +229,63 @@ impl<'a> ActionContext<'a> {
     pub fn with_triggers(mut self, triggers: &'a TriggerDispatcher) -> ActionContext<'a> {
         self.triggers = Some(triggers);
         self
+    }
+
+    /// Run this action as a **workflow step**, with the run's context in hand.
+    ///
+    /// The only way `in_run` is set, so the two halves of decision 8 arrive
+    /// together: what the action reads and writes ([`context`]) and the fact that
+    /// its settings may *name* it ([`shape`], [`bindings`]).
+    ///
+    /// [`context`]: ActionContext::context
+    /// [`shape`]: ActionContext::shape
+    /// [`bindings`]: ActionContext::bindings
+    pub fn with_run_context(mut self, context: Attrs) -> ActionContext<'a> {
+        self.context = context;
+        self.in_run = true;
+        self
+    }
+
+    /// The workflow run's context, or `None` when this is an ordinary trigger's
+    /// action body.
+    pub fn run_context(&self) -> Option<&Attrs> {
+        self.in_run.then_some(&self.context)
+    }
+
+    /// The scope this action's configured formulas and templates are read in:
+    /// [`action_shape`](crate::action_shape), plus the ambient `context` when
+    /// this is a workflow step ([`step_shape`](crate::step_shape)).
+    ///
+    /// The evaluation-time twin of [`ConfigCheck::shape`], and the reason both
+    /// exist as one call each: a setting accepted on save and then unbound when
+    /// the step runs would be the worst of the two, so neither side gets to
+    /// decide the scope for itself.
+    pub fn shape(&self) -> Result<SchemaShape> {
+        let channel = self.event.channel.as_deref();
+        match self.in_run {
+            true => step_shape(self.catalog, channel),
+            false => action_shape(self.catalog, channel),
+        }
+    }
+
+    /// What the event — and, in a run, the context — binds in that scope.
+    ///
+    /// Every action that evaluates a setting builds its bindings through this or
+    /// through [`bind_values`](ActionContext::bind_values), so `context` is in
+    /// scope for exactly the runs [`shape`](ActionContext::shape) says it is.
+    pub fn bindings(&self) -> EventBindings {
+        self.bind_values(|_, _, json| value_from_json(json))
+    }
+
+    /// [`bindings`](ActionContext::bindings) with a caller-supplied reading of
+    /// each field — how a row action types the event's values against real
+    /// columns so an inlined `user.id` can be compared to a `uuid` column in SQL.
+    pub fn bind_values(&self, value: impl Fn(Ambient, &str, &Json) -> Value) -> EventBindings {
+        let bindings = EventBindings::with_values(self.event, value);
+        match self.run_context() {
+            Some(context) => bindings.with_context(context),
+            None => bindings,
+        }
     }
 
     /// Supply the chain this run descends from (`Event::firing`'s result).

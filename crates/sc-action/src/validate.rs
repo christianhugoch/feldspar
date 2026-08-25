@@ -33,6 +33,7 @@ use sc_types::validate_attrs;
 
 use crate::action::ConfigCheck;
 use crate::registry::ActionRegistry;
+use crate::scope::action_shape;
 use crate::trigger::Trigger;
 
 /// Check everything about `trigger` that can be checked without firing it.
@@ -127,11 +128,15 @@ pub async fn validate_trigger(
         // resolves in the scope this event gives it. Only the action knows what
         // its own settings mean, so only the action can check them — and it is
         // checked *here*, on save and on load, rather than at fire time.
+        // The trigger's own scope: an action body that is not a workflow step
+        // has no run to read, so `context` is not in it.
+        let shape = action_shape(catalog, channel).map_err(|e| problem(e.to_string()))?;
         action
             .validate_config(&ConfigCheck {
                 catalog,
                 config: configuration,
                 channel,
+                shape: &shape,
             })
             .await
             .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;

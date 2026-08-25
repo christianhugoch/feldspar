@@ -23,6 +23,7 @@ import {
   columnType,
   moduleFunctionDeclarations,
   typeName,
+  type CodeScope,
   type ModuleFunctionInfo,
   type TableInfo,
 } from "./codeTypes";
@@ -106,9 +107,10 @@ function sandboxFiles(
   body: string,
   tables: TableInfo[],
   functions: ModuleFunctionInfo[] = [],
+  scope: CodeScope = { table: "invoices", event: "insert" },
 ): Record<string, string> {
   return {
-    "sandbox.d.ts": codeLibrary(tables, { table: "invoices", event: "insert" }, functions),
+    "sandbox.d.ts": codeLibrary(tables, scope, functions),
     // A code body is the inside of an **async** function: `return` at the top
     // level is what the action runs and `await` at it is legal, so it is wrapped
     // for the compiler exactly as the runtime wraps it.
@@ -120,8 +122,9 @@ function check(
   body: string,
   tables: TableInfo[] = TABLES,
   functions: ModuleFunctionInfo[] = [],
+  scope: CodeScope = { table: "invoices", event: "insert" },
 ): string[] {
-  const files = sandboxFiles(body, tables, functions);
+  const files = sandboxFiles(body, tables, functions, scope);
   // The installed TypeScript's own library files, by the absolute path it
   // reports for them.
   const defaultLib = ts.getDefaultLibFilePath(OPTIONS);
@@ -536,6 +539,32 @@ describe("the types the code editor loads", () => {
     expect(check(`return db.mystery;`, [...TABLES, { name: "mystery", columns: [] }])).toEqual(
       [],
     );
+  });
+});
+
+describe("the run a workflow step's body can read", () => {
+  const STEP: CodeScope = { table: "invoices", event: "insert", run: true };
+
+  it("declare `context` for a workflow step, and only for one", () => {
+    // A step is handed the run so far; a trigger's own body is handed nothing,
+    // and naming it there is a `ReferenceError` in the sandbox — so completing
+    // it would be promising something the run refuses.
+    expect(check(`return context.total ?? 0;`, TABLES, [], STEP)).toEqual([]);
+    const outside = check(`return context.total ?? 0;`, TABLES, []);
+    expect(outside.length).toBeGreaterThan(0);
+    expect(outside.join(" ")).toContain("context");
+  });
+
+  it("keep the event's own bindings beside it", () => {
+    expect(
+      check(
+        `const n = await db.invoices.where({ customer: row.id }).count();
+         return { n, who: user?.email ?? null, from: payload.source, seen: context.seen };`,
+        TABLES,
+        [],
+        STEP,
+      ),
+    ).toEqual([]);
   });
 });
 

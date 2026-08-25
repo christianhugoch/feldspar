@@ -17,8 +17,14 @@
 //! of three assignments is three trips to the evaluator and one step, and its
 //! `Next` — a branch whose guards need evaluating — belongs to the step that is
 //! ending rather than to the one that has not begun. So the loop inside an
-//! advance continues while the machine keeps asking about the same step, and
-//! stops the moment the work belongs to another one.
+//! advance continues while the machine keeps asking about the same **entry** of
+//! a step, and stops the moment the work belongs to another one.
+//!
+//! The entry, not the name: a `ForEach` whose body is a single step asks about
+//! that one name once per item, and a pass that serviced all hundred of them
+//! would give the loop one write and one trace row for the lot — the durability
+//! granularity of the loop rather than of the item. `steps_taken` moves on every
+//! entry, so comparing it is what makes a hundred iterations a hundred advances.
 //!
 //! What that write contains is decision 6's guarantee: the context, the cursor,
 //! the attempt count, the run's state, its `wake_at` and the step's trace row,
@@ -199,10 +205,11 @@ impl<'a> Driver<'a> {
         let started_at = self.clock.now();
         let spent = state.steps_taken();
 
-        // What this pass serviced, if anything: the step, the attempt at it, how
-        // it came out. One trace row per step attempt (§9), so this is filled in
-        // once and never twice.
-        let mut serviced: Option<(String, u32)> = None;
+        // What this pass serviced, if anything: which **entry** of a step
+        // (`steps_taken` as it was entered), its name, the attempt at it. One
+        // trace row per step attempt (§9), so this is filled in once and never
+        // twice.
+        let mut serviced: Option<(u32, String, u32)> = None;
         let mut failure: Option<String> = None;
 
         // A **later** step this pass entered which stopped the run without doing
@@ -254,15 +261,20 @@ impl<'a> Driver<'a> {
                     action,
                     configuration,
                 } => {
-                    if serviced.as_ref().is_some_and(|(s, _)| *s != step) {
-                        // A different step wants the world: this pass is over,
-                        // and the state already records that the next one has
-                        // begun — so the next pass is told the same thing rather
-                        // than entering it twice.
+                    if serviced
+                        .as_ref()
+                        .is_some_and(|(entry, ..)| *entry != state.steps_taken())
+                    {
+                        // A different step entry wants the world: this pass is
+                        // over, and the state already records that the next one
+                        // has begun — so the next pass is told the same thing
+                        // rather than entering it twice. The *entry* rather than
+                        // the name, so one iteration of a single-step loop body
+                        // is one advance and one write.
                         break Advanced::Stepped;
                     }
                     let attempt = state.attempt();
-                    serviced = Some((step.clone(), attempt));
+                    serviced = Some((state.steps_taken(), step.clone(), attempt));
                     let outcome = self
                         .run_action(&event, &chain, &step, &action, &configuration, &state)
                         .await;
@@ -279,11 +291,14 @@ impl<'a> Driver<'a> {
                     }
                 }
                 Decision::Evaluate { step, formulas } => {
-                    if serviced.as_ref().is_some_and(|(s, _)| *s != step) {
+                    if serviced
+                        .as_ref()
+                        .is_some_and(|(entry, ..)| *entry != state.steps_taken())
+                    {
                         break Advanced::Stepped;
                     }
                     let attempt = state.attempt();
-                    serviced = Some((step.clone(), attempt));
+                    serviced = Some((state.steps_taken(), step.clone(), attempt));
                     match self
                         .evaluate(&event, state.context(), &formulas, &step)
                         .await
@@ -310,7 +325,7 @@ impl<'a> Driver<'a> {
         let mut traces = Vec::new();
         if workflow.trace {
             let finished_at = self.clock.now();
-            if let Some((step, attempt)) = &serviced {
+            if let Some((_, step, attempt)) = &serviced {
                 let outcome = match (&failure, stopped_at.is_none() && state.is_suspended()) {
                     (Some(_), _) => TraceOutcome::Error,
                     (None, true) => TraceOutcome::Suspended,
@@ -422,18 +437,21 @@ impl<'a> Driver<'a> {
         let mut step_chain = chain.to_vec();
         step_chain.push(step.to_owned());
 
+        // The seam §10.1 left for exactly this: the step reads and writes the
+        // run's context, and — decision 8 — its own **settings** may name it, so
+        // `insert_row`'s `context.total` is the value the `Set` before it wrote.
         let mut ctx = ActionContext::new(self.catalog, event, configuration, step)
             .with_chain(step_chain)
-            .with_triggers(self.dispatcher);
+            .with_triggers(self.dispatcher)
+            .with_run_context(state.context().clone());
         if let Some(evaluator) = &services.evaluator {
             ctx = ctx.with_evaluator(evaluator);
         }
         if let Some(mailer) = &services.mailer {
             ctx = ctx.with_mailer(mailer);
         }
-        // The seam §10.1 left for exactly this: an action reads and writes the
-        // run's context, and its return value is what the step contributes.
-        ctx.context = state.context().clone();
+        // The action's return value is what the step contributes to the context;
+        // what it wrote there directly travels with it.
         let value = action.run(&mut ctx).await?;
         Ok((value, ctx.context))
     }
@@ -590,8 +608,13 @@ pub async fn start_run(
 /// And it is neither when the run is merely being told again about a stop it was
 /// already in, which is what an idempotent `next_step` answers to a pass that has
 /// nothing to do (`steps_taken` has not moved).
+///
+/// Which of the three it is, is decided by the step **entry** rather than by its
+/// name, for the reason [`advance_on`](Driver::advance_on)'s loop is: the same
+/// name entered twice — an iteration of a single-step loop body — is two step
+/// attempts and two rows, not one.
 fn stop_at(
-    serviced: &mut Option<(String, u32)>,
+    serviced: &mut Option<(u32, String, u32)>,
     stopped_at: &mut Option<(String, u32, TraceOutcome)>,
     step: &str,
     state: &WorkflowRun,
@@ -599,10 +622,10 @@ fn stop_at(
     outcome: TraceOutcome,
 ) {
     match serviced {
-        Some((already, _)) if already == step => {}
+        Some((entry, ..)) if *entry == state.steps_taken() => {}
         Some(_) => *stopped_at = Some((step.to_owned(), state.attempt(), outcome)),
         None if state.steps_taken() > spent => {
-            *serviced = Some((step.to_owned(), state.attempt()));
+            *serviced = Some((state.steps_taken(), step.to_owned(), state.attempt()));
         }
         None => {}
     }

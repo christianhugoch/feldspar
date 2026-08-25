@@ -44,8 +44,8 @@
 use std::sync::Arc;
 
 use sc_action::{
-    Action, ActionContext, ConfigCheck, EVENT_SCOPE, action_shape, check_formula,
-    event_formula_value, required_formula,
+    Action, ActionContext, ConfigCheck, EVENT_SCOPE, check_formula, event_formula_value,
+    required_formula,
 };
 use sc_agent::{
     AgentLoop, AgentRegistry, Conclusion, ProviderConnector, Run, RunCaller, Runner, save_run,
@@ -121,8 +121,12 @@ impl Action for RunAgent {
             return Err(Error::invalid(format!("no agent named `{name}`")));
         }
         let formula = required_formula(check.config, CFG_PROMPT)?;
-        let shape = action_shape(check.catalog, check.channel)?;
-        check_formula(&shape, EVENT_SCOPE, &formula, &format!("`{CFG_PROMPT}`"))
+        check_formula(
+            check.shape,
+            EVENT_SCOPE,
+            &formula,
+            &format!("`{CFG_PROMPT}`"),
+        )
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {

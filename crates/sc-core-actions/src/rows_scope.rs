@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use sc_action::{ActionContext, Event, EventBindings, action_shape, config_str, required_formula};
+use sc_action::{ActionContext, EventBindings, config_str, required_formula};
 use sc_auth::{ROLE_ADMIN, USERS_TABLE};
 use sc_catalog::{CallerContext, Catalog, Table, prefetch_bindings};
 use sc_error::{Error, Result};
@@ -110,18 +110,18 @@ impl<'a> Scope<'a> {
     /// one, and doing nothing quietly is the failure mode this refuses.
     pub(crate) fn of(ctx: &'a ActionContext<'_>) -> Result<Scope<'a>> {
         let event = ctx.event;
-        let channel = event
-            .channel
-            .as_deref()
-            .filter(|_| event.kind.is_table_event());
         Ok(Scope {
             trigger: ctx.trigger,
             catalog: ctx.catalog,
             user_json: event.user.as_ref(),
             chain: ctx.chain.clone(),
             evaluator: ctx.evaluator()?,
-            shape: action_shape(ctx.catalog, channel)?,
-            bindings: typed_bindings(ctx.catalog, event),
+            // The scope, and the values in it, both come off the context: a step
+            // of a workflow reads `context` and a trigger's own action body does
+            // not, and neither the shape nor the bindings gets to decide that
+            // for itself.
+            shape: ctx.shape()?,
+            bindings: typed_bindings(ctx),
         })
     }
 
@@ -260,18 +260,21 @@ impl<'a> Scope<'a> {
 /// to where there is one: `row`/`old` against the event's own table, `user`
 /// against the users table.
 ///
-/// The *structure* — which objects are in scope, and `old` present-but-null on an
-/// insert — comes from [`EventBindings`] one layer down, so it cannot drift from
+/// The *structure* — which objects are in scope, `old` present-but-null on an
+/// insert, and the run's `context` when this action is a workflow step — comes
+/// from [`ActionContext::bind_values`] one layer down, so it cannot drift from
 /// what the actions there bind. Only the reading of each value is this crate's,
 /// and only because a translated `where` compares these literals against real
 /// columns: `user.id` has to be a uuid, not the string a typeless reading gives.
-fn typed_bindings(catalog: &Catalog, event: &Event) -> EventBindings {
-    let event_table = event
+fn typed_bindings(ctx: &ActionContext<'_>) -> EventBindings {
+    let catalog = ctx.catalog;
+    let event_table = ctx
+        .event
         .channel
         .as_deref()
         .and_then(|name| catalog.get(name).ok().flatten());
     let users = catalog.get(USERS_TABLE).ok().flatten();
-    EventBindings::with_values(event, |ambient, field, json| {
+    ctx.bind_values(|ambient, field, json| {
         let table = match ambient {
             Ambient::User => users.as_ref(),
             Ambient::Row | Ambient::Old => event_table.as_ref(),

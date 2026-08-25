@@ -7,9 +7,7 @@ use sc_expr::Operation;
 use sc_types::{BasicType, FormField};
 use serde_json::{Map, Value as Json};
 
-use sc_action::{
-    Action, ActionContext, ConfigCheck, EVENT_SCOPE, action_shape, check_formula, formula_map,
-};
+use sc_action::{Action, ActionContext, ConfigCheck, EVENT_SCOPE, check_formula, formula_map};
 
 use crate::rows_scope::{CFG_TABLE, CFG_VALUES, Scope, target_table, writable_field};
 use sc_api::rows;
@@ -47,12 +45,11 @@ impl Action for InsertRow {
 
     async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
         let table = target_table(check.catalog, check.config)?;
-        let shape = action_shape(check.catalog, check.channel)?;
         for (field, formula) in formula_map(check.config, CFG_VALUES)? {
             writable_field(&table, &field)?;
             // No table scope: the values are computed *from the event*, so a bare
             // `title` is refused by name and `row.title` is what was meant.
-            check_formula(&shape, EVENT_SCOPE, &formula, &format!("`{field}`"))?;
+            check_formula(check.shape, EVENT_SCOPE, &formula, &format!("`{field}`"))?;
         }
         Ok(())
     }

@@ -374,7 +374,7 @@ impl Action for RunJsCode {
         let module_fns = ctx.catalog.module_functions();
         let call = CodeCall {
             code,
-            bindings: bindings(ctx.event),
+            bindings: bindings(ctx.event, ctx.run_context()),
             host: Some(&host),
             fetch: Some(&net),
             files: Some(&files),
@@ -424,13 +424,28 @@ fn timeout(config: &Attrs) -> Result<Option<Duration>> {
     Ok(Some(Duration::from_millis(ms.unsigned_abs())))
 }
 
-/// What the event binds in the code's scope (`row`, `old`, `user`, `payload`).
+/// What the event binds in the code's scope (`row`, `old`, `user`, `payload`) —
+/// plus `context` when this body is a **workflow step** (§10.3, decision 8): the
+/// run so far, as an object, which is the same thing a step's formulas read.
 ///
 /// Presence is scope, exactly as it is for a formula: an absent binding is a
 /// `ReferenceError` naming it, a binding present as `null` is a value. `old` on an
-/// insert is the case that distinguishes the two — in scope, null.
-fn bindings(event: &Event) -> BTreeMap<String, Json> {
+/// insert is the case that distinguishes the two — in scope, null. `context` is
+/// the other: outside a run it is not bound at all, so a body that names it says
+/// so rather than reading an empty object as "nothing has happened yet".
+fn bindings(event: &Event, run_context: Option<&Attrs>) -> BTreeMap<String, Json> {
     let mut bindings = BTreeMap::new();
+    if let Some(context) = run_context {
+        bindings.insert(
+            "context".to_owned(),
+            Json::Object(
+                context
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
+    }
     if event.kind.is_table_event() {
         bindings.insert("row".to_owned(), Json::Object(event.row_object()));
         bindings.insert(
@@ -450,7 +465,6 @@ fn bindings(event: &Event) -> BTreeMap<String, Json> {
 mod tests {
     use super::*;
     use sc_action::EventKind;
-    use sc_types::Attrs;
     use serde_json::json;
 
     #[test]
@@ -504,7 +518,7 @@ mod tests {
             .row(json!({ "id": 1, "title": "now" }))
             .old_row(json!({ "id": 1, "title": "was" }))
             .caller(1, Some(json!({ "email": "a@b.c" })));
-        let bound = bindings(&update);
+        let bound = bindings(&update, None);
         assert_eq!(
             bound.keys().map(String::as_str).collect::<Vec<_>>(),
             vec!["old", "payload", "row", "user"]
@@ -517,15 +531,27 @@ mod tests {
         let insert = Event::new(EventKind::Insert)
             .on("books")
             .row(json!({ "id": 1 }));
-        let bound = bindings(&insert);
+        let bound = bindings(&insert, None);
         assert_eq!(bound["old"], Json::Null);
         assert_eq!(bound["user"], Json::Null, "anonymous binds null");
 
         // An event with no row binds neither, so code naming `row` there fails
         // in the engine instead of reading undefined.
         let called = Event::new(EventKind::None).payload(json!({ "n": 2 }));
-        let bound = bindings(&called);
+        let bound = bindings(&called, None);
         assert!(!bound.contains_key("row") && !bound.contains_key("old"));
         assert_eq!(bound["payload"], json!({ "n": 2 }));
+
+        // Outside a run there is no `context` at all; as a workflow step it is
+        // bound — including on the first step, where it is empty. Presence is
+        // scope, so a body may ask what has happened before anything has.
+        assert!(!bound.contains_key("context"));
+        let step = bindings(&called, Some(&Attrs::new()));
+        assert_eq!(step["context"], json!({}));
+        let later: Attrs = [("total".to_owned(), json!(120))].into_iter().collect();
+        assert_eq!(
+            bindings(&called, Some(&later))["context"],
+            json!({"total": 120})
+        );
     }
 }

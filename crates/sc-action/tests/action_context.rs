@@ -9,7 +9,9 @@
 //! What is asserted: an action reaches the event, its configuration and the
 //! catalog; a missing required setting and a missing JavaScript engine are each an
 //! error naming the trigger, not a quiet no-op; the run context is writable and
-//! survives the run; and the cascade chain defaults to the trigger itself.
+//! survives the run; that a **workflow step**'s settings see that context and a
+//! trigger's own action body does not; and that the cascade chain defaults to the
+//! trigger itself.
 
 use std::sync::Arc;
 
@@ -18,6 +20,8 @@ use sc_catalog::{Catalog, DataField};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::{ErrorKind, Result};
+use sc_expr::Ambient;
+use sc_query::Value;
 use sc_test_harness::TestDb;
 use sc_types::{Attrs, BasicType, FormField, TypeRef};
 use serde_json::{Value as Json, json};
@@ -111,6 +115,62 @@ async fn an_action_sees_its_event_its_config_and_the_catalog() -> Result<()> {
     // The run context survives the run — the seam a workflow's durable context
     // grows into.
     assert_eq!(ctx.context.get("ran"), Some(&json!(true)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_step_of_a_run_reads_the_context_and_a_trigger_body_does_not() -> Result<()> {
+    // Decision 8, both halves (TODO 9.1). An action's settings are read in the
+    // scope its *caller* decides, and the two callers are a trigger firing once
+    // and a workflow step. The action does not choose between them and must not
+    // have to: it asks `shape()` and `bindings()`, and gets whichever it is in.
+    let db = TestDb::new().await?;
+    let cat = catalog(&db).await?;
+    books(&cat).await?;
+
+    let event = Event::new(EventKind::Update)
+        .on("books")
+        .row(json!({ "id": 1, "title": "new" }))
+        .old_row(json!({ "id": 1, "title": "old" }));
+    let config = Attrs::new();
+
+    // A trigger's own action body: no run, so no `context` — not an empty one.
+    let plain = ActionContext::new(&cat, &event, &config, "audit");
+    assert!(plain.run_context().is_none());
+    assert!(!plain.shape()?.declares_ambient(Ambient::Context));
+    assert!(!plain.bindings().ambient.contains_key(&Ambient::Context));
+    // What the event puts in scope is unchanged either way.
+    assert!(plain.shape()?.declares_ambient(Ambient::Row));
+
+    // The same action as a workflow step: `context` is in scope and bound to
+    // what the steps before it left, and `context.anything` resolves because
+    // nothing declares what a run has accumulated.
+    let context: Attrs = [("total".to_owned(), json!(120))].into_iter().collect();
+    let step = ActionContext::new(&cat, &event, &config, "write").with_run_context(context);
+    assert_eq!(
+        step.run_context().and_then(|c| c.get("total")),
+        Some(&json!(120))
+    );
+    let shape = step.shape()?;
+    assert!(shape.declares_ambient(Ambient::Context));
+    assert!(shape.ambient_field_set(Ambient::Context).is_none());
+    assert!(
+        shape.declares_ambient(Ambient::Row),
+        "the event is still there"
+    );
+    let bound = step.bindings();
+    assert_eq!(
+        bound.ambient[&Ambient::Context]
+            .as_ref()
+            .and_then(|c| c.get("total")),
+        Some(&Value::Int(120))
+    );
+
+    // The first step of a run has an empty context and still reads it: presence
+    // is scope, so `context.x` there is a null rather than an unknown name.
+    let first = ActionContext::new(&cat, &event, &config, "first").with_run_context(Attrs::new());
+    assert!(first.shape()?.declares_ambient(Ambient::Context));
+    assert!(first.bindings().ambient.contains_key(&Ambient::Context));
     Ok(())
 }
 

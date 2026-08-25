@@ -2,6 +2,50 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 9: the two gaps the documentation found
+
+Both deviations §10.3 recorded last week are closed, so the design document and the code say the
+same thing again — and the tutorial's "trips people up" section is two entries shorter.
+
+- **An action step's settings read `context`** (TODO 9.1). Decision 8's rule is that *every*
+  formula a step contains reads the run; the first four (a `Set` value, a branch guard, a
+  `ForEach`'s collection, a form's timeout) already did, because the driver evaluates them. The
+  settings are evaluated by the **action**, which cannot know whether it is a trigger's body or a
+  workflow step — so it is now told, once, on each side of the seam. `ConfigCheck::shape` carries
+  the scope a configuration is validated in (`action_shape` for a trigger,
+  `sc_action::step_shape` — the same plus the ambient `context` — for a step), and
+  `ActionContext::with_run_context` marks the run whose context `ActionContext::shape` and
+  `ActionContext::bindings` then put in scope. `sc-workflow`'s `workflow_shape` *is* `step_shape`
+  now rather than a second implementation of it, so the engine and the action cannot disagree
+  about what a step may name.
+- **Every action that evaluates a setting went through those two calls**, and none of them build
+  a scope of their own any more: `insert_row`/`update_rows`/`delete_rows` through `rows_scope`
+  (whose typed bindings now come off the context), `send_email` and `fetch` through
+  `render_event_template`, `run_agent` through `event_formula_value`, and `run_js_code`, whose
+  body is bound `context` as an object beside `row`/`old`/`user`/`payload`. So
+  `"status": "context.large ? 'big' : 'small'"` on an `update_rows` step is the identifier the
+  `Set` before it wrote, and `return { seen: context.large }` in a code body is too.
+- **Presence is scope, on both sides.** The same action configured as a trigger's own action body
+  has no run to read, so `context` there is still the unknown identifier it should be rather than
+  an empty object that reads as "nothing has happened yet" — and the first step of a run, whose
+  context *is* empty, can still name it. Pinned in `crates/sc-action/tests/action_context.rs` and
+  end-to-end in `tutorial_workflows.rs`, where the test that used to assert the refusal now
+  asserts the rule and its edge.
+- **Each iteration of a loop is its own advance, write and trace row** (TODO 9.2). An advance
+  services one step **entry**, not one step *name*: `Driver::advance_on` and `stop_at` compare
+  `steps_taken` rather than the name, so a `Set`'s three assignments are still one step and one
+  write, while a `ForEach` whose body is a single step no longer services a hundred iterations in
+  one pass. The durability granularity of a loop is the item — a crash re-runs one item rather
+  than the uncommitted tail — and the run screen's timeline shows the body once per item.
+  `each_iteration_of_a_one_step_loop_body_is_its_own_advance` drives a hundred-item loop one
+  advance at a time and fails on the old behaviour at the third pass.
+- **The documents changed with the code**: §10.3's "the scope a step's formulas are read in — and
+  the gap in it" is now the rule with both halves and no gap, §10.1 names `step_shape` beside
+  `action_shape`, the driver's paragraph says *step entry*, and the tutorial's two "trips people
+  up" entries are rewritten — one to what an action's settings may name, the other to what a loop
+  writes. The step inspector's hint offers `context.total` instead of warning against it, and the
+  code editor's declarations bind `context` for a workflow step and for nothing else.
+
 ## Workflows, phase 8: the documentation
 
 The milestone written down: a tutorial that builds the order-approval workflow from an empty

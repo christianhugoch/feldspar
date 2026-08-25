@@ -63,8 +63,12 @@ export type ModuleFunctionInfo = {
  * that has no row — which is exactly the difference between `row` being declared
  * and not being declared at all, because that is the difference in the sandbox
  * (`run_js_code`'s `bindings`: naming `row` in a `login` body is a
- * `ReferenceError`, not a null). */
-export type CodeScope = { table?: string; event?: string };
+ * `ReferenceError`, not a null).
+ *
+ * `run` says the body is a **workflow step**, which is the same difference for
+ * `context`: a step is bound the run so far and a trigger's own body is bound
+ * nothing at all. */
+export type CodeScope = { table?: string; event?: string; run?: boolean };
 
 /** The join separator between a key field and a column of the table it points
  * at (`customerⱵemail`) — `sc_expr::JOIN`. */
@@ -733,6 +737,16 @@ export function scopeDeclarations(
       ` * trigger, or what the event carried. */\n` +
       `declare const payload: Record<string, any>;`,
   );
+  if (scope.run) {
+    // Only a workflow step has it, so it is declared only for one — naming it
+    // in a trigger's own body is a `ReferenceError`, and completing it would be
+    // promising something the run refuses.
+    parts.push(
+      `/** The run so far: what the steps before this one returned, under their\n` +
+        ` * own names, plus whatever a \`Set\` step wrote. Only a workflow step\n` +
+        ` * has it. */\ndeclare const context: Record<string, any>;`,
+    );
+  }
   parts.push(
     `/** The tables. Only a code body has this — a formula (an \`only if\`, an\n` +
       ` * ownership rule) evaluates without it. */\ndeclare const db: ScDb;`,

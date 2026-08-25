@@ -443,7 +443,7 @@ fn the_workflows_tutorial_teaches_each_part_of_the_engine() {
         "context.error",          // …and what a handler reads
         "Cancel",                 // the two buttons a stuck run has
         "Retry from",             //
-        "unknown identifier `context`", // the gap an author hits first (§10.3)
+        "unknown identifier `context`", // what naming the run outside one says (§10.3)
     ] {
         assert!(
             workflows.contains(fragment),
@@ -759,9 +759,8 @@ fn the_rest_tutorial_reaches_the_motivating_query_and_its_rules() {
 
 /// The workflow milestone, held to what it built (§10.3): the four things the
 /// engine *is*, the guarantee that changed on contact with reality, and the two
-/// gaps between the decisions and the code — which are the paragraphs a reader
-/// is most harmed by losing, because each is a promise the plan made that the
-/// code does not yet keep.
+/// rules a reader is most harmed by losing — what a step's formulas may name,
+/// and what one advance is, which is what a loop's durability rests on.
 #[test]
 fn the_design_records_what_the_workflow_milestone_actually_built() {
     let root = workspace_root();
@@ -784,12 +783,14 @@ fn the_design_records_what_the_workflow_milestone_actually_built() {
         "WorkQueue",
         "Recovery is not a special case",
         "started by `serve`",
-        // The scope rule, and the gap in it.
+        // The scope rule: one shape, and both the callers it is handed to.
         "workflow_shape",
-        "Known gap",
-        "unknown identifier `context`",
-        // …and the second, smaller deviation.
-        "granularity of such a loop is the loop, not the item",
+        "step_shape",
+        "ConfigCheck::shape",
+        "ActionContext::with_run_context",
+        // …and what one advance is, which is what makes a loop's item durable.
+        "One advance services one *step entry*",
+        "durability granularity of a loop is the item",
         // The editor, and what was deliberately not built.
         "React Flow",
         "WorkflowRoom",

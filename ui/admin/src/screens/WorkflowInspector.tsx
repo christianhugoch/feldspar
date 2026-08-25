@@ -238,7 +238,7 @@ function KindEditor({
           spec={spec}
           values={values}
           idPrefix="step-cfg"
-          codeScope={{ table: channel, event }}
+          codeScope={{ table: channel, event, run: true }}
           onChange={(name, value) =>
             set({
               type: "action",
@@ -247,15 +247,14 @@ function KindEditor({
             })
           }
         />
-        {/* An action evaluates its own settings, in the scope a trigger's
-            settings have — the event, not the run — so `context` here is an
-            unknown identifier and is refused on save (§10.3, "known gap"). Say
-            so where the admin is typing rather than at the save button. */}
+        {/* An action evaluates its own settings, but in the *step's* scope,
+            which the engine hands it — so `context` here means what it means in
+            a `Set` (§10.3). Say what is in scope where the admin is typing. */}
         <Form.Text muted>
-          Values are formulas over the <strong>event</strong>: <code>row.title</code>,{" "}
-          <code>user.email</code>. An action&apos;s settings cannot read{" "}
-          <code>context</code> — put what needs the run in a <code>Set</code> step, or read
-          it in a code body.
+          Values are formulas over the <strong>event</strong> and the{" "}
+          <strong>run</strong>: <code>row.title</code>, <code>user.email</code>,{" "}
+          <code>context.total</code> — the same <code>context</code> a{" "}
+          <code>Set</code> step writes.
         </Form.Text>
       </>
     );

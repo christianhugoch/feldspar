@@ -1518,7 +1518,8 @@ Three commitments are expressed as types rather than as prose:
 defines: bare identifiers are the affected row's fields, `row`/`old`/`user`/`payload` are
 ambient, and `row`/`old` are *out of scope* on an event that has no row (so naming `row` in a
 `login` trigger is an unknown identifier, not a silent null). `sc-action` owns that scope
-(`action_shape`) so an `only_if` and an action's settings cannot disagree about what is
+(`action_shape`, and `step_shape` for the same action run as a workflow step, which adds the
+run's `context` — §10.3) so an `only_if` and an action's settings cannot disagree about what is
 in scope.
 
 The six built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code` and
@@ -2281,8 +2282,10 @@ because a trace row carries a copy of the whole context.
 `Driver::advance` loads the pinned version, asks the machine, does the IO — runs the action
 through `ActionRegistry` with an `ActionContext` carrying the run context, the event, the
 evaluator, the mailer and the dispatcher; or evaluates the formulas through the server's isolate
-— feeds the outcome back, and **writes once**. One advance services one *step*, not one decision:
-a `Set` of three assignments is three trips to the evaluator and one step.
+— feeds the outcome back, and **writes once**. One advance services one *step entry*: not one
+decision, so a `Set` of three assignments is three trips to the evaluator and one step; and not
+one step *name*, so a `ForEach` whose body is a single step gets one advance, one write and one
+trace row **per item** — the durability granularity of a loop is the item.
 
 **Execution guarantees (normative, and honest about the one that changed):**
 
@@ -2345,33 +2348,30 @@ carry the run's chain plus the step's name, so `MAX_DEPTH` bounds a workflow tha
 that starts a workflow exactly as it bounds an action that writes a row; the authority is the one
 §10.1 gives an action.
 
-#### The scope a step's formulas are read in — and the gap in it
+#### The scope a step's formulas are read in
 
-`workflow_shape` is `action_shape` plus one fieldless ambient, `context`, and it is the only place
-a step's scope is decided. `context.x` rather than a bare `x` deliberately: bare identifiers
-already mean "a field of the row this formula ranges over" (§10.1's `EVENT_SCOPE`), and
-redefining them inside a workflow would make one language mean two things. An action reads and
-writes the run context through `ActionContext::context`, and its return value is stored under the
-step's name.
+`step_shape` is `action_shape` plus one fieldless ambient, `context` (`sc-workflow`'s
+`workflow_shape` is that function, named there rather than reimplemented), and it is the only
+place a step's scope is decided. `context.x` rather than a bare `x` deliberately: bare
+identifiers already mean "a field of the row this formula ranges over" (§10.1's `EVENT_SCOPE`),
+and redefining them inside a workflow would make one language mean two things. An action reads
+and writes the run context through `ActionContext::context`, and its return value is stored under
+the step's name.
 
-**Known gap.** The intended rule is that *every* formula a step contains — a `Set` value, a
-branch guard, a `ForEach`'s collection, **and an action's own settings** — reads the context. The
-first three do: they are evaluated by the driver, in `workflow_shape`. An action's settings do
-**not**: they are evaluated by the action itself, which builds `action_shape` from the event, so
-`context.total` in an `insert_row` step's value formula is refused on save, saying
-*unknown identifier `context`*; and a `run_js_code` step's body is given `row`/`old`/`user`/
-`payload` and no `context`. Closing it means letting an action know it is configured for a run — a shape on
-`ConfigCheck` and the context on `ActionContext`'s bindings — and touching every action that
-evaluates a setting. Until it is closed, a workflow passes values between steps through the
-context for its *own* formulas, and a step that needs to act on them does its own reading (a code
-body over `row`), which is what the tutorial shows.
+**Every** formula a step contains reads the context — a `Set` value, a branch guard, a `ForEach`'s
+collection, a `Wait`'s deadline, a form's timeout **and the action's own settings** — and that
+takes both halves of one rule. The first group is evaluated by the driver, in `workflow_shape`.
+The settings are evaluated by the action, which cannot know which of the two it is in, so it is
+*told*: `ConfigCheck::shape` carries the scope its configuration is validated against, and
+`ActionContext::with_run_context` marks the run whose context `ActionContext::shape` and
+`ActionContext::bindings` then put in scope. Every action that evaluates a setting goes through
+those two calls rather than building a scope of its own — `insert_row`/`update_rows`/`delete_rows`
+through `rows_scope`, `send_email` and `fetch` through `render_event_template`, `run_agent`
+through `event_formula_value`, and `run_js_code`, whose body is bound `context` as an object.
 
-A second, smaller deviation, in the same spirit of writing down what is true: an advance
-continues while the machine keeps asking about the **same step**, which is what lets a `Set`'s
-assignments be evaluated one at a time — but it also means a `ForEach` whose body is a *single*
-step services all of its iterations in one advance, so they share one write and one trace row.
-Correctness is unaffected (the context reverts wholesale on a crash), but the durability
-granularity of such a loop is the loop, not the item.
+Presence is scope, as it is for `row`: the *same* action configured as a trigger's own body has
+no run to read, so `context` there is the unknown identifier it should be rather than an empty
+object that reads as "nothing has happened yet".
 
 #### The editor
 

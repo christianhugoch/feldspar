@@ -16,17 +16,19 @@
 //!   — the hazard a workflow on a table it also writes actually has;
 //! - a code step whose **return value** is the context key later steps read;
 //! - the loop: a `Set` before it, a `for_each` over the code step's answer, and a
-//!   body that accumulates — which is the only shape a loop can have while an
-//!   action step cannot read the context (see the last test);
+//!   body that accumulates — one advance, one write and one trace row per item;
 //! - the branch, the approval form's declaration, and the answer merged under
 //!   `context.approval`;
 //! - the two endings, one of which is the tutorial's example of an **idempotent**
 //!   step (an update keyed by the event's row) and the other of which is its
 //!   example of a step made idempotent **by hand** (a code body that checks
 //!   before it writes);
-//! - and the gap the tutorial's "trips people up" section names: an action step's
-//!   settings cannot read `context`. That test exists to fail the day the gap is
-//!   closed, because the document has a paragraph that must change with it.
+//! - and the rule its "trips people up" section states about scope: an action
+//!   step's settings read `context` like every other formula a step contains,
+//!   and the same action outside a workflow has no run to read.
+//!
+//! Those last two are what the tutorial's paragraphs promise, so they fail here
+//! before a reader finds them wrong.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -453,16 +455,16 @@ async fn a_large_order_loops_over_its_lines_waits_for_a_person_and_ships() -> sc
         .iter()
         .map(|t| t["step"].as_str().unwrap())
         .collect();
-    // One entry per **advance**, which is not quite one per iteration: a loop
-    // body that is a single step keeps the driver on the same step name, so both
-    // iterations are serviced in one pass and share one trace row (and one
-    // write). The tutorial says so, because it is what a reader sees here.
+    // One entry per **advance**, and an advance is one step *entry* — so the
+    // two-line loop body appears twice, once per item, each with its own write
+    // (TODO 9.2). The tutorial says so, because it is what a reader sees here.
     assert_eq!(
         steps,
         vec![
             "load_lines",
             "start_count",
             "per_line",
+            "add_line",
             "add_line",
             "classify",
             "approve",
@@ -474,7 +476,7 @@ async fn a_large_order_loops_over_its_lines_waits_for_a_person_and_ships() -> sc
     assert_eq!(
         context["units"],
         json!(7),
-        "3 + 4: the body ran once per line, whatever the trace's granularity"
+        "3 + 4: the body ran once per line, and was written once per line"
     );
     assert_eq!(
         context["line"],
@@ -586,18 +588,19 @@ async fn a_rejected_order_takes_the_other_ending() -> sc_error::Result<()> {
 }
 
 #[tokio::test]
-async fn an_action_steps_settings_cannot_read_the_context_and_the_tutorial_says_so()
+async fn an_action_steps_settings_read_the_run_context_and_the_tutorial_says_so()
 -> sc_error::Result<()> {
-    // The "trips people up" entry, pinned. A `Set`, a branch guard, a loop's
-    // collection and a form's timeout are evaluated by the **engine**, in the
-    // scope `workflow_shape` decides, and see `context`; an action's own settings
-    // are evaluated by the **action**, in the scope a trigger's settings have,
-    // and do not.
+    // The "trips people up" entry, pinned (TODO 9.1). Decision 8's rule is that
+    // *every* formula a step contains reads the run: a `Set`, a branch guard, a
+    // loop's collection and a form's timeout are evaluated by the **engine**, an
+    // action's own settings by the **action** — and both in the scope
+    // `step_shape` decides, so `context.large` in an `update_rows` assignment is
+    // the same identifier the `Set` before it wrote.
     //
-    // This test is a promise about a *document*, not an endorsement of the
-    // behaviour: decision 8 intends an action's settings to see the run. The day
-    // that gap is closed this test fails, and the tutorial's paragraph and
-    // §10.3's note have to change with it — which is exactly what it is for.
+    // The other half is what makes it a rule rather than a leak: presence is
+    // scope, so the same action configured as a trigger's own body has no
+    // `context` at all. Both halves are asserted here, and the tutorial's
+    // paragraph and §10.3 say what this says.
     let mut server = setup().await?;
     let created = server
         .client
@@ -624,26 +627,94 @@ async fn an_action_steps_settings_cannot_read_the_context_and_the_tutorial_says_
                     "configuration": {
                         "table": "orders",
                         "where": "id === row.id",
-                        // The formula an admin reaches for, and the one that is
-                        // refused.
+                        // The formula an admin reaches for, and the one that now
+                        // means what it says.
                         "assignments": { "status": "context.large ? 'big' : 'small'" }
                     }
+                },
+                "next": { "type": "step", "step": "note" }
+            },
+            {
+                // A code body reads the run the same way, as an object.
+                "name": "note",
+                "kind": {
+                    "type": "action",
+                    "action": "run_js_code",
+                    "configuration": { "code": "return { seen: context.large };" }
                 },
                 "next": { "type": "end" }
             }
         ]
     });
+    let saved = server
+        .client
+        .ok(
+            "POST",
+            &format!("/api/workflows/{id}"),
+            Some(json!({ "workflow": program, "description": "reads the run" })),
+        )
+        .await;
+    // Saved, with no issues: the setting resolves in the step's scope. (Version 2
+    // — creating the trigger mints an empty version 1.)
+    assert_eq!(saved["version"], json!(2), "{saved}");
+    assert_eq!(saved["issues"], json!([]), "{saved}");
+
+    // Big and small, through the action's own setting.
+    let big = submit(&mut server, 500, &[1]).await;
+    assert_eq!(order(&mut server, big).await["status"], json!("big"));
+    let small = submit(&mut server, 5, &[1]).await;
+    assert_eq!(order(&mut server, small).await["status"], json!("small"));
+
+    // And the code body saw it too.
+    let runs = server
+        .client
+        .ok("GET", &format!("/api/workflows/{id}/runs"), None)
+        .await;
+    let runs = runs.as_array().cloned().unwrap_or_default();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    for run in &runs {
+        let run_id = run["id"].as_str().expect("a run id");
+        let detail = server
+            .client
+            .ok("GET", &format!("/api/runs/{run_id}"), None)
+            .await;
+        assert_eq!(detail["state"], json!("done"), "{detail}");
+        assert!(
+            detail["context"]["context"]["note"]["seen"].is_boolean(),
+            "the body read `context`: {detail}"
+        );
+    }
+
+    // The same setting on a trigger whose body is the action itself has no run
+    // to read, and is refused on save naming the identifier.
     let (status, body) = server
         .client
         .send(
             "POST",
-            &format!("/api/workflows/{id}"),
-            Some(json!({ "workflow": program, "description": "probe" })),
+            "/api/triggers",
+            Some(json!({
+                "name": "outside_a_run",
+                "description": "",
+                "when": "insert",
+                "channel": "orders",
+                "only_if": Value::Null,
+                "body": "action",
+                "action": "update_rows",
+                "configuration": {
+                    "table": "orders",
+                    "where": "id === row.id",
+                    "assignments": { "status": "context.large ? 'big' : 'small'" }
+                },
+                "min_role": Value::Null,
+                "enabled": true,
+            })),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let message = body["error"].as_str().unwrap_or_default();
-    assert!(message.contains("unknown identifier `context`"), "{message}");
-    assert!(message.contains("step `write`"), "{message}");
+    assert!(
+        message.contains("unknown identifier `context`"),
+        "{message}"
+    );
     Ok(())
 }

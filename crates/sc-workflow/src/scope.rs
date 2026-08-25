@@ -6,36 +6,31 @@
 //! worst of both, and two functions that answer "what is in scope" eventually
 //! answer differently.
 //!
+//! It is **`sc-action`'s** [`step_shape`], named here rather than reimplemented,
+//! and that is the point: a step's own formulas (a `Set`, a branch guard, a
+//! loop's collection) and the settings of the action it runs are the same
+//! language read in the same place, so the engine and the action have to be
+//! given one answer, not two that agree today.
+//!
 //! A step sees everything an action's configuration sees — the catalog's tables,
 //! the event's `row`/`old`/`user`/`payload`, and [`EVENT_SCOPE`] as the table a
 //! formula that ranges over nothing is validated in — plus one thing: the
 //! ambient **`context`**, which is the run.
-//!
-//! It is `context.x` rather than a bare `x` deliberately. Bare identifiers
-//! already mean "a field of the row this formula ranges over" everywhere else in
-//! the language (§10.1's `EVENT_SCOPE`), and quietly redefining them inside a
-//! workflow would make one language mean two things depending on where it was
-//! written. `context` is fieldless, like `payload`: nothing declares what a run
-//! has accumulated, so `context.total` resolves and reads null before the step
-//! that writes it has run.
 
-use sc_action::{EVENT_SCOPE, action_shape};
+use sc_action::{EVENT_SCOPE, step_shape};
 use sc_catalog::Catalog;
 use sc_error::Result;
-use sc_expr::{Ambient, SchemaShape};
+use sc_expr::SchemaShape;
 
 /// The scope a workflow step's formulas are validated and evaluated in:
-/// [`action_shape`] plus the ambient `context`.
+/// [`step_shape`] — an action's own scope plus the ambient `context`.
 ///
 /// `channel` is the trigger's — the table for a table event, `None` otherwise —
 /// so a step of a workflow on `orders` may read `row.total`, and the same step
 /// in a workflow on a `login` trigger is told `row` is not in scope rather than
 /// reading null.
 pub fn workflow_shape(catalog: &Catalog, channel: Option<&str>) -> Result<SchemaShape> {
-    Ok(action_shape(catalog, channel)?
-        // `None` fields: in scope, unchecked. What is in a run context is what
-        // the steps before this one put there, which no schema can declare.
-        .ambient_fields(Ambient::Context, None::<[String; 0]>))
+    step_shape(catalog, channel)
 }
 
 /// The name a workflow's formulas that range over **no table** are validated
@@ -57,6 +52,7 @@ mod tests {
 
     #[test]
     fn context_is_ambient_and_fieldless() {
+        use sc_expr::Ambient;
         let shape = SchemaShape::new().ambient_fields(Ambient::Context, None::<[String; 0]>);
         assert!(shape.declares_ambient(Ambient::Context));
         // Fieldless: nothing to check `context.x` against, so `context.x`

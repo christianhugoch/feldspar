@@ -263,7 +263,8 @@ async fn check_step(
                 configuration,
             } => {
                 for found in
-                    action_problems(catalog, registry, action, configuration, channel).await?
+                    action_problems(catalog, registry, action, configuration, channel, shape)
+                        .await?
                 {
                     problem(found);
                 }
@@ -382,13 +383,17 @@ async fn check_step(
 ///
 /// The same two checks a trigger's action body gets, in the same order and
 /// through the same functions — because a step *is* an action body, and the only
-/// difference is where its settings are stored.
+/// difference is where its settings are stored, and that it is read in the
+/// step's scope: `shape` is [`workflow_shape`]'s, so `context.total` in an
+/// `insert_row` value is the same identifier the `Set` before it wrote
+/// (decision 8).
 async fn action_problems(
     catalog: &Catalog,
     registry: &ActionRegistry,
     action: &str,
     configuration: &Attrs,
     channel: Option<&str>,
+    shape: &sc_expr::SchemaShape,
 ) -> Result<Vec<String>> {
     if action.trim().is_empty() {
         return Ok(vec!["this step names no action".to_owned()]);
@@ -414,6 +419,7 @@ async fn action_problems(
             catalog,
             config: configuration,
             channel,
+            shape,
         })
         .await
     {

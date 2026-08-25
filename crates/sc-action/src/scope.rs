@@ -20,8 +20,10 @@
 //!   no declared fields because nothing declares what a sender put in it — so
 //!   `payload.x` resolves and reads null where there is none.
 //! - `context` is ambient in a **workflow run** and nowhere else (§10.3): what
-//!   the steps before this one left behind, put in scope by the engine through
-//!   [`EventBindings::with_context`].
+//!   the steps before this one left behind. A step's action is told it is one
+//!   ([`ActionContext::with_run_context`]), and that is what both puts `context`
+//!   in its settings' scope ([`step_shape`]) and binds it
+//!   ([`EventBindings::with_context`]).
 //! - **Bare identifiers are the row the formula ranges over**, which for a
 //!   formula that only reads the event is *nothing*: those are validated against
 //!   [`EVENT_SCOPE`], an empty table, so `title` where `row.title` was meant is
@@ -60,6 +62,27 @@ pub const EVENT_SCOPE: &str = "(the event)";
 /// `only_if` uses, so the two scopes cannot disagree), plus [`EVENT_SCOPE`].
 pub fn action_shape(catalog: &Catalog, channel: Option<&str>) -> Result<SchemaShape> {
     Ok(trigger_shape(catalog, channel)?.table(EVENT_SCOPE, TableShape::new()))
+}
+
+/// The shape the settings of an action run as a **workflow step** are validated
+/// and evaluated in: [`action_shape`] plus the ambient `context` (§10.3,
+/// decision 8).
+///
+/// The one place a step's scope is decided — `sc-workflow`'s `workflow_shape` is
+/// this function, and so is [`ActionContext::shape`](crate::ActionContext::shape)
+/// — because a step's own formulas (a `Set`, a branch guard, a loop's collection)
+/// and the settings of the action it runs are the same language read in the same
+/// place, and two functions answering "what is in scope" eventually answer
+/// differently.
+///
+/// `context` is fieldless: nothing declares what a run has accumulated, so
+/// `context.total` resolves and reads null before the step that writes it has
+/// run. It is `context.x` rather than a bare `x` because bare identifiers already
+/// mean "a field of the row this formula ranges over" ([`EVENT_SCOPE`]), and
+/// quietly redefining them inside a workflow would make one language mean two
+/// things depending on where it was written.
+pub fn step_shape(catalog: &Catalog, channel: Option<&str>) -> Result<SchemaShape> {
+    Ok(action_shape(catalog, channel)?.ambient_fields(Ambient::Context, None::<[String; 0]>))
 }
 
 /// A required string setting, or an error naming it.
@@ -403,7 +426,7 @@ pub async fn event_formula_value(
     formula: &Formula,
     what: &str,
 ) -> Result<Json> {
-    let bindings = EventBindings::of(ctx.event);
+    let bindings = ctx.bindings();
     let call = bindings.call(formula, Operation::Read, &BTreeMap::new());
     ctx.evaluator()?
         .eval_value(call)
@@ -439,7 +462,10 @@ pub async fn render_event_template(
         Some(name) => Some(ctx.catalog.require(name).map_err(named)?),
         None => None,
     };
-    let shape = action_shape(ctx.catalog, channel)?;
+    // The scope the *context* asks for when this is a workflow step, so
+    // `{{ context.total }}` in a subject line is read the same way the `Set`
+    // that wrote it was.
+    let shape = ctx.shape()?;
     let analyses = template
         .validate(&shape, template_scope(channel))
         .map_err(named)?;
@@ -447,7 +473,7 @@ pub async fn render_event_template(
     // The event's objects, each field typed by its own column — what a prefetch
     // correlates on has to agree with the database (a uuid compared as text is
     // a SQL error, not a mismatch).
-    let bindings = EventBindings::with_values(ctx.event, |ambient, field, json| match ambient {
+    let bindings = ctx.bind_values(|ambient, field, json| match ambient {
         Ambient::User | Ambient::Payload | Ambient::Context => value_from_json(json),
         Ambient::Row | Ambient::Old => typed_value(table.as_ref(), field, json),
     });

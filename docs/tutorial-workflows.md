@@ -363,8 +363,9 @@ Now open the run (**Runs → the run's row**) and look at it before you answer:
   and the current step marked. The card's subtitle says *drawn on version 2, the one this run is
   pinned to*, because drawing the path of one program on the picture of another would be a lie.
 - **What happened** — the trace as a timeline: one entry per completed step attempt, with what
-  that step *changed* in the context rather than the whole document twenty times over. There is
-  **one** `add_line` entry for two lines; the last of the "trips people up" entries says why.
+  that step *changed* in the context rather than the whole document twenty times over. There are
+  **two** `add_line` entries for two lines: each iteration of a loop is a step attempt, an
+  advance and a write of its own.
 
 Tick **Approved?**, write a note, and press **Answer and carry on**.
 
@@ -384,10 +385,9 @@ Here is the guarantee, stated exactly:
 > transactional — so **a step runs at least once**: a process that dies between a step's effect
 > and its write comes back, is told to run *that* step again, and runs no other.
 
-The window is small and it is real. (One nuance, spelled out in the last "trips people up"
-entry: when a loop body is a *single* step, its iterations are serviced in one pass, so a crash
-re-runs the iterations that had not been written rather than only the last one.) So: what do you
-do about a step whose effect must not happen twice?
+The window is small and it is real, and it is one **step entry** wide — including inside a
+loop, where each iteration of the body is its own advance and its own write, so a crash re-runs
+one item. So: what do you do about a step whose effect must not happen twice?
 
 **1. Prefer effects that are repeatable.** `ship` sets `status` to `'shipped'` for one order.
 Running it twice leaves exactly the same row — that is what "idempotent" means, and most row
@@ -444,18 +444,18 @@ to do less of.
 
 ## Things that trip people up
 
-- **An Action step's settings cannot read `context` — today.** A `Set`, a branch guard, a
-  `For each`'s collection, a `Wait`'s deadline and a form's timeout are evaluated by the engine
-  and see the run; an action's own settings are evaluated by the action, in the same scope a
-  trigger's settings have, which is the **event** (`row`, `old`, `user`, `payload`) and not the
-  run. `"title": "context.large"` on an `insert_row` step is refused on save, saying
-  *unknown identifier `context`*. The way round it is the one Step 3 uses: put the work in a
-  `run_js_code` body, which can read `row` and query the database for whatever else it needs.
-  (§10.3 records this as the gap it is; decision 8 intends an action's settings to see the run,
-  and they do not yet.)
-- **A `run_js_code` body sees the event, not the run.** Same reason, same shape: `row`, `old`,
-  `user` and `payload` are bound; `context` is not. What the body *returns* lands in the context
-  under the step's name, which is how a body hands its answer to the steps after it.
+- **An Action step's settings read `context` too, and only inside a workflow.** A `Set`, a
+  branch guard, a `For each`'s collection, a `Wait`'s deadline and a form's timeout are
+  evaluated by the engine; an action's own settings are evaluated by the action — but both are
+  read in the **step's** scope, so `"status": "context.large ? 'big' : 'small'"` on an
+  `update_rows` step is the same identifier the `Set` before it wrote. The same trigger's
+  action body outside a workflow is refused on save with *unknown identifier `context`*, which
+  is the point: presence is scope, and there is no run to read.
+- **A `run_js_code` body sees the run too, as `context`.** `row`, `old`, `user` and `payload`
+  are the event; `context` is the run so far, bound as an object — and bound only in a workflow,
+  so a body outside one that names it gets a `ReferenceError` rather than an empty object that
+  reads as "nothing has happened yet". What the body *returns* lands in the context under the
+  step's name, which is how a body hands its answer to the steps after it.
 - **`End the run` inside a loop body ends the iteration.** It is the same `Next::End`; which one
   it means is a question the run's frame stack answers. A body that "ends" is a body that has
   finished this item.
@@ -463,13 +463,11 @@ to do less of.
   `per_line` has finished, because the item is bound *into the context* and nothing clears it. Do
   not read it after the loop expecting it to be gone; accumulate what you need, as `add_line`
   does.
-- **A loop body of one step is serviced in one pass.** The engine keeps working while the next
-  thing it is asked about is the step it is already on, and iteration two of a one-step body is
-  that same step — so all the iterations share **one** trace entry and **one** write. It does
-  not change what the run computes, and for a `Set` body it costs nothing; but a body whose step
-  has an *effect* is worth splitting into two steps, because then each iteration is its own
-  advance, its own write and its own trace row, and a crash re-runs one item rather than the
-  uncommitted tail of the loop.
+- **Each iteration of a loop is its own write.** The engine keeps working while the next thing
+  it is asked about is the *entry* it is already on — a `Set`'s three assignments are one step
+  and one write — and entering the body again is a new entry even when the body is a single
+  step. So a hundred items are a hundred advances, a hundred writes and a hundred trace rows,
+  and a crash re-runs one item rather than the uncommitted tail of the loop.
 - **A step budget stops a loop that never leaves.** 1000 steps by default, configurable per
   workflow, counted across the whole run. A run that hits it stops and names the step it stopped
   at — and it refuses to be retried into the same wall.
@@ -506,6 +504,6 @@ rather than a result, because a workflow may not have finished by the time the r
 
 From here, [tutorial-agents.md](tutorial-agents.md) is the natural next step: `run_agent` is an
 ordinary registered action, so an agent is an ordinary workflow step — its prompt a formula over
-the event, as every action's settings are — and "ask the model, then have a human approve what it
+the event **and the run**, as every action's settings are inside a workflow — and "ask the model, then have a human approve what it
 suggested" is this tutorial's shape with `load_lines` swapped for the agent.
 [tutorial-constraints.md](tutorial-constraints.md) is the other one, for Step 12's third remedy.

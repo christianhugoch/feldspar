@@ -35,8 +35,9 @@ use sc_workflow::machine::WorkflowRun;
 use sc_workflow::queue::WorkQueue;
 use sc_workflow::{
     Advanced, Assignment, Backoff, BranchArm, DatabaseQueue, Driver, ErrorPolicy, ManualClock,
-    Next, Step, StepKind, TraceOutcome, Workflow, WorkflowEngineTask, bootstrap_run_traces,
-    bootstrap_workflow_versions, list_run_traces, run_state, save_workflow, start_run,
+    Next, RunTrace, Step, StepKind, TraceOutcome, Workflow, WorkflowEngineTask,
+    bootstrap_run_traces, bootstrap_workflow_versions, list_run_traces, run_state, save_workflow,
+    start_run,
 };
 use serde_json::{Value as Json, json};
 
@@ -1016,6 +1017,106 @@ async fn a_hundred_iterations_stay_inside_the_budget_and_the_budget_stops_a_loop
 }
 
 #[tokio::test]
+async fn each_iteration_of_a_one_step_loop_body_is_its_own_advance() -> Result<()> {
+    // TODO 9.2. An advance services one step *entry*, not one step name: the body
+    // of this loop is a single step, so continuing while "the same step" is asked
+    // about would run all hundred iterations inside one pass — one write and one
+    // trace row for the lot, which would make the durability granularity of a
+    // loop the loop rather than the item. A node that died half way through would
+    // then come back and start the loop again from the top.
+    let db = TestDb::new().await?;
+    let catalog = catalog(&db).await?;
+    let (recorder, recording) = Recorder::new("record");
+    let dispatcher = dispatcher(recorder)?;
+
+    let trigger = trigger("each_item");
+    let mut workflow = Workflow::of(
+        trigger.id,
+        1,
+        vec![
+            Step::new(
+                "items",
+                StepKind::Set {
+                    assignments: vec![Assignment::new(
+                        "items",
+                        "Array(100).fill(0).map((_, i) => i)",
+                    )],
+                },
+            )
+            .then(Next::step("each")),
+            Step::new(
+                "each",
+                StepKind::ForEach {
+                    over: "context.items".to_owned(),
+                    var: "item".to_owned(),
+                    body: "one".to_owned(),
+                },
+            )
+            .then(Next::End),
+            action_step("one").then(Next::End),
+        ],
+    )
+    .traced();
+    workflow.max_steps = 1_000;
+    save_workflow(&catalog, &workflow, "v1", None).await?;
+
+    // Started but not driven, so the passes can be counted one at a time.
+    let clock = ManualClock::new(Utc::now());
+    let state = WorkflowRun::new(&workflow);
+    let mut run = sc_workflow::new_run(
+        &trigger,
+        1,
+        &insert_event(),
+        vec!["each_item".to_owned()],
+        &state,
+    );
+    save_run(&catalog, &run).await?;
+
+    let driver = Driver::new(&catalog, &dispatcher, &clock);
+    let mut done = 0;
+    let mut passes = 0;
+    loop {
+        let advanced = driver.advance(&mut run).await?;
+        passes += 1;
+        // The assertion: **at most one item per advance**, and an advance is one
+        // write. Before this was fixed the first pass to reach the body ran all
+        // hundred of them.
+        let ran = recording.count("one");
+        assert!(
+            ran - done <= 1,
+            "pass {passes} ran {} iterations in one write",
+            ran - done
+        );
+        done = ran;
+        if !advanced.is_runnable() {
+            break;
+        }
+    }
+    assert_eq!(require_run(&catalog, run.id).await?.state, RunState::Done);
+    assert_eq!(done, 100);
+
+    // A hundred iterations, a hundred writes: one trace row per body step, each
+    // committed with the advance that made it (decision 6) and each its own step
+    // attempt — so a run recovered mid-loop resumes at the item it was on.
+    let traces = list_run_traces(&catalog, run.id.0).await?;
+    let body: Vec<&RunTrace> = traces.iter().filter(|t| t.step == "one").collect();
+    assert_eq!(
+        body.len(),
+        100,
+        "one row per iteration, not one for the loop"
+    );
+    assert!(
+        body.iter()
+            .all(|t| t.attempt == 1 && t.outcome == TraceOutcome::Ok)
+    );
+    assert!(
+        body.windows(2).all(|w| w[0].seq < w[1].seq),
+        "the timeline is in the order the items were serviced"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_workflow_with_no_saved_version_refuses_to_start_a_run() -> Result<()> {
     let db = TestDb::new().await?;
     let catalog = catalog(&db).await?;
@@ -1276,11 +1377,7 @@ async fn a_workflow_that_starts_a_workflow_carries_the_chain_and_is_bounded_by_i
     );
     save_workflow(
         &catalog,
-        &Workflow::of(
-            child.id,
-            1,
-            vec![action_step("childstep").then(Next::End)],
-        ),
+        &Workflow::of(child.id, 1, vec![action_step("childstep").then(Next::End)]),
         "v1",
         None,
     )
