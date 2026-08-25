@@ -2,6 +2,95 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phases 4 and 5: suspension, and the admin API
+
+A run that **stops** — for a while, for a person, or because somebody said so — and the typed
+API an admin drives it through. From here a workflow is drawn, saved, run, suspended waiting for
+an approval, answered a day later through a form rendered from the step's own declaration, and
+finished **on the version it started with**. That is the milestone's definition of done, minus
+the browser, and it is pinned by an end-to-end HTTP test.
+
+- **Waiting for a time is a column, not a timer.** A `Wait`'s deadline is written to
+  `_sc_runs.wake_at` and the run leaves the queue's reach until then, so it is restart-safe by
+  construction: nothing is holding a future, and nothing has to be rebuilt after a restart. The
+  test moves a `ManualClock` a day forward and asks the queue; **no test sleeps**.
+- **Waiting for a person has no deadline at all.** A `UserForm` suspends with `wake_at` NULL,
+  which is what "no clock will make this runnable" means, and the form is carried **on the run**
+  rather than looked up when somebody asks. That is decision 2 doing its work at a second scale:
+  the workflow may be edited twice while an approval sits in somebody's inbox, and what they are
+  answering is the form they were shown. `resume_run` checks the answers against *that*
+  declaration with the same `validate_attrs` a trigger's configuration goes through, merges them
+  into the context whole under the step's `assign_to`, and drives the run on.
+- **Resuming drives; it does not merely enqueue.** An admin who clicks *Approve* and is told
+  "running" would have to reload to find out what happened, so the resume claims the run under a
+  lease and drives it on the request's own stack — exactly as starting a run from the Run button
+  already did. Holding the lease across the drive is half the point: without it the engine task
+  could claim the same row a millisecond later and run the step twice for nothing.
+- **`cancel_run` and `retry_run`, the two things an admin looking at a stuck run needs.**
+  Cancelling makes a live run `aborted` — not `failed`, because nothing went wrong, somebody
+  decided — with the reason on the row and the machine state kept, so the detail screen still
+  shows where it had got to. Retrying starts again **at the step that failed**, attempt count
+  reset, on the pinned version: the steps before it already had their effects, and re-running
+  those is the thing at-least-once is trying to do less of. A run that stopped at its step budget
+  is refused rather than restarted into the same wall.
+- **Who may answer** is the form's own `min_role`, defaulting to admin — the same floor, the same
+  comparison and the same safe default a trigger's exposure has. Checked in the API layer rather
+  than assumed, on the `may_chat` precedent: today every caller that reaches it is an admin and
+  meets every floor, and a form exposed to a role is exactly the thing that must not be reachable
+  by way of a surface that forgot to ask.
+- **A workflow validates on save and again on load** (decision 11), in one pass that answers a
+  **list**: every `Next` names a step that exists, the start step exists, every step is reachable,
+  each action resolves and its configuration validates against its own `config_spec_for` the
+  trigger's channel, each formula parses and resolves in the scope that step will have, and an
+  error policy names a real step. A list rather than one error because the caller is a visual
+  editor: three broken steps are three markers on three nodes, and an admin told about one of
+  four problems fixes it and is told about the next one. Reachability stands down — deliberately
+  and with the reason recorded — when a `Next::Formula` is reachable, because which step a
+  computed `next` goes to is the run's answer and marking a good step dead is worse than saying
+  nothing.
+- **A broken workflow stays editable and refuses to run.** It is still stored, still returned by
+  `getWorkflow` with its issues beside it, and still saveable over — editing it *is* the repair.
+  What it cannot do is start a run: `start_run` validates the pinned version before the first
+  step, so a workflow whose table was dropped fails in front of the admin rather than half way
+  through, with the steps before the broken one already done.
+- **The API is seven endpoints and no new nouns.** `getWorkflow` / `saveWorkflow` /
+  `revertWorkflow` are addressed by the **trigger's** id, because decision 1 made a workflow a
+  body rather than an entity; there is no create and no delete, because creating the trigger
+  mints version 1 (an empty canvas, not an error) — as does switching an existing action trigger
+  to a workflow body — and deleting it takes its versions with it.
+  There is no `updateWorkflow` either: saving mints the next version and reverting mints a new
+  version whose steps are an old one's, since rewriting history is exactly what append-only says
+  no to — and a run suspended on version 1 still has to be able to load version 1 tomorrow.
+  `listWorkflowRuns` is by state and paged; `resumeRun`, `cancelRun` and `retryRun` each answer
+  the run's new state.
+- **One document, one spelling.** `saveWorkflow` takes and `getWorkflow` answers the whole
+  program as the JSON `_sc_workflow_versions` stores — the same shape the engine reads and the
+  canvas will round-trip — rather than a field-by-field re-declaration that would be a second
+  thing to keep in step. The run schema grows the same way: the trace rows and the pending form
+  are lifted out as fields, and the pending form is lowered to the ordinary `FormField`
+  vocabulary so `SettingsFields` renders an approval with no knowledge that workflows exist.
+- **`listActions` says which actions the palette may offer.** `workflow_step` is false when an
+  action's declaration for this channel has a required setting with nothing to pick, which is
+  what an action that cannot serve this channel looks like from outside — decided from the
+  declaration rather than from a list of action names, so a plugin's action is judged by the same
+  rule as a built-in.
+- **A trace fix carried from phase 3.** When one advance finished a step whose `next` led straight
+  into a step that stopped the run, the finished step's row was labelled `suspended` and the
+  suspending step got no row at all — a timeline of the wrong run. An advance now writes **two**
+  rows in that case, still in the one transaction: the step that completed, and the step the run
+  stopped at.
+
+Tests: 11 more against a real Postgres in `sc-workflow` (a day-long `Wait` moved by hand, an
+approval answered through its own declaration, an answer that is not what the form asked for
+refused with the run untouched, an abandoned approval timing out into its handler, a role floor
+that travels with the run, a cancellation the queue never picks up again, a retry that re-runs
+only the failing step, a retry that finishes on version 1 after two edits, the two-row trace, and
+the run list filtered and paged), 8 over HTTP in `sc-server` (the whole definition of done, a
+refusal that lists every problem and stores nothing, a revert that is a new version, cancel and
+retry through the router, the palette flag, an action trigger switched to a workflow, and the
+refusal the workflow endpoints owe a trigger that runs an action), and 3 more synchronous machine
+tests for `retry`.
+
 ## Workflows, phase 3: the driver, durability, recovery and the queue
 
 The machine gets a body. A `Driver` in `sc-workflow` loads the version a run is **pinned** to,

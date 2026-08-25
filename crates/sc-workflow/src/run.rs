@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use uuid::Uuid;
 
-use crate::machine::{Conclusion, WorkflowRun};
+use crate::machine::{Conclusion, PendingForm, WorkflowRun};
 
 /// The run attribute holding the **trigger's id**, as a string.
 ///
@@ -296,6 +296,50 @@ pub fn record(run: &mut Run, state: &WorkflowRun, now: DateTime<Utc>) {
             run.wake_at = Some(now);
         }
     }
+}
+
+/// The form this run is waiting for somebody to fill in, if it is waiting for
+/// one (§10.3, phase 4.2).
+///
+/// Read out of the machine state rather than kept in a column of its own,
+/// because the state is where it already is and a second copy would be a second
+/// thing to keep in step. What the *row* says about it is `state = waiting` with
+/// `wake_at` NULL, which is the query "who is waiting on a person" needs and is
+/// all it needs.
+pub fn run_pending_form(run: &Run) -> Result<Option<PendingForm>> {
+    Ok(run_state(run)?.pending_form().cloned())
+}
+
+/// The step this run is on, or `None` once it is over — what a run list shows
+/// beside its state.
+pub fn run_current_step(run: &Run) -> Option<String> {
+    run_state(run)
+        .ok()
+        .and_then(|state| state.current_step().map(str::to_owned))
+}
+
+/// Stop a run for good, at somebody's request rather than because of anything it
+/// did (§10.3, phase 4.4).
+///
+/// `aborted` is a fifth state beside `running`, `waiting`, `done` and `failed`,
+/// and it is deliberately not `failed`: nothing went wrong, an admin decided.
+/// The reason goes on the same column a failure's does, prefixed with what it
+/// is, because the column is "why did this run stop" and an operator reading it
+/// wants one answer.
+///
+/// The machine state is left exactly as it was. That is the record of where the
+/// run had got to, which is what somebody looking at a cancelled run wants to
+/// see — and the queue cannot pick the row up again, because `aborted` is not
+/// one of the states it looks for.
+pub fn mark_aborted(run: &mut Run, reason: Option<&str>, now: DateTime<Utc>) {
+    run.state = RunState::Aborted;
+    run.error = Some(match reason.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(reason) => format!("cancelled: {reason}"),
+        None => "cancelled".to_owned(),
+    });
+    run.wake_at = None;
+    run.updated_at = now;
+    release(run);
 }
 
 /// Let go of the lease: nothing is working on this run any more.

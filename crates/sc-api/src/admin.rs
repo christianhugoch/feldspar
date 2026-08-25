@@ -1630,6 +1630,135 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // --- workflows ----------------------------------------------------------
+    // A workflow is a **trigger body** (§10.3, decision 1), so it is addressed by
+    // the trigger's id and has no create or delete of its own: creating the
+    // trigger creates version 1, and deleting the trigger takes its versions with
+    // it. What is left is what a workflow has that an action body does not — a
+    // program, and a history of the programs it used to be.
+    //
+    // **Versions are rows and the table is append-only** (decision 2). So there
+    // is no `updateWorkflow`: `saveWorkflow` mints the next version, and
+    // `revertWorkflow` mints a new version whose steps are an old one's, because
+    // rewriting history is exactly what append-only says no to — and because a
+    // run suspended on version 1 has to still be able to load version 1
+    // tomorrow.
+
+    set.register(
+        Endpoint::new(
+            "getWorkflow",
+            Method::Get,
+            api().lit("workflows").param("id", ValueType::Uuid),
+        )
+        .output(workflow_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "saveWorkflow",
+            Method::Post,
+            api().lit("workflows").param("id", ValueType::Uuid),
+        )
+        .input(TypeSchema::struct_of([
+            // The whole program — the steps, the start, the workflow-level error
+            // policy, the trace flag and the step budget — in the **stored**
+            // shape, which is also the editor's. Passed through as JSON rather
+            // than described field by field for the reason a run's `context` is:
+            // the document's shape belongs to the engine, and a second
+            // declaration of it here would be a second spelling to keep in step
+            // (decision: the stored JSON is the API shape, and there is no
+            // third).
+            StructField::new("workflow", TypeSchema::json()),
+            // The commit message. A version history without one is a list of
+            // numbers.
+            StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(workflow_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "revertWorkflow",
+            Method::Post,
+            api()
+                .lit("workflows")
+                .param("id", ValueType::Uuid)
+                .lit("revert"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("version", TypeSchema::int()),
+            StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(workflow_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The runs of one workflow, newest first. Filterable by state and paged,
+    // because a workflow that fires on every insert has as many runs as the table
+    // has rows and the screen wants the ones that are stuck.
+    set.register(
+        Endpoint::new(
+            "listWorkflowRuns",
+            Method::Get,
+            api()
+                .lit("workflows")
+                .param("id", ValueType::Uuid)
+                .lit("runs"),
+        )
+        .query([
+            QueryParam::new("state", ValueType::Text),
+            QueryParam::new("limit", ValueType::Int),
+            QueryParam::new("offset", ValueType::Int),
+        ])
+        .output(TypeSchema::array(run_summary_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- the three things an admin does to a run ----------------------------
+    // On `runs/{id}` rather than under a workflow, because a run is addressed by
+    // its own id everywhere else (`getRun`, `deleteRun`) and knowing which
+    // workflow it is of is the server's job, not the caller's.
+
+    set.register(
+        Endpoint::new(
+            "resumeRun",
+            Method::Post,
+            api().lit("runs").param("id", ValueType::Uuid).lit("resume"),
+        )
+        // The answers to the step's own form, keyed by its declared field names —
+        // checked against that declaration, which is the one the person was shown
+        // rather than the workflow's current text.
+        .input(TypeSchema::json())
+        .output(run_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "cancelRun",
+            Method::Post,
+            api().lit("runs").param("id", ValueType::Uuid).lit("cancel"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "reason",
+            TypeSchema::optional(TypeSchema::text()),
+        )]))
+        .output(run_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "retryRun",
+            Method::Post,
+            api().lit("runs").param("id", ValueType::Uuid).lit("retry"),
+        )
+        .output(run_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- settings -----------------------------------------------------------
     // The `_sc_config` values an admin edits (§9, §13.5). Two endpoints, and
     // both carry the **declarations** alongside the values, for the same reason
@@ -2425,31 +2554,145 @@ fn run_summary_schema() -> TypeSchema {
         StructField::new("id", TypeSchema::uuid()),
         // `agent` or `workflow` (§10.3's engine shares this table).
         StructField::new("kind", TypeSchema::text()),
-        // What the run is of: the agent's **name**.
+        // What the run is of: the agent's or the trigger's **name**.
         StructField::new("subject", TypeSchema::text()),
         StructField::new("description", TypeSchema::text()),
-        // `running` | `done` | `failed` | `aborted`.
+        // `running` | `waiting` | `done` | `failed` | `aborted`.
         StructField::new("state", TypeSchema::text()),
         StructField::new("error", TypeSchema::optional(TypeSchema::text())),
         StructField::new("user", TypeSchema::optional(TypeSchema::uuid())),
         StructField::new("created_at", TypeSchema::timestamp()),
         StructField::new("updated_at", TypeSchema::timestamp()),
+        // The workflow half (§10.3), null on an agent run. The version this run
+        // is **pinned** to is the whole of "a suspended run finishes on its own
+        // version", and a list that did not show it would hide the one fact that
+        // explains why two runs of one workflow behaved differently.
+        StructField::new("subject_version", TypeSchema::optional(TypeSchema::int())),
+        // The step it is on, or null once it is over.
+        StructField::new("current_step", TypeSchema::optional(TypeSchema::text())),
+        // When it next wants the engine. Null and `waiting` together mean "only a
+        // person can wake this", which is what the run list has to be able to
+        // show as an approval somebody is sitting on.
+        StructField::new("wake_at", TypeSchema::optional(TypeSchema::timestamp())),
     ])
 }
 
-/// One whole run: the summary plus the loop state it can be read back from.
+/// One whole run: the summary plus the state it can be read back from, and — for
+/// a workflow run — its trace and the form it is waiting on.
 ///
 /// `context` is passed through as JSON rather than described field by field: it
-/// is `sc-agent`'s `AgentLoop`, whose shape belongs to the loop and changes with
-/// it, and a second declaration of it here would be a second thing to keep in
-/// step. What the chat panel reads out of it — the messages — is stable.
+/// is `sc-agent`'s `AgentLoop` or `sc-workflow`'s `WorkflowRun`, whose shape
+/// belongs to the engine and changes with it, and a second declaration of it here
+/// would be a second thing to keep in step. What the chat panel reads out of it —
+/// the messages — is stable, and so is what the run detail reads: the trace and
+/// the pending form are lifted out into fields of their own below.
 fn run_schema() -> TypeSchema {
     let TypeSchema::Struct(mut fields) = run_summary_schema() else {
         return run_summary_schema();
     };
     fields.push(StructField::new("context", TypeSchema::json()));
     fields.push(StructField::new("attributes", TypeSchema::json()));
+    // The workflow half. Empty and null on an agent run rather than absent, so
+    // one typed shape serves both and the client has no union to narrow.
+    fields.push(StructField::new(
+        "trace",
+        TypeSchema::array(run_trace_schema()),
+    ));
+    fields.push(StructField::new(
+        "pending_form",
+        TypeSchema::optional(pending_form_schema()),
+    ));
     TypeSchema::Struct(fields)
+}
+
+/// One `_sc_run_traces` row: one attempt at one step, and the context after it
+/// (§9, §10.3).
+///
+/// This is what the run detail draws its timeline from — and what the read-only
+/// canvas highlights the path taken with, because the steps named here in `seq`
+/// order *are* the path.
+fn run_trace_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("seq", TypeSchema::int()),
+        StructField::new("step", TypeSchema::text()),
+        StructField::new("started_at", TypeSchema::timestamp()),
+        StructField::new("finished_at", TypeSchema::timestamp()),
+        StructField::new("attempt", TypeSchema::int()),
+        // `ok` | `error` | `suspended`.
+        StructField::new("outcome", TypeSchema::text()),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        // The context **after** the step, which is what makes a timeline a
+        // diff: the change from the row before it is the step's contribution.
+        StructField::new("context", TypeSchema::json()),
+    ])
+}
+
+/// The form a suspended run is waiting for somebody to fill in (§10.3, phase
+/// 4.2).
+///
+/// The fields are the ordinary [`form_field_schema`] vocabulary, so `resumeRun`'s
+/// form is rendered by the **same** `SettingsFields` component that renders a
+/// trigger's action settings and a file store's — and the step's declaration is
+/// carried on the run rather than looked up, so the form somebody is looking at
+/// does not change under them when the workflow is edited.
+fn pending_form_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("fields", TypeSchema::array(form_field_schema())),
+        StructField::new("assign_to", TypeSchema::text()),
+        // The role floor for answering; null means admin-only, the same safe
+        // reading a trigger's own `min_role` has.
+        StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// One version of a workflow, with the program itself and the checks against it
+/// (§10.3, phase 5.1).
+fn workflow_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        // The trigger's id: a workflow is a trigger body, not an entity of its
+        // own, so this is the trigger's identity and not a second one.
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("name", TypeSchema::text()),
+        // The table the trigger fires on, which is what decides a step's scope
+        // and an action's declaration — the editor needs it to ask `listActions`
+        // the right question.
+        StructField::new("channel", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("version", TypeSchema::int()),
+        // The program, in the stored shape (see `saveWorkflow`).
+        StructField::new("workflow", TypeSchema::json()),
+        // Everything wrong with it, each naming the step it is about so the
+        // canvas can mark the node. **Empty is usable**; a workflow with issues
+        // is still stored, still listed and still editable — that is what makes
+        // it fixable — and only refuses to start a run.
+        StructField::new("issues", TypeSchema::array(workflow_issue_schema())),
+        StructField::new("versions", TypeSchema::array(workflow_version_schema())),
+    ])
+}
+
+/// One thing wrong with a workflow, and where it is.
+fn workflow_issue_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        // Null for a problem about the workflow as a whole rather than any one
+        // step (a start step that does not exist, an error policy naming a
+        // stranger).
+        StructField::new("step", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("problem", TypeSchema::text()),
+    ])
+}
+
+/// One entry in a workflow's history: which version, when, and who saved it.
+///
+/// The steps are deliberately absent. A history is a list, and carrying every
+/// version's whole program would send the same document a dozen times to draw a
+/// dropdown; `revertWorkflow` is how an old one is brought back.
+fn workflow_version_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("version", TypeSchema::int()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("created_at", TypeSchema::timestamp()),
+        StructField::new("created_by", TypeSchema::optional(TypeSchema::uuid())),
+    ])
 }
 
 /// A registered file-store backend and the settings it declares, so the admin UI
@@ -2736,6 +2979,16 @@ fn action_info_schema() -> TypeSchema {
         StructField::new("name", TypeSchema::text()),
         StructField::new("description", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+        // Whether this action can be offered as a **workflow step** on the table
+        // asked about (§10.3, phase 5.4): false when its declaration for that
+        // channel has a required setting with nothing to pick, which is what an
+        // action that cannot serve this channel looks like from the outside. The
+        // step palette hides those rather than offering a step whose settings
+        // form cannot be completed.
+        //
+        // Decided from the declaration, not from a list of action names, so a
+        // plugin's action is judged by the same rule as a built-in.
+        StructField::new("workflow_step", TypeSchema::bool()),
     ])
 }
 

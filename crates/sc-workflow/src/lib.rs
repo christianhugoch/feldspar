@@ -33,6 +33,10 @@
 //! - The **queue** ([`queue`]): which runs want the engine, claimed under a lease
 //!   — a query over the runs table, which is what makes a crashed node's run
 //!   recoverable without anybody having to detect the crash.
+//! - The **checks** ([`validate`]): every way a workflow can be wrong, in one
+//!   pass, run on save and again before a run of it starts (decision 11).
+//! - The **operations** ([`ops`]): the four things a person does *to* a run —
+//!   answer its form, cancel it, retry it, list the runs of one workflow.
 //! - The **engine** ([`engine`]): [`WorkflowEngineTask`], the
 //!   [`WorkflowEngine`](sc_action::WorkflowEngine) seam filled in and the one
 //!   tokio task that advances runs nobody is waiting for.
@@ -51,25 +55,35 @@
 pub mod driver;
 pub mod engine;
 pub mod machine;
+pub mod ops;
 pub mod queue;
 pub mod run;
 pub mod scope;
 pub mod traces;
+pub mod validate;
 pub mod versions;
 pub mod workflow;
 
 pub use driver::{Advanced, Clock, Driver, ManualClock, SystemClock, node_id, start_run};
 pub use engine::{DEFAULT_LEASE_SECONDS, DEFAULT_POLL_SECONDS, WorkflowEngineTask};
 pub use machine::{Conclusion, Decision, PendingForm, WorkflowRun};
+pub use ops::{
+    INLINE_LEASE_SECONDS, ROLE_ADMIN, cancel_run, check_may_resume, list_workflow_runs, may_resume,
+    resume_run, retry_run,
+};
 pub use queue::{DEFAULT_BATCH, DatabaseQueue, WorkQueue};
 pub use run::{
-    ATTR_CHAIN, ATTR_EVENT, ATTR_WORKFLOW, StoredEvent, new_run, record, release, run_chain,
-    run_event, run_state, run_version, run_workflow_id,
+    ATTR_CHAIN, ATTR_EVENT, ATTR_WORKFLOW, StoredEvent, mark_aborted, new_run, record, release,
+    run_chain, run_current_step, run_event, run_pending_form, run_state, run_version,
+    run_workflow_id,
 };
 pub use scope::{WORKFLOW_SCOPE, workflow_shape};
 pub use traces::{
     RunTrace, TRACES_TABLE, TraceOutcome, bootstrap_run_traces, delete_run_traces, list_run_traces,
     save_run_trace, trace_insert,
+};
+pub use validate::{
+    WorkflowIssue, issues_message, usable_as_step, validate_workflow, workflow_issues,
 };
 pub use versions::{
     VERSIONS_TABLE, WorkflowVersion, bootstrap_workflow_versions, current_workflow,

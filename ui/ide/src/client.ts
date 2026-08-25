@@ -91,8 +91,8 @@ export type UpdateAgentRequest = { name: string; description: string; provider: 
 export type UpdateAgentResponse = { id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null };
 export type DeleteAgentResponse = { deleted: boolean };
 export type ListAgentTraitsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
-export type ListRunsResponse = Array<{ id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string }>;
-export type GetRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; context: unknown; attributes: unknown };
+export type ListRunsResponse = Array<{ id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null }>;
+export type GetRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null };
 export type DeleteRunResponse = { deleted: boolean };
 export type BrowseFilesRequest = { dir: string };
 export type BrowseFilesResponse = Array<{ name: string; path: string; is_dir: boolean; size?: number | null }>;
@@ -146,7 +146,19 @@ export type DeleteTriggerResponse = { deleted: boolean };
 export type RunTriggerRequest = unknown;
 export type RunTriggerResponse = { result: unknown };
 export type ListActionsQuery = { table?: string };
-export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
+export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; workflow_step: boolean }>;
+export type GetWorkflowResponse = { id: string; name: string; channel?: string | null; version: number; workflow: unknown; issues: Array<{ step?: string | null; problem: string }>; versions: Array<{ version: number; description: string; created_at: string; created_by?: string | null }> };
+export type SaveWorkflowRequest = { workflow: unknown; description?: string | null };
+export type SaveWorkflowResponse = { id: string; name: string; channel?: string | null; version: number; workflow: unknown; issues: Array<{ step?: string | null; problem: string }>; versions: Array<{ version: number; description: string; created_at: string; created_by?: string | null }> };
+export type RevertWorkflowRequest = { version: number; description?: string | null };
+export type RevertWorkflowResponse = { id: string; name: string; channel?: string | null; version: number; workflow: unknown; issues: Array<{ step?: string | null; problem: string }>; versions: Array<{ version: number; description: string; created_at: string; created_by?: string | null }> };
+export type ListWorkflowRunsQuery = { state?: string; limit?: number; offset?: number };
+export type ListWorkflowRunsResponse = Array<{ id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null }>;
+export type ResumeRunRequest = unknown;
+export type ResumeRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null };
+export type CancelRunRequest = { reason?: string | null };
+export type CancelRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null };
+export type RetryRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null };
 export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
 export type UpdateSettingsRequest = { values: unknown };
 export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
@@ -253,6 +265,13 @@ export interface ApiClient {
   deleteTrigger(id: string): Promise<DeleteTriggerResponse>;
   runTrigger(id: string, body: RunTriggerRequest): Promise<RunTriggerResponse>;
   listActions(query?: ListActionsQuery): Promise<ListActionsResponse>;
+  getWorkflow(id: string): Promise<GetWorkflowResponse>;
+  saveWorkflow(id: string, body: SaveWorkflowRequest): Promise<SaveWorkflowResponse>;
+  revertWorkflow(id: string, body: RevertWorkflowRequest): Promise<RevertWorkflowResponse>;
+  listWorkflowRuns(id: string, query?: ListWorkflowRunsQuery): Promise<ListWorkflowRunsResponse>;
+  resumeRun(id: string, body: ResumeRunRequest): Promise<ResumeRunResponse>;
+  cancelRun(id: string, body: CancelRunRequest): Promise<CancelRunResponse>;
+  retryRun(id: string): Promise<RetryRunResponse>;
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
   sendTestEmail(body: SendTestEmailRequest): Promise<SendTestEmailResponse>;
@@ -1081,6 +1100,71 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listActions", res);
       return (await res.json()) as ListActionsResponse;
+    },
+    async getWorkflow(id) {
+      const res = await doFetch(`${baseUrl}/api/workflows/${id}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getWorkflow", res);
+      return (await res.json()) as GetWorkflowResponse;
+    },
+    async saveWorkflow(id, body) {
+      const res = await doFetch(`${baseUrl}/api/workflows/${id}`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveWorkflow", res);
+      return (await res.json()) as SaveWorkflowResponse;
+    },
+    async revertWorkflow(id, body) {
+      const res = await doFetch(`${baseUrl}/api/workflows/${id}/revert`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("revertWorkflow", res);
+      return (await res.json()) as RevertWorkflowResponse;
+    },
+    async listWorkflowRuns(id, query) {
+      const search = new URLSearchParams();
+      if (query?.state !== undefined && query?.state !== null) search.append("state", String(query?.state));
+      if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
+      if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/workflows/${id}/runs${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listWorkflowRuns", res);
+      return (await res.json()) as ListWorkflowRunsResponse;
+    },
+    async resumeRun(id, body) {
+      const res = await doFetch(`${baseUrl}/api/runs/${id}/resume`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("resumeRun", res);
+      return (await res.json()) as ResumeRunResponse;
+    },
+    async cancelRun(id, body) {
+      const res = await doFetch(`${baseUrl}/api/runs/${id}/cancel`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("cancelRun", res);
+      return (await res.json()) as CancelRunResponse;
+    },
+    async retryRun(id) {
+      const res = await doFetch(`${baseUrl}/api/runs/${id}/retry`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("retryRun", res);
+      return (await res.json()) as RetryRunResponse;
     },
     async getSettings() {
       const res = await doFetch(`${baseUrl}/api/settings`, {

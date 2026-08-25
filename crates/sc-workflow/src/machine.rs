@@ -618,6 +618,44 @@ impl WorkflowRun {
         }
     }
 
+    /// Start again at the step this run stopped at, as a **fresh attempt**
+    /// (§10.3, phase 4.4).
+    ///
+    /// The one thing an admin can do to a failed run other than read it: the
+    /// outage that failed the step is over, and what the run should do is carry
+    /// on from where it stopped rather than start again from the beginning — the
+    /// steps before it already had their effects, and re-running them is exactly
+    /// what "at least once" is trying not to do more of.
+    ///
+    /// The attempt count goes back to zero, so a step whose policy allows three
+    /// tries gets three again. The **budget does not**: a run that stopped
+    /// because it ran out of steps would only run out again, so it is refused by
+    /// name here instead of being restarted into the same wall.
+    pub fn retry(&mut self, workflow: &Workflow) -> Result<()> {
+        let Phase::Done {
+            conclusion: Conclusion::Failed { step, .. },
+        } = self.phase.clone()
+        else {
+            return Err(Error::invalid(
+                "only a run that stopped at a step can be retried; this one did not fail",
+            ));
+        };
+        if self.steps_taken >= self.max_steps {
+            return Err(Error::invalid(format!(
+                "this run stopped at its budget of {} steps, so retrying it would stop again \
+                 at once; raise the workflow's `max_steps` and start a new run",
+                self.max_steps
+            )));
+        }
+        // The run is pinned to a version, so a step that is not in it will not
+        // appear later: retrying into it would fail identically and tell the
+        // admin nothing they do not already know.
+        workflow.require_step(&step)?;
+        self.attempt = 0;
+        self.phase = Phase::Enter { step };
+        Ok(())
+    }
+
     /// The `seq` the next trace row gets, consuming it.
     ///
     /// The counter lives in the run state rather than in the driver because it
@@ -2127,6 +2165,79 @@ mod tests {
         run.next_step(&workflow, now + Duration::milliseconds(1_000));
         assert_eq!(run.attempt(), 2);
         assert!(!run.is_done());
+    }
+
+    #[test]
+    fn a_retry_starts_again_at_the_step_that_failed_and_not_at_the_beginning() {
+        let workflow = wf(vec![act("first").then(Next::step("send")), act("send")]);
+        let mut run = WorkflowRun::new(&workflow);
+        let now = Fake::new().now;
+        // `first` succeeds and is not run again; `send` fails and the run stops.
+        run.next_step(&workflow, now);
+        run.step_succeeded(json!("done")).unwrap();
+        run.next_step(&workflow, now);
+        run.step_failed(&workflow, "the supplier is down", now)
+            .unwrap();
+        let (step, _) = failure(run.next_step(&workflow, now));
+        assert_eq!(step, "send");
+        let spent = run.steps_taken();
+
+        run.retry(&workflow).unwrap();
+        // The step that failed, with its attempts back to zero — and what the
+        // steps before it wrote still in the context, because they are not run
+        // again.
+        assert_eq!(run.current_step(), Some("send"));
+        assert_eq!(run.attempt(), 0);
+        assert_eq!(run.context().get("first"), Some(&json!("done")));
+        let decision = run.next_step(&workflow, now);
+        assert!(
+            matches!(&decision, Decision::RunAction { step, .. } if step == "send"),
+            "{decision:?}"
+        );
+        assert_eq!(run.attempt(), 1);
+        assert_eq!(
+            run.steps_taken(),
+            spent + 1,
+            "the budget is the run's, so a retried step spends one of it"
+        );
+    }
+
+    #[test]
+    fn only_a_run_that_stopped_at_a_step_can_be_retried() {
+        let workflow = wf(vec![act("a")]);
+        let mut run = WorkflowRun::new(&workflow);
+        let now = Fake::new().now;
+        run.next_step(&workflow, now);
+        // Still in flight: there is nothing to start again.
+        let err = run.retry(&workflow).unwrap_err().to_string();
+        assert!(err.contains("did not fail"), "{err}");
+
+        run.step_succeeded(json!(1)).unwrap();
+        run.next_step(&workflow, now);
+        assert!(run.is_done());
+        assert!(
+            run.retry(&workflow).is_err(),
+            "a finished run has no failure"
+        );
+    }
+
+    #[test]
+    fn a_run_that_stopped_at_its_budget_is_refused_rather_than_restarted_into_the_same_wall() {
+        // A loop with no exit, stopped by the budget: retrying it would spend
+        // the same zero remaining steps and stop again at once, so it is refused
+        // by name instead.
+        let mut workflow = wf(vec![act("a").then(Next::step("a"))]);
+        workflow.max_steps = 3;
+        let mut run = WorkflowRun::new(&workflow);
+        let now = Fake::new().now;
+        for _ in 0..3 {
+            run.next_step(&workflow, now);
+            run.step_succeeded(json!(1)).unwrap();
+        }
+        let (_, error) = failure(run.next_step(&workflow, now));
+        assert!(error.contains("budget"), "{error}");
+        let err = run.retry(&workflow).unwrap_err().to_string();
+        assert!(err.contains("max_steps"), "{err}");
     }
 
     #[test]

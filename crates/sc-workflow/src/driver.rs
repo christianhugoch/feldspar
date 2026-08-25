@@ -205,6 +205,14 @@ impl<'a> Driver<'a> {
         let mut serviced: Option<(String, u32)> = None;
         let mut failure: Option<String> = None;
 
+        // A **later** step this pass entered which stopped the run without doing
+        // any work of its own — a `UserForm` reached from the step before it, or
+        // a step the program turns out not to have. It gets a trace row of its
+        // own rather than borrowing the serviced step's, because a timeline that
+        // labelled the branch before an approval "suspended" and then never
+        // mentioned the approval would be a timeline of the wrong run.
+        let mut stopped_at: Option<(String, u32, TraceOutcome)> = None;
+
         // Whether the run was still going when this pass began. A pass over a
         // run that had already stopped writes the same row again and must not
         // report the same failure a second time — an alert per poll for a
@@ -219,16 +227,26 @@ impl<'a> Driver<'a> {
                     // A workflow that turned out to be inconsistent fails here
                     // rather than through a policy, and the step it stopped at is
                     // still worth a trace row when this pass is what entered it.
-                    if serviced.is_none() && state.steps_taken() > spent {
-                        serviced = Some((step.clone(), state.attempt()));
-                    }
+                    stop_at(
+                        &mut serviced,
+                        &mut stopped_at,
+                        &step,
+                        &state,
+                        spent,
+                        TraceOutcome::Error,
+                    );
                     failure.get_or_insert_with(|| error.clone());
                     break Advanced::Failed { step, error };
                 }
                 Decision::Suspend { step, until, .. } => {
-                    if serviced.is_none() && state.steps_taken() > spent {
-                        serviced = Some((step, state.attempt()));
-                    }
+                    stop_at(
+                        &mut serviced,
+                        &mut stopped_at,
+                        &step,
+                        &state,
+                        spent,
+                        TraceOutcome::Suspended,
+                    );
                     break Advanced::Suspended { until };
                 }
                 Decision::RunAction {
@@ -281,30 +299,52 @@ impl<'a> Driver<'a> {
             }
         };
 
-        // The trace row, when this workflow asked for one and this pass actually
-        // did something. Its `seq` comes off the run state, so a recovered run's
-        // trace carries on rather than colliding with the rows it already wrote.
-        let trace = match (&serviced, workflow.trace) {
-            (Some((step, attempt)), true) => {
-                let outcome = if failure.is_some() {
-                    TraceOutcome::Error
-                } else if state.is_suspended() {
-                    TraceOutcome::Suspended
-                } else {
-                    TraceOutcome::Ok
+        // The trace rows, when this workflow asked for them and this pass
+        // actually did something. Their `seq` comes off the run state, so a
+        // recovered run's trace carries on rather than colliding with the rows it
+        // already wrote — and both rows go in the **same** write as the advance,
+        // which is decision 6's guarantee.
+        //
+        // Usually there is one: the step this pass serviced. There are two when
+        // that step's `next` led straight into one that stopped the run.
+        let mut traces = Vec::new();
+        if workflow.trace {
+            let finished_at = self.clock.now();
+            if let Some((step, attempt)) = &serviced {
+                let outcome = match (&failure, stopped_at.is_none() && state.is_suspended()) {
+                    (Some(_), _) => TraceOutcome::Error,
+                    (None, true) => TraceOutcome::Suspended,
+                    (None, false) => TraceOutcome::Ok,
                 };
                 let mut trace =
                     RunTrace::new(run.id.0, state.next_trace_seq(), step, started_at, outcome)
                         .attempt(*attempt)
-                        .finished_at(self.clock.now())
+                        .finished_at(finished_at)
                         .context(state.context().clone());
                 if let Some(error) = &failure {
                     trace = trace.error(error);
                 }
-                Some(trace)
+                traces.push(trace);
             }
-            _ => None,
-        };
+            if let Some((step, attempt, outcome)) = &stopped_at {
+                // It did no work, so it started and finished now: what the row
+                // records is that the run reached this step and stopped there.
+                let mut trace = RunTrace::new(
+                    run.id.0,
+                    state.next_trace_seq(),
+                    step,
+                    finished_at,
+                    *outcome,
+                )
+                .attempt(*attempt)
+                .finished_at(finished_at)
+                .context(state.context().clone());
+                if let Some(error) = &failure {
+                    trace = trace.error(error);
+                }
+                traces.push(trace);
+            }
+        }
 
         let now = self.clock.now();
         record(run, &state, now);
@@ -315,7 +355,7 @@ impl<'a> Driver<'a> {
             // out.
             release(run);
         }
-        self.write(run, trace.as_ref()).await?;
+        self.write(run, &traces).await?;
 
         if let Advanced::Failed { step, error } = &advanced
             && was_live
@@ -442,14 +482,14 @@ impl<'a> Driver<'a> {
     /// traced, its step's trace row — **in one transaction**, so a reader never
     /// sees a trace row for an advance that did not commit, or an advance whose
     /// trace was lost (decision 6).
-    async fn write(&self, run: &Run, trace: Option<&RunTrace>) -> Result<()> {
+    async fn write(&self, run: &Run, traces: &[RunTrace]) -> Result<()> {
         let mut tx = self.catalog.primary().begin().await?;
         let update = sc_query::Statement::from(run_update(run));
         if let Err(e) = tx.query(&update).await {
             tx.rollback().await?;
             return Err(e);
         }
-        if let Some(trace) = trace {
+        for trace in traces {
             let insert = sc_query::Statement::from(trace_insert(trace));
             if let Err(e) = tx.query(&insert).await {
                 tx.rollback().await?;
@@ -500,6 +540,21 @@ pub async fn start_run(
     chain: Vec<String>,
 ) -> Result<Run> {
     let workflow = require_current_workflow(catalog, trigger.id, &trigger.name).await?;
+    // Checked again here, not only on save (decision 11). The world moves
+    // underneath a stored document — a table dropped, a plugin that provided a
+    // step's action removed, a dump restored somewhere its formulas do not
+    // resolve — and a run of a workflow that no longer holds together would
+    // discover that half way through, with the steps before the broken one
+    // already done. Refusing costs one pass and is the same fail-closed reading
+    // an invalid trigger gets from the live set.
+    crate::validate::validate_workflow(
+        catalog,
+        &dispatcher.registry(),
+        &workflow,
+        trigger.channel.as_deref(),
+    )
+    .await
+    .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", trigger.name)))?;
     let state = WorkflowRun::new(&workflow);
     let mut run = crate::run::new_run(trigger, workflow.version, event, chain, &state);
     sc_agent::save_run(catalog, &run).await?;
@@ -521,6 +576,36 @@ pub async fn start_run(
         sc_agent::save_run(catalog, &run).await?;
     }
     Ok(run)
+}
+
+/// Record which step a pass stopped at, for the trace.
+///
+/// It is the **serviced** step when this pass did that step's work — a step whose
+/// own action failed, a retry's backoff, a `Wait` whose deadline was just
+/// evaluated. It is a *second* row when the pass finished one step and its `next`
+/// led straight into a step that stopped without doing anything: an approval
+/// reached from the branch before it is a step attempt of its own, and a timeline
+/// that never mentioned it would be a timeline of the wrong run.
+///
+/// And it is neither when the run is merely being told again about a stop it was
+/// already in, which is what an idempotent `next_step` answers to a pass that has
+/// nothing to do (`steps_taken` has not moved).
+fn stop_at(
+    serviced: &mut Option<(String, u32)>,
+    stopped_at: &mut Option<(String, u32, TraceOutcome)>,
+    step: &str,
+    state: &WorkflowRun,
+    spent: u32,
+    outcome: TraceOutcome,
+) {
+    match serviced {
+        Some((already, _)) if already == step => {}
+        Some(_) => *stopped_at = Some((step.to_owned(), state.attempt(), outcome)),
+        None if state.steps_taken() > spent => {
+            *serviced = Some((step.to_owned(), state.attempt()));
+        }
+        None => {}
+    }
 }
 
 /// How an ending reads in one phrase on the run's closing log line.

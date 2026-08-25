@@ -246,39 +246,39 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ### 4. Suspension: waiting for a time, and waiting for a person
 
-- [ ] 4.1 `Wait { until }`: a formula yielding a duration or an instant; the run's `wake_at` is
+- [x] 4.1 `Wait { until }`: a formula yielding a duration or an instant; the run's `wake_at` is
   written and the run leaves the queue's reach until then. Restart-safe by construction, and
   tested by moving the clock rather than by waiting.
-- [ ] 4.2 `UserForm { fields, assign_to, min_role, timeout }`: the step declares `FormField`s —
+- [x] 4.2 `UserForm { fields, assign_to, min_role, timeout }`: the step declares `FormField`s —
   the same "settings as data" vocabulary everything else uses — and the run suspends with
   `wake_at` NULL and the pending form recorded on the run. `resume_run(id, values)` validates the
   values against the declaration (`validate_attrs`), merges them into the context under
   `assign_to`, and hands the run back to the queue. A `timeout` sets `wake_at` so an abandoned
   approval fails or branches instead of waiting forever.
-- [ ] 4.3 Who may resume: the run's `min_role` floor, defaulting to admin, checked in the API
+- [x] 4.3 Who may resume: the run's `min_role` floor, defaulting to admin, checked in the API
   layer — the same rule and the same default a trigger's exposure has.
-- [ ] 4.4 `cancel_run` (a running or waiting run becomes `aborted` with a reason) and
+- [x] 4.4 `cancel_run` (a running or waiting run becomes `aborted` with a reason) and
   `retry_run` (a failed run resumes at the step that failed, attempt count reset) — the two
   operations an admin looking at a stuck run actually needs.
 
 ### 5. The admin API
 
-- [ ] 5.1 `getWorkflow` — the current version's steps, the version number, the validation issues,
+- [x] 5.1 `getWorkflow` — the current version's steps, the version number, the validation issues,
   and the version history (number, when, who). `saveWorkflow` — steps in, a new version out,
   refusing an invalid one with the message the editor shows in place. `revertWorkflow` — mint a
   new version whose steps are an old one's, because rewriting history is what append-only says
   no to.
-- [ ] 5.2 `listWorkflowRuns` (by workflow, filterable by state, newest first, paged) reusing the
+- [x] 5.2 `listWorkflowRuns` (by workflow, filterable by state, newest first, paged) reusing the
   run summary schema the agent milestone defined, plus `subject_version`, the current step and
   `wake_at`. `getRun` grows the workflow half: the trace rows, the pending form and the pinned
   version.
-- [ ] 5.3 `resumeRun`, `cancelRun`, `retryRun` — §4's three, typed, admin-authenticated, each
+- [x] 5.3 `resumeRun`, `cancelRun`, `retryRun` — §4's three, typed, admin-authenticated, each
   answering the run's new state.
-- [ ] 5.4 `listActions` already declares every action's `config_spec` and is what the step
+- [x] 5.4 `listActions` already declares every action's `config_spec` and is what the step
   palette and the step inspector render; the one addition is which actions are *usable as a
   workflow step* on a channel-less run, so the palette does not offer a step whose configuration
   cannot be filled in.
-- [ ] 5.5 The trigger endpoints carry `TriggerBody`: creating a trigger with a workflow body
+- [x] 5.5 The trigger endpoints carry `TriggerBody`: creating a trigger with a workflow body
   creates version 1 (an empty workflow with one start step, so a new workflow opens on a canvas
   rather than on an error), and `runTrigger` on one answers a run id.
 

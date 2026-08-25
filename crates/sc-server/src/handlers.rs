@@ -1769,7 +1769,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
                 let run = sc_agent::require_run(&catalog, id).await?;
-                Ok(HandlerResponse::ok(run_json(&run)))
+                Ok(HandlerResponse::ok(
+                    run_json_with_workflow(&catalog, &run).await?,
+                ))
             }
         }
     });
@@ -2103,6 +2105,21 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let dispatcher = triggers_of(&apps)?;
                 let trigger = trigger_from_body(TriggerId::new(), &ctx.body)?;
                 save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
+                // A workflow body gets **version 1** here, not on the editor's
+                // first save (§10.3, phase 5.5): an empty workflow with one
+                // start step, so a new workflow opens on a canvas rather than on
+                // "no version of this has been saved yet", which is not a good
+                // first thing for an admin to be told about something they have
+                // just created.
+                if trigger.body == TriggerBody::Workflow {
+                    sc_workflow::save_workflow(
+                        &catalog,
+                        &sc_workflow::Workflow::empty(trigger.id),
+                        "created",
+                        ctx.user.as_ref().map(|u| u.id),
+                    )
+                    .await?;
+                }
                 dispatcher.reload(&catalog).await?;
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)).with_status(201))
             }
@@ -2125,6 +2142,22 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // not something a payload gets to reassign.
                 let trigger = trigger_from_body(id, &ctx.body)?;
                 save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
+                // Switching an action body to a workflow one is the other way a
+                // trigger comes to need a version 1 (§10.3, phase 5.5), and it
+                // gets the same empty canvas a create does. Only when it has
+                // none: a trigger switched to an action and back finds the
+                // program it had, because the versions were never deleted.
+                if trigger.body == TriggerBody::Workflow
+                    && sc_workflow::max_version(&catalog, id).await?.is_none()
+                {
+                    sc_workflow::save_workflow(
+                        &catalog,
+                        &sc_workflow::Workflow::empty(id),
+                        "created",
+                        ctx.user.as_ref().map(|u| u.id),
+                    )
+                    .await?;
+                }
                 dispatcher.reload(&catalog).await?;
                 Ok(HandlerResponse::ok(trigger_json(&trigger, None)))
             }
@@ -2143,6 +2176,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 if !delete_trigger(&catalog, id).await? {
                     return Err(Error::not_found(format!("no trigger with id {id}")));
                 }
+                // Append-only is a rule about *editing* a workflow, not a promise
+                // that a deleted trigger leaves rows nobody can reach: the
+                // versions are keyed by this id and there is now nothing to
+                // address them by.
+                sc_workflow::delete_workflow_versions(&catalog, id).await?;
                 dispatcher.reload(&catalog).await?;
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
             }
@@ -2197,18 +2235,259 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .registry()
                     .all()
                     .map(|action| {
+                        let spec = action.config_spec_for(&catalog, channel);
                         json!({
                             "name": action.name(),
                             "description": action.description(),
-                            "config_spec": action
-                                .config_spec_for(&catalog, channel)
+                            "config_spec": spec
                                 .iter()
                                 .map(form_field_json)
                                 .collect::<Vec<_>>(),
+                            // Whether the step palette may offer it here (§10.3,
+                            // phase 5.4). Decided from the declaration this same
+                            // call is answering with, so the flag and the form
+                            // the client would render cannot disagree.
+                            "workflow_step": sc_workflow::usable_as_step(&spec),
                         })
                     })
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    // --- workflows ----------------------------------------------------------
+    // The program half of a trigger whose body is a workflow (§10.3). Addressed
+    // by the **trigger's** id, because that is what a workflow is identified by:
+    // decision 1 made it a body rather than an entity, and inventing a second id
+    // here would be inventing the entity back.
+    //
+    // Every read validates, and every write validates before it stores
+    // (decision 11). A workflow that does not validate is still returned, still
+    // listed and still editable — with its issues beside it, because editing it
+    // is the repair — and what it cannot do is start a run.
+
+    reg.register("getWorkflow", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let trigger = require_workflow_trigger(&catalog, ctx.path_param("id")?).await?;
+                let versions = sc_workflow::list_workflow_versions(&catalog, trigger.id).await?;
+                // The newest version is the current one; a trigger created
+                // before its first save has none, which is a real state and is
+                // answered as an empty canvas rather than as an error.
+                let workflow = match versions.first() {
+                    Some(version) => version.workflow.clone(),
+                    None => sc_workflow::Workflow::empty(trigger.id),
+                };
+                Ok(HandlerResponse::ok(
+                    workflow_json(&catalog, &dispatcher, &trigger, &workflow, &versions).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("saveWorkflow", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let trigger = require_workflow_trigger(&catalog, ctx.path_param("id")?).await?;
+                let obj = require_object(&ctx.body)?;
+                let posted = obj
+                    .get("workflow")
+                    .ok_or_else(|| Error::invalid("field `workflow` is required"))?;
+                let workflow = workflow_from_document(trigger.id, posted)?;
+                // Refused *before* it is stored, with the whole list of problems
+                // rather than the first: an admin told about one of three fixes
+                // it and is told about the next one, which is three round trips
+                // to save one workflow.
+                sc_workflow::validate_workflow(
+                    &catalog,
+                    &dispatcher.registry(),
+                    &workflow,
+                    trigger.channel.as_deref(),
+                )
+                .await?;
+                let saved = sc_workflow::save_workflow(
+                    &catalog,
+                    &workflow,
+                    &optional_str(obj, "description"),
+                    ctx.user.as_ref().map(|u| u.id),
+                )
+                .await?;
+                let versions = sc_workflow::list_workflow_versions(&catalog, trigger.id).await?;
+                Ok(HandlerResponse::ok(
+                    workflow_json(&catalog, &dispatcher, &trigger, &saved, &versions).await?,
+                ))
+            }
+        }
+    });
+
+    // Revert: a **new** version whose steps are an old one's. Not a rewrite, and
+    // not a deletion of the versions in between — a run suspended on any of them
+    // still has to be able to load the one it is pinned to tomorrow, which is
+    // the whole reason the table is append-only (decision 2).
+    reg.register("revertWorkflow", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let trigger = require_workflow_trigger(&catalog, ctx.path_param("id")?).await?;
+                let obj = require_object(&ctx.body)?;
+                let version = obj
+                    .get("version")
+                    .and_then(Json::as_u64)
+                    .ok_or_else(|| Error::invalid("field `version` must be a version number"))?;
+                let version = u32::try_from(version)
+                    .map_err(|_| Error::invalid(format!("there is no version {version}")))?;
+                let old =
+                    sc_workflow::require_workflow_version(&catalog, trigger.id, version).await?;
+                // Checked again on the way back in: a version that was fine when
+                // it was saved may name a table that has since been dropped, and
+                // restoring it silently would restore a workflow that cannot run.
+                sc_workflow::validate_workflow(
+                    &catalog,
+                    &dispatcher.registry(),
+                    &old,
+                    trigger.channel.as_deref(),
+                )
+                .await?;
+                let description = match optional_str(obj, "description") {
+                    given if given.is_empty() => format!("reverted to version {version}"),
+                    given => given,
+                };
+                let saved = sc_workflow::save_workflow(
+                    &catalog,
+                    &old,
+                    &description,
+                    ctx.user.as_ref().map(|u| u.id),
+                )
+                .await?;
+                let versions = sc_workflow::list_workflow_versions(&catalog, trigger.id).await?;
+                Ok(HandlerResponse::ok(
+                    workflow_json(&catalog, &dispatcher, &trigger, &saved, &versions).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("listWorkflowRuns", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let trigger = require_workflow_trigger(&catalog, ctx.path_param("id")?).await?;
+                let state = match ctx
+                    .query_get("state")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(state) => Some(sc_agent::RunState::parse(state)?),
+                    None => None,
+                };
+                let runs = sc_workflow::list_workflow_runs(
+                    &catalog,
+                    &trigger.name,
+                    state,
+                    query_count(&ctx, "limit", DEFAULT_RUN_PAGE),
+                    query_count(&ctx, "offset", 0),
+                )
+                .await?;
+                let out: Vec<Json> = runs.iter().map(run_summary_json).collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    // --- the three things an admin does to a run ----------------------------
+
+    reg.register("resumeRun", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
+                let run = sc_agent::require_run(&catalog, id).await?;
+                // The step's own floor, checked here rather than assumed
+                // (§10.3, phase 4.3). Today every caller that reaches this is an
+                // admin and meets every floor; the check is still made, because
+                // a form exposed to a role is exactly the thing that must not be
+                // reachable by way of a surface that forgot to ask.
+                if let Some(form) = sc_workflow::run_pending_form(&run)? {
+                    sc_workflow::check_may_resume(&form, caller_role(&ctx))?;
+                }
+                let values = match &ctx.body {
+                    Json::Null => sc_types::Attrs::new(),
+                    body => require_object(body)?.clone().into_iter().collect(),
+                };
+                let run = sc_workflow::resume_run(
+                    &catalog,
+                    &dispatcher,
+                    &sc_workflow::SystemClock,
+                    id,
+                    values,
+                )
+                .await?;
+                Ok(HandlerResponse::ok(
+                    run_json_with_workflow(&catalog, &run).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("cancelRun", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
+                let reason = match &ctx.body {
+                    Json::Null => None,
+                    body => Some(optional_str(require_object(body)?, "reason").to_owned()),
+                };
+                let run = sc_workflow::cancel_run(
+                    &catalog,
+                    &sc_workflow::SystemClock,
+                    id,
+                    reason.as_deref(),
+                )
+                .await?;
+                Ok(HandlerResponse::ok(
+                    run_json_with_workflow(&catalog, &run).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("retryRun", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
+                let run =
+                    sc_workflow::retry_run(&catalog, &dispatcher, &sc_workflow::SystemClock, id)
+                        .await?;
+                Ok(HandlerResponse::ok(
+                    run_json_with_workflow(&catalog, &run).await?,
+                ))
             }
         }
     });
@@ -4492,11 +4771,19 @@ fn run_summary_json(run: &sc_agent::Run) -> Json {
         "user": run.user,
         "created_at": run.created_at,
         "updated_at": run.updated_at,
+        // The workflow half (§10.3), null on an agent run: the version this run
+        // is pinned to, the step it is on, and when it next wants the engine.
+        "subject_version": run.subject_version,
+        "current_step": sc_workflow::run_current_step(run),
+        "wake_at": run.wake_at,
     })
 }
 
 /// One whole run (matching `run_schema`): the summary plus the loop state the
 /// chat panel reads a transcript out of.
+///
+/// The workflow half — the trace and the pending form — is empty here and filled
+/// in by [`run_json_with_workflow`], which is the one that reads the database.
 fn run_json(run: &sc_agent::Run) -> Json {
     let mut out = run_summary_json(run);
     if let Json::Object(fields) = &mut out {
@@ -4505,8 +4792,172 @@ fn run_json(run: &sc_agent::Run) -> Json {
             "attributes".to_owned(),
             Json::Object(run.attributes.clone()),
         );
+        fields.insert("trace".to_owned(), Json::Array(Vec::new()));
+        fields.insert("pending_form".to_owned(), Json::Null);
     }
     out
+}
+
+/// One whole run, with the workflow half filled in: the `_sc_run_traces` rows a
+/// traced workflow wrote, and the form a suspended run is waiting on (§10.3).
+///
+/// Empty and null on an agent run rather than absent, so one typed shape serves
+/// both engines and the client has no union to narrow. The trace rows are read
+/// unconditionally for a workflow run because a workflow with tracing off simply
+/// has none — asking is one query, and branching on the pinned version's `trace`
+/// flag would be a second read to save the first.
+async fn run_json_with_workflow(catalog: &Catalog, run: &sc_agent::Run) -> Result<Json> {
+    let mut out = run_json(run);
+    if run.kind != sc_agent::RunKind::Workflow {
+        return Ok(out);
+    }
+    let traces = sc_workflow::list_run_traces(catalog, run.id.0).await?;
+    // A run whose stored state will not parse is still a row worth showing: the
+    // admin looking at it is the person who has to decide what to do about it,
+    // and answering an error instead of the run would take the evidence away.
+    let form = sc_workflow::run_pending_form(run).unwrap_or(None);
+    if let Json::Object(fields) = &mut out {
+        fields.insert(
+            "trace".to_owned(),
+            Json::Array(traces.iter().map(run_trace_json).collect()),
+        );
+        fields.insert(
+            "pending_form".to_owned(),
+            match form {
+                Some(form) => pending_form_json(&form)?,
+                None => Json::Null,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// One trace row (matching `run_trace_schema`).
+fn run_trace_json(trace: &sc_workflow::RunTrace) -> Json {
+    json!({
+        "id": trace.id,
+        "seq": trace.seq,
+        "step": trace.step,
+        "started_at": trace.started_at,
+        "finished_at": trace.finished_at,
+        "attempt": trace.attempt,
+        "outcome": trace.outcome.as_str(),
+        "error": trace.error,
+        "context": Json::Object(trace.context.clone()),
+    })
+}
+
+/// The form a suspended run is waiting on, lowered to the `FormField`
+/// vocabulary the admin UI already renders every other settings form from.
+///
+/// Lowered here rather than sent as the stored declaration, so `SettingsFields`
+/// renders an approval form with no knowledge that workflows exist — and so a
+/// field whose declared type nothing recognises is reported *here*, where the
+/// admin can read it, rather than as a control nobody can fill in.
+fn pending_form_json(form: &sc_workflow::PendingForm) -> Result<Json> {
+    let fields = form
+        .fields
+        .iter()
+        .map(|f| f.to_form_field())
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({
+        "fields": fields.iter().map(form_field_json).collect::<Vec<_>>(),
+        "assign_to": form.assign_to,
+        "min_role": form.min_role,
+    }))
+}
+
+/// How many runs a page holds when the caller does not say.
+const DEFAULT_RUN_PAGE: usize = 50;
+
+/// A non-negative count from a query parameter, or `fallback` for one that is
+/// absent, blank or not a number.
+///
+/// Lenient on purpose, and only here: a paging parameter a client got wrong is
+/// not worth failing a list over, and the failure it would cause — a screen that
+/// shows nothing — is worse than a page of the default size.
+fn query_count(ctx: &crate::handler::HandlerCtx, name: &str, fallback: usize) -> usize {
+    ctx.query_get(name)
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(fallback)
+}
+
+/// The trigger of this id, refusing one whose body is an **action**.
+///
+/// By id, and strict about the body: the workflow endpoints all address a
+/// trigger, and answering an empty canvas for a trigger that runs one action
+/// would invite an admin to draw a program nothing would ever run.
+async fn require_workflow_trigger(catalog: &Catalog, id: &str) -> Result<Trigger> {
+    let id = parse_trigger_id(id)?;
+    let trigger = load_trigger(catalog, id)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no trigger with id {id}")))?;
+    if trigger.body != TriggerBody::Workflow {
+        return Err(Error::invalid(format!(
+            "trigger `{}` runs an action, not a workflow",
+            trigger.name
+        )));
+    }
+    Ok(trigger)
+}
+
+/// The posted document as a [`Workflow`](sc_workflow::Workflow) of `id`.
+///
+/// The document's own `id` and `version` are **the server's**: a payload does not
+/// get to reassign which workflow it is, and which version it is, is the store's
+/// answer (`save_workflow` reads the maximum and mints the next). Everything else
+/// is read strictly through the stored serde shape, so what the editor may send
+/// and what the engine will run cannot drift apart.
+fn workflow_from_document(
+    id: sc_action::TriggerId,
+    posted: &Json,
+) -> Result<sc_workflow::Workflow> {
+    let mut document = match posted {
+        Json::Object(fields) => fields.clone(),
+        _ => return Err(Error::invalid("field `workflow` must be a workflow object")),
+    };
+    document.insert("id".to_owned(), json!(id.0));
+    document.insert("version".to_owned(), json!(1));
+    serde_json::from_value(Json::Object(document))
+        .map_err(|e| Error::invalid(format!("this is not a workflow the engine can read: {e}")))
+}
+
+/// One workflow as the editor reads it (matching `workflow_schema`): the
+/// program, the checks against it, and the history behind it.
+async fn workflow_json(
+    catalog: &Catalog,
+    dispatcher: &sc_action::TriggerDispatcher,
+    trigger: &Trigger,
+    workflow: &sc_workflow::Workflow,
+    versions: &[sc_workflow::WorkflowVersion],
+) -> Result<Json> {
+    let issues = sc_workflow::workflow_issues(
+        catalog,
+        &dispatcher.registry(),
+        workflow,
+        trigger.channel.as_deref(),
+    )
+    .await?;
+    Ok(json!({
+        "id": trigger.id.0,
+        "name": trigger.name,
+        "channel": trigger.channel,
+        "version": workflow.version,
+        "workflow": serde_json::to_value(workflow).unwrap_or(Json::Null),
+        "issues": issues
+            .iter()
+            .map(|issue| json!({ "step": issue.step, "problem": issue.problem }))
+            .collect::<Vec<_>>(),
+        "versions": versions
+            .iter()
+            .map(|v| json!({
+                "version": v.version,
+                "description": v.description,
+                "created_at": v.created_at,
+                "created_by": v.created_by,
+            }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 /// The agents that call through the LLM provider `id`, by name — what a delete
