@@ -24,10 +24,18 @@
 //!   driver. Sans-IO — it owns every decision and performs none of the work — so
 //!   the engine's rules are testable synchronously, with no database, no runtime
 //!   and no clock.
-//!
-//! The driver that does the IO and the queue that claims runnable runs are the
-//! next phases of §10.3; the [`WorkflowEngine`](sc_action::WorkflowEngine) seam
-//! they install themselves into already exists in `sc-action`.
+//! - The **run record** ([`run`]): the workflow half of an `_sc_runs` row — the
+//!   machine state, the version it is pinned to, the event that started it and
+//!   the chain that bounds its writes.
+//! - The **driver** ([`driver`]): the one thing that does the IO — load the
+//!   pinned version, ask the machine, run the action or evaluate the formulas,
+//!   feed the outcome back, and **write once**.
+//! - The **queue** ([`queue`]): which runs want the engine, claimed under a lease
+//!   — a query over the runs table, which is what makes a crashed node's run
+//!   recoverable without anybody having to detect the crash.
+//! - The **engine** ([`engine`]): [`WorkflowEngineTask`], the
+//!   [`WorkflowEngine`](sc_action::WorkflowEngine) seam filled in and the one
+//!   tokio task that advances runs nobody is waiting for.
 //!
 //! ## The two decisions worth knowing before reading
 //!
@@ -40,17 +48,28 @@
 //! rewritten. That is the whole implementation of "a suspended run finishes with
 //! its version of the workflow".
 
+pub mod driver;
+pub mod engine;
 pub mod machine;
+pub mod queue;
+pub mod run;
 pub mod scope;
 pub mod traces;
 pub mod versions;
 pub mod workflow;
 
+pub use driver::{Advanced, Clock, Driver, ManualClock, SystemClock, node_id, start_run};
+pub use engine::{DEFAULT_LEASE_SECONDS, DEFAULT_POLL_SECONDS, WorkflowEngineTask};
 pub use machine::{Conclusion, Decision, PendingForm, WorkflowRun};
+pub use queue::{DEFAULT_BATCH, DatabaseQueue, WorkQueue};
+pub use run::{
+    ATTR_CHAIN, ATTR_EVENT, ATTR_WORKFLOW, StoredEvent, new_run, record, release, run_chain,
+    run_event, run_state, run_version, run_workflow_id,
+};
 pub use scope::{WORKFLOW_SCOPE, workflow_shape};
 pub use traces::{
     RunTrace, TRACES_TABLE, TraceOutcome, bootstrap_run_traces, delete_run_traces, list_run_traces,
-    save_run_trace,
+    save_run_trace, trace_insert,
 };
 pub use versions::{
     VERSIONS_TABLE, WorkflowVersion, bootstrap_workflow_versions, current_workflow,

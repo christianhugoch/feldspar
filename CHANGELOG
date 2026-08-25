@@ -2,6 +2,82 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 3: the driver, durability, recovery and the queue
+
+The machine gets a body. A `Driver` in `sc-workflow` loads the version a run is **pinned** to,
+asks the machine what to do, does it — runs an action through the registry, or evaluates a
+step's formulas through the server's own isolate — feeds the outcome back, and **writes once**.
+A `WorkQueue` says which runs want the engine, and a `WorkflowEngineTask` fills in the
+`WorkflowEngine` seam `sc-action` has been holding since phase 1 and advances the runs nobody is
+waiting for. From this phase, an insert on a table starts a durable run that survives a restart.
+
+- **One advance is one step, and one write.** `Driver::advance` services a whole step rather
+  than a single decision: a `Set` of three assignments is three trips to the evaluator and *one*
+  step, and resolving its `Next` — a branch whose guards need evaluating — belongs to the step
+  that is ending rather than to the one that has not begun. The loop continues while the machine
+  keeps asking about the same step, and stops the moment the work belongs to another.
+- **Decision 6's guarantee, kept and stated honestly.** The context, the cursor, the attempt
+  count, the run's state, its `wake_at` and the step's trace row commit **together, once**, in a
+  single database transaction, so a run is never observed half-advanced. What is *not* in that
+  transaction is the step's own effect — an HTTP call, an email and (today) a row write are not
+  transactional — so a step is **at least once**: a node that dies between running an action and
+  writing the advance comes back, is told to run the same step again, and runs no other.
+- **The queue is the runs table, claimed with a lease** (decision 5). The runnable set is a
+  query — a live workflow run whose `wake_at` has come and whose lease is absent or expired — and
+  claiming is a conditional `UPDATE` on that same predicate, which is correct for two nodes as
+  well as one: both may read the row, the first puts a lease in the future, and the second's
+  `WHERE` then matches nothing. `WorkQueue` is the seam `sc-bus` will implement; behind it today
+  is a poll and a sleep, and **nothing above the seam knows which it is talking to**.
+- **Recovery is not a special case.** An expired lease reads exactly like no lease, so a crashed
+  node's run is picked up by the next poll. There is no crash detector, no heartbeat table and no
+  recovery pass — which is why the test writes a row with a stale lease rather than killing a
+  process, and asserts the step that was in flight runs **once more** rather than the run
+  restarting.
+- **A run carries the event that started it**, whole (`StoredEvent`, in the run's attributes),
+  because there is nothing to rebuild it from: the row may have been deleted or updated twice, and
+  a `login` event's user is not a row of anything. A run that woke up and re-read the world would
+  be a run whose formulas mean something different from what they meant when it started — the same
+  mistake as un-pinning its version.
+- **Version pinning is now visible.** The driver loads `_sc_workflow_versions` per advance by the
+  run's own `subject_version`, so a run suspended on a `Wait` finishes on version 1 after the
+  workflow has been saved twice underneath it. Tested exactly that way.
+- **The cascade bound holds through a workflow.** A step's `ActionContext` carries the run's
+  chain plus the step's name, so `MAX_DEPTH` stops a workflow that starts work that starts a
+  workflow at the same depth it stops an action that writes a row that writes a row — and the
+  refusal names the whole chain rather than a number. The authority is unchanged: a step runs as
+  §10.1 gives an action, admin carrying the event's user, which is the row actions' own rule and
+  not something the engine gets to change.
+- **A failed run is a record, not a lost report** (§16). The reason is on `_sc_runs.error` with
+  the step named, on the server log, and raised as an `error` **event** so an alerting trigger
+  sees a workflow that stopped exactly as it sees a request that failed. A pass over a run that
+  had already stopped reports nothing, because an alert per poll for a failure that happened once
+  is the report becoming the noise.
+- **The clock is a parameter**, as the scheduler's already is. `Clock` is a trait with
+  `SystemClock` behind it in a server and `ManualClock` in a test, so a retry's exponential
+  backoff, an hour-long `Wait` and a run claimed after its lease ran out are all exercised by
+  moving the clock. **No test in this phase sleeps.**
+- **Started only by `serve`.** `start_workflow_engine` installs the engine on the dispatcher and
+  starts its one task, beside where the periodic scheduler is started and for the same reason: a
+  `build-app` or an admin script must not begin advancing suspended runs because it happened to
+  open the same database. A process with no engine still refuses a workflow trigger by name.
+- Small enabling changes elsewhere: `sc-agent` exposes `run_insert`/`run_update`/`run_from_row`
+  (the runs table is one table for both engines, and the workflow driver needs its statements to
+  put them in a transaction with a trace row); `sc-action`'s dispatcher exposes its
+  `ActionServices`, so a step is built with the evaluator and mailer a trigger's own action would
+  have got rather than a second isolate; the machine gains `context_written` (an action reads and
+  writes `ActionContext::context`, and this is how the copy comes home) and `is_evaluating`.
+
+Tests: 16 against a real Postgres, a real isolate, a recording action registry and a hand-moved
+clock — a run walking its steps with the context written after each, one trace row per step
+attempt (not one per formula), a retry with backoff that succeeds on its second attempt, a
+handler jump carrying the reason under the reserved key, a failure that names its step, a branch
+into a `ForEach` with the chain asserted inside the body, a hundred iterations inside the budget
+and a budget that stops a loop, a run finishing on version 1 after two edits, a crashed node's
+run recovered from an expired lease, exclusive claiming with the longest wait first, a form
+suspension that no clock will wake, an engine tick that advances a run whose timer came round,
+tracing off writing nothing, and `MAX_DEPTH` refusing the sixth link of a chain that goes through
+a workflow.
+
 ## Workflows, phase 2: the machine
 
 The engine's decisions, as a value. `WorkflowRun` in `sc-workflow` is the whole resumable state

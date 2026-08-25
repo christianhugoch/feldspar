@@ -8351,13 +8351,16 @@ dependencies = [
 name = "sc-workflow"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "sc-action",
+ "sc-agent",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",
  "sc-error",
  "sc-expr",
+ "sc-log",
  "sc-query",
  "sc-test-harness",
  "sc-types",

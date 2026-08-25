@@ -241,6 +241,12 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // process.
     let (_scheduler, _scheduler_task) = sc_server::start_scheduler(&catalog, &triggers);
 
+    // And the workflow engine's (§10.3): from here a trigger whose body is a
+    // workflow starts a durable run, a suspended run's timer fires, and a run a
+    // crashed node was holding is picked up when its lease runs out. Started
+    // here and nowhere else, for the reason the scheduler is.
+    let (_workflows, _workflow_task) = sc_server::start_workflow_engine(&catalog, &triggers);
+
     // Sessions are rows, not process memory (§7.2), which is what lets a second
     // application server exist: put two of these behind a load balancer and a
     // session minted by either is a session both honour. Each keeps its own

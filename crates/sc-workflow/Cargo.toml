@@ -29,12 +29,25 @@ sc-expr.workspace = true
 # through, and the `WorkflowEngine` seam the engine will install itself into
 # once there is an engine (§10.3, phase 3). Layer 6.
 sc-action.workspace = true
+# `_sc_runs` is one table for both engines (§11.4): a chat session and a durable
+# workflow run are the same problem — a context written after every step and read
+# back to carry on — so the run record, its storage and its states are
+# `sc-agent`'s and this crate is the second engine over them, not a second table.
+sc-agent.workspace = true
+# What a run costs and where it stopped, said once (§16).
+sc-log.workspace = true
+async-trait.workspace = true
+# The engine is one task: the queue's poll, the lease renewal and the shutdown.
+tokio = { workspace = true, features = ["time", "rt", "macros"] }
 serde = { workspace = true }
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
+# The reified evaluator a step's formulas are actually run through, so the
+# driver's tests exercise the isolate rather than a stand-in for it.
+sc-expr = { workspace = true, features = ["eval"] }
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

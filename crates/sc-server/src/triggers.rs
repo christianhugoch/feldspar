@@ -25,6 +25,7 @@ use sc_catalog::Catalog;
 use sc_core_actions::builtin_actions;
 use sc_error::{Context, Result};
 use sc_expr::JsEvaluator;
+use sc_workflow::WorkflowEngineTask;
 
 use crate::agents::AgentServices;
 
@@ -128,6 +129,34 @@ pub fn start_scheduler(
     let scheduler = Arc::new(Scheduler::new(Arc::clone(catalog), Arc::clone(dispatcher)));
     let handle = scheduler.start();
     (scheduler, handle)
+}
+
+/// Start the **workflow engine**: the seam a trigger whose body is a workflow is
+/// run by, and the one task that advances runs nobody is waiting for (§10.3).
+///
+/// Started **only by `serve`**, for the reason the scheduler is: a `build-app` or
+/// an admin script must not start advancing suspended workflow runs because it
+/// happened to open the same database. A process without it runs every action
+/// trigger normally and tells the caller, of a workflow, that nothing here can
+/// run one — rather than returning success for a run that was never started.
+///
+/// Installed **on** the dispatcher, which it also holds: the engine's steps run
+/// actions through the same registry and may run another trigger, so the two
+/// reference each other and both live for the process.
+///
+/// The returned handle is the caller's to abort; dropping it leaves the task
+/// running, which is what a server wants.
+pub fn start_workflow_engine(
+    catalog: &Arc<Catalog>,
+    dispatcher: &Arc<TriggerDispatcher>,
+) -> (Arc<WorkflowEngineTask>, tokio::task::JoinHandle<()>) {
+    let engine = Arc::new(WorkflowEngineTask::new(
+        Arc::clone(catalog),
+        Arc::clone(dispatcher),
+    ));
+    dispatcher.set_workflow_engine(Arc::clone(&engine) as Arc<dyn sc_action::WorkflowEngine>);
+    let handle = engine.start();
+    (engine, handle)
 }
 
 /// Fire the **`startup`** event: the server is up (§10.2).

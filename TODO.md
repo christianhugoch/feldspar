@@ -219,29 +219,29 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ### 3. The driver: durability, recovery and the queue
 
-- [ ] 3.1 `Driver::advance(run)`: load the pinned workflow version, ask the machine, do the IO
+- [x] 3.1 `Driver::advance(run)`: load the pinned workflow version, ask the machine, do the IO
   (run the action through `ActionRegistry` with an `ActionContext` carrying the run context, the
   event, the evaluator, the mailer and the dispatcher; or evaluate the formulas), feed the
   outcome back, and **write once** — context, cursor, attempt, state, `wake_at` and the trace row
   in one batch (decision 6).
-- [ ] 3.2 `WorkQueue` (decision 5) with the polling implementation: claim due runs under a lease,
+- [x] 3.2 `WorkQueue` (decision 5) with the polling implementation: claim due runs under a lease,
   renew it while a step is in flight, and release it on write. A lease that expires is a crashed
   node's run, and the next poll picks it up — which is the recovery path, tested by writing a run
   with a stale lease rather than by killing a process.
-- [ ] 3.3 `WorkflowEngineTask`: one tokio task started by `serve` (and only by `serve`, as the
+- [x] 3.3 `WorkflowEngineTask`: one tokio task started by `serve` (and only by `serve`, as the
   scheduler is), with a bounded number of runs in flight, the clock as a parameter, and a
   shutdown that lets in-flight steps finish. Installed on the dispatcher as the `WorkflowEngine`
   seam.
-- [ ] 3.4 Starting a run: from an event (the payload, row, old and user land in the run's own
+- [x] 3.4 Starting a run: from an event (the payload, row, old and user land in the run's own
   event record so a resumed run still has them), from the admin's Run button, from the scheduler,
   and from an application's exposed endpoint. The response is the run id and its state — a
   workflow body does not return a value at the end of `run`, it suspends (§10.2), and the caller
   gets something addressable rather than a wait.
-- [ ] 3.5 Cascade and authority: a step's writes carry the run's chain (the trigger's name plus
+- [x] 3.5 Cascade and authority: a step's writes carry the run's chain (the trigger's name plus
   the step's), so `MAX_DEPTH` bounds a workflow that writes a row that starts a workflow exactly
   as it bounds actions today; and a step runs with the authority §10.1 gives an action — admin,
   carrying the event's user.
-- [ ] 3.6 Failures reach the error log (§16) and the run's `error` column, with the step named.
+- [x] 3.6 Failures reach the error log (§16) and the run's `error` column, with the step named.
   A run that fails is a record, not a lost report.
 
 ### 4. Suspension: waiting for a time, and waiting for a person

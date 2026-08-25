@@ -215,12 +215,21 @@ pub async fn bootstrap_run_traces(catalog: &Catalog) -> Result<Table> {
 /// changes it. There is no update path here at all, which is why a trace row
 /// cannot drift away from the advance it was written with.
 pub async fn save_run_trace(catalog: &Catalog, trace: &RunTrace) -> Result<()> {
-    let insert = Insert::row(
+    exec(catalog, Statement::from(trace_insert(trace))).await
+}
+
+/// The `INSERT` that writes one trace row.
+///
+/// Public because the driver commits a trace row **in the same transaction** as
+/// the run's advance (decision 6), and a transaction takes statements rather
+/// than a catalog. [`save_run_trace`] is a caller of it like any other, so there
+/// is one place the row is built.
+pub fn trace_insert(trace: &RunTrace) -> Insert {
+    Insert::row(
         TRACES_TABLE,
         trace_columns(),
         trace_values(trace).into_iter().map(Expr::Lit).collect(),
-    );
-    exec(catalog, Statement::from(insert)).await
+    )
 }
 
 /// Every trace row of one run, in the order the steps were taken.

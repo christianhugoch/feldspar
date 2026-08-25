@@ -91,4 +91,6 @@ pub use tls::{
     TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,
     redirect_router, serve_https, tls_domains,
 };
-pub use triggers::{base_action_registry, fire_startup, install_triggers, start_scheduler};
+pub use triggers::{
+    base_action_registry, fire_startup, install_triggers, start_scheduler, start_workflow_engine,
+};

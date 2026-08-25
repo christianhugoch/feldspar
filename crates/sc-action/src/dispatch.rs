@@ -170,6 +170,18 @@ impl TriggerDispatcher {
         }
     }
 
+    /// The services an action run is given: the JavaScript engine and the mail
+    /// transport this process assembled, or neither.
+    ///
+    /// Exposed for the **workflow engine** (§10.3), which builds an
+    /// [`ActionContext`] of its own for every step it runs and must build it
+    /// with what a trigger's own action would have got. An engine that assembled
+    /// its own evaluator would be a second isolate, and one that assembled none
+    /// would make `run_js_code` work as a trigger and fail as a step.
+    pub fn services(&self) -> &ActionServices {
+        &self.services
+    }
+
     /// Replace the actions this dispatcher can run — what installing,
     /// configuring or removing a **module** does (TODO decision 5).
     ///

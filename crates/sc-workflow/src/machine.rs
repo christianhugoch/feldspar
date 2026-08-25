@@ -405,6 +405,30 @@ impl WorkflowRun {
         Ok(())
     }
 
+    /// Take back the context an action was handed, with whatever it wrote into
+    /// it.
+    ///
+    /// An action reads and writes `ActionContext::context` (§10.1 left the seam
+    /// for exactly this), and the driver hands it a copy of the run's. This is
+    /// how the copy comes home — called **before**
+    /// [`step_succeeded`](WorkflowRun::step_succeeded), so a step that writes
+    /// `context.total` *and* returns a value gets both, with the return value
+    /// under the step's name winning any collision.
+    ///
+    /// Strict about the phase, like every other piece of feedback: a context
+    /// handed back by something that was not running a step is a driver bug, and
+    /// silently accepting it would let one run's context be written by another's
+    /// action.
+    pub fn context_written(&mut self, context: Attrs) -> Result<()> {
+        if !matches!(self.phase, Phase::Running { .. }) {
+            return Err(Error::msg(
+                "the workflow run was given a context it did not hand out",
+            ));
+        }
+        self.context = context;
+        Ok(())
+    }
+
     /// Feed back that the current step failed, and let its error policy decide
     /// what that means (§2.4).
     ///
@@ -562,6 +586,17 @@ impl WorkflowRun {
             Phase::Suspended { until, .. } => *until,
             _ => None,
         }
+    }
+
+    /// Whether the run is still waiting on the **evaluator** for the step it is
+    /// on — a `Set` with another assignment to compute, a `Branch` whose guards
+    /// have not been asked yet.
+    ///
+    /// The driver's test for "this step is not finished with me": one advance
+    /// covers one step, and a `Set` of three assignments is three evaluations of
+    /// one step, not three steps.
+    pub fn is_evaluating(&self) -> bool {
+        matches!(self.phase, Phase::Evaluating { .. })
     }
 
     /// Whether the run is suspended — durably stopped, and not runnable until its

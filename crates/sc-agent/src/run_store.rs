@@ -103,29 +103,39 @@ pub async fn bootstrap_runs(catalog: &Catalog) -> Result<Table> {
 /// what happened. Refusing to store a step because the state looks odd would lose
 /// the only record of the thing that went wrong.
 pub async fn save_run(catalog: &Catalog, run: &Run) -> Result<()> {
-    let columns = run_columns();
-    let values = run_values(run);
-
     if load_run(catalog, run.id).await?.is_some() {
-        let assignments = columns
-            .iter()
-            .zip(values)
-            // Neither the id nor the creation instant is something a later step
-            // may rewrite.
-            .filter(|(col, _)| *col != COL_ID && *col != COL_CREATED_AT)
-            .map(|(col, value)| Assignment::new(col.clone(), Expr::Lit(value)))
-            .collect();
-        let update = sc_query::Update::new(RUNS_TABLE, assignments)
-            .filter(Expr::col(COL_ID).eq(Expr::lit(run.id.0)));
-        exec(catalog, Statement::from(update)).await
+        exec(catalog, Statement::from(run_update(run))).await
     } else {
-        let insert = Insert::row(
-            RUNS_TABLE,
-            columns,
-            values.into_iter().map(Expr::Lit).collect(),
-        );
-        exec(catalog, Statement::from(insert)).await
+        exec(catalog, Statement::from(run_insert(run))).await
     }
+}
+
+/// The `INSERT` that first writes `run`'s row.
+///
+/// Public, with [`run_update`], because the workflow engine commits a run's
+/// advance **and** its trace row in one transaction (§10.3, decision 6), and a
+/// transaction takes statements rather than a catalog. Two writers of the same
+/// row would be two chances for a column to be forgotten by one of them, so
+/// there is one place the row's statements are built and [`save_run`] is a
+/// caller of it like any other.
+pub fn run_insert(run: &Run) -> Insert {
+    Insert::row(
+        RUNS_TABLE,
+        run_columns(),
+        run_values(run).into_iter().map(Expr::Lit).collect(),
+    )
+}
+
+/// The `UPDATE` that writes `run` back to its row: every column except the id
+/// and the creation instant, neither of which a later step may rewrite.
+pub fn run_update(run: &Run) -> sc_query::Update {
+    let assignments = run_columns()
+        .iter()
+        .zip(run_values(run))
+        .filter(|(col, _)| *col != COL_ID && *col != COL_CREATED_AT)
+        .map(|(col, value)| Assignment::new(col.clone(), Expr::Lit(value)))
+        .collect();
+    sc_query::Update::new(RUNS_TABLE, assignments).filter(Expr::col(COL_ID).eq(Expr::lit(run.id.0)))
 }
 
 /// Load the run with this id, if it exists.
@@ -229,7 +239,12 @@ fn run_values(run: &Run) -> Vec<Value> {
 /// Strict, for the reason `_sc_agents`' reader is: a run read as something other
 /// than what was stored would be resumed as something other than what was
 /// running.
-fn run_from_row(row: &Row) -> Result<Run> {
+///
+/// Public because the workflow engine's queue (§10.3, decision 5) selects the
+/// runnable set with a predicate of its own and must read the rows back the same
+/// way `load_run` does — a second reader would be a second chance to interpret a
+/// stored state differently from the one that wrote it.
+pub fn run_from_row(row: &Row) -> Result<Run> {
     let id = match row.get(COL_ID) {
         Some(Value::Uuid(u)) => RunId(*u),
         other => return Err(bad_column(COL_ID, "a uuid", other)),
