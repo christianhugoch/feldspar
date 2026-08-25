@@ -247,9 +247,15 @@ function KindEditor({
             })
           }
         />
+        {/* An action evaluates its own settings, in the scope a trigger's
+            settings have — the event, not the run — so `context` here is an
+            unknown identifier and is refused on save (§10.3, "known gap"). Say
+            so where the admin is typing rather than at the save button. */}
         <Form.Text muted>
-          Values are formulas over the event and the run: <code>row.title</code>,{" "}
-          <code>context.total</code>.
+          Values are formulas over the <strong>event</strong>: <code>row.title</code>,{" "}
+          <code>user.email</code>. An action&apos;s settings cannot read{" "}
+          <code>context</code> — put what needs the run in a <code>Set</code> step, or read
+          it in a code body.
         </Form.Text>
       </>
     );

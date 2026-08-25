@@ -334,15 +334,35 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ### 8. Documentation
 
-- [ ] 8.1 `docs/tutorial-workflows.md`: build the order-approval workflow of the definition of
+- [x] 8.1 `docs/tutorial-workflows.md`: build the order-approval workflow of the definition of
   done from an empty canvas, including what to do when a step is not idempotent.
-- [ ] 8.2 §10.3 of `docs/TECHNICAL_DESIGN.md` rewritten to what was built — decision 3's `Next`,
+- [x] 8.2 §10.3 of `docs/TECHNICAL_DESIGN.md` rewritten to what was built — decision 3's `Next`,
   decision 5's queue and its `WorkQueue` seam, decision 6's honest reading of the transaction
   guarantee, and the step set with the reason it is five.
-- [ ] 8.3 The CHANGELOG entry, and the crate tree in §2 (`sc-workflow` loses its "planned"
+- [x] 8.3 The CHANGELOG entry, and the crate tree in §2 (`sc-workflow` loses its "planned"
   status; `ui/admin` gains React Flow).
 
 ---
+
+## Found while documenting, not yet fixed
+
+- [ ] 9.1 **An action step's settings cannot read `context`** — decision 8 says they should. A
+  `Set`, a branch guard, a `ForEach`'s collection and a form's timeout are evaluated by the
+  driver in `workflow_shape` and see the run; an action's settings are evaluated by the action
+  in `action_shape` and do not, so `context.total` in an `insert_row` step is refused on save
+  with *unknown identifier `context`*, and a `run_js_code` body is handed no context either. The
+  fix: let an action know it is configured for a run — the shape on `ConfigCheck`, the context on
+  the bindings `ActionContext` builds — and take it through every action that evaluates a
+  setting (`rows_scope`'s three, `send_email`, `fetch`, `run_js_code`, `run_agent`). Pinned by
+  `an_action_steps_settings_cannot_read_the_context_and_the_tutorial_says_so`, which fails when
+  it is fixed; §10.3 and `docs/tutorial-workflows.md` have paragraphs that change with it.
+- [ ] 9.2 **A loop body of one step is serviced in one advance.** The driver continues while the
+  machine keeps asking about the same step *name*, which is right for a `Set`'s assignments and
+  wrong for a `ForEach` whose body is a single step: its iterations share one write and one trace
+  row, so the durability granularity of that loop is the loop rather than the item. The fix is to
+  compare the step *entry* rather than its name (`steps_taken()` moves on every entry), in
+  `Driver::advance_on` and `stop_at`, with a test that a hundred-item loop with a one-step body
+  writes a hundred times.
 
 ## Carried past this milestone
 

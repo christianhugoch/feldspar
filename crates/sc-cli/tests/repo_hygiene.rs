@@ -316,6 +316,19 @@ fn tutorials_are_cross_linked() {
         triggers.contains("tutorial-agents.md"),
         "the triggers tutorial should point at the agents tutorial as a next step"
     );
+    assert!(
+        triggers.contains("tutorial-workflows.md"),
+        "the triggers tutorial should point at the workflows tutorial as a next step"
+    );
+    let workflows = read(&root, "docs/tutorial-workflows.md");
+    assert!(
+        workflows.contains("tutorial-triggers.md"),
+        "the workflows tutorial builds on the triggers tutorial and should link it"
+    );
+    assert!(
+        workflows.contains("tutorial-agents.md"),
+        "the workflows tutorial should point at the agents tutorial as a next step"
+    );
     let agents = read(&root, "docs/tutorial-agents.md");
     assert!(
         agents.contains("tutorial-triggers.md"),
@@ -397,6 +410,44 @@ fn the_agents_tutorial_teaches_each_step_of_the_loop() {
         assert!(
             agents.contains(fragment),
             "the agents tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// The workflows tutorial has to teach **the whole engine**, because each of
+/// these is something a workflow author is stuck without and a document that
+/// quietly lost one would still read fine: the five step kinds, the two ways a
+/// run stops, the two ways it is answered, versioning, and — the one the engine
+/// asks of *them* — what to do about a step that is not idempotent.
+#[test]
+fn the_workflows_tutorial_teaches_each_part_of_the_engine() {
+    let root = workspace_root();
+    let workflows = read(&root, "docs/tutorial-workflows.md");
+    for fragment in [
+        "A workflow",             // the trigger body that makes one
+        "only_if",                // …and the condition that stops it starting itself
+        "run_js_code",            // an Action step, and the one that does the reading
+        "For each",               // the loop,
+        "Item name",              // …and how its body names the item
+        "User form",              // the wait for a person,
+        "Give up after",          // …and the deadline that makes abandoning it a decision
+        "Answers go to",          // …and where the answers land
+        "Branch on a condition",  // control flow as data
+        "Save a new version",     // versions are appended
+        "Restore",                // …and a revert is a new one
+        "pinned",                 // …which is what a suspended run finishes on
+        "Restart the server",     // durability, demonstrated rather than claimed
+        "at least once",          // the guarantee,
+        "idempotent",             // …and the section about living with it
+        "Retry, then fall through", // the error policies
+        "context.error",          // …and what a handler reads
+        "Cancel",                 // the two buttons a stuck run has
+        "Retry from",             //
+        "unknown identifier `context`", // the gap an author hits first (§10.3)
+    ] {
+        assert!(
+            workflows.contains(fragment),
+            "the workflows tutorial should cover `{fragment}`"
         );
     }
 }
@@ -702,6 +753,50 @@ fn the_rest_tutorial_reaches_the_motivating_query_and_its_rules() {
         assert!(
             tutorial.contains(fragment),
             "the REST tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// The workflow milestone, held to what it built (§10.3): the four things the
+/// engine *is*, the guarantee that changed on contact with reality, and the two
+/// gaps between the decisions and the code — which are the paragraphs a reader
+/// is most harmed by losing, because each is a promise the plan made that the
+/// code does not yet keep.
+#[test]
+fn the_design_records_what_the_workflow_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        // A workflow is a trigger body, and its steps are versioned rows.
+        "TriggerBody",
+        "_sc_workflow_versions",
+        "append-only",
+        "subject_version",
+        // Control flow is data, and the step set is five.
+        "Control flow is data",
+        "Five step kinds",
+        "UserForm",
+        // The machine, and what one advance guarantees.
+        "no IO",
+        "One advance is one atomic write",
+        "at least once",
+        // The queue, and why it is not the bus yet.
+        "WorkQueue",
+        "Recovery is not a special case",
+        "started by `serve`",
+        // The scope rule, and the gap in it.
+        "workflow_shape",
+        "Known gap",
+        "unknown identifier `context`",
+        // …and the second, smaller deviation.
+        "granularity of such a loop is the loop, not the item",
+        // The editor, and what was deliberately not built.
+        "React Flow",
+        "WorkflowRoom",
+    ] {
+        assert!(
+            design.contains(fragment),
+            "the design should record `{fragment}`"
         );
     }
 }

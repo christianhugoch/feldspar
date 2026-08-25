@@ -97,7 +97,8 @@ saltcorn/
 │  └─ sc-cli/                     # 10. `saltcorn` binary (serve, user/app mgmt, backup/restore)
 ├─ ui/
 │  ├─ admin/                      # React + TypeScript + react-bootstrap admin SPA over the
-│  │                              #    generated typed API client (table editor, file mgr)
+│  │                              #    generated typed API client (table editor, file mgr, and
+│  │                              #    the workflow editor: React Flow + dagre, §10.3)
 │  ├─ builder/                    # React + Craft.js + react-flow drag-and-drop builder
 │  └─ form-runtime/               # React dynamic-form framework (conditional/repeated/dynamic)
 ├─ plugins/                       # first-party plugins (may be JS or Rust)
@@ -202,7 +203,7 @@ Three things the graph is worth reading for:
   AST it compiles into and nothing about tables.
 
 Crates planned in the tree above but **not yet created**: `sc-bus`, `sc-code`,
-`sc-fieldview`, `sc-viewpattern`, `sc-workflow`, `sc-model`, `sc-copilot`. `sc-test-harness`
+`sc-fieldview`, `sc-viewpattern`, `sc-model`, `sc-copilot`. `sc-test-harness`
 (under `tests/`) is a dev-dependency of most crates and depends only on `sc-config-file` and
 `sc-error`; it is left out of the graph because a dev-only edge is not part of the layering.
 
@@ -2033,11 +2034,12 @@ pub struct Trigger {
 }
 ```
 
-**One trigger = one event + one action.** Not a list of actions: a sequence of steps is a
+**One trigger = one event + one *body*.** Not a list of actions: a sequence of steps is a
 *workflow*, and conflating the two is what made v1's execution path hard to reason about. Two
-triggers on the same event is how you get two things done today. `TriggerBody::Workflow` is
-still the intended growth path (§10.3) and the record is shaped for it — `action` +
-`configuration` become one variant of a body — but nothing else has to move.
+triggers on the same event is how you get two things done. The body is where that distinction
+now lives: `TriggerBody` is `Action { action, configuration }` or `Workflow` (§10.3), stored with
+a `body` discriminator column, so a workflow is a trigger whose body is a program and inherits
+everything above unchanged.
 
 **The event is separate from the trigger.** One insert on `books` is one `Event`; it may fire
 three triggers or none, and nothing about the event changes either way. That split is what lets
@@ -2164,62 +2166,239 @@ does not return a value at the end of `run`, it *suspends*.
 
 ### 10.3 Durable workflow engine
 
-This is the part GOALS is most emphatic about ("v1 is a mess; match modern engines"). The
-design draws on DBOS / Temporal / Restate:
+*Built in the eighteenth post-MVP milestone; this section describes what exists, and says so
+where it deviates from what was planned.*
+
+This is the part GOALS is most emphatic about ("v1 is a mess; match modern engines"), and the
+design draws on DBOS / Temporal / Restate. The shape it landed in is four things: a **program**
+that is data, a **version** that is a row, a **run** that is a steppable value, and a **queue**
+that is a query.
+
+**A workflow is a trigger body, not a top-level entity.** `TriggerBody` is `Action { action,
+configuration }` or `Workflow`, `_sc_triggers` carries a `body` discriminator, and `action` is
+nullable. So a workflow inherits its event, its `only_if`, its `min_role`, its enabled flag, its
+periodic timing, its exposure through an application and the admin's Run button with no second
+copy of any of them (GOALS: "every workflow is a trigger").
 
 ```rust
 pub struct Workflow {
-    pub id: TriggerId,
-    pub version: u32,                     // versioned; a suspended run keeps its version
+    pub id: TriggerId,                    // the trigger's id: a workflow is its body
+    pub version: u32,                     // a run pins one and finishes on it
+    pub start: String,
     pub steps: Vec<Step>,
-    pub error_policy: ErrorPolicy,        // default for the workflow
+    pub error_policy: ErrorPolicy,        // the default for every step
+    pub trace: bool,                      // write `_sc_run_traces` rows
+    pub max_steps: u32,                   // the step budget; 1000 by default
 }
 
 pub struct Step {
-    pub name: String,
-    pub action: TriggerBody,
-    pub next: Formula,                    // evaluated against context; yields next step name
-    pub error_policy: Option<ErrorPolicy>,// per-step override
+    pub name: String,                     // what a `next` points at, and the context key an
+    pub description: String,              //   action step's result is stored under
+    pub kind: StepKind,
+    pub next: Next,
+    pub error_policy: Option<ErrorPolicy>,// overrides the workflow's
+}
+
+pub enum StepKind {
+    Action { action: String, configuration: Attrs },   // any registered action
+    Set { assignments: Vec<Assignment> },              // formulas into the context
+    ForEach { over: String, var: String, body: String },
+    Wait { until: String },                            // a durable timer
+    UserForm { fields: Vec<FieldDecl>, assign_to: String,
+               min_role: Option<u8>, timeout: Option<String> },
+}
+
+pub enum Next {                           // control flow is **data** (see below)
+    Step { step: String },
+    Branch { arms: Vec<BranchArm>, otherwise: Option<String> },
+    Formula { formula: String },          // v1's escape hatch, kept
+    End,
 }
 
 pub enum ErrorPolicy {
-    Retry { max: u32, backoff: Backoff }, // configurable backoff
-    Handler { step: String },             // jump to a designated error-handling step
+    Retry { max: u32, backoff: Backoff }, // exponential, capped, jittered
+    Handler { step: String },             // jump, with the error under `context.error`
     Fail,
-}
-
-pub struct Run {
-    pub id: RunId,
-    pub workflow: TriggerId,
-    pub workflow_version: u32,
-    pub context: Value,                   // JSON, accumulates state
-    pub state: RunState,                  // Running{step} | Suspended{waiting} | Done | Failed
-    pub trace: bool,
 }
 ```
 
-**Execution guarantees (normative, from GOALS):**
+**Five step kinds, and the count is the decision.** GOALS asks for a minimal set of built-in
+workflow actions, so `Action` runs *any* registered action — which is how `run_js_code`,
+`send_email`, the row actions and `run_agent` are all workflow steps with no code in
+`sc-workflow` — and the other four are the things no action can be: writing the context, looping,
+waiting, and asking a person. Adding an action is not adding a step kind.
 
-- **Each step runs in one database transaction.** The step's effects and the advance of
-  `Run.state`/`context` commit together.
-- **At-least-once per step.** If the engine crashes mid-step, on recovery it *resumes the
-  step it was running* (the run row records which step is in flight). Steps SHOULD therefore
-  be idempotent; the engine provides the transactional commit of context+position to make
-  most steps effectively once.
-- **Error handling** per the policy above: a designated handler step, or bounded retries
-  with configurable backoff, defaulting at the workflow level and overridable per step.
-- **Durability**: a run persists context + position after every step, so it can suspend
-  (e.g. awaiting user input) and resume across process restarts — the run outlives any
-  request.
+**Control flow is data, with a formula escape hatch.** v1 spells `next_step` as a JavaScript
+expression over the step names: expressive, and impossible to *draw*, because a visual editor
+cannot round-trip an arbitrary expression into edges. `Next` is therefore an enum whose first two
+variants are exactly what the canvas draws and edits, while `Formula` keeps v1's power for the
+case that needs it — drawn as one dashed edge to a "computed" marker, editable as text, never
+silently rewritten, and standing the reachability check down rather than marking a good step
+dead. All four lower to one question the engine asks: *given this context, which step is next?*
 
-Control flow is data: the `next` formula sees every step name as an in-scope string
-identifier (as in v1), and loops use an explicit `ForLoop` step type. Keeping control flow
-in the engine (not in code actions) is what keeps step code clean.
+#### Versions are rows, and a run pins one
 
-The engine is driven by a **durable queue** on the bus: scheduled/periodic triggers, retry
-timers, and resume-after-suspend all flow through it, so a multi-node deployment can pick up
-any runnable step. The in-process and pg-NOTIFY bus drivers are enough for single-node;
-redis/kafka drivers scale it out.
+`_sc_workflow_versions` holds `(id, workflow, version, description, steps, attributes,
+created_at, created_by)` with `UNIQUE (workflow, version)`, and it is **append-only**: saving an
+edited workflow reads the maximum and inserts the next; nothing updates a row, and a *revert*
+mints a new version whose steps are an old one's. `_sc_runs.subject_version` is what the run
+started on, and the driver loads *that* row on every advance. That is the whole implementation of
+GOALS' "a suspended run can finish with its version of the workflow": the program may be edited
+twice while an approval sits in somebody's inbox, and the run is not retro-fitted to steps it
+never started.
+
+#### The run is a steppable machine
+
+`WorkflowRun` is the whole resumable state of one run as a single serialisable value — the
+context, the **frame stack** (a `ForEach` keeps its collection and cursor in a frame, so loops
+nest without nesting the step list), the current step, the attempt count, the step budget and the
+trace sequence — and it performs **no IO**. It answers a `Decision`:
+
+```text
+RunAction { step, action, configuration }   // run this action
+Evaluate  { step, formulas }                // a Set value, a Branch guard, a ForEach's
+                                            //   collection, a Wait's deadline, a computed next
+Suspend   { step, until, awaiting_input }   // a timer, or a person
+Done      { context }
+Failed    { step, error }
+```
+
+fed back through `step_succeeded`, `step_failed`, `evaluated` and `resumed`. It is **idempotent**:
+asking twice without answering asks for the same thing twice and spends no more budget, which is
+what makes at-least-once a property rather than a hope. The state *is* what `_sc_runs.context`
+stores, so resuming is a deserialise rather than a reconstruction, and every rule above is
+testable synchronously with no database, no clock and no runtime — the same split as the agent
+loop (§11.2), for the same reason.
+
+`_sc_runs` is one table for both engines, as `RunKind` promised; a workflow run adds
+`subject_version`, `wake_at`, `lease_until` and `claimed_by`, and `RunState` gained `Waiting`.
+`_sc_run_traces` holds one row per completed step attempt — when it ran, which attempt, how it
+came out, and the context *after* it — written only when the workflow's `trace` flag is on,
+because a trace row carries a copy of the whole context.
+
+#### The driver, and what one advance guarantees
+
+`Driver::advance` loads the pinned version, asks the machine, does the IO — runs the action
+through `ActionRegistry` with an `ActionContext` carrying the run context, the event, the
+evaluator, the mailer and the dispatcher; or evaluates the formulas through the server's isolate
+— feeds the outcome back, and **writes once**. One advance services one *step*, not one decision:
+a `Set` of three assignments is three trips to the evaluator and one step.
+
+**Execution guarantees (normative, and honest about the one that changed):**
+
+- **One advance is one atomic write.** The context, the cursor, the attempt count, the run's
+  state, its `wake_at` and the step's trace row commit **together, once**, so a run is never
+  observed half-advanced.
+- **A step is at least once.** The plan said "each step runs in one database transaction", and
+  that cannot be honoured literally: an HTTP request, an email and an LLM call are not
+  transactional, and the row layer's writes are individual statements by design (§6 — a
+  caller-context transaction is per statement, because RLS rides on session settings). So a node
+  that dies between a step's effect and its write comes back, is told to run **that** step again,
+  and runs no other. Steps SHOULD be idempotent; `docs/tutorial-workflows.md` has the working
+  remedies. *(Threading one transaction through a step's row writes needs `CallerContext` to
+  carry a transaction handle — a change to every write path, and a milestone of its own.)*
+- **Error handling** is the policy above: bounded retries with an exponential, capped, **jittered**
+  backoff (jitter derived from the step, the attempt and the sub-second part of the failure's
+  instant — deterministic, so the machine's tests are repeatable, and non-synchronising, so a
+  hundred runs that failed on one outage do not become its second wave); or a jump to a handler
+  step with the failure under `context.error`; or fail. A per-step policy beats the workflow's,
+  exhausting a step's retries falls through to the workflow's, and a workflow-level retry that
+  runs out **fails** rather than starting again. A `Next` that names a step the workflow does not
+  have is the *program* being wrong: it ends the run without consulting a policy.
+- **Durability.** A run persists its context and position after every step, so it can wait for a
+  timer, a person, or a restart. A failed run is a record — the reason on `_sc_runs.error` with
+  the step named, in the error log (§16), and raised as an `error` event, once.
+
+#### The queue is the runs table, claimed with a lease
+
+The plan said the engine is driven by "a durable queue on the bus", and `sc-bus` does not exist.
+Building one to hold the queue would be building the wrong thing first: a durable queue's
+authority has to be the database anyway, or a crashed node loses the runs it was holding. So the
+runnable set is a query —
+
+```text
+kind = 'workflow' AND state IN ('running','waiting')
+  AND wake_at IS NOT NULL AND wake_at <= now
+  AND (lease_until IS NULL OR lease_until < now)
+```
+
+— and claiming is a conditional `UPDATE` on that same predicate, correct for two nodes as well as
+one: both may read the row, the first puts a lease in the future, and the second's `WHERE` then
+matches nothing. **Recovery is not a special case**: an expired lease reads exactly like no
+lease, so a crashed node's run is picked up by the next poll, with no crash detector, no heartbeat
+table and no recovery pass.
+
+`WorkQueue` — *claim what is due*, *renew a lease*, *wake me when something might be* — is the
+seam `sc-bus` will implement (a `NOTIFY`, a Redis subscription). Behind it today is a poll and a
+sleep, and **nothing above the seam knows which it is talking to**; the engine's tests drive it
+over an in-memory queue to keep that true. `WorkflowEngineTask` is the one tokio task that
+advances runs nobody is waiting for, started by `serve` and only by `serve` (as the scheduler is,
+and for the same reason: a build tool or an admin script must not begin advancing runs because it
+opened the same database), with the clock as a parameter and a shutdown that lets an in-flight
+step finish. It fills the `WorkflowEngine` seam `sc-action` holds — dispatch is layer 6 and the
+engine layer 7, so the dispatcher cannot name it — and a process with no engine refuses a
+workflow trigger **by name**.
+
+Starting a run answers the run's **id and state**, not a value: a workflow body may suspend for a
+day, so what a caller gets is something addressable rather than a wait (§10.2). A step's writes
+carry the run's chain plus the step's name, so `MAX_DEPTH` bounds a workflow that writes a row
+that starts a workflow exactly as it bounds an action that writes a row; the authority is the one
+§10.1 gives an action.
+
+#### The scope a step's formulas are read in — and the gap in it
+
+`workflow_shape` is `action_shape` plus one fieldless ambient, `context`, and it is the only place
+a step's scope is decided. `context.x` rather than a bare `x` deliberately: bare identifiers
+already mean "a field of the row this formula ranges over" (§10.1's `EVENT_SCOPE`), and
+redefining them inside a workflow would make one language mean two things. An action reads and
+writes the run context through `ActionContext::context`, and its return value is stored under the
+step's name.
+
+**Known gap.** The intended rule is that *every* formula a step contains — a `Set` value, a
+branch guard, a `ForEach`'s collection, **and an action's own settings** — reads the context. The
+first three do: they are evaluated by the driver, in `workflow_shape`. An action's settings do
+**not**: they are evaluated by the action itself, which builds `action_shape` from the event, so
+`context.total` in an `insert_row` step's value formula is refused on save, saying
+*unknown identifier `context`*; and a `run_js_code` step's body is given `row`/`old`/`user`/
+`payload` and no `context`. Closing it means letting an action know it is configured for a run — a shape on
+`ConfigCheck` and the context on `ActionContext`'s bindings — and touching every action that
+evaluates a setting. Until it is closed, a workflow passes values between steps through the
+context for its *own* formulas, and a step that needs to act on them does its own reading (a code
+body over `row`), which is what the tutorial shows.
+
+A second, smaller deviation, in the same spirit of writing down what is true: an advance
+continues while the machine keeps asking about the **same step**, which is what lets a `Set`'s
+assignments be evaluated one at a time — but it also means a `ForEach` whose body is a *single*
+step services all of its iterations in one advance, so they share one write and one trace row.
+Correctness is unaffected (the context reverts wholesale on a crash), but the durability
+granularity of such a loop is the loop, not the item.
+
+#### The editor
+
+The visual editor is React Flow (`@xyflow/react` 12, MIT) with `@dagrejs/dagre` for layout, in
+`ui/admin`; no canvas is written by hand. The rules are not in the canvas: `workflowGraph.ts`
+holds `stepsToGraph` / `graphToSteps` / `layout` / `validate` / `runPath` as plain functions over
+plain values with `vitest` tests over them — the repo's established split — and the `.tsx` files
+render what they return. Edges are the authority on control flow, so dragging one is an edit;
+what the canvas cannot draw (descriptions, an action's configuration, a retry's backoff) it
+carries untouched, so a trip through the editor changes nothing the admin did not change. An
+`Action` step's settings are `SettingsFields` over that action's own `config_spec`, which is why a
+plugin's action gets a working step form with no change to the editor. The run screen reuses the
+same canvas read-only, with the trace projected onto it as the path taken — **drawn on the version
+the run is pinned to**.
+
+A workflow **validates on save and again before a run starts**, in one pass that answers a
+*list*: every `Next` names a step that exists, the start step exists, every step is reachable,
+each action resolves and its configuration validates against its own `config_spec_for` the
+trigger's channel, each formula parses and resolves in the scope that step will have, and an
+error policy names a real step. A list rather than one error because the caller is an editor:
+three broken steps are three markers on three nodes. A workflow that fails stays stored, listed
+and editable — editing it is the repair — and refuses to start a run.
+
+**Not built here**, and named so the gaps are the reader's rather than a surprise: the end-user
+presentation of a running workflow (v1's `WorkflowRoom` and its modal popups, which wait on §13's
+viewpatterns — today a suspended run is resumed from the admin UI or the API), a `SubWorkflow`
+step, parallel steps, and the copilot that *writes* workflows (§11.6).
 
 ---
 
@@ -3095,11 +3274,14 @@ scripts, no inline event handlers). v2 satisfies this **structurally through Rea
 than through a server-side HTML model: the admin UI is a **React + TypeScript SPA**
 (`ui/admin`) that talks to the server exclusively over a **typed JSON API** (§13), and every
 UI bundle is self-hosted with no inline handlers, so the CSP needs no `unsafe-inline` **script**
-source. Inline *styles* are allowed, for one reason named in the policy itself: a code setting
+source. Inline *styles* are allowed, for a reason named in the policy itself: a code setting
 (a `run_js_code` body) is edited in an embedded **Monaco** editor (§12.2), and Monaco writes
 the theme that colours the syntax into a `<style>` element it creates at runtime, with no nonce
-hook to sign it with. Nothing about *where code may come from* moves: `script-src 'self'`, no
-`eval`, no `blob:`, and `default-src 'self'` leaves injected CSS nowhere to send anything.
+hook to sign it with. The workflow editor's canvas (§10.3) rides on the same allowance — React
+Flow positions its nodes with inline transforms — and **nothing was relaxed for it**: a test
+asserts the policy is character-for-character what it was. Nothing about *where code may come
+from* moves: `script-src 'self'`, no `eval`, no `blob:`, and `default-src 'self'` leaves injected
+CSS nowhere to send anything.
 
 This replaces v1's server-string HTML **and the previously-planned `sc-markup` symbolic
 tree + JS-extraction crate — both dropped.** The server renders no admin HTML beyond a
@@ -3114,9 +3296,12 @@ generated typed client (§13.1), so the API and the UI cannot drift.
   under a separate URL (subdomain or path) from user-facing routes. Only admins log in
   initially; later, admins may grant restricted access (e.g. app development only) to selected
   non-admins. Includes a much-improved **table editor** (Airtable-inspired), a **file
-  manager**, and an **application manager** (§13.2) — creating an app, configuring its
+  manager**, an **application manager** (§13.2) — creating an app, configuring its
   framework from that framework's declared settings, and building/mounting it are admin-UI
-  operations, not code — all built against the typed API client.
+  operations, not code — and the **workflow editor** (§10.3): a drag-and-drop canvas over
+  **React Flow** (`@xyflow/react`) with **dagre** for layout, whose rules live in a tested
+  `.ts` module rather than in the canvas, and whose read-only twin draws a run's path on the
+  version that run is pinned to. All of it is built against the typed API client.
 - **`ui/form-runtime`** — the dynamic form framework (React + TypeScript), rebuilt cleanly
   from v1's messy client JS. Covers the requirements GOALS lists explicitly: conditional
   fields (shown based on other values), repeated sub-forms (order lines on an order),

@@ -600,7 +600,12 @@ pairing is [tutorial-ownership.md](tutorial-ownership.md)'s formula language, wh
 language these triggers are configured in — `only_if`, a `where`, and every field value are all
 the one expression syntax, evaluated the same way, over the event instead of over a row.
 
-Then [tutorial-agents.md](tutorial-agents.md), which adds one more action to the table above:
+Then [tutorial-workflows.md](tutorial-workflows.md), which is what a trigger becomes when one
+action is not enough: the same event model, but the body is a **program** — steps, branches, a
+loop, a durable wait and an approval a person answers tomorrow — drawn on a canvas and versioned,
+so a run that has been waiting since yesterday finishes on yesterday's program.
+
+And [tutorial-agents.md](tutorial-agents.md), which adds one more action to the table above:
 `run_agent`, whose configuration is an agent's name and a prompt formula over the same event. An
 agent is a configured LLM loop that can read your tables, run the triggers you built here, and
 edit your app's source — and hanging one off a trigger is how it runs when nobody is watching.

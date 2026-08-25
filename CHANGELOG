@@ -2,6 +2,65 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 8: the documentation
+
+The milestone written down: a tutorial that builds the order-approval workflow from an empty
+canvas, §10.3 rewritten to what was actually built, and the crate tree brought up to date. Two
+of those were bookkeeping. The tutorial was not — writing it found two gaps between the design
+and the code, and both are now recorded rather than discovered later by somebody following the
+document.
+
+- **`docs/tutorial-workflows.md`**, and **it runs**. `crates/sc-server/tests/tutorial_workflows.rs`
+  copies the program out of the document and puts it through the admin API the reader drives by
+  hand: create the trigger, save the workflow, submit an order, watch the run suspend at the
+  approval, answer it, and read back the two rows the workflow wrote. The precedent is
+  `tutorial_triggers.rs` and so is the reason — a tutorial is a promise that the words in the
+  boxes work, and the ways it stops being true (a formula rule tightens, an action renames a
+  setting) do not break a test that only reads the markdown. Four cases: the large order that
+  waits for a person, the small one that takes the other arm and never stops, the rejection, and
+  the gap below.
+- **The tutorial's trigger fires on an *update*, not an insert**, and that is the first thing
+  the test taught. An order's lines cannot exist before the order does, so a workflow started by
+  the order's insert loops over nothing; submitting is the moment the work is ready. The
+  `only_if` — `status === 'submitted' && old.status !== 'submitted'` — then does a second job
+  worth teaching in its own right: two of the steps write to `orders`, and a write to `orders` is
+  an update event on `orders`. A condition about a *change* is what stops a workflow starting
+  itself, and "bounded at five deep" is not the same as "intended".
+- **Known gap, now written down in three places: an action step's settings cannot read
+  `context`.** Decision 8 says every formula a step contains — a `Set` value, a branch guard, a
+  `ForEach`'s collection **and an action's own settings** — reads the run through
+  `Ambient::Context`. The first three do, because the *driver* evaluates them in
+  `workflow_shape`. An action's settings do not: the action evaluates them itself, in
+  `action_shape`, so `context.total` in an `insert_row` step is refused on save with *unknown
+  identifier `context`* — and a `run_js_code` step's body is handed `row`/`old`/`user`/`payload`
+  and no context either. §10.3 records it as a gap with the shape of the fix; the tutorial's
+  "trips people up" section leads with it and shows the way round (do the reading in a code body
+  over `row`); a test pins it **so that it fails the day the gap is closed**, because the
+  document has a paragraph that must change with it. The step inspector's hint, which until now
+  told admins to write exactly the formula that is refused, says the truth instead.
+- **Second deviation, smaller: a loop body that is a single step is serviced in one advance.**
+  The driver continues while the machine keeps asking about the same *step name* — which is what
+  lets a `Set`'s three assignments be evaluated one at a time — and iteration two of a one-step
+  body is that same name. So all the iterations share one write and one trace row. What the run
+  computes is unaffected (a crash reverts the context wholesale), but the durability granularity
+  of such a loop is the loop rather than the item, which is not what "persist after every step"
+  implies. Recorded in §10.3, and in the tutorial as the practical advice it amounts to: give a
+  loop body whose step has an *effect* a second step.
+- **§10.3 rewritten to what was built** (TODO 8.2): the five step kinds and why the count is the
+  decision, `Next` as data with its formula escape hatch, versions as append-only rows and the
+  pin that makes a suspended run finish on its own program, the sans-IO machine and its
+  `Decision`, the driver's honest reading of "each step runs in one transaction" (one *advance*
+  is one atomic write; a step is at least once), the queue as a query with `WorkQueue` as the
+  seam `sc-bus` will fill, the scope rule and its gap, and the editor's split between a tested
+  `.ts` model and a canvas that holds no rules. What is *not* built is named too — `WorkflowRoom`,
+  a `SubWorkflow` step, parallel steps, the copilot that writes workflows — so the gaps are the
+  reader's rather than a surprise.
+- **The crate tree and the admin UI section** (TODO 8.3): `sc-workflow` is off the "not yet
+  created" list, `ui/admin` says it holds the workflow editor over React Flow and dagre, and the
+  CSP paragraph says the canvas rides on the `style-src 'unsafe-inline'` Monaco already needed
+  and that **nothing was relaxed** for it. §10.2's paragraph promising `TriggerBody::Workflow` as
+  a growth path now describes it as the thing that exists.
+
 ## Workflows, phase 7: the tests
 
 The milestone's test plan, closed. Most of §7 was written as the phases landed — that is what
