@@ -52,9 +52,12 @@ import { Settings } from "./screens/Settings";
 import { Tables } from "./screens/Tables";
 import { TableData } from "./screens/TableData";
 import { TableDetail } from "./screens/TableDetail";
+import { RunDetail } from "./screens/RunDetail";
 import { Triggers } from "./screens/Triggers";
 import { TriggerForm } from "./screens/TriggerForm";
 import { Users } from "./screens/Users";
+import { WorkflowEditor } from "./screens/WorkflowEditor";
+import { WorkflowRuns } from "./screens/WorkflowRuns";
 
 /** The authenticated user, as reported by `authStatus` / `login`. */
 export type CurrentUser = NonNullable<AuthStatusResponse["current_user"]>;
@@ -418,6 +421,18 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   if (triggerEditMatch) {
     return <TriggerForm triggerId={decodeURIComponent(triggerEditMatch[1])} />;
   }
+  // A workflow is a trigger **body** (§10.3, decision 1), so its editor and its
+  // runs hang off the trigger's id rather than standing beside it as an entity
+  // of their own — there is no `/workflows/…` because there is no workflow to
+  // address without a trigger.
+  const workflowMatch = route.match(/^\/triggers\/([^/]+)\/workflow$/);
+  if (workflowMatch) {
+    return <WorkflowEditor triggerId={decodeURIComponent(workflowMatch[1])} />;
+  }
+  const workflowRunsMatch = route.match(/^\/triggers\/([^/]+)\/runs$/);
+  if (workflowRunsMatch) {
+    return <WorkflowRuns triggerId={decodeURIComponent(workflowRunsMatch[1])} />;
+  }
   if (route.startsWith("/triggers")) {
     return <Triggers />;
   }
@@ -471,6 +486,12 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   if (route.startsWith("/db-connections")) {
     return <DbConnections />;
+  }
+  // A run is addressed by its own id, as `getRun` is: which workflow it is of is
+  // the server's answer, not the URL's.
+  const runMatch = route.match(/^\/runs\/([^/]+)$/);
+  if (runMatch) {
+    return <RunDetail runId={decodeURIComponent(runMatch[1])} />;
   }
   if (route.startsWith("/users")) {
     return <Users />;

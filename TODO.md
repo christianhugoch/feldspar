@@ -284,35 +284,35 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ### 6. The visual editor
 
-- [ ] 6.1 `@xyflow/react` and `@dagrejs/dagre` added to `ui/admin`; the vendored CSS imported
+- [x] 6.1 `@xyflow/react` and `@dagrejs/dagre` added to `ui/admin`; the vendored CSS imported
   through the bundler (no CDN, no `@import` — the admin theme test's rule); a test asserting the
   admin CSP is unchanged by their arrival.
-- [ ] 6.2 `workflowGraph.ts` (decision 10): `stepsToGraph(steps)` → nodes and edges, with a
+- [x] 6.2 `workflowGraph.ts` (decision 10): `stepsToGraph(steps)` → nodes and edges, with a
   branch's arms as labelled edges and a `Next::Formula` as one dashed edge to a computed marker;
   `graphToSteps(nodes, edges)` back again, preserving everything the canvas does not model
   (descriptions, per-step error policies, formula text); `layout(nodes, edges)` over dagre; and
   `validate(steps)` — decision 11's rules, client-side, for the message that appears while the
   admin is still looking at the canvas. `vitest` for each, including a round-trip property over a
   workflow using every step kind.
-- [ ] 6.3 `WorkflowEditor.tsx`: the canvas with one node type per step kind (its own icon and
+- [x] 6.3 `WorkflowEditor.tsx`: the canvas with one node type per step kind (its own icon and
   colour, the step's name, a one-line summary of what it is configured to do), edges drawn and
   deleted by dragging, a palette to drop a new step, undo/redo, auto-layout on demand, and a
   save that mints a version. Deleting a step that others point at is refused with their names,
   not silently repointed.
-- [ ] 6.4 The inspector: the selected step's name, description, `Next` (a picker per branch arm
+- [x] 6.4 The inspector: the selected step's name, description, `Next` (a picker per branch arm
   with the formula beside it), its error policy, and — for an `Action` step — the action picker
   and `SettingsFields` over that action's `config_spec`, which is the same component the trigger
   form uses and is why a plugin's action gets a working step form with no change to this file.
   `Set`, `ForEach`, `Wait` and `UserForm` each get their own small editor; `UserForm`'s is a
   repeated form of `FormField` declarations.
-- [ ] 6.5 The trigger form gains "Workflow" beside the actions, and saving one lands on the
+- [x] 6.5 The trigger form gains "Workflow" beside the actions, and saving one lands on the
   editor. The triggers list shows a workflow's step count and its version, and links to its runs.
-- [ ] 6.6 `WorkflowRuns.tsx` and `RunDetail.tsx`: the run list with state, current step, when it
+- [x] 6.6 `WorkflowRuns.tsx` and `RunDetail.tsx`: the run list with state, current step, when it
   will wake and who started it; the detail showing the trace as a timeline (step, attempt,
   duration, outcome, the context after it, with the change from the step before highlighted) and
   **the same canvas in read-only mode** with the path taken drawn on it and the current step
   marked — the reuse decision 10's split is what makes cheap.
-- [ ] 6.7 A suspended run's pending form, rendered from its declaration by `SettingsFields`, with
+- [x] 6.7 A suspended run's pending form, rendered from its declaration by `SettingsFields`, with
   resume, cancel and (on a failed run) retry.
 
 ### 7. Tests
@@ -329,7 +329,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [ ] 7.4 An end-to-end integration test over HTTP: create the trigger, save the workflow, insert
   a row, watch the run suspend, resume it with a form value, and read the finished context and
   its trace — the milestone's definition of done, minus the browser.
-- [ ] 7.5 `vitest` for `workflowGraph.ts` and the run-path projection.
+- [x] 7.5 `vitest` for `workflowGraph.ts` and the run-path projection.
 - [ ] 7.6 A test that the depth bound still holds when the cascade goes through a workflow.
 
 ### 8. Documentation

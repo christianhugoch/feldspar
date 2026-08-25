@@ -721,3 +721,154 @@ async fn deleting_a_workflow_trigger_takes_its_versions_with_it() -> sc_error::R
     assert_eq!(opened["version"], json!(1));
     Ok(())
 }
+
+/// Phase 6 asks the run detail screen to draw a run's path **on the graph that
+/// run actually ran** — which for a run suspended across two edits is not
+/// today's steps. So `getWorkflow` takes the version to read, and the two
+/// answers are different programs.
+#[tokio::test]
+async fn a_pinned_version_can_be_read_back_for_the_canvas_a_run_ran_on() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    let created = server
+        .client
+        .ok("POST", "/api/triggers", Some(workflow_trigger("drawn")))
+        .await;
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    // Version 2: the program as first drawn.
+    server
+        .client
+        .ok(
+            "POST",
+            &format!("/api/workflows/{id}"),
+            Some(json!({ "workflow": approval_program(), "description": "as drawn" })),
+        )
+        .await;
+    // Version 3: the same program, edited.
+    let mut edited = approval_program();
+    edited["steps"][2]["kind"]["assignments"] = json!([{ "target": "mark", "formula": "'later'" }]);
+    server
+        .client
+        .ok(
+            "POST",
+            &format!("/api/workflows/{id}"),
+            Some(json!({ "workflow": edited, "description": "edited" })),
+        )
+        .await;
+
+    // With no version asked for, the current one — which is what the editor
+    // opens on.
+    let current = server
+        .client
+        .ok("GET", &format!("/api/workflows/{id}"), None)
+        .await;
+    assert_eq!(current["version"], json!(3));
+    assert_eq!(
+        current["workflow"]["steps"][2]["kind"]["assignments"][0]["target"],
+        json!("mark")
+    );
+
+    // With one, that one: the steps a run pinned to version 2 is running, which
+    // is the graph its path has to be drawn on. Anything else would be the path
+    // of one program drawn on the picture of another.
+    let pinned = server
+        .client
+        .ok("GET", &format!("/api/workflows/{id}?version=2"), None)
+        .await;
+    assert_eq!(pinned["version"], json!(2));
+    assert_eq!(
+        pinned["workflow"]["steps"][2]["kind"]["assignments"][0]["target"],
+        json!("customer")
+    );
+
+    // A version that was never saved is a 404 naming it, not the current one
+    // quietly substituted — a canvas showing the wrong program is worse than a
+    // canvas that says it cannot be drawn.
+    let (status, _) = server
+        .client
+        .send("GET", &format!("/api/workflows/{id}?version=99"), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// The triggers list says how big a workflow is and which version is live —
+/// because "workflow" on its own tells one row from another not at all, and the
+/// alternative was one `getWorkflow` per row from the browser.
+#[tokio::test]
+async fn the_trigger_list_says_how_big_a_workflow_is_and_which_version_is_live()
+-> sc_error::Result<()> {
+    let mut server = setup().await?;
+    let created = server
+        .client
+        .ok("POST", "/api/triggers", Some(workflow_trigger("listed")))
+        .await;
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    // Creating the trigger minted version 1: the empty canvas, one start step.
+    let listed = server.client.ok("GET", "/api/triggers", None).await;
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(id))
+        .unwrap()
+        .clone();
+    assert_eq!(row["body"], json!("workflow"));
+    assert_eq!(row["workflow_version"], json!(1));
+    assert_eq!(row["workflow_steps"], json!(1));
+    // …and none of the action body's fields, which is what a workflow having no
+    // action means.
+    assert_eq!(row["action"], Value::Null);
+
+    server
+        .client
+        .ok(
+            "POST",
+            &format!("/api/workflows/{id}"),
+            Some(json!({ "workflow": approval_program(), "description": "three steps" })),
+        )
+        .await;
+    let listed = server.client.ok("GET", "/api/triggers", None).await;
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(id))
+        .unwrap()
+        .clone();
+    assert_eq!(row["workflow_version"], json!(2));
+    assert_eq!(row["workflow_steps"], json!(3));
+
+    // An **action** trigger answers null for both rather than 0: it has no
+    // workflow, which is not the same as having an empty one.
+    server
+        .client
+        .ok(
+            "POST",
+            "/api/triggers",
+            Some(json!({
+                "name": "plain",
+                "description": "",
+                "when": "none",
+                "channel": Value::Null,
+                "only_if": Value::Null,
+                "action": "run_js_code",
+                "configuration": { "code": "return 1;" },
+                "min_role": Value::Null,
+                "enabled": true,
+            })),
+        )
+        .await;
+    let listed = server.client.ok("GET", "/api/triggers", None).await;
+    let plain = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == json!("plain"))
+        .unwrap()
+        .clone();
+    assert_eq!(plain["workflow_version"], Value::Null);
+    assert_eq!(plain["workflow_steps"], Value::Null);
+    Ok(())
+}

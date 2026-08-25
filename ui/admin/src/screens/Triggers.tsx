@@ -73,11 +73,17 @@ function lastRun(trigger: TriggerItem): string {
   return Number.isNaN(at.getTime()) ? trigger.last_run_at : at.toLocaleString();
 }
 
-function targetSummary(trigger: TriggerItem): string {
+export function targetSummary(trigger: TriggerItem): string {
   // A workflow body runs a program rather than an action, and has no
-  // configuration to read a table out of (§10.3).
+  // configuration to read a table out of (§10.3). "workflow" alone tells one
+  // trigger from another not at all, so the list says how big the program is and
+  // which version is live — the two facts that make a row identifiable.
   const action = trigger.action ?? "";
-  if (trigger.body === "workflow") return "workflow";
+  if (trigger.body === "workflow") {
+    if (trigger.workflow_version == null) return "workflow";
+    const steps = trigger.workflow_steps ?? 0;
+    return `workflow · ${steps} step${steps === 1 ? "" : "s"} · v${trigger.workflow_version}`;
+  }
   const config = trigger.configuration;
   if (!config || typeof config !== "object") return action;
   const table = (config as Record<string, unknown>).table;
@@ -129,6 +135,9 @@ export function Triggers() {
     try {
       const { result } = await api.runTrigger(trigger.id, {});
       setRan({ name: trigger.name, result: JSON.stringify(result, null, 2) });
+      // A workflow body does not return a value: it answers a run id and its
+      // state (§10.3, phase 3.4), and what an admin wants next is to watch it.
+      if (trigger.body === "workflow") navigate(`/triggers/${encodeURIComponent(trigger.id)}/runs`);
     } catch (err) {
       // The action's own failure, which is what a test run is for — surfaced as
       // the error it is, not as a result that happens to be empty.
@@ -222,6 +231,28 @@ export function Triggers() {
                       >
                         Edit
                       </Button>
+                      {/* A workflow's steps are not on the trigger form: they
+                          are a version of their own, drawn on a canvas, and its
+                          runs are durable things an admin comes looking for
+                          (§10.3). Both hang off the trigger's id. */}
+                      {trigger.body === "workflow" && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline-secondary"
+                            href={`#/triggers/${encodeURIComponent(trigger.id)}/workflow`}
+                          >
+                            Steps
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline-secondary"
+                            href={`#/triggers/${encodeURIComponent(trigger.id)}/runs`}
+                          >
+                            Runs
+                          </Button>
+                        </>
+                      )}
                       {/* Only a `none` trigger is meaningful to run by hand:
                           every other kind needs its own occurrence (a row, a
                           login) to say anything about, and would fail on the

@@ -1,10 +1,17 @@
-// Create / edit a trigger: one event bound to one configured action (§10.2).
+// Create / edit a trigger: one event bound to a **body** — a configured action
+// (§10.2) or a workflow (§10.3).
 //
 // The point this screen proves is the one the framework and file-store pickers
 // prove: **no screen knows a specific action's settings**. The admin picks an
 // action and the form renders whatever that action's `config_spec` declares, so
 // an action added by a plugin gets a working configuration form with no change
 // to this file.
+//
+// The body is the one choice this form makes that is not about settings: an
+// action is configured here, and a workflow is a program drawn on its own canvas
+// — so choosing "workflow" replaces the settings half with the way to it, and
+// saving lands there. The alternative was a second create screen, which would
+// duplicate the event half of this one and then have to keep up with it.
 //
 // What is *not* generic is the event, and deliberately: which fields apply
 // depends on the kind. A table event needs a table and can carry an `only_if`
@@ -139,6 +146,10 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
   const [when, setWhen] = useState("insert");
   const [channel, setChannel] = useState(table ?? "");
   const [onlyIf, setOnlyIf] = useState("");
+  // Which engine runs this trigger: `action` (a configured action) or
+  // `workflow` (a program). New triggers default to an action, which is what
+  // every trigger was before workflows.
+  const [body, setBody] = useState<"action" | "workflow">("action");
   const [actionName, setActionName] = useState("");
   const [config, setConfig] = useState<Record<string, string>>({});
   const [minRole, setMinRole] = useState<number | null>(null);
@@ -175,6 +186,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           // Both are the action body's, and both come back null for a
           // workflow (§10.3), whose steps are edited on their own screen —
           // this form fills in the fields the two bodies share either way.
+          setBody(existing.body === "workflow" ? "workflow" : "action");
           setActionName(existing.action ?? "");
           setConfig(readConfig(existing.configuration ?? {}));
           setMinRole(existing.min_role ?? null);
@@ -242,7 +254,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
     setBusy(true);
     setError(null);
     try {
-      const body = {
+      const record = {
         name: name.trim(),
         description: description.trim(),
         when,
@@ -251,20 +263,29 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
         // from: what is not on the screen is not part of the save.
         channel: tableEvent && channel !== "" ? channel : null,
         only_if: tableEvent && onlyIf.trim() !== "" ? onlyIf.trim() : null,
-        action: actionName,
-        configuration: buildConfig(spec, config),
+        body,
+        // Both belong to the **action** body, and both are refused on a workflow
+        // — whose steps are a version of their own, edited on the canvas.
+        action: body === "action" ? actionName : null,
+        configuration: body === "action" ? buildConfig(spec, config) : null,
         min_role: minRole,
         enabled,
         minute: timingValue("minute"),
         hour: timingValue("hour"),
         day_of_week: timingValue("day_of_week"),
       };
-      if (triggerId) {
-        await api.updateTrigger(triggerId, body);
-      } else {
-        await api.createTrigger(body);
-      }
-      navigate("/triggers");
+      const saved = triggerId
+        ? await api.updateTrigger(triggerId, record)
+        : await api.createTrigger(record);
+      // A workflow trigger is only half-made when the trigger is saved: creating
+      // it minted version 1 (an empty canvas, not an error), and the steps are
+      // the point. So the save lands on the editor rather than back on a list
+      // that would say "workflow" and nothing else.
+      navigate(
+        saved.body === "workflow"
+          ? `/triggers/${encodeURIComponent(saved.id)}/workflow`
+          : "/triggers",
+      );
     } catch (err) {
       // The server's own refusal — "no table named `books`", "`only if`:
       // unknown identifier `titel`" — is the message that says what to fix.
@@ -474,6 +495,41 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           <Card className="mb-3">
             <Card.Header>Do</Card.Header>
             <Card.Body>
+              <Form.Group className="mb-3" controlId="triggerBody">
+                <Form.Label>Runs</Form.Label>
+                <Form.Select
+                  value={body}
+                  onChange={(e) => setBody(e.target.value as "action" | "workflow")}
+                >
+                  <option value="action">One action</option>
+                  <option value="workflow">A workflow</option>
+                </Form.Select>
+                <Form.Text muted>
+                  A workflow is a program — steps, branches, loops, waits and human
+                  approvals — drawn on its own canvas and versioned, so a run that has
+                  been waiting since yesterday finishes on the version it started with.
+                </Form.Text>
+              </Form.Group>
+
+              {body === "workflow" ? (
+                <div className="text-muted">
+                  {triggerId ? (
+                    <>
+                      The steps live on the canvas.{" "}
+                      <Button
+                        size="sm"
+                        variant="outline-primary"
+                        href={`#/triggers/${encodeURIComponent(triggerId)}/workflow`}
+                      >
+                        Open the workflow editor
+                      </Button>
+                    </>
+                  ) : (
+                    "Saving opens the editor, on an empty canvas with one start step."
+                  )}
+                </div>
+              ) : (
+              <>
               <Form.Group className="mb-3" controlId="triggerAction">
                 <Form.Label>Action</Form.Label>
                 <Form.Select
@@ -513,6 +569,8 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                 Values are formulas over the event: <code>row.title</code>,{" "}
                 <code>user.email</code>, <code>payload.n</code>.
               </Form.Text>
+              </>
+              )}
             </Card.Body>
           </Card>
 

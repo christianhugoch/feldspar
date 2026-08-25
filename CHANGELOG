@@ -2,6 +2,95 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 6: the visual editor
+
+The browser half of the milestone. An admin now draws a workflow — steps as nodes, control flow
+as edges, each step's settings rendered from the action's own declaration — saves it as a
+version, watches its runs, and answers a suspended one's approval form. That is the definition
+of done including the browser.
+
+- **The graph model is a tested TypeScript module and the canvas is a dumb renderer**
+  (decision 10). `workflowGraph.ts` holds `stepsToGraph` / `graphToSteps` / `layout` / `validate`
+  / `runPath` as plain functions over plain values, with 25 `vitest` cases over them, and
+  `WorkflowCanvas.tsx` renders what they return. The split is the repo's established one
+  (`fieldForm.ts`, `constraintForm.ts`, `agentChat.ts`) and it is here for a specific hazard: the
+  round trip through nodes and edges is the part that can silently lose an admin's work, and the
+  property test over a workflow using **every** step kind and every `Next` variant — the mirror
+  of `sc_workflow`'s own `every_kind()` serde fixture — is what says it does not.
+- **Edges are the authority on control flow.** Everything drawable is drawn — a plain `next`,
+  each arm of a branch with its guard as the label, a `for_each`'s body off the node's right-hand
+  side, a step's error handler dashed — and `graphToSteps` reads the program back **out of the
+  edges**, which is what makes dragging one an edit rather than a decoration. What the canvas
+  cannot draw it carries untouched on the node (descriptions, an action's configuration, a
+  retry's backoff), so a trip through the canvas changes nothing the admin did not change.
+- **A computed `next` is one dashed edge to a marker, and never edges to steps.** Decision 3
+  kept v1's formula escape hatch, and this is what "impossible to draw" means in practice: the
+  editor cannot know which step `context.total > 100 ? 'approve' : 'ship'` reaches, so it draws
+  that it does not know. The same honesty runs through validation, which **stands down** about
+  reachability when a reachable step has a computed `next` — marking a good step dead because
+  the browser cannot read JavaScript is worse than saying nothing, and it is the rule the
+  server's own pass already follows.
+- **Drawing an edge onto a step that already has one makes a branch**, whose first arm is the new
+  edge and whose `otherwise` is where the step used to go. Stated rather than guessed at: it
+  keeps the program the admin already had reachable, and the empty guard is what validation then
+  asks them to fill in. A step whose `next` is a formula refuses the edge instead, because an
+  edge that would never be taken is worse than no edge.
+- **Deleting a step is refused with the names of the steps that point at it.** Silently
+  repointing them would be inventing a program nobody wrote and leaving them dangling would save
+  one that refers to a step that is not there, so the third option: say who, and let the admin
+  decide. It is the inspector's button rather than the Delete key, because React Flow deletes a
+  node and its edges in one gesture and a *refused* delete would still have taken the edges.
+  Renaming a step, by contrast, repoints everything that named it — including the start.
+- **The step inspector does not grow when someone adds an action.** An `Action` step's settings
+  are `SettingsFields` over that action's own `config_spec` for this trigger's table — the same
+  component the trigger form uses — so a plugin's action gets a working step form with no change
+  to the file, which is the promise §13.3 makes about frameworks and file-store backends kept for
+  workflow steps. The palette offers only the actions `listActions` marked `workflow_step`. The
+  other four kinds get their own small editors, because each asks a different question and a
+  superset with most of it greyed out is not a form.
+- **A run is drawn on the version it ran on.** `getWorkflow` gained a `version` query parameter,
+  because the run detail screen's read-only canvas would otherwise draw the path of one program
+  on the picture of another — a run suspended across two edits did not run today's steps. A
+  version that was never saved is a 404 naming it rather than the current one quietly
+  substituted. The path itself is `runPath`, a projection of the trace onto the same
+  `stepsToGraph` output the editor draws, which is the reuse decision 10's split was for; a
+  retried step is one node and no self-loop, and a handler's edge lights only on the failure that
+  took it.
+- **The trace as a timeline shows what *changed*.** The whole context after every step is the
+  same document twenty times over, so each entry names the keys that step wrote and keeps the
+  document one click away. Beside it: the attempt number (which is what a retry looks like from
+  outside), the duration, and the outcome.
+- **A suspended run's form is a settings form.** Phase 4 lowered the pending declaration to the
+  ordinary `FormField` vocabulary, and this is what that bought: the approval an admin answers a
+  day later is `SettingsFields` over `pending_form.fields`, rendered by a component that knows
+  nothing about workflows. Cancel sits beside it for a live run, and Retry for a failed one —
+  never both, since one of them could not do anything.
+- **The triggers list says how big a workflow is and which version is live.** "workflow" alone
+  tells one row from another not at all. One extra read per workflow trigger in `listTriggers`,
+  and none for an action one; an action body answers `null` for both rather than 0, because
+  having no workflow is not the same as having an empty one.
+- **Nothing was relaxed to admit React Flow** (decision 9). Its inline node transforms fit inside
+  the `style-src 'unsafe-inline'` Monaco already needed, its stylesheet is imported through the
+  bundler into the one same-origin `<link>` (no CDN, no `@import` — the admin theme test's rule)
+  and carries no webfont and no remote image, and a test asserts the policy **character for
+  character**, with `unsafe-eval`, `blob:`, `worker-src` and `frame-src` named as things it must
+  not gain. A library that quietly wanted one of those would be a security change disguised as a
+  dependency bump.
+- **`@xyflow/react` is pinned exactly, at 12.10.2.** 12.11.4 ships an `index.js` importing
+  `handleAttributionWarning` from the `@xyflow/system` 0.0.80 it pins, which does not export it —
+  the browser build resolves around it and any Node-conditions resolver (vitest's) does not, so
+  the editor's tests would not run. A caret would let it back in.
+
+Tests: 25 `vitest` cases for `workflowGraph.ts` (the round trip over every step kind, the
+branch-arm and computed-marker drawings, a cut body edge read back as an edit, layout without
+overlaps and with a dangling target, validation reporting every problem including per-step
+markers, the rename repointing everything, and the run-path projection's retry, handler and
+trace-less cases), 5 Rust tests over the checked-in `ui/admin` source (the CSP character for
+character, the dependencies and the bundler import, the canvas classes against `admin.css`
+including one colour per step kind, the routes, and that both step settings and a pending form go
+through `SettingsFields`), and 2 more against a real Postgres in `workflow_admin_api` (a pinned
+version read back for the canvas, and the trigger list's workflow columns).
+
 ## Workflows, phases 4 and 5: suspension, and the admin API
 
 A run that **stops** — for a while, for a person, or because somebody said so — and the typed

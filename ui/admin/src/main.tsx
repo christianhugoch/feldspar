@@ -12,6 +12,12 @@
 // `data:` URI and its font stack falls back to the system UI font, so nothing
 // is fetched from another origin.
 import "./vendor/tabler/tabler.min.css";
+// React Flow's stylesheet, for the workflow editor's canvas (§10.3, decision 9).
+// Imported through the bundler like Tabler's — same origin, one `<link>`, no CDN
+// and no `@import` — and it is self-contained: no webfonts and no remote images,
+// so `style-src 'self'`, `font-src 'self'` and `img-src 'self' data:` are all it
+// needs. Before `admin.css`, so the node styling there wins.
+import "@xyflow/react/dist/style.css";
 import "./admin.css";
 
 import { StrictMode } from "react";

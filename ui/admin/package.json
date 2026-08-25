@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Saltcorn admin SPA — React + TypeScript + react-bootstrap over the generated typed API client (design §12).",
+  "description": "Saltcorn admin SPA \u2014 React + TypeScript + react-bootstrap over the generated typed API client (design \u00a712).",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -12,6 +12,8 @@
     "gen-client": "cargo run -q -p sc-api --example emit_admin_client -- src/client.ts"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^1.1.8",
+    "@xyflow/react": "12.10.2",
     "bootstrap": "^5.3.3",
     "monaco-editor": "^0.54.0",
     "react": "^18.3.1",

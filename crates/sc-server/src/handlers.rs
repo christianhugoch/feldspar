@@ -2079,17 +2079,25 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let stored = list_triggers(&catalog).await?;
                 let dispatcher = triggers_of(&apps)?;
                 let issues = dispatcher.triggers()?;
-                let out: Vec<Json> = stored
-                    .iter()
-                    .map(|t| {
-                        let problem = issues
-                            .issues()
-                            .iter()
-                            .find(|i| i.trigger == t.name)
-                            .map(|i| i.problem.clone());
-                        trigger_json(t, problem)
-                    })
-                    .collect();
+                let mut out: Vec<Json> = Vec::with_capacity(stored.len());
+                for t in &stored {
+                    let problem = issues
+                        .issues()
+                        .iter()
+                        .find(|i| i.trigger == t.name)
+                        .map(|i| i.problem.clone());
+                    // One extra read per **workflow** trigger, and none for an
+                    // action one: a list of triggers is short, and "workflow" on
+                    // its own says nothing that tells one apart from another.
+                    let workflow = if t.body == TriggerBody::Workflow {
+                        sc_workflow::current_workflow(&catalog, t.id)
+                            .await?
+                            .map(|w| (w.version, w.steps.len()))
+                    } else {
+                        None
+                    };
+                    out.push(trigger_json_with(t, problem, workflow));
+                }
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
@@ -2277,12 +2285,32 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let dispatcher = triggers_of(&apps)?;
                 let trigger = require_workflow_trigger(&catalog, ctx.path_param("id")?).await?;
                 let versions = sc_workflow::list_workflow_versions(&catalog, trigger.id).await?;
-                // The newest version is the current one; a trigger created
-                // before its first save has none, which is a real state and is
-                // answered as an empty canvas rather than as an error.
-                let workflow = match versions.first() {
-                    Some(version) => version.workflow.clone(),
-                    None => sc_workflow::Workflow::empty(trigger.id),
+                // A specific version when the caller asked for one — which is
+                // what the run detail screen does, because a run is pinned to the
+                // version it started on and drawing it on today's steps would be
+                // drawing the wrong program. Otherwise the newest, which is the
+                // current one; a trigger created before its first save has none,
+                // which is a real state and is answered as an empty canvas rather
+                // than as an error.
+                let asked = match ctx
+                    .query_get("version")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(text) => Some(
+                        text.parse::<u32>()
+                            .map_err(|_| Error::invalid(format!("`{text}` is not a version")))?,
+                    ),
+                    None => None,
+                };
+                let workflow = match asked {
+                    Some(version) => {
+                        sc_workflow::require_workflow_version(&catalog, trigger.id, version).await?
+                    }
+                    None => match versions.first() {
+                        Some(version) => version.workflow.clone(),
+                        None => sc_workflow::Workflow::empty(trigger.id),
+                    },
                 };
                 Ok(HandlerResponse::ok(
                     workflow_json(&catalog, &dispatcher, &trigger, &workflow, &versions).await?,
@@ -5037,7 +5065,22 @@ fn reproject_apps(apps: &AppMounts) {
 /// One stored trigger as JSON, with the reason it is not usable when there is
 /// one (§10.2 — a broken trigger stays listed and editable).
 pub(crate) fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
-    json!({
+    trigger_json_with(trigger, problem, None)
+}
+
+/// The same, plus the live version of a **workflow** body: which version is
+/// current and how many steps it has.
+///
+/// A separate entry point rather than a fifth argument on every caller, because
+/// only the list has the answer to hand: creating or updating a trigger has just
+/// written the row and has not read the versions table, and answering `null`
+/// there is honest — the editor is the next screen, and it asks.
+pub(crate) fn trigger_json_with(
+    trigger: &Trigger,
+    problem: Option<String>,
+    workflow: Option<(u32, usize)>,
+) -> Json {
+    let mut out = json!({
         "id": trigger.id.0,
         "name": trigger.name,
         "description": trigger.description,
@@ -5061,7 +5104,16 @@ pub(crate) fn trigger_json(trigger: &Trigger, problem: Option<String>) -> Json {
         // The scheduler's record, RFC 3339 — what the list shows so an admin can
         // see that a nightly job is actually running.
         "last_run_at": trigger.last_run_at.map(|t| t.to_rfc3339()),
-    })
+        // The workflow half, null on an action body and on a workflow whose
+        // versions the caller did not read.
+        "workflow_version": Json::Null,
+        "workflow_steps": Json::Null,
+    });
+    if let (Some(map), Some((version, steps))) = (out.as_object_mut(), workflow) {
+        map.insert("workflow_version".to_owned(), json!(version));
+        map.insert("workflow_steps".to_owned(), json!(steps));
+    }
+    out
 }
 
 /// A trigger from a request body, under the id the caller's route decided.

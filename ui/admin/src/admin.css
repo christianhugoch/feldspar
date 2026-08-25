@@ -933,3 +933,137 @@ div.navbar-brand > a:hover {
   user-select: all;
   margin-bottom: 0;
 }
+
+/* ---------------------------------------------------------------------------
+   The workflow editor (§10.3, phase 6)
+
+   React Flow brings its own stylesheet (imported through the bundler, so it is
+   one same-origin `<link>` like everything else — no CDN and no `@import`, the
+   rule the admin theme test keeps). What is here is the *nodes*, which are ours:
+   React Flow draws no node content at all, so a step's card, its colour and the
+   marks a run leaves on it are entirely this file's job.
+
+   Colours come from Tabler's own `--tblr-<tone>` variables rather than from
+   literals, so the canvas follows the theme into dark mode with the rest of the
+   admin.
+   --------------------------------------------------------------------------- */
+
+.workflow-canvas {
+  height: 34rem;
+  /* React Flow measures its container; a percentage height inside a card body
+     with no height of its own collapses to nothing. */
+  min-height: 20rem;
+  width: 100%;
+}
+
+.wf-node {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--tblr-border-color);
+  border-left: 4px solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius);
+  background: var(--tblr-bg-surface);
+  color: var(--tblr-body-color);
+  font-size: 0.8125rem;
+  overflow: hidden;
+}
+
+/* One colour per kind, so the shape of a workflow — where it waits, where it
+   asks a person — reads at a glance without opening five steps. */
+.wf-node-action {
+  border-left-color: var(--tblr-blue);
+}
+.wf-node-set {
+  border-left-color: var(--tblr-azure);
+}
+.wf-node-for_each {
+  border-left-color: var(--tblr-purple);
+}
+.wf-node-wait {
+  border-left-color: var(--tblr-yellow);
+}
+.wf-node-user_form {
+  border-left-color: var(--tblr-green);
+}
+
+.wf-node-selected {
+  outline: 2px solid var(--tblr-primary);
+  outline-offset: 1px;
+}
+
+/* Something is wrong with this step: the same red the triggers list uses for a
+   trigger that is stored but not usable, and for the same reason — it is still
+   there, still editable, and editing it is the repair. */
+.wf-node-problem {
+  border-color: var(--tblr-red);
+}
+
+.wf-node-head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.6875rem;
+}
+
+.wf-node-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-node-summary {
+  color: var(--tblr-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A run drawn on the canvas: visited steps keep their colour, the current one is
+   ringed, the failed one is red, and everything the run did not touch stays
+   plain — so the path is what stands out rather than the graph. */
+.wf-node-visited {
+  box-shadow: 0 0 0 1px var(--tblr-primary);
+}
+.wf-node-current {
+  box-shadow: 0 0 0 2px var(--tblr-primary);
+}
+.wf-node-failed {
+  box-shadow: 0 0 0 2px var(--tblr-red);
+}
+
+.wf-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--tblr-border-color);
+  border-radius: 999px;
+  background: var(--tblr-bg-surface);
+  color: var(--tblr-secondary);
+  font-size: 0.6875rem;
+}
+
+/* The loop-body handle, off the right-hand side, so "what runs per item" and
+   "what runs after the loop" are two edges an admin can tell apart. */
+.wf-handle-body {
+  background: var(--tblr-purple);
+}
+
+/* Edges. React Flow styles `.react-flow__edge-path`; these ride on the class we
+   put on the edge itself. */
+.wf-edge-dashed .react-flow__edge-path {
+  stroke-dasharray: 6 4;
+}
+
+.wf-edge-taken .react-flow__edge-path {
+  stroke: var(--tblr-primary);
+  stroke-width: 2;
+}
+
+/* On a run's canvas, the edges it did not take fade rather than disappear: the
+   shape of the whole program is the context that makes the path mean something. */
+.wf-edge-untaken .react-flow__edge-path {
+  opacity: 0.35;
+}

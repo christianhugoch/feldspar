@@ -137,16 +137,17 @@ export type SetUserDisabledResponse = { id: string; email: string; role: number;
 export type ForceLogoutUserResponse = { ok: boolean };
 export type BecomeUserResponse = { id: string; email: string; role: number };
 export type SetRandomPasswordResponse = { email: string; password: string };
-export type ListTriggersResponse = Array<{ id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null }>;
+export type ListTriggersResponse = Array<{ id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null; workflow_version?: number | null; workflow_steps?: number | null }>;
 export type CreateTriggerRequest = { name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null };
-export type CreateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null };
+export type CreateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null; workflow_version?: number | null; workflow_steps?: number | null };
 export type UpdateTriggerRequest = { name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null };
-export type UpdateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null };
+export type UpdateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null; workflow_version?: number | null; workflow_steps?: number | null };
 export type DeleteTriggerResponse = { deleted: boolean };
 export type RunTriggerRequest = unknown;
 export type RunTriggerResponse = { result: unknown };
 export type ListActionsQuery = { table?: string };
 export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; workflow_step: boolean }>;
+export type GetWorkflowQuery = { version?: number };
 export type GetWorkflowResponse = { id: string; name: string; channel?: string | null; version: number; workflow: unknown; issues: Array<{ step?: string | null; problem: string }>; versions: Array<{ version: number; description: string; created_at: string; created_by?: string | null }> };
 export type SaveWorkflowRequest = { workflow: unknown; description?: string | null };
 export type SaveWorkflowResponse = { id: string; name: string; channel?: string | null; version: number; workflow: unknown; issues: Array<{ step?: string | null; problem: string }>; versions: Array<{ version: number; description: string; created_at: string; created_by?: string | null }> };
@@ -265,7 +266,7 @@ export interface ApiClient {
   deleteTrigger(id: string): Promise<DeleteTriggerResponse>;
   runTrigger(id: string, body: RunTriggerRequest): Promise<RunTriggerResponse>;
   listActions(query?: ListActionsQuery): Promise<ListActionsResponse>;
-  getWorkflow(id: string): Promise<GetWorkflowResponse>;
+  getWorkflow(id: string, query?: GetWorkflowQuery): Promise<GetWorkflowResponse>;
   saveWorkflow(id: string, body: SaveWorkflowRequest): Promise<SaveWorkflowResponse>;
   revertWorkflow(id: string, body: RevertWorkflowRequest): Promise<RevertWorkflowResponse>;
   listWorkflowRuns(id: string, query?: ListWorkflowRunsQuery): Promise<ListWorkflowRunsResponse>;
@@ -1101,8 +1102,11 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("listActions", res);
       return (await res.json()) as ListActionsResponse;
     },
-    async getWorkflow(id) {
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}`, {
+    async getWorkflow(id, query) {
+      const search = new URLSearchParams();
+      if (query?.version !== undefined && query?.version !== null) search.append("version", String(query?.version));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/workflows/${id}${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });

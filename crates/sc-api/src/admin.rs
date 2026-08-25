@@ -1650,6 +1650,13 @@ pub fn admin_endpoints() -> EndpointSet {
             Method::Get,
             api().lit("workflows").param("id", ValueType::Uuid),
         )
+        // Which version to read, defaulting to the current one. A run is
+        // **pinned** to the version it started on (decision 2), so the screen
+        // that draws a run on the canvas it ran on has to be able to ask for
+        // that version rather than for today's — otherwise "the path taken,
+        // highlighted on the same graph the admin drew" would be the path of one
+        // program drawn on the picture of another.
+        .query([QueryParam::new("version", ValueType::Int)])
         .output(workflow_schema())
         .auth(AuthRequirement::admin()),
     );
@@ -2928,6 +2935,20 @@ fn trigger_schema() -> TypeSchema {
     fields.push(StructField::new(
         "last_run_at",
         TypeSchema::optional(TypeSchema::timestamp()),
+    ));
+    // The workflow half, and read-only for the same reason `last_run_at` is: a
+    // workflow's steps are versions of their own, written through the workflow
+    // endpoints. Null on an action body. The list shows them because "a
+    // workflow" is not a useful description of a trigger — how many steps it has
+    // and which version is live is what tells one apart from another, and the
+    // alternative was one `getWorkflow` per row.
+    fields.push(StructField::new(
+        "workflow_version",
+        TypeSchema::optional(TypeSchema::int()),
+    ));
+    fields.push(StructField::new(
+        "workflow_steps",
+        TypeSchema::optional(TypeSchema::int()),
     ));
     TypeSchema::Struct(fields)
 }
