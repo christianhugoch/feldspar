@@ -67,7 +67,8 @@ impl Action for DeleteRows {
         let mut ids = Vec::with_capacity(matched.len());
         for values in &matched {
             let (id, id_json) = row_id(&table, &pk, values)?;
-            rows::delete_row_ctx(ctx.catalog, &table, &id, Some(&authority)).await?;
+            rows::delete_row_in(ctx.catalog, &table, &id, Some(&authority), scope.executor())
+                .await?;
             ids.push(id_json);
         }
         Ok(json!({ "deleted": ids.len(), "ids": ids }))

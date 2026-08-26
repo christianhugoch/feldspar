@@ -15,7 +15,7 @@
 //! endpoint's [`AuthRequirement`](crate::AuthRequirement) first, so every API
 //! surface goes through the same §7 layer.
 
-use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table, TableWrite, WriteOp};
+use sc_catalog::{CallerContext, Catalog, DataFieldKind, SharedTx, Table, TableWrite, WriteOp};
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
 use sc_expr::{CalcFields, Env, Formula, TranslateError, UserEnv, translate_value};
@@ -32,11 +32,11 @@ use crate::convert::{json_to_value, value_to_json};
 ///
 /// Almost always [`Pooled`](Executor::Pooled): the table's provider takes a
 /// connection from the pool, or — on a table with row-level security — a
-/// one-statement transaction that sets the caller GUCs first. The exception is a
-/// caller holding **one transaction open across many rows**, which is what a CSV
-/// import is (§13.1): the writes have to share a transaction for the foreign-key
-/// checks to be deferrable to its commit, and the reads have to share it or they
-/// would not see the rows the import has already written.
+/// one-statement transaction that sets the caller GUCs first. The exceptions are
+/// the two callers that hold **one transaction open across many writes**: a CSV
+/// import (§13.1), whose foreign-key checks are deferred to its commit and whose
+/// reads must see the rows it has already written, and a **workflow step**
+/// (§10.3, decision 6), whose writes commit with the run's advance or not at all.
 ///
 /// It is an explicit parameter rather than something hidden in the context
 /// because it changes when a write becomes visible and when it becomes
@@ -44,15 +44,47 @@ use crate::convert::{json_to_value, value_to_json};
 /// written**, before the commit (a trigger reading the table on another
 /// connection will not see them yet), and a rollback undoes rows whose events
 /// have already gone out.
-pub enum Executor<'a> {
+#[derive(Clone, Default)]
+pub enum Executor {
     /// The ordinary path: the table's provider, or an RLS caller-context
     /// transaction when the table has policies.
+    #[default]
     Pooled,
-    /// A transaction the caller opened, set up and will commit. Every statement
-    /// joins it; the caller-context GUCs are the caller's to have set (see
-    /// [`sc_catalog::set_caller_context`]), because they are `SET LOCAL` to this
-    /// transaction and nothing here can add them afterwards.
-    Transaction(&'a mut dyn sc_db::Transaction),
+    /// A transaction the caller opened and will finish. Every statement for a
+    /// table that transaction [`serves`](sc_catalog::SharedTx::serves) joins it,
+    /// carrying its own caller — the GUCs are re-applied per writer rather than
+    /// set once, because a shared transaction has more than one (§10.3).
+    ///
+    /// A table it does **not** serve — one on another database connection, or one
+    /// a module provides — takes the pooled path instead: those rows are not
+    /// reachable from this transaction, and pretending otherwise would write them
+    /// somewhere else entirely.
+    Transaction(SharedTx),
+}
+
+impl Executor {
+    /// The executor for an optional transaction: the caller's when it has one,
+    /// [`Pooled`](Executor::Pooled) when it does not.
+    ///
+    /// Every caller that *may* be inside a step transaction spells the choice
+    /// this way, so "am I in one?" is asked once, here, instead of at each of the
+    /// row layer's entry points.
+    pub fn of(tx: Option<SharedTx>) -> Executor {
+        match tx {
+            Some(tx) => Executor::Transaction(tx),
+            None => Executor::Pooled,
+        }
+    }
+
+    /// The transaction this executor runs `table`'s statements in, if any: `None`
+    /// for the pooled path, and `None` for a table the transaction does not
+    /// serve.
+    fn serving(&self, table: &Table) -> Option<&SharedTx> {
+        match self {
+            Executor::Pooled => None,
+            Executor::Transaction(tx) => tx.serves(table).then_some(tx),
+        }
+    }
 }
 
 /// Every row of `table`, as a JSON array of objects.
@@ -304,12 +336,26 @@ pub async fn list_row_values(
     query: &RowQuery,
     context: Option<&CallerContext>,
 ) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
-    let rows = run_read(
+    list_row_values_in(catalog, table, query, context, &Executor::Pooled).await
+}
+
+/// [`list_row_values`] on a caller's [`Executor`] — the same read, inside the
+/// caller's transaction, which is the only way to see what that transaction has
+/// written but not yet committed.
+pub async fn list_row_values_in(
+    catalog: &Catalog,
+    table: &Table,
+    query: &RowQuery,
+    context: Option<&CallerContext>,
+    executor: &Executor,
+) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
+    let rows = run_read_in(
         catalog,
         table,
         &read_select(catalog, table, query)?,
         context,
         query.in_caller_context,
+        executor,
     )
     .await?;
     Ok(rows.iter().map(row_values).collect())
@@ -495,7 +541,7 @@ pub async fn select_values(
     filter: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
-    select_values_in(catalog, table, filter, context, &mut Executor::Pooled).await
+    select_values_in(catalog, table, filter, context, &Executor::Pooled).await
 }
 
 /// [`select_values`] on a caller's [`Executor`] — a read inside the caller's
@@ -506,7 +552,7 @@ pub async fn select_values_in(
     table: &Table,
     filter: Option<Expr>,
     context: Option<&CallerContext>,
-    executor: &mut Executor<'_>,
+    executor: &Executor,
 ) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
     let mut columns = vec![Projection::all()];
     columns.extend(calc_projections(catalog, table)?);
@@ -534,7 +580,7 @@ pub async fn create_row_ctx(
     body: &Json,
     context: Option<&CallerContext>,
 ) -> Result<Json> {
-    create_row_in(catalog, table, body, context, &mut Executor::Pooled).await
+    create_row_in(catalog, table, body, context, &Executor::Pooled).await
 }
 
 /// [`create_row_ctx`] on a caller's [`Executor`] — the same insert, the same
@@ -544,7 +590,7 @@ pub async fn create_row_in(
     table: &Table,
     body: &Json,
     context: Option<&CallerContext>,
-    executor: &mut Executor<'_>,
+    executor: &Executor,
 ) -> Result<Json> {
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
@@ -568,7 +614,16 @@ pub async fn create_row_in(
         .next()
         .ok_or_else(|| Error::not_found("the insert was refused"))?;
     let row = row_to_json(&row);
-    emit(catalog, table, WriteOp::Insert, &row, None, context).await;
+    emit(
+        catalog,
+        table,
+        WriteOp::Insert,
+        &row,
+        None,
+        context,
+        executor,
+    )
+    .await;
     Ok(row)
 }
 
@@ -592,16 +647,7 @@ pub(crate) async fn update_row_guarded(
     guard: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<Json> {
-    update_row_guarded_in(
-        catalog,
-        table,
-        id,
-        body,
-        guard,
-        context,
-        &mut Executor::Pooled,
-    )
-    .await
+    update_row_guarded_in(catalog, table, id, body, guard, context, &Executor::Pooled).await
 }
 
 /// [`update_row_ctx`] on a caller's [`Executor`] — see [`create_row_in`].
@@ -611,19 +657,19 @@ pub async fn update_row_in(
     id: &str,
     body: &Json,
     context: Option<&CallerContext>,
-    executor: &mut Executor<'_>,
+    executor: &Executor,
 ) -> Result<Json> {
     update_row_guarded_in(catalog, table, id, body, None, context, executor).await
 }
 
-async fn update_row_guarded_in(
+pub(crate) async fn update_row_guarded_in(
     catalog: &Catalog,
     table: &Table,
     id: &str,
     body: &Json,
     guard: Option<Expr>,
     context: Option<&CallerContext>,
-    executor: &mut Executor<'_>,
+    executor: &Executor,
 ) -> Result<Json> {
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
@@ -663,7 +709,16 @@ async fn update_row_guarded_in(
         .next()
         .ok_or_else(|| Error::not_found(format!("no row with {pk} = {id}")))?;
     let row = row_to_json(&row);
-    emit(catalog, table, WriteOp::Update, &row, old_row, context).await;
+    emit(
+        catalog,
+        table,
+        WriteOp::Update,
+        &row,
+        old_row,
+        context,
+        executor,
+    )
+    .await;
     Ok(row)
 }
 
@@ -690,6 +745,28 @@ pub(crate) async fn delete_row_guarded(
     guard: Option<Expr>,
     context: Option<&CallerContext>,
 ) -> Result<Json> {
+    delete_row_guarded_in(catalog, table, id, guard, context, &Executor::Pooled).await
+}
+
+/// [`delete_row_ctx`] on a caller's [`Executor`] — see [`create_row_in`].
+pub async fn delete_row_in(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    context: Option<&CallerContext>,
+    executor: &Executor,
+) -> Result<Json> {
+    delete_row_guarded_in(catalog, table, id, None, context, executor).await
+}
+
+pub(crate) async fn delete_row_guarded_in(
+    catalog: &Catalog,
+    table: &Table,
+    id: &str,
+    guard: Option<Expr>,
+    context: Option<&CallerContext>,
+    executor: &Executor,
+) -> Result<Json> {
     let pk = single_pk(table)?;
     let delete = Delete {
         table: table.name.clone(),
@@ -701,12 +778,21 @@ pub(crate) async fn delete_row_guarded(
         // good answer.
         returning: vec![Projection::all()],
     };
-    let rows = run_write(catalog, table, Statement::from(delete), context).await?;
+    let rows = run_write_in(catalog, table, Statement::from(delete), context, executor).await?;
     let Some(row) = rows.first() else {
         return Err(Error::not_found(format!("no row with {pk} = {id}")));
     };
     let row = row_to_json(row);
-    emit(catalog, table, WriteOp::Delete, &row, None, context).await;
+    emit(
+        catalog,
+        table,
+        WriteOp::Delete,
+        &row,
+        None,
+        context,
+        executor,
+    )
+    .await;
     Ok(row)
 }
 
@@ -727,6 +813,7 @@ async fn emit(
     row: &Json,
     old_row: Option<Json>,
     caller: Option<&CallerContext>,
+    executor: &Executor,
 ) {
     if !catalog.observes_writes(&table.name, op) {
         return;
@@ -737,6 +824,11 @@ async fn emit(
         row: row.clone(),
         old_row,
         caller,
+        // The transaction the write was made in travels with the event, so what
+        // a listening trigger writes about it lands in the same transaction and
+        // shares its fate (§10.3, decision 6). `None` on the pooled path, which
+        // is every write outside a step or an import.
+        tx: executor.serving(table).cloned(),
     };
     if let Err(e) = catalog.emit_write(write).await {
         eprintln!(
@@ -759,7 +851,7 @@ async fn read_row_in(
     pk: &str,
     id: &str,
     context: Option<&CallerContext>,
-    executor: &mut Executor<'_>,
+    executor: &Executor,
 ) -> Result<Option<Json>> {
     let filter = pk_filter(table, pk, id)?;
     let select = read_select(catalog, table, &RowQuery::new().where_(Some(filter)))?;
@@ -1119,7 +1211,7 @@ pub(crate) async fn run_read(
         select,
         context,
         reaches_rls,
-        &mut Executor::Pooled,
+        &Executor::Pooled,
     )
     .await
 }
@@ -1133,13 +1225,14 @@ pub(crate) async fn run_read_in(
     select: &Select,
     context: Option<&CallerContext>,
     reaches_rls: bool,
-    executor: &mut Executor<'_>,
+    executor: &Executor,
 ) -> Result<Vec<Row>> {
-    if let Executor::Transaction(tx) = executor {
+    if let Some(tx) = executor.serving(table) {
+        // The caller travels with the statement here, not with the transaction:
+        // a step transaction has several writers, and each one's statements are
+        // decided by the policies as *itself* (`SharedTx::run`).
         return tx
-            .query(&Statement::Select(Box::new(select.clone())))
-            .await?
-            .try_collect()
+            .run(context, &Statement::Select(Box::new(select.clone())))
             .await;
     }
     match in_context(table, context, reaches_rls) {
@@ -1162,31 +1255,20 @@ pub(crate) async fn run_read_in(
     }
 }
 
-/// Run a write statement, collecting `RETURNING` rows — through an RLS
-/// caller-context transaction on an RLS table, else via the provider.
-async fn run_write(
-    catalog: &Catalog,
-    table: &Table,
-    statement: Statement,
-    context: Option<&CallerContext>,
-) -> Result<Vec<Row>> {
-    run_write_in(catalog, table, statement, context, &mut Executor::Pooled).await
-}
-
-/// [`run_write`] on a caller's executor — see [`run_read_in`].
+/// Run a write statement, collecting `RETURNING` rows — on the caller's
+/// executor: their transaction when it serves this table, else an RLS
+/// caller-context transaction on an RLS table, else the provider (see
+/// [`run_read_in`]).
 async fn run_write_in(
     catalog: &Catalog,
     table: &Table,
     statement: Statement,
     context: Option<&CallerContext>,
-    executor: &mut Executor<'_>,
+    executor: &Executor,
 ) -> Result<Vec<Row>> {
-    let outcome = match executor {
-        Executor::Transaction(tx) => match tx.query(&statement).await {
-            Ok(stream) => stream.try_collect().await,
-            Err(e) => Err(e),
-        },
-        _ => match in_context(table, context, false) {
+    let outcome = match executor.serving(table) {
+        Some(tx) => tx.run(context, &statement).await,
+        None => match in_context(table, context, false) {
             Some(context) => sc_catalog::run_in_context(catalog, context, &statement).await,
             None => match catalog.provider(table)?.write(&statement).await {
                 Ok(stream) => stream.try_collect().await,

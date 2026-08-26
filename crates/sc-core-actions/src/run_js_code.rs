@@ -347,6 +347,10 @@ impl Action for RunJsCode {
         let host = TableHost::new(ctx.catalog)
             .caused_by(ctx.event.role, ctx.event.user.clone())
             .chained(ctx.chain.clone())
+            // The step's transaction, when this body is a workflow step: what it
+            // writes commits with the step or is rolled back with it, and what it
+            // reads sees what the step has already written (§10.3, decision 6).
+            .in_transaction(ctx.transaction())
             .with_evaluator(Some(Arc::clone(evaluator)));
         // The network, on the same terms: borrowed for this run, bounded by the
         // run's own clock, and counted on a budget of its own.
@@ -365,6 +369,7 @@ impl Action for RunJsCode {
             TriggerRunHost::new(d, ctx.catalog)
                 .caused_by(ctx.event.role, ctx.event.user.clone())
                 .chained(ctx.chain.clone())
+                .in_transaction(ctx.transaction())
         });
         // The module functions, when this server has modules installed and
         // loaded — and nothing at all when it does not, so a body that names

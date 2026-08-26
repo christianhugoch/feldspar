@@ -75,10 +75,34 @@ pub async fn set_caller_context(
     tx: &mut dyn sc_db::Transaction,
     context: &CallerContext,
 ) -> Result<()> {
+    // **Both**, always. A transaction that runs one statement takes the whole
+    // pair from this one caller, and one that runs many ([`SharedTx`], §10.3's
+    // step transaction) hands each writer the pair *it* means: a `SET LOCAL`
+    // outlives its statement, so leaving one of the two alone would let the last
+    // writer's identity decide the next writer's policy. Anonymous is spelled
+    // `''` rather than left unset, which both policy clauses fold to `NULL`
+    // (`NULLIF(current_setting(…), '')`) — so it reaches them as no access.
+    //
+    // [`SharedTx`]: crate::SharedTx
     tx.set_local(ROLE_GUC, &context.role.to_string()).await?;
-    if let Some(user_json) = context.user_json() {
-        tx.set_local(USER_GUC, &user_json).await?;
-    }
+    tx.set_local(USER_GUC, context.user_json().as_deref().unwrap_or(""))
+        .await?;
+    Ok(())
+}
+
+/// Clear the caller-context GUCs on a transaction the caller is holding open, so
+/// the next statement on it reaches the policies as **no caller**.
+///
+/// The other half of [`set_caller_context`], and it exists because a `SET LOCAL`
+/// outlives its statement: on a shared transaction ([`SharedTx`](crate::SharedTx))
+/// a statement with no caller must not inherit the last writer's identity. The
+/// empty string rather than a role nobody has — both policy clauses fold `''` to
+/// `NULL` (`NULLIF(current_setting(…), '')`), and `NULL` is what every one of
+/// them treats as no access, while a *number* would be a role and role 0 would be
+/// more privileged than the admin.
+pub async fn clear_caller_context(tx: &mut dyn sc_db::Transaction) -> Result<()> {
+    tx.set_local(ROLE_GUC, "").await?;
+    tx.set_local(USER_GUC, "").await?;
     Ok(())
 }
 
@@ -140,7 +164,7 @@ async fn run_in_context_mode(
 /// SQLSTATE in the text it formats (§5's constraint work needed the code for the
 /// same reason this did), and the message is kept as the fallback for a driver
 /// that does not.
-fn map_policy_violation(e: Error) -> Error {
+pub(crate) fn map_policy_violation(e: Error) -> Error {
     let chain = sc_error::format_chain(&e);
     if chain.contains("row-level security") || chain.contains("42501") {
         Error::not_found("no such row")

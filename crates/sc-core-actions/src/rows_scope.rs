@@ -26,10 +26,18 @@
 //! that reads `user` sees who caused it.
 //!
 //! On an RLS-enforced table that caller becomes the `SET LOCAL` GUCs the policies
-//! read; off one it sets nothing and the write takes the ordinary pooled path,
-//! but it still travels — because the **event** this write raises has to say who
-//! caused it, and it carries the **chain** of triggers that led here, which is
-//! what lets `Event::firing` see how deep a cascade already is (§10.2).
+//! read; off one nothing reads them, but it still travels — because the **event**
+//! this write raises has to say who caused it, and it carries the **chain** of
+//! triggers that led here, which is what lets `Event::firing` see how deep a
+//! cascade already is (§10.2).
+//!
+//! ## Where the write runs
+//!
+//! Wherever the step says: [`Scope::executor`] is the transaction a **workflow
+//! step** hands the action through `ActionContext::transaction` (§10.3, decision
+//! 6), and the pooled path for a trigger's own action body. One line at each call
+//! site, and the same line in each of the three — an action does not get to have
+//! an opinion about whether it is part of a larger unit of work.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -91,6 +99,11 @@ pub(crate) fn writable_field(table: &Table, field: &str) -> Result<()> {
 pub(crate) struct Scope<'a> {
     trigger: &'a str,
     catalog: &'a Catalog,
+    /// The transaction this action's reads and writes belong in, when it has one
+    /// — a workflow step's (§10.3, decision 6). The whole of what a row action
+    /// has to know about it: it is handed to the row layer as an
+    /// [`Executor`](rows::Executor) and everything else follows.
+    executor: rows::Executor,
     /// The caller, for the authority a write runs under.
     user_json: Option<&'a Json>,
     /// The triggers that led here, including this one — what a write this action
@@ -113,6 +126,7 @@ impl<'a> Scope<'a> {
         Ok(Scope {
             trigger: ctx.trigger,
             catalog: ctx.catalog,
+            executor: rows::Executor::of(ctx.transaction()),
             user_json: event.user.as_ref(),
             chain: ctx.chain.clone(),
             evaluator: ctx.evaluator()?,
@@ -220,6 +234,12 @@ impl<'a> Scope<'a> {
     /// reports as its caller, which is the same question answered for the same
     /// write. The chain is what bounds the cascade: an event raised by this write
     /// carries it, so `Event::firing` can see how deep it already is.
+    /// Where this action's statements run: the step's transaction when there is
+    /// one, and the pooled path when there is not.
+    pub(crate) fn executor(&self) -> &rows::Executor {
+        &self.executor
+    }
+
     pub(crate) fn authority(&self) -> CallerContext {
         CallerContext::new(ROLE_ADMIN, self.user_json.cloned()).chained(self.chain.clone())
     }
@@ -247,7 +267,14 @@ impl<'a> Scope<'a> {
         table: &Table,
         filter: Option<Expr>,
     ) -> Result<Vec<BTreeMap<String, Value>>> {
-        rows::select_values(self.catalog, table, filter, Some(&self.authority())).await
+        rows::select_values_in(
+            self.catalog,
+            table,
+            filter,
+            Some(&self.authority()),
+            &self.executor,
+        )
+        .await
     }
 
     /// An action failure attributed to the trigger and the setting that caused it.

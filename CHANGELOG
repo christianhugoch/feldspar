@@ -2,6 +2,64 @@
 
 Changes in reverse chronological order.
 
+## Workflows, phase 10: each step runs in one transaction
+
+GOALS asks for it in those words, and phase 3 could not honour it: a step's row writes were
+individual statements, so a step that failed half way left the rows it had already written and
+the run then recorded a failure that had not undone anything. Decision 6 carried the gap past the
+milestone with a note about `CallerContext`. This closes it — the rows a step writes and the fact
+that the run took the step are now **one commit or nothing**.
+
+- **`sc_catalog::SharedTx`**: one open transaction several writers hold at once. A transaction
+  handle is a `&mut` thing, and a step's writes are made several frames below it — by an action,
+  by the row layer, by the triggers those writes cascade into — none of which can be handed a
+  unique borrow. So the handle became an `Arc` over an async mutex, cloned into every frame that
+  might write, with each statement holding the lock for as long as it runs and no longer (one
+  connection runs one statement at a time anyway). It **begins on its first statement**, so a
+  step that calls an HTTP endpoint and writes nothing holds no transaction while it waits, and it
+  serves **one database** (`SharedTx::serves`): a write to a secondary connection or a
+  module-served table takes the pooled path rather than being sent somewhere it does not belong.
+- **The caller travels with the statement, not with the transaction.** A shared transaction has
+  more than one writer — the step writes as the admin, a trigger it cascades into writes as
+  itself — and a `SET LOCAL` outlives its statement. `SharedTx::run` therefore re-applies the
+  caller GUCs whenever the writer changes, and *clears* them (to `''`, which both policy clauses
+  fold to `NULL` through their `NULLIF`) for a statement with no caller, so a shared transaction
+  can never lend one writer's identity to the next. `set_caller_context` now always sets both
+  GUCs and `clear_caller_context` is its other half; `crates/sc-catalog/tests/shared_tx.rs` pins
+  all three, and caught the version of this that spelled "nobody" as role 0 — which the role
+  clause reads as *more* privileged than the admin.
+- **`rows::Executor::Transaction` now carries a `SharedTx`** instead of a borrowed handle, so it
+  has no lifetime and can be stored in the `&self` structures that need it. Every row-layer entry
+  point takes `&Executor` and joins the transaction when it serves the table
+  (`create_row_in`/`update_row_in`/`delete_row_in`/`list_row_values_in`/`select_values_in`/…);
+  the CSV import, the other holder of one, moved onto the same representation and its
+  per-statement caller now travels the same way.
+- **The cascade is part of the step.** `TableWrite::tx` carries the transaction into the emit
+  seam, and `TriggerDispatcher::{fire_in, dispatch_in, run_trigger_in}` plus `fire_trigger_in`
+  hand it to each listening trigger's `ActionContext` — so a trigger that writes an audit row for
+  a row the step wrote commits with the step or vanishes with it. A **workflow** fired from
+  inside a step is the one body the transaction does not reach into: a run is its own unit of
+  durability, as an agent run is.
+- **Actions ask for it in one line.** `ActionContext::{with_transaction, transaction}` is the
+  seam; `insert_row`, `update_rows` and `delete_rows` get it through `Scope::executor`, and
+  `run_js_code` hands it to its `TableHost`, its `TriggerRunHost` and its `db.sql()` — so a code
+  body in a step, `asUser()` writes included, lands where the step lands and *reads what the step
+  has already written*.
+- **`Driver::advance_on` opens one per advance**, hands it to the step, writes the advance and
+  the trace rows on it and commits **once**. A step that **fails** is rolled back first and its
+  failure recorded afterwards in a transaction of its own — a record that rolled back with the
+  failure would leave a run that had never heard of it.
+- **What is still at least once**, said plainly rather than left to be discovered: HTTP requests,
+  email, LLM calls, writes to another database connection or a module-served table, and the runs
+  (agent or workflow) a step starts. A statement that fails inside a step's transaction also ends
+  the step — Postgres refuses everything after it — and the row layer now says that in those
+  words instead of passing on `25P02`. §10.3, §11 and §7.3 of the design, the workflow tutorial
+  and TODO decision 6 all say the same thing again.
+- **Tests**: `crates/sc-workflow/tests/step_transaction.rs` drives real steps through the real row
+  layer against Postgres — a step's rows commit with its advance (and the step sees its own
+  uncommitted write), a failed step's rows are gone while the failure and its trace row are
+  recorded, and a cascading trigger's write lands wherever the step lands, both ways.
+
 ## Workflows, phase 9: the two gaps the documentation found
 
 Both deviations §10.3 recorded last week are closed, so the design document and the code say the

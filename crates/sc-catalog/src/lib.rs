@@ -41,6 +41,7 @@ mod provider;
 mod rls;
 mod table;
 mod table_meta;
+mod tx;
 
 pub use caller::CallerContext;
 pub use catalog::{Catalog, ProvidedTableIssue, SchemaStep};
@@ -79,8 +80,8 @@ pub use provider::{
     TableProviderKind,
 };
 pub use rls::{
-    Access, ROLE_GUC, disable_rls, disable_rls_sql, enable_rls, enable_rls_sql, run_in_context,
-    run_in_context_read_only, set_caller_context,
+    Access, ROLE_GUC, clear_caller_context, disable_rls, disable_rls_sql, enable_rls,
+    enable_rls_sql, run_in_context, run_in_context_read_only, set_caller_context,
 };
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
@@ -89,6 +90,7 @@ pub use table_meta::{
     bootstrap_table_meta, delete_table_meta, list_table_meta, load_table_meta,
     load_table_meta_by_name, orphan_table_meta, save_table_meta, save_table_meta_row,
 };
+pub use tx::SharedTx;
 
 #[cfg(test)]
 mod tests {

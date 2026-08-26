@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, SharedTx};
 use sc_email::Mailer;
 use sc_error::{Error, Result};
 use sc_expr::{Ambient, JsEvaluator, SchemaShape, value_from_json};
@@ -171,6 +171,20 @@ pub struct ActionContext<'a> {
     /// `None` where a context has none (client generation, a unit test), and an
     /// action that needs it says so by name rather than doing nothing.
     triggers: Option<&'a TriggerDispatcher>,
+    /// The transaction this action's writes belong in, when it has one.
+    ///
+    /// A **workflow step** has one (§10.3, decision 6): everything the step does
+    /// to the database — its own writes, and the writes of any trigger those
+    /// writes cascade into — commits with the run's advance or is rolled back
+    /// with it. An ordinary trigger's action has none, and writes as it always
+    /// did, one statement at a time.
+    ///
+    /// Cloned rather than borrowed ([`SharedTx`] is a handle on one transaction,
+    /// not the transaction): an action's write happens several frames below this
+    /// one, through a row layer that cannot be handed a unique borrow, and a
+    /// handle that can be cloned into those frames is what makes "one step, one
+    /// transaction" implementable at all.
+    tx: Option<SharedTx>,
     /// The run context: a JSON object the action may read and write — what the
     /// steps before this one left behind, and what this one contributes to.
     pub context: Attrs,
@@ -207,6 +221,7 @@ impl<'a> ActionContext<'a> {
             evaluator: None,
             mailer: None,
             triggers: None,
+            tx: None,
             context: Attrs::new(),
             in_run: false,
         }
@@ -229,6 +244,24 @@ impl<'a> ActionContext<'a> {
     pub fn with_triggers(mut self, triggers: &'a TriggerDispatcher) -> ActionContext<'a> {
         self.triggers = Some(triggers);
         self
+    }
+
+    /// Run this action **inside `tx`**: every row it writes joins that
+    /// transaction, and so does every write of every trigger it cascades into.
+    ///
+    /// What the workflow driver hands a step (§10.3, decision 6). An action that
+    /// writes rows does not have to know: it asks
+    /// [`transaction`](ActionContext::transaction) and hands what it gets to the
+    /// row layer, which is one line and the same line in each of them.
+    pub fn with_transaction(mut self, tx: SharedTx) -> ActionContext<'a> {
+        self.tx = Some(tx);
+        self
+    }
+
+    /// The transaction this action's writes belong in, if any — a **handle** on
+    /// it, so an action may keep it for as long as it is writing.
+    pub fn transaction(&self) -> Option<SharedTx> {
+        self.tx.clone()
     }
 
     /// Run this action as a **workflow step**, with the run's context in hand.

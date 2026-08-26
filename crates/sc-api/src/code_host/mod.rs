@@ -111,7 +111,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use sc_auth::{ROLE_ADMIN, ROLE_PUBLIC, User};
-use sc_catalog::{CallerContext, Catalog, Table};
+use sc_catalog::{CallerContext, Catalog, SharedTx, Table};
 use sc_error::{Error, Repr, Result};
 use sc_expr::{CodeHost, DEFAULT_MAX_HOST_CALLS, JsEvaluator};
 use serde_json::Value as Json;
@@ -186,6 +186,11 @@ pub struct TableHost<'a> {
     /// isolate — which is exactly why the two runtimes are separate (decision 1):
     /// one isolate serving both would deadlock here, waiting for itself.
     evaluator: Option<Arc<dyn JsEvaluator>>,
+    /// Where this run's statements go: a **workflow step's** transaction when the
+    /// body is a step of one (§10.3, decision 6), so what a code body writes
+    /// commits with the step or is rolled back with it, and the pooled path
+    /// everywhere else.
+    executor: rows::Executor,
     /// How many calls this run has made.
     calls: AtomicU32,
 }
@@ -200,8 +205,18 @@ impl<'a> TableHost<'a> {
             chain: Vec::new(),
             limits: HostLimits::default(),
             evaluator: None,
+            executor: rows::Executor::Pooled,
             calls: AtomicU32::new(0),
         }
+    }
+
+    /// Run every statement of this host **inside `tx`** — what a workflow step
+    /// hands a code body, so `db.orders.insert(…)` in a step lands where the
+    /// step lands (§10.3, decision 6).
+    #[must_use]
+    pub fn in_transaction(mut self, tx: Option<SharedTx>) -> TableHost<'a> {
+        self.executor = rows::Executor::of(tx);
+        self
     }
 
     /// Attach the event's caller: the role it was served at and the user's own
@@ -284,7 +299,14 @@ impl<'a> TableHost<'a> {
         }
         let values = match actor {
             Actor::Admin(context) => {
-                rows::list_row_values(self.catalog, &read.table, &read.query, Some(context)).await?
+                rows::list_row_values_in(
+                    self.catalog,
+                    &read.table,
+                    &read.query,
+                    Some(context),
+                    &self.executor,
+                )
+                .await?
             }
             // §7.3's rule, in the one place it lives: the formula narrows the
             // rows in the `WHERE` where it can and row by row where it cannot,
@@ -406,7 +428,17 @@ impl<'a> TableHost<'a> {
     async fn sql(&self, plan: &SqlPlan) -> Result<Json> {
         let statement = plan::statement(self.catalog, plan)?;
         let context = self.actor(plan.authority)?.context(&self.chain);
-        let rows = sc_catalog::run_in_context(self.catalog, &context, &statement).await?;
+        let rows = match &self.executor {
+            // Inside a step's transaction the statement joins it, so a `db.sql()`
+            // sees what the step has written and what it writes is undone with
+            // the step. The GUCs are applied per statement there, which is what
+            // keeps `asUser()` meaning to raw SQL exactly what it means to the
+            // chain (§10.3, decision 6).
+            rows::Executor::Transaction(tx) => tx.run(Some(&context), &statement).await?,
+            rows::Executor::Pooled => {
+                sc_catalog::run_in_context(self.catalog, &context, &statement).await?
+            }
+        };
         self.within_cap(
             rows.len(),
             "this `db.sql()` returned",
@@ -433,7 +465,14 @@ impl<'a> TableHost<'a> {
         for row in &insertion.rows {
             written.push(match actor {
                 Actor::Admin(context) => {
-                    rows::create_row_ctx(self.catalog, &insertion.table, row, Some(context)).await?
+                    rows::create_row_in(
+                        self.catalog,
+                        &insertion.table,
+                        row,
+                        Some(context),
+                        &self.executor,
+                    )
+                    .await?
                 }
                 Actor::Caller { role, user } => {
                     ownership::insert_row_as(
@@ -444,6 +483,7 @@ impl<'a> TableHost<'a> {
                         user.as_ref(),
                         self.evaluator.as_ref(),
                         &self.chain,
+                        &self.executor,
                     )
                     .await?
                 }
@@ -473,8 +513,14 @@ impl<'a> TableHost<'a> {
         let table = &write.matched.table;
         let values = match actor {
             Actor::Admin(context) => {
-                rows::list_row_values(self.catalog, table, &write.matched.query, Some(context))
-                    .await?
+                rows::list_row_values_in(
+                    self.catalog,
+                    table,
+                    &write.matched.query,
+                    Some(context),
+                    &self.executor,
+                )
+                .await?
             }
             Actor::Caller { role, user } => {
                 ownership::read_row_values_as(
@@ -503,11 +549,19 @@ impl<'a> TableHost<'a> {
             let (id, key) = rows::row_key(table, &write.pk, row)?;
             match (actor, &write.values) {
                 (Actor::Admin(context), Some(assignments)) => {
-                    rows::update_row_ctx(self.catalog, table, &id, assignments, Some(context))
-                        .await?;
+                    rows::update_row_in(
+                        self.catalog,
+                        table,
+                        &id,
+                        assignments,
+                        Some(context),
+                        &self.executor,
+                    )
+                    .await?;
                 }
                 (Actor::Admin(context), None) => {
-                    rows::delete_row_ctx(self.catalog, table, &id, Some(context)).await?;
+                    rows::delete_row_in(self.catalog, table, &id, Some(context), &self.executor)
+                        .await?;
                 }
                 (Actor::Caller { role, user }, Some(assignments)) => {
                     ownership::update_row_as(
@@ -519,6 +573,7 @@ impl<'a> TableHost<'a> {
                         user.as_ref(),
                         self.evaluator.as_ref(),
                         &self.chain,
+                        &self.executor,
                     )
                     .await?;
                 }
@@ -531,6 +586,7 @@ impl<'a> TableHost<'a> {
                         user.as_ref(),
                         self.evaluator.as_ref(),
                         &self.chain,
+                        &self.executor,
                     )
                     .await?;
                 }

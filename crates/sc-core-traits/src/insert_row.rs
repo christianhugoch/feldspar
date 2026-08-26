@@ -120,6 +120,11 @@ impl AgentTrait for InsertRow {
             // A tool call is not a trigger firing (see `run_agent`): nothing led
             // here, so the write this raises is at depth 0.
             &[],
+            // An agent run is its own unit of durability — its own run row,
+            // persisted after every step — so its tools' writes commit as they
+            // are made, even when the run was started by a workflow step
+            // (§10.3, decision 6).
+            &sc_api::rows::Executor::Pooled,
         )
         .await?;
         // The whole stored row, not the fields that were sent: the model needs

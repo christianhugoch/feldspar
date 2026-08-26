@@ -424,25 +424,25 @@ fn the_workflows_tutorial_teaches_each_part_of_the_engine() {
     let root = workspace_root();
     let workflows = read(&root, "docs/tutorial-workflows.md");
     for fragment in [
-        "A workflow",             // the trigger body that makes one
-        "only_if",                // …and the condition that stops it starting itself
-        "run_js_code",            // an Action step, and the one that does the reading
-        "For each",               // the loop,
-        "Item name",              // …and how its body names the item
-        "User form",              // the wait for a person,
-        "Give up after",          // …and the deadline that makes abandoning it a decision
-        "Answers go to",          // …and where the answers land
-        "Branch on a condition",  // control flow as data
-        "Save a new version",     // versions are appended
-        "Restore",                // …and a revert is a new one
-        "pinned",                 // …which is what a suspended run finishes on
-        "Restart the server",     // durability, demonstrated rather than claimed
-        "at least once",          // the guarantee,
-        "idempotent",             // …and the section about living with it
-        "Retry, then fall through", // the error policies
-        "context.error",          // …and what a handler reads
-        "Cancel",                 // the two buttons a stuck run has
-        "Retry from",             //
+        "A workflow",                   // the trigger body that makes one
+        "only_if",                      // …and the condition that stops it starting itself
+        "run_js_code",                  // an Action step, and the one that does the reading
+        "For each",                     // the loop,
+        "Item name",                    // …and how its body names the item
+        "User form",                    // the wait for a person,
+        "Give up after",                // …and the deadline that makes abandoning it a decision
+        "Answers go to",                // …and where the answers land
+        "Branch on a condition",        // control flow as data
+        "Save a new version",           // versions are appended
+        "Restore",                      // …and a revert is a new one
+        "pinned",                       // …which is what a suspended run finishes on
+        "Restart the server",           // durability, demonstrated rather than claimed
+        "at least once",                // the guarantee,
+        "idempotent",                   // …and the section about living with it
+        "Retry, then fall through",     // the error policies
+        "context.error",                // …and what a handler reads
+        "Cancel",                       // the two buttons a stuck run has
+        "Retry from",                   //
         "unknown identifier `context`", // what naming the run outside one says (§10.3)
     ] {
         assert!(
@@ -777,7 +777,8 @@ fn the_design_records_what_the_workflow_milestone_actually_built() {
         "UserForm",
         // The machine, and what one advance guarantees.
         "no IO",
-        "One advance is one atomic write",
+        "Each step runs in one transaction, and one advance is one atomic write",
+        "SharedTx",
         "at least once",
         // The queue, and why it is not the bus yet.
         "WorkQueue",

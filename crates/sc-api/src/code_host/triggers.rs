@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sc_action::TriggerDispatcher;
-use sc_catalog::{CallerContext, Catalog};
+use sc_catalog::{CallerContext, Catalog, SharedTx};
 use sc_error::{Error, Result};
 use sc_expr::{DEFAULT_MAX_TRIGGER_RUNS, TriggerHost};
 use serde::Deserialize;
@@ -76,6 +76,11 @@ pub struct TriggerRunHost<'a> {
     dispatcher: &'a TriggerDispatcher,
     /// The catalog the run happens against.
     catalog: &'a Catalog,
+    /// The transaction the trigger this body runs should write in — a workflow
+    /// step's, when the body is a step of one (§10.3, decision 6). What
+    /// `trigger("name")` does to the database is as much the step's work as what
+    /// the body did itself, and lands where the step lands.
+    tx: Option<SharedTx>,
     /// The role the event was served at — what a delegated run is checked
     /// against, and public for an event with no caller at all.
     role: u8,
@@ -100,6 +105,7 @@ impl<'a> TriggerRunHost<'a> {
             role: sc_auth::ROLE_PUBLIC,
             user: None,
             chain: Vec::new(),
+            tx: None,
             max_runs: DEFAULT_MAX_TRIGGER_RUNS,
             runs: AtomicU32::new(0),
         }
@@ -118,6 +124,14 @@ impl<'a> TriggerRunHost<'a> {
     #[must_use]
     pub fn chained(mut self, chain: Vec<String>) -> TriggerRunHost<'a> {
         self.chain = chain;
+        self
+    }
+
+    /// Run the triggers this body starts **inside `tx`** — a workflow step's
+    /// transaction, when the body is a step of one (§10.3, decision 6).
+    #[must_use]
+    pub fn in_transaction(mut self, tx: Option<SharedTx>) -> TriggerRunHost<'a> {
+        self.tx = tx;
         self
     }
 
@@ -166,9 +180,13 @@ impl<'a> TriggerRunHost<'a> {
         // the chain that led here — so the trigger that runs sees who caused it
         // and the cascade bound counts this level.
         let caller = CallerContext::new(self.role, self.user.clone()).chained(self.chain.clone());
-        let run = self
-            .dispatcher
-            .run_trigger(self.catalog, name, request.payload, Some(&caller));
+        let run = self.dispatcher.run_trigger_in(
+            self.catalog,
+            name,
+            request.payload,
+            Some(&caller),
+            self.tx.as_ref(),
+        );
         let Some(limit) = request.timeout_ms.map(Duration::from_millis) else {
             return run.await;
         };

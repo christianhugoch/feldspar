@@ -208,6 +208,14 @@ impl Catalog {
         &self.primary
     }
 
+    /// The id of the primary database — what a table's
+    /// [`database`](crate::Table::database) is compared against to ask whether it
+    /// lives there (a [`SharedTx`](crate::SharedTx) serves one database, and a
+    /// table on another connection is not reachable from it).
+    pub fn primary_db(&self) -> &DbId {
+        &self.primary_db
+    }
+
     /// Re-introspect the primary database and rebuild the table cache, applying
     /// the `_sc_tables` overlay on top. Called after every schema change the
     /// catalog applies, and after every overlay change, so the cache never

@@ -96,12 +96,13 @@ impl Action for UpdateRows {
                 body.insert(field.clone(), value);
             }
             let (id, id_json) = row_id(&table, &pk, values)?;
-            rows::update_row_ctx(
+            rows::update_row_in(
                 ctx.catalog,
                 &table,
                 &id,
                 &Json::Object(body),
                 Some(&authority),
+                scope.executor(),
             )
             .await?;
             ids.push(id_json);

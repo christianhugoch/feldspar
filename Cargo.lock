@@ -8355,6 +8355,8 @@ dependencies = [
  "chrono",
  "sc-action",
  "sc-agent",
+ "sc-api",
+ "sc-auth",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",

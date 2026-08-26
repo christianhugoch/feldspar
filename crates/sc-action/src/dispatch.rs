@@ -52,7 +52,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use sc_catalog::{CallerContext, Catalog, TableEvents, TableWrite, WriteOp, prefetch_bindings};
+use sc_catalog::{
+    CallerContext, Catalog, SharedTx, TableEvents, TableWrite, WriteOp, prefetch_bindings,
+};
 use sc_email::Mailer;
 use sc_error::{Error, Result};
 use sc_expr::{Ambient, Formula, JsEvaluator, Operation, value_from_json};
@@ -297,6 +299,23 @@ impl TriggerDispatcher {
     /// outcome and the rest still run. The caller decides what to do with those —
     /// the emit path logs them, a test asserts on them.
     pub async fn dispatch(&self, catalog: &Catalog, event: &Event) -> Vec<TriggerRun> {
+        self.dispatch_in(catalog, event, None).await
+    }
+
+    /// [`dispatch`](TriggerDispatcher::dispatch) **inside a transaction**: every
+    /// row these triggers write joins `tx` (§10.3, decision 6).
+    ///
+    /// This is how a workflow step's atomicity survives a cascade. The step's
+    /// write raised this event, and a trigger listening to it writes an audit
+    /// row, a total, a notification — work that is part of the step, and must
+    /// commit with the step or vanish with it. `None` is the ordinary case and
+    /// is exactly [`dispatch`](TriggerDispatcher::dispatch).
+    pub async fn dispatch_in(
+        &self,
+        catalog: &Catalog,
+        event: &Event,
+        tx: Option<&SharedTx>,
+    ) -> Vec<TriggerRun> {
         // Cloned out of the lock: an action writes rows, which fire events, which
         // arrive back here — so nothing may be held across the await.
         let matched: Vec<Trigger> = match self.triggers() {
@@ -310,7 +329,7 @@ impl TriggerDispatcher {
         };
         let mut runs = Vec::with_capacity(matched.len());
         for trigger in matched {
-            let outcome = fire_trigger(self, catalog, &trigger, event).await;
+            let outcome = fire_trigger_in(self, catalog, &trigger, event, tx).await;
             runs.push(TriggerRun {
                 trigger: trigger.name,
                 outcome,
@@ -336,8 +355,14 @@ impl TriggerDispatcher {
     /// dropped. A misconfigured trigger must not become an infinite loop at the
     /// worst possible moment — which is precisely when an error event fires.
     pub async fn fire(&self, catalog: &Catalog, event: &Event) {
+        self.fire_in(catalog, event, None).await;
+    }
+
+    /// [`fire`](TriggerDispatcher::fire) **inside a transaction** — see
+    /// [`dispatch_in`](TriggerDispatcher::dispatch_in).
+    pub async fn fire_in(&self, catalog: &Catalog, event: &Event, tx: Option<&SharedTx>) {
         if event.kind != EventKind::Error {
-            self.report(catalog, event).await;
+            self.report(catalog, event, tx).await;
             return;
         }
         if HANDLING_ERROR.try_with(|()| ()).is_ok() {
@@ -346,13 +371,13 @@ impl TriggerDispatcher {
             return;
         }
         HANDLING_ERROR
-            .scope((), async { self.report(catalog, event).await })
+            .scope((), async { self.report(catalog, event, tx).await })
             .await;
     }
 
     /// [`dispatch`](TriggerDispatcher::dispatch), logging what failed.
-    async fn report(&self, catalog: &Catalog, event: &Event) {
-        for run in self.dispatch(catalog, event).await {
+    async fn report(&self, catalog: &Catalog, event: &Event, tx: Option<&SharedTx>) {
+        for run in self.dispatch_in(catalog, event, tx).await {
             if let Err(e) = run.outcome {
                 eprintln!(
                     "saltcorn: trigger `{}` on the {} event: {}",
@@ -385,6 +410,24 @@ impl TriggerDispatcher {
         payload: Json,
         caller: Option<&CallerContext>,
     ) -> Result<Json> {
+        self.run_trigger_in(catalog, name, payload, caller, None)
+            .await
+    }
+
+    /// [`run_trigger`](TriggerDispatcher::run_trigger) **inside a transaction**:
+    /// what the trigger writes joins `tx`.
+    ///
+    /// A code body inside a workflow step calls `trigger("name")`, and what that
+    /// trigger writes is as much the step's work as what the body wrote itself —
+    /// see [`dispatch_in`](TriggerDispatcher::dispatch_in).
+    pub async fn run_trigger_in(
+        &self,
+        catalog: &Catalog,
+        name: &str,
+        payload: Json,
+        caller: Option<&CallerContext>,
+        tx: Option<&SharedTx>,
+    ) -> Result<Json> {
         let triggers = self.triggers()?;
         // `require` distinguishes "no such trigger" from "stored but not usable,
         // and here is why" — the second is the answer the asker needs.
@@ -404,7 +447,7 @@ impl TriggerDispatcher {
                 .caller(caller.role, caller.user.clone())
                 .chained(caller.chain.clone());
         }
-        let result = fire_trigger(self, catalog, trigger, &event).await?;
+        let result = fire_trigger_in(self, catalog, trigger, &event, tx).await?;
         Ok(result.unwrap_or(Json::Null))
     }
 }
@@ -436,9 +479,14 @@ impl TableEvents for TriggerDispatcher {
     }
 
     async fn emit(&self, catalog: &Catalog, write: TableWrite<'_>) -> Result<()> {
-        // The write has committed, so a trigger that failed is reported rather
+        // The write has happened, so a trigger that failed is reported rather
         // than returned — the same rule every non-request event follows.
-        self.fire(catalog, &table_event(&write)).await;
+        //
+        // In the transaction the write was made in, when it was made in one: a
+        // step's cascade is part of the step, and lands where the step lands
+        // (§10.3, decision 6).
+        self.fire_in(catalog, &table_event(&write), write.tx.as_ref())
+            .await;
         Ok(())
     }
 }
@@ -493,6 +541,24 @@ pub async fn fire_trigger(
     trigger: &Trigger,
     event: &Event,
 ) -> Result<Option<Json>> {
+    fire_trigger_in(dispatcher, catalog, trigger, event, None).await
+}
+
+/// [`fire_trigger`] **inside a transaction**: the action's row writes join `tx`
+/// (§10.3, decision 6), and so do the writes of whatever they cascade into.
+///
+/// A **workflow** body is the one thing `tx` does not reach into: starting a run
+/// writes a run row that has to survive whatever happens to the transaction that
+/// started it, and its steps open transactions of their own, one per step. So a
+/// workflow fired from inside a step is its own unit of durability, which is what
+/// a run has always been.
+pub async fn fire_trigger_in(
+    dispatcher: &TriggerDispatcher,
+    catalog: &Catalog,
+    trigger: &Trigger,
+    event: &Event,
+    tx: Option<&SharedTx>,
+) -> Result<Option<Json>> {
     let services = &dispatcher.services;
     // The cascade bound, checked before anything else runs: past it, the trigger
     // does not fire and the error names the whole chain (§10.2).
@@ -525,6 +591,9 @@ pub async fn fire_trigger(
     let mut ctx = ActionContext::new(catalog, event, configuration, &trigger.name)
         .with_chain(chain)
         .with_triggers(dispatcher);
+    if let Some(tx) = tx {
+        ctx = ctx.with_transaction(tx.clone());
+    }
     if let Some(evaluator) = &services.evaluator {
         ctx = ctx.with_evaluator(evaluator);
     }
@@ -651,6 +720,7 @@ mod tests {
             row: json!({ "id": 1, "title": "now" }),
             old_row: Some(json!({ "id": 1, "title": "was" })),
             caller: Some(&caller),
+            tx: None,
         });
         assert_eq!(event.kind, EventKind::Update);
         assert_eq!(event.channel.as_deref(), Some("books"));
@@ -669,6 +739,7 @@ mod tests {
             row: json!({ "id": 2 }),
             old_row: None,
             caller: None,
+            tx: None,
         });
         assert_eq!(event.kind, EventKind::Insert);
         assert_eq!(event.role, ROLE_PUBLIC);

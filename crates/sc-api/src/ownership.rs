@@ -431,6 +431,15 @@ pub async fn aggregate_grouped_as(
 /// of the trigger running it, which is what keeps `Event::firing`'s cascade
 /// bound applying to `db.asUser().t.insert(…)` exactly as it does to
 /// `db.t.insert(…)`.
+///
+/// `executor` is where the **write** lands: a workflow step's transaction when
+/// this is reached from inside one (§10.3, decision 6), so a delegated write is
+/// as much part of the step's atomic advance as an undelegated one, and
+/// [`Pooled`](rows::Executor::Pooled) everywhere else. The ownership *checks*
+/// above it read through the pool either way — they decide permission and write
+/// nothing, and a check that cannot see an uncommitted row denies rather than
+/// grants.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_row_as(
     cat: &Catalog,
     table: &Table,
@@ -439,12 +448,13 @@ pub async fn insert_row_as(
     user: Option<&User>,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
     chain: &[String],
+    executor: &rows::Executor,
 ) -> Result<Json> {
     let caller = caller_context_at(role, user).chained(chain.to_vec());
     // The database enforces this table's ownership: the policies decide, and a
     // `WITH CHECK` they refuse surfaces from `run_in_context`.
     if table.rls_enabled {
-        return rows::create_row_ctx(cat, table, body, Some(&caller)).await;
+        return rows::create_row_in(cat, table, body, Some(&caller), executor).await;
     }
     if let Some(formula) = write_formula(table, role, "write")? {
         let proposed = rows::coerce_row_values(table, body)?;
@@ -465,7 +475,7 @@ pub async fn insert_row_as(
             )));
         }
     }
-    rows::create_row_ctx(cat, table, body, Some(&caller)).await
+    rows::create_row_in(cat, table, body, Some(&caller), executor).await
 }
 
 /// Update the row of `table` addressed by `id`, as a caller who is not an API
@@ -477,7 +487,8 @@ pub async fn insert_row_as(
 /// formula withholds is the **same** not-found an absent row gets — a tool must
 /// not become a way to probe which rows exist.
 ///
-/// `chain` is what led here, as in [`insert_row_as`].
+/// `chain` is what led here, and `executor` where the write lands, as in
+/// [`insert_row_as`].
 #[allow(clippy::too_many_arguments)]
 pub async fn update_row_as(
     cat: &Catalog,
@@ -488,13 +499,14 @@ pub async fn update_row_as(
     user: Option<&User>,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
     chain: &[String],
+    executor: &rows::Executor,
 ) -> Result<Json> {
     let caller = caller_context_at(role, user).chained(chain.to_vec());
     if table.rls_enabled {
-        return rows::update_row_ctx(cat, table, id, body, Some(&caller)).await;
+        return rows::update_row_in(cat, table, id, body, Some(&caller), executor).await;
     }
     let Some(formula) = write_formula(table, role, "write")? else {
-        return rows::update_row_ctx(cat, table, id, body, Some(&caller)).await;
+        return rows::update_row_in(cat, table, id, body, Some(&caller), executor).await;
     };
     let existing = owned_row(cat, table, formula, Operation::Update, user, evaluator, id).await?;
     let changes = rows::coerce_row_values(table, body)?;
@@ -518,13 +530,15 @@ pub async fn update_row_as(
     // The translated predicate rides in the UPDATE's WHERE where it can, closing
     // the gap between the check and the write.
     let guard = write_guard(cat, table, formula, Operation::Update, user)?;
-    rows::update_row_guarded(cat, table, id, body, guard, Some(&caller)).await
+    rows::update_row_guarded_in(cat, table, id, body, guard, Some(&caller), executor).await
 }
 
 /// Delete the row of `table` addressed by `id`, as a caller who is not an API
 /// surface (§11.3). [`insert_row_as`]'s sibling, and the same not-found rule.
 ///
-/// `chain` is what led here, as in [`insert_row_as`].
+/// `chain` is what led here, and `executor` where the write lands, as in
+/// [`insert_row_as`].
+#[allow(clippy::too_many_arguments)]
 pub async fn delete_row_as(
     cat: &Catalog,
     table: &Table,
@@ -533,17 +547,18 @@ pub async fn delete_row_as(
     user: Option<&User>,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
     chain: &[String],
+    executor: &rows::Executor,
 ) -> Result<Json> {
     let caller = caller_context_at(role, user).chained(chain.to_vec());
     if table.rls_enabled {
-        return rows::delete_row_ctx(cat, table, id, Some(&caller)).await;
+        return rows::delete_row_in(cat, table, id, Some(&caller), executor).await;
     }
     let Some(formula) = write_formula(table, role, "delete from")? else {
-        return rows::delete_row_ctx(cat, table, id, Some(&caller)).await;
+        return rows::delete_row_in(cat, table, id, Some(&caller), executor).await;
     };
     owned_row(cat, table, formula, Operation::Delete, user, evaluator, id).await?;
     let guard = write_guard(cat, table, formula, Operation::Delete, user)?;
-    rows::delete_row_guarded(cat, table, id, guard, Some(&caller)).await
+    rows::delete_row_guarded_in(cat, table, id, guard, Some(&caller), executor).await
 }
 
 /// Which formula a sub-floor writer is judged by: `None` when the caller meets

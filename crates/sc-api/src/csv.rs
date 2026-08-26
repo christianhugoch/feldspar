@@ -49,7 +49,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table};
+use sc_catalog::{CallerContext, Catalog, DataFieldKind, SharedTx, Table};
 use sc_error::{Error, Result};
 use sc_query::Expr;
 use sc_types::BasicType;
@@ -178,20 +178,17 @@ pub async fn import_table(
     // On the database that hosts the table, not on the primary: a table created
     // on a connection takes its rows in the same database its columns are in.
     let driver = catalog.driver_for(table)?;
-    let mut tx = driver.begin().await?;
-    // The caller travels with the transaction, not with each statement: `SET
-    // LOCAL` is transaction-scoped, so an RLS table's policies would see no
-    // caller at all (and deny everything) if this were left to the writes. On a
-    // backend with no policies there is nothing to hand it to, and asking would
-    // fail an import that is perfectly safe to run.
-    if let Some(context) = context
-        && driver.capabilities().row_level_security
-    {
-        sc_catalog::set_caller_context(tx.as_mut(), context).await?;
-    }
+    // Shared rather than held: the import makes every statement itself, but the
+    // *events* its writes raise reach triggers that write too, and those writes
+    // belong in this transaction as much as the import's own (§10.3, decision 6).
+    // The caller travels with each statement — `SharedTx::run` applies its GUCs —
+    // so an RLS table's policies see the importer on the import's writes and the
+    // trigger on the trigger's.
+    let tx = SharedTx::begin_on(&driver, table.database.clone());
     // Rows may reference rows that arrive later in the file; the keys are all
     // checked at commit.
     tx.defer_constraints().await?;
+    let executor = rows::Executor::Transaction(tx.clone());
 
     for (index, record) in reader.records().enumerate() {
         // Line numbers as a spreadsheet counts them: the header is line 1, so
@@ -217,7 +214,6 @@ pub async fn import_table(
         // next row would fail with "current transaction is aborted" rather than
         // with anything about itself.
         tx.batch(&format!("SAVEPOINT {ROW_SAVEPOINT}")).await?;
-        let mut executor = rows::Executor::Transaction(tx.as_mut());
         let result = write_row(
             catalog,
             table,
@@ -226,7 +222,7 @@ pub async fn import_table(
             context,
             &mut summaries,
             &mut keys_seen,
-            &mut executor,
+            &executor,
         )
         .await;
         match result {
@@ -297,7 +293,7 @@ async fn write_row(
     context: Option<&CallerContext>,
     summaries: &mut SummaryLookups,
     keys_seen: &mut HashSet<String>,
-    executor: &mut rows::Executor<'_>,
+    executor: &rows::Executor,
 ) -> Result<Written> {
     summaries
         .resolve(catalog, table, &mut body, context, executor)
@@ -580,7 +576,7 @@ async fn write_by_key(
     key: &str,
     body: Map<String, Json>,
     context: Option<&CallerContext>,
-    executor: &mut rows::Executor<'_>,
+    executor: &rows::Executor,
 ) -> Result<Written> {
     if row_exists(catalog, table, key, context, executor).await? {
         // `update_row_in` ignores the key in the body — it addresses the row —
@@ -603,7 +599,7 @@ async fn row_exists(
     table: &Table,
     key: &str,
     context: Option<&CallerContext>,
-    executor: &mut rows::Executor<'_>,
+    executor: &rows::Executor,
 ) -> Result<bool> {
     let pk = rows::single_pk(table)?;
     let value = rows::column_value(table, &pk, &Json::String(key.to_owned()))?;
@@ -673,7 +669,7 @@ impl SummaryLookups {
         table: &Table,
         body: &mut Map<String, Json>,
         context: Option<&CallerContext>,
-        executor: &mut rows::Executor<'_>,
+        executor: &rows::Executor,
     ) -> Result<()> {
         for field in &table.fields {
             let DataFieldKind::Key {
@@ -745,7 +741,7 @@ async fn summary_key(
     target_field: &str,
     text: &str,
     context: Option<&CallerContext>,
-    executor: &mut rows::Executor<'_>,
+    executor: &rows::Executor,
 ) -> Result<Option<Json>> {
     let Ok(value) = rows::column_value(target, summary, &Json::String(text.to_owned())) else {
         return Ok(None);

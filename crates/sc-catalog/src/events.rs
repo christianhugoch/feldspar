@@ -29,6 +29,7 @@ use sc_error::Result;
 use crate::caller::CallerContext;
 use crate::catalog::Catalog;
 use crate::table::Table;
+use crate::tx::SharedTx;
 
 /// Which of the three observable row operations happened.
 ///
@@ -81,6 +82,16 @@ pub struct TableWrite<'a> {
     /// Who caused the write, and which triggers led here. `None` where a caller
     /// was not supplied, which reads as an anonymous, un-chained write.
     pub caller: Option<&'a CallerContext>,
+    /// The transaction the write was made in, when it was made in one — a
+    /// workflow step's (§10.3, decision 6), or an import's.
+    ///
+    /// It travels with the event so that what a listener does about the write
+    /// lands **where the write landed**: a trigger that inserts an audit row for
+    /// a row a step wrote must commit with it and roll back with it, or a failed
+    /// step leaves an audit trail for something that never happened. A listener
+    /// with no use for it ignores it; a write made on a pooled connection carries
+    /// `None`, which is every write outside a step or an import.
+    pub tx: Option<SharedTx>,
 }
 
 /// What it means to observe table writes. `sc-action`'s trigger dispatcher is the
@@ -94,12 +105,18 @@ pub trait TableEvents: Send + Sync {
     /// for one that would be.
     fn observes(&self, table: &str, op: WriteOp) -> bool;
 
-    /// Handle one write that has already committed.
+    /// Handle one write that has already happened.
     ///
     /// Called after the statement succeeded, so it cannot veto the write (a
     /// before-commit hook is a different contract, and a later milestone). An
     /// `Err` here means the *dispatch* failed, never the write: the caller logs
     /// it and returns the row.
+    ///
+    /// "Happened" is not always "committed": a write made inside a
+    /// [`SharedTx`](crate::SharedTx) — a workflow step's, an import's — is
+    /// dispatched before that transaction commits, and
+    /// [`TableWrite::tx`] is how a listener joins it, so what it does about the
+    /// write shares the write's fate.
     async fn emit(&self, catalog: &Catalog, write: TableWrite<'_>) -> Result<()>;
 }
 

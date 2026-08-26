@@ -888,7 +888,10 @@ absence — affected-rows 0, mapped to not-found — so "exists but forbidden" i
   true)` (a JSON GUC) and the role floor a read of `sc.role`. Every row operation runs inside a
   transaction that `SET LOCAL`s those two GUCs (the value is bound via `set_config`, never
   interpolated); admin endpoints run at `sc.role = 1` so the row viewer works on a FORCE'd
-  table. Reads go unfiltered and writes unpredicated to the database — the policy does the
+  table. That transaction is per statement on the ordinary path, and the caller's **own**
+  statement inside a shared one — a workflow step's, an import's — where `SharedTx::run` applies
+  the pair per writer and clears it (to `''`, which the policies read as `NULL`) for a statement
+  with no caller, so a shared transaction never lends one writer's identity to the next (§10.3). Reads go unfiltered and writes unpredicated to the database — the policy does the
   work, including the joinfield subselects, so nothing is refetched. Enabling RLS is refused at
   save time if the formula does not translate under the GUC env for all four operations, so a
   policy is never emitted for a formula the database cannot honour. `USER_GUC = "sc.user"` and
@@ -1768,9 +1771,12 @@ overran and names its trigger, and that body's co-residents are re-queued only w
 made **no** host call: one that has already written rows is answered with an error of its own
 rather than run a second time. `fetch` adds two of its own (below). Behind all of them the
 isolate's **heap** is bounded too, and
-reaching it stops the worker admitting new runs rather than aborting the process. There are **no transactions across
-statements**: each autocommits, as every action's writes do, and
-`db.transaction(fn)` is a later addition whose seam is the row layer's `Executor::Transaction`.
+reaching it stops the worker admitting new runs rather than aborting the process. A body's
+statements each autocommit, as every action's writes do — **except inside a workflow step**,
+where the whole body runs in the step's transaction (§10.3): its `db` operations, its `db.sql()`
+and the triggers its `trigger(…)` calls run all join it, so a body that fails half way through a
+step leaves nothing behind. A body-scoped `db.transaction(fn)` is a later addition over the same
+seam, the row layer's `Executor::Transaction`.
 
 **How many run at once.** A run suspended on a host call costs a pending promise rather than a
 thread, so one isolate serves hundreds of bodies at once and the pool stays small: more isolates
@@ -2289,17 +2295,41 @@ trace row **per item** — the durability granularity of a loop is the item.
 
 **Execution guarantees (normative, and honest about the one that changed):**
 
-- **One advance is one atomic write.** The context, the cursor, the attempt count, the run's
-  state, its `wake_at` and the step's trace row commit **together, once**, so a run is never
-  observed half-advanced.
-- **A step is at least once.** The plan said "each step runs in one database transaction", and
-  that cannot be honoured literally: an HTTP request, an email and an LLM call are not
-  transactional, and the row layer's writes are individual statements by design (§6 — a
-  caller-context transaction is per statement, because RLS rides on session settings). So a node
-  that dies between a step's effect and its write comes back, is told to run **that** step again,
-  and runs no other. Steps SHOULD be idempotent; `docs/tutorial-workflows.md` has the working
-  remedies. *(Threading one transaction through a step's row writes needs `CallerContext` to
-  carry a transaction handle — a change to every write path, and a milestone of its own.)*
+- **Each step runs in one transaction, and one advance is one atomic write.** The rows the step
+  writes, the context, the cursor, the attempt count, the run's state, its `wake_at` and the
+  step's trace row commit **together, once** — so a run is never observed half-advanced, and
+  never advanced past a step whose writes were lost. A step that **fails** is rolled back first
+  and its failure recorded afterwards, in a transaction of its own: a record that rolled back
+  with the failure would leave a run that had never heard of it.
+
+  The mechanism is `sc_catalog::SharedTx` — a transaction handle several writers hold at once,
+  because a step's writes are made several frames below it, by an action, by the row layer, and
+  by the triggers those writes cascade into, none of which can be handed a unique borrow. The
+  driver creates one per advance and hands it to the step through `ActionContext::transaction`;
+  the row layer runs every statement for a table that transaction serves inside it
+  (`rows::Executor::Transaction`); `TableWrite::tx` carries it into the emit seam so a cascade
+  lands where its cause landed; and a code body's `db` operations and `trigger(…)` calls take it
+  the same way. It **begins on its first statement**, so a step that calls an HTTP endpoint and
+  writes nothing holds no transaction while it waits.
+
+  Because the writers sharing one transaction are *not* the same caller, the caller-context GUCs
+  travel with the **statement** rather than with the transaction: `SharedTx::run` re-applies them
+  whenever they change, and applies the empty value for a statement with no caller — which both
+  policy clauses fold to `NULL`, so "no caller" reaches the policies as no access rather than as
+  whoever went last.
+- **A step is still at least once**, for what the database does not hold: an HTTP request, an
+  email and an LLM call are not transactional, and neither is a write to a table on another
+  database connection or one a module serves (a `SharedTx` serves one database — those writes
+  take the pooled path), nor a **run** a step starts, agent or workflow, each of which is its own
+  unit of durability with its own run row. So a node that dies between a step's effect and its
+  commit comes back, is told to run **that** step again, and runs no other. Steps SHOULD be
+  idempotent; `docs/tutorial-workflows.md` has the working remedies.
+
+  Two consequences worth stating rather than discovering: a statement that fails inside a step's
+  transaction ends the step (Postgres refuses everything after it until the rollback, and the
+  row layer says so in those words), and an ownership *check* on a delegated write still reads
+  through the pool — it decides permission and writes nothing, and a check that cannot see an
+  uncommitted row denies rather than grants.
 - **Error handling** is the policy above: bounded retries with an exponential, capped, **jittered**
   backoff (jitter derived from the step, the attempt and the sub-second part of the failure's
   instant — deterministic, so the machine's tests are repeatable, and non-synchronising, so a

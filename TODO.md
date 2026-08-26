@@ -97,17 +97,18 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
    one. A `WorkQueue` seam over "wake me when something is runnable" is what the bus will
    implement later (a `NOTIFY`, a Redis subscription); the polling implementation behind it is
    twenty lines and is what ships. **Nothing above the seam knows which it is talking to.**
-6. **"Each step runs in one transaction" means the run's advance is one atomic write.** The
-   normative sentence in GOALS cannot be honoured literally for every step, and saying so now is
-   better than implying it: an HTTP request, an email and an LLM call are not transactional, and
-   the row layer's writes are individual statements by design (§6 — a caller-context transaction
-   is per statement, because RLS rides on session settings). What the engine *does* guarantee,
-   and tests: the context, the cursor, the attempt count and the trace row for a completed step
-   commit **together, once**, so a run is never observed half-advanced; and a step is **at least
-   once**, so a crash mid-step re-runs that step and no other. Steps SHOULD be idempotent, the
-   admin UI says so beside any step that is not, and the deviation is recorded in §10.3 rather
-   than left for someone to discover. *(Threading one transaction through a step's row writes is
-   a real design change to `CallerContext` and is carried past this milestone.)*
+6. **Each step runs in one transaction.** *(Revised 2026-08-26, when the deferred half below was
+   built — see §11.)* The rows a step writes, the writes of every trigger they cascade into, the
+   context, the cursor, the attempt count, the run's state, its `wake_at` and the step's trace row
+   commit **together, once**: a run is never observed half-advanced, and never advanced past a
+   step whose writes were lost. A step that fails is **rolled back** and its failure then recorded
+   on its own, because a record that rolled back with the failure would be no record at all.
+   What the transaction still cannot hold is what the database does not: an HTTP request, an
+   email, an LLM call, a write to another database connection or a module-served table, and the
+   runs (agent or workflow) a step starts — each of those is its own unit of durability. So a step
+   is **at least once**, a crash mid-step re-runs that step and no other, steps SHOULD be
+   idempotent, the admin UI says so beside any step that is not, and the remaining deviation is
+   recorded in §10.3 rather than left for someone to discover.
 7. **The built-in step set is five kinds**, and the count is a decision GOALS made for us
    ("the number of built-in workflow actions should be minimal"). `Action` (run any registered
    action, which is how `run_js_code`, `send_email`, the row actions and `run_agent` are all
@@ -365,13 +366,47 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
   trace row per item. `each_iteration_of_a_one_step_loop_body_is_its_own_advance` drives a
   hundred-item loop one advance at a time.
 
+## 11. Each step in its own transaction
+
+Decision 6's deferred half, built after the milestone because the requirement is not negotiable:
+a step's writes and its advance are one commit or nothing.
+
+- [x] 11.1 `sc_catalog::SharedTx`: one transaction handle several writers hold at once — an
+  `Arc` over an async mutex, cloned into every frame that might write, begun **on its first
+  statement** so a step that only calls an HTTP endpoint holds nothing while it waits. It serves
+  one database (`serves`), so a write to a secondary connection or a module-served table takes
+  the pooled path instead of being sent somewhere it does not belong.
+- [x] 11.2 The caller travels with the **statement**, not the transaction: `SharedTx::run`
+  re-applies the caller GUCs whenever the writer changes and clears them (to `''`, which both
+  policy clauses fold to `NULL`) for a statement with no caller — so a shared transaction never
+  lends one writer's identity to the next. `set_caller_context` now always sets both GUCs, and
+  `clear_caller_context` is its other half.
+- [x] 11.3 `rows::Executor::Transaction(SharedTx)` replaces the borrowed handle: every row-layer
+  entry point takes `&Executor`, the statement joins the transaction when it serves the table,
+  and the CSV import — the other holder of one — moves onto the same representation.
+- [x] 11.4 The cascade joins it: `TableWrite::tx` carries the transaction into the emit seam, and
+  `TriggerDispatcher::{fire_in, dispatch_in, run_trigger_in}` / `fire_trigger_in` hand it to each
+  listening trigger's `ActionContext`, so a trigger that audits a row the step wrote commits with
+  the step or vanishes with it.
+- [x] 11.5 `ActionContext::{with_transaction, transaction}`, and the actions that write through
+  it: `insert_row`, `update_rows`, `delete_rows` (one line each, through `Scope::executor`), and
+  `run_js_code` — whose `TableHost`, `TriggerRunHost` and `db.sql()` all run in the step's
+  transaction, delegated (`asUser()`) writes included.
+- [x] 11.6 `Driver::advance_on` opens one per advance, hands it to the step, writes the advance
+  and the trace rows on it and commits **once**; a failed step is rolled back first and its
+  failure recorded in a transaction of its own.
+- [x] 11.7 Tests: `sc-workflow`'s `step_transaction.rs` (a step's rows commit with its advance, a
+  failed step's rows are gone while the failure is recorded, and a cascade lands wherever the step
+  lands) and `sc-catalog`'s `shared_tx.rs` (lazy begin, privacy until commit, and a statement's
+  own caller reaching the policies). §10.3, §11 and §7.3 of the design updated with it.
+
+---
+
 ## Carried past this milestone
 
 - **A `sc-bus` crate.** Decision 5 leaves a seam shaped for it: cache invalidation, the queue's
   wake-up and real-time collaboration are one problem, and solving it for the queue alone would
   be solving it in the wrong place.
-- **One transaction across a step's row writes** (decision 6), which needs `CallerContext` to
-  carry a transaction handle — a change to every write path, and a milestone of its own.
 - **`WorkflowRoom`**: the end-user chat presentation of a running workflow, and modal
   interaction pushed over a socket. Both wait on §13's viewpatterns.
 - **A `SubWorkflow` step** that starts a child run and waits for it durably — a parent suspended

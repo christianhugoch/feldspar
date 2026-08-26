@@ -26,10 +26,13 @@ Three consequences worth holding on to before you draw anything:
 - **A run is pinned to the version it started on.** Saving an edited workflow mints a *new*
   version; it never rewrites one. A run suspended since yesterday finishes on yesterday's
   program, which is the only reading of "waiting for approval" that is not a lie.
-- **A step runs at least once.** The context, the cursor and the trace commit together, once —
-  but a step's *effect* (an HTTP call, an email, a row write) is not in that transaction, so a
-  node that dies between the effect and the write re-runs that step when it comes back. There is
-  a whole section on this below, because it is the one thing a workflow asks of you.
+- **A step is one transaction.** The rows a step writes — its own, and those of any trigger they
+  set off — commit with the context, the cursor and the trace row, together, once. A step that
+  fails leaves nothing behind, and a run is never observed half-advanced.
+- **A step still runs at least once**, because a step's effects *outside* the database (an HTTP
+  call, an email, an LLM call) cannot be in that transaction, so a node that dies between such an
+  effect and the commit re-runs that step when it comes back. There is a whole section on this
+  below, because it is the one thing a workflow asks of you.
 
 ## What you will build
 
@@ -379,11 +382,13 @@ program it started on.
 
 Here is the guarantee, stated exactly:
 
-> The context, the cursor, the attempt count, the run's state, its `wake_at` and its trace row
-> commit **together, once**. A run is never observed half-advanced. But a step's own effect is
-> not in that transaction — an HTTP request, an email and (today) a row write are not
-> transactional — so **a step runs at least once**: a process that dies between a step's effect
-> and its write comes back, is told to run *that* step again, and runs no other.
+> The rows the step wrote, the context, the cursor, the attempt count, the run's state, its
+> `wake_at` and its trace row commit **together, once**. A run is never observed half-advanced,
+> and a step that fails is rolled back — including the writes of any trigger it set off. But what
+> a step does *outside the database* is not in that transaction — an HTTP request, an email, an
+> LLM call, and a write to a table on another database connection or one a module serves — so
+> **a step runs at least once**: a process that dies between such an effect and the commit comes
+> back, is told to run *that* step again, and runs no other.
 
 The window is small and it is real, and it is one **step entry** wide — including inside a
 loop, where each iteration of the body is its own advance and its own write, so a crash re-runs
@@ -392,17 +397,21 @@ one item. So: what do you do about a step whose effect must not happen twice?
 **1. Prefer effects that are repeatable.** `ship` sets `status` to `'shipped'` for one order.
 Running it twice leaves exactly the same row — that is what "idempotent" means, and most row
 updates are, for free. Prefer an update keyed by the event's row over an insert that appends.
+(Rows are the easy case now: a re-run step's *previous* attempt left nothing, because it was
+rolled back. What needs the care below is everything that is not a row.)
 
-**2. Make the step ask whether it has already happened.** That is why `log` is written as a
-`run_js_code` body with a check in front of the insert rather than an `insert_row` step: a second
-run of it finds the `order_events` row already there and writes nothing. The check and the write
+**2. Make the step ask whether it has already happened.** That is the shape to reach for when a
+step's effect leaves the server — and it is why `log` is written as a `run_js_code` body with a
+check in front of the insert rather than an `insert_row` step: a second run of it finds the
+`order_events` row already there and writes nothing. The check and the write
 are one database round trip each, but they are *the step's own*, so re-running the step re-runs
 the check.
 
 **3. Let the database refuse the duplicate.** A unique constraint on `(order, kind)`
 ([tutorial-constraints.md](tutorial-constraints.md)) makes the second insert impossible rather
-than merely unlikely. Note what happens next, though: the second insert *fails*, and a failing
-step goes through its error policy — so pair the constraint with a body that catches it, or with
+than merely unlikely. Note what happens next, though: the second insert *fails*, that failure
+ends the step's transaction (nothing more can be done in it), and a failing step goes through its
+error policy — so pair the constraint with a body that catches it, or with
 **If it fails → Jump to a step** pointing at somewhere that treats "already done" as success.
 
 **4. For an effect that leaves the server, carry an idempotency key.** A payment or a webhook

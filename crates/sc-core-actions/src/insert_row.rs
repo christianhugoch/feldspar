@@ -67,11 +67,12 @@ impl Action for InsertRow {
                 .await?;
             body.insert(field.clone(), value);
         }
-        rows::create_row_ctx(
+        rows::create_row_in(
             ctx.catalog,
             &table,
             &Json::Object(body),
             Some(&scope.authority()),
+            scope.executor(),
         )
         .await
     }

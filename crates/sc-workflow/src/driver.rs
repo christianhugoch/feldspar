@@ -28,15 +28,37 @@
 //!
 //! What that write contains is decision 6's guarantee: the context, the cursor,
 //! the attempt count, the run's state, its `wake_at` and the step's trace row,
-//! committed **together, once**, in a single transaction. A run is therefore
-//! never observed half-advanced.
+//! committed **together, once**, in a single transaction — **and the rows the
+//! step itself wrote go in it too**. A run is therefore never observed
+//! half-advanced, and never advanced past a step whose writes were lost.
 //!
-//! What it does **not** contain is the step's own effects — an HTTP request, an
-//! email, an LLM call and (today) a row write are not transactional, and §10.3
-//! records that deviation rather than implying otherwise. The consequence is the
-//! honest one: a step is **at least once**. A node that dies between running an
-//! action and writing the advance comes back, is told to run the same step again,
-//! and runs no other. Steps SHOULD be idempotent.
+//! ## One step, one transaction
+//!
+//! The transaction is opened for the step, not for the write at the end of it: a
+//! [`SharedTx`] is handed to the action through its [`ActionContext`], the row
+//! layer runs every statement for a table that transaction serves inside it, and
+//! the events those writes raise are dispatched **in the same transaction** — so
+//! a trigger that writes an audit row for a row this step wrote commits with the
+//! step or vanishes with it. Then the run's advance and its trace rows go in
+//! before the single commit.
+//!
+//! A step that **fails** is rolled back before anything else happens: the rows it
+//! wrote are undone, and only then is the failure itself recorded (the attempt
+//! count, the retry deadline, the error) — in a transaction of its own, because a
+//! record of the failure that rolled back with the failure would be no record at
+//! all.
+//!
+//! It begins when the step first touches the database, so a step that calls an
+//! HTTP endpoint and writes nothing holds no transaction while it waits.
+//!
+//! What the transaction cannot contain is what the database does not hold: an
+//! HTTP request, an email, an LLM call, a write to a table on another connection
+//! or one a module serves, and the runs (agent or workflow) a step starts — each
+//! of those is its own unit of durability, and §10.3 records the deviation rather
+//! than implying otherwise. The consequence is the honest one: a step is **at
+//! least once**. A node that dies between running an action and committing comes
+//! back, is told to run the same step again, and runs no other. Steps SHOULD be
+//! idempotent.
 //!
 //! ## The clock is a parameter
 //!
@@ -50,7 +72,7 @@ use std::sync::Mutex;
 use chrono::{DateTime, Utc};
 use sc_action::{ActionContext, Event, EventBindings, Trigger, TriggerDispatcher};
 use sc_agent::{Run, run_update};
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, SharedTx};
 use sc_error::{Error, Result};
 use sc_expr::{Formula, Operation};
 use sc_types::Attrs;
@@ -199,6 +221,10 @@ impl<'a> Driver<'a> {
     /// [`drive`](Driver::drive) uses so a hundred steps of one run are not a
     /// hundred loads of the same document.
     async fn advance_on(&self, run: &mut Run, workflow: &Workflow) -> Result<Advanced> {
+        // The step's transaction. Nothing has begun on the database yet — it
+        // opens on the first statement anything makes through it, and a step that
+        // writes nothing never opens one at all.
+        let tx = SharedTx::begin_primary(self.catalog)?;
         let mut state = run_state(run)?;
         let event = run_event(run)?;
         let chain = run_chain(run);
@@ -211,6 +237,15 @@ impl<'a> Driver<'a> {
         // twice.
         let mut serviced: Option<(u32, String, u32)> = None;
         let mut failure: Option<String> = None;
+        // Whether the step's **own work** failed, which is what the step's
+        // transaction lives or dies by. Not the same question as `failure`: a
+        // step can do its work perfectly and the run still stop, because the
+        // *program* turned out to be inconsistent (a `Next` naming a step the
+        // workflow does not have). That failure is the workflow's, not the
+        // step's, and rolling the step back for it would discard work that
+        // succeeded — and leave a context that records what the rows no longer
+        // say.
+        let mut step_failed = false;
 
         // A **later** step this pass entered which stopped the run without doing
         // any work of its own — a `UserForm` reached from the step before it, or
@@ -276,7 +311,7 @@ impl<'a> Driver<'a> {
                     let attempt = state.attempt();
                     serviced = Some((state.steps_taken(), step.clone(), attempt));
                     let outcome = self
-                        .run_action(&event, &chain, &step, &action, &configuration, &state)
+                        .run_action(&event, &chain, &step, &action, &configuration, &state, &tx)
                         .await;
                     match outcome {
                         Ok((value, context)) => {
@@ -287,6 +322,7 @@ impl<'a> Driver<'a> {
                             let error = sc_error::format_chain(&e);
                             state.step_failed(workflow, &error, now)?;
                             failure = Some(error);
+                            step_failed = true;
                         }
                     }
                 }
@@ -308,6 +344,7 @@ impl<'a> Driver<'a> {
                             let error = sc_error::format_chain(&e);
                             state.step_failed(workflow, &error, now)?;
                             failure = Some(error);
+                            step_failed = true;
                         }
                     }
                 }
@@ -370,7 +407,30 @@ impl<'a> Driver<'a> {
             // out.
             release(run);
         }
-        self.write(run, &traces).await?;
+        match step_failed {
+            // The step failed. Whatever it wrote is undone **first** — half a
+            // step is not a step — and the failure is then recorded on its own,
+            // because a record that rolled back with the failure would leave a
+            // run that had never heard of it.
+            true => {
+                if let Err(e) = tx.rollback().await {
+                    sc_log::log_error!(
+                        "workflow `{}` run {}: rolling back the failed step: {e}",
+                        run.subject,
+                        run.id
+                    );
+                }
+                self.write(run, &traces).await?;
+            }
+            // The step succeeded: its rows, the advance and the trace rows commit
+            // together, once (decision 6). Including when the run stops here
+            // anyway because the *program* is inconsistent — the step's work is
+            // still the step's work.
+            false => {
+                self.write_on(run, &traces, &tx).await?;
+                tx.commit().await?;
+            }
+        }
 
         if let Advanced::Failed { step, error } = &advanced
             && was_live
@@ -422,6 +482,7 @@ impl<'a> Driver<'a> {
     /// The authority is the one §10.1 gives an action: the row actions write as
     /// admin carrying the event's user, which is a property of those actions and
     /// not something the engine gets to change.
+    #[allow(clippy::too_many_arguments)]
     async fn run_action(
         &self,
         event: &Event,
@@ -430,6 +491,7 @@ impl<'a> Driver<'a> {
         action: &str,
         configuration: &Attrs,
         state: &WorkflowRun,
+        tx: &SharedTx,
     ) -> Result<(Json, Attrs)> {
         let registry = self.dispatcher.registry();
         let action = registry.require(action.trim())?;
@@ -443,6 +505,10 @@ impl<'a> Driver<'a> {
         let mut ctx = ActionContext::new(self.catalog, event, configuration, step)
             .with_chain(step_chain)
             .with_triggers(self.dispatcher)
+            // The step's transaction: what this action writes — and what the
+            // triggers its writes fire write — commits with this step's advance
+            // or is rolled back with it (decision 6).
+            .with_transaction(tx.clone())
             .with_run_context(state.context().clone());
         if let Some(evaluator) = &services.evaluator {
             ctx = ctx.with_evaluator(evaluator);
@@ -496,25 +562,41 @@ impl<'a> Driver<'a> {
         Ok(values)
     }
 
-    /// The one write an advance makes: the run's row and, when the workflow is
-    /// traced, its step's trace row — **in one transaction**, so a reader never
-    /// sees a trace row for an advance that did not commit, or an advance whose
-    /// trace was lost (decision 6).
+    /// The advance, in a transaction of its own: the run's row and, when the
+    /// workflow is traced, its step's trace rows.
+    ///
+    /// What a **failed** step's advance takes, after its own transaction has been
+    /// rolled back — the failure has to be recorded even though everything the
+    /// step did is being undone.
     async fn write(&self, run: &Run, traces: &[RunTrace]) -> Result<()> {
-        let mut tx = self.catalog.primary().begin().await?;
-        let update = sc_query::Statement::from(run_update(run));
-        if let Err(e) = tx.query(&update).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        for trace in traces {
-            let insert = sc_query::Statement::from(trace_insert(trace));
-            if let Err(e) = tx.query(&insert).await {
-                tx.rollback().await?;
-                return Err(e);
+        let tx = SharedTx::begin_primary(self.catalog)?;
+        match self.write_on(run, traces, &tx).await {
+            Ok(()) => tx.commit().await,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
             }
         }
-        tx.commit().await
+    }
+
+    /// The advance's statements on `tx`, committing nothing: the run's row and,
+    /// when the workflow is traced, its step's trace rows.
+    ///
+    /// On the **step's** transaction for a step that succeeded, which is the
+    /// whole of decision 6 in one call — the rows the step wrote and the fact
+    /// that it took it are one commit, so a reader never sees a trace row for an
+    /// advance that did not happen, an advance whose writes were lost, or a run
+    /// half way through a step.
+    async fn write_on(&self, run: &Run, traces: &[RunTrace], tx: &SharedTx) -> Result<()> {
+        // No caller context: these are the engine's own `_sc_*` tables, which
+        // carry no policies (§9) and are not reachable by an application's rows.
+        tx.run(None, &sc_query::Statement::from(run_update(run)))
+            .await?;
+        for trace in traces {
+            tx.run(None, &sc_query::Statement::from(trace_insert(trace)))
+                .await?;
+        }
+        Ok(())
     }
 
     /// A failed run is a **record**, not a lost report (§10.3, phase 3.6).
