@@ -32,7 +32,11 @@ async fn main() -> ExitCode {
     match run(&args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            // The **chain**, not just the outermost context: every boot step
+            // wraps its failure in a sentence saying what it was doing, and
+            // printing only that one ("ensuring the triggers table exists")
+            // throws away the sentence that says what actually went wrong.
+            eprintln!("error: {}", sc_error::format_chain(&e));
             ExitCode::FAILURE
         }
     }

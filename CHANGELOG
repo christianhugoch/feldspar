@@ -2,6 +2,30 @@
 
 Changes in reverse chronological order.
 
+## Booting against a database that predates a required column
+
+`saltcorn serve` on a database with triggers in it stopped with `error: ensuring the triggers
+table exists` and nothing else. Two separate faults, both fixed here.
+
+- **The additive bootstrap now knows its own boundary.** `Catalog::bootstrap_table` documents the
+  rule that a column added to an existing table's declaration cannot be `required` — the stored
+  rows have no value for it — but it enforced nothing, so §10.3's `_sc_triggers.body` (declared
+  `required`) reached a populated table as a raw `ALTER TABLE … ADD COLUMN … NOT NULL` and the
+  database refused it. It now asks whether the table is empty (`LIMIT 1`, not `count(*)`, and only
+  when some missing column is `required`): **empty, and the column is added as declared**, which is
+  the deployment a new release should be able to start against; **not empty, and it stops with a
+  sentence naming the table and the column** and saying the answer is to backfill by hand or drop
+  the table, because there is no migration framework here. `crates/sc-catalog/tests/bootstrap_table.rs`
+  covers all three cases and checks the refusal leaves the table untouched.
+- **The binary prints the whole error chain.** `main` printed `error: {e}` — the outermost context
+  only. Every boot step wraps its failure in a sentence saying what it was doing, so that threw away
+  the sentence saying what went wrong. It now prints `sc_error::format_chain`, which is what the
+  server's own logging already used.
+
+Note for existing databases: `_sc_triggers` from before §10.3 needs `body` added (`'action'` for
+every stored row) and `action` relaxed to nullable — the second is a re-constraint, which the
+additive bootstrap deliberately never performs.
+
 ## Workflows, phase 10: each step runs in one transaction
 
 GOALS asks for it in those words, and phase 3 could not honour it: a step's row writes were

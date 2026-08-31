@@ -16,6 +16,7 @@ use std::sync::{Arc, RwLock};
 use sc_db::{DatabaseDriver, SchemaChange};
 use sc_error::{Error, Result};
 use sc_files::FileStore;
+use sc_query::{Select, Source, Statement};
 
 use crate::field::{DataField, DbId, TableId};
 use crate::field_meta::{FIELD_META_TABLE, list_field_meta};
@@ -864,21 +865,67 @@ impl Catalog {
     /// rows already there.
     ///
     /// The corollary a caller must respect: **a field added to an existing
-    /// table's declaration cannot be `required`**. The rows already stored have no
-    /// value for it, so `NOT NULL` would be rejected by the database (or, worse,
-    /// accepted with an invented default). Such a column is nullable, and its
-    /// reader treats `NULL` as the empty value.
+    /// table's declaration cannot be `required`** unless the table is empty. The
+    /// rows already stored have no value for it, so `NOT NULL` would be rejected
+    /// by the database (or, worse, accepted with an invented default). Such a
+    /// column is nullable, and its reader treats `NULL` as the empty value.
+    ///
+    /// A `required` column *is* added to a table that has no rows — there is
+    /// nothing for `NOT NULL` to contradict, and a deployment that has the table
+    /// but has never written to it is exactly the one a new release should be
+    /// able to start against. When there are rows, this stops with a sentence
+    /// naming the table and the column rather than letting the database refuse
+    /// the `ALTER`: the raw error says only that a null value violates a
+    /// constraint, and the admin needs telling that the answer is to give the
+    /// stored rows a value by hand (or drop the table) because this prototype has
+    /// no migration framework to do it for them.
     pub async fn bootstrap_table(&self, name: &str, fields: &[DataField]) -> Result<Table> {
         let Some(existing) = self.get(name)? else {
             return self.create_table(name, fields).await;
         };
         let mut table = existing;
+        // Emptiness is asked **once**, and only if some missing column needs the
+        // answer: it is a query against the table, and the common case — nothing
+        // missing — must stay the no-op it has always been.
+        let mut empty: Option<bool> = None;
         for field in fields {
-            if table.field(&field.base.name).is_none() {
-                table = self.create_field(name, field).await?;
+            if table.field(&field.base.name).is_some() {
+                continue;
             }
+            if field.required {
+                let is_empty = match empty {
+                    Some(known) => known,
+                    None => *empty.insert(self.table_is_empty(name).await?),
+                };
+                if !is_empty {
+                    return Err(Error::invalid(format!(
+                        "`{name}` is missing the column `{}`, which is declared NOT NULL, and the \
+                         table already has rows: the rows stored have no value for it, so adding \
+                         it would be refused. There is no migration framework here — add the \
+                         column and backfill it by hand, or drop `{name}` and let it be recreated",
+                        field.base.name
+                    )));
+                }
+            }
+            table = self.create_field(name, field).await?;
         }
         Ok(table)
+    }
+
+    /// Whether `name` holds no rows — asked by [`bootstrap_table`](Self::bootstrap_table)
+    /// before it adds a `NOT NULL` column to a table that is already there.
+    ///
+    /// `LIMIT 1` rather than `count(*)`: the question is "is there a row", and on
+    /// a table with a million of them the count would read every one to answer it.
+    async fn table_is_empty(&self, name: &str) -> Result<bool> {
+        let select = Select::from(Source::table(name)).limit(1);
+        let rows = self
+            .driver_for_table(name)?
+            .query(&Statement::from(select))
+            .await?
+            .try_collect()
+            .await?;
+        Ok(rows.is_empty())
     }
 
     /// A provider that serves the given table's rows: the trivial
