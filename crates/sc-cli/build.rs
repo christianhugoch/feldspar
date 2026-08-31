@@ -14,6 +14,16 @@
 //! (`1`, `true`, unset) builds. Turned off, the script is a no-op beyond its
 //! `rerun-if-changed` lines.
 //!
+//! The path recorded is the one in this checkout, which is the right answer for a
+//! binary run from the tree it was built in and the wrong one for a binary that is
+//! *packaged* — copied to another machine, where the checkout does not exist.
+//! **`SC_BUNDLE_PREFIX`** is that case: set it to the directory the artifact will
+//! be installed under (`scripts/build-static.sh` sets it to the install prefix) and
+//! the recorded paths become `$SC_BUNDLE_PREFIX/ui/admin/dist` and
+//! `$SC_BUNDLE_PREFIX/ui/ide/dist` — the same `ui/<name>/dist` layout, rooted where
+//! the bundles will actually be. The bundles are still built here; only the path
+//! compiled into the binary moves.
+//!
 //! **One variable, not two.** The IDE is not a separate product an operator
 //! chooses: it is where they edit an application's source, reached from the admin
 //! UI, and a build that produced the admin UI without it would leave a button
@@ -25,6 +35,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SC_BUILD_ADMIN");
+    println!("cargo:rerun-if-env-changed=SC_BUNDLE_PREFIX");
     let build = build_requested(std::env::var("SC_BUILD_ADMIN").ok().as_deref());
     build_bundle("ui/admin", "SC_ADMIN_BUNDLE_DIR", "admin UI", build);
     build_bundle("ui/ide", "SC_IDE_BUNDLE_DIR", "file-store IDE", build);
@@ -91,7 +102,38 @@ fn build_bundle(subdir: &str, env_var: &str, label: &str, build: bool) {
     }
     // Canonicalize so the embedded path is absolute regardless of run-time CWD.
     let dist = dist.canonicalize().unwrap_or(dist);
-    println!("cargo:rustc-env={env_var}={}", dist.display());
+    let recorded = recorded_dir(
+        std::env::var("SC_BUNDLE_PREFIX").ok().as_deref(),
+        subdir,
+        &dist,
+    );
+    println!("cargo:rustc-env={env_var}={}", recorded.display());
+}
+
+/// The path to compile into the binary for a bundle built at `dist`.
+///
+/// Without `SC_BUNDLE_PREFIX` this is `dist` itself — the bundle in this checkout,
+/// which is where a binary run from its own tree should look. With it, the same
+/// `ui/<name>/dist` tail is re-rooted at the prefix the artifact will be installed
+/// under, so the recorded path describes the *target* machine rather than this one.
+/// A relative prefix is an operator error worth failing on rather than recording a
+/// path that resolves against whatever directory the service happens to start in.
+///
+/// `pub` for the same reason `build_requested` is: `tests/build_script.rs` pulls
+/// this file in as a module, which is a build script's only way to be tested.
+pub fn recorded_dir(prefix: Option<&str>, subdir: &str, dist: &std::path::Path) -> PathBuf {
+    match prefix {
+        None => dist.to_path_buf(),
+        Some(prefix) => {
+            let prefix = PathBuf::from(prefix);
+            assert!(
+                prefix.is_absolute(),
+                "SC_BUNDLE_PREFIX must be an absolute path, got {}",
+                prefix.display()
+            );
+            prefix.join(subdir).join("dist")
+        }
+    }
 }
 
 /// Run `npm <args>` in `dir`, failing the build loudly on any error.

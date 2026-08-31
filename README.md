@@ -353,6 +353,27 @@ The binary is produced at `target/release/saltcorn` (or `target/debug/saltcorn`
 for a plain `cargo build`). You can also run it through cargo with
 `cargo run --release -p sc-cli -- <args>`.
 
+### 4.1 Building for a machine that will not have a toolchain
+
+Everything above builds *here*, and the binary it produces belongs here: it is
+linked against this machine's glibc and carries this checkout's paths to the admin
+UI and IDE bundles. To deploy to a VM without repeating §2.1 and §3 on it, build a
+packaged artifact instead:
+
+```bash
+scripts/build-static.sh                    # dist/saltcorn-<version>-<target>.tar.gz
+scripts/build-static.sh --help             # targets, install prefix, options
+```
+
+The binary inside is statically linked (`+crt-static`), so it has no shared-library
+dependencies and no interpreter: the same tarball runs on Debian, Ubuntu, RHEL and
+on Alpine. It carries the admin SPA and the IDE beside it, and an `install.sh` that
+puts the tree at `/opt/saltcorn` — the prefix compiled into the binary, which
+`--prefix` changes at build time.
+
+The destination then needs no Rust, no `libclang` and no C toolchain. It still needs
+a database, and it still needs `npm` if applications will be *built* on it (§7).
+
 ---
 
 ## 5. Database setup

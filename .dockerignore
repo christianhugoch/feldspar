@@ -1,0 +1,8 @@
+# The build context for `scripts/static-build.Dockerfile`. Everything below is
+# either rebuilt inside the container or is output rather than source; sending it
+# would be tens of gigabytes of build tree over the daemon socket.
+target/
+dist/
+**/node_modules/
+ui/*/dist/
+.git/

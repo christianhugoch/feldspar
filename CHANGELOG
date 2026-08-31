@@ -2,6 +2,61 @@
 
 Changes in reverse chronological order.
 
+## A binary that installs on a machine that never built it
+
+`cargo build --release` produces a binary for the machine it ran on: linked against that box's
+glibc, and carrying that checkout's absolute paths to the two UI bundles. Copied to a VM it
+either does not start or serves no admin UI, so deploying has meant installing a Rust toolchain,
+`libclang`, a C compiler and Node on the destination and building there (README §2). This adds
+the other way: one file with no dependencies at all, packaged with the bundles it serves.
+
+- **`scripts/build-static.sh`** builds `sc-cli` with `-C target-feature=+crt-static` and packages
+  the result as `dist/saltcorn-<version>-<target>.tar.gz` — `bin/saltcorn`, `ui/admin/dist`,
+  `ui/ide/dist`, an `install.sh` that copies the tree to the install prefix, and a `README`
+  describing the deployment. `--target` (`x86_64`/`aarch64-unknown-linux-gnu`), `--docker` /
+  `--native`, `--prefix`, `--output`, `--jobs`, `--no-ui`, `--no-strip`, `--no-verify`.
+- **One artifact for glibc distributions *and* Alpine, and it is not a musl build.** The musl
+  targets are refused by name, with the reason: `deno_core` links V8, V8 arrives as `rusty_v8`'s
+  prebuilt static archive, and upstream publishes those for `*-unknown-linux-gnu`,
+  `*-apple-darwin` and Windows only — Deno itself ships no musl build either. Building V8 from
+  source against musl is not a supported configuration, and would have to be redone at every V8
+  bump. `+crt-static` on the **gnu** target gets there instead: rustc emits a static-PIE with no
+  interpreter and no shared libraries, which Alpine runs unchanged. Refusing early matters —
+  the alternative is discovering it forty minutes into a build.
+- **The one sharp edge of static glibc is not one here.** `getaddrinfo` used to need a matching
+  `libnss_*.so` at run time, which an Alpine box has no copy of; since glibc 2.34 `nss_files` and
+  `nss_dns` live in libc itself, so a static binary carries them. Measured rather than assumed: a
+  static-PIE resolving a public name inside `alpine:3.20` returns the addresses. What does not
+  survive is `dlopen`, so a module's native Node addon (`.node`, through `deno_napi`) cannot load.
+  Nothing in the server needs one.
+- **`SC_BUNDLE_PREFIX`, in `crates/sc-cli/build.rs`** — the bundle paths compiled into the binary
+  can now describe the machine it is going to rather than the one it was built on. Unset, nothing
+  changes: the recorded path is this checkout's `ui/<name>/dist`. Set to an install prefix, the
+  same `ui/<name>/dist` tail is re-rooted there, and an absolute prefix is required because a
+  relative one would resolve against whatever directory the service happened to start in. This is
+  what makes the artifact installable at all: `--static-dir` overrides the admin bundle at run
+  time, but the IDE's path has no flag, by design (§12.1), and a packaged binary would otherwise
+  point at a directory that exists only on the build machine.
+- **`scripts/static-build.Dockerfile`** is the reproducible build behind `--docker`, and the
+  default when this machine has docker with buildx (without it the script says so and builds
+  locally, rather than failing on a Dockerfile the legacy builder cannot parse). It pins the Rust
+  image and the Node version and installs the C-side requirements that are easy to be missing —
+  `libclang` for bindgen, `cmake` for `aws-lc-sys`, and `zlib1g-dev`, whose **`libz.a`** a
+  `+crt-static` link needs and whose shared library alone will not do. The source is copied to
+  the install prefix so the compiled-in paths line up, and the export stage is `scratch`, so the
+  build writes files to the host and leaves no image behind.
+- **It verifies the property it exists to produce.** `file` must report a static binary — a stray
+  `.cargo/config.toml` or a dependency insisting on a shared library is worth catching here rather
+  than on the destination VM — and the stripped binary is then run in `debian:12-slim` and
+  `alpine:3.20`, where it must start and print its usage. Verified end to end: the tarball
+  unpacked into `/opt/saltcorn` inside `alpine:3.20`, `saltcorn serve --sqlite`, `/health`
+  answering `{"status":"ok"}` and `/` serving the built admin SPA rather than the bootstrap
+  document — which is the assertion that the re-rooted bundle path is right.
+- Sizes, for the record: 207 MB linked, 149 MB stripped, 65 MB in the tarball with both bundles.
+- `crates/sc-cli/tests/build_script.rs` covers the new path decision: no prefix records the
+  checkout's own bundle, a prefix re-roots both bundles under it, and a relative prefix fails the
+  build.
+
 ## An idle workflow engine stops asking the database
 
 The engine's queue is a query, and the task ran it every five seconds whether or not there was
