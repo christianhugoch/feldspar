@@ -2361,6 +2361,19 @@ matches nothing. **Recovery is not a special case**: an expired lease reads exac
 lease, so a crashed node's run is picked up by the next poll, with no crash detector, no heartbeat
 table and no recovery pass.
 
+That query is cheap, and it was still the most expensive thing an idle server did: one round trip
+every poll, forever, on a deployment with no runs in it at all — which the low-power goal will not
+have. So the **catalog caches one fact about the runs table**, `RunWakeups`: the earliest instant
+any live run might want the engine. A poll the cache says is pointless runs **no query at all**;
+a poll that finds nothing due asks once more (`next_wakeup`) for when to bother next and then goes
+quiet until then. The cache is maintained by everything that writes a run row — `note_wakeup`, on
+the same call that writes it — and its invariant is deliberately one-sided: **never later than the
+truth**. Too early costs one query that finds nothing and rescans; too late would be a run that
+never wakes, so a note only ever moves the instant earlier and only the database's own answer may
+move it later. A run another process started is invisible until the scan's **trust window** (five
+minutes) ends, which is the floor under how wrong a quiet process can be with no bus to tell it;
+when `sc-bus` exists a `NOTIFY` calls `note_wakeup` and the window can grow.
+
 `WorkQueue` — *claim what is due*, *renew a lease*, *wake me when something might be* — is the
 seam `sc-bus` will implement (a `NOTIFY`, a Redis subscription). Behind it today is a poll and a
 sleep, and **nothing above the seam knows which it is talking to**; the engine's tests drive it

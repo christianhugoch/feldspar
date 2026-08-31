@@ -42,6 +42,7 @@ mod rls;
 mod table;
 mod table_meta;
 mod tx;
+mod wakeups;
 
 pub use caller::CallerContext;
 pub use catalog::{Catalog, ProvidedTableIssue, SchemaStep};
@@ -91,6 +92,7 @@ pub use table_meta::{
     load_table_meta_by_name, orphan_table_meta, save_table_meta, save_table_meta_row,
 };
 pub use tx::SharedTx;
+pub use wakeups::RunWakeups;
 
 #[cfg(test)]
 mod tests {

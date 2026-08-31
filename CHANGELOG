@@ -2,6 +2,43 @@
 
 Changes in reverse chronological order.
 
+## An idle workflow engine stops asking the database
+
+The engine's queue is a query, and the task ran it every five seconds whether or not there was
+anything to ask about: a server with no workflow runs in it at all paid a round trip every poll,
+forever. That is the wrong shape for the low-power goal, so the answer is now cached where the
+other facts about the connected database are — in the catalog.
+
+- **`sc_catalog::RunWakeups`**: the earliest instant any live run might want the engine, held
+  beside the table cache and read by `Catalog::run_wakeups()`. It is a cache of one fact, not a
+  queue: it answers "is it worth asking the database", never "which runs". Its invariant is
+  one-sided on purpose — **never later than the truth**. Too early costs one query that finds
+  nothing; too late would be a run that never wakes. So a note only ever moves the instant
+  earlier, a scan generation stops an in-flight scan from overwriting a run written while it was
+  reading, and a poisoned lock answers "ask the database".
+- **Everything that writes a run row says when it wants the engine.** `sc_agent::note_wakeup` is
+  called by `save_run` (a run started, resumed, retried or cancelled) and by the workflow driver,
+  which writes the row itself inside the step's transaction. Before the write, deliberately: a
+  note that is early costs a query, a note that is lost costs a run. A run waiting on a **person**
+  has no `wake_at` and is not noted — no clock will make it runnable.
+- **The poll skips the query.** `DatabaseQueue::claim` consults the cache first and returns with
+  no database work at all when nothing is due. A poll that finds nothing due asks
+  `next_wakeup()` — one row, the earliest `wake_at` of any live run, blind to leases so it cannot
+  answer later than the truth — and the polls until that instant are free. `due()` itself is
+  unchanged and still always asks: it is the question, and `claim` is where it is skipped.
+- **A trust window bounds being wrong.** A run written by *another* process cannot be noted, so a
+  scan is trusted for `DEFAULT_RESCAN_SECONDS` (five minutes, `with_rescan` to change it) and then
+  re-checked. One query per five minutes instead of one per five seconds, and when `sc-bus` exists
+  a `NOTIFY` calls `note_wakeup` and the window can grow.
+
+`crates/sc-workflow/tests/wakeup_cache.rs` asserts the thing a benchmark could not — not that the
+poll is fast but that it does not happen — by wrapping a real Postgres driver in one that counts
+every statement mentioning `_sc_runs`: an empty database is asked twice and then left alone for a
+hundred polls, a run that wakes tomorrow costs nothing until tomorrow and is claimed when the day
+comes, a run written while the engine is quiet is claimed by the very next poll, and a run another
+process wrote is picked up when the trust window ends. `sc-catalog`'s own unit tests pin the
+cache's rules, including the note that arrives while a scan is in flight.
+
 ## Booting against a database that predates a required column
 
 `saltcorn serve` on a database with triggers in it stopped with `error: ensuring the triggers

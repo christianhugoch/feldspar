@@ -28,6 +28,25 @@
 //! **nothing above the seam knows which it is talking to**. The polling
 //! implementation is what ships, and it is twenty lines.
 //!
+//! ## The query an idle deployment does not run
+//!
+//! That predicate is cheap, and it was still the most expensive thing an idle
+//! server did: a round trip every poll, forever, to be told nothing is due. So
+//! the catalog keeps [`RunWakeups`](sc_catalog::RunWakeups) — the earliest
+//! instant any live run might want the engine — and a poll that the cache says
+//! is pointless **runs no query at all**. The cache is maintained by whoever
+//! writes a run row (`sc_agent::note_wakeup`), refreshed by
+//! [`next_wakeup`](DatabaseQueue::next_wakeup) whenever a poll finds nothing
+//! due, and re-checked against the database once per
+//! [`trust window`](DatabaseQueue::with_rescan) so a run another process started
+//! is picked up even with no bus to hear about it.
+//!
+//! ```text
+//! nothing at all:    poll → cache says no → 0 queries    (one scan per window)
+//! a wait until 3pm:  poll → cache says no → 0 queries    (until 3pm)
+//! something due:     poll → the runnable set → claim
+//! ```
+//!
 //! ## Recovery is not a special case
 //!
 //! A lease that has run out is a crashed node's run, and the next poll picks it
@@ -39,7 +58,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sc_agent::run_store::{
     COL_CLAIMED_BY, COL_ID, COL_KIND, COL_LEASE_UNTIL, COL_STATE, COL_WAKE_AT, RUNS_TABLE,
     run_from_row,
@@ -54,6 +73,17 @@ use sc_query::{
 
 /// How many runs one poll claims when the caller does not say.
 pub const DEFAULT_BATCH: usize = 8;
+
+/// How long the queue trusts its cached answer to "is anything due" before
+/// asking the database again.
+///
+/// The floor under how stale a quiet process may be: nothing this process wrote
+/// can go unnoticed for any of it — a run written here is noted the moment it is
+/// written — but a run another process started is invisible until the window
+/// ends. Five minutes turns a poll every five seconds into a query every five
+/// minutes on an idle deployment, and a bus that carries the notification will
+/// make even that unnecessary.
+pub const DEFAULT_RESCAN_SECONDS: i64 = 300;
 
 /// Where the engine gets runnable runs from, and how it says it is working on
 /// one.
@@ -98,6 +128,8 @@ pub struct DatabaseQueue {
     catalog: Arc<Catalog>,
     node: String,
     poll: std::time::Duration,
+    /// How long a scan's answer is trusted before the database is asked again.
+    rescan: Duration,
 }
 
 impl DatabaseQueue {
@@ -107,13 +139,25 @@ impl DatabaseQueue {
             catalog,
             node: node.into(),
             poll,
+            rescan: Duration::seconds(DEFAULT_RESCAN_SECONDS),
         }
+    }
+
+    /// How long a scan's answer is trusted before the database is asked again
+    /// (see [`DEFAULT_RESCAN_SECONDS`]).
+    pub fn with_rescan(mut self, rescan: Duration) -> DatabaseQueue {
+        self.rescan = rescan;
+        self
     }
 
     /// The runs that want the engine at `now` and that nothing is working on.
     ///
     /// Ordered by `wake_at`, so the run that has been waiting longest goes first
     /// and a busy engine cannot starve one run behind a stream of newer ones.
+    ///
+    /// Always asks the database: this is the question itself, and
+    /// [`claim`](DatabaseQueue::claim) is where the answer is skipped when the
+    /// catalog already knows there is nothing to ask about.
     pub async fn due(&self, now: DateTime<Utc>, limit: usize) -> Result<Vec<Run>> {
         let mut select = Select::from(Source::table(RUNS_TABLE)).filter(runnable(now));
         select.order = vec![OrderBy::asc(Expr::col(COL_WAKE_AT))];
@@ -127,6 +171,32 @@ impl DatabaseQueue {
             .await?;
         rows.iter().map(run_from_row).collect()
     }
+
+    /// The earliest instant **any** live run wants the engine, or `None` if none
+    /// does — what the cache in the catalog holds, read from the authority.
+    ///
+    /// Deliberately blind to leases: a run another node holds and has not
+    /// finished still has a `wake_at` in the past, and answering with that keeps
+    /// the cache's one-sided invariant (never later than the truth) at the cost
+    /// of polling while somebody else works. Taking the lease into account would
+    /// mean answering later than the truth for the run behind it, and a run that
+    /// wakes late by a lease is the bug this cache must not introduce.
+    pub async fn next_wakeup(&self) -> Result<Option<DateTime<Utc>>> {
+        let mut select = Select::from(Source::table(RUNS_TABLE)).filter(live());
+        select.order = vec![OrderBy::asc(Expr::col(COL_WAKE_AT))];
+        select.limit = Some(1);
+        let rows: Vec<Row> = self
+            .catalog
+            .primary()
+            .query(&Statement::from(select))
+            .await?
+            .try_collect()
+            .await?;
+        match rows.first() {
+            Some(row) => Ok(run_from_row(row)?.wake_at),
+            None => Ok(None),
+        }
+    }
 }
 
 #[async_trait]
@@ -137,8 +207,28 @@ impl WorkQueue for DatabaseQueue {
         until: DateTime<Utc>,
         limit: usize,
     ) -> Result<Vec<Run>> {
+        let wakeups = self.catalog.run_wakeups();
+        // The whole point: a poll on a deployment where nothing is due does no
+        // database work at all.
+        if !wakeups.due_by(now, self.rescan) {
+            return Ok(Vec::new());
+        }
+        // Taken before the query, so a run written while it is in flight is not
+        // overwritten by an answer that could not have seen it.
+        let scan = wakeups.begin_scan();
+        let due = self.due(now, limit).await?;
+        if due.is_empty() {
+            // Nothing was due after all — the cache was stale, or this is the
+            // first poll since boot. One more query says when to bother next,
+            // and the polls until then are free.
+            wakeups.scanned(scan, now, self.next_wakeup().await?);
+            return Ok(Vec::new());
+        }
+        // Something was due, so the cache stays as it is: these runs are about
+        // to move, and each write of them notes where they moved to. What it
+        // must not do is go quiet — there may be more due runs than the batch.
         let mut claimed = Vec::new();
-        for run in self.due(now, limit).await? {
+        for run in due {
             // The compare-and-set: the same predicate that made the run look
             // claimable, re-checked by the database at the moment of the write.
             // A second node that got there first has put a lease in the future,
@@ -211,6 +301,22 @@ impl WorkQueue for DatabaseQueue {
 /// The runnable set (see the module docs): a live workflow run whose time has
 /// come and that nothing is working on.
 fn runnable(now: DateTime<Utc>) -> Expr {
+    live()
+        .and(Expr::binary(
+            BinOp::Le,
+            Expr::col(COL_WAKE_AT),
+            Expr::Lit(Value::Timestamp(now)),
+        ))
+        .and(unleased(now))
+}
+
+/// A workflow run that some clock will make runnable: not finished, not failed,
+/// not cancelled, and not waiting on a **person**.
+///
+/// A NULL `wake_at` is that last case — live for a week and runnable at no point
+/// in it, which is why "is it live" and "is it runnable now" are two questions,
+/// and why the cache is a cache of *this* set's earliest instant.
+fn live() -> Expr {
     Expr::col(COL_KIND)
         .eq(Expr::lit(RunKind::Workflow.as_str()))
         .and(Expr::In {
@@ -220,16 +326,7 @@ fn runnable(now: DateTime<Utc>) -> Expr {
                 Expr::lit(RunState::Waiting.as_str()),
             ]),
         })
-        // A NULL `wake_at` is a run waiting on a **person**: live for a week and
-        // runnable at no point in it, which is why "is it live" and "is it
-        // runnable now" are two questions.
         .and(Expr::unary(UnOp::IsNotNull, Expr::col(COL_WAKE_AT)))
-        .and(Expr::binary(
-            BinOp::Le,
-            Expr::col(COL_WAKE_AT),
-            Expr::Lit(Value::Timestamp(now)),
-        ))
-        .and(unleased(now))
 }
 
 /// Nothing is working on this run: no lease, or one that has run out — which is

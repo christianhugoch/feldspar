@@ -103,10 +103,31 @@ pub async fn bootstrap_runs(catalog: &Catalog) -> Result<Table> {
 /// what happened. Refusing to store a step because the state looks odd would lose
 /// the only record of the thing that went wrong.
 pub async fn save_run(catalog: &Catalog, run: &Run) -> Result<()> {
+    note_wakeup(catalog, run);
     if load_run(catalog, run.id).await?.is_some() {
         exec(catalog, Statement::from(run_update(run))).await
     } else {
         exec(catalog, Statement::from(run_insert(run))).await
+    }
+}
+
+/// Tell the catalog that this run wants the engine, so the engine's queue does
+/// not have to discover it by polling ([`sc_catalog::RunWakeups`]).
+///
+/// Called by everything that writes a run row — [`save_run`] here, and the
+/// workflow driver, which writes the row itself inside the step's transaction.
+/// **Before** the write, deliberately: a note that is early costs one query that
+/// finds nothing, a note that is lost costs a run that never wakes, and a write
+/// that fails leaves the row as it was, which the cache is still allowed to be
+/// early about.
+///
+/// A run waiting on a person has no `wake_at` and is not noted: no clock will
+/// make it runnable, and the resume that will is a write of its own.
+pub fn note_wakeup(catalog: &Catalog, run: &Run) {
+    if run.kind == RunKind::Workflow
+        && let Some(at) = run.wake_at
+    {
+        catalog.run_wakeups().note(at);
     }
 }
 

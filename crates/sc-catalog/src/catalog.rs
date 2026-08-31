@@ -136,6 +136,17 @@ pub struct Catalog {
     /// `saltcorn.toml` environment. `None` where nobody said, which is a normal
     /// state: a server with no base domain serves no applications.
     public_origin: RwLock<Option<crate::PublicOrigin>>,
+    /// Whether anything in this database wants the workflow engine, and when
+    /// ([`crate::RunWakeups`]).
+    ///
+    /// Not table metadata, and here for the reason [`table_events`] is: the
+    /// engine's queue (layer 9) polls it and the run store (layer 6) maintains
+    /// it, neither may name the other, and the catalog is what both already
+    /// hold. Without it a deployment with no runs at all pays an SQL round trip
+    /// every few seconds to be told so.
+    ///
+    /// [`table_events`]: Catalog::set_table_events
+    run_wakeups: crate::RunWakeups,
 }
 
 /// Why a **provided** table (§8.3) is not the table an admin expected.
@@ -199,6 +210,7 @@ impl Catalog {
             provided_table_issues: RwLock::new(Vec::new()),
             public_origin: RwLock::new(None),
             table_events: RwLock::new(None),
+            run_wakeups: crate::RunWakeups::new(),
         };
         catalog.reload().await?;
         Ok(catalog)
@@ -845,6 +857,15 @@ impl Catalog {
             .read()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// What this process believes about workflow runs that want the engine.
+    ///
+    /// The runs table is the authority; this is the cache that keeps an idle
+    /// process from asking it every few seconds (see [`crate::RunWakeups`]).
+    /// Written by whoever writes a run row, read by the engine's queue.
+    pub fn run_wakeups(&self) -> &crate::RunWakeups {
+        &self.run_wakeups
     }
 
     /// Ensure a system metadata table exists with (at least) `fields`, creating

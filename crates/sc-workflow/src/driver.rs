@@ -71,7 +71,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use sc_action::{ActionContext, Event, EventBindings, Trigger, TriggerDispatcher};
-use sc_agent::{Run, run_update};
+use sc_agent::{Run, note_wakeup, run_update};
 use sc_catalog::{Catalog, SharedTx};
 use sc_error::{Error, Result};
 use sc_expr::{Formula, Operation};
@@ -400,6 +400,12 @@ impl<'a> Driver<'a> {
 
         let now = self.clock.now();
         record(run, &state, now);
+        // The row this step is about to write is the engine's queue: a `Wait`'s
+        // deadline, a retry's backoff, or "at once" for a run that has more to
+        // do. Telling the catalog now is what lets the queue stop asking the
+        // database whether anything is due (`sc_catalog::RunWakeups`) — the
+        // driver writes the row itself, so `save_run`'s note never sees it.
+        note_wakeup(self.catalog, run);
         if !advanced.is_runnable() {
             // Nothing is working on it any more: a finished run must not sit
             // leased, and a suspended one must be claimable the instant its

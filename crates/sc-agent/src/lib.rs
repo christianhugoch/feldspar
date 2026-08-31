@@ -66,8 +66,8 @@ pub use machine::{AgentLoop, Conclusion, Step, ToolOutcome};
 pub use registry::AgentRegistry;
 pub use run::{Run, RunId, RunKind, RunState};
 pub use run_store::{
-    RUNS_TABLE, bootstrap_runs, delete_run, list_runs, load_run, require_run, run_insert,
-    run_update, save_run,
+    RUNS_TABLE, bootstrap_runs, delete_run, list_runs, load_run, note_wakeup, require_run,
+    run_insert, run_update, save_run,
 };
 pub use store::{
     AGENTS_TABLE, bootstrap_agents, delete_agent, list_agents, load_agent, load_agent_by_name,
