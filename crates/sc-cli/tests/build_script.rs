@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn without_a_prefix_the_checkouts_own_bundle_is_recorded() {
-    let dist = Path::new("/home/dev/saltcorn/ui/admin/dist");
+    let dist = Path::new("/home/dev/feldspar/ui/admin/dist");
     assert_eq!(recorded_dir(None, "ui/admin", dist), dist.to_path_buf());
 }
 
@@ -57,12 +57,12 @@ fn a_prefix_re_roots_each_bundle_under_the_install_directory() {
     // What `scripts/build-static.sh` does: the bundles are built in this
     // checkout, but the binary is going to a machine where only the prefix
     // exists, so that is the path it must carry.
-    let prefix = Some("/opt/saltcorn");
+    let prefix = Some("/opt/feldspar");
     for (subdir, expected) in [
-        ("ui/admin", "/opt/saltcorn/ui/admin/dist"),
-        ("ui/ide", "/opt/saltcorn/ui/ide/dist"),
+        ("ui/admin", "/opt/feldspar/ui/admin/dist"),
+        ("ui/ide", "/opt/feldspar/ui/ide/dist"),
     ] {
-        let built = PathBuf::from("/home/dev/saltcorn")
+        let built = PathBuf::from("/home/dev/feldspar")
             .join(subdir)
             .join("dist");
         assert_eq!(
@@ -75,10 +75,10 @@ fn a_prefix_re_roots_each_bundle_under_the_install_directory() {
 #[test]
 #[should_panic(expected = "SC_BUNDLE_PREFIX must be an absolute path")]
 fn a_relative_prefix_fails_the_build() {
-    // Rather than recording `opt/saltcorn/ui/admin/dist`, which would resolve
+    // Rather than recording `opt/feldspar/ui/admin/dist`, which would resolve
     // against whatever directory the service was started in.
     recorded_dir(
-        Some("opt/saltcorn"),
+        Some("opt/feldspar"),
         "ui/admin",
         Path::new("/src/ui/admin/dist"),
     );

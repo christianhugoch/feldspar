@@ -88,7 +88,7 @@ export function Applications() {
     }
   };
 
-  // Rewrite the app's generated code (`src/saltcorn/**`) without building it.
+  // Rewrite the app's generated code (`src/feldspar/**`) without building it.
   // The server does this by itself whenever the API definition changes, so this
   // is the "now, please" case: a store that was unreachable when a table
   // changed, or a project directory that was emptied — which the server

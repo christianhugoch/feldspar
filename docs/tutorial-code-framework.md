@@ -20,7 +20,7 @@ store) to create the project in the first place.
 Start the server with a base domain, so applications have somewhere to be served:
 
 ```bash
-saltcorn serve --base-domain localhost
+feldspar serve --base-domain localhost
 ```
 
 ## Step 1 — Add a file store and a data model
@@ -87,7 +87,7 @@ build leaves the previously built version serving.
 **Dependencies are yours to install.** Unlike a scaffolded React app, `code` runs no
 `npm install`: if the build needs it, run it on the host, or make your build command do it.
 
-The same build runs from a terminal as `saltcorn build-app todo`, which prints your bundler's
+The same build runs from a terminal as `feldspar build-app todo`, which prints your bundler's
 output whole and mounts nothing — useful in a deploy script, or when a failed build has left the
 app unreachable.
 

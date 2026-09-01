@@ -1,4 +1,4 @@
-//! `saltcorn auth token`: a signed-in browser session, written to a file.
+//! `feldspar auth token`: a signed-in browser session, written to a file.
 //!
 //! An application's screens are behind a sign-in (design §13.3 — a scaffolded
 //! project's routes require a user unless they say otherwise), so a screenshot
@@ -56,9 +56,9 @@ use serde_json::{Value as Json, json};
 use uuid::Uuid;
 
 /// The default file name for [`SessionFormat::Playwright`].
-pub const DEFAULT_PLAYWRIGHT_FILE: &str = ".saltcorn-session.json";
+pub const DEFAULT_PLAYWRIGHT_FILE: &str = ".feldspar-session.json";
 /// The default file name for [`SessionFormat::Netscape`].
-pub const DEFAULT_NETSCAPE_FILE: &str = ".saltcorn-cookies.txt";
+pub const DEFAULT_NETSCAPE_FILE: &str = ".feldspar-cookies.txt";
 
 /// The names of the two cookies a signed-in browser carries.
 ///
@@ -265,7 +265,7 @@ fn same_site(raw: &str) -> &'static str {
 fn netscape(cookies: &[Cookie], host: &str) -> String {
     let mut out = String::from(
         "# Netscape HTTP Cookie File\n\
-         # Written by `saltcorn auth token`. This is a live session — treat it as a password.\n",
+         # Written by `feldspar auth token`. This is a live session — treat it as a password.\n",
     );
     for c in cookies {
         out.push_str(&format!(

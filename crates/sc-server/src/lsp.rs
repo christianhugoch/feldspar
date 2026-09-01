@@ -217,7 +217,7 @@ async fn bridge(socket: WebSocket, root: PathBuf, store: String, permit: OwnedSe
     let mut child = match spawn_language_server(&root) {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("saltcorn: language server for {store}: {e}");
+            eprintln!("feldspar: language server for {store}: {e}");
             refuse(socket, format!("could not start {SERVER_BIN}: {e}")).await;
             return;
         }
@@ -232,7 +232,7 @@ async fn bridge(socket: WebSocket, root: PathBuf, store: String, permit: OwnedSe
         match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
             (Some(i), Some(o), Some(e)) => (i, o, e),
             _ => {
-                eprintln!("saltcorn: language server for {store}: no pipes on the child process");
+                eprintln!("feldspar: language server for {store}: no pipes on the child process");
                 refuse(
                     socket,
                     "the language server started without pipes".to_owned(),
@@ -248,7 +248,7 @@ async fn bridge(socket: WebSocket, root: PathBuf, store: String, permit: OwnedSe
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("saltcorn: {SERVER_BIN} [{store_for_log}]: {line}");
+            eprintln!("feldspar: {SERVER_BIN} [{store_for_log}]: {line}");
         }
     });
 

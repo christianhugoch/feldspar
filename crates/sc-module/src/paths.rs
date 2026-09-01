@@ -9,17 +9,17 @@
 //! ```
 //!
 //! **Where the root is** follows the same rule `sc_config_file` states for the
-//! configuration file: ask the platform rather than hard-coding `~/.saltcorn`.
+//! configuration file: ask the platform rather than hard-coding `~/.feldspar`.
 //! The order of authority is the operator's word first — `serve --modules-dir`,
-//! then a `modules_dir` in the chosen `saltcorn.toml` environment, both of which
+//! then a `modules_dir` in the chosen `feldspar.toml` environment, both of which
 //! reach this crate as an explicit path — and the platform's **data** directory
 //! last, because installed packages are state, not configuration:
 //!
 //! | | modules root |
 //! |---|---|
-//! | Linux/BSD | `$XDG_DATA_HOME/saltcorn/modules` (else `~/.local/share/saltcorn/modules`) |
-//! | macOS | `~/Library/Application Support/saltcorn/modules` |
-//! | Windows | `%APPDATA%\saltcorn\modules` |
+//! | Linux/BSD | `$XDG_DATA_HOME/feldspar/modules` (else `~/.local/share/feldspar/modules`) |
+//! | macOS | `~/Library/Application Support/feldspar/modules` |
+//! | Windows | `%APPDATA%\feldspar\modules` |
 //!
 //! Written against `std::env` for the same reason `sc_config_file` is: these are
 //! three variables and two fallbacks, and a directories crate would cost more to
@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use sc_error::{Error, Result};
 
 /// The directory name under the platform's data directory.
-const APP_DIR: &str = "saltcorn";
+const APP_DIR: &str = "feldspar";
 /// The subdirectory of that holding the npm project.
 const MODULES_DIR: &str = "modules";
 

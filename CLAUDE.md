@@ -1,4 +1,4 @@
-This contains the work in progress design specification for the next version of saltcorn
+This contains the work in progress design specification for the next version of saltcorn, called Saltcorn Feldspar (or just feldspar)
 
 Files:
 

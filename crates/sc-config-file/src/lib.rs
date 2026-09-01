@@ -1,4 +1,4 @@
-//! The `saltcorn.toml` configuration file: named environments, each holding one
+//! The `feldspar.toml` configuration file: named environments, each holding one
 //! set of primary-database connection parameters.
 //!
 //! A deployment does not have *a* database; it has a production database, a
@@ -47,9 +47,9 @@
 //! secure_cookies = true
 //! ```
 //!
-//! Those three mirror `serve`'s flags of the same names, so `saltcorn serve
+//! Those three mirror `serve`'s flags of the same names, so `feldspar serve
 //! --environment production` needs none of them on the command line — and, less
-//! obviously but more usefully, a `saltcorn build-app` run against the same
+//! obviously but more usefully, a `feldspar build-app` run against the same
 //! environment writes the application's real URL into the documentation it
 //! generates instead of a placeholder.
 //!
@@ -72,13 +72,13 @@
 //! path is *no file at all*, which is not a misconfiguration — it is the
 //! environment-variable deployment this file exists alongside.
 //!
-//! **Two readers, not one.** The `saltcorn` binary reads it to know where the
+//! **Two readers, not one.** The `feldspar` binary reads it to know where the
 //! primary database is; the integration-test harness reads the `test`
 //! environment to know which database it may create its per-test databases from,
 //! and which template to clone them out of ([`Environment::test_template`]).
 //! That is why the reader is a layer-0 crate of its own rather than a module of
 //! `sc-cli`: a `cargo test` on a developer's machine should need no environment
-//! variables that a `saltcorn serve` on the same machine does not.
+//! variables that a `feldspar serve` on the same machine does not.
 //!
 //! Not to be confused with `sc-config`, which is the `_sc_config` **table** —
 //! the settings an admin edits in the running server. This crate is the file on
@@ -91,21 +91,21 @@ use sc_error::{Error, Result};
 use serde::Deserialize;
 
 /// The file's name, in whichever directory it is found.
-pub const FILE_NAME: &str = "saltcorn.toml";
+pub const FILE_NAME: &str = "feldspar.toml";
 /// The per-application directory the file sits in, under the platform's
 /// configuration root.
-pub const APP_DIR: &str = "saltcorn";
+pub const APP_DIR: &str = "feldspar";
 /// Environment variable naming the configuration file outright (overrides the
 /// search). The file it names must exist.
-pub const CONFIG_PATH_VAR: &str = "SALTCORN_CONFIG";
+pub const CONFIG_PATH_VAR: &str = "FELDSPAR_CONFIG";
 /// Environment variable selecting the environment, when `--environment` is not
 /// passed. Selecting one this way is as explicit as the flag.
-pub const ENVIRONMENT_VAR: &str = "SALTCORN_ENV";
+pub const ENVIRONMENT_VAR: &str = "FELDSPAR_ENV";
 /// The environment used when the file names no `default_environment` and the
 /// command line selects none.
 pub const DEFAULT_ENVIRONMENT: &str = "production";
 
-/// A parsed `saltcorn.toml`.
+/// A parsed `feldspar.toml`.
 ///
 /// `deny_unknown_fields`: a key we do not recognise is a typo in a file whose
 /// whole job is to say which database to write to, and stepping over it would
@@ -129,10 +129,10 @@ pub struct ConfigFile {
 ///
 /// The last three are the **serving** half, and they are here because an
 /// environment is a deployment rather than a connection string. Two things
-/// follow from having them: `saltcorn serve --environment production` needs no
+/// follow from having them: `feldspar serve --environment production` needs no
 /// other flag, and — the reason they were added — a build run from the command
 /// line writes the *same* application URL into the generated documentation that
-/// a build run by the server would. Without them, `saltcorn build-app` would
+/// a build run by the server would. Without them, `feldspar build-app` would
 /// quietly rewrite `AGENTS.md` with the URL taken out, which is worse than
 /// never having written it. They mirror three `serve` flags exactly; the rest of
 /// `serve`'s flags are not here because none of them decides where an
@@ -386,13 +386,13 @@ pub fn locate() -> Option<PathBuf> {
 /// configuration directory, then the system-wide one.
 ///
 /// The platform conventions, which is the whole point of asking rather than
-/// hard-coding `~/.saltcorn`:
+/// hard-coding `~/.feldspar`:
 ///
 /// | | user | system |
 /// |---|---|---|
-/// | Linux/BSD | `$XDG_CONFIG_HOME/saltcorn/` (else `~/.config/saltcorn/`) | `/etc/saltcorn/` |
-/// | macOS | `~/Library/Application Support/saltcorn/` | `/etc/saltcorn/` |
-/// | Windows | `%APPDATA%\saltcorn\` | `%PROGRAMDATA%\saltcorn\` |
+/// | Linux/BSD | `$XDG_CONFIG_HOME/feldspar/` (else `~/.config/feldspar/`) | `/etc/feldspar/` |
+/// | macOS | `~/Library/Application Support/feldspar/` | `/etc/feldspar/` |
+/// | Windows | `%APPDATA%\feldspar\` | `%PROGRAMDATA%\feldspar\` |
 ///
 /// Written against `std::env` rather than a directories crate: these are four
 /// variables and two fallbacks, and the platform seam is small enough that a
@@ -470,7 +470,7 @@ fn warn_if_world_readable(path: &Path) {
     let mode = meta.permissions().mode() & 0o077;
     if mode != 0 {
         eprintln!(
-            "saltcorn: warning: the configuration file {} is readable by other users \
+            "feldspar: warning: the configuration file {} is readable by other users \
              (mode {:o}); it may contain database passwords — consider `chmod 600`",
             path.display(),
             meta.permissions().mode() & 0o777,
@@ -505,7 +505,7 @@ test_template = "saltcorn_template"
 "#;
 
     fn parse(text: &str) -> Result<ConfigFile> {
-        ConfigFile::parse(text, Path::new("saltcorn.toml"))
+        ConfigFile::parse(text, Path::new("feldspar.toml"))
     }
 
     #[test]
@@ -628,7 +628,7 @@ port = "5432"
     fn selecting_an_undefined_environment_lists_the_defined_ones() {
         let file = parse(SAMPLE).expect("parse");
         let err = file
-            .environment("prod", Path::new("/etc/saltcorn/saltcorn.toml"))
+            .environment("prod", Path::new("/etc/feldspar/feldspar.toml"))
             .expect_err("unknown environment");
         let msg = err.to_string();
         assert!(msg.contains("prod"), "{msg}");
@@ -656,7 +656,7 @@ port = "5432"
     #[test]
     fn search_paths_are_platform_appropriate() {
         // Whatever the platform, the file is looked for under an app directory
-        // named `saltcorn` and is called `saltcorn.toml`.
+        // named `feldspar` and is called `feldspar.toml`.
         for path in search_paths() {
             assert!(
                 path.ends_with(Path::new(APP_DIR).join(FILE_NAME)),

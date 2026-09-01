@@ -1,10 +1,10 @@
-//! `saltcorn serve` under a `Type=notify` service manager, end to end.
+//! `feldspar serve` under a `Type=notify` service manager, end to end.
 //!
 //! The unit tests in `sc-server`'s `systemd` module assert the *protocol* — what
 //! each notification looks like on the wire. What they cannot assert is the one
 //! thing `Type=notify` is bought for: that `READY=1` means **the port is
 //! open**. A readiness notification sent a moment too early is worse than none,
-//! because every unit ordered `After=saltcorn.service` is then released into a
+//! because every unit ordered `After=feldspar.service` is then released into a
 //! connection refused.
 //!
 //! So this test stands the real [`sc_server::serve`] up with a real

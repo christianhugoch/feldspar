@@ -1,9 +1,9 @@
-# Saltcorn v2
+# Saltcorn Feldspar
 
-A ground-up rewrite of Saltcorn in Rust. This repository currently implements the
+Saltcorn Feldspar is a ground-up rewrite of Saltcorn in Rust. This repository currently implements the
 **MVP milestone**: a single Postgres database, a create-first-user / login flow,
 a table and field editor, a row editor, and user management — all driven from a
-**React + TypeScript admin SPA** served by the `saltcorn` process over a typed
+**React + TypeScript admin SPA** served by the `feldspar` process over a typed
 JSON API.
 
 This README is for **operators**: how to install the prerequisites, set up the
@@ -16,7 +16,7 @@ own, for every other kind of box. (Design and planning docs live under
 
 ## 1. What you get
 
-- A single binary, `saltcorn`, that serves the admin UI and its API.
+- A single binary, `feldspar`, that serves the admin UI and its API.
 - One Postgres database is the source of truth. The server **introspects** whatever
   tables already exist and, on first start, creates a `users` table if none is
   present. It does **not** create the database itself — you do that once (below).
@@ -33,7 +33,7 @@ scope" section of [`TODO.md`](TODO.md).
 
 A complete deployment, from a clean Debian 13 ("trixie") machine to a service that
 starts at boot: PostgreSQL, a Rust toolchain, a build from source, a
-`saltcorn.toml`, and a systemd unit. Each step links to the section that explains
+`feldspar.toml`, and a systemd unit. Each step links to the section that explains
 it properly — read those when something does not fit your box. If you only want to
 *try* Saltcorn, skip this and follow §3–§8 instead.
 
@@ -60,9 +60,9 @@ sudo apt install -y build-essential pkg-config git curl ca-certificates \
   They are needed **twice**: once at build time, for the two front-end bundles (§6),
   and again at run time — the server itself runs `npm` whenever an application is
   installed or built, from the admin UI's **Build** button or from
-  `saltcorn build-app` (§7), and whenever a module is installed. It never runs
+  `feldspar build-app` (§7), and whenever a module is installed. It never runs
   `node`: an application's bundle is built by npm, and a module runs on a
-  JavaScript worker inside the `saltcorn` process.
+  JavaScript worker inside the `feldspar` process.
 
 The build needs outbound network for cargo's crates and a prebuilt V8, but nothing
 listens on the internet until §2.7.
@@ -73,18 +73,18 @@ Run the server as its own unprivileged system user, and keep the checkout somewh
 that user can read:
 
 ```bash
-sudo adduser --system --group --home /opt/saltcorn saltcorn
-sudo install -d -o "$USER" -g "$USER" /opt/saltcorn/src
+sudo adduser --system --group --home /opt/feldspar saltcorn
+sudo install -d -o "$USER" -g "$USER" /opt/feldspar/src
 ```
 
 The checkout is built and owned by *you* and is only ever read by the service; the
 service's writable state (disk file stores, application source trees and their
-`node_modules`, npm's cache) lives in `/var/lib/saltcorn`, which the systemd unit in
+`node_modules`, npm's cache) lives in `/var/lib/feldspar`, which the systemd unit in
 §2.6 creates.
 
 > **The built binary keeps a path back into its checkout.** `cargo build` records the
 > absolute paths of `ui/admin/dist` and `ui/ide/dist` in the binary (§6), which is how
-> `saltcorn serve` serves the admin UI and the IDE with no flags at all. That path has
+> `feldspar serve` serves the admin UI and the IDE with no flags at all. That path has
 > to keep existing: build in the directory you intend to keep, not in `/tmp` or a home
 > directory you will clean out. Copying or installing the *binary* elsewhere is fine —
 > the recorded paths are absolute. If you do need to separate the two, pass
@@ -132,22 +132,22 @@ and wants a few GB of RAM — on a small VM, add swap first (§11 explains why t
 build is heavy):
 
 ```bash
-git clone <this-repo-url> /opt/saltcorn/src
-cd /opt/saltcorn/src
+git clone <this-repo-url> /opt/feldspar/src
+cd /opt/feldspar/src
 cargo build --release -p sc-cli
-sudo install -m 0755 target/release/saltcorn /usr/local/bin/saltcorn
-saltcorn                       # prints the usage summary and the config paths it searches
+sudo install -m 0755 target/release/feldspar /usr/local/bin/feldspar
+feldspar                       # prints the usage summary and the config paths it searches
 ```
 
 ### 2.5 The configuration file
 
 A service account has no home directory to keep a configuration file in, so put it in
-the system location — `/etc/saltcorn/saltcorn.toml`, which is one of the paths
-`saltcorn` searches on Linux (§7):
+the system location — `/etc/feldspar/feldspar.toml`, which is one of the paths
+`feldspar` searches on Linux (§7):
 
 ```bash
-sudo install -d -m 0755 /etc/saltcorn
-sudo tee /etc/saltcorn/saltcorn.toml >/dev/null <<'TOML'
+sudo install -d -m 0755 /etc/feldspar
+sudo tee /etc/feldspar/feldspar.toml >/dev/null <<'TOML'
 default_environment = "production"
 
 [environments.production]
@@ -158,21 +158,21 @@ database = "saltcorn"
 base_domain = "example.com"    # each application is served at <subdomain>.example.com
 bind = "0.0.0.0:80"
 TOML
-sudo chown saltcorn:saltcorn /etc/saltcorn/saltcorn.toml
-sudo chmod 600 /etc/saltcorn/saltcorn.toml
+sudo chown saltcorn:saltcorn /etc/feldspar/feldspar.toml
+sudo chmod 600 /etc/feldspar/feldspar.toml
 ```
 
 Notes on that file, all of which §7 covers in full:
 
-- `base_domain` and `bind` mirror the flags of the same names, so `saltcorn serve`
-  needs neither on the command line — and a `saltcorn build-app` run against the same
+- `base_domain` and `bind` mirror the flags of the same names, so `feldspar serve`
+  needs neither on the command line — and a `feldspar build-app` run against the same
   environment writes the application's real URL into the documentation it generates.
 - **Without `base_domain` no application is served at all**, only the admin UI: the
   server has no way to address an app.
 - A remote database goes in as a URL instead of the socket parts:
   `url = "postgres://saltcorn:change-me@db.internal:5432/saltcorn"`.
 - Add a `[environments.staging]` section when you have a second database, and select
-  it with `saltcorn serve --environment staging`.
+  it with `feldspar serve --environment staging`.
 - `chmod 600` because such a file may hold a password; the server warns on stderr when
   it is readable by anyone else.
 - Leave `secure_cookies` unset for now. It is for a deployment behind a
@@ -182,9 +182,9 @@ Notes on that file, all of which §7 covers in full:
 ### 2.6 The systemd unit
 
 ```bash
-sudo tee /etc/systemd/system/saltcorn.service >/dev/null <<'UNIT'
+sudo tee /etc/systemd/system/feldspar.service >/dev/null <<'UNIT'
 [Unit]
-Description=Saltcorn
+Description=Saltcorn Feldspar
 After=network-online.target postgresql.service
 Wants=network-online.target
 
@@ -193,11 +193,11 @@ Type=notify
 WatchdogSec=30s
 User=saltcorn
 Group=saltcorn
-ExecStart=/usr/local/bin/saltcorn serve --environment production
-Environment=SALTCORN_CONFIG=/etc/saltcorn/saltcorn.toml
-Environment=HOME=/var/lib/saltcorn
-StateDirectory=saltcorn
-WorkingDirectory=/var/lib/saltcorn
+ExecStart=/usr/local/bin/feldspar serve --environment production
+Environment=FELDSPAR_CONFIG=/etc/feldspar/feldspar.toml
+Environment=HOME=/var/lib/feldspar
+StateDirectory=feldspar
+WorkingDirectory=/var/lib/feldspar
 Restart=on-failure
 RestartSec=5s
 
@@ -210,22 +210,22 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/saltcorn
+ReadWritePaths=/var/lib/feldspar
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now saltcorn
-systemctl status saltcorn
-journalctl -u saltcorn -f      # the boot log names the environment and the file it came from
+sudo systemctl enable --now feldspar
+systemctl status feldspar
+journalctl -u feldspar -f      # the boot log names the environment and the file it came from
 ```
 
 Why each of the less obvious lines:
 
 - **`Type=notify`.** The server tells systemd when it is *serving*: `systemctl start`
-  returns once the port is bound and accepting, so a unit ordered `After=saltcorn.service`
+  returns once the port is bound and accepting, so a unit ordered `After=feldspar.service`
   never races the listener. Until then `systemctl status` shows what the boot is doing —
   connecting to the database, building each application — and a boot step that legitimately
   takes minutes (an application's first `npm install`) asks systemd for more time rather
@@ -240,12 +240,12 @@ Why each of the less obvious lines:
 - **`--environment production`**, even though it is the file's default: *naming* an
   environment makes that section outrank any ambient `DATABASE_URL`/`PG*` in the unit's
   environment, so the service cannot be pointed at the wrong database by accident (§7).
-- **`SALTCORN_CONFIG`** names the file outright instead of relying on the search paths,
+- **`FELDSPAR_CONFIG`** names the file outright instead of relying on the search paths,
   which depend on `HOME`.
-- **`StateDirectory=saltcorn`** creates `/var/lib/saltcorn` owned by the service user,
+- **`StateDirectory=feldspar`** creates `/var/lib/feldspar` owned by the service user,
   and **`ReadWritePaths`** makes it the one writable place under `ProtectSystem=strict`.
   Keep disk file stores inside it; a store pointed anywhere else will fail to write.
-- **`HOME=/var/lib/saltcorn`** gives npm a writable home for its cache when the server
+- **`HOME=/var/lib/feldspar`** gives npm a writable home for its cache when the server
   builds an application.
 - **`WorkingDirectory`** is what a relative file-store path resolves against.
 - **`AmbientCapabilities=CAP_NET_BIND_SERVICE`** lets an unprivileged process bind 80
@@ -257,7 +257,7 @@ Confirm the process is up (§9):
 curl -s http://127.0.0.1/health      # {"status":"ok"}
 ```
 
-If it is not, `journalctl -u saltcorn` has the reason: the server exits immediately,
+If it is not, `journalctl -u feldspar` has the reason: the server exits immediately,
 naming the target, rather than booting half-working (§10).
 
 ### 2.7 First user, DNS, TLS
@@ -286,10 +286,10 @@ so take a dump before you upgrade one.
 ```bash
 sudo -u saltcorn pg_dump -h /var/run/postgresql saltcorn > ~/saltcorn-$(date +%F).sql
 
-cd /opt/saltcorn/src && git pull
+cd /opt/feldspar/src && git pull
 cargo build --release -p sc-cli
-sudo install -m 0755 target/release/saltcorn /usr/local/bin/saltcorn
-sudo systemctl restart saltcorn
+sudo install -m 0755 target/release/feldspar /usr/local/bin/feldspar
+sudo systemctl restart feldspar
 ```
 
 The restart rebuilds and remounts every stored application; one that fails to build is
@@ -297,7 +297,7 @@ logged and skipped rather than taking the server with it (§7). To rebuild a sin
 application on its own, and to see the bundler's own diagnostics when it fails:
 
 ```bash
-saltcorn build-app blog --environment production
+feldspar build-app blog --environment production
 ```
 
 That command mounts nothing, so it is safe to run against the live deployment's
@@ -309,7 +309,7 @@ database (§7).
 
 | Component | Version | Needed for |
 |---|---|---|
-| **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `saltcorn` binary |
+| **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `feldspar` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
 | **npm** (and the Node.js it ships with) | Node 18+ | building the admin UI bundle (optional; see §6), **and** *installing* modules (Settings → Modules) |
@@ -327,7 +327,7 @@ and §10 Troubleshooting), and **modules** — Saltcorn v1 plugins, which are np
 packages — cannot be installed.
 
 **`node` is not a runtime requirement.** npm is the *installer*; a module then runs
-on a JavaScript worker inside the `saltcorn` process itself, on the same V8 the
+on a JavaScript worker inside the `feldspar` process itself, on the same V8 the
 server already links for code bodies. A server whose modules are already installed
 — a container image built elsewhere, a deployment that never adds one — needs no
 JavaScript toolchain on its `PATH` at all. What that worker may reach is a
@@ -342,14 +342,14 @@ that supplies a **table** rather than an action.
 ## 4. Get the code and do a first build
 
 ```bash
-git clone <this-repo-url> saltcorn
-cd saltcorn
+git clone <this-repo-url> feldspar
+cd feldspar
 
 # Compile the server binary (without the web UI bundle for now — see §6).
 cargo build --release -p sc-cli
 ```
 
-The binary is produced at `target/release/saltcorn` (or `target/debug/saltcorn`
+The binary is produced at `target/release/feldspar` (or `target/debug/feldspar`
 for a plain `cargo build`). You can also run it through cargo with
 `cargo run --release -p sc-cli -- <args>`.
 
@@ -361,14 +361,14 @@ UI and IDE bundles. To deploy to a VM without repeating §2.1 and §3 on it, bui
 packaged artifact instead:
 
 ```bash
-scripts/build-static.sh                    # dist/saltcorn-<version>-<target>.tar.gz
+scripts/build-static.sh                    # dist/feldspar-<version>-<target>.tar.gz
 scripts/build-static.sh --help             # targets, install prefix, options
 ```
 
 The binary inside is statically linked (`+crt-static`), so it has no shared-library
 dependencies and no interpreter: the same tarball runs on Debian, Ubuntu, RHEL and
 on Alpine. It carries the admin SPA and the IDE beside it, and an `install.sh` that
-puts the tree at `/opt/saltcorn` — the prefix compiled into the binary, which
+puts the tree at `/opt/feldspar` — the prefix compiled into the binary, which
 `--prefix` changes at build time.
 
 The destination then needs no Rust, no `libclang` and no C toolchain. It still needs
@@ -417,7 +417,7 @@ That gives you `postgres://saltcorn:change-me@localhost:5432/saltcorn`.
 ### Option C — a SQLite file, and nothing else
 
 ```bash
-target/release/saltcorn serve --sqlite ./app.sqlite
+target/release/feldspar serve --sqlite ./app.sqlite
 ```
 
 No server, no role, nothing to create: the file is the database, and it is created
@@ -452,12 +452,12 @@ put it in a file store and add it under **Tables → Connections**, choosing
 The admin SPA lives in [`ui/admin`](ui/admin) and is compiled to a static bundle
 that the server serves. **`cargo build` builds it for you**: `sc-cli`'s build
 script runs `npm ci && npm run build` in `ui/admin` (and in [`ui/ide`](ui/ide),
-below), embeds the resulting paths in the binary, and `saltcorn serve` then serves
+below), embeds the resulting paths in the binary, and `feldspar serve` then serves
 the UI with no `--static-dir` needed:
 
 ```bash
 cargo build --release -p sc-cli     # builds the Rust binary *and* both front ends
-target/release/saltcorn serve ...   # serves the admin UI, no flags
+target/release/feldspar serve ...   # serves the admin UI, no flags
 ```
 
 The price is that a build needs a Node toolchain and takes as long as `npm ci` does.
@@ -475,7 +475,7 @@ SC_BUILD_ADMIN=0 cargo build --release -p sc-cli   # Rust only, no bundles
 Any other value (including `1` and `true`) builds the UI, as does leaving it unset.
 
 > **`SC_BUILD_ADMIN` is a _build-time_ variable, read by `cargo build` — not by
-> `saltcorn serve`.** Putting it on the run command has **no effect** either way:
+> `feldspar serve`.** Putting it on the run command has **no effect** either way:
 > a binary built without the bundle stays without it, and the browser gets a blank
 > page (see §10).
 
@@ -487,7 +487,7 @@ at the output with `--static-dir`:
 cd ui/admin && npm ci && npm run build   # outputs ui/admin/dist (index.html + hashed assets/)
 cd ../..
 
-target/release/saltcorn serve --static-dir ui/admin/dist ...   # see §7
+target/release/feldspar serve --static-dir ui/admin/dist ...   # see §7
 ```
 
 That is also the quickest loop when you are *working on* the UI: what you serve is
@@ -536,9 +536,9 @@ and everything else about the workbench goes on working.
 
 ## 7. Running the server
 
-The main command is `saltcorn serve`. It takes **database flags** and **server
+The main command is `feldspar serve`. It takes **database flags** and **server
 flags**; database settings may also come from environment variables or from a
-configuration file. (The other command is `saltcorn build-app`, below.)
+configuration file. (The other command is `feldspar build-app`, below.)
 
 ### Database connection
 
@@ -554,11 +554,11 @@ anything the environment does not set is taken from the configuration file below
 | `--db-user <user>` | `PGUSER` | `user` | (libpq default) |
 | `--db-password <pw>` | `PGPASSWORD` | `password` | — |
 | `--db-name <name>` | `PGDATABASE` | `database` | (libpq default) |
-| `--sqlite <path>` | `SALTCORN_SQLITE` | `sqlite` | — |
+| `--sqlite <path>` | `FELDSPAR_SQLITE` | `sqlite` | — |
 
 `--sqlite` names the other kind of database: a **SQLite file** rather than a
 Postgres server, with no host, no role and nothing to start. The file is created
-if it is not there, which is what makes `saltcorn serve --sqlite ./app.sqlite` a
+if it is not there, which is what makes `feldspar serve --sqlite ./app.sqlite` a
 complete installation on a laptop or a Raspberry Pi. It is exclusive with the
 Postgres parameters — an environment that names both is refused rather than
 quietly preferring one — and a `--database-url` typed on the command line beside
@@ -575,7 +575,7 @@ database and the tables list says `rls_available: false`) and **`LISTEN`/
 ### Environments, and the configuration file
 
 A deployment usually has more than one database — production, staging, test — so
-their connection parameters can live together in a `saltcorn.toml`, one section
+their connection parameters can live together in a `feldspar.toml`, one section
 each, and the command line picks one:
 
 ```toml
@@ -597,9 +597,9 @@ test_template = "sc_template"   # read by `cargo test`, not by the server
 ```
 
 ```bash
-saltcorn serve                          # the file's default_environment
-saltcorn serve --environment staging    # or --env staging, or SALTCORN_ENV=staging
-saltcorn serve --environment test
+feldspar serve                          # the file's default_environment
+feldspar serve --environment staging    # or --env staging, or FELDSPAR_ENV=staging
+feldspar serve --environment test
 ```
 
 `environments` is an ordinary table: define as many as you have databases, named
@@ -611,17 +611,17 @@ see "For developers" below.
 
 | Flag | Environment fallback | Meaning |
 |---|---|---|
-| `--environment <name>` | `SALTCORN_ENV` | which `[environments.<name>]` section to connect with |
-| `--config <path>` | `SALTCORN_CONFIG` | read this file instead of searching for one |
+| `--environment <name>` | `FELDSPAR_ENV` | which `[environments.<name>]` section to connect with |
+| `--config <path>` | `FELDSPAR_CONFIG` | read this file instead of searching for one |
 
 Without `--config`, the file is looked for in the platform's configuration
 directories, user first:
 
 | | user | system |
 |---|---|---|
-| Linux/BSD | `$XDG_CONFIG_HOME/saltcorn/saltcorn.toml` (else `~/.config/saltcorn/saltcorn.toml`) | `/etc/saltcorn/saltcorn.toml` |
-| macOS | `~/Library/Application Support/saltcorn/saltcorn.toml` | `/etc/saltcorn/saltcorn.toml` |
-| Windows | `%APPDATA%\saltcorn\saltcorn.toml` | `%PROGRAMDATA%\saltcorn\saltcorn.toml` |
+| Linux/BSD | `$XDG_CONFIG_HOME/feldspar/feldspar.toml` (else `~/.config/feldspar/feldspar.toml`) | `/etc/feldspar/feldspar.toml` |
+| macOS | `~/Library/Application Support/feldspar/feldspar.toml` | `/etc/feldspar/feldspar.toml` |
+| Windows | `%APPDATA%\feldspar\feldspar.toml` | `%PROGRAMDATA%\feldspar\feldspar.toml` |
 
 No file at all is fine — that is the environment-variable deployment. But a file
 that does not parse, a key that is not recognised, a `--config` path that does not
@@ -635,7 +635,7 @@ other users can read it.
 > `--environment staging` is an instruction: for that run the section is
 > authoritative and the ambient variables are ignored entirely, so an operator who
 > asks for staging on a box where `DATABASE_URL` points at production gets
-> staging. Explicit `--db-*` flags still win over everything. `saltcorn serve`
+> staging. Explicit `--db-*` flags still win over everything. `feldspar serve`
 > prints which environment it connected with, from which file.
 
 ### Server options
@@ -661,7 +661,7 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 > time counted inside each run's own `timeout_ms`. Past that the ceiling is the
 > database connection pool, which is where it belongs.
 
-> **`--base-domain` mounts your applications.** With it set, `saltcorn serve` loads
+> **`--base-domain` mounts your applications.** With it set, `feldspar serve` loads
 > every `_sc_applications` row at boot, builds each, and serves it at
 > `<subdomain>.<base-domain>`; an app that fails to build is logged and skipped, not
 > fatal, and can be fixed and rebuilt without a restart. Without a base domain the
@@ -705,7 +705,7 @@ admin who configured TLS and got HTTP would not find out from the server.
 ### Building one application from the command line
 
 ```bash
-saltcorn build-app <subdomain> [database flags] [--file-store NAME=PATH]
+feldspar build-app <subdomain> [database flags] [--file-store NAME=PATH]
 ```
 
 Builds the application served at that subdomain — regenerating its typed client,
@@ -731,7 +731,7 @@ Local development, connecting with a URL and serving the pre-built bundle
 (Option A from §6 — the simplest path):
 
 ```bash
-target/release/saltcorn serve \
+target/release/feldspar serve \
   --database-url postgres://saltcorn:change-me@localhost:5432/saltcorn \
   --static-dir ui/admin/dist \
   --bind 127.0.0.1:3032
@@ -740,7 +740,7 @@ target/release/saltcorn serve \
 Individual DB parts, listening on all interfaces:
 
 ```bash
-target/release/saltcorn serve \
+target/release/feldspar serve \
   --db-host localhost --db-user saltcorn --db-password change-me --db-name saltcorn \
   --static-dir ui/admin/dist \
   --bind 0.0.0.0:8080
@@ -751,7 +751,7 @@ then unnecessary):
 
 ```bash
 cargo build --release -p sc-cli
-target/release/saltcorn serve \
+target/release/feldspar serve \
   --database-url postgres://saltcorn:change-me@localhost:5432/saltcorn \
   --bind 127.0.0.1:3032
 ```
@@ -760,16 +760,16 @@ Using environment variables (handy for systemd/containers), behind a TLS proxy:
 
 ```bash
 export DATABASE_URL=postgres://saltcorn:change-me@localhost:5432/saltcorn
-target/release/saltcorn serve --bind 127.0.0.1:3032 --secure-cookies
+target/release/feldspar serve --bind 127.0.0.1:3032 --secure-cookies
 ```
 
-One box, three databases: the parameters in `~/.config/saltcorn/saltcorn.toml`
-(or `/etc/saltcorn/saltcorn.toml` for a service account), the choice on the
+One box, three databases: the parameters in `~/.config/feldspar/feldspar.toml`
+(or `/etc/feldspar/feldspar.toml` for a service account), the choice on the
 command line:
 
 ```bash
-target/release/saltcorn serve --environment staging --bind 127.0.0.1:3001
-target/release/saltcorn build-app blog --environment staging
+target/release/feldspar serve --environment staging --bind 127.0.0.1:3001
+target/release/feldspar build-app blog --environment staging
 ```
 
 On start the server prints the address it is listening on. If the database is
@@ -859,7 +859,7 @@ them at a database in either of two ways:
 - `DATABASE_URL` (the same variable the server uses). CI sets
   `postgres://saltcorn:saltcorn@localhost:5432/saltcorn_test` against a
   `postgres:16` service.
-- the `test` environment of `saltcorn.toml` — the same file `saltcorn serve`
+- the `test` environment of `feldspar.toml` — the same file `feldspar serve`
   reads, on the same search paths. Written down there once, `cargo test` needs no
   environment at all; `DATABASE_URL` still overrides it when set.
 

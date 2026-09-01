@@ -1269,7 +1269,7 @@ fn error_response(err: &Error, audience: Audience) -> Response {
         "request error"
     };
     // The log always gets everything, including the failing line.
-    eprintln!("saltcorn: {label}: {}", err.chain());
+    eprintln!("feldspar: {label}: {}", err.chain());
     let message = match audience {
         // An admin needs the cause. `Display` on a context error renders only the
         // outermost layer — "connecting file store `docs`" with no hint that the
@@ -1346,7 +1346,7 @@ enum Audience {
 /// Log a discarded lower-level failure at a call site that only knows "it broke"
 /// (no [`Error`] value to forward). Keeps those paths from failing silently.
 fn log_failure(context: &str, err: &(dyn std::error::Error + 'static)) {
-    eprintln!("saltcorn: {context}: {}", sc_error::format_chain(err));
+    eprintln!("feldspar: {context}: {}", sc_error::format_chain(err));
 }
 
 /// The header the SPA must echo the CSRF cookie in (re-exported for callers/tests).

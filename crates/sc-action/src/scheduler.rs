@@ -120,7 +120,7 @@ impl Scheduler {
         let live = match self.dispatcher.triggers() {
             Ok(live) => live,
             Err(e) => {
-                eprintln!("saltcorn: the scheduler could not read the trigger set: {e}");
+                eprintln!("feldspar: the scheduler could not read the trigger set: {e}");
                 return Vec::new();
             }
         };
@@ -137,7 +137,7 @@ impl Scheduler {
                 Ok(None) => continue,
                 Err(e) => {
                     eprintln!(
-                        "saltcorn: periodic trigger `{}` has no usable timing: {e}",
+                        "feldspar: periodic trigger `{}` has no usable timing: {e}",
                         trigger.name
                     );
                     continue;
@@ -237,7 +237,7 @@ impl Scheduler {
                 .await;
             if let Err(e) = outcome {
                 eprintln!(
-                    "saltcorn: scheduled trigger `{}`: {}",
+                    "feldspar: scheduled trigger `{}`: {}",
                     trigger.name,
                     sc_error::format_chain(&e)
                 );
@@ -247,7 +247,7 @@ impl Scheduler {
             // turn one misconfiguration into a flood.
             if let Err(e) = record_trigger_run(&catalog, trigger.id, at).await {
                 eprintln!(
-                    "saltcorn: could not record the run of scheduled trigger `{}`, so it \
+                    "feldspar: could not record the run of scheduled trigger `{}`, so it \
                      may run again after a restart: {}",
                     trigger.name,
                     sc_error::format_chain(&e)

@@ -130,7 +130,7 @@ async fn serve_with_tls(
         }
     });
 
-    eprintln!("saltcorn: serving TLS on https://{tls_addr}");
+    eprintln!("feldspar: serving TLS on https://{tls_addr}");
     // Both listeners are bound by now — the TLS one synchronously above, the
     // plain one just after it — so readiness is not a claim about the TLS
     // handshake (whose certificate may still be being ordered from an ACME CA)

@@ -22,7 +22,7 @@
 //! | `source`  | `todo` |
 //! | `output`  | `todo/dist` |
 //! | `command` | `npm run build` |
-//! | `client`  | `todo/src/saltcorn/client.ts` |
+//! | `client`  | `todo/src/feldspar/client.ts` |
 
 use sc_error::{Error, Result};
 use sc_types::{BasicType, FormField};
@@ -55,7 +55,7 @@ pub const REACT_OUTPUT_SUBDIR: &str = "dist";
 
 /// Where the generated client and hooks live inside the project — generated
 /// output, overwritten on every build (TODO §2.1).
-pub const REACT_RUNTIME_SUBDIR: &str = "src/saltcorn";
+pub const REACT_RUNTIME_SUBDIR: &str = "src/feldspar";
 
 /// The generated TypeScript client's file name within [`REACT_RUNTIME_SUBDIR`].
 pub const REACT_CLIENT_FILE: &str = "client.ts";
@@ -150,13 +150,13 @@ pub fn react_build_spec(project: &str) -> BuildSpec {
 }
 
 /// Where the app's generated runtime (client and typed hooks) is written,
-/// relative to the file store: `<project>/src/saltcorn`.
+/// relative to the file store: `<project>/src/feldspar`.
 pub fn react_runtime_dir(project: &str) -> String {
     project_path(project, REACT_RUNTIME_SUBDIR)
 }
 
 /// Where the generated TypeScript client is written, relative to the file store:
-/// `<project>/src/saltcorn/client.ts`.
+/// `<project>/src/feldspar/client.ts`.
 ///
 /// The scaffold imports from this path, so it is a convention shared by the
 /// generator and the generated code rather than a setting either could get wrong.
@@ -278,8 +278,8 @@ mod tests {
         assert_eq!(build.args, ["run", "build"]);
         assert_eq!(build.source_dir, "todo");
         assert_eq!(build.output_dir, "todo/dist");
-        assert_eq!(react_runtime_dir("todo"), "todo/src/saltcorn");
-        assert_eq!(react_client_path("todo"), "todo/src/saltcorn/client.ts");
+        assert_eq!(react_runtime_dir("todo"), "todo/src/feldspar");
+        assert_eq!(react_client_path("todo"), "todo/src/feldspar/client.ts");
 
         // The client lives under the runtime directory, not beside it: §2.1's
         // "generated, overwritten" boundary is one directory, so the scaffold has
@@ -304,8 +304,8 @@ mod tests {
         // slash the store would have to forgive.
         assert_eq!(build.source_dir, "");
         assert_eq!(build.output_dir, "dist");
-        assert_eq!(react_runtime_dir(""), "src/saltcorn");
-        assert_eq!(react_client_path(""), "src/saltcorn/client.ts");
+        assert_eq!(react_runtime_dir(""), "src/feldspar");
+        assert_eq!(react_client_path(""), "src/feldspar/client.ts");
         assert_eq!(project_path("", "package.json"), "package.json");
         assert_eq!(project_path("todo", "package.json"), "todo/package.json");
         for path in [

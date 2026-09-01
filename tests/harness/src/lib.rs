@@ -9,7 +9,7 @@
 //! **Where the base connection comes from**, in order of authority:
 //!
 //! 1. The `DATABASE_URL` environment variable (the one CI sets).
-//! 2. The `test` environment of `saltcorn.toml` — the same file `saltcorn serve`
+//! 2. The `test` environment of `feldspar.toml` — the same file `feldspar serve`
 //!    reads, found on the same search paths (see `sc_config_file`). A developer
 //!    whose Postgres is not the one CI runs writes it down once, there, and
 //!    `cargo test` needs no environment at all.
@@ -22,13 +22,13 @@
 //! fail; it must name an empty database, since every per-test database inherits
 //! whatever is in it.
 //!
-//! `SC_TEST_ENVIRONMENT` names a section other than `test`, and `SALTCORN_CONFIG`
+//! `SC_TEST_ENVIRONMENT` names a section other than `test`, and `FELDSPAR_CONFIG`
 //! names the file outright. Naming a section the file does not define is an error
 //! rather than a silent fall-through to the default connection (principle 5) — as
-//! is a file that does not parse, or a `SALTCORN_CONFIG` path that does not exist.
+//! is a file that does not parse, or a `FELDSPAR_CONFIG` path that does not exist.
 //! No file at all is not a misconfiguration, and is quiet.
 //!
-//! `SALTCORN_ENV`, which selects the *server's* environment, is deliberately not
+//! `FELDSPAR_ENV`, which selects the *server's* environment, is deliberately not
 //! read here: a shell that exports it to serve production must not thereby point
 //! a test run at production.
 //!
@@ -72,12 +72,12 @@ const DEFAULT_URL: &str = "postgres://saltcorn:saltcorn@localhost:5432/saltcorn_
 /// cloned from. Overrides the configuration file's `test_template`.
 pub const TEMPLATE_VAR: &str = "SC_TEST_TEMPLATE";
 
-/// Environment variable naming which `saltcorn.toml` section the harness reads.
+/// Environment variable naming which `feldspar.toml` section the harness reads.
 /// Rarely needed; it exists so a machine with two test databases can point one
 /// test run at each.
 pub const TEST_ENVIRONMENT_VAR: &str = "SC_TEST_ENVIRONMENT";
 
-/// The `saltcorn.toml` section read when [`TEST_ENVIRONMENT_VAR`] is unset.
+/// The `feldspar.toml` section read when [`TEST_ENVIRONMENT_VAR`] is unset.
 ///
 /// Deliberately *not* the file's `default_environment`: that is production on a
 /// deployed box, and a test run must never fall into it by default.
@@ -160,8 +160,8 @@ impl TestDb {
     /// A connection **URL** for the per-test database.
     ///
     /// The same connection the pool uses, rendered as a string for the code
-    /// paths that take one — `saltcorn`'s `--database-url`, a `url =` line in a
-    /// `saltcorn.toml` fixture. It is built from the resolved base connection,
+    /// paths that take one — `feldspar`'s `--database-url`, a `url =` line in a
+    /// `feldspar.toml` fixture. It is built from the resolved base connection,
     /// so a test that hands it out works whether that came from `DATABASE_URL`,
     /// from the configuration file's test environment or from the default. A
     /// Unix-socket connection comes back as `?host=/the/socket/dir`, which is

@@ -23,7 +23,7 @@
 //! [`sc_app::save_application`] is the one authority, exactly as
 //! [`sc_api::schema_edit`] is for the schema and [`sc_action::save_trigger`] is
 //! for the triggers. It runs the same validation the admin's own form and
-//! `saltcorn api add-query` run — one statement, declared parameters matching the
+//! `feldspar api add-query` run — one statement, declared parameters matching the
 //! used ones, a path no table route already answers, a name no client method
 //! already has — and then **prepares every query against the database**, which is
 //! both the last validation and the typing: a statement Postgres will not prepare
@@ -38,7 +38,7 @@
 //!
 //! A query belongs to one API of one application, and
 //! [`sc_app::select_api`] is the shared rule for finding it — the same function
-//! `saltcorn api add-query` calls. An application with two APIs that serve custom
+//! `feldspar api add-query` calls. An application with two APIs that serve custom
 //! queries is **ambiguous**, and ambiguity is refused rather than resolved:
 //! picking one would be picking which client method appears where.
 //!

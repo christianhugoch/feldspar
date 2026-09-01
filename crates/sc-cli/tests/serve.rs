@@ -1,4 +1,4 @@
-//! Smoke test for `saltcorn serve` (Phase 7): the CLI's boot path brings the
+//! Smoke test for `feldspar serve` (Phase 7): the CLI's boot path brings the
 //! data layer up against a **real Postgres database** and the assembled server
 //! answers its health route.
 //!

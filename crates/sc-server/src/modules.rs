@@ -75,7 +75,7 @@ impl ModuleServices {
                     // Report and carry on with a root nothing will be installed
                     // into: an install through the API will fail with the same
                     // message, in front of the admin who can act on it.
-                    eprintln!("saltcorn: {}", sc_error::format_chain(&e));
+                    eprintln!("feldspar: {}", sc_error::format_chain(&e));
                     PathBuf::from("modules")
                 }
             },
@@ -92,7 +92,7 @@ impl ModuleServices {
         services.reload().await?;
         for issue in services.modules().issues() {
             eprintln!(
-                "saltcorn: module `{}` is installed but not fully usable: {}",
+                "feldspar: module `{}` is installed but not fully usable: {}",
                 issue.module, issue.problem
             );
         }

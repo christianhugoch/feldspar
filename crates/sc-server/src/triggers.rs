@@ -82,7 +82,7 @@ pub async fn install_triggers(
         .context("loading the stored triggers")?;
     for issue in dispatcher.triggers()?.issues() {
         eprintln!(
-            "saltcorn: trigger `{}` is stored but not usable: {}",
+            "feldspar: trigger `{}` is stored but not usable: {}",
             issue.trigger, issue.problem
         );
     }

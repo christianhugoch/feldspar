@@ -3,7 +3,7 @@
 //! [`ServerConfig`] is the small, plain settings value the CLI builds and hands
 //! to [`serve`](crate::serve): where to bind, where the built `ui/admin` bundle
 //! lives, session lifetime, and whether cookies carry the `Secure` attribute.
-//! [`ServerConfig::from_args`] parses the handful of flags the `saltcorn serve`
+//! [`ServerConfig::from_args`] parses the handful of flags the `feldspar serve`
 //! command accepts, so the binary needs no argument-parsing dependency.
 
 use std::net::SocketAddr;

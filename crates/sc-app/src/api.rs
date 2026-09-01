@@ -216,7 +216,7 @@ pub fn serves_custom_queries(name: &str) -> bool {
 /// there is exactly one candidate, by there being nothing to choose.
 ///
 /// The one answer to "which API does this query belong to", shared by everything
-/// that writes one: the CLI's `saltcorn api add-query`, and the `admin_copilot`
+/// that writes one: the CLI's `feldspar api add-query`, and the `admin_copilot`
 /// trait's `save_api_query` (§11.3). Two answers would be two ways for a query to
 /// land somewhere its author did not mean.
 ///

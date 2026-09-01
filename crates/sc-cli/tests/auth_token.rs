@@ -1,4 +1,4 @@
-//! `saltcorn auth token` against a **real running server** on a real socket.
+//! `feldspar auth token` against a **real running server** on a real socket.
 //!
 //! The point of this command is that the session it writes is one the server
 //! will actually accept, and since the command no longer *asks* the server for
@@ -98,7 +98,7 @@ async fn start() -> sc_error::Result<Running> {
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
         admin_handlers(catalog.clone(), apps.clone()),
-        // The database-backed store, as `saltcorn serve` builds it — which is the
+        // The database-backed store, as `feldspar serve` builds it — which is the
         // whole point here: the command writes a session row this server has
         // never heard of, and it must honour it anyway.
         Arc::new(SessionStore::database(catalog.clone())),

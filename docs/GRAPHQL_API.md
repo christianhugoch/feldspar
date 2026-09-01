@@ -116,7 +116,7 @@ match the schema must fail the build rather than 404 at runtime.
 React hooks, consumes `TypedDocumentNode` natively), Apollo Client (heavy, normalised
 cache), Relay (a compiler and a build-time schema; too rigid for a schema that changes when
 an admin adds a table). **Decision: generate a dependency-free client** into
-`src/saltcorn/` beside the typed REST client — a `graphql<TData, TVars>(document, vars)`
+`src/feldspar/` beside the typed REST client — a `graphql<TData, TVars>(document, vars)`
 over `fetch` is ~30 lines, adds nothing to `package.json`, and is CSP-proof. `urql` remains
 the documented upgrade for an app that wants caching; the generated client is a plain
 `fetch` call it can be swapped for.
@@ -124,7 +124,7 @@ the documented upgrade for an app that wants caching; the generated client is a 
 **Typing.** `gql.tada` computes result and variable types *in TypeScript itself* from a
 schema file — no codegen step, types never stale — versus `graphql-code-generator` (a build
 step and a config, but the incumbent) and `genql`. Both need the schema on disk. We have
-`Schema::sdl()`, so **the build writes `src/saltcorn/schema.graphql`** on every build, the
+`Schema::sdl()`, so **the build writes `src/feldspar/schema.graphql`** on every build, the
 same way it rewrites `client.ts` and `hooks.ts`, and the scaffold ships a `gql.tada`
 configuration pointed at it. A developer who wants codegen instead points it at the same
 file. This is the piece that makes the requirement — "arbitrary aggregations, dynamically"

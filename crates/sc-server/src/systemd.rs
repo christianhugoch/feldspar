@@ -2,7 +2,7 @@
 //!
 //! A unit that says `Type=simple` is "started" the moment the process is forked,
 //! which is a lie an operator pays for twice: `systemctl start` returns before
-//! the port is bound, so a dependent unit ordered `After=saltcorn.service` races
+//! the port is bound, so a dependent unit ordered `After=feldspar.service` races
 //! the listener, and a boot that dies while connecting to the database still
 //! looks like a successful start. `Type=notify` replaces the guess with a fact —
 //! the process itself says when it is serving.
@@ -209,7 +209,7 @@ impl ServiceManager {
         let interval = self.watchdog_interval()?;
         let manager = self.clone();
         eprintln!(
-            "saltcorn: systemd watchdog enabled, pinging every {:.1}s",
+            "feldspar: systemd watchdog enabled, pinging every {:.1}s",
             interval.as_secs_f64()
         );
         Some(tokio::spawn(async move {
@@ -237,7 +237,7 @@ impl ServiceManager {
             };
             if let Err(error) = send_datagram(target, message.as_bytes()) {
                 let first = message.lines().next().unwrap_or_default();
-                eprintln!("saltcorn: could not notify the service manager ({first}): {error}");
+                eprintln!("feldspar: could not notify the service manager ({first}): {error}");
             }
         }
         #[cfg(not(unix))]
@@ -276,7 +276,7 @@ fn parse_target(notify_socket: &str) -> Option<Target> {
         [b'/', ..] => Some(Target::Path(std::path::PathBuf::from(notify_socket))),
         _ => {
             eprintln!(
-                "saltcorn: ignoring {NOTIFY_SOCKET}={notify_socket}: not an absolute path or an abstract socket"
+                "feldspar: ignoring {NOTIFY_SOCKET}={notify_socket}: not an absolute path or an abstract socket"
             );
             None
         }

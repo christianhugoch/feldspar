@@ -368,7 +368,7 @@ with Postgres's own message and nothing is stored.
 Three things to notice:
 
 - **The app's generated client already has the method.** Re-emitting it is part of the save, so
-  `src/saltcorn/api.ts` grows a typed `hoursByEarner(...)` before you have looked at it.
+  `src/feldspar/api.ts` grows a typed `hoursByEarner(...)` before you have looked at it.
 - **The endpoint is not answering yet.** A mounted app's API is built from its record when the app
   is mounted, so the agent will tell you it is served from the app's next **Build** — the same as
   when you save one in the application form.

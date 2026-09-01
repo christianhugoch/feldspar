@@ -741,7 +741,7 @@ fn the_rest_tutorial_reaches_the_motivating_query_and_its_rules() {
         "describeCustomQuery",
         "no table event",
         "READ ONLY",
-        "saltcorn api add-query",
+        "feldspar api add-query",
         "list-queries",
         "drop table books", // …an argument is a value, and the table survives
         "TopAuthorsResponse",
@@ -1174,7 +1174,7 @@ fn readme_section_references_resolve() {
     }
 }
 
-/// The `saltcorn.toml` the Debian quick start (§2.5) tells an operator to write
+/// The `feldspar.toml` the Debian quick start (§2.5) tells an operator to write
 /// must parse — with the *real* reader, the one the binary uses.
 ///
 /// The file is `deny_unknown_fields` precisely so that a misspelled key fails
@@ -1185,9 +1185,9 @@ fn readme_quick_start_config_file_parses() {
     let root = workspace_root();
     let readme = read(&root, "README.md");
 
-    // The sample is the heredoc the quick start pipes into /etc/saltcorn.
+    // The sample is the heredoc the quick start pipes into /etc/feldspar.
     let (_, after) = readme
-        .split_once("sudo tee /etc/saltcorn/saltcorn.toml >/dev/null <<'TOML'\n")
+        .split_once("sudo tee /etc/feldspar/feldspar.toml >/dev/null <<'TOML'\n")
         .expect("§2.5 should write the configuration file with a TOML heredoc");
     let sample = after
         .split_once("\nTOML\n")
@@ -1195,7 +1195,7 @@ fn readme_quick_start_config_file_parses() {
         .0;
 
     let config = sc_cli::ConfigFile::parse(sample, Path::new("README.md#2.5"))
-        .expect("the quick start's saltcorn.toml should parse");
+        .expect("the quick start's feldspar.toml should parse");
     assert_eq!(config.default_environment.as_deref(), Some("production"));
 
     let production = config
@@ -1229,7 +1229,7 @@ fn readme_quick_start_systemd_unit_is_complete() {
     let root = workspace_root();
     let readme = read(&root, "README.md");
     let (_, after) = readme
-        .split_once("sudo tee /etc/systemd/system/saltcorn.service >/dev/null <<'UNIT'\n")
+        .split_once("sudo tee /etc/systemd/system/feldspar.service >/dev/null <<'UNIT'\n")
         .expect("§2.6 should write the unit with a heredoc");
     let unit = after
         .split_once("\nUNIT\n")
@@ -1240,9 +1240,9 @@ fn readme_quick_start_systemd_unit_is_complete() {
         "Type=notify",
         "WatchdogSec=",
         "User=saltcorn",
-        "StateDirectory=saltcorn",
-        "ReadWritePaths=/var/lib/saltcorn",
-        "Environment=HOME=/var/lib/saltcorn",
+        "StateDirectory=feldspar",
+        "ReadWritePaths=/var/lib/feldspar",
+        "Environment=HOME=/var/lib/feldspar",
         "AmbientCapabilities=CAP_NET_BIND_SERVICE",
         "WantedBy=multi-user.target",
     ] {
@@ -1254,5 +1254,91 @@ fn readme_quick_start_systemd_unit_is_complete() {
     assert!(
         !unit.contains("Type=simple"),
         "the server notifies readiness, so the unit should claim it rather than Type=simple"
+    );
+}
+
+/// The command is `feldspar`, and everything the binary owns on disk is named
+/// after it.
+///
+/// The project is **Saltcorn Feldspar**: Saltcorn is the company and the lineage,
+/// Feldspar is this rewrite, and the shipped artifact is one binary called
+/// `feldspar`. That name reaches an operator through four independent surfaces —
+/// the packaged executable, the deployment file it looks for, the environment
+/// variables that override it, and the directory it scaffolds into an
+/// application — and each of them lives in a different file, so a partial rename
+/// is a thing that compiles. Every one is pinned here.
+///
+/// What deliberately keeps the old name is asserted too, so that a later sweep
+/// does not "finish the job" and break something: the Postgres role and database
+/// in the quick start are an operator's own objects (and the unit's `User=` must
+/// match the role for peer authentication over the socket), and `@saltcorn/…` is
+/// the npm scope Saltcorn v1's modules are published under.
+#[test]
+fn the_binary_and_everything_it_owns_are_named_feldspar() {
+    let root = workspace_root();
+
+    // 1. The packaged executable. `[[bin]] name` is what `cargo build` writes,
+    //    what `CARGO_BIN_EXE_*` resolves to, and what an operator types.
+    let manifest = read(&root, "crates/sc-cli/Cargo.toml");
+    let bin = toml_section(&manifest, "[[bin]]").expect("sc-cli declares a [[bin]] target");
+    assert!(
+        bin.contains(r#"name = "feldspar""#),
+        "the CLI binary should be named `feldspar`, not: {bin}"
+    );
+
+    // 2. The deployment file and the directory it is searched for in, and 3. the
+    //    environment variables that name it — the reader's own constants, not a
+    //    doc's spelling of them.
+    assert_eq!(sc_cli::config_file::FILE_NAME, "feldspar.toml");
+    assert_eq!(sc_cli::config_file::APP_DIR, "feldspar");
+    assert_eq!(sc_cli::config_file::CONFIG_PATH_VAR, "FELDSPAR_CONFIG");
+    assert_eq!(sc_cli::config_file::ENVIRONMENT_VAR, "FELDSPAR_ENV");
+
+    // 4. The generated runtime the scaffolder writes into an application's
+    //    project, which its README, its AGENTS.md and every emitted import agree on.
+    assert_eq!(sc_app::REACT_RUNTIME_SUBDIR, "src/feldspar");
+
+    // The install artifact and the unit that runs it.
+    let script = read(&root, "scripts/build-static.sh");
+    for fragment in ["bin/feldspar", "/opt/feldspar"] {
+        assert!(
+            script.contains(fragment),
+            "scripts/build-static.sh should package `{fragment}`"
+        );
+    }
+
+    // No live document may still tell a reader to run the old command. The
+    // historical records under `docs/TODO-*.md` and the CHANGELOG describe work
+    // as it was done and are deliberately left alone.
+    for doc in documentation_files(&root) {
+        let rel = doc.strip_prefix(&root).unwrap_or(&doc).to_owned();
+        let name = rel.to_string_lossy();
+        if name.contains("TODO") || name.contains("Saltcorn1_description") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&doc).expect("read a documentation file");
+        for stale in [
+            "saltcorn serve",
+            "saltcorn api ",
+            "saltcorn auth ",
+            "saltcorn build-app",
+            "saltcorn.toml",
+            "src/saltcorn",
+            "SALTCORN_",
+        ] {
+            assert!(
+                !text.contains(stale),
+                "{}: the command is `feldspar`, so `{stale}` is stale",
+                name
+            );
+        }
+    }
+
+    // And what keeps the Saltcorn name on purpose.
+    let readme = read(&root, "README.md");
+    assert!(
+        readme.contains("CREATE ROLE saltcorn") && readme.contains("User=saltcorn"),
+        "the quick start's Postgres role and the unit's service user stay `saltcorn`, \
+         and must match each other for peer authentication over the socket"
     );
 }

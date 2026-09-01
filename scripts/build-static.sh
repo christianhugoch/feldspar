@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build a self-contained `saltcorn` release that can be copied to another VM.
+# Build a self-contained `feldspar` release that can be copied to another VM.
 #
 # What "static" means here, and why
 # ---------------------------------
@@ -29,15 +29,15 @@
 #
 # What it produces
 # ----------------
-#   dist/saltcorn-<version>-<target>.tar.gz   the artifact
-#   dist/saltcorn-<version>-<target>.tar.gz.sha256
+#   dist/feldspar-<version>-<target>.tar.gz   the artifact
+#   dist/feldspar-<version>-<target>.tar.gz.sha256
 #
-# unpacking to the **install prefix** (`/opt/saltcorn` by default):
+# unpacking to the **install prefix** (`/opt/feldspar` by default):
 #
-#   /opt/saltcorn/bin/saltcorn        the binary
-#   /opt/saltcorn/ui/admin/dist       the admin SPA it serves
-#   /opt/saltcorn/ui/ide/dist         the file-store IDE it serves
-#   /opt/saltcorn/install.sh          copies the tree into place
+#   /opt/feldspar/bin/feldspar        the binary
+#   /opt/feldspar/ui/admin/dist       the admin SPA it serves
+#   /opt/feldspar/ui/ide/dist         the file-store IDE it serves
+#   /opt/feldspar/install.sh          copies the tree into place
 #
 # The prefix is not cosmetic: `crates/sc-cli/build.rs` compiles the two bundle
 # paths into the binary, and the IDE's has no run-time flag to override it. This
@@ -47,11 +47,11 @@
 #
 # Usage
 # -----
-#   scripts/build-static.sh                          # x86_64, /opt/saltcorn
+#   scripts/build-static.sh                          # x86_64, /opt/feldspar
 #   scripts/build-static.sh --docker                 # pinned toolchain in a container
 #   scripts/build-static.sh --native                 # this machine's toolchain
 #   scripts/build-static.sh --target aarch64-unknown-linux-gnu
-#   scripts/build-static.sh --prefix /usr/local/saltcorn
+#   scripts/build-static.sh --prefix /usr/local/feldspar
 #   scripts/build-static.sh --no-ui                  # no Node toolchain needed
 #
 set -euo pipefail
@@ -68,7 +68,7 @@ TARGET="x86_64-unknown-linux-gnu"
 # container's is the one whose toolchain is pinned, so it is preferred when it is
 # there rather than demanded when it is not.
 MODE="auto"
-PREFIX="/opt/saltcorn"
+PREFIX="/opt/feldspar"
 OUTPUT_DIR="${REPO_ROOT}/dist"
 JOBS=""
 BUILD_UI=1
@@ -85,7 +85,7 @@ readonly SUPPORTED_TARGETS=(
 
 usage() {
     cat <<EOF
-Build a self-contained, statically linked saltcorn binary and package it for
+Build a self-contained, statically linked feldspar binary and package it for
 installation on another machine.
 
 Usage: scripts/build-static.sh [options]
@@ -209,13 +209,13 @@ if git -C "${REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "${REPO_ROOT}" diff --quiet HEAD 2>/dev/null || GIT_DESC="${GIT_DESC}-dirty"
 fi
 
-NAME="saltcorn-${VERSION}${GIT_DESC:+-${GIT_DESC}}-${TARGET}"
-STAGE="$(mktemp -d "${TMPDIR:-/tmp}/saltcorn-package.XXXXXX")"
+NAME="feldspar-${VERSION}${GIT_DESC:+-${GIT_DESC}}-${TARGET}"
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/feldspar-package.XXXXXX")"
 trap 'rm -rf "${STAGE}"' EXIT
 
 log() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 
-log "saltcorn ${VERSION}${GIT_DESC:+ (${GIT_DESC})}"
+log "feldspar ${VERSION}${GIT_DESC:+ (${GIT_DESC})}"
 log "target ${TARGET}, ${MODE} build, install prefix ${PREFIX}"
 [[ "${MODE}" == "native" ]] && ! command -v docker >/dev/null &&
     log "note: no docker/buildx here, so this is a build with the local toolchain"
@@ -294,7 +294,7 @@ build_native() {
     )
 
     mkdir -p "${STAGE}/bin"
-    cp "${REPO_ROOT}/target/${TARGET}/release/saltcorn" "${STAGE}/bin/saltcorn"
+    cp "${REPO_ROOT}/target/${TARGET}/release/feldspar" "${STAGE}/bin/feldspar"
     if [[ ${BUILD_UI} -eq 1 ]]; then
         for bundle in admin ide; do
             local dist="${REPO_ROOT}/ui/${bundle}/dist"
@@ -310,7 +310,7 @@ case "${MODE}" in
     native) build_native ;;
 esac
 
-BINARY="${STAGE}/bin/saltcorn"
+BINARY="${STAGE}/bin/feldspar"
 [[ -f "${BINARY}" ]] || { echo "error: the build produced no binary at ${BINARY}" >&2; exit 1; }
 chmod +x "${BINARY}"
 
@@ -369,8 +369,8 @@ smoke_test_distros() {
     for image in debian:12-slim alpine:3.20; do
         log "smoke test on ${image}"
         if ! output="$(docker run --rm --network none \
-                -v "${BINARY}:/usr/local/bin/saltcorn:ro" \
-                "${image}" /usr/local/bin/saltcorn 2>&1)"; then
+                -v "${BINARY}:/usr/local/bin/feldspar:ro" \
+                "${image}" /usr/local/bin/feldspar 2>&1)"; then
             echo "error: the binary does not run on ${image}:" >&2
             printf '%s\n' "${output}" >&2
             exit 1
@@ -412,15 +412,15 @@ if [ -d "\${SRC}/ui" ]; then
     mkdir -p "\${PREFIX}/ui"
     cp -r "\${SRC}/ui/." "\${PREFIX}/ui/"
 fi
-chmod +x "\${PREFIX}/bin/saltcorn"
+chmod +x "\${PREFIX}/bin/feldspar"
 
-echo "installed \${PREFIX}/bin/saltcorn"
-echo "add it to PATH:  ln -sf \${PREFIX}/bin/saltcorn /usr/local/bin/saltcorn"
+echo "installed \${PREFIX}/bin/feldspar"
+echo "add it to PATH:  ln -sf \${PREFIX}/bin/feldspar /usr/local/bin/feldspar"
 EOF
 chmod +x "${STAGE}/install.sh"
 
 cat > "${STAGE}/README" <<EOF
-saltcorn ${VERSION}${GIT_DESC:+ (${GIT_DESC})} — ${TARGET}
+feldspar ${VERSION}${GIT_DESC:+ (${GIT_DESC})} — ${TARGET}
 
 This binary is statically linked: it has no shared-library dependencies and no
 interpreter, so it runs on glibc distributions (Debian, Ubuntu, RHEL) and on musl
@@ -428,20 +428,20 @@ ones (Alpine) without anything installed alongside it.
 
 Install
   sudo ./install.sh          # copies this tree to ${PREFIX}
-  ${PREFIX}/bin/saltcorn     # prints the available commands
+  ${PREFIX}/bin/feldspar     # prints the available commands
 
 Run
-  saltcorn serve --database-url postgres://user:pass@host/db
-  saltcorn serve --environment prod     # from saltcorn.toml
+  feldspar serve --database-url postgres://user:pass@host/db
+  feldspar serve --environment prod     # from feldspar.toml
 
-  Database settings can come from flags, the environment, or a saltcorn.toml
-  read from /etc/saltcorn/ or ~/.config/saltcorn/.
+  Database settings can come from flags, the environment, or a feldspar.toml
+  read from /etc/feldspar/ or ~/.config/feldspar/.
 
 What is in the tarball
-  bin/saltcorn          the server and management CLI
+  bin/feldspar          the server and management CLI
 $(if [[ ${BUILD_UI} -eq 1 ]]; then
 cat <<INNER
-  ui/admin/dist         the admin SPA, served by \`saltcorn serve\`
+  ui/admin/dist         the admin SPA, served by \`feldspar serve\`
   ui/ide/dist           the file-store IDE, reached from the admin UI
 INNER
 else
@@ -460,7 +460,7 @@ What the target machine still needs
   the build-time toolchain (libclang, cmake, a C compiler) is needed here.
   A database — Postgres, or a SQLite file.
   npm and node, but only if applications are built or modules installed on this
-  machine: \`saltcorn build-app\`, the admin UI's Build button and a module install
+  machine: \`feldspar build-app\`, the admin UI's Build button and a module install
   all run npm. A server that only serves an already-built application does not
   need them.
 
@@ -484,5 +484,5 @@ Install it on the target VM with:
 
   scp ${TARBALL} vm:/tmp/
   ssh vm 'tar -xzf /tmp/${NAME}.tar.gz -C /tmp && sudo /tmp/${NAME}/install.sh'
-  ssh vm '${PREFIX}/bin/saltcorn'
+  ssh vm '${PREFIX}/bin/feldspar'
 EOF

@@ -1,4 +1,4 @@
-//! Primary-database connection configuration for the `saltcorn` binary.
+//! Primary-database connection configuration for the `feldspar` binary.
 //!
 //! [`DbConfig`] gathers where the primary database lives from three places, in
 //! this order of authority:
@@ -7,7 +7,7 @@
 //!    individual `host`/`port`/`user`/`password`/`db` parts (`--db-host` etc.).
 //! 2. **The environment** — `DATABASE_URL`, or the conventional `PG*` variables.
 //! 3. **The configuration file** — the environment selected out of
-//!    `saltcorn.toml` ([`crate::config_file`]), which is where a deployment keeps
+//!    `feldspar.toml` ([`crate::config_file`]), which is where a deployment keeps
 //!    production's, staging's and test's parameters side by side.
 //!
 //! A URL, wherever it comes from, wins wholesale over the parts; otherwise the
@@ -121,7 +121,7 @@ const DEFAULT_HOST: &str = "localhost";
 const DEFAULT_PORT: u16 = 5432;
 /// Environment variable naming a SQLite file to use as the primary database —
 /// the counterpart of `DATABASE_URL` for the other kind of database.
-const SQLITE_VAR: &str = "SALTCORN_SQLITE";
+const SQLITE_VAR: &str = "FELDSPAR_SQLITE";
 
 /// How to reach the primary database. The flag fields hold only what was passed
 /// on the command line; the environment variables and the defaults are applied
@@ -138,7 +138,7 @@ pub struct DbConfig {
     dbname: Option<String>,
     /// A SQLite file to use instead of a Postgres server.
     sqlite: Option<String>,
-    /// The environment selected out of `saltcorn.toml`, if there is one.
+    /// The environment selected out of `feldspar.toml`, if there is one.
     selected: Option<SelectedEnvironment>,
 }
 
@@ -505,7 +505,7 @@ mod tests {
     // --- The configuration file -------------------------------------------
     //
     // These drive `extract` with an explicit `--config`, never the search path,
-    // so they cannot pick up (or be broken by) a real `saltcorn.toml` on the
+    // so they cannot pick up (or be broken by) a real `feldspar.toml` on the
     // machine running them. Nothing here sets an environment variable: doing so
     // is racy across the test threads, so the assertions are written to hold
     // whatever `DATABASE_URL`/`PG*` the suite happens to be run with — which is

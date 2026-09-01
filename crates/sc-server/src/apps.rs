@@ -319,7 +319,7 @@ impl AppMounts {
         Ok(())
     }
 
-    /// Rewrite the generated files (`src/saltcorn/**`) of each of `apps`, in the
+    /// Rewrite the generated files (`src/feldspar/**`) of each of `apps`, in the
     /// background — the automatic half of "if the API definition changes, the
     /// client code must be updated automatically" (GOALS, decision 10).
     ///
@@ -357,7 +357,7 @@ impl AppMounts {
                     // failure, and it says nothing.
                     Ok(_) => {}
                     Err(e) => eprintln!(
-                        "saltcorn: application `{}` changed, but its generated client \
+                        "feldspar: application `{}` changed, but its generated client \
                          could not be rewritten: {e}",
                         app.subdomain
                     ),
@@ -483,7 +483,7 @@ pub async fn mount_all(apps: &AppMounts) {
     let stored = match list_applications(catalog).await {
         Ok(apps) => apps,
         Err(e) => {
-            eprintln!("saltcorn: could not load applications to mount: {e}");
+            eprintln!("feldspar: could not load applications to mount: {e}");
             return;
         }
     };
@@ -500,9 +500,9 @@ pub async fn mount_all(apps: &AppMounts) {
         service.notify_status(&format!("building application `{subdomain}`"));
         service.extend_timeout(APP_BUILD_GRACE);
         match build_and_mount(apps, app).await {
-            Ok(_) => eprintln!("saltcorn: mounted application `{subdomain}`"),
+            Ok(_) => eprintln!("feldspar: mounted application `{subdomain}`"),
             Err(e) => {
-                eprintln!("saltcorn: application `{subdomain}` failed to build, skipping: {e}")
+                eprintln!("feldspar: application `{subdomain}` failed to build, skipping: {e}")
             }
         }
     }

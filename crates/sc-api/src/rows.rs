@@ -832,7 +832,7 @@ async fn emit(
     };
     if let Err(e) = catalog.emit_write(write).await {
         eprintln!(
-            "saltcorn: dispatching the {op} event for `{}`: {}",
+            "feldspar: dispatching the {op} event for `{}`: {}",
             table.name,
             sc_error::format_chain(&e)
         );

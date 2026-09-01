@@ -12,7 +12,7 @@
 //!
 //! **Why a second backend at all.** Postgres is what a deployment runs; SQLite
 //! is what a laptop, a Raspberry Pi and a one-file backup run. It is the primary
-//! database of an installation that names a file in `saltcorn.toml` — no server,
+//! database of an installation that names a file in `feldspar.toml` — no server,
 //! no role, no `createdb` — and it is a *secondary* connection to any `.sqlite`
 //! file sitting in a file store, whose tables then join the tables list beside
 //! everything else.

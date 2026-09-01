@@ -285,7 +285,7 @@ impl TriggerDispatcher {
             && let Err(e) = observer.triggers_changed(catalog)
         {
             eprintln!(
-                "saltcorn: the trigger set changed, but an application could not be \
+                "feldspar: the trigger set changed, but an application could not be \
                  re-projected and keeps its previous mount: {}",
                 sc_error::format_chain(&e)
             );
@@ -380,7 +380,7 @@ impl TriggerDispatcher {
         for run in self.dispatch_in(catalog, event, tx).await {
             if let Err(e) = run.outcome {
                 eprintln!(
-                    "saltcorn: trigger `{}` on the {} event: {}",
+                    "feldspar: trigger `{}` on the {} event: {}",
                     run.trigger,
                     event.kind,
                     sc_error::format_chain(&e)

@@ -1,4 +1,4 @@
-//! `saltcorn build-app SUBDOMAIN`: building one application from a terminal.
+//! `feldspar build-app SUBDOMAIN`: building one application from a terminal.
 //!
 //! Driven through the **real binary**, because that is the whole point of the
 //! command — a build an admin can run where its output can be piped, grepped and
@@ -57,11 +57,11 @@ fn npm_available() -> bool {
 /// Run the binary's `build-app` with the given arguments, returning
 /// (success, stdout, stderr).
 fn build_app(args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_saltcorn"))
+    let out = Command::new(env!("CARGO_BIN_EXE_feldspar"))
         .arg("build-app")
         .args(args)
         .output()
-        .expect("run the saltcorn binary");
+        .expect("run the feldspar binary");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),

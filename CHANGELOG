@@ -2,6 +2,47 @@
 
 Changes in reverse chronological order.
 
+## The project has a name: Saltcorn Feldspar, and the command is `feldspar`
+
+Saltcorn is the company and the lineage this design draws on; Feldspar names the rewrite. The
+shipped artifact is one binary, and it is now called `feldspar` rather than `saltcorn`.
+
+- **`[[bin]] name = "feldspar"`** in `crates/sc-cli`, so `cargo build` writes `feldspar`,
+  `CARGO_BIN_EXE_feldspar` resolves to it and every subcommand is invoked as `feldspar serve`,
+  `feldspar build-app`, `feldspar api add-query`, `feldspar auth token`. The usage banner, every
+  `feldspar:` line the server writes to stderr, and `pkill -HUP feldspar` follow.
+- **Everything the binary owns on disk is named after it.** The deployment file is
+  `feldspar.toml`; it is searched for in `/etc/feldspar`, `$XDG_CONFIG_HOME/feldspar` (else
+  `~/.config/feldspar`), `~/Library/Application Support/feldspar` and `%APPDATA%\feldspar`; the
+  overrides are `FELDSPAR_CONFIG`, `FELDSPAR_ENV` and `FELDSPAR_SQLITE`; the module store is
+  `$XDG_DATA_HOME/feldspar/modules`; the git working copies the server places itself go under the
+  `Feldspar` data directory; the install prefix is `/opt/feldspar` and the unit is
+  `feldspar.service` with `StateDirectory=feldspar`. **An existing installation must move its
+  `saltcorn.toml` to the new name and path** — nothing reads the old one, by design (§Status: no
+  backwards compatibility).
+- **The scaffolded runtime is `src/feldspar/`**, not `src/saltcorn/` — the typed REST client, the
+  hooks, the store, `schema.sql`, the GraphQL half and the README that says the directory is
+  generated. Every emitted import (`../feldspar/hooks`, `./feldspar/graphql`) and both `AGENTS.md`
+  and `src/feldspar/README.md` agree, and the CLI command they tell a coding agent to run is
+  `feldspar api add-query`. The session files `feldspar auth token` writes are
+  `.feldspar-session.json` and `.feldspar-cookies.txt`.
+- **What deliberately keeps the Saltcorn name**, because it is not the binary's to rename: the
+  Postgres role and database in the quick start (the unit's `User=` has to match the role for peer
+  authentication over the socket), the `@saltcorn/…` npm scope v1's modules are published under,
+  the `globalThis.saltcorn` API a v1 module sees, the backup format identifier, the `saltcorn.meta`
+  xattr key, and the product name in prose and in the admin UI's chrome — this is Saltcorn
+  Feldspar, and "Saltcorn v1" still means the JavaScript implementation.
+- **`the_binary_and_everything_it_owns_are_named_feldspar`** (`sc-cli`'s `repo_hygiene`) pins all
+  four surfaces the name reaches an operator through — the `[[bin]]` target, the config reader's
+  own `FILE_NAME`/`APP_DIR`/`*_VAR` constants, `REACT_RUNTIME_SUBDIR`, and the packaging script —
+  because they live in four different files and a partial rename is a thing that compiles. It also
+  sweeps every live document for a stale `saltcorn serve`/`saltcorn.toml`/`src/saltcorn`, and
+  asserts the deliberately-kept names above are still there so a later sweep does not "finish the
+  job". `docs/TODO-*.md` and this CHANGELOG are exempt: they record work as it was done.
+- `README.md`, `docs/TECHNICAL_DESIGN.md` (which now opens with the naming and its provenance),
+  the tutorials and `scripts/build-static.sh` / `scripts/static-build.Dockerfile` follow; the
+  release artifact is `dist/feldspar-<version>-<target>.tar.gz`.
+
 ## A binary that installs on a machine that never built it
 
 `cargo build --release` produces a binary for the machine it ran on: linked against that box's

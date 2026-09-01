@@ -7,7 +7,7 @@
 //!
 //! Two kinds of file come out, and the difference is load-bearing (§2.1):
 //!
-//! - **Generated runtime** under `src/saltcorn/` — the typed client and the hooks
+//! - **Generated runtime** under `src/feldspar/` — the typed client and the hooks
 //!   over it, plus the GraphQL client and schema of an app that enables that
 //!   provider. Rewritten on every build, so a table added later shows up in the
 //!   types. Carries a "DO NOT EDIT" header because it means it.
@@ -129,7 +129,7 @@ pub struct ProjectContext<'a> {
     /// This installation's roles, most privileged first
     /// ([`list_roles`](sc_auth::list_roles)).
     ///
-    /// The documentation names them because `saltcorn auth token --role NAME`
+    /// The documentation names them because `feldspar auth token --role NAME`
     /// takes one, and a reader inside a project directory has no other way to
     /// find out what this server calls its roles. Not a contract — an admin may
     /// add or rename one tomorrow — which is why the generated README says when
@@ -240,7 +240,7 @@ impl ProjectContext<'_> {
     }
 }
 
-/// The files under `src/saltcorn/`: the typed client, the typed hooks, the
+/// The files under `src/feldspar/`: the typed client, the typed hooks, the
 /// schema of the tables the app declares, the README that says what this
 /// directory is — and, for an app that enables the GraphQL provider, its client
 /// and its schema.
@@ -361,7 +361,7 @@ pub fn project_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
 
 // --- the two generated documents --------------------------------------------
 
-/// The `saltcorn api add-query` invocation, spelled out for *this* application:
+/// The `feldspar api add-query` invocation, spelled out for *this* application:
 /// the one command that turns a `SELECT` into a typed client method.
 ///
 /// Both documents carry it, because both are read in the situation it answers —
@@ -375,7 +375,7 @@ fn add_query_command(ctx: &ProjectContext<'_>) -> String {
     };
     format!(
         "```sh\n\
-         saltcorn api add-query \\\n  \
+         feldspar api add-query \\\n  \
            --app {subdomain} \\\n\
          {api}  \
            --name topAuthors \\\n  \
@@ -418,7 +418,7 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
          re-reads it, and `SIGHUP` is what makes it:\n\
          \n\
          ```sh\n\
-         npm run build && pkill -HUP saltcorn\n\
+         npm run build && pkill -HUP feldspar\n\
          ```\n\
          \n\
          That drops every application's cached bundle and re-reads it from disk, \
@@ -434,11 +434,11 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
          \n\
          Most of this application's screens require a signed-in user, so a \
          browser driven by a script needs a session cookie before it can \
-         photograph anything but the sign-in page. `saltcorn auth token` mints \
+         photograph anything but the sign-in page. `feldspar auth token` mints \
          one against the **running server** and writes it to disk:\n\
          \n\
          ```sh\n\
-         saltcorn auth token --app {subdomain} --admin\n\
+         feldspar auth token --app {subdomain} --admin\n\
          ```\n\
          \n\
          {base_domain_section}\
@@ -467,9 +467,9 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
          name rather than guessed at, so `--role Reviewer` on a server with no \
          reviewers tells you which of the two is the case.\n\
          \n\
-         The default output is `.saltcorn-session.json` in the working \
+         The default output is `.feldspar-session.json` in the working \
          directory, in Playwright's `storageState` shape; `--format netscape` \
-         writes `.saltcorn-cookies.txt` for `curl --cookie` instead, and `--out` \
+         writes `.feldspar-cookies.txt` for `curl --cookie` instead, and `--out` \
          puts either anywhere you like. **The file is a live credential**: it is \
          written `0600`, both default names are in this project's `.gitignore`, \
          and one that leaks is a logged-in browser for whoever has it.\n\
@@ -486,7 +486,7 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
          ```js\n\
          const browser = await chromium.launch();\n\
          const context = await browser.newContext({{\n  \
-           storageState: '.saltcorn-session.json',\n  \
+           storageState: '.feldspar-session.json',\n  \
            viewport: {{ width: 1280, height: 800 }},\n\
          }});\n\
          const page = await context.newPage();\n\
@@ -505,8 +505,8 @@ fn testing_section(ctx: &ProjectContext<'_>) -> String {
          with `curl`:\n\
          \n\
          ```sh\n\
-         saltcorn auth token --app {subdomain} --admin --format netscape\n\
-         curl --cookie .saltcorn-cookies.txt {url}{mount}/whoami\n\
+         feldspar auth token --app {subdomain} --admin --format netscape\n\
+         curl --cookie .feldspar-cookies.txt {url}{mount}/whoami\n\
          ```\n",
         subdomain = ctx.app.subdomain,
         url = ctx.app_url_or_placeholder(),
@@ -544,7 +544,7 @@ fn base_domain_section(ctx: &ProjectContext<'_>) -> String {
          command line:\n\
          \n\
          ```sh\n\
-         saltcorn auth token --app {subdomain} --admin --base-domain \
+         feldspar auth token --app {subdomain} --admin --base-domain \
          <the server's base domain>\n\
          ```\n\
          \n",
@@ -594,15 +594,15 @@ fn testing_summary(ctx: &ProjectContext<'_>) -> String {
          between an edit and a screenshot of it, and neither is obvious:\n\
          \n\
          ```sh\n\
-         npm run build && pkill -HUP saltcorn    # the server serves a cached bundle until this\n\
-         saltcorn auth token --app {subdomain} --admin\n\
+         npm run build && pkill -HUP feldspar    # the server serves a cached bundle until this\n\
+         feldspar auth token --app {subdomain} --admin\n\
          ```\n\
          \n\
          The first makes the running server re-read what the build just wrote \
          (it runs no bundler; it is the fast half of the admin UI's *Build* \
          button). The second mints a session and writes \
-         `.saltcorn-session.json`, which Playwright loads as \
-         `browser.newContext({{ storageState: '.saltcorn-session.json' }})` — \
+         `.feldspar-session.json`, which Playwright loads as \
+         `browser.newContext({{ storageState: '.feldspar-session.json' }})` — \
          without it, every screen behind the sign-in page photographs as the \
          sign-in page.\n\
          \n\
@@ -644,7 +644,7 @@ fn base_domain_line(ctx: &ProjectContext<'_>) -> String {
     .to_owned()
 }
 
-/// `src/saltcorn/README.md`: what this directory is, and the one command that
+/// `src/feldspar/README.md`: what this directory is, and the one command that
 /// adds an endpoint to it.
 ///
 /// Generated like everything else here — it names this app's tables and this
@@ -692,7 +692,7 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
         )
     };
     format!(
-        "# `src/saltcorn/` — generated by Saltcorn\n\
+        "# `src/feldspar/` — generated by Saltcorn\n\
          \n\
          **Every file in this directory is written by the Saltcorn server and \
          overwritten without warning.** It is rewritten on every build, and again \
@@ -725,8 +725,8 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
          The server **prepares** the statement before storing anything, so a query \
          that will not prepare is refused carrying Postgres's own message, and the \
          columns Postgres reports become the method's return type in \
-         `{REACT_CLIENT_FILE}` — which this command rewrites. `saltcorn api \
-         list-queries` and `saltcorn api remove-query` sit beside it, and the same \
+         `{REACT_CLIENT_FILE}` — which this command rewrites. `feldspar api \
+         list-queries` and `feldspar api remove-query` sit beside it, and the same \
          editor exists on the application's screen in the admin UI.\n\
          \n\
          **A custom query's authority is its own.** Raw SQL does not go through \
@@ -945,11 +945,11 @@ fn index_html(project: &str) -> String {
 /// `node_modules` and `dist` only. The generated runtime is **not** ignored: it
 /// is part of the source an admin reads and type-checks against, and a git repo
 /// that omits it cannot be built anywhere but here.
-/// The last two lines are the session files `saltcorn auth token` writes: they
+/// The last two lines are the session files `feldspar auth token` writes: they
 /// are live credentials for this application, and a project that committed one
 /// would be handing out a logged-in browser.
 const GITIGNORE: &str = "node_modules\ndist\n*.local\n\
-                         .saltcorn-session.json\n.saltcorn-cookies.txt\n";
+                         .feldspar-session.json\n.feldspar-cookies.txt\n";
 
 /// The entry point. The auth provider wraps the router when there is one, so the
 /// current user is known before any route renders.
@@ -1002,7 +1002,7 @@ const AUTH_TSX: &str = r#"import {
   useState,
   type ReactNode,
 } from "react";
-import { api } from "./saltcorn/hooks";
+import { api } from "./feldspar/hooks";
 
 export type User = { id: string; email: string; role: number };
 
@@ -1292,7 +1292,7 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
         head.push_str("import { useState } from \"react\";\n");
     }
     head.push_str(&format!(
-        "import {{ {hook_imports}, type {row_type} }} from \"../saltcorn/hooks\";\n"
+        "import {{ {hook_imports}, type {row_type} }} from \"../feldspar/hooks\";\n"
     ));
 
     let (empty_const, create_form) = if can_create {
@@ -1445,7 +1445,7 @@ fn store_page_tsx(table: &Table) -> String {
 
     format!(
         r#"import {{ useState }} from "react";
-import {{ use{pascal}Store }} from "../saltcorn/store";
+import {{ use{pascal}Store }} from "../feldspar/store";
 
 const empty = {{
 {empty_form}
@@ -1691,7 +1691,7 @@ th {
 
 // --- the generated runtime --------------------------------------------------
 
-/// `src/saltcorn/hooks.ts`: a hook set **per table**, over that table's object on
+/// `src/feldspar/hooks.ts`: a hook set **per table**, over that table's object on
 /// the generated client.
 ///
 /// This is the file that justifies generating the runtime instead of shipping it
@@ -1851,7 +1851,7 @@ export function useMutation<A>(table: string, fn: (arg: A) => Promise<unknown>):
     out
 }
 
-/// `src/saltcorn/store.ts`: a **writable, optimistic** view of a table, over the
+/// `src/feldspar/store.ts`: a **writable, optimistic** view of a table, over the
 /// same cache the hooks read through.
 ///
 /// The hooks are the honest primitives — a read, a write, and an invalidation —
@@ -2428,12 +2428,12 @@ mod tests {
             "src/Login.tsx",
             "src/app.css",
             "src/pages/Tasks.tsx",
-            "src/saltcorn/client.ts",
-            "src/saltcorn/helper.ts",
-            "src/saltcorn/hooks.ts",
-            "src/saltcorn/store.ts",
-            "src/saltcorn/schema.sql",
-            "src/saltcorn/README.md",
+            "src/feldspar/client.ts",
+            "src/feldspar/helper.ts",
+            "src/feldspar/hooks.ts",
+            "src/feldspar/store.ts",
+            "src/feldspar/schema.sql",
+            "src/feldspar/README.md",
         ] {
             assert!(paths.contains(&expected), "missing {expected}: {paths:?}");
         }
@@ -2454,18 +2454,18 @@ mod tests {
         // Every regenerated file says so, each in a syntax its own reader can
         // parse; nothing outside the directory does, because nothing outside it
         // is overwritten.
-        assert!(file(&files, "src/saltcorn/hooks.ts").contains("DO NOT EDIT"));
-        assert!(file(&files, "src/saltcorn/store.ts").contains("DO NOT EDIT"));
-        assert!(file(&files, "src/saltcorn/client.ts").contains("DO NOT EDIT"));
-        assert!(file(&files, "src/saltcorn/helper.ts").contains("DO NOT EDIT"));
-        assert!(file(&files, "src/saltcorn/schema.sql").starts_with("-- Schema generated"));
+        assert!(file(&files, "src/feldspar/hooks.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/feldspar/store.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/feldspar/client.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/feldspar/helper.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/feldspar/schema.sql").starts_with("-- Schema generated"));
         assert!(
-            file(&files, "src/saltcorn/README.md").contains("overwritten without warning"),
+            file(&files, "src/feldspar/README.md").contains("overwritten without warning"),
             "the README's whole job is to say this"
         );
         let project = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
         for f in &project {
-            if !f.path.starts_with("src/saltcorn/") {
+            if !f.path.starts_with("src/feldspar/") {
                 assert!(!f.contents.contains("DO NOT EDIT"), "{}", f.path);
             }
         }
@@ -2482,14 +2482,14 @@ mod tests {
         // `schema.sql` is the DDL the driver rendered, under a header saying it
         // describes rather than migrates — the mistake a file of CREATE TABLE
         // invites.
-        let schema = file(&files, "src/saltcorn/schema.sql");
+        let schema = file(&files, "src/feldspar/schema.sql");
         assert!(schema.contains("CREATE TABLE \"tasks\""), "{schema}");
         assert!(schema.contains("not a migration"), "{schema}");
 
         // The README carries the command, spelled for this app — the subdomain
         // and mount are its own, so it is pasteable rather than a template.
-        let readme = file(&files, "src/saltcorn/README.md");
-        assert!(readme.contains("saltcorn api add-query"), "{readme}");
+        let readme = file(&files, "src/feldspar/README.md");
+        assert!(readme.contains("feldspar api add-query"), "{readme}");
         assert!(readme.contains("--app todo"), "{readme}");
         assert!(readme.contains("--api /api"), "{readme}");
         assert!(readme.contains("--param since:date"), "{readme}");
@@ -2503,9 +2503,9 @@ mod tests {
         // `AGENTS.md` is at the project root, not in the generated directory, and
         // points at the README rather than restating it.
         let agents = file(&files, "AGENTS.md");
-        assert!(agents.contains("src/saltcorn/README.md"), "{agents}");
+        assert!(agents.contains("src/feldspar/README.md"), "{agents}");
         assert!(agents.contains("never edit it"), "{agents}");
-        assert!(agents.contains("saltcorn api add-query"), "{agents}");
+        assert!(agents.contains("feldspar api add-query"), "{agents}");
         // It says it is the developer's, because that is the only thing stopping
         // an agent from treating it as generated and leaving it alone.
         assert!(agents.contains("never overwrites it"), "{agents}");
@@ -2520,17 +2520,17 @@ mod tests {
         let app = todo();
         let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
 
-        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+        for path in ["AGENTS.md", "src/feldspar/README.md"] {
             let doc = file(&files, path);
             assert!(
-                doc.contains("npm run build && pkill -HUP saltcorn"),
+                doc.contains("npm run build && pkill -HUP feldspar"),
                 "{path} should carry the reload in one pasteable line: {doc}"
             );
             // Why the reload is needed at all — the served bundle is a snapshot.
             assert!(doc.contains("cached bundle"), "{path}: {doc}");
             // The session command, spelled for this app.
             assert!(
-                doc.contains("saltcorn auth token --app todo"),
+                doc.contains("feldspar auth token --app todo"),
                 "{path}: {doc}"
             );
             // And what loads the result, which is the point of the file.
@@ -2539,7 +2539,7 @@ mod tests {
 
         // The README is the one that explains; `AGENTS.md` points at it rather
         // than restating any of it (decision 9's division of labour).
-        let readme = file(&files, "src/saltcorn/README.md");
+        let readme = file(&files, "src/feldspar/README.md");
         assert!(readme.contains("read into memory"), "{readme}");
         assert!(readme.contains("--format netscape"), "{readme}");
         assert!(readme.contains("live credential"), "{readme}");
@@ -2547,14 +2547,14 @@ mod tests {
         assert!(!agents.contains("--format netscape"), "{agents}");
         assert!(agents.contains("has the whole procedure"), "{agents}");
         assert!(
-            agents.contains("](src/saltcorn/README.md)"),
+            agents.contains("](src/feldspar/README.md)"),
             "the pointer should be a link: {agents}"
         );
 
         // A session file is a credential, so the project refuses to commit one.
         let ignore = file(&files, ".gitignore");
-        assert!(ignore.contains(".saltcorn-session.json"), "{ignore}");
-        assert!(ignore.contains(".saltcorn-cookies.txt"), "{ignore}");
+        assert!(ignore.contains(".feldspar-session.json"), "{ignore}");
+        assert!(ignore.contains(".feldspar-cookies.txt"), "{ignore}");
     }
 
     /// The session command asks for no password, and both documents say what to
@@ -2567,17 +2567,17 @@ mod tests {
         let app = todo();
         let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
 
-        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+        for path in ["AGENTS.md", "src/feldspar/README.md"] {
             let doc = file(&files, path);
             // The pasteable command carries no password flag, and neither
             // document mentions one: a reader who pastes the old line would get
             // "unknown argument" from a command that no longer takes it.
             assert!(
-                doc.contains("saltcorn auth token --app todo --admin"),
+                doc.contains("feldspar auth token --app todo --admin"),
                 "{path}: {doc}"
             );
             assert!(!doc.contains("--password"), "{path}: {doc}");
-            assert!(!doc.contains("SALTCORN_PASSWORD"), "{path}: {doc}");
+            assert!(!doc.contains("FELDSPAR_PASSWORD"), "{path}: {doc}");
             for flag in ["--admin", "--role NAME", "--email you@example.com"] {
                 assert!(doc.contains(flag), "{path} should offer {flag}: {doc}");
             }
@@ -2590,7 +2590,7 @@ mod tests {
 
         // The README also says what each role is for, which is what a reader
         // choosing an account for an agent actually needs.
-        let readme = file(&files, "src/saltcorn/README.md");
+        let readme = file(&files, "src/feldspar/README.md");
         assert!(
             readme.contains("**`Editor`** (role 40) — May write posts."),
             "{readme}"
@@ -2612,7 +2612,7 @@ mod tests {
             ..ctx(&app, &tables, &endpoints, None)
         });
 
-        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+        for path in ["AGENTS.md", "src/feldspar/README.md"] {
             let doc = file(&files, path);
             assert!(doc.contains("listed in the admin UI"), "{path}: {doc}");
             assert!(
@@ -2644,7 +2644,7 @@ mod tests {
             &endpoints,
             PublicOrigin::new("example.com", 3032),
         ));
-        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+        for path in ["AGENTS.md", "src/feldspar/README.md"] {
             let doc = file(&known, path);
             assert!(
                 doc.contains("http://todo.example.com:3032"),
@@ -2665,7 +2665,7 @@ mod tests {
                 "{path} should not ask for a base domain it knows: {doc}"
             );
             assert!(
-                !doc.contains("saltcorn.toml"),
+                !doc.contains("feldspar.toml"),
                 "{path} should not send the reader to a config file: {doc}"
             );
         }
@@ -2673,16 +2673,16 @@ mod tests {
         // Not told: the placeholder, and a note saying which piece is missing —
         // rather than `localhost`, which would be wrong everywhere else.
         let unknown = project_files(&ctx(&app, &tables, &endpoints, None));
-        for path in ["AGENTS.md", "src/saltcorn/README.md"] {
+        for path in ["AGENTS.md", "src/feldspar/README.md"] {
             let doc = file(&unknown, path);
             assert!(
                 doc.contains("http://todo.<the server's base domain>"),
                 "{path}: {doc}"
             );
             // The one place a reader of *this* project can supply it: the
-            // command line. Never the server's `saltcorn.toml`.
+            // command line. Never the server's `feldspar.toml`.
             assert!(doc.contains("--base-domain"), "{path}: {doc}");
-            assert!(!doc.contains("saltcorn.toml"), "{path}: {doc}");
+            assert!(!doc.contains("feldspar.toml"), "{path}: {doc}");
             assert!(!doc.contains("localhost"), "{path}: {doc}");
         }
     }
@@ -2697,8 +2697,8 @@ mod tests {
 
         let without = runtime_files(&ctx(&app, &tables, &eps, None));
         let paths: Vec<&str> = without.iter().map(|f| f.path.as_str()).collect();
-        assert!(!paths.contains(&"src/saltcorn/graphql.ts"), "{paths:?}");
-        assert!(!paths.contains(&"src/saltcorn/schema.graphql"), "{paths:?}");
+        assert!(!paths.contains(&"src/feldspar/graphql.ts"), "{paths:?}");
+        assert!(!paths.contains(&"src/feldspar/schema.graphql"), "{paths:?}");
 
         let graphql = AppGraphql {
             mount: "/graphql".to_owned(),
@@ -2706,7 +2706,7 @@ mod tests {
         };
         let with = runtime_files(&ctx(&app, &tables, &eps, Some(&graphql)));
         // The client posts to the mount the provider is actually mounted at.
-        let client = file(&with, "src/saltcorn/graphql.ts");
+        let client = file(&with, "src/feldspar/graphql.ts");
         assert!(
             client.contains(r#"GRAPHQL_ENDPOINT = "/graphql""#),
             "{client}"
@@ -2714,7 +2714,7 @@ mod tests {
         assert!(client.contains("DO NOT EDIT"), "{client}");
         // The schema is the SDL, under a header GraphQL can parse: `//` is not a
         // comment there, and an unparseable schema breaks the one tool it is for.
-        let sdl = file(&with, "src/saltcorn/schema.graphql");
+        let sdl = file(&with, "src/feldspar/schema.graphql");
         assert!(sdl.starts_with("# Schema generated by Saltcorn"), "{sdl}");
         assert!(sdl.contains("type Query {"), "{sdl}");
         assert!(!sdl.contains("//"), "{sdl}");
@@ -2731,7 +2731,7 @@ mod tests {
         let with = tsconfig(true);
         assert!(with.contains("gql.tada/ts-plugin"), "{with}");
         assert!(
-            with.contains(r#""schema": "./src/saltcorn/schema.graphql""#),
+            with.contains(r#""schema": "./src/feldspar/schema.graphql""#),
             "{with}"
         );
         // Still valid JSON with the plugins appended.

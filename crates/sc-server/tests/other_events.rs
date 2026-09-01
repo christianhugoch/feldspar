@@ -148,7 +148,7 @@ async fn setup() -> sc_error::Result<Server> {
     let apps = Arc::new(AppMounts::new(catalog.clone()).with_triggers(dispatcher.clone()));
     // `build_router_with_apps`, not `build_router`: the mount registry is what
     // carries the dispatcher to the router, and `build_router` builds its own
-    // empty one. This is the assembly `saltcorn serve` performs.
+    // empty one. This is the assembly `feldspar serve` performs.
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
         admin_handlers(catalog.clone(), apps.clone()),
@@ -238,7 +238,7 @@ async fn a_startup_trigger_runs_when_the_server_comes_up() -> sc_error::Result<(
     // is raised by the boot path, not by the trigger existing.
     assert!(server.client.journal().await.is_empty());
 
-    // The boot path, which `saltcorn serve` runs once the catalog, the file
+    // The boot path, which `feldspar serve` runs once the catalog, the file
     // stores, the applications and the triggers are all up.
     fire_startup(&server.catalog, &server.dispatcher).await;
 

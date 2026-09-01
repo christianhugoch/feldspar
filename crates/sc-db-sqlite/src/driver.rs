@@ -40,7 +40,7 @@ impl SqliteDriver {
     /// Open the database at `path`, **creating the file** when it is not there.
     ///
     /// This is how the primary database is opened: a deployment that names a
-    /// SQLite file in `saltcorn.toml` and starts the server for the first time
+    /// SQLite file in `feldspar.toml` and starts the server for the first time
     /// means for that file to come into existence, exactly as `createdb` is part
     /// of setting Postgres up.
     pub fn open(path: impl AsRef<Path>) -> Result<SqliteDriver> {

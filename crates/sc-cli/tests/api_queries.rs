@@ -1,4 +1,4 @@
-//! `saltcorn api add-query` / `list-queries` / `remove-query`: an application's
+//! `feldspar api add-query` / `list-queries` / `remove-query`: an application's
 //! custom SQL queries from a terminal (TODO "API improvements" Phase 5).
 //!
 //! Driven through the **real binary** against a **real Postgres**, because both
@@ -49,13 +49,13 @@ impl Drop for TempDir {
     }
 }
 
-/// Run `saltcorn api …`, returning (success, stdout, stderr).
+/// Run `feldspar api …`, returning (success, stdout, stderr).
 fn api(args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_saltcorn"))
+    let out = Command::new(env!("CARGO_BIN_EXE_feldspar"))
         .arg("api")
         .args(args)
         .output()
-        .expect("run the saltcorn binary");
+        .expect("run the feldspar binary");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),

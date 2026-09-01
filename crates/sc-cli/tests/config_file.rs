@@ -1,5 +1,5 @@
 //! The configuration file, end to end against a **real Postgres database**: a
-//! `saltcorn.toml` with a `test` environment, `--environment test` on the command
+//! `feldspar.toml` with a `test` environment, `--environment test` on the command
 //! line, and the boot path connecting to the database that file names.
 //!
 //! The unit tests in `sc-config-file` and `src/db.rs` cover the parsing and the
@@ -13,7 +13,7 @@
 use sc_cli::{DbConfig, connect_catalog};
 use sc_test_harness::TestDb;
 
-/// A `saltcorn.toml` on disk for the duration of one test.
+/// A `feldspar.toml` on disk for the duration of one test.
 struct Fixture(std::path::PathBuf);
 
 impl Fixture {
@@ -230,7 +230,7 @@ fn an_environment_carries_where_its_applications_are_served() {
 /// this state are "no file was found" and "the file that was found applies
 /// nothing", and a bare [`DbConfig::extract`] would take the first of those from
 /// the *machine the test runs on*: a developer whose own
-/// `~/.config/saltcorn/saltcorn.toml` sets `base_domain` (which is the ordinary
+/// `~/.config/feldspar/feldspar.toml` sets `base_domain` (which is the ordinary
 /// way to run this server locally) would watch this fail for a reason that is
 /// nothing to do with the code. So the state is built directly, and the
 /// searching path is covered by the fixture-driven tests above.

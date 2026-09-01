@@ -133,7 +133,7 @@ pub struct Catalog {
     /// Where this deployment's applications are reachable in a browser
     /// (`crate::origin`), set once at boot by the process that knows — the
     /// server from its command line, a command-line build from its
-    /// `saltcorn.toml` environment. `None` where nobody said, which is a normal
+    /// `feldspar.toml` environment. `None` where nobody said, which is a normal
     /// state: a server with no base domain serves no applications.
     public_origin: RwLock<Option<crate::PublicOrigin>>,
     /// Whether anything in this database wants the workflow engine, and when
@@ -835,8 +835,8 @@ impl Catalog {
     /// Record where this deployment's applications are reachable in a browser
     /// (see [`crate::origin`]), replacing anything set before.
     ///
-    /// Called once at boot by the process that knows: `saltcorn serve` from its
-    /// `--base-domain`/`--bind`, a command-line build from the `saltcorn.toml`
+    /// Called once at boot by the process that knows: `feldspar serve` from its
+    /// `--base-domain`/`--bind`, a command-line build from the `feldspar.toml`
     /// environment it connected with. It is not database state and is not
     /// persisted — it is a fact about *this process's* view of the deployment,
     /// held here because the project generator that needs it already has a

@@ -67,7 +67,7 @@
 //!
 //! [`SessionStore::memory`] keeps the original in-memory map, and is what the
 //! router's own tests — which have no database at all — run against. It is a
-//! test seam, not a deployment mode: `saltcorn serve` always builds the
+//! test seam, not a deployment mode: `feldspar serve` always builds the
 //! database-backed store.
 
 use std::num::NonZeroUsize;
@@ -161,7 +161,7 @@ pub async fn bootstrap_sessions(catalog: &Catalog) -> Result<Table> {
 ///
 /// The store's own [`login`](SessionStore::login) is this plus a cache write.
 /// It is public because a session being **a row** is the whole point of this
-/// module: `saltcorn auth token` (§7.2) runs in a shell holding the primary
+/// module: `feldspar auth token` (§7.2) runs in a shell holding the primary
 /// database's credentials and can now write one itself, with no running server
 /// to ask and no one-time grant to bridge the gap. That is not a new authority —
 /// whoever can write this row can already read every password hash and rewrite

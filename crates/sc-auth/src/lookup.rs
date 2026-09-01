@@ -3,7 +3,7 @@
 //! [`authenticate`](crate::authenticate) answers "is this person who they say
 //! they are?"; these answer "which row is that?" — the question a caller who has
 //! already established its authority some other way needs, and the only question
-//! [`redeem_session_grant`](crate::redeem_session_grant) and `saltcorn auth
+//! [`redeem_session_grant`](crate::redeem_session_grant) and `feldspar auth
 //! token` ask. Nothing here checks a password, and nothing here is reachable
 //! from the wire: the callers are the server redeeming a grant it was handed and
 //! a command line holding the database's own credentials.

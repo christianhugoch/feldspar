@@ -91,7 +91,7 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     let db = TestDb::new().await?;
     let cat = catalog_with_tasks(&db).await?;
     // The roles a server has from its first boot, plus one this installation
-    // invented: the generated documentation names them, because `saltcorn auth
+    // invented: the generated documentation names them, because `feldspar auth
     // token --role NAME` takes a name and the project has no other way to know.
     sc_auth::bootstrap(&cat).await?;
     sc_auth::save_role(&cat, &sc_auth::Role::new(40, "Editor")).await?;
@@ -121,12 +121,12 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
         "src/Login.tsx",
         "src/app.css",
         "AGENTS.md",
-        "src/saltcorn/client.ts",
-        "src/saltcorn/helper.ts",
-        "src/saltcorn/hooks.ts",
-        "src/saltcorn/store.ts",
-        "src/saltcorn/schema.sql",
-        "src/saltcorn/README.md",
+        "src/feldspar/client.ts",
+        "src/feldspar/helper.ts",
+        "src/feldspar/hooks.ts",
+        "src/feldspar/store.ts",
+        "src/feldspar/schema.sql",
+        "src/feldspar/README.md",
     ] {
         assert!(project.join(expected).is_file(), "missing {expected}");
     }
@@ -138,28 +138,28 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     // app's real tables. The DDL is the *driver's* — the same text the database
     // was given — so it cannot drift from the columns that are actually there.
     let agents = std::fs::read_to_string(project.join("AGENTS.md"))?;
-    assert!(agents.contains("src/saltcorn/README.md"), "{agents}");
+    assert!(agents.contains("src/feldspar/README.md"), "{agents}");
     assert!(agents.contains("`tasks`"), "{agents}");
-    let schema = std::fs::read_to_string(project.join("src/saltcorn/schema.sql"))?;
+    let schema = std::fs::read_to_string(project.join("src/feldspar/schema.sql"))?;
     assert!(schema.contains(r#"CREATE TABLE "tasks""#), "{schema}");
     assert!(schema.contains(r#""title" text NOT NULL"#), "{schema}");
     assert!(schema.contains(r#"PRIMARY KEY ("id")"#), "{schema}");
-    let readme = std::fs::read_to_string(project.join("src/saltcorn/README.md"))?;
-    assert!(readme.contains("saltcorn api add-query"), "{readme}");
+    let readme = std::fs::read_to_string(project.join("src/feldspar/README.md"))?;
+    assert!(readme.contains("feldspar api add-query"), "{readme}");
     assert!(readme.contains("--app todo"), "{readme}");
     assert!(readme.contains("--api /api"), "{readme}");
 
-    // The catalog was told where this deployment serves (as `saltcorn serve` and
+    // The catalog was told where this deployment serves (as `feldspar serve` and
     // the command-line build both do at boot), so both documents name the URL to
     // open rather than describing one — and the session command that gets a
     // browser past the sign-in page.
     assert!(agents.contains("http://todo.example.com:3032"), "{agents}");
     assert!(readme.contains("http://todo.example.com:3032"), "{readme}");
     assert!(
-        agents.contains("saltcorn auth token --app todo --admin"),
+        agents.contains("feldspar auth token --app todo --admin"),
         "{agents}"
     );
-    assert!(readme.contains("pkill -HUP saltcorn"), "{readme}");
+    assert!(readme.contains("pkill -HUP feldspar"), "{readme}");
     // Both documents name this installation's roles — read out of the database
     // this scaffold ran against, not described in the abstract — and neither
     // asks for a password, because the command no longer takes one.
@@ -174,26 +174,26 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
         // without a paragraph about a setting the reader does not have to touch
         // or about the server's own configuration file.
         assert!(!doc.contains("--base-domain"), "{doc}");
-        assert!(!doc.contains("saltcorn.toml"), "{doc}");
+        assert!(!doc.contains("feldspar.toml"), "{doc}");
     }
     // ...and the session file it writes is not committable.
     let ignore = std::fs::read_to_string(project.join(".gitignore"))?;
-    assert!(ignore.contains(".saltcorn-session.json"), "{ignore}");
+    assert!(ignore.contains(".feldspar-session.json"), "{ignore}");
 
     // Generated against the app's real table, not a placeholder: there is a page
     // for `tasks`, and the hooks carry its columns and their nullability.
     assert!(project.join("src/pages/Tasks.tsx").is_file());
-    let hooks = std::fs::read_to_string(project.join("src/saltcorn/hooks.ts"))?;
+    let hooks = std::fs::read_to_string(project.join("src/feldspar/hooks.ts"))?;
     assert!(hooks.contains("type TasksRow"), "{hooks}");
     assert!(hooks.contains("api.tasks.list()"), "{hooks}");
     // …and a store over the same table, so a write shows before it lands.
-    let store = std::fs::read_to_string(project.join("src/saltcorn/store.ts"))?;
+    let store = std::fs::read_to_string(project.join("src/feldspar/store.ts"))?;
     assert!(store.contains("export function useTasksStore()"), "{store}");
 
     // The client is generated at the conventional path the scaffold imports
     // from, so the two halves of the runtime meet without a setting. The row
     // type is the app's own columns, with their nullability.
-    let client = std::fs::read_to_string(project.join("src/saltcorn/client.ts"))?;
+    let client = std::fs::read_to_string(project.join("src/feldspar/client.ts"))?;
     assert!(client.contains("export interface TasksRow {"), "{client}");
     assert!(client.contains("title: string;"), "{client}");
     assert!(client.contains("done: boolean | null;"), "{client}");
@@ -270,9 +270,9 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
         "index.html",
         "src/App.tsx",
         "src/pages/Tasks.tsx",
-        "src/saltcorn/client.ts",
-        "src/saltcorn/helper.ts",
-        "src/saltcorn/hooks.ts",
+        "src/feldspar/client.ts",
+        "src/feldspar/helper.ts",
+        "src/feldspar/hooks.ts",
     ] {
         assert!(tmp.path().join(expected).is_file(), "missing {expected}");
     }
@@ -294,7 +294,7 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
     assert_eq!(source.build.output_dir, "dist");
     assert_eq!(
         source.client_path.as_deref(),
-        Some("src/saltcorn/client.ts")
+        Some("src/feldspar/client.ts")
     );
 
     // A re-emit rewrites the generated directory in place, at the root.
@@ -302,12 +302,12 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
     assert_eq!(
         written,
         [
-            "src/saltcorn/client.ts",
-            "src/saltcorn/helper.ts",
-            "src/saltcorn/hooks.ts",
-            "src/saltcorn/store.ts",
-            "src/saltcorn/schema.sql",
-            "src/saltcorn/README.md",
+            "src/feldspar/client.ts",
+            "src/feldspar/helper.ts",
+            "src/feldspar/hooks.ts",
+            "src/feldspar/store.ts",
+            "src/feldspar/schema.sql",
+            "src/feldspar/README.md",
         ]
     );
 
@@ -375,25 +375,25 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
     assert_eq!(
         written,
         [
-            "todo/src/saltcorn/client.ts",
-            "todo/src/saltcorn/helper.ts",
-            "todo/src/saltcorn/hooks.ts",
-            "todo/src/saltcorn/store.ts",
-            "todo/src/saltcorn/schema.sql",
-            "todo/src/saltcorn/README.md",
+            "todo/src/feldspar/client.ts",
+            "todo/src/feldspar/helper.ts",
+            "todo/src/feldspar/hooks.ts",
+            "todo/src/feldspar/store.ts",
+            "todo/src/feldspar/schema.sql",
+            "todo/src/feldspar/README.md",
         ]
     );
 
-    let hooks = std::fs::read_to_string(project.join("src/saltcorn/hooks.ts"))?;
+    let hooks = std::fs::read_to_string(project.join("src/feldspar/hooks.ts"))?;
     assert!(hooks.contains("export function useNotes()"), "{hooks}");
     assert!(hooks.contains("type NotesRow"), "{hooks}");
     // The schema description follows the tables, for the same reason and on the
     // same schedule: an agent writing SQL against this project must not be
     // reading last week's columns.
-    let schema = std::fs::read_to_string(project.join("src/saltcorn/schema.sql"))?;
+    let schema = std::fs::read_to_string(project.join("src/feldspar/schema.sql"))?;
     assert!(schema.contains(r#"CREATE TABLE "notes""#), "{schema}");
     assert!(schema.contains(r#""body" text"#), "{schema}");
-    // Everything outside `src/saltcorn/` is untouched — including the page for
+    // Everything outside `src/feldspar/` is untouched — including the page for
     // the new table, which is the admin's to add or not, and the notes in
     // `AGENTS.md`.
     assert_eq!(std::fs::read_to_string(project.join("src/App.tsx"))?, mine);
@@ -415,7 +415,7 @@ async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populat
     let app = todo_app();
     let project = tmp.path().join("todo");
 
-    // Nothing there yet: re-emitting would leave a `src/saltcorn/` with no
+    // Nothing there yet: re-emitting would leave a `src/feldspar/` with no
     // project around it, which cannot build. So it scaffolds, and says so.
     let update = update_app_client(&cat, &app, None).await?;
     assert!(matches!(update, ClientUpdate::Scaffolded(_)), "{update:?}");
@@ -425,7 +425,7 @@ async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populat
         update.summary()
     );
     assert!(project.join("package.json").is_file());
-    assert!(project.join("src/saltcorn/README.md").is_file());
+    assert!(project.join("src/feldspar/README.md").is_file());
 
     // Now it is populated, so the same button regenerates and leaves the
     // developer's own files alone.
@@ -438,12 +438,12 @@ async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populat
     assert_eq!(
         files,
         &[
-            "todo/src/saltcorn/client.ts",
-            "todo/src/saltcorn/helper.ts",
-            "todo/src/saltcorn/hooks.ts",
-            "todo/src/saltcorn/store.ts",
-            "todo/src/saltcorn/schema.sql",
-            "todo/src/saltcorn/README.md",
+            "todo/src/feldspar/client.ts",
+            "todo/src/feldspar/helper.ts",
+            "todo/src/feldspar/hooks.ts",
+            "todo/src/feldspar/store.ts",
+            "todo/src/feldspar/schema.sql",
+            "todo/src/feldspar/README.md",
         ]
     );
     assert_eq!(std::fs::read_to_string(project.join("src/App.tsx"))?, mine);
@@ -498,7 +498,7 @@ async fn a_scaffolded_app_installs_builds_and_serves_end_to_end() -> sc_error::R
     // call fails the build.
     std::fs::write(
         tmp.path().join("todo/src/reports.ts"),
-        "import { api } from \"./saltcorn/hooks\";\n\
+        "import { api } from \"./feldspar/hooks\";\n\
          \n\
          export async function countTasks(title: string): Promise<number> {\n\
          \x20 const rows = await api.countTasks({ title });\n\

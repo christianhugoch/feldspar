@@ -1310,7 +1310,7 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // Rewrite an application's **generated** code from its current definition —
-    // `src/saltcorn/**`: the typed client, the hooks, the schema and the README
+    // `src/feldspar/**`: the typed client, the hooks, the schema and the README
     // (§13.3). No bundler runs; this is the "if the API definition changes, the
     // client code must be updated automatically" path (decision 10) with a
     // button on it, for the times an admin wants it *now* rather than at the
@@ -1318,7 +1318,7 @@ pub fn admin_endpoints() -> EndpointSet {
     //
     // A project directory that is **empty** is scaffolded instead — an app whose
     // store was unreachable when it was created, or whose tree somebody deleted,
-    // has nothing to regenerate, and a `src/saltcorn/` with no project around it
+    // has nothing to regenerate, and a `src/feldspar/` with no project around it
     // could not build. Which of the two happened is in the response, because
     // writing a whole project is not the same news as rewriting four files.
     set.register(

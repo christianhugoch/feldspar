@@ -389,7 +389,7 @@ fn sibling(path: &str, name: &str) -> String {
 }
 
 /// Rewrite an application's **generated** files from its current definition —
-/// the typed client, and a `react` app's whole `src/saltcorn/` runtime — without
+/// the typed client, and a `react` app's whole `src/feldspar/` runtime — without
 /// building anything.
 ///
 /// This is "if the API definition changes, the client code must be updated
@@ -805,7 +805,7 @@ mod tests {
         // so an app that did not emit one would not compile.
         assert_eq!(
             source.client_path.as_deref(),
-            Some("todo/src/saltcorn/client.ts")
+            Some("todo/src/feldspar/client.ts")
         );
 
         // Dependencies install themselves on first build (§2.3): the framework
@@ -825,7 +825,7 @@ mod tests {
             .with(CFG_SOURCE, "todo")
             .with(CFG_OUTPUT, "todo/dist")
             .with(CFG_COMMAND, "npm run build")
-            .with(CFG_CLIENT, "todo/src/saltcorn/client.ts");
+            .with(CFG_CLIENT, "todo/src/feldspar/client.ts");
         let code_build = app_source_from_config(&equivalent).unwrap().build;
         assert_eq!(code_build.install, None);
         assert_eq!(
@@ -873,7 +873,7 @@ mod tests {
             assert_eq!(source.build.output_dir, "dist");
             assert_eq!(
                 source.client_path.as_deref(),
-                Some("src/saltcorn/client.ts"),
+                Some("src/feldspar/client.ts"),
                 "no path acquires a leading slash"
             );
             // Still an npm project, so it still installs itself.

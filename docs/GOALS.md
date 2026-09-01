@@ -1,6 +1,6 @@
-# Saltcorn v2
+# Saltcorn Feldspar
 
-This document outlines a high-level plan for the design of Saltcorn 2.0, the evolution of Saltcorn, an database application builder for web and mobile apps. The goals for the significant rewrite are outlined below after a statement of the scope
+This document outlines a high-level plan for the design of Saltcorn Feldspar (Saltcorn 2), the evolution of Saltcorn, an database application builder for web and mobile apps. The goals for the significant rewrite are outlined below after a statement of the scope
 
 ## Scope
 
@@ -76,7 +76,7 @@ API:
 - There must be a button to update the client code in each code application following table changes. This should also check if rescaffolding is needed, e.g. if the application directory is empty. 
 - If the api defintion changes, the client code must be updated automatically.
 - the generated typescript client subdirectory must have a README.md file that explains that this directory is maintained externally and any changes will be overwritten
-- the saltcorn cli must include a command to add a custom SQL query to the API. This must update the  
+- the feldspar cli must include a command to add a custom SQL query to the API. This must update the  
 - the generated typescript client directory must include the SQL definition for the connected tables, to help any coding agents running in the directory formulate custom queries.
 - when scaffolding typescript apps, include an AGENTS.md file that points to the README.md file for the client and explains how to add a custom SQL query with the cli. 
 
@@ -117,7 +117,7 @@ Database driver must be written in Rust. The remaining code entities can be writ
 
 Table provider: can provide a virtual table. It will look to the user as if it is a database table with fields and rows. Examples: SQL query, RSS feed, IMAP, instant messaging search. This has to interpret the universal query language. and return the rows corresponding to the query. Any provided table can optionally be materialised into a real table with options for syncing.
 
-Types: Rich types: types known to saltcorn, with attributes and fieldviews. Basic types: other types not known. The database driver makes a correspondence between types in its database and rich types. 
+Types: Rich types: types known to saltcorn feldspar, with attributes and fieldviews. Basic types: other types not known. The database driver makes a correspondence between types in its database and rich types. 
 
 Fieldviews: can that can display and possibly edit data types in HTML. Each fieldview can display/edit multiple (at least one) types. some catch-all fieldviews can edit any type. 
 

@@ -479,7 +479,7 @@ async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> s
 
     let project = tmp.path().join("todo");
     assert!(project.join("package.json").is_file());
-    assert!(project.join("src/saltcorn/hooks.ts").is_file());
+    assert!(project.join("src/feldspar/hooks.ts").is_file());
     // Generated against the app's declared table.
     assert!(project.join("src/pages/Posts.tsx").is_file());
 

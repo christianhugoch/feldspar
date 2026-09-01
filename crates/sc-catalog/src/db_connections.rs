@@ -9,7 +9,7 @@
 //! primary's, listed together, queried the same way, and told apart by the badge
 //! the admin UI puts next to the name.
 //!
-//! **Why a row and not `saltcorn.toml`.** The file names the *primary*
+//! **Why a row and not `feldspar.toml`.** The file names the *primary*
 //! connection, which the process needs before it can read anything at all, and
 //! which is therefore an operator's to write down. A secondary connection is not
 //! like that: it is a thing an admin adds while the server is running, with

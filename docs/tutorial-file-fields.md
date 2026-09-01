@@ -100,7 +100,7 @@ GET  /api/tasks/{id}/attachment             the bytes behind this row's attachme
 POST /api/tasks/{id}/attachment/{filename}  upload; body = the file's bytes
 ```
 
-The rebuild is for the *typed client*: `src/saltcorn/client.ts` is regenerated from the app's
+The rebuild is for the *typed client*: `src/feldspar/client.ts` is regenerated from the app's
 endpoints, and now carries
 
 ```ts
@@ -116,7 +116,7 @@ Edit `src/pages/Tasks.tsx` (through the file manager or your own editor). Add a 
 each task row:
 
 ```tsx
-import { api, invalidate } from "../saltcorn/hooks";
+import { api, invalidate } from "../feldspar/hooks";
 
 function AttachButton({ id }: { id: number }) {
   return (

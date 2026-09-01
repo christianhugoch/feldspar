@@ -1,6 +1,6 @@
 [package]
 name = "sc-cli"
-description = "The saltcorn binary: serve and management commands (layer 10)"
+description = "The feldspar binary: serve and management commands (layer 10)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "saltcorn"
+name = "feldspar"
 path = "src/main.rs"
 
 [dependencies]
@@ -43,7 +43,7 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 sc-query.workspace = true
-# The `saltcorn.toml` configuration file: named environments, each with one set
+# The `feldspar.toml` configuration file: named environments, each with one set
 # of database connection parameters. It is its own crate because the
 # integration-test harness reads the same file.
 sc-config-file.workspace = true

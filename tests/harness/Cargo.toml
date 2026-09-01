@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 sc-error.workspace = true
-# `saltcorn.toml`: the harness reads its `test` environment, so a developer whose
+# `feldspar.toml`: the harness reads its `test` environment, so a developer whose
 # Postgres is not the one CI runs needs no environment variables to `cargo test`.
 sc-config-file.workspace = true
 tokio.workspace = true

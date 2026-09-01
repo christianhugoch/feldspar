@@ -269,7 +269,7 @@ The build wrote two more files into the app's source tree, beside the REST clien
 because this application enables the provider:
 
 ```
-staff/src/saltcorn/
+staff/src/feldspar/
   client.ts         the typed REST client
   hooks.ts          the React hooks over it
   graphql.ts        graphql() / graphqlRequest() — a fetch wrapper, no dependency
@@ -279,7 +279,7 @@ staff/src/saltcorn/
 Write a query against it — `src/report.ts`:
 
 ```ts
-import { graphql, GraphqlError } from "./saltcorn/graphql";
+import { graphql, GraphqlError } from "./feldspar/graphql";
 
 type Report = {
   departments: {
@@ -315,7 +315,7 @@ rather than a status code. When a **partial** result is the answer you want, `gr
 returns the whole response instead: a child list the caller may not read is an error on that
 field with the parents still present.
 
-Press **Build** again (or, in the project, `npm run build && pkill -HUP saltcorn` — the build is
+Press **Build** again (or, in the project, `npm run build && pkill -HUP feldspar` — the build is
 `tsc --noEmit && vite build`, and the signal is what makes the server re-read what it wrote).
 The build regenerates `schema.graphql` from the app's tables *before* it type-checks, so the SDL
 in the tree always describes the API this build will serve — nobody exports it by hand, and it
@@ -324,7 +324,7 @@ cannot be stale.
 **That is only half the guarantee, and the other half is one `npm install`.** The `Report` type
 above is written by hand, so `tsc` checks your *code* against it and nobody checks it against the
 schema. Install `gql.tada` in the project and that gap closes: the generated `tsconfig.json`
-already points its TypeScript plugin at `src/saltcorn/schema.graphql`, so a document's result and
+already points its TypeScript plugin at `src/feldspar/schema.graphql`, so a document's result and
 variable types are derived from the schema by TypeScript itself — no codegen step, and a field
 the schema no longer has is an error on the query. Saltcorn does not install it for you: an
 application's dependencies are the developer's business, and a language-service plugin is ignored

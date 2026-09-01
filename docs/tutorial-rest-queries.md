@@ -194,7 +194,7 @@ with.
 ## Step 6 — The same read from the typed client
 
 Open the project — the **Applications** row links to its source directory, with **(edit code)**
-beside it for the in-browser IDE — and look at `src/saltcorn/client.ts`. `listBooks` takes
+beside it for the in-browser IDE — and look at `src/feldspar/client.ts`. `listBooks` takes
 a typed options object, because a query parameter is part of the endpoint (§13.1) and a client
 that could not express `?select=` would leave you hand-writing a `fetch` beside it — which is
 where drift starts:
@@ -220,7 +220,7 @@ In your own code, the generated per-table hook (`useBooks()`) is the unshaped re
 goes through `useQuery`, which is exported for exactly this and joins the same per-table cache:
 
 ```ts
-import { api, useQuery } from "./saltcorn/hooks";
+import { api, useQuery } from "./feldspar/hooks";
 
 type Recent = { title: string; published: string | null; author: { name: string } | null };
 
@@ -309,7 +309,7 @@ used; and no two result columns of one name, which would collapse into one JSON 
 For a deploy step, or for a coding agent working in the project, the three commands are:
 
 ```bash
-saltcorn api add-query \
+feldspar api add-query \
   --app library \
   --api /api \
   --name topAuthors \
@@ -319,8 +319,8 @@ saltcorn api add-query \
   --param since:date \
   --sql @top-authors.sql
 
-saltcorn api list-queries --app library
-saltcorn api remove-query --app library --name topAuthors
+feldspar api list-queries --app library
+feldspar api remove-query --app library --name topAuthors
 ```
 
 Three rather than one because an add-only command is a trap: the first typo would need a browser
@@ -338,7 +338,7 @@ to fix, which is the situation the command exists to avoid. Notes:
   generated client.
 - **Validation is the save**, which is what prepares: a query that will not prepare exits
   non-zero carrying Postgres's message and leaves the stored application untouched. On success it
-  prints the columns the database reported and rewrites `src/saltcorn/`.
+  prints the columns the database reported and rewrites `src/feldspar/`.
 
 A running server keeps serving the endpoint set it mounted with, so a query added this way is
 answered after the app is next mounted — press **Build** on the applications screen, or restart.
@@ -378,23 +378,23 @@ what the endpoint actually returns.
 
 ## Step 10 — Nobody regenerates anything by hand
 
-Add a column to `books` in the admin UI and look at the project again: `src/saltcorn/` already
+Add a column to `books` in the admin UI and look at the project again: `src/feldspar/` already
 has it. Re-emitting that directory is not a build — no bundler runs — so it happens on every
 event that invalidates the endpoint set: a table changing, an application being saved, a query
 added from the CLI. `npm run build` stays the Build button's job.
 
 Two files in there are worth opening once:
 
-- **`src/saltcorn/README.md`** — that everything in the directory is overwritten without
-  warning, what each file is, and the `saltcorn api add-query` command spelled out with *this*
+- **`src/feldspar/README.md`** — that everything in the directory is overwritten without
+  warning, what each file is, and the `feldspar api add-query` command spelled out with *this*
   app's subdomain and mount, ready to paste, with the authority note beside it.
-- **`src/saltcorn/schema.sql`** — the `CREATE TABLE` definitions of your tables, rendered by the
+- **`src/feldspar/schema.sql`** — the `CREATE TABLE` definitions of your tables, rendered by the
   same driver code that applies real schema changes, so somebody writing a custom query has real
   column names and types. Its header says it describes rather than migrates: the database
   already has these tables.
 
 At the project **root** there is **`AGENTS.md`**, written once when the project was scaffolded
-and **never rewritten** — what the app is, that `src/saltcorn/` is generated, that data reaches
+and **never rewritten** — what the app is, that `src/feldspar/` is generated, that data reaches
 the browser through the generated client and nothing else, and how to add a custom query. It is
 yours: append what you learn about the project to it, and no build will clobber it. That is the
 whole boundary, stated in the tree rather than only in the design document — inside the generated

@@ -84,9 +84,9 @@ pub const DATA_DIR_ENV: &str = "SC_DATA_DIR";
 ///
 /// | Platform | Directory |
 /// |---|---|
-/// | Windows | `%LOCALAPPDATA%\Saltcorn` |
-/// | macOS | `~/Library/Application Support/Saltcorn` |
-/// | other (XDG) | `$XDG_DATA_HOME/saltcorn`, else `~/.local/share/saltcorn` |
+/// | Windows | `%LOCALAPPDATA%\Feldspar` |
+/// | macOS | `~/Library/Application Support/Feldspar` |
+/// | other (XDG) | `$XDG_DATA_HOME/feldspar`, else `~/.local/share/feldspar` |
 ///
 /// [`DATA_DIR_ENV`] overrides all of it. An environment with none of the
 /// variables set — a daemon started with a scrubbed environment — is an error
@@ -100,7 +100,7 @@ pub fn data_dir() -> Result<PathBuf> {
     }
     if cfg!(windows) {
         return std::env::var("LOCALAPPDATA")
-            .map(|d| PathBuf::from(d).join("Saltcorn"))
+            .map(|d| PathBuf::from(d).join("Feldspar"))
             .map_err(|_| {
                 Error::config(
                     "cannot decide where to keep git clones: neither \
@@ -114,11 +114,11 @@ pub fn data_dir() -> Result<PathBuf> {
         )
     })?;
     if cfg!(target_os = "macos") {
-        return Ok(PathBuf::from(home).join("Library/Application Support/Saltcorn"));
+        return Ok(PathBuf::from(home).join("Library/Application Support/Feldspar"));
     }
     match std::env::var("XDG_DATA_HOME") {
-        Ok(xdg) if !xdg.trim().is_empty() => Ok(PathBuf::from(xdg).join("saltcorn")),
-        _ => Ok(PathBuf::from(home).join(".local/share/saltcorn")),
+        Ok(xdg) if !xdg.trim().is_empty() => Ok(PathBuf::from(xdg).join("feldspar")),
+        _ => Ok(PathBuf::from(home).join(".local/share/feldspar")),
     }
 }
 

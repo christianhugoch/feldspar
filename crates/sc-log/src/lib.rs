@@ -258,7 +258,7 @@ fn truncate(text: &str, max: usize) -> String {
 enum Stream {
     /// Standard output: the SQL echo, which is what somebody redirects.
     Out,
-    /// Standard error: level messages, beside every other `saltcorn:` line.
+    /// Standard error: level messages, beside every other `feldspar:` line.
     Err,
 }
 

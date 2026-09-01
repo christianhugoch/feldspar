@@ -10,7 +10,7 @@
 # Node toolchain for the two UI bundles. On a developer's machine that is a list
 # of things to have forgotten; here it is a layer.
 #
-# Everything is built **at the install prefix** (`/opt/saltcorn` by default).
+# Everything is built **at the install prefix** (`/opt/feldspar` by default).
 # `crates/sc-cli/build.rs` compiles the admin and IDE bundle paths into the
 # binary, and `SC_BUNDLE_PREFIX` is what makes those paths describe the machine
 # the artifact is going to rather than this container.
@@ -61,7 +61,7 @@ RUN rustup target add "${TARGET}"
 # The source lives at the prefix it will be installed to. Two things then line
 # up for free: the bundle paths `build.rs` records, and any absolute path that
 # ends up in a build artifact.
-ARG PREFIX=/opt/saltcorn
+ARG PREFIX=/opt/feldspar
 WORKDIR ${PREFIX}
 COPY . ${PREFIX}
 
@@ -90,7 +90,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     export RUSTFLAGS="-C target-feature=+crt-static${RUSTFLAGS:+ ${RUSTFLAGS}}"; \
     cargo build --release --target "${TARGET}" -p sc-cli ${JOBS:+--jobs "${JOBS}"}; \
     mkdir -p /out/bin; \
-    cp "/build/target/${TARGET}/release/saltcorn" /out/bin/saltcorn
+    cp "/build/target/${TARGET}/release/feldspar" /out/bin/feldspar
 
 # Staged separately from the build so the cache mount above is not held open
 # while the (large) copies happen.

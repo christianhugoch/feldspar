@@ -1604,7 +1604,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 services.host().unload(&module.name).await;
                 if let Err(e) = services.installer().uninstall(&module.name).await {
                     sc_log::log_error!(
-                        "saltcorn: the module `{}` was removed but its package could not be \
+                        "feldspar: the module `{}` was removed but its package could not be \
                          uninstalled: {}",
                         module.name,
                         sc_error::format_chain(&e)
@@ -3644,7 +3644,7 @@ async fn scaffold_new_app(
 /// operator's console and to nobody else.
 ///
 /// Saving an application changes its API definition — the tables it declares,
-/// the providers it enables, the custom queries on them — so its `src/saltcorn/`
+/// the providers it enables, the custom queries on them — so its `src/feldspar/`
 /// must follow (decision 10). It deliberately does **not** affect the response:
 /// the application is stored and valid, and an unreachable store is something
 /// the admin fixes and re-triggers with the update button, not a reason to tell
@@ -3656,7 +3656,7 @@ async fn reemit_app_client(
 ) {
     if let Err(e) = sc_app::emit_app_client(catalog, app, dispatcher).await {
         eprintln!(
-            "saltcorn: application `{}` was saved, but its generated client could \
+            "feldspar: application `{}` was saved, but its generated client could \
              not be rewritten: {e}",
             app.subdomain
         );
@@ -5055,7 +5055,7 @@ pub(crate) fn triggers_of(apps: &AppMounts) -> Result<Arc<sc_action::TriggerDisp
 fn reproject_apps(apps: &AppMounts) {
     if let Err(e) = apps.refresh_triggers() {
         eprintln!(
-            "saltcorn: the trigger set changed, but an application could not be \
+            "feldspar: the trigger set changed, but an application could not be \
              re-projected and keeps its previous mount: {}",
             sc_error::format_chain(&e)
         );

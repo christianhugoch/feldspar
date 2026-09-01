@@ -10,7 +10,7 @@ An application is served on **its own subdomain**, so the one thing that has to 
 the server starts is the domain those subdomains sit under:
 
 ```bash
-saltcorn serve --base-domain localhost
+feldspar serve --base-domain localhost
 ```
 
 `--base-domain localhost` turns on subdomain routing, so an app with subdomain `todo` is
@@ -19,11 +19,11 @@ a base domain the server has no way to address an app, so it serves the admin UI
 
 That is the whole command line. Sign in to the admin UI at `http://localhost:3032`.
 
-A deployment with more than one database can put this in `saltcorn.toml` beside the connection
+A deployment with more than one database can put this in `feldspar.toml` beside the connection
 parameters instead — `base_domain`, `bind` and `secure_cookies` in the `[environments.NAME]`
-section — so `saltcorn serve --environment production` needs no flags. It is worth doing even
+section — so `feldspar serve --environment production` needs no flags. It is worth doing even
 for one: the same settings are what a **command-line build** reads to write your application's
-real URL into the documentation it generates for that project, and what `saltcorn auth token`
+real URL into the documentation it generates for that project, and what `feldspar auth token`
 (below) reads to know which host to mint a session for. An environment carrying connection
 parameters and no `base_domain` stops that command with `no base domain` — add it there once,
 or pass `--base-domain` on every invocation.
@@ -118,11 +118,11 @@ there.
 ### Without a browser to sign in with
 
 A script — a screenshot run, a smoke test, a coding agent checking its own work — cannot type
-into that sign-in screen, so it photographs the sign-in screen. `saltcorn auth token` gets it a
+into that sign-in screen, so it photographs the sign-in screen. `feldspar auth token` gets it a
 session and writes the cookies down:
 
 ```
-saltcorn auth token --app todo --admin
+feldspar auth token --app todo --admin
 ```
 
 It asks for no password. You are at a shell that already holds the database this server runs
@@ -132,10 +132,10 @@ holding a role (the error lists the roles when the name is not one), and `--emai
 you@example.com` that person exactly. The session itself is minted by the running server, from
 a single-use grant good for two minutes, so what comes back is exactly the session a browser
 would have got — the same user, the same role, the same limits. It writes
-`.saltcorn-session.json`, which is Playwright's `storageState`:
+`.feldspar-session.json`, which is Playwright's `storageState`:
 
 ```js
-const context = await browser.newContext({ storageState: '.saltcorn-session.json' });
+const context = await browser.newContext({ storageState: '.feldspar-session.json' });
 await (await context.newPage()).goto('http://todo.localhost:3032/');
 ```
 
@@ -144,7 +144,7 @@ await (await context.newPage()).goto('http://todo.localhost:3032/');
 give the script **its own account** at the lowest role that can see what it is looking at,
 rather than yours. The session lasts until the server's session lifetime runs out (24 hours by
 default) or the server restarts — sessions live in the server's memory. The generated
-`todo/src/saltcorn/README.md` says all of this again, in the project, where the script's author
+`todo/src/feldspar/README.md` says all of this again, in the project, where the script's author
 will be.
 
 ## Step 6 — What was generated
@@ -168,7 +168,7 @@ todo/
       hooks.ts      typed hooks over it
 ```
 
-**`src/saltcorn/` is ours.** It is regenerated every build and carries a `DO NOT EDIT` header.
+**`src/feldspar/` is ours.** It is regenerated every build and carries a `DO NOT EDIT` header.
 That is what keeps it in step with your schema: add a column to `tasks`, rebuild, and
 `TasksRow` has it.
 
@@ -258,7 +258,7 @@ Misspell a column in the row that `Tasks.tsx` renders:
 `titel` is squiggled immediately — `Property 'titel' does not exist on type 'TasksRow'. Did you
 mean 'title'?` — the **Problems** panel names the file and line, and `Ctrl+.` offers the spelling
 fix. Take it, and the squiggle goes. Hovering `row` shows `TasksRow` with your two columns on it;
-`F12` on `useTasks` jumps into `src/saltcorn/hooks.ts`, and `F12` on a React import jumps into the
+`F12` on `useTasks` jumps into `src/feldspar/hooks.ts`, and `F12` on a React import jumps into the
 really-installed `node_modules`.
 
 Those semantics come from a real `typescript-language-server` running **on the server, in your
@@ -319,17 +319,17 @@ repository on disk; nothing here depends on having gone through the IDE.
   It notices its own writes, a build's, and a git operation's; a change made from the file manager,
   over SSH or by another tab is seen when something lists — the explorer's **Refresh**, find-in-files,
   Go to File — or when you come back to the tab, which drops everything it remembered.
-- **Building from a terminal**: `saltcorn build-app todo` builds one application by subdomain
+- **Building from a terminal**: `feldspar build-app todo` builds one application by subdomain
   and prints the installer's and bundler's output as it goes. It is the same build the button
   runs, so it is what to reach for in a deploy script — or when a failing build has left the
   app unreachable in a browser. It does not mount anything, so it is safe to run against a
   live deployment's database.
 - **Building in the project directory, and `SIGHUP`**: `npm run build` in `/srv/apps/todo`
   writes `dist/`, but the running server serves the bundle it read into memory when *it* last
-  built, so the page does not change. `pkill -HUP saltcorn` makes it re-read: `SIGHUP` drops
+  built, so the page does not change. `pkill -HUP feldspar` makes it re-read: `SIGHUP` drops
   every application's cached bundle, re-reads it from disk, and reloads the catalog and the
   stored application definitions with it — running **no bundler and no `npm install`**, so it
-  takes milliseconds. `npm run build && pkill -HUP saltcorn`, then reload the page, is the
+  takes milliseconds. `npm run build && pkill -HUP feldspar`, then reload the page, is the
   whole loop, and it is the one to give a coding agent working in the project. The server logs
   what it reloaded and how long it took.
 

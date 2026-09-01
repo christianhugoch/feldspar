@@ -175,7 +175,7 @@ fn react_prompt(app: &Application, store: &str, root: &str) -> String {
          `{subdomain}` subdomain. Its source is in the `{store}` file store under \
          `{root}`, and your file tools are scoped to exactly that directory.\n\n\
          {SHARED_PROMPT}\n\n\
-         Two conventions of this framework: `src/saltcorn/` is generated from the \
+         Two conventions of this framework: `src/feldspar/` is generated from the \
          application's own API — its client and typed hooks are rewritten on every \
          build, so read it to learn what data is available but never edit it — and \
          the application's data is reached through that client, never by talking to \
@@ -268,7 +268,7 @@ mod tests {
         let prompt = &spec.system_prompt;
         assert!(prompt.contains("Todo"), "{prompt}");
         assert!(prompt.contains("apps"), "{prompt}");
-        assert!(prompt.contains("src/saltcorn/"), "{prompt}");
+        assert!(prompt.contains("src/feldspar/"), "{prompt}");
         assert!(prompt.contains("build"), "{prompt}");
     }
 
@@ -286,7 +286,7 @@ mod tests {
 
         // No React conventions are claimed for a project this framework knows
         // nothing about.
-        assert!(!spec.system_prompt.contains("src/saltcorn/"));
+        assert!(!spec.system_prompt.contains("src/feldspar/"));
         assert!(spec.system_prompt.contains("Blog"));
     }
 

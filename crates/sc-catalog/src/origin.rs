@@ -10,17 +10,17 @@
 //!
 //! The two layers here are the **server**, which is told the base domain on its
 //! command line, and the **project generator** in `sc-app`, which writes an
-//! application's `AGENTS.md` and `src/saltcorn/README.md` and has to tell a
+//! application's `AGENTS.md` and `src/feldspar/README.md` and has to tell a
 //! developer — or their coding agent — which URL to open. Threading an origin
 //! through `scaffold_app`, `emit_react_runtime`, `emit_app_client`,
 //! `build_application` and every one of their callers would put a parameter that
 //! is about *documentation* into the signature of everything that builds; every
 //! one of those functions already takes a `&Catalog`.
 //!
-//! It is set once, at boot, by whichever process is doing the work: `saltcorn
+//! It is set once, at boot, by whichever process is doing the work: `feldspar
 //! serve` from its own configuration, and the command-line build from the
-//! `saltcorn.toml` environment it was pointed at. That last part is the point of
-//! storing it rather than passing it from the server alone — a `saltcorn
+//! `feldspar.toml` environment it was pointed at. That last part is the point of
+//! storing it rather than passing it from the server alone — a `feldspar
 //! build-app` that rewrote the generated documentation *without* the URL would
 //! be worse than one that never wrote it, because the two builds would disagree.
 //!

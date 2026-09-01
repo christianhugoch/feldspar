@@ -85,7 +85,7 @@ pub async fn install_agents(catalog: &Arc<Catalog>) -> Result<AgentServices> {
         .issues()
     {
         eprintln!(
-            "saltcorn: agent `{}` is stored but not usable: {}",
+            "feldspar: agent `{}` is stored but not usable: {}",
             issue.agent, issue.problem
         );
     }

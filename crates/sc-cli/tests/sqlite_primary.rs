@@ -37,13 +37,13 @@ impl Drop for TempDir {
 #[tokio::test]
 async fn a_sqlite_file_is_a_whole_installation() -> sc_error::Result<()> {
     let dir = TempDir::new();
-    let path = dir.0.join("saltcorn.sqlite");
+    let path = dir.0.join("feldspar.sqlite");
 
     // --- boot ----------------------------------------------------------------
     // The file does not exist yet: naming it is the installation.
     assert!(!path.exists());
     let cfg = DbConfig::from_sqlite(path.display().to_string());
-    assert!(cfg.target().contains("saltcorn.sqlite"));
+    assert!(cfg.target().contains("feldspar.sqlite"));
     let catalog = connect_catalog(&cfg).await?;
     assert!(path.is_file(), "serving a SQLite file creates it");
 

@@ -95,7 +95,7 @@ pub async fn scaffold_app(
     let graphql = app_graphql(app, cat)?;
     let schema_sql = app_schema_sql(app, cat)?;
     // This installation's roles, for the documentation that says how to get a
-    // session: `saltcorn auth token --role NAME` takes a name, and nothing inside
+    // session: `feldspar auth token --role NAME` takes a name, and nothing inside
     // a project directory knows what this server calls its roles.
     let roles = documented_roles(cat).await?;
     let generated = files::project_files(&files::ProjectContext {
@@ -254,7 +254,7 @@ async fn require_auth_endpoints_for_source(
     )))
 }
 
-/// Rewrite the generated runtime (`src/saltcorn/`) for `app` — the typed client,
+/// Rewrite the generated runtime (`src/feldspar/`) for `app` — the typed client,
 /// the hooks, and the GraphQL client and schema of an app that enables that
 /// provider — leaving every other file alone.
 ///
@@ -357,11 +357,11 @@ impl ClientUpdate {
 /// Bring an application's generated code up to date on demand — the admin
 /// screen's button, and the CLI's re-emit with one extra case handled.
 ///
-/// Ordinarily this rewrites `src/saltcorn/**` and nothing else
+/// Ordinarily this rewrites `src/feldspar/**` and nothing else
 /// ([`emit_app_client`](crate::emit_app_client)). But a project directory that
 /// is **empty** has nothing to rewrite: the app was created before its store was
 /// reachable, or somebody deleted the tree. Re-emitting into it would leave a
-/// `src/saltcorn/` with no project around it — a directory of generated files
+/// `src/feldspar/` with no project around it — a directory of generated files
 /// that cannot build — so an empty directory is scaffolded instead, through the
 /// scaffold's own emptiness check rather than a second opinion about what
 /// "empty" means.
@@ -436,7 +436,7 @@ async fn init_git_repo(source: &AppSource, project_path: Option<&std::path::Path
         Ok(out) if out.status.success() => Ok(true),
         Ok(out) => {
             eprintln!(
-                "saltcorn: `git init` in {} failed ({}): {}",
+                "feldspar: `git init` in {} failed ({}): {}",
                 path.display(),
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -445,7 +445,7 @@ async fn init_git_repo(source: &AppSource, project_path: Option<&std::path::Path
         }
         Err(e) => {
             eprintln!(
-                "saltcorn: could not run `git init` in {} ({e}); \
+                "feldspar: could not run `git init` in {} ({e}); \
                  the project was scaffolded without version control",
                 path.display()
             );

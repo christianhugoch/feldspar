@@ -1,4 +1,4 @@
-//! The saltcorn binary: serve and management commands (layer 10).
+//! The feldspar binary: serve and management commands (layer 10).
 //!
 //! The entry point runs on the **tokio** runtime (the workspace-wide runtime
 //! decision), since the server it launches is async top to bottom. It exposes
@@ -6,7 +6,7 @@
 //! [`Catalog`](sc_catalog::Catalog), and starts the HTTP server with the admin
 //! API mounted. The database connection is configured by [`DbConfig`] — flags,
 //! the environment, or the environment selected with `--environment` out of the
-//! `saltcorn.toml` configuration file; the remaining flags configure the HTTP
+//! `feldspar.toml` configuration file; the remaining flags configure the HTTP
 //! server itself ([`ServerConfig`]). The reusable boot logic lives in the crate
 //! library ([`sc_cli`]).
 
@@ -78,7 +78,7 @@ fn ide_bundle_dir() -> Option<std::path::PathBuf> {
     path.join("index.html").exists().then_some(path)
 }
 
-/// `saltcorn serve [--database-url URL | --db-host H ...] [--bind ADDR] [...]`.
+/// `feldspar serve [--database-url URL | --db-host H ...] [--bind ADDR] [...]`.
 ///
 /// Database flags are consumed by [`DbConfig::extract`]; whatever is left over is
 /// parsed as [`ServerConfig`], so a typo in either still fails loudly.
@@ -104,7 +104,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // environments off one binary should be able to see, in the log, that this
     // one is staging.
     if let Some(source) = db.source() {
-        eprintln!("saltcorn: database configured from {source}");
+        eprintln!("feldspar: database configured from {source}");
     }
 
     // The service manager that started this process, where one did (a
@@ -136,7 +136,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         config.secure_cookies = true;
     }
     // Where this process serves its applications, recorded for the project
-    // generator: an app's `AGENTS.md` and `src/saltcorn/README.md` name the URL
+    // generator: an app's `AGENTS.md` and `src/feldspar/README.md` name the URL
     // to open, and this is the only place that knows it (§13.2).
     if let Some(domain) = &config.base_domain {
         let port = if ssl.enabled() {
@@ -259,11 +259,11 @@ async fn serve_command(args: &[String]) -> Result<()> {
     let sessions = Arc::new(SessionStore::database(catalog.clone()));
     if config.tls.enabled() && config.tls.redirect_http() {
         eprintln!(
-            "saltcorn: listening on http://{} (redirecting to HTTPS)",
+            "feldspar: listening on http://{} (redirecting to HTTPS)",
             config.addr
         );
     } else {
-        eprintln!("saltcorn: listening on http://{}", config.addr);
+        eprintln!("feldspar: listening on http://{}", config.addr);
     }
     let handlers = admin_handlers(catalog, apps.clone());
     serve(config, admin_endpoints(), handlers, sessions, apps).await
@@ -329,7 +329,7 @@ fn set_public_origin(catalog: &sc_catalog::Catalog, db: &DbConfig, base_domain: 
     }
 }
 
-/// `saltcorn build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]`.
+/// `feldspar build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]`.
 ///
 /// Builds one application from the command line, printing the tool output as it
 /// goes and failing with the bundler's own diagnostics.
@@ -350,7 +350,7 @@ async fn build_app_command(args: &[String]) -> Result<()> {
         _ => {
             return Err(sc_error::Error::config(
                 "build-app requires the application's subdomain: \
-                 saltcorn build-app SUBDOMAIN [database flags]",
+                 feldspar build-app SUBDOMAIN [database flags]",
             ));
         }
     };
@@ -364,10 +364,10 @@ async fn build_app_command(args: &[String]) -> Result<()> {
     }
 
     if let Some(source) = db.source() {
-        eprintln!("saltcorn: database configured from {source}");
+        eprintln!("feldspar: database configured from {source}");
     }
     let catalog = connect_catalog(&db).await?;
-    // A build rewrites `src/saltcorn/README.md`, which names the URL the
+    // A build rewrites `src/feldspar/README.md`, which names the URL the
     // application is served at — so this build has to know it, or it would
     // replace the server's answer with a placeholder.
     set_public_origin(&catalog, &db, base_domain.as_deref());
@@ -382,7 +382,7 @@ async fn build_app_command(args: &[String]) -> Result<()> {
         })?;
 
     eprintln!(
-        "saltcorn: building application `{}` ({})",
+        "feldspar: building application `{}` ({})",
         app.name, subdomain
     );
     let source = app_source_from_config(&app.framework)?;
@@ -398,7 +398,7 @@ async fn build_app_command(args: &[String]) -> Result<()> {
     eprint!("{}", report.stderr);
 
     eprintln!(
-        "saltcorn: built {} file{} into {}{}",
+        "feldspar: built {} file{} into {}{}",
         report.bundle.len(),
         if report.bundle.len() == 1 { "" } else { "s" },
         report.output_dir.display(),
@@ -411,7 +411,7 @@ async fn build_app_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `saltcorn api SUBCOMMAND …` — an application's custom SQL queries from the
+/// `feldspar api SUBCOMMAND …` — an application's custom SQL queries from the
 /// command line (§13.4).
 ///
 /// Three subcommands rather than one, because an add-only command is a trap: the
@@ -446,7 +446,7 @@ async fn open_app(
     base_domain: Option<&str>,
 ) -> Result<(std::sync::Arc<sc_catalog::Catalog>, sc_app::Application)> {
     if let Some(source) = db.source() {
-        eprintln!("saltcorn: database configured from {source}");
+        eprintln!("feldspar: database configured from {source}");
     }
     let catalog = connect_catalog(db).await?;
     // These commands re-emit the generated directory, README included, so they
@@ -474,24 +474,24 @@ async fn reemit_client(catalog: &sc_catalog::Catalog, app: &sc_app::Application)
     match sc_app::emit_app_client(catalog, app, None).await {
         Ok(written) if written.is_empty() => {
             eprintln!(
-                "saltcorn: application `{}` generates no client, so nothing was \
+                "feldspar: application `{}` generates no client, so nothing was \
                  rewritten",
                 app.subdomain
             );
         }
         Ok(written) => {
-            eprintln!("saltcorn: rewrote {}", written.join(", "));
+            eprintln!("feldspar: rewrote {}", written.join(", "));
         }
         Err(e) => {
             eprintln!(
-                "saltcorn: the query was saved, but the generated client could not \
+                "feldspar: the query was saved, but the generated client could not \
                  be rewritten: {e}"
             );
         }
     }
 }
 
-/// `saltcorn api add-query --app SUBDOMAIN [--api MOUNT] --name … --path … --sql …`.
+/// `feldspar api add-query --app SUBDOMAIN [--api MOUNT] --name … --path … --sql …`.
 ///
 /// Validates by **preparing** — the same call the admin UI's check button and
 /// every save make — so a query that will not prepare exits non-zero carrying
@@ -509,7 +509,7 @@ async fn add_query_command(args: &[String]) -> Result<()> {
     if queries.iter().any(|q| q.name == parsed.query.name) {
         return Err(sc_error::Error::invalid(format!(
             "application `{}` already has a custom query named `{}`; remove it \
-             first (saltcorn api remove-query) or use another name",
+             first (feldspar api remove-query) or use another name",
             parsed.app, parsed.query.name
         )));
     }
@@ -523,7 +523,7 @@ async fn add_query_command(args: &[String]) -> Result<()> {
     // exactly as it was, because nothing is written until every query prepares.
     let saved = save_application(&catalog, &app).await?;
     eprintln!(
-        "saltcorn: added `{name}` to the API at {mount} of `{}`",
+        "feldspar: added `{name}` to the API at {mount} of `{}`",
         parsed.app
     );
     print_query_columns(&saved, &mount, &name)?;
@@ -560,7 +560,7 @@ fn print_query_columns(app: &sc_app::Application, mount: &str, name: &str) -> Re
     Ok(())
 }
 
-/// `saltcorn api list-queries --app SUBDOMAIN [--api MOUNT]`.
+/// `feldspar api list-queries --app SUBDOMAIN [--api MOUNT]`.
 async fn list_queries_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
     let (file_stores, rest) = extract_file_stores(rest)?;
@@ -620,14 +620,14 @@ async fn list_queries_command(args: &[String]) -> Result<()> {
     }
     if found == 0 {
         eprintln!(
-            "saltcorn: application `{}` has no custom SQL queries",
+            "feldspar: application `{}` has no custom SQL queries",
             parsed.app
         );
     }
     Ok(())
 }
 
-/// `saltcorn api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME`.
+/// `feldspar api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME`.
 async fn remove_query_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
     let (base_domain, rest) = take_option(rest, "--base-domain")?;
@@ -664,14 +664,14 @@ async fn remove_query_command(args: &[String]) -> Result<()> {
     sc_api::set_custom_queries(&mut api.config, &queries)?;
     let saved = save_application(&catalog, &app).await?;
     eprintln!(
-        "saltcorn: removed `{name}` from the API at {mount} of `{}`",
+        "feldspar: removed `{name}` from the API at {mount} of `{}`",
         parsed.app
     );
     reemit_client(&catalog, &saved).await;
     Ok(())
 }
 
-/// `saltcorn auth SUBCOMMAND …` — sessions for driving an application without a
+/// `feldspar auth SUBCOMMAND …` — sessions for driving an application without a
 /// browser to sign in with.
 async fn auth_command(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
@@ -685,7 +685,7 @@ async fn auth_command(args: &[String]) -> Result<()> {
     }
 }
 
-/// `saltcorn auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)
+/// `feldspar auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)
 /// [--url …] [--out PATH] [--format playwright|netscape]`.
 ///
 /// Mints a session for a user of the **running server** and writes the cookies a
@@ -702,7 +702,7 @@ async fn auth_token_command(args: &[String]) -> Result<()> {
     let parsed = sc_cli::auth::parse_token_args(&rest)?;
 
     if let Some(source) = db.source() {
-        eprintln!("saltcorn: database configured from {source}");
+        eprintln!("feldspar: database configured from {source}");
     }
     let catalog = connect_catalog(&db).await?;
     let app = load_application_by_subdomain(&catalog, &parsed.app)
@@ -725,7 +725,7 @@ async fn auth_token_command(args: &[String]) -> Result<()> {
             sc_error::Error::config(
                 "no base domain: an application is served at \
                  `<subdomain>.<base-domain>`, so pass --base-domain, or set \
-                 `base_domain` in the saltcorn.toml environment this is \
+                 `base_domain` in the feldspar.toml environment this is \
                  connecting with",
             )
         })?;
@@ -750,7 +750,7 @@ async fn auth_token_command(args: &[String]) -> Result<()> {
     // answer, not the flag's: `--admin` and `--role` name a user this command
     // chose, and the caller should be told which one it got.
     eprintln!(
-        "saltcorn: session for {}{} — written to {}",
+        "feldspar: session for {}{} — written to {}",
         signed_in
             .get("email")
             .and_then(|e| e.as_str())
@@ -761,24 +761,24 @@ async fn auth_token_command(args: &[String]) -> Result<()> {
         },
         path.display()
     );
-    eprintln!("saltcorn: the application is at {}", target.browser_url());
+    eprintln!("feldspar: the application is at {}", target.browser_url());
     Ok(())
 }
 
 /// Print the short usage summary.
 fn print_usage() {
-    eprintln!("saltcorn — usage:");
-    eprintln!("  saltcorn serve [database flags] [server flags]");
-    eprintln!("  saltcorn build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]");
-    eprintln!("  saltcorn api add-query --app SUBDOMAIN [--api MOUNT] --name NAME");
+    eprintln!("feldspar — usage:");
+    eprintln!("  feldspar serve [database flags] [server flags]");
+    eprintln!("  feldspar build-app SUBDOMAIN [database flags] [--file-store NAME=PATH]");
+    eprintln!("  feldspar api add-query --app SUBDOMAIN [--api MOUNT] --name NAME");
     eprintln!(
         "                        [--method GET] --path /sub/path [--min-role N] \
          [--description TEXT]"
     );
     eprintln!("                        [--param name:type[,name:type…]]… --sql TEXT|@FILE");
-    eprintln!("  saltcorn api list-queries --app SUBDOMAIN [--api MOUNT]");
-    eprintln!("  saltcorn api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME");
-    eprintln!("  saltcorn auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
+    eprintln!("  feldspar api list-queries --app SUBDOMAIN [--api MOUNT]");
+    eprintln!("  feldspar api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME");
+    eprintln!("  feldspar auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
     eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
     eprintln!();
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
@@ -786,17 +786,17 @@ fn print_usage() {
     eprintln!("    --db-host H  --db-port N  --db-user U  --db-password P  --db-name D");
     eprintln!(
         "    --sqlite PATH        use a SQLite file as the primary database instead \
-         (or SALTCORN_SQLITE);"
+         (or FELDSPAR_SQLITE);"
     );
     eprintln!("                         it is created if it is not there");
     eprintln!();
     eprintln!("  configuration file (used for whatever the flags and environment leave unset):");
     eprintln!(
         "    --environment NAME   which [environments.NAME] section to connect with \
-         (or SALTCORN_ENV);"
+         (or FELDSPAR_ENV);"
     );
     eprintln!("                         naming one makes it outrank DATABASE_URL / PG*");
-    eprintln!("    --config PATH        read this file instead of searching (or SALTCORN_CONFIG)");
+    eprintln!("    --config PATH        read this file instead of searching (or FELDSPAR_CONFIG)");
     for path in sc_cli::config_file::search_paths() {
         eprintln!("                         searched: {}", path.display());
     }
@@ -821,7 +821,7 @@ fn print_usage() {
        with --role NAME (the first user holding that role — the error lists the
        roles when the name is not one). It forges nothing: the session is minted
        by the server, from a one-time grant, and can do exactly what that account
-       can. The default file is .saltcorn-session.json, Playwright's
+       can. The default file is .feldspar-session.json, Playwright's
        storageState; --format netscape writes a cookies.txt for curl instead.
        Both are written 0600 — a session file is a password.
 
@@ -836,11 +836,11 @@ fn print_usage() {
         "    --code-workers N         V8 isolates serving run_js_code bodies (default 2)
     --code-max-inflight N    runs each of those isolates keeps resident (default 256)
     --modules-dir PATH       where modules are installed (default: the platform's
-                             data directory, e.g. ~/.local/share/saltcorn/modules)"
+                             data directory, e.g. ~/.local/share/feldspar/modules)"
     );
     eprintln!();
     eprintln!(
-        "  a saltcorn.toml environment may also carry `base_domain`, `bind` and
+        "  a feldspar.toml environment may also carry `base_domain`, `bind` and
   `secure_cookies`, so `serve --environment NAME` needs none of those flags —
   and so a build from the command line writes the same application URL into the
   generated documentation that the server would."

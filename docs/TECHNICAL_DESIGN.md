@@ -1,9 +1,17 @@
-# Saltcorn v2 — Technical Design Requirements
+# Saltcorn Feldspar — Technical Design Requirements
 
 This document translates the vision in [GOALS.md](./GOALS.md) into a concrete technical
 design: the project (workspace/crate) structure, the major data structures, and the
 software architecture. It is a living document and is expected to change as the design is
 validated against the MVP.
+
+The project is named **Saltcorn Feldspar** — Saltcorn is the company and the lineage this
+design draws on; Feldspar names this rewrite. The shipped artifact is a single binary
+called `feldspar`, and everything the binary owns on disk is named after it: the
+`feldspar.toml` deployment file, the `/etc/feldspar` and `~/.config/feldspar` search
+directories, the `FELDSPAR_*` environment variables, and the `src/feldspar/` runtime
+scaffolded into an application's project. "Saltcorn v1" throughout this document means the
+previous, JavaScript implementation.
 
 It is normative where it uses **MUST**/**SHOULD**/**MAY** (RFC 2119); everything else is
 guidance and rationale. Rust type sketches are illustrative, not final signatures — they
@@ -43,17 +51,17 @@ Two design invariants that fall out of the goals and pervade everything below:
 
 ## 2. Workspace and crate structure
 
-Saltcorn v2 is a single Cargo workspace. Crates are layered strictly: a crate may only
+Saltcorn Feldspar is a single Cargo workspace. Crates are layered strictly: a crate may only
 depend on crates above it in this list (lower-numbered). This keeps the dependency graph
 acyclic and the layering enforceable by `cargo`.
 
 ```
-saltcorn/
+feldspar/
 ├─ Cargo.toml                     # workspace
 ├─ crates/
 │  ├─ sc-error/                   # 0. error type, Result alias, no-silent-failure helpers
 │  ├─ sc-log/                     # 0. structured logging + the error log sink
-│  ├─ sc-config-file/             # 0. `saltcorn.toml`: named environments (connection +
+│  ├─ sc-config-file/             # 0. `feldspar.toml`: named environments (connection +
 │  │                              #    serving parameters). Read by the binary and, for its
 │  │                              #    `test` environment, by the integration-test harness
 │  ├─ sc-query/                   # 1. universal query language (enum AST) + SQL rendering trait
@@ -94,7 +102,7 @@ saltcorn/
 │  │                              #    reason: their writes go through the row layer (§11.3)
 │  ├─ sc-copilot/                 # 9. copilot agent + AppConstructor stages
 │  ├─ sc-server/                  # 9. HTTP server: admin routes, user routes, auth, CSP, sockets
-│  └─ sc-cli/                     # 10. `saltcorn` binary (serve, user/app mgmt, backup/restore)
+│  └─ sc-cli/                     # 10. `feldspar` binary (serve, user/app mgmt, backup/restore)
 ├─ ui/
 │  ├─ admin/                      # React + TypeScript + react-bootstrap admin SPA over the
 │  │                              #    generated typed API client (table editor, file mgr, and
@@ -424,7 +432,7 @@ Design rules from GOALS:
 
 ### 5.0 Secondary databases (Connections)
 
-The primary database is the one `saltcorn.toml` names: the one that hosts `users` and every
+The primary database is the one `feldspar.toml` names: the one that hosts `users` and every
 `_sc_*` table, and the one the process must reach before it can read anything at all. It is not
 the only one. An admin adds a **connection** in Tables → Connections — host, port, database,
 user, password, schema — and that database's tables join the catalog beside the primary's, with
@@ -550,7 +558,7 @@ data only. (MVP: single database, same as the primary store.)
 
 Postgres is what a deployment runs; SQLite is what a laptop, a Raspberry Pi and a one-file
 backup run. It is a second implementation of the same `DatabaseDriver` trait and it is reached
-two ways: as the **primary** database, named by `sqlite = "…"` in `saltcorn.toml` (or `--sqlite
+two ways: as the **primary** database, named by `sqlite = "…"` in `feldspar.toml` (or `--sqlite
 PATH`), and as a **secondary connection** to a `.sqlite` file sitting in one of the file stores
 (§5.0). Nothing above layer 2 changes for either: the catalog holds an `Arc<dyn DatabaseDriver>`
 and does not ask which one it is.
@@ -3048,7 +3056,7 @@ Four decisions in that part:
 
 - **`sc_app::save_application` is the one authority**, as `schema_edit` is for the schema and
   `sc_action::save_trigger` is for the triggers. It runs the validation the admin's form and
-  `saltcorn api add-query` run, and then **prepares every query against the database** — which is
+  `feldspar api add-query` run, and then **prepares every query against the database** — which is
   both the last validation and the typing. A statement Postgres will not prepare comes back
   carrying Postgres's own message with nothing stored; one it will is stored with the result
   columns the database reported, and those columns come back to the model as `returns` in the same
@@ -3843,7 +3851,7 @@ until its first build.
 the `AssetBundle` the server read out of the build's output directory *when it last built*,
 so a developer who runs `npm run build` in the project directory changes the disk and changes
 nothing a browser can see — and the same holds for an application row edited by another
-process (`saltcorn api add-query`), which the running server's mounts have never read. Both
+process (`feldspar api add-query`), which the running server's mounts have never read. Both
 are the same gap: state that was loaded once and is now stale, with no way to say so from
 outside the process. `SIGHUP` is that way (`sc_server::reload_all`). It reloads the catalog
 (re-introspection and both overlays) and every stored application — the row, and with it the
@@ -3950,7 +3958,7 @@ does — the difference is entirely configuration and scaffolding.
 
 Its `config_spec` is two settings: `store` and `project`. Everything `code` asks for is
 derived: a project named `todo` has source `todo/`, output `todo/dist`, build command
-`npm run build`, and its generated client and runtime under `todo/src/saltcorn/`. The same
+`npm run build`, and its generated client and runtime under `todo/src/feldspar/`. The same
 `BuildSpec` comes out the other end (`app_source_from_config` resolves both frameworks), so
 the build, mount and serve paths are shared, not forked — nothing downstream of that function
 can tell which framework it is building.
@@ -3962,7 +3970,7 @@ holding one application — a git store cloned from that application's own repos
 sub-directory to name, and requiring one would make the admin invent a nesting level their
 repository does not have. Every derived path collapses accordingly (`react::project_path` is the
 one place that rule lives), so a root project has source `""`, output `dist/` and its runtime
-under `src/saltcorn/`. When it is given it is constrained to a plain identifier (ASCII letters,
+under `src/feldspar/`. When it is given it is constrained to a plain identifier (ASCII letters,
 digits, `-`, `_`, leading alphanumeric), checked **on save** by the framework itself — §6.2's
 vocabulary states presence, type and membership, not patterns, and growing it for one setting
 would oblige every guest-language framework to be understood by it. Checking at save rather
@@ -3993,7 +4001,7 @@ store: two apps sharing a store are two agents, neither able to edit the other's
 is on, because changing the source is what the agent is for; `may_run_scripts` is **off**, because
 running the project's other scripts executes code the agent did not write and building has its own
 tool. The system prompt is the framework's too, which is where a convention a model would otherwise
-break on its first edit gets stated — for `react`, that `src/saltcorn/` is generated and rewritten
+break on its first edit gets stated — for `react`, that `src/feldspar/` is generated and rewritten
 on every build.
 
 What the framework declares is *data*: trait names and their configuration (`BuilderAgentSpec`),
@@ -4061,7 +4069,7 @@ hard-coded:
   hooks worth having are typed per table, hence generated from this app's endpoints, which a
   registry package cannot contain — it could only ship generic untyped hooks, discarding the
   reason to have a hooks layer. So the usual objection to vendoring (instantly stale) does
-  not apply: `src/saltcorn/**` is generated output refreshed on every build, like the client,
+  not apply: `src/feldspar/**` is generated output refreshed on every build, like the client,
   and a server upgrade cannot leave it pinned behind. The accepted cost is that it is
   overwritten and so not hackable in place; everything outside it is the admin's and is never
   touched.
@@ -4083,7 +4091,7 @@ What is generated:
   point, the app shell, the login screen, the route list, a stylesheet, and **one page per
   table the app declares**, using that table's real columns.
 - `AGENTS.md` at the project **root** — see the contract below.
-- The runtime under `src/saltcorn/`: the typed client and its `helper.ts`, the typed hooks
+- The runtime under `src/feldspar/`: the typed client and its `helper.ts`, the typed hooks
   and the optimistic per-table store (`store.ts`), from the app's own `EndpointSet`, plus the
   directory's own `README.md` and `schema.sql`.
 
@@ -4094,7 +4102,7 @@ tables**, so the app comes up showing rows rather than a placeholder whose first
 deleted. And **failures carry the tool's own output** (§16) — a failed `npm install` reports
 the registry error, not that something failed.
 
-Only `src/saltcorn/` is rewritten afterwards, on every build; everything else belongs to the
+Only `src/feldspar/` is rewritten afterwards, on every build; everything else belongs to the
 admin from the moment it exists. That split is what makes regeneration safe and is why adding
 a table in the admin UI makes its hooks exist at the next build with nobody regenerating
 anything by hand. The build also **installs dependencies** when `node_modules` is absent
@@ -4109,12 +4117,12 @@ The split above is the whole arrangement, so it is stated **in the tree** and no
 a boundary a developer (or their coding agent) has to read the design document to discover is
 one they will cross. Every regenerated file carries a `DO NOT EDIT` header in its own comment
 syntax (`//` for TypeScript, `#` for SDL, `--` for SQL: a header that made the file unparseable
-would break the one tool it exists for), and `src/saltcorn/` holds two documents beside the
+would break the one tool it exists for), and `src/feldspar/` holds two documents beside the
 code:
 
 - **`README.md`** — that everything in the directory is overwritten without warning, what each
   file in it is, which tables this application may read and write, and **how to add an endpoint
-  the client does not have**: `saltcorn api add-query` (§13.4) spelled with *this* app's
+  the client does not have**: `feldspar api add-query` (§13.4) spelled with *this* app's
   subdomain and *this* app's REST mount, so it is pasteable rather than a template. It carries
   the custom-query authority note with it, beside the command that opens the hole.
 - **`schema.sql`** — the `CREATE TABLE` definitions of the tables the application declares, so
@@ -4126,7 +4134,7 @@ code:
   `CREATE TABLE` invites.
 
 **`AGENTS.md` goes at the project root, and is written once.** It says what the project is,
-that `src/saltcorn/` is generated and points at that README, that data reaches the browser
+that `src/feldspar/` is generated and points at that README, that data reaches the browser
 through the generated client and nothing else, and how to add a custom query. The scaffold
 writes it and **nothing ever rewrites it**: it is at the root, which is the developer's, and
 coding agents append what they learn to it — clobbering that on the next build would destroy
@@ -4137,20 +4145,20 @@ directory is ours and is rewritten, the root is theirs and is not.
 step of it surprises somebody and none of it is discoverable from the project. The served
 bundle is a snapshot the server took when it last built, so `npm run build` alone changes
 nothing a browser can see (`SIGHUP`, §13.2). The screens are behind a sign-in, so a script's
-screenshot is a screenshot of the sign-in page (`saltcorn auth token`, below). And the URL is
+screenshot is a screenshot of the sign-in page (`feldspar auth token`, below). And the URL is
 a subdomain of a base domain that is the *server's* configuration and appears nowhere in the
 project — so it is written in, resolved, from `Catalog::public_origin`: the base domain, the
-bound port and whether it is behind TLS, recorded at boot by `saltcorn serve` from its own
-flags and by a command-line build from its `saltcorn.toml` environment. It rides on the
+bound port and whether it is behind TLS, recorded at boot by `feldspar serve` from its own
+flags and by a command-line build from its `feldspar.toml` environment. It rides on the
 catalog for the reason the schema observer does — every generator already holds one, and the
 alternative is a documentation parameter in the signature of everything that builds. Both
-processes must resolve it or the two disagree: a `saltcorn build-app` that rewrote `README.md`
+processes must resolve it or the two disagree: a `feldspar build-app` that rewrote `README.md`
 with the URL taken *out* would be worse than one that never wrote it, which is why an
-environment in `saltcorn.toml` carries `base_domain`/`bind`/`secure_cookies` beside its
+environment in `feldspar.toml` carries `base_domain`/`bind`/`secure_cookies` beside its
 connection parameters. Never guessed: a process that was not told says which setting is
 missing rather than inventing `localhost`.
 
-**`saltcorn auth token`** is the session half. An application's screens require a signed-in
+**`feldspar auth token`** is the session half. An application's screens require a signed-in
 user, so a screenshot taken by a script is a screenshot of the sign-in page unless something
 hands it the cookie a browser would have got.
 
@@ -4187,10 +4195,10 @@ browser would be handed one on its first page load; `curl` would not, and its fi
 would 403.
 
 **Regeneration is not a build** (and this is what discharges GOALS' "if the API definition
-changes, the client code must be updated automatically"). Re-emitting `src/saltcorn/**` is
+changes, the client code must be updated automatically"). Re-emitting `src/feldspar/**` is
 fast, runs no external process and cannot fail on a bundler, so it happens on every event that
 invalidates the endpoint set: `AppMounts::refresh_table` (a column added, a table's access
-changed), saving an application, `saltcorn api add-query` / `remove-query`, and an agent's
+changed), saving an application, `feldspar api add-query` / `remove-query`, and an agent's
 `save_api_query` / `delete_api_query` (§11.3). All of them go through one
 `sc_app::emit_app_client`, so they cannot disagree. `npm run build` stays the build
 button's and the dev server's. A re-emit that fails — an unreachable store, a `code` app with
@@ -4201,7 +4209,7 @@ application down.
 `updateApplicationClient` is the same thing on demand, for when the store *was* unreachable
 when a table changed. It reports which of two things it did, because they are not the same
 news: when the project directory is **empty** it scaffolds instead of re-emitting — filling an
-empty tree with a `src/saltcorn/` and no project around it would produce something that cannot
+empty tree with a `src/feldspar/` and no project around it would produce something that cannot
 build — using the scaffold's own emptiness check, since a second opinion about what "empty"
 means is how the two would eventually disagree.
 
@@ -4380,7 +4388,7 @@ which would collapse into a single JSON property. Parameters project as **query 
 `describeCustomQuery`, an admin endpoint that runs the model's rules *and* `describe` and stores
 nothing, so the whole refusal a save would give arrives in one round trip — and on success the
 columns it reports are also the documentation, being exactly what the client method will hand
-back. `saltcorn api add-query` / `list-queries` / `remove-query` do the same from a terminal
+back. `feldspar api add-query` / `list-queries` / `remove-query` do the same from a terminal
 (validating by saving, which is what prepares) and re-emit the app's generated client, because a
 command that changed the API and left the client describing the old one would be the drift §13.1
 exists to prevent, introduced by the tool meant to avoid it. The third is an **agent** carrying
@@ -4552,8 +4560,8 @@ application's two APIs cannot disagree about which tables exist or about a row a
 formula decides; the mount check refuses two providers on one mount, since a request resolves to
 the longest matching mount and the loser of that tie is a whole API that is mounted, generated a
 client for and unreachable. For an application that enables the provider — and only for one — the
-build writes `src/saltcorn/schema.graphql` from `Schema::sdl()` and a dependency-free
-`src/saltcorn/graphql.ts` beside the REST `client.ts`, and points a `gql.tada` language-service
+build writes `src/feldspar/schema.graphql` from `Schema::sdl()` and a dependency-free
+`src/feldspar/graphql.ts` beside the REST `client.ts`, and points a `gql.tada` language-service
 plugin at the SDL, so a query's result and variable types are TypeScript's own work with no
 codegen step and the scaffold's `tsc --noEmit` makes a stale query a build failure. Nothing is
 added to `package.json`: an application's CSP is `default-src 'self'` and its dependencies are
@@ -4948,7 +4956,7 @@ setting's help text says.
 Both live in **`sc-log`** (layer 0) as process-wide atomics, read by layers far below the one
 that stores them, and both are `apply`d — at boot from `connect_catalog`, and again whenever
 an admin saves the settings — so a switch takes effect on the running server rather than at
-the next restart. Level messages go to stderr, beside every other `saltcorn:` line; the SQL
+the next restart. Level messages go to stderr, beside every other `feldspar:` line; the SQL
 echo goes to stdout, so a redirected stdout is the SQL and nothing else. Below `info` the
 request middleware checks one relaxed atomic and does nothing.
 
@@ -4964,12 +4972,12 @@ initialising the catalog against existing tables, row CRUD, user create/login/lo
 The harness (`tests/harness`) creates one database per test from a maintenance connection and
 drops it on teardown. **Where that connection comes from is the same question the server
 asks**, so it is answered out of the same file: `DATABASE_URL` first (what CI sets), then the
-`test` environment of `saltcorn.toml` (§2's `sc-config-file`, which exists as its own layer-0
+`test` environment of `feldspar.toml` (§2's `sc-config-file`, which exists as its own layer-0
 crate for exactly this reason — the harness cannot depend on `sc-cli`, which is layer 10),
 then a local default. The section may also carry `test_template`, the database each per-test
 database is cloned from, overridden by `SC_TEST_TEMPLATE`; a machine whose `template1` has a
 stale collation version cannot `CREATE DATABASE` without one. The point is that a developer
-writes their machine's parameters down **once**, where `saltcorn serve` already reads them,
+writes their machine's parameters down **once**, where `feldspar serve` already reads them,
 and `cargo test` needs no environment at all — while CI, which has an environment and no
 file, is unaffected.
 
@@ -4998,7 +5006,7 @@ a socket that has gone away is reported on stderr and ignored.
 **Runtime and core dependencies.** The workspace is a single Cargo workspace on Rust
 **edition 2024** with an MSRV of **1.85**. The async runtime is **tokio** (multi-threaded);
 every async trait in this document is expressed with `async_trait` over it, and the
-`saltcorn` binary's entry point is `#[tokio::main]`. The MVP Postgres driver is
+`feldspar` binary's entry point is `#[tokio::main]`. The MVP Postgres driver is
 **tokio-postgres** with **deadpool-postgres** for pooling — deliberately **not sqlx**:
 `sc-query` already renders a `Statement` into `(sql, binds)` (§3), so sqlx's compile-time
 query macros would add no value, whereas tokio-postgres offers native `$n` parameter binding

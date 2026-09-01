@@ -12,7 +12,7 @@
 //! `SIGHUP` is the third way, and the cheap one:
 //!
 //! ```text
-//! npm run build && pkill -HUP saltcorn
+//! npm run build && pkill -HUP feldspar
 //! ```
 //!
 //! It **vacates the serving cache** — every mounted app's bundle is re-read from
@@ -98,32 +98,32 @@ impl ReloadReport {
     /// just took.
     pub fn log(&self) {
         if let Some(e) = &self.catalog_error {
-            eprintln!("saltcorn: the catalog could not be reloaded: {e}");
+            eprintln!("feldspar: the catalog could not be reloaded: {e}");
         } else {
             eprintln!(
-                "saltcorn: reloaded the catalog — {} table{} in {}",
+                "feldspar: reloaded the catalog — {} table{} in {}",
                 self.tables,
                 plural(self.tables),
                 ms(self.catalog)
             );
         }
         if let Some(e) = &self.applications_error {
-            eprintln!("saltcorn: the applications could not be listed: {e}");
+            eprintln!("feldspar: the applications could not be listed: {e}");
         }
         for subdomain in &self.reloaded {
-            eprintln!("saltcorn: reloaded application `{subdomain}`");
+            eprintln!("feldspar: reloaded application `{subdomain}`");
         }
         for subdomain in &self.unmounted {
-            eprintln!("saltcorn: unmounted application `{subdomain}` — its row is gone");
+            eprintln!("feldspar: unmounted application `{subdomain}` — its row is gone");
         }
         for (subdomain, error) in &self.failed {
             eprintln!(
-                "saltcorn: application `{subdomain}` could not be reloaded and is still \
+                "feldspar: application `{subdomain}` could not be reloaded and is still \
                  serving its previous version: {error}"
             );
         }
         eprintln!(
-            "saltcorn: reload complete in {} — catalog {}, {} application{} ({} asset{}) {}",
+            "feldspar: reload complete in {} — catalog {}, {} application{} ({} asset{}) {}",
             ms(self.total),
             ms(self.catalog),
             self.reloaded.len(),
@@ -242,7 +242,7 @@ fn remount_from_disk(apps: &AppMounts, catalog: &Catalog, app: Application) -> R
 /// shell — a developer's, or a coding agent's — in the application's project
 /// directory, right after `npm run build`. It has no session, no CSRF token and
 /// no reason to acquire either, but it is on the machine and it can run `pkill
-/// -HUP saltcorn`. (The admin API's Build button is still there and still builds;
+/// -HUP feldspar`. (The admin API's Build button is still there and still builds;
 /// this is the half that skips the bundler.)
 ///
 /// Reloads are **serialised by the listener**: a signal that arrives while one is
@@ -263,7 +263,7 @@ pub fn spawn_sighup_reload(apps: Arc<AppMounts>) {
         // Not fatal: the server serves, it just cannot be reloaded without a
         // restart, and the operator should know which of those they are in.
         Err(e) => {
-            eprintln!("saltcorn: SIGHUP reloading is unavailable: {e}");
+            eprintln!("feldspar: SIGHUP reloading is unavailable: {e}");
             return;
         }
     };
@@ -271,12 +271,12 @@ pub fn spawn_sighup_reload(apps: Arc<AppMounts>) {
     // one: the operator (or the agent reading this terminal) now knows there is
     // something between "edit" and "restart".
     eprintln!(
-        "saltcorn: SIGHUP reloads the catalog and the applications in place — \
-         `pkill -HUP saltcorn` after a build, no restart needed"
+        "feldspar: SIGHUP reloads the catalog and the applications in place — \
+         `pkill -HUP feldspar` after a build, no restart needed"
     );
     tokio::spawn(async move {
         while hangup.recv().await.is_some() {
-            eprintln!("saltcorn: SIGHUP — reloading the catalog and the applications");
+            eprintln!("feldspar: SIGHUP — reloading the catalog and the applications");
             reload_all(&apps).await.log();
         }
     });

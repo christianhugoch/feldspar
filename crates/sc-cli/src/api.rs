@@ -1,10 +1,10 @@
-//! `saltcorn api` — an application's **custom SQL queries** from the command
+//! `feldspar api` — an application's **custom SQL queries** from the command
 //! line (§13.4).
 //!
 //! The admin UI can add one; so can this, and for the reasons `build-app`
 //! exists: it is scriptable, it is what a deploy step or a coding agent calls,
 //! and it works when there is no browser pointed at the server. The generated
-//! `src/saltcorn/README.md` tells an agent working in an app's project to use it,
+//! `src/feldspar/README.md` tells an agent working in an app's project to use it,
 //! which is the same reason there are three commands rather than one — an
 //! add-only command is a trap, because the first typo would need a browser to
 //! fix, which is exactly the situation the command exists to avoid.
@@ -19,7 +19,7 @@
 use sc_api::{CustomParam, CustomQuery, Method, ValueType};
 use sc_error::{Error, Result};
 
-/// `saltcorn api add-query`'s arguments, parsed.
+/// `feldspar api add-query`'s arguments, parsed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddQueryArgs {
     /// `--app`: which application, by subdomain.
@@ -31,7 +31,7 @@ pub struct AddQueryArgs {
     pub query: CustomQuery,
 }
 
-/// `saltcorn api list-queries` / `remove-query`'s arguments.
+/// `feldspar api list-queries` / `remove-query`'s arguments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryRefArgs {
     /// `--app`: which application, by subdomain.

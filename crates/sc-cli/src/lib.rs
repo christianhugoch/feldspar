@@ -1,4 +1,4 @@
-//! Library half of the `saltcorn` binary (layer 10).
+//! Library half of the `feldspar` binary (layer 10).
 //!
 //! The binary ([`main`](../main/index.html)) stays thin; the reusable pieces —
 //! parsing the database connection ([`DbConfig`]), reading the per-environment
@@ -11,7 +11,7 @@ pub mod api;
 pub mod auth;
 pub mod db;
 
-/// The `saltcorn.toml` reader. It lives in its own layer-0 crate because the
+/// The `feldspar.toml` reader. It lives in its own layer-0 crate because the
 /// integration-test harness reads the same file (for the `test` environment),
 /// and the harness cannot depend on the binary that sits at the top of the
 /// workspace.
@@ -33,7 +33,7 @@ pub use db::{DbConfig, Serving};
 /// [`Catalog`] from its live schema, and ensure the platform tables (`users`,
 /// `_sc_applications`, `_sc_file_stores`, `_sc_tables`) exist.
 ///
-/// This is the whole "bring the data layer up" step of `saltcorn serve`. The
+/// This is the whole "bring the data layer up" step of `feldspar serve`. The
 /// first real connection happens inside [`Catalog::init`] (introspection), so a
 /// database that is unreachable or misconfigured fails here — with the redacted
 /// [`DbConfig::target`] in the message rather than a silent, half-booted server.
@@ -88,7 +88,7 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
         .context("ensuring the configuration tables exist")?;
     // The stored Development settings become this process's logging switches as
     // soon as there is a database to read them from — here rather than in
-    // `serve_command`, so a `saltcorn` *command* run against an installation
+    // `serve_command`, so a `feldspar` *command* run against an installation
     // with the SQL echo on prints its SQL too. Everything before this line runs
     // at the default verbosity, which is the price of the settings living in the
     // database the connection is being made to.
@@ -101,7 +101,7 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     // it.
     if development.log_sql || development.verbosity != sc_log::DEFAULT_VERBOSITY {
         eprintln!(
-            "saltcorn: log verbosity {}{} (Settings → Development)",
+            "feldspar: log verbosity {}{} (Settings → Development)",
             development.verbosity.as_str(),
             if development.log_sql {
                 ", logging every SQL statement to stdout"
@@ -126,10 +126,10 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
 pub async fn connect_stored_file_stores(catalog: &Catalog) -> Result<FileStoreConnections> {
     let report = connect_all_file_stores(catalog).await?;
     for name in &report.connected {
-        eprintln!("saltcorn: connected file store `{name}`");
+        eprintln!("feldspar: connected file store `{name}`");
     }
     for (name, error) in &report.failed {
-        eprintln!("saltcorn: file store `{name}` is defined but could not be connected: {error}");
+        eprintln!("feldspar: file store `{name}` is defined but could not be connected: {error}");
     }
     Ok(report)
 }
@@ -149,10 +149,10 @@ pub async fn connect_stored_file_stores(catalog: &Catalog) -> Result<FileStoreCo
 pub async fn connect_stored_databases(catalog: &Catalog) -> Result<DbConnections> {
     let report = connect_all_db_connections(catalog).await?;
     for name in &report.connected {
-        eprintln!("saltcorn: connected database `{name}`");
+        eprintln!("feldspar: connected database `{name}`");
     }
     for (name, error) in &report.failed {
-        eprintln!("saltcorn: database `{name}` is defined but could not be connected: {error}");
+        eprintln!("feldspar: database `{name}` is defined but could not be connected: {error}");
     }
     Ok(report)
 }

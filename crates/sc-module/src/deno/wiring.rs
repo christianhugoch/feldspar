@@ -291,7 +291,7 @@ fn container(permissions: &ModulePermissions) -> PermissionsContainer {
         Ok(permissions) => PermissionsContainer::new(parser, permissions),
         Err(e) => {
             sc_log::log_error!(
-                "saltcorn: a module's permissions could not be applied ({e}); it will run with \
+                "feldspar: a module's permissions could not be applied ({e}); it will run with \
                  none of them"
             );
             PermissionsContainer::new(parser, Permissions::none_without_prompt())

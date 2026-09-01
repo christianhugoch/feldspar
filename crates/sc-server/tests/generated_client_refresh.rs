@@ -5,7 +5,7 @@
 //! Two claims that only a running server can carry:
 //!
 //! - A column added through the admin API rewrites the mounted app's
-//!   `src/saltcorn/client.ts` **and** its `schema.sql`, with no build, no
+//!   `src/feldspar/client.ts` **and** its `schema.sql`, with no build, no
 //!   restart, and nobody asking for it. The seam is the same
 //!   [`SchemaObserver`](sc_catalog::SchemaObserver) that re-projects the app's
 //!   providers: the projection in memory and the client on disk must not be
@@ -248,8 +248,8 @@ async fn adding_a_column_rewrites_the_apps_generated_directory() -> sc_error::Re
     let mut h = setup("column").await?;
     // The row type the app's components are written against lives in the
     // generated client, beside the methods that answer with it.
-    let client_ts = h.project.join("src/saltcorn/client.ts");
-    let schema_sql = h.project.join("src/saltcorn/schema.sql");
+    let client_ts = h.project.join("src/feldspar/client.ts");
+    let schema_sql = h.project.join("src/feldspar/schema.sql");
 
     // What the scaffold wrote describes the table as it was.
     assert!(!std::fs::read_to_string(&client_ts)?.contains("done"));
@@ -287,7 +287,7 @@ async fn adding_a_column_rewrites_the_apps_generated_directory() -> sc_error::Re
 #[tokio::test]
 async fn saving_an_application_rewrites_its_typed_client() -> sc_error::Result<()> {
     let mut h = setup("save").await?;
-    let client_ts = h.project.join("src/saltcorn/client.ts");
+    let client_ts = h.project.join("src/feldspar/client.ts");
     assert!(!std::fs::read_to_string(&client_ts)?.contains("countTasks"));
 
     // The app as the admin form would post it back, with one query added to the
@@ -349,12 +349,12 @@ async fn the_update_client_endpoint_regenerates_and_rescaffolds() -> sc_error::R
     assert_eq!(
         files,
         [
-            "todo/src/saltcorn/client.ts",
-            "todo/src/saltcorn/helper.ts",
-            "todo/src/saltcorn/hooks.ts",
-            "todo/src/saltcorn/store.ts",
-            "todo/src/saltcorn/schema.sql",
-            "todo/src/saltcorn/README.md",
+            "todo/src/feldspar/client.ts",
+            "todo/src/feldspar/helper.ts",
+            "todo/src/feldspar/hooks.ts",
+            "todo/src/feldspar/store.ts",
+            "todo/src/feldspar/schema.sql",
+            "todo/src/feldspar/README.md",
         ],
         "{body}"
     );
@@ -377,6 +377,6 @@ async fn the_update_client_endpoint_regenerates_and_rescaffolds() -> sc_error::R
     );
     assert!(h.project.join("package.json").is_file());
     assert!(h.project.join("AGENTS.md").is_file());
-    assert!(h.project.join("src/saltcorn/README.md").is_file());
+    assert!(h.project.join("src/feldspar/README.md").is_file());
     Ok(())
 }

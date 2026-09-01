@@ -380,8 +380,8 @@ async fn drive_acme(mut state: AcmeState<Error, Error>) {
     use futures::StreamExt;
     while let Some(event) = state.next().await {
         match event {
-            Ok(ok) => eprintln!("saltcorn: acme: {ok:?}"),
-            Err(err) => eprintln!("saltcorn: acme error: {err}"),
+            Ok(ok) => eprintln!("feldspar: acme: {ok:?}"),
+            Err(err) => eprintln!("feldspar: acme error: {err}"),
         }
     }
 }

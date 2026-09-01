@@ -316,10 +316,10 @@ fn host_log(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: 
     };
     let message = args.get(2).to_rust_string_lossy(scope);
     match level.as_str() {
-        "error" => sc_log::log_error!("saltcorn: {who}: {message}"),
-        "warning" => sc_log::log_warn!("saltcorn: {who}: {message}"),
-        "verbose" => sc_log::log_verbose!("saltcorn: {who}: {message}"),
-        _ => sc_log::log_info!("saltcorn: {who}: {message}"),
+        "error" => sc_log::log_error!("feldspar: {who}: {message}"),
+        "warning" => sc_log::log_warn!("feldspar: {who}: {message}"),
+        "verbose" => sc_log::log_verbose!("feldspar: {who}: {message}"),
+        _ => sc_log::log_info!("feldspar: {who}: {message}"),
     }
 }
 
@@ -707,7 +707,7 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
         let reason = ending_reason(&host, &ended, config.js_slice);
         if !matches!(ended, End::Stop) {
             sc_log::log_error!(
-                "saltcorn: module worker {} stopped: {reason}. It will be restarted, with every \
+                "feldspar: module worker {} stopped: {reason}. It will be restarted, with every \
                  module replayed, on the next call",
                 config.index
             );
@@ -722,7 +722,7 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
                     ))));
                 }
                 Pending::Replay(name) => {
-                    sc_log::log_error!("saltcorn: the reload of `{name}` was lost: {reason}");
+                    sc_log::log_error!("feldspar: the reload of `{name}` was lost: {reason}");
                 }
             }
         }
@@ -807,7 +807,7 @@ fn dispatch(
         }
         Pending::Replay(name) => {
             if let Err(e) = answer.outcome {
-                sc_log::log_error!("saltcorn: replaying the load of `{name}` failed: {e}");
+                sc_log::log_error!("feldspar: replaying the load of `{name}` failed: {e}");
             }
         }
     }
