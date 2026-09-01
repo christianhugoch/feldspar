@@ -14,7 +14,7 @@
 #
 #    and on the host itself, once:
 #
-#        curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+#        curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
 #          | sh -s -- --static --domain example.com
 #
 #    That is the whole installation. Either order works: with --static this script
@@ -25,7 +25,7 @@
 #    default: rustup, a clone and a release build, which wants a C toolchain,
 #    libclang, Node and a few GB of RAM.
 #
-#        curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+#        curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
 #          | sh -s -- --domain example.com
 #
 # Running it
@@ -36,7 +36,7 @@
 # it would write without touching anything, which is worth doing once before
 # piping a script off the internet into a shell.
 #
-#   wget -qO- https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+#   wget -qO- https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
 #     | sh -s -- --dry-run --static --domain example.com
 #
 # Run it as root, or as a user who can sudo.
@@ -59,7 +59,7 @@ SERVICE_USER="feldspar"
 DB_NAME="feldspar"
 DB_USER="feldspar"
 DATABASE_URL=""         # set: an existing database elsewhere, and no local postgres
-REPO="https://github.com/saltcorn/v2.git"
+REPO="https://github.com/saltcorn/feldspar.git"
 BRANCH="main"
 SRC_DIR="/opt/feldspar/src"
 CONFIG_FILE="/etc/feldspar/feldspar.toml"
@@ -75,7 +75,7 @@ Set up this host to run Saltcorn Feldspar: packages, a service account, the
 database, the configuration file and the systemd unit.
 
 Usage: setup-host.sh [options]
-   or: curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \\
+   or: curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \\
          | sh -s -- [options]
 
 How the binary gets here

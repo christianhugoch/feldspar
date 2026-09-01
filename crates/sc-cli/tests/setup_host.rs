@@ -388,7 +388,7 @@ fn an_existing_config_and_unit_are_kept_unless_forced() {
 #[test]
 fn the_header_documents_the_curl_and_wget_invocations() {
     let text = fs::read_to_string(script()).expect("read setup-host.sh");
-    let raw = "https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh";
+    let raw = "https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh";
     assert!(text.contains(raw), "the header should carry the raw URL");
     assert!(
         text.contains("curl -fsSL") && text.contains("wget -qO-"),

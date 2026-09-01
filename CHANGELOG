@@ -8,7 +8,7 @@ README §2 is a page of `apt`, `adduser`, `createdb`, a `tee` of a TOML file and
 of a unit, done by hand on every new machine. It is now also a script, written in POSIX
 `sh` and safe to pipe into one:
 
-    curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+    curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
       | sh -s -- --static --domain example.com
 
 - **Two steps for a static install, and no toolchain on the host.**

@@ -58,7 +58,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Saltcorn contributors"]
-repository = "https://github.com/saltcorn/saltcorn"
+repository = "https://github.com/saltcorn/feldspar"
 rust-version = "1.85"
 
 # Internal crates are referenced by path so the strict layering in the technical

@@ -45,7 +45,7 @@ service account, the role and database, `feldspar.toml`, the unit — and it can
 fetched and run on a bare host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
   | sh -s -- --domain example.com            # builds from source here, as §2.4 does
 ```
 
@@ -59,7 +59,7 @@ scripts/build-static.sh --deploy root@host   # build, copy, unpack, install
 and on the host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
   | sh -s -- --static --domain example.com
 ```
 
