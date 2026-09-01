@@ -145,6 +145,9 @@ Deployment
                         installed at ${PREFIX} on that machine. HOST is anything
                         ssh accepts, a ~/.ssh/config alias included. The remote
                         side runs install.sh under sudo unless the login is root.
+                        A running feldspar.service is stopped just before the
+                        install and started again after it; a unit that is absent
+                        or already stopped is left alone.
       --ssh-opt OPT     Extra option for the ssh invocations, e.g. --ssh-opt -p2222
                         or --ssh-opt -oStrictHostKeyChecking=no. Repeatable; each
                         occurrence is one argv element, so write a flag and its
@@ -580,7 +583,32 @@ else
     exit 1
 fi
 
+# A running server holds ${PREFIX}/bin/feldspar open, and the kernel refuses to
+# write over the executable of a live process ("Text file busy"), so the unit has
+# to be stopped before install.sh copies the binary in. This is as late as it can
+# be — the tarball is already here and unpacked — so the downtime is the install
+# and nothing more.
+#
+# Only a unit that is *running* is stopped and started again: on a machine with
+# no systemd, no feldspar.service, or a service deliberately left down, the
+# install happens exactly as it did before and nothing is started behind the
+# operator's back.
+restart_unit=""
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet feldspar 2>/dev/null; then
+    echo "stopping feldspar.service"
+    if \${sudo} systemctl stop feldspar; then
+        restart_unit="yes"
+    else
+        echo "warning: could not stop feldspar.service; installing anyway" >&2
+    fi
+fi
+
 \${sudo} "\${tree}/install.sh"
+
+if [ -n "\${restart_unit}" ]; then
+    echo "starting feldspar.service"
+    \${sudo} systemctl start feldspar
+fi
 
 # The installed binary, run where it now lives: it prints its usage and exits 0,
 # which is the claim this whole script exists to make — one file that runs on

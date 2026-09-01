@@ -4,9 +4,11 @@
 //! The build itself is not what is under test here — compiling V8 to check a
 //! `scp` would be absurd — so this drives the script inside a throwaway
 //! "repository" (the script, and the `Cargo.toml` it reads the version from)
-//! with a `PATH` in front of it holding stubs for the three commands the deploy
-//! path cannot really run: `cargo` (writes a one-line executable where the build
-//! would have left the binary), `rustup`, and `ssh`.
+//! with a `PATH` in front of it holding stubs for the commands the deploy path
+//! cannot really run: `cargo` (writes a one-line executable where the build would
+//! have left the binary), `rustup`, `ssh`, `sudo` — and `systemctl`, which the
+//! deploy asks whether the service is running and which a test must never reach
+//! for real.
 //!
 //! The `ssh` stub is what makes this a real test rather than a spelling check:
 //! it runs the command it was handed **locally**, so the remote half of the
@@ -56,10 +58,26 @@ fn write_executable(path: &Path, contents: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-#[test]
-fn deploy_copies_unpacks_and_installs_over_ssh() {
+/// The throwaway repository, and the stub `PATH` in front of it. `systemctl` is
+/// the body of that stub, in `sh`, so each test decides what the "remote"
+/// machine's service manager reports.
+struct Fixture {
+    dir: PathBuf,
+    repo: PathBuf,
+    bin: PathBuf,
+    /// Every ssh argv, one per line.
+    log: PathBuf,
+    /// Every systemctl call that was not a query, one per line.
+    events: PathBuf,
+    prefix: PathBuf,
+    remote_tmp: PathBuf,
+}
+
+const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+fn fixture(name: &str) -> Fixture {
     let root = workspace_root();
-    let dir = scratch("ok");
+    let dir = scratch(name);
 
     // The repository the script thinks it is in: itself, plus the Cargo.toml it
     // reads the workspace version from. Not a git checkout, so the artifact name
@@ -73,9 +91,9 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
     .expect("copy build-static.sh");
     fs::copy(root.join("Cargo.toml"), repo.join("Cargo.toml")).unwrap();
 
-    let target = "x86_64-unknown-linux-gnu";
     let bin = dir.join("bin");
     let log = dir.join("ssh.log");
+    let events = dir.join("systemctl.log");
 
     // `cargo build --release --target T -p sc-cli`, minus the compiler: leave an
     // executable where the real build would have left one. It prints usage and
@@ -83,7 +101,7 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
     write_executable(
         &bin.join("cargo"),
         &format!(
-            "#!/bin/sh\nset -eu\nout=\"$PWD/target/{target}/release\"\n\
+            "#!/bin/sh\nset -eu\nout=\"$PWD/target/{TARGET}/release\"\n\
              mkdir -p \"$out\"\n\
              printf '#!/bin/sh\\necho feldspar usage\\n' > \"$out/feldspar\"\n\
              chmod +x \"$out/feldspar\"\n"
@@ -91,7 +109,7 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
     );
     write_executable(
         &bin.join("rustup"),
-        &format!("#!/bin/sh\n[ \"${{1:-}}\" = target ] && echo {target}\nexit 0\n"),
+        &format!("#!/bin/sh\n[ \"${{1:-}}\" = target ] && echo {TARGET}\nexit 0\n"),
     );
     // The remote, played locally: record the argv, then run the command the
     // script sent (the last argument) with its stdin attached, exactly as the
@@ -114,29 +132,100 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
     // be re-run as root.
     let prefix = dir.join("opt/feldspar");
     fs::create_dir_all(prefix.parent().unwrap()).unwrap();
-    let remote_tmp = dir.join("remote-tmp");
 
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let output = Command::new("bash")
-        .arg(repo.join("scripts/build-static.sh"))
-        .args(["--native", "--no-ui", "--no-strip", "--no-verify"])
-        .arg("--prefix")
-        .arg(&prefix)
-        .arg("--remote-tmp")
-        .arg(&remote_tmp)
-        .arg("--output")
-        .arg(dir.join("dist"))
-        .args(["--ssh-opt", "-oStrictHostKeyChecking=no", "--deploy", "vm"])
-        .env("PATH", &path)
-        .output()
-        .expect("run build-static.sh");
+    let f = Fixture {
+        remote_tmp: dir.join("remote-tmp"),
+        dir,
+        repo,
+        bin,
+        log,
+        events,
+        prefix,
+    };
+    // The default remote has no service running, so the deploy is an install and
+    // nothing else. A test that wants one calls `systemctl` again.
+    f.systemctl(false, 0);
+    f
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+impl Fixture {
+    fn deploy(&self) -> (std::process::Output, String, String) {
+        let path = format!(
+            "{}:{}",
+            self.bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let output = Command::new("bash")
+            .arg(self.repo.join("scripts/build-static.sh"))
+            .args(["--native", "--no-ui", "--no-strip", "--no-verify"])
+            .arg("--prefix")
+            .arg(&self.prefix)
+            .arg("--remote-tmp")
+            .arg(&self.remote_tmp)
+            .arg("--output")
+            .arg(self.dir.join("dist"))
+            .args(["--ssh-opt", "-oStrictHostKeyChecking=no", "--deploy", "vm"])
+            .env("PATH", &path)
+            .output()
+            .expect("run build-static.sh");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        (output, stdout, stderr)
+    }
+
+    /// What the systemctl stub recorded, in the order it was called.
+    fn systemctl_calls(&self) -> Vec<String> {
+        fs::read_to_string(&self.events)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// Rewrite the fixture's `systemctl` stub. `active` decides what `is-active`
+/// answers and `stop_status` the exit code of `stop`; every call that is not a
+/// query is appended to the log together with the second line of the installed
+/// binary as it was at that moment — the line that differs between the old and
+/// the new one — which is how the ordering against install.sh is checked without
+/// timestamps.
+impl Fixture {
+    fn systemctl(&self, active: bool, stop_status: i32) {
+        let stub = format!(
+            "#!/bin/sh\n\
+             events='{events}'\n\
+             installed='{prefix}/bin/feldspar'\n\
+             seen=\"$(sed -n 2p \"$installed\" 2>/dev/null || true)\"\n\
+             case \"${{1:-}}\" in\n\
+             is-active) exit {is_active} ;;\n\
+             stop) echo \"stop [$seen]\" >> \"$events\"; exit {stop_status} ;;\n\
+             start) echo \"start [$seen]\" >> \"$events\"; exit 0 ;;\n\
+             esac\n\
+             exit 0\n",
+            events = self.events.display(),
+            prefix = self.prefix.display(),
+            is_active = i32::from(!active) * 3,
+        );
+        write_executable(&self.bin.join("systemctl"), &stub);
+    }
+
+    /// The prefix as an upgrade finds it: a previous release already installed
+    /// and — as far as the stub above is concerned — running.
+    fn pretend_already_installed(&self) {
+        write_executable(
+            &self.prefix.join("bin/feldspar"),
+            "#!/bin/sh\necho previous release\n",
+        );
+    }
+}
+
+#[test]
+fn deploy_copies_unpacks_and_installs_over_ssh() {
+    // Nothing running on the far side: the deploy is the install and nothing else.
+    let f = fixture("ok");
+    let (dir, remote_tmp, prefix, log) = (&f.dir, &f.remote_tmp, &f.prefix, &f.log);
+    let (output, stdout, stderr) = f.deploy();
+
     assert!(
         output.status.success(),
         "build-static.sh --deploy failed ({})\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
@@ -157,7 +246,7 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
 
     // 2. It cleaned up after itself: the tarball, the unpacked tree and the
     //    generated remote script are all gone from the staging directory.
-    let leftovers: Vec<String> = fs::read_dir(&remote_tmp)
+    let leftovers: Vec<String> = fs::read_dir(remote_tmp)
         .expect("the remote staging directory should still exist")
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -178,7 +267,7 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
     // 4. What went over the wire, in order: the reachability probe before the
     //    build, the tarball, the remote script, and the run of that script. And
     //    --ssh-opt reached every one of them.
-    let sent = fs::read_to_string(&log).expect("the ssh stub should have logged");
+    let sent = fs::read_to_string(log).expect("the ssh stub should have logged");
     let calls: Vec<&str> = sent.lines().collect();
     assert!(
         calls.len() >= 4,
@@ -210,7 +299,92 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
         "the script should report where it installed:\n{stdout}"
     );
 
-    fs::remove_dir_all(&dir).ok();
+    // 5. A service that was not running is not touched: no stop, and above all
+    //    no start of something the operator had deliberately left down.
+    assert!(
+        f.systemctl_calls().is_empty(),
+        "an inactive unit should be left alone, got {:?}",
+        f.systemctl_calls()
+    );
+
+    fs::remove_dir_all(dir).ok();
+}
+
+/// The reason this exists: a running server holds its own executable open, and
+/// `cp` over it fails with ETXTBSY. The unit is stopped between the unpack and
+/// the install, and started again once the new binary is in place.
+#[test]
+fn deploy_stops_a_running_service_around_the_install() {
+    let f = fixture("running");
+    f.systemctl(true, 0);
+    f.pretend_already_installed();
+
+    let (output, stdout, stderr) = f.deploy();
+    assert!(
+        output.status.success(),
+        "deploy over a running service failed ({})\n{stdout}\n{stderr}",
+        output.status
+    );
+
+    // The stub logs the first line of the installed binary at the moment it is
+    // called, so the log alone says on which side of the install each call fell:
+    // the stop saw the previous release, the start saw the new one.
+    let calls = f.systemctl_calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected exactly a stop and a start, got {calls:?}"
+    );
+    assert_eq!(
+        calls[0], "stop [echo previous release]",
+        "the stop must come while the previous release is still installed: {calls:?}"
+    );
+    assert_eq!(
+        calls[1], "start [echo feldspar usage]",
+        "the service should be started again, after the new binary is in place: {calls:?}"
+    );
+
+    // Belt and braces on the ordering: what is installed now is the new build.
+    let installed = fs::read_to_string(f.prefix.join("bin/feldspar")).unwrap();
+    assert!(
+        installed.contains("feldspar usage"),
+        "the new binary should have replaced the old one, found: {installed}"
+    );
+
+    fs::remove_dir_all(&f.dir).ok();
+}
+
+/// A stop that fails is not fatal — the install goes ahead — and it must not be
+/// followed by a start, which would leave the machine running something the
+/// deploy never managed to stop.
+#[test]
+fn a_failed_stop_does_not_abort_the_install_or_start_the_service() {
+    let f = fixture("stop-fails");
+    f.systemctl(true, 1);
+    f.pretend_already_installed();
+    let (output, stdout, stderr) = f.deploy();
+    assert!(
+        output.status.success(),
+        "a failed stop should not fail the deploy ({})\n{stdout}\n{stderr}",
+        output.status
+    );
+    assert!(
+        stderr.contains("could not stop"),
+        "the failed stop should be reported:\n{stderr}"
+    );
+
+    let calls = f.systemctl_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "a failed stop must not be followed by a start: {calls:?}"
+    );
+    assert!(
+        f.prefix.join("bin/feldspar").is_file(),
+        "it should still have installed"
+    );
+
+    fs::remove_dir_all(&f.dir).ok();
 }
 
 /// The options that cannot work are refused before the build, not after an hour

@@ -2,6 +2,23 @@
 
 Changes in reverse chronological order.
 
+## `--deploy` stops the service around the install
+
+Deploying onto a machine that was already running the server failed at the last step:
+
+    cp: cannot create regular file '/opt/feldspar/bin/./feldspar': Text file busy
+
+The kernel refuses to write over the executable of a live process, so the unit has to
+be down while `install.sh` copies the binary in. `build-static.sh --deploy` now does
+that itself: after the tarball is copied and unpacked on the remote — as late as it can
+be, so the downtime is the install and nothing more — it stops `feldspar.service`, runs
+`install.sh`, and starts it again.
+
+Only a unit that is *running* is touched. On a machine with no systemd, no
+`feldspar.service`, or a service deliberately left down, the install happens exactly as
+it did before and nothing is started behind the operator's back. A `stop` that fails is
+a warning, not an error: the install goes ahead, and no `start` follows it.
+
 ## `scripts/setup-host.sh`: a host, set up in one command
 
 README §2 is a page of `apt`, `adduser`, `createdb`, a `tee` of a TOML file and a `tee`
