@@ -40,6 +40,34 @@ it properly — read those when something does not fit your box. If you only wan
 Everything below assumes a `sudo`-capable login, and uses `example.com` as the
 domain applications will be served under.
 
+**Or run it as a script.** `scripts/setup-host.sh` is this section — packages, the
+service account, the role and database, `feldspar.toml`, the unit — and it can be
+fetched and run on a bare host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+  | sh -s -- --domain example.com            # builds from source here, as §2.4 does
+```
+
+With a binary built elsewhere (§4.1) an installation is two commands and the host
+never sees a toolchain — from your workstation:
+
+```bash
+scripts/build-static.sh --deploy root@host   # build, copy, unpack, install
+```
+
+and on the host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+  | sh -s -- --static --domain example.com
+```
+
+Either order works, `wget -qO-` does as well as curl, `--dry-run` prints every
+command and file first, and `--help` lists the rest (an external database with
+`--database-url`, a different listen address, a second run that keeps what is
+already there). Read on to know what it did.
+
 ### 2.1 Packages
 
 ```bash
@@ -292,6 +320,14 @@ sudo install -m 0755 target/release/feldspar /usr/local/bin/feldspar
 sudo systemctl restart feldspar
 ```
 
+A host installed from a static artifact is updated from the workstation instead —
+the deploy replaces the binary in place, and nothing on the host restarts by itself:
+
+```bash
+scripts/build-static.sh --deploy root@host
+ssh root@host systemctl restart feldspar
+```
+
 The restart rebuilds and remounts every stored application; one that fails to build is
 logged and skipped rather than taking the server with it (§7). To rebuild a single
 application on its own, and to see the bundler's own diagnostics when it fails:
@@ -362,6 +398,7 @@ packaged artifact instead:
 
 ```bash
 scripts/build-static.sh                    # dist/feldspar-<version>-<target>.tar.gz
+scripts/build-static.sh --deploy root@vm   # ...and install it on that machine
 scripts/build-static.sh --help             # targets, install prefix, options
 ```
 
@@ -373,6 +410,19 @@ puts the tree at `/opt/feldspar` — the prefix compiled into the binary, which
 
 The destination then needs no Rust, no `libclang` and no C toolchain. It still needs
 a database, and it still needs `npm` if applications will be *built* on it (§7).
+
+`--deploy [user@]host` finishes the job over ssh: the tarball is copied to the host,
+unpacked in `/tmp` (`--remote-tmp` elsewhere), installed with its own `install.sh`
+under `sudo` unless the login is root, and the staging copy removed again. The host
+is anything ssh accepts, a `~/.ssh/config` alias included, and `--ssh-opt` (repeatable,
+one argv element each, e.g. `--ssh-opt -p2222`) passes options through. It is checked
+that the host answers *before* the build starts rather than after it. Nothing is
+restarted: an already-running server keeps serving the binary it started with until
+you restart the unit (`sudo systemctl restart feldspar`, §2.6).
+
+The host still needs a database, a service account and a unit, which is the other
+half of the two-step install: `scripts/setup-host.sh --static` on the host, in
+either order with the deploy (§2).
 
 **Name resolution does not go through glibc.** A statically linked binary that calls
 `getaddrinfo` gets glibc's NSS machinery, which `dlopen`s a shared object for every

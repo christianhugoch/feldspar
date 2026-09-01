@@ -2,6 +2,79 @@
 
 Changes in reverse chronological order.
 
+## `scripts/setup-host.sh`: a host, set up in one command
+
+README §2 is a page of `apt`, `adduser`, `createdb`, a `tee` of a TOML file and a `tee`
+of a unit, done by hand on every new machine. It is now also a script, written in POSIX
+`sh` and safe to pipe into one:
+
+    curl -fsSL https://raw.githubusercontent.com/saltcorn/v2/main/scripts/setup-host.sh \
+      | sh -s -- --static --domain example.com
+
+- **Two steps for a static install, and no toolchain on the host.**
+  `--static` skips rustup, the clone and the build; the binary is expected at
+  `/opt/feldspar/bin/feldspar`, where `build-static.sh --deploy` puts it. The two halves
+  can run in either order: when the binary is not there yet the unit is written and
+  *enabled* but not started, and the script prints the deploy command that finishes the
+  job. Without `--static` it installs the toolchain, clones and builds, which is §2.4.
+- **It asks nothing.** A script arriving down a pipe *is* the shell's stdin, so there is
+  nothing to read a prompt from; every choice is a flag (`--domain`, `--bind`,
+  `--database-url` for a database that already exists elsewhere, `--prefix`, `--user`,
+  `--config`, `--unit`, `--no-start`).
+- **`--dry-run` prints the plan** — every command, and both generated files in full —
+  through the same `run` wrapper the real thing goes through, so it cannot drift from
+  what would happen. It is the answer to being asked to pipe a URL into a shell.
+- **A second run keeps what it finds**: an existing account, role, database, checkout,
+  configuration file and unit are left alone (`--force` replaces the two files), because
+  by then they are someone's decisions rather than this script's.
+- **`npm` is installed in both modes.** It is not a build dependency: the server shells
+  out to npm whenever an application is built or a module installed.
+- Root and a sudo-capable login both work. The postgres superuser is reached with
+  `sudo -u postgres` or, when this is already root, `runuser` — `${SUDO} -u postgres`
+  degenerates into running `-u` as a command in a root shell, which is exactly how the
+  script arrives when it is piped into one.
+
+`crates/sc-cli/tests/setup_host.rs` runs it two ways. The static path runs **for real**,
+with `--config` and `--unit` pointing into a temporary directory and stubs on `PATH` for
+`sudo`, `apt-get`, `systemctl`, `adduser`, `chown` and `ln` — the `sudo` stub drops a
+leading `-u NAME` and runs the rest — so the assertions are on the files that actually
+appeared (the unit's `ExecStart`, `FELDSPAR_CONFIG`, the hardening lines; the config's
+mode 600) and on the log the stubs kept. What a test user cannot do — installing
+PostgreSQL, `createuser`, rustup, a release build — is asserted through `--dry-run`,
+including that a `--static` plan contains no `cargo build` and no `libclang-dev`.
+
+## `build-static.sh --deploy` installs the artifact on a host over ssh
+
+The tarball's own README ended with three commands to copy, unpack and install it, and
+they were run by hand every time. `scripts/build-static.sh --deploy [user@]host` now runs
+them: after the artifact is written it goes to the host, is unpacked in `/tmp`, and its
+`install.sh` puts the tree at the prefix the binary was built for.
+
+- **The failure that matters happens first.** A wrong host, a missing key or an `ssh` that
+  is not installed is found by a `BatchMode=yes` probe *before* the build, not at the end
+  of an hour of compiling V8 with the artifact built and nowhere to put it. `--remote-tmp`
+  is checked for absoluteness in the same place, beside `--prefix`'s existing check.
+- **One transport, so one spelling of an option.** The tarball goes over the ssh
+  connection (`cat > …`) rather than through `scp`, because the two disagree about their
+  flags — a port is `-p` for one and `-P` for the other — and `--ssh-opt` has to mean the
+  same thing in every call it appears in.
+- **The remote half is a file on the remote, not a command line and not stdin.** Written
+  there first and then run, which decides the quoting here once and leaves the remote's
+  stdin free for `sudo` to read a password from; `-t` is asked for only when this end has
+  a terminal to prompt on. It is `sh`, not bash: the destination is whatever the static
+  binary runs on, Alpine included. Root runs `install.sh` directly, a non-root login runs
+  it under `sudo`, and a login that is neither says so instead of failing inside the copy.
+- **It ends by running the binary it installed** (usage, exit 0) and removing the tarball,
+  the unpacked tree and the script from the staging directory. Nothing is restarted — an
+  already-running server keeps serving the binary it started with.
+
+`crates/sc-cli/tests/build_static_deploy.rs` drives the deploy for real: the script runs
+in a throwaway repository with stubs for `cargo`, `rustup` and `ssh` on `PATH`, and the
+`ssh` stub executes what it is handed **locally**, so the unpack, `install.sh`, the smoke
+run and the cleanup all actually happen — against a prefix and a staging directory inside
+the test's temporary directory. The assertions are on the installed tree, the emptied
+staging directory and the four calls that went over the wire, not on the script's text.
+
 ## Names are resolved by the binary, not by glibc
 
 A `feldspar` built by `scripts/build-static.sh` and configured for `letsencrypt` died of

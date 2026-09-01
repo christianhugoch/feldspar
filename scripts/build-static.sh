@@ -61,6 +61,7 @@
 #   scripts/build-static.sh --target aarch64-unknown-linux-gnu
 #   scripts/build-static.sh --prefix /usr/local/feldspar
 #   scripts/build-static.sh --no-ui                  # no Node toolchain needed
+#   scripts/build-static.sh --deploy root@vm         # ...and install it there over ssh
 #
 set -euo pipefail
 
@@ -84,6 +85,9 @@ STRIP=1
 VERIFY=1
 RUST_VERSION="1.97"
 NODE_VERSION="22.14.0"
+DEPLOY_HOST=""
+REMOTE_TMP="/tmp"
+SSH_OPTS=()
 
 # The targets that have a prebuilt V8 archive and a glibc to link statically.
 readonly SUPPORTED_TARGETS=(
@@ -133,6 +137,20 @@ Packaging
       --no-strip        Keep debug symbols (the binary is ~2x larger).
       --no-verify       Skip the post-build checks (static linkage, and a smoke
                         run on Debian and Alpine containers).
+
+Deployment
+      --deploy [USER@]HOST
+                        After packaging, copy the tarball to HOST over ssh, unpack
+                        it there and run its install.sh, so the artifact ends up
+                        installed at ${PREFIX} on that machine. HOST is anything
+                        ssh accepts, a ~/.ssh/config alias included. The remote
+                        side runs install.sh under sudo unless the login is root.
+      --ssh-opt OPT     Extra option for the ssh invocations, e.g. --ssh-opt -p2222
+                        or --ssh-opt -oStrictHostKeyChecking=no. Repeatable; each
+                        occurrence is one argv element, so write a flag and its
+                        value together (-p2222, not -p 2222).
+      --remote-tmp DIR  Directory on the remote to copy and unpack into
+                        (default ${REMOTE_TMP}). Removed again afterwards.
   -h, --help            This message.
 EOF
 }
@@ -158,6 +176,9 @@ while [[ $# -gt 0 ]]; do
         --no-ui)           BUILD_UI=0; shift ;;
         --no-strip)        STRIP=0; shift ;;
         --no-verify)       VERIFY=0; shift ;;
+        --deploy)          need_value "$@"; DEPLOY_HOST="$2"; shift 2 ;;
+        --ssh-opt)         need_value "$@"; SSH_OPTS+=("$2"); shift 2 ;;
+        --remote-tmp)      need_value "$@"; REMOTE_TMP="$2"; shift 2 ;;
         -h|--help)         usage; exit 0 ;;
         *)                 echo "error: unknown option $1" >&2; echo >&2; usage >&2; exit 2 ;;
     esac
@@ -188,6 +209,17 @@ if [[ ! " ${SUPPORTED_TARGETS[*]} " == *" ${TARGET} "* ]]; then
 fi
 
 [[ "${PREFIX}" = /* ]] || { echo "error: --prefix must be absolute, got ${PREFIX}" >&2; exit 2; }
+
+# Everything about --deploy that can be known before the build is checked before
+# the build: an option that cannot work, or a missing ssh, is otherwise found out
+# at the end of an hour of compiling V8, with the artifact built and nowhere to
+# put it.
+if [[ -n "${DEPLOY_HOST}" ]]; then
+    [[ "${REMOTE_TMP}" = /* ]] ||
+        { echo "error: --remote-tmp must be absolute, got ${REMOTE_TMP}" >&2; exit 2; }
+    command -v ssh >/dev/null ||
+        { echo "error: --deploy needs ssh, which is not on PATH" >&2; exit 1; }
+fi
 
 # A container build needs both docker and its buildx plugin; `docker build` alone
 # cannot run the Dockerfile. Deciding here rather than inside `build_docker` keeps
@@ -227,6 +259,21 @@ log "feldspar ${VERSION}${GIT_DESC:+ (${GIT_DESC})}"
 log "target ${TARGET}, ${MODE} build, install prefix ${PREFIX}"
 [[ "${MODE}" == "native" ]] && ! command -v docker >/dev/null &&
     log "note: no docker/buildx here, so this is a build with the local toolchain"
+
+# `${SSH_OPTS[@]}` on its own would be an unbound variable under `set -u` when no
+# --ssh-opt was given, on bash before 4.4; this expansion is empty there instead.
+ssh_run() { ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$@"; }
+
+if [[ -n "${DEPLOY_HOST}" ]]; then
+    log "deploying to ${DEPLOY_HOST} when the build finishes"
+    # A connection now, so a wrong host or a missing key shows up before the
+    # compile rather than after it. A warning and not an error, because a login
+    # that legitimately wants a passphrase looks the same from here as a broken
+    # one; BatchMode is for the probe only, since a probe that blocks on a prompt
+    # at the start of an unattended build is worse than one that fails.
+    ssh_run -o BatchMode=yes -o ConnectTimeout=10 "${DEPLOY_HOST}" true 2>/dev/null ||
+        log "warning: ${DEPLOY_HOST} did not answer without a prompt; the deploy may ask for one"
+fi
 
 # ---------------------------------------------------------------------------
 # Build
@@ -490,11 +537,88 @@ tar -czf "${TARBALL}" -C "${STAGE}" --transform "s,^\.,${NAME}," .
 (cd "${OUTPUT_DIR}" && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
 
 log "wrote ${TARBALL} ($(du -h "${TARBALL}" | cut -f1))"
-cat <<EOF
+
+# ---------------------------------------------------------------------------
+# Deploy
+# ---------------------------------------------------------------------------
+
+# The three commands this script prints when --deploy is *not* given, run for
+# you: copy, unpack, install. The tarball goes over the ssh connection itself
+# rather than through scp, because
+# scp and ssh spell their options differently (-P against -p for a port) and one
+# --ssh-opt has to mean the same thing in both places.
+deploy_to_host() {
+    local remote_tarball="${REMOTE_TMP}/${NAME}.tar.gz"
+    local remote_script="${REMOTE_TMP}/${NAME}.deploy.sh"
+
+    log "copying $(du -h "${TARBALL}" | cut -f1) to ${DEPLOY_HOST}:${remote_tarball}"
+    ssh_run "${DEPLOY_HOST}" \
+        "mkdir -p '${REMOTE_TMP}' && cat > '${remote_tarball}'" < "${TARBALL}"
+
+    # The remote side is a *file* on the remote rather than a command line or a
+    # script on stdin: the quoting is then decided here once, and — the reason it
+    # is a file and not stdin — the remote's stdin stays free for sudo to read a
+    # password from. It is `sh`, not bash: the destination is whatever the
+    # artifact runs on, Alpine included.
+    ssh_run "${DEPLOY_HOST}" "cat > '${remote_script}'" <<REMOTE
+set -eu
+
+tarball="${remote_tarball}"
+tree="${REMOTE_TMP}/${NAME}"
+
+# What an interrupted deploy of this same version left behind; unpacking over it
+# would mix two trees.
+rm -rf "\${tree}"
+tar -xzf "\${tarball}" -C "${REMOTE_TMP}"
+
+if [ "\$(id -u)" -eq 0 ]; then
+    sudo=""
+elif command -v sudo >/dev/null 2>&1; then
+    sudo="sudo"
+else
+    echo "error: installing to ${PREFIX} needs root, and this login is neither root nor has sudo" >&2
+    exit 1
+fi
+
+\${sudo} "\${tree}/install.sh"
+
+# The installed binary, run where it now lives: it prints its usage and exits 0,
+# which is the claim this whole script exists to make — one file that runs on
+# this machine with nothing installed beside it.
+"${PREFIX}/bin/feldspar" >/dev/null
+
+rm -rf "\${tree}" "\${tarball}" "${remote_script}"
+REMOTE
+
+    log "unpacking and installing on ${DEPLOY_HOST}"
+    # -t so that sudo can prompt on the terminal this was started from; asked for
+    # only when there is one, or ssh warns about a pty it cannot allocate.
+    local tty=()
+    [[ -t 0 && -t 1 ]] && tty=(-t)
+    ssh_run "${tty[@]+"${tty[@]}"}" "${DEPLOY_HOST}" "sh '${remote_script}'"
+
+    log "installed ${PREFIX}/bin/feldspar on ${DEPLOY_HOST}"
+}
+
+if [[ -n "${DEPLOY_HOST}" ]]; then
+    deploy_to_host
+    cat <<EOF
+
+Installed on ${DEPLOY_HOST}. Run it there with:
+
+  ssh ${DEPLOY_HOST} '${PREFIX}/bin/feldspar serve --environment prod'
+EOF
+else
+    cat <<EOF
 
 Install it on the target VM with:
 
   scp ${TARBALL} vm:/tmp/
   ssh vm 'tar -xzf /tmp/${NAME}.tar.gz -C /tmp && sudo /tmp/${NAME}/install.sh'
   ssh vm '${PREFIX}/bin/feldspar'
+
+or have this script do it next time:
+
+  scripts/build-static.sh --deploy vm
 EOF
+fi
