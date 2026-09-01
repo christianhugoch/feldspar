@@ -5,6 +5,9 @@ members = [
     "crates/sc-error",
     "crates/sc-log",
     "crates/sc-config-file",
+    # Name resolution for the whole process, glibc's NSS taken out of the path
+    # (§13.5): layer 0 because it is linked in front of libc rather than called.
+    "crates/sc-dns",
     # Layer 1 — query language, expression language
     "crates/sc-query",
     "crates/sc-expr",
@@ -68,6 +71,10 @@ sc-log = { path = "crates/sc-log" }
 # primary database is, and the integration-test harness, to know which database
 # it may create its per-test databases from.
 sc-config-file = { path = "crates/sc-config-file" }
+# The process's resolver. Depended on by the binary alone: what it exports is a
+# pair of C symbols the linker puts in front of glibc's, which is a property of
+# the *link*, not of any caller.
+sc-dns = { path = "crates/sc-dns" }
 sc-query = { path = "crates/sc-query" }
 # `default-features = false` at the workspace level so members choose: the
 # catalog takes the parse/validate/translate half only; the server adds
@@ -317,6 +324,16 @@ rustls-pemfile = "2"
 # `axum-server` acceptor so both certificate sources reach the listener the same
 # way.
 rustls-acme = { version = "0.15", features = ["tokio", "axum"] }
+# The resolver behind `sc-dns`, and the C types its `getaddrinfo` speaks.
+#
+# glibc's own resolver `dlopen`s a shared object per module on the `hosts:` line
+# of `/etc/nsswitch.conf`, which drags a second, dynamic `libc.so.6` into a
+# statically linked binary and kills it — so this process resolves names in Rust
+# instead (see `crates/sc-dns`). `hickory-resolver` is already in the tree as
+# `deno_net`'s dependency, so the switch costs no new vendor: `system-config`
+# reads `/etc/resolv.conf`, `tokio` is the runtime the queries run on.
+hickory-resolver = { version = "0.25", features = ["system-config", "tokio"] }
+libc = "0.2"
 # Certificate generation **for tests only** (a dev-dependency wherever it is
 # used): a TLS test needs a certificate, and the two alternatives — checking one
 # into the repository or asking a CA for one — are a key in git and a network

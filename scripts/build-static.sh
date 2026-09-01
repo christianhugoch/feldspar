@@ -19,13 +19,21 @@
 # musl targets are refused by name below, with that message, rather than failing
 # forty minutes into a build.
 #
-# Static glibc has one well-known sharp edge — `getaddrinfo` historically needed
-# the matching `libnss_*.so` at runtime, which an Alpine box does not have. Since
-# glibc 2.34 `nss_files` and `nss_dns` are inside libc itself, so a static binary
-# carries them: DNS resolution from this artifact was tested on Alpine and
-# resolves. The residual limit is `dlopen`, which a static binary cannot do:
-# native Node addons (`.node` files loaded through `deno_napi`) will not load.
-# Nothing in the server needs one; an application that ships one does.
+# Static glibc has one well-known sharp edge — `getaddrinfo` and NSS — and this
+# build does not rely on getting it right. `nss_files` and `nss_dns` have been
+# inside libc since glibc 2.34, but any *other* module on the `hosts:` line of
+# /etc/nsswitch.conf is still a `dlopen` of a shared object linked against the
+# shared glibc, which loads a second complete `libc.so.6` into this binary and
+# kills it. Debian and Ubuntu put `myhostname` on that line by default, so this
+# is the common case, not the exotic one — and it is invisible until the process
+# resolves its first hostname, which for this server is the ACME CA, seconds
+# after TLS is switched on. `crates/sc-dns` therefore resolves names in Rust and
+# `crates/sc-cli/build.rs` links it in front of glibc's resolver; nothing here
+# calls NSS. See README §4.1.
+#
+# The residual limit is `dlopen`, which a static binary cannot do: native Node
+# addons (`.node` files loaded through `deno_napi`) will not load. Nothing in the
+# server needs one; an application that ships one does.
 #
 # What it produces
 # ----------------
@@ -467,6 +475,10 @@ What the target machine still needs
 Limits of a static binary
   dlopen does not work, so native Node addons (.node, loaded through deno_napi)
   cannot be loaded by modules. Nothing in the server itself needs one.
+  Hostnames are resolved by the binary's own resolver (/etc/resolv.conf and
+  /etc/hosts), not by glibc's NSS — which in a static binary would dlopen a
+  second libc and crash the process. /etc/nsswitch.conf does not affect this
+  server: a name it must reach belongs in DNS or in /etc/hosts.
 EOF
 
 mkdir -p "${OUTPUT_DIR}"

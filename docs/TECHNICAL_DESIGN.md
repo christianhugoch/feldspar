@@ -64,6 +64,9 @@ feldspar/
 │  ├─ sc-config-file/             # 0. `feldspar.toml`: named environments (connection +
 │  │                              #    serving parameters). Read by the binary and, for its
 │  │                              #    `test` environment, by the integration-test harness
+│  ├─ sc-dns/                     # 0. the process's resolver: a hickory-backed getaddrinfo
+│  │                              #    linked in front of glibc's, so no NSS module is
+│  │                              #    dlopened into the static binary (§13.5)
 │  ├─ sc-query/                   # 1. universal query language (enum AST) + SQL rendering trait
 │  ├─ sc-bus/                     # 1. message bus trait + drivers (pg NOTIFY, in-proc, redis…)
 │  ├─ sc-db/                      # 2. DatabaseDriver trait, connection, migrations, tx
@@ -126,6 +129,7 @@ direct-dependency lists follow the diagram.
 graph TD
   cli["sc-cli"] --> server["sc-server"]
   cli --> cfgfile["sc-config-file"]
+  cli --> dns["sc-dns"]
   server --> coreact["sc-core-actions"]
   server --> coretraits["sc-core-traits"]
   server --> pg["sc-db-postgres"]
@@ -171,6 +175,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-error` | — (nothing) |
 | `sc-log` | `sc-error` |
 | `sc-config-file` | `sc-error` |
+| `sc-dns` | `sc-error` |
 | `sc-query` | `sc-error` |
 | `sc-types` | `sc-error` `sc-query` |
 | `sc-db` | `sc-error` `sc-query` |
@@ -192,7 +197,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
 | `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-module` `sc-query` `sc-types` `sc-workflow` |
-| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` |
+| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` |
 
 Three things the graph is worth reading for:
 
@@ -4627,6 +4632,23 @@ subdomain. Five decisions worth stating:
 With TLS on there are two listeners — the bind address (plain HTTP, redirecting with a **308**
 so a redirected `POST` stays a `POST`, unless the admin turns the redirect off) and the TLS
 port beside it — and one shutdown signal stops both.
+
+**Name resolution is this process's own** (`sc-dns`, layer 0), and turning TLS on is what
+first made that necessary. glibc's `getaddrinfo` `dlopen`s a shared object per module named on
+the `hosts:` line of `/etc/nsswitch.conf` — `myhostname`, `mdns4_minimal`, `systemd` — each of
+which links the *shared* glibc, so the first hostname a `+crt-static` binary resolves loads a
+second, complete `libc.so.6` beside the statically linked one. On a Debian VM that killed the
+server with `SIGFPE` a second after `READY=1`, and only once `letsencrypt` was selected,
+because the ACME client's call to the CA is the first name the boot path has to look up: the
+database is a Unix socket and nothing else has a hostname. The fix is a linker one —
+`--wrap=getaddrinfo` (`crates/sc-cli/build.rs`) puts `sc-dns`'s resolver in front of glibc's
+for the binary, so `std`, tokio, `async-net`, `reqwest`, `tokio-postgres` and an application's
+own `fetch` all resolve through `hickory-resolver` over `/etc/resolv.conf` and `/etc/hosts`,
+in Rust, with no `dlopen`. Two consequences worth stating: **one interception, not one per
+client** — a resolver setting on each HTTP client would have left Deno's `fetch` on
+`getaddrinfo` and the crash armed for any application that makes a request — and **NSS host
+modules no longer apply to this process**, so a deployment that resolves names through mDNS or
+sssd must put them in DNS or in `/etc/hosts`.
 
 **Readiness notification.** On systemd-managed Linux, `sc-server` sends `READY=1` via the
 `sd_notify` protocol once it has bound its listener(s) and the catalog is initialised, so the

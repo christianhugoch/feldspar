@@ -1,0 +1,24 @@
+[package]
+name = "sc-dns"
+description = "Name resolution without glibc's NSS: a hickory-backed getaddrinfo (layer 0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sc-error.workspace = true
+# The resolver itself: pure Rust, /etc/resolv.conf and /etc/hosts, no NSS. It is
+# already in the tree as a dependency of `deno_net`, so this costs no new vendor.
+hickory-resolver.workspace = true
+# `addrinfo`, `sockaddr_in`, the `EAI_*` codes: this crate's whole surface to the
+# rest of the process is a C ABI, so it names the C types directly.
+libc.workspace = true
+# One current-thread runtime on one thread, owned by this crate: the resolver is
+# async and every caller of `getaddrinfo` is not.
+tokio.workspace = true
+
+[lints]
+workspace = true

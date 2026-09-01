@@ -34,11 +34,33 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    wrap_getaddrinfo();
     println!("cargo:rerun-if-env-changed=SC_BUILD_ADMIN");
     println!("cargo:rerun-if-env-changed=SC_BUNDLE_PREFIX");
     let build = build_requested(std::env::var("SC_BUILD_ADMIN").ok().as_deref());
     build_bundle("ui/admin", "SC_ADMIN_BUNDLE_DIR", "admin UI", build);
     build_bundle("ui/ide", "SC_IDE_BUNDLE_DIR", "file-store IDE", build);
+}
+
+/// Put `sc-dns`'s resolver in front of glibc's for this binary.
+///
+/// `--wrap=getaddrinfo` rewrites every unresolved reference to `getaddrinfo` —
+/// `std`'s included, which is where `ToSocketAddrs`, tokio, `async-net`,
+/// `reqwest` and Deno all end up — into a reference to `__wrap_getaddrinfo`,
+/// and leaves glibc's own reachable as `__real_getaddrinfo`. Both are defined in
+/// `sc-dns`, which this crate depends on so that the rlib defining them is on
+/// the link line at all.
+///
+/// **Why the binary and not the whole workspace.** glibc's resolver `dlopen`s a
+/// module per entry on the `hosts:` line of `/etc/nsswitch.conf`, and in a
+/// `+crt-static` binary that loads a second `libc.so.6` beside the statically
+/// linked one and crashes the process (`crates/sc-dns`, README §2.7). That is a
+/// property of the shipped artifact; an integration test elsewhere in the
+/// workspace links dynamically and resolves through glibc exactly as before.
+fn wrap_getaddrinfo() {
+    for symbol in ["getaddrinfo", "freeaddrinfo"] {
+        println!("cargo:rustc-link-arg-bins=-Wl,--wrap={symbol}");
+    }
 }
 
 /// Decide whether to build the UI bundles from `SC_BUILD_ADMIN`'s value.

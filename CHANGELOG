@@ -2,6 +2,54 @@
 
 Changes in reverse chronological order.
 
+## Names are resolved by the binary, not by glibc
+
+A `feldspar` built by `scripts/build-static.sh` and configured for `letsencrypt` died of
+`SIGFPE` about a second after `READY=1`, over and over, on a Debian VM. The core showed
+`libnss_myhostname.so.2`, `ld-linux.so` and a whole second `libc.so.6` mapped into a
+*statically linked* binary, with the faulting address inside that second libc. glibc's
+`getaddrinfo` reads `/etc/nsswitch.conf` and `dlopen`s a shared object per module on the
+`hosts:` line; every one of those links the shared glibc, so the first hostname a `+crt-static`
+process resolves loads a second complete C library beside the one it already has. It appeared
+only with TLS on because ACME's call to the CA is the first name the boot path looks up — the
+database is a Unix socket, and nothing else on it has a hostname to resolve. `files` and `dns`
+have been inside libc since glibc 2.34 and load nothing, which is why the artifact tested clean
+on Alpine and on a workstation whose `hosts:` line happens to be ordinary.
+
+- **`crates/sc-dns`** (layer 0) answers `getaddrinfo` and `freeaddrinfo` itself:
+  `hickory-resolver` over `/etc/resolv.conf` and `/etc/hosts` for a hostname, an address
+  literal parsed in-process (including an IPv6 `%zone`), and the answer marshalled into the
+  `malloc`ed `addrinfo` list the C ABI promises. The resolver runs on one current-thread
+  runtime on a thread the crate owns, because `getaddrinfo` is a blocking call made from tokio
+  workers, blocking pools, V8 threads and threads this process never created — and `block_on`
+  inside a runtime worker panics.
+- **The interception is a linker flag**, not a library setting: `crates/sc-cli/build.rs` passes
+  `-Wl,--wrap=getaddrinfo`, which rewrites every unresolved reference — `std`'s included, and
+  therefore tokio's, `async-net`'s (the ACME client's), `reqwest`'s, `tokio-postgres`'s and
+  Deno's — into a reference to `__wrap_getaddrinfo`, leaving glibc's reachable as
+  `__real_getaddrinfo`. **One place, not one per client**: a resolver feature on `reqwest` and
+  a replacement for `rustls-acme` would still have left an application's own `fetch()` on
+  `getaddrinfo`, and any client left there re-arms the crash.
+- **What still goes to glibc**, because neither call touches the `hosts:` line: a null `node`
+  (the service-only lookup that precedes a bind) and a named service (`"https"`), resolved by a
+  second, host-less call that reads `/etc/services`.
+- **`localhost` always answers**, with loopback, even where `/etc/hosts` does not say so —
+  glibc has `myhostname` for that, and `myhostname` is precisely what must not load.
+- **What this gives up**, stated in the README and in the tarball's own: NSS host modules no
+  longer apply to this process. No mDNS (`.local`), no `myhostname`, no LDAP/sssd hosts; a name
+  this server must reach belongs in DNS or in `/etc/hosts`. RFC 6724 sorting is not
+  implemented either — addresses come back IPv4 first, then IPv6, and callers walk the list.
+- **`tests/no_nss.rs`** is the regression test, and it is the negative control that makes it
+  worth having: on the development machine an unwrapped `getaddrinfo` maps
+  `libnss_mdns4_minimal.so.2` and `libnss_mymachines.so.2`, and the test asserts that resolving
+  through `ToSocketAddrs` maps neither — while also asserting the call reached
+  `__wrap_getaddrinfo` at all, which is the one thing a binary linked without the flag would
+  fail. Alongside it: the `EAI_*` codes callers branch on, a named service becoming a port, the
+  address literals, and the `addrinfo` marshalling built and freed on its own.
+- `scripts/build-static.sh`'s header claimed this was handled because `nss_files` and `nss_dns`
+  are built in. True, and not enough — the sentence now says what the other modules do. The
+  crate tree in the technical design and §13.5 follow.
+
 ## The project has a name: Saltcorn Feldspar, and the command is `feldspar`
 
 Saltcorn is the company and the lineage this design draws on; Feldspar names the rewrite. The

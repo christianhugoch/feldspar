@@ -107,6 +107,14 @@ async fn serve_command(args: &[String]) -> Result<()> {
         eprintln!("feldspar: database configured from {source}");
     }
 
+    // Start this process's resolver before anything can want a name. It is not
+    // glibc's: a `+crt-static` binary that calls `getaddrinfo` loads an NSS
+    // module, and with it a second `libc.so.6`, which is fatal (see `sc-dns`).
+    // The first name a server resolves is usually the ACME CA's, seconds after
+    // the port opens, so a resolver that cannot start is worth knowing about
+    // here rather than then.
+    sc_dns::init()?;
+
     // The service manager that started this process, where one did (a
     // `Type=notify` systemd unit). The boot is the interesting part of a
     // Saltcorn start — everything below happens before the port opens — so each

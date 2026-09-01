@@ -31,6 +31,11 @@ sc-agent.workspace = true
 # because how this process serves TLS is a stored setting rather than a flag
 # (§13.5).
 sc-config.workspace = true
+# Name resolution for the whole binary. Depended on here and nowhere else: what
+# it exports is `__wrap_getaddrinfo`, which `build.rs` puts in front of glibc's
+# resolver at link time, and this dependency is what puts the rlib defining it on
+# the link line.
+sc-dns.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-db-sqlite.workspace = true

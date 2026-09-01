@@ -7998,6 +7998,7 @@ dependencies = [
  "sc-db",
  "sc-db-postgres",
  "sc-db-sqlite",
+ "sc-dns",
  "sc-error",
  "sc-files",
  "sc-llm",
@@ -8141,6 +8142,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "sc-dns"
+version = "0.1.0"
+dependencies = [
+ "hickory-resolver",
+ "libc",
+ "sc-error",
+ "tokio",
 ]
 
 [[package]]

@@ -374,6 +374,18 @@ puts the tree at `/opt/feldspar` — the prefix compiled into the binary, which
 The destination then needs no Rust, no `libclang` and no C toolchain. It still needs
 a database, and it still needs `npm` if applications will be *built* on it (§7).
 
+**Name resolution does not go through glibc.** A statically linked binary that calls
+`getaddrinfo` gets glibc's NSS machinery, which `dlopen`s a shared object for every
+module on the `hosts:` line of `/etc/nsswitch.conf` — `myhostname` is on Debian's and
+Ubuntu's by default — and each of those links the *shared* glibc, so the first hostname
+the process resolves loads a second `libc.so.6` beside the static one and the process
+dies. This binary therefore resolves names itself (`crates/sc-dns`): the linker puts a
+`hickory-resolver` implementation of `getaddrinfo` in front of glibc's, reading
+`/etc/resolv.conf` and `/etc/hosts` with no `dlopen` anywhere. Two things follow for a
+deployment: `/etc/nsswitch.conf` no longer affects how this process resolves anything,
+and a name it must reach has to be in DNS or in `/etc/hosts` — mDNS (`.local`),
+`myhostname`'s synthesis of the local hostname, and LDAP/sssd hosts do not apply to it.
+
 ---
 
 ## 5. Database setup
