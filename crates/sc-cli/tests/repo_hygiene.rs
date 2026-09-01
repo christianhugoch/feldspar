@@ -1204,8 +1204,8 @@ fn readme_quick_start_config_file_parses() {
     // Peer authentication over the socket: a host that is a directory, a user,
     // a database — and deliberately no password to leave lying in /etc.
     assert_eq!(production.host.as_deref(), Some("/var/run/postgresql"));
-    assert_eq!(production.user.as_deref(), Some("saltcorn"));
-    assert_eq!(production.database.as_deref(), Some("saltcorn"));
+    assert_eq!(production.user.as_deref(), Some("feldspar"));
+    assert_eq!(production.database.as_deref(), Some("feldspar"));
     assert!(production.password.is_none() && production.url.is_none());
     // The serving half: without a base domain the server mounts no application.
     assert!(production.base_domain.is_some());
@@ -1239,7 +1239,7 @@ fn readme_quick_start_systemd_unit_is_complete() {
     for line in [
         "Type=notify",
         "WatchdogSec=",
-        "User=saltcorn",
+        "User=feldspar",
         "StateDirectory=feldspar",
         "ReadWritePaths=/var/lib/feldspar",
         "Environment=HOME=/var/lib/feldspar",
@@ -1334,11 +1334,23 @@ fn the_binary_and_everything_it_owns_are_named_feldspar() {
         }
     }
 
-    // And what keeps the Saltcorn name on purpose.
+    // The quick start's Postgres role and the unit's service user are both
+    // `feldspar` — and, more importantly, are the *same*: §2.3 connects over the
+    // Unix socket with peer authentication, which only works when the operating
+    // system user and the database role have the same name.
     let readme = read(&root, "README.md");
     assert!(
-        readme.contains("CREATE ROLE saltcorn") && readme.contains("User=saltcorn"),
-        "the quick start's Postgres role and the unit's service user stay `saltcorn`, \
-         and must match each other for peer authentication over the socket"
+        readme.contains("CREATE ROLE feldspar") && readme.contains("User=feldspar"),
+        "the quick start's Postgres role and the unit's service user should both be \
+         `feldspar`, and must match each other for peer authentication over the socket"
+    );
+
+    // What keeps the Saltcorn name on purpose, so a later sweep does not take it:
+    // `@saltcorn/…` is the npm scope v1's modules are published under, and
+    // `globalThis.saltcorn` is the API a v1 module is handed at run time.
+    let install = read(&root, "crates/sc-module/src/install.rs");
+    assert!(
+        install.contains("@saltcorn/"),
+        "v1 modules are published under the `@saltcorn/` npm scope, which is not ours to rename"
     );
 }

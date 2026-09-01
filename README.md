@@ -73,7 +73,7 @@ Run the server as its own unprivileged system user, and keep the checkout somewh
 that user can read:
 
 ```bash
-sudo adduser --system --group --home /opt/feldspar saltcorn
+sudo adduser --system --group --home /opt/feldspar feldspar
 sudo install -d -o "$USER" -g "$USER" /opt/feldspar/src
 ```
 
@@ -97,14 +97,14 @@ authentication** means the service account connects as itself, and no database
 password is written to disk anywhere:
 
 ```bash
-sudo -u postgres createuser saltcorn
-sudo -u postgres createdb -O saltcorn saltcorn
+sudo -u postgres createuser feldspar
+sudo -u postgres createdb -O feldspar feldspar
 ```
 
 Check it from the service account:
 
 ```bash
-sudo -u saltcorn psql -h /var/run/postgresql -d saltcorn -c '\conninfo'
+sudo -u feldspar psql -h /var/run/postgresql -d feldspar -c '\conninfo'
 ```
 
 Saltcorn never creates or drops the database — this step is yours, once (§5). The
@@ -112,7 +112,7 @@ role must own the database, because the server creates the `users` table on firs
 start and the admin UI creates every table after that.
 
 For a Postgres on another host, give the role a password instead
-(`sudo -u postgres psql -c "CREATE ROLE saltcorn LOGIN PASSWORD 'change-me'"`) and put
+(`sudo -u postgres psql -c "CREATE ROLE feldspar LOGIN PASSWORD 'change-me'"`) and put
 a `url` in the configuration file below rather than a socket path.
 
 ### 2.4 Rust, and the build
@@ -152,13 +152,13 @@ default_environment = "production"
 
 [environments.production]
 host = "/var/run/postgresql"   # a leading `/` is a Unix socket directory
-user = "saltcorn"
-database = "saltcorn"
+user = "feldspar"
+database = "feldspar"
 
 base_domain = "example.com"    # each application is served at <subdomain>.example.com
 bind = "0.0.0.0:80"
 TOML
-sudo chown saltcorn:saltcorn /etc/feldspar/feldspar.toml
+sudo chown feldspar:feldspar /etc/feldspar/feldspar.toml
 sudo chmod 600 /etc/feldspar/feldspar.toml
 ```
 
@@ -170,7 +170,7 @@ Notes on that file, all of which §7 covers in full:
 - **Without `base_domain` no application is served at all**, only the admin UI: the
   server has no way to address an app.
 - A remote database goes in as a URL instead of the socket parts:
-  `url = "postgres://saltcorn:change-me@db.internal:5432/saltcorn"`.
+  `url = "postgres://feldspar:change-me@db.internal:5432/feldspar"`.
 - Add a `[environments.staging]` section when you have a second database, and select
   it with `feldspar serve --environment staging`.
 - `chmod 600` because such a file may hold a password; the server warns on stderr when
@@ -191,8 +191,8 @@ Wants=network-online.target
 [Service]
 Type=notify
 WatchdogSec=30s
-User=saltcorn
-Group=saltcorn
+User=feldspar
+Group=feldspar
 ExecStart=/usr/local/bin/feldspar serve --environment production
 Environment=FELDSPAR_CONFIG=/etc/feldspar/feldspar.toml
 Environment=HOME=/var/lib/feldspar
@@ -284,7 +284,7 @@ The project is a **prototype**: it does not migrate databases created by older b
 so take a dump before you upgrade one.
 
 ```bash
-sudo -u saltcorn pg_dump -h /var/run/postgresql saltcorn > ~/saltcorn-$(date +%F).sql
+sudo -u feldspar pg_dump -h /var/run/postgresql feldspar > ~/feldspar-$(date +%F).sql
 
 cd /opt/feldspar/src && git pull
 cargo build --release -p sc-cli
@@ -390,29 +390,29 @@ Assuming a local Postgres you can administer (as the `postgres` superuser):
 ```bash
 # Create a dedicated role and database. Choose your own password.
 sudo -u postgres psql <<'SQL'
-CREATE ROLE saltcorn WITH LOGIN PASSWORD 'change-me';
-CREATE DATABASE saltcorn OWNER saltcorn;
+CREATE ROLE feldspar WITH LOGIN PASSWORD 'change-me';
+CREATE DATABASE feldspar OWNER feldspar;
 SQL
 ```
 
 Verify you can connect as that role:
 
 ```bash
-psql "postgres://saltcorn:change-me@localhost:5432/saltcorn" -c '\conninfo'
+psql "postgres://feldspar:change-me@localhost:5432/feldspar" -c '\conninfo'
 ```
 
 ### Option B — Docker
 
 ```bash
-docker run --name saltcorn-db \
-  -e POSTGRES_USER=saltcorn \
+docker run --name feldspar-db \
+  -e POSTGRES_USER=feldspar \
   -e POSTGRES_PASSWORD=change-me \
-  -e POSTGRES_DB=saltcorn \
+  -e POSTGRES_DB=feldspar \
   -p 5432:5432 \
   -d postgres:16
 ```
 
-That gives you `postgres://saltcorn:change-me@localhost:5432/saltcorn`.
+That gives you `postgres://feldspar:change-me@localhost:5432/feldspar`.
 
 ### Option C — a SQLite file, and nothing else
 
@@ -584,15 +584,15 @@ default_environment = "production"
 [environments.production]
 host = "db.internal"
 port = 5432
-user = "saltcorn"
+user = "feldspar"
 password = "change-me"
-database = "saltcorn"
+database = "feldspar"
 
 [environments.staging]
-url = "postgres://saltcorn:change-me@staging.internal:5432/saltcorn"
+url = "postgres://feldspar:change-me@staging.internal:5432/feldspar"
 
 [environments.test]
-database = "saltcorn_test"
+database = "feldspar_test"
 test_template = "sc_template"   # read by `cargo test`, not by the server
 ```
 
@@ -732,7 +732,7 @@ Local development, connecting with a URL and serving the pre-built bundle
 
 ```bash
 target/release/feldspar serve \
-  --database-url postgres://saltcorn:change-me@localhost:5432/saltcorn \
+  --database-url postgres://feldspar:change-me@localhost:5432/feldspar \
   --static-dir ui/admin/dist \
   --bind 127.0.0.1:3032
 ```
@@ -741,7 +741,7 @@ Individual DB parts, listening on all interfaces:
 
 ```bash
 target/release/feldspar serve \
-  --db-host localhost --db-user saltcorn --db-password change-me --db-name saltcorn \
+  --db-host localhost --db-user feldspar --db-password change-me --db-name feldspar \
   --static-dir ui/admin/dist \
   --bind 0.0.0.0:8080
 ```
@@ -752,14 +752,14 @@ then unnecessary):
 ```bash
 cargo build --release -p sc-cli
 target/release/feldspar serve \
-  --database-url postgres://saltcorn:change-me@localhost:5432/saltcorn \
+  --database-url postgres://feldspar:change-me@localhost:5432/feldspar \
   --bind 127.0.0.1:3032
 ```
 
 Using environment variables (handy for systemd/containers), behind a TLS proxy:
 
 ```bash
-export DATABASE_URL=postgres://saltcorn:change-me@localhost:5432/saltcorn
+export DATABASE_URL=postgres://feldspar:change-me@localhost:5432/feldspar
 target/release/feldspar serve --bind 127.0.0.1:3032 --secure-cookies
 ```
 

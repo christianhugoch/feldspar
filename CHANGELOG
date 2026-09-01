@@ -26,12 +26,17 @@ shipped artifact is one binary, and it is now called `feldspar` rather than `sal
   and `src/feldspar/README.md` agree, and the CLI command they tell a coding agent to run is
   `feldspar api add-query`. The session files `feldspar auth token` writes are
   `.feldspar-session.json` and `.feldspar-cookies.txt`.
-- **What deliberately keeps the Saltcorn name**, because it is not the binary's to rename: the
-  Postgres role and database in the quick start (the unit's `User=` has to match the role for peer
-  authentication over the socket), the `@saltcorn/…` npm scope v1's modules are published under,
-  the `globalThis.saltcorn` API a v1 module sees, the backup format identifier, the `saltcorn.meta`
-  xattr key, and the product name in prose and in the admin UI's chrome — this is Saltcorn
-  Feldspar, and "Saltcorn v1" still means the JavaScript implementation.
+- **The README's recommended Postgres role and database are `feldspar` too**, along with the
+  service account and the unit's `User=`/`Group=` — §2.3 connects over the Unix socket with peer
+  authentication, so the operating-system user and the database role have to carry the same name.
+  README §11 is the exception and still says `saltcorn_test`: it describes the database
+  `.github/workflows/ci.yml` actually creates, and renaming it in prose alone would make the README
+  wrong rather than consistent.
+- **What deliberately keeps the Saltcorn name**, because it is not ours to rename: the
+  `@saltcorn/…` npm scope v1's modules are published under, the `globalThis.saltcorn` API a v1
+  module sees, the backup format identifier, the `saltcorn.meta` xattr key, and the product name in
+  prose and in the admin UI's chrome — this is Saltcorn Feldspar, and "Saltcorn v1" still means the
+  JavaScript implementation.
 - **`the_binary_and_everything_it_owns_are_named_feldspar`** (`sc-cli`'s `repo_hygiene`) pins all
   four surfaces the name reaches an operator through — the `[[bin]]` target, the config reader's
   own `FILE_NAME`/`APP_DIR`/`*_VAR` constants, `REACT_RUNTIME_SUBDIR`, and the packaging script —
