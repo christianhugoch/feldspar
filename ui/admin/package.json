@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Saltcorn admin SPA \u2014 React + TypeScript + react-bootstrap over the generated typed API client (design \u00a712).",
+  "description": "Saltcorn admin SPA — React + TypeScript + react-bootstrap over the generated typed API client (design §12).",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.8",
+    "@tanstack/react-table": "^9.2.4",
+    "@tanstack/react-virtual": "^3.14.10",
     "@xyflow/react": "12.10.2",
     "bootstrap": "^5.3.3",
     "monaco-editor": "^0.54.0",

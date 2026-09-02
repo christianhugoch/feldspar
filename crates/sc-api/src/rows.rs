@@ -436,12 +436,27 @@ pub async fn count_rows(
     table: &Table,
     context: Option<&CallerContext>,
 ) -> Result<i64> {
+    count_rows_where(catalog, table, None, context).await
+}
+
+/// [`count_rows`] over the rows a filter leaves.
+///
+/// The admin grid's scrollbar is as long as this number, and the rows it scrolls
+/// are what `list_rows_query` returns for the same filter — so the two take the
+/// same predicate, from the same parse of the same query string, rather than
+/// counting one population and paging another.
+pub async fn count_rows_where(
+    catalog: &Catalog,
+    table: &Table,
+    filter: Option<Expr>,
+    context: Option<&CallerContext>,
+) -> Result<i64> {
     let count = sc_expr::aggregate_expr(&sc_expr::AggFunc::Count, false, None, &table.name)?;
     let values = aggregate_values(
         catalog,
         table,
         vec![Projection::expr_as(count, ROW_COUNT_KEY)],
-        None,
+        filter,
         context,
     )
     .await?;

@@ -40,7 +40,9 @@ export type CreateConstraintRequest = { type: string; fields?: Array<string> | n
 export type CreateConstraintResponse = { name: string; type: string; fields: Array<string>; expression?: string | null; method?: string | null; language?: string | null; formula?: string | null; error_message?: string | null; managed: boolean };
 export type DeleteConstraintResponse = { dropped: string };
 export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
+export type ListRowsQuery = { order?: string; limit?: number; offset?: number; filter?: Record<string, string> };
 export type ListRowsResponse = Array<unknown>;
+export type CountRowsQuery = { filter?: Record<string, string> };
 export type CountRowsResponse = { count: number };
 export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
@@ -197,8 +199,8 @@ export interface ApiClient {
   createConstraint(table: string, body: CreateConstraintRequest): Promise<CreateConstraintResponse>;
   deleteConstraint(table: string, constraint: string): Promise<DeleteConstraintResponse>;
   listFieldTypes(): Promise<ListFieldTypesResponse>;
-  listRows(table: string): Promise<ListRowsResponse>;
-  countRows(table: string): Promise<CountRowsResponse>;
+  listRows(table: string, query?: ListRowsQuery): Promise<ListRowsResponse>;
+  countRows(table: string, query?: CountRowsQuery): Promise<CountRowsResponse>;
   createRow(table: string, body: CreateRowRequest): Promise<CreateRowResponse>;
   updateRow(table: string, id: string, body: UpdateRowRequest): Promise<UpdateRowResponse>;
   deleteRow(table: string, id: string): Promise<void>;
@@ -498,16 +500,25 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("listFieldTypes", res);
       return (await res.json()) as ListFieldTypesResponse;
     },
-    async listRows(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
+    async listRows(table, query) {
+      const search = new URLSearchParams();
+      if (query?.order !== undefined && query?.order !== null) search.append("order", String(query?.order));
+      if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
+      if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
+      for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
       if (!res.ok) throw await clientError("listRows", res);
       return (await res.json()) as ListRowsResponse;
     },
-    async countRows(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/count`, {
+    async countRows(table, query) {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/count${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });

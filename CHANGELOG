@@ -2,6 +2,96 @@
 
 Changes in reverse chronological order.
 
+## The table data editor is a spreadsheet
+
+`/#/tables/T/data` was a form above an HTML table of every row. That is fine for
+six rows and useless for six thousand: it fetched the whole table to draw it,
+changing one cell meant a round trip through a form at the top of the page, and
+there was no way to sort, to narrow, or to stop looking at the twelve columns
+that were not the two in question. It is now a grid, built on TanStack Table v9,
+that an admin arrows around, types into and copies out of.
+
+- **A range selection, with the modifiers every spreadsheet has.** Click focuses,
+  shift-click and drag take a rectangle, ctrl/cmd-click adds a second, Ctrl-A
+  takes everything, Escape drops it. This is v9's `cellSelectionFeature` rather
+  than arithmetic of our own: a selection there is a list of rectangles with an
+  *anchor* and a *focus*, which is what makes shift-clicking twice resize one
+  range instead of leaving a trail behind it, and the "which of my sides are on
+  the boundary" question every cell would otherwise ask its neighbours is
+  answered once per change and read per cell.
+- **Cut, copy and paste, in the format every other spreadsheet speaks.** Tabs
+  between columns, newlines between rows, and a cell containing one of those (or
+  a quote) wrapped and its quotes doubled — so a range copied here pastes into
+  Excel, Numbers or Sheets and a range copied from any of them pastes in here.
+  A paste anchors at the top-left of the selection and clips at the last row and
+  the last column rather than wrapping, and pasting a single cell over a range
+  fills it. `gridClipboard.ts` (with `gridClipboard.test.ts`) is the parser, not
+  the component.
+- **Editing in the grid.** Typing a printable character on the focused cell
+  starts an edit with it, F2 and Enter open one on what is there, double-click
+  does the same with the mouse; Enter commits and moves down, Tab commits and
+  moves right, Escape abandons. Delete clears a range. Every one of those becomes
+  one `updateRow` per row it touches, addressed by the table's **primary key** —
+  and a row the grid has not fetched is *skipped and reported* rather than
+  guessed at, because there is no key to name it by. A table with no
+  single-column key can be read and added to but not edited in place, and says
+  so, which is the rule the old screen already had.
+- **What a piece of text means is the column's decision, not the text's.** `0` is
+  `false` in a `bool` column and the string `"0"` in a `text` one, so copying a
+  range and pasting it straight back changes nothing — a property `gridValues.ts`
+  exists to hold and `gridValues.test.ts` asserts over every value a cell can
+  take. Text a column cannot accept is sent as text, because the server's own
+  coercion can name the column and its type and a guess made in the browser
+  cannot.
+- **Sorting and a filter row, both the server's.** Clicking a header cycles
+  ascending → descending → unsorted, and shift-click adds a tiebreaker rather
+  than replacing the first. The filter row (toggled from the toolbar, badged with
+  how many boxes are filtering) takes three spellings per box: the server's own
+  vocabulary straight through (`gte.2020-01-01`, `in.(1,2,3)`, `is_null.true`), a
+  comparison symbol (`>= 100`, `!= draft`), or a bare word — which means
+  *contains* on a string column and *equals* on anything else, because `ilike` is
+  not a comparison a `date` or a `uuid` column has and defaulting to it would
+  turn a filter into a 400.
+- **Rows are fetched as they are scrolled to.** A page is 100 rows; the
+  virtualizer's viewport decides which pages are asked for, and a page belonging
+  to a question that has since been replaced is discarded rather than drawn. The
+  scrollbar is as long as the *filtered* count, from the same filters the pages
+  come from.
+- **Columns hidden, shown, reordered and resized.** A Fields menu with a tick and
+  a pair of nudges per field, drag-and-drop on the headers, and a drag handle on
+  each boundary. The arrangement is saved per table in the browser and reconciled
+  against the fields the table has *now* on every read: a dropped field cannot
+  leave a hole in the order and a new field arrives visible rather than silently
+  hidden (`gridColumns.ts`, `gridColumns.test.ts`).
+- **The row form is what is left of the old screen**, and is now a modal reached
+  from the toolbar ("New row") or the chevron in each row's gutter. Two things
+  need it and cannot have cells: creating a row, which must offer every column at
+  once including the required ones, and a `File` field, whose value is a path
+  *within* a store and so is browsed rather than typed.
+
+Underneath, **`listRows` and `countRows` take a query string** — `order`,
+`limit`, `offset` and one `column=op.value` pair per filter — and it is the same
+query string an application's REST read takes, parsed by the same code. The
+filter/order/bound half of `rest/query.rs` moved out to a new public
+`sc_api::query_string`, which the REST provider now calls into for everything but
+`select` (embeds are its own shape). So the admin grid is not a second reader
+with a second idea of what `gte` means: one place decides, and a comparison added
+there appears in both surfaces at once. `countRows` takes the same filter map for
+one reason — the scrollbar has to be as long as the rows the filter row leaves,
+and counting one population while paging another is how the last screen of a
+filtered table ends up empty. An absent `limit` becomes `sc_api::ROW_PAGE_CAP`,
+so the endpoint has a bound even when the caller forgets one.
+
+Two limits worth stating rather than discovering. The grid builds one row-model
+object per row of the table, which is what makes a cell's position in the
+selection *be* its row number and lets a range survive a scroll; past 50,000 rows
+that costs more than the screen is worth, so it shows the first 50,000 of the
+current order and says so — narrowing with the filter row is how the rest is
+reached, and is also how anybody actually finds a row in a table that size. And
+the grid's elements carry grid *roles* in their class names rather than in ARIA,
+which would be a promise its keyboard model does not yet keep.
+
+
 ## The file manager works like a file browser
 
 The file manager listed names and sizes and put five buttons on every row. Anything an

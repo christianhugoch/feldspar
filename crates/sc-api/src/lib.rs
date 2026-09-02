@@ -33,6 +33,7 @@ pub mod convert;
 pub mod csv;
 pub mod filter;
 pub mod provided_tables;
+pub mod query_string;
 pub mod rows;
 pub mod schema_edit;
 
@@ -46,7 +47,7 @@ mod rest;
 mod schema;
 mod typescript;
 
-pub use admin::{ADMIN_API_PREFIX, admin_endpoints};
+pub use admin::{ADMIN_API_PREFIX, ROW_PAGE_CAP, admin_endpoints};
 pub use endpoint::{
     AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec, QueryParam,
 };
@@ -179,7 +180,11 @@ mod tests {
         assert!(ts.contains("export function createClient("));
 
         // Path params are typed method args; the URL interpolates them.
-        assert!(ts.contains("listRows(table: string): Promise<ListRowsResponse>"));
+        assert!(
+            ts.contains(
+                "listRows(table: string, query?: ListRowsQuery): Promise<ListRowsResponse>"
+            )
+        );
         assert!(ts.contains("/api/tables/${table}/rows"));
 
         // A void endpoint (logout has no response payload).

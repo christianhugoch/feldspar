@@ -419,6 +419,12 @@ pub fn admin_endpoints() -> EndpointSet {
     // are different surfaces onto the same rows, and reading this as an
     // oversight would be the mistake.
 
+    // A **page** of rows, filtered and ordered by the same query string an
+    // application's REST read takes (`crate::query_string`): the admin's data
+    // grid is a spreadsheet over a table of any size, so sorting a column,
+    // typing in its filter row and scrolling to row 40,000 each cost one page
+    // rather than the table. An absent `limit` is [`ROW_PAGE_CAP`], so the
+    // endpoint has a bound even when the caller forgets one.
     set.register(
         Endpoint::new(
             "listRows",
@@ -428,6 +434,7 @@ pub fn admin_endpoints() -> EndpointSet {
                 .param("table", ValueType::Text)
                 .lit("rows"),
         )
+        .query(row_read_params())
         .output(TypeSchema::array(TypeSchema::json()))
         .auth(AuthRequirement::admin()),
     );
@@ -445,6 +452,11 @@ pub fn admin_endpoints() -> EndpointSet {
                 .lit("rows")
                 .lit("count"),
         )
+        // The same filter map `listRows` takes, and for one reason: the grid's
+        // scrollbar has to be as long as the rows the filter row leaves. A count
+        // that ignored the filters would size the scroller to the whole table
+        // and leave the last screen of it empty.
+        .query([QueryParam::new("filter", ValueType::Text).map()])
         .output(TypeSchema::struct_of([StructField::new(
             "count",
             TypeSchema::int(),
@@ -1946,6 +1958,27 @@ fn backup_selection_schema() -> TypeSchema {
         StructField::new("triggers", TypeSchema::bool()),
         StructField::new("ssl", TypeSchema::bool()),
     ])
+}
+
+/// The most rows one `listRows` will answer with.
+///
+/// A ceiling rather than a page size: the grid picks its own page and the number
+/// it sends is clamped to this, so a caller who asks for the whole of a million-
+/// row table gets a page and not the table. It is generous because the admin
+/// grid is the one surface that legitimately pages fast — a screen of rows plus
+/// a screen of overscan either side.
+pub const ROW_PAGE_CAP: u64 = 1_000;
+
+/// The query string a row read takes: the shared vocabulary
+/// (`crate::query_string`) minus `select`, which is the REST provider's own
+/// shape and has no meaning for a grid that shows the table's own columns.
+fn row_read_params() -> Vec<QueryParam> {
+    vec![
+        QueryParam::new("order", ValueType::Text),
+        QueryParam::new("limit", ValueType::Int),
+        QueryParam::new("offset", ValueType::Int),
+        QueryParam::new("filter", ValueType::Text).map(),
+    ]
 }
 
 /// A `PathSpec` rooted at the admin API prefix.

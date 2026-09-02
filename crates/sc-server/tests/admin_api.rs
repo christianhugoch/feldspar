@@ -347,3 +347,142 @@ async fn full_admin_api_story() -> sc_error::Result<()> {
 
     Ok(())
 }
+
+/// The data grid's read: a page of rows, ordered, and narrowed by the same
+/// `column=op.value` filters an application's REST read takes.
+///
+/// The grid is a spreadsheet over a table of any size, so it never asks for the
+/// table — it asks for the rows under the viewport, in the order the header says,
+/// out of the population the filter row leaves. Two things here are worth an
+/// assertion rather than a reading of the code: that `limit`/`offset` slice the
+/// *ordered* population (a page of an unordered read is a different set of rows
+/// each time), and that `countRows` counts what `listRows` pages — the scrollbar
+/// is as long as that number, so a count that ignored the filters would leave
+/// the bottom of a filtered table empty.
+#[tokio::test]
+async fn rows_are_paged_ordered_and_filtered_by_the_query_string() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+
+    // A GET first: it is what mints the CSRF cookie the client echoes on every
+    // mutation after it, exactly as a browser loading the SPA would.
+    client.send("GET", "/api/auth/status", None).await;
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/first-user",
+            Some(json!({ "email": "admin@example.com", "password": "hunter2pass" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = client
+        .send("POST", "/api/tables", Some(json!({ "name": "note" })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    client
+        .send(
+            "POST",
+            "/api/tables/note/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
+    client
+        .send(
+            "POST",
+            "/api/tables/note/fields",
+            Some(json!({ "name": "title", "type": "text" })),
+        )
+        .await;
+    client
+        .send(
+            "POST",
+            "/api/tables/note/fields",
+            Some(json!({ "name": "pages", "type": "int" })),
+        )
+        .await;
+
+    // Twelve rows, inserted in an order that is not any of the orders asked for
+    // below, so an assertion about ordering cannot pass by accident.
+    for n in [7, 3, 11, 1, 9, 5, 12, 2, 8, 4, 10, 6] {
+        let (status, _) = client
+            .send(
+                "POST",
+                "/api/tables/note/rows",
+                Some(json!({ "title": format!("note {n:02}"), "pages": n })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // A page of the ordered population: rows 5..9 by `pages`.
+    let (status, body) = client
+        .send(
+            "GET",
+            "/api/tables/note/rows?order=pages.asc&limit=4&offset=4",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pages: Vec<i64> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["pages"].as_i64().unwrap())
+        .collect();
+    assert_eq!(pages, [5, 6, 7, 8]);
+
+    // The same page descending is the other end of the same order.
+    let (_, body) = client
+        .send(
+            "GET",
+            "/api/tables/note/rows?order=pages.desc&limit=4&offset=0",
+            None,
+        )
+        .await;
+    let pages: Vec<i64> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["pages"].as_i64().unwrap())
+        .collect();
+    assert_eq!(pages, [12, 11, 10, 9]);
+
+    // A filter row with two boxes typed in: a comparison and a pattern, ANDed.
+    let (status, body) = client
+        .send(
+            "GET",
+            "/api/tables/note/rows?pages=gte.9&title=ilike.%25note%25&order=pages.asc",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pages: Vec<i64> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["pages"].as_i64().unwrap())
+        .collect();
+    assert_eq!(pages, [9, 10, 11, 12]);
+
+    // …and the count is of that population, not of the table.
+    let (_, body) = client
+        .send(
+            "GET",
+            "/api/tables/note/rows/count?pages=gte.9&title=ilike.%25note%25",
+            None,
+        )
+        .await;
+    assert_eq!(body["count"], json!(4));
+    let (_, body) = client
+        .send("GET", "/api/tables/note/rows/count", None)
+        .await;
+    assert_eq!(body["count"], json!(12));
+
+    // A filter naming a column the table does not have is refused rather than
+    // ignored: a silently dropped filter answers with rows nobody asked for.
+    let (status, body) = client
+        .send("GET", "/api/tables/note/rows?nope=eq.1", None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    Ok(())
+}

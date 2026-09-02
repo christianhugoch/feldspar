@@ -762,15 +762,26 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     // --- row CRUD -----------------------------------------------------------
 
+    // A page of rows, filtered and ordered by the query string — the same
+    // vocabulary an application's REST read takes, parsed by the same code
+    // (`sc_api::query_string`). The admin grid sends `order`, `limit`, `offset`
+    // and one `column=op.value` pair per box its filter row has typed in.
     reg.register("listRows", {
         let catalog = catalog.clone();
         move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
+                let query =
+                    sc_api::query_string::row_query(&table, &ctx.query, sc_api::ROW_PAGE_CAP)?;
                 Ok(HandlerResponse::ok(
-                    rows::list_rows_ctx(&catalog, &table, Some(&admin_caller(ctx.user.as_ref())))
-                        .await?,
+                    rows::list_rows_query(
+                        &catalog,
+                        &table,
+                        &query,
+                        Some(&admin_caller(ctx.user.as_ref())),
+                    )
+                    .await?,
                 ))
             }
         }
@@ -782,9 +793,18 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let table = catalog.require(ctx.path_param("table")?)?;
-                let count =
-                    rows::count_rows(&catalog, &table, Some(&admin_caller(ctx.user.as_ref())))
-                        .await?;
+                // The count is of the rows the *same* filters leave: the grid
+                // sizes its scroller by this and pages through `listRows`, so a
+                // count that ignored the filter row would leave the last screen
+                // of a filtered table empty.
+                let filter = sc_api::query_string::filter_predicate(&table, &ctx.query)?;
+                let count = rows::count_rows_where(
+                    &catalog,
+                    &table,
+                    filter,
+                    Some(&admin_caller(ctx.user.as_ref())),
+                )
+                .await?;
                 Ok(HandlerResponse::ok(json!({ "count": count })))
             }
         }
