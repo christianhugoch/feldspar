@@ -1096,3 +1096,12 @@ div.navbar-brand > a:hover {
 .file-search-input {
   padding-left: 2.25rem;
 }
+
+/* The selection bar keeps its place in the layout when nothing is selected.
+   Hiding it by *removing* it means the first click on a file pushes the whole
+   listing down by the bar's height — out from under the cursor that just
+   clicked, so the next click lands on the wrong row. `visibility` (rather than
+   `opacity`) also takes its buttons out of the tab order while it is hidden. */
+.file-selection-bar-empty {
+  visibility: hidden;
+}

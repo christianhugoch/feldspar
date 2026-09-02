@@ -15,7 +15,10 @@ dialog per file. This rebuilds it as the thing everybody already knows how to us
   run, Ctrl-A takes everything on screen, Escape drops it. A badge above the listing says
   what is selected ("4 files selected") and carries the same three-dots menu a row carries,
   so an operation on four files is the operation on one, in the same place — a bulk delete
-  confirms once, naming everything it will remove. The arithmetic is `fileSelection.ts`
+  confirms once, naming everything it will remove. The bar is always in the layout and merely
+  *hidden* when nothing is selected — appearing on the first click would push every row down
+  by its own height, out from under the cursor that had just clicked one, so the next click
+  would land on the wrong file. The arithmetic is `fileSelection.ts`
   (with `fileSelection.test.ts`), not React: the two rules worth pinning down are that
   shift-click measures from the row picked *deliberately* — so shift-clicking twice resizes
   one run instead of leaving a trail — and that a selection is a set of paths that cannot

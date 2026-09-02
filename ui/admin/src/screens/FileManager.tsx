@@ -429,34 +429,44 @@ export function FileManager({
 
         {/* The badge the selection puts above the listing, carrying the same menu
             a row carries — so an operation on four files is the operation on one,
-            in the same place. */}
-        {selected.length > 0 && (
-          <div className="d-flex align-items-center gap-2 mb-2">
-            <StatusBadge tone="blue">
-              {selectionSummary(entries ?? [], selection.selected)}
-            </StatusBadge>
-            <EntryMenu
-              id="selection-menu"
-              label={`Actions for ${selected.length} selected`}
-              entries={selected}
-              busy={busy}
-              onOpen={openEntry}
-              onEdit={(entry) => void openEditor(entry)}
-              onDownload={() => void download(selected)}
-              onRename={rename}
-              onPermissions={(entry) => void openPermissions(entry)}
-              onDelete={() => removeSelected(selected)}
-            />
-            <Button
-              size="sm"
-              variant="link"
-              className="text-muted"
-              onClick={() => setSelection(NOTHING_SELECTED)}
-            >
-              Clear
-            </Button>
-          </div>
-        )}
+            in the same place.
+
+            It is always in the layout and merely *hidden* when nothing is
+            selected, rather than absent: appearing on the first click would push
+            every row down by its own height, out from under the cursor that had
+            just clicked one — so the next click lands on the wrong file.
+            `visibility` also takes it out of the tab order while it is hidden,
+            which `opacity` would not. */}
+        <div
+          className={`d-flex align-items-center gap-2 mb-2 file-selection-bar${
+            selected.length === 0 ? " file-selection-bar-empty" : ""
+          }`}
+          aria-hidden={selected.length === 0}
+        >
+          <StatusBadge tone="blue">
+            {selectionSummary(entries ?? [], selection.selected)}
+          </StatusBadge>
+          <EntryMenu
+            id="selection-menu"
+            label={`Actions for ${selected.length} selected`}
+            entries={selected}
+            busy={busy}
+            onOpen={openEntry}
+            onEdit={(entry) => void openEditor(entry)}
+            onDownload={() => void download(selected)}
+            onRename={rename}
+            onPermissions={(entry) => void openPermissions(entry)}
+            onDelete={() => removeSelected(selected)}
+          />
+          <Button
+            size="sm"
+            variant="link"
+            className="text-muted"
+            onClick={() => setSelection(NOTHING_SELECTED)}
+          >
+            Clear
+          </Button>
+        </div>
 
         {searched && (
           <div className="text-muted small mb-2">
@@ -675,7 +685,7 @@ function EntryMenu({
         )}
         <Dropdown.Divider />
         <Dropdown.Item className="text-danger" onClick={onDelete}>
-          {entries.length === 1 ? "Delete" : `Delete ${entries.length} items`}
+          {entries.length > 1 ? `Delete ${entries.length} items` : "Delete"}
         </Dropdown.Item>
       </Dropdown.Menu>
     </Dropdown>
