@@ -2,6 +2,30 @@
 
 Changes in reverse chronological order.
 
+## A leak check that fired on a database whose password is its own username
+
+CI's `test` job failed one assertion, in the db-connections admin API test:
+
+```
+the stored password must not appear anywhere in the listing
+```
+
+Nothing had leaked. The test serialised the whole `GET /api/db-connections` listing and
+searched it for the stored password — but the listing is *meant* to carry the connection's
+non-secret parts, and CI connects as a role called `sc_test` whose password is also
+`sc_test`. The row said its own username and the search found it there. It passed locally
+only because this machine's test environment uses peer authentication and has no password
+at all, so the check was skipped entirely.
+
+- **The scan now drops the fields that legitimately carry those values** (`name`,
+  `description`, `host`, `database`, `username`, `schema`, `file_store`, `file_path`) and
+  looks for the password in what is left. `password` itself still has to be the sentinel,
+  and `error` is still searched — a connection failure that echoes back the DSN is exactly
+  the leak this guards, and it is the one place the password could plausibly reappear.
+
+Reproduced locally by pointing the harness at a DSN whose user and password match
+(`DATABASE_URL=postgres://tomn:tomn@...`): the old assertion fails, the new one passes.
+
 ## One test binary per crate: CI runs out of disk before it runs out of patience
 
 CI's `test` job had started failing in the linker, on a message that names nothing

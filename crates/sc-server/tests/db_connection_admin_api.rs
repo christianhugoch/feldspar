@@ -252,11 +252,34 @@ async fn a_connections_tables_join_the_tables_list_and_say_where_they_are_from()
         assert_eq!(row["password"], json!(""));
     } else {
         assert_eq!(row["password"], json!(SENTINEL));
+        // "Anywhere" means anywhere the password has no business being — the
+        // non-secret parts are *meant* to come back, and a development database
+        // whose password happens to equal one of them (CI's role is `sc_test`
+        // with password `sc_test`) would otherwise fail this for saying its own
+        // username. Drop those, then look for the password in what is left,
+        // `error` included: a connection failure that echoes the DSN is exactly
+        // the leak this guards.
+        let mut scrubbed = listing.clone();
+        for row in scrubbed.as_array_mut().unwrap() {
+            let row = row.as_object_mut().unwrap();
+            for part in [
+                "name",
+                "description",
+                "host",
+                "database",
+                "username",
+                "schema",
+                "file_store",
+                "file_path",
+            ] {
+                row.remove(part);
+            }
+        }
         assert!(
-            !serde_json::to_string(&listing)
+            !serde_json::to_string(&scrubbed)
                 .unwrap()
                 .contains(&stored_password),
-            "the stored password must not appear anywhere in the listing"
+            "the stored password must not appear anywhere in the listing: {scrubbed}"
         );
     }
 
