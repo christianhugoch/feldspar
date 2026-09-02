@@ -4,11 +4,13 @@
 //! parsing the database connection ([`DbConfig`]), reading the per-environment
 //! configuration file (`sc-config-file`, re-exported here as [`config_file`]),
 //! parsing the `api` commands' flags
-//! ([`api`]) and standing up a connected [`Catalog`] ([`connect_catalog`]) —
+//! ([`api`]), the `get-cfg`/`set-cfg` commands' arguments ([`config`]) and
+//! standing up a connected [`Catalog`] ([`connect_catalog`]) —
 //! live here so integration tests can drive the same boot path the CLI uses.
 
 pub mod api;
 pub mod auth;
+pub mod config;
 pub mod db;
 
 /// The `feldspar.toml` reader. It lives in its own layer-0 crate because the

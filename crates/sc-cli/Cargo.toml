@@ -31,6 +31,10 @@ sc-agent.workspace = true
 # because how this process serves TLS is a stored setting rather than a flag
 # (§13.5).
 sc-config.workspace = true
+# The `FormField` vocabulary a configuration key is declared in: `get-cfg` and
+# `set-cfg` read the declaration to know what type a value typed at a terminal
+# has, and which keys are secrets to redact in a listing.
+sc-types.workspace = true
 # Name resolution for the whole binary. Depended on here and nowhere else: what
 # it exports is `__wrap_getaddrinfo`, which `build.rs` puts in front of glibc's
 # resolver at link time, and this dependency is what puts the rlib defining it on
@@ -58,7 +62,6 @@ sc-config-file.workspace = true
 # server, which needs an HTTP client; nothing in the command itself does any more.
 reqwest.workspace = true
 sc-test-harness.workspace = true
-sc-types.workspace = true
 axum.workspace = true
 tower.workspace = true
 serde_json.workspace = true

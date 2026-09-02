@@ -48,6 +48,8 @@ async fn run(args: &[String]) -> Result<()> {
         Some("serve") => serve_command(&args[1..]).await,
         Some("build-app") => build_app_command(&args[1..]).await,
         Some("api") => api_command(&args[1..]).await,
+        Some("get-cfg") => get_cfg_command(&args[1..]).await,
+        Some("set-cfg") => set_cfg_command(&args[1..]).await,
         Some("auth") => auth_command(&args[1..]).await,
         Some(other) => Err(sc_error::Error::config(format!(
             "unknown command `{other}`"
@@ -679,6 +681,165 @@ async fn remove_query_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `feldspar get-cfg [KEY] [database flags]` — the stored configuration values
+/// (§13.5).
+///
+/// With a key it prints that value and nothing else, so a script can capture it:
+/// `port=$(feldspar get-cfg https_port)`. With no key it prints every declared
+/// setting as `key=value`, one per line, which is the answer to "what is this
+/// installation actually configured to do" — the question that otherwise needs a
+/// browser and a session.
+///
+/// **What it prints is what the server acts on**: the stored value where there is
+/// one, the declared default where there is not — the same
+/// [`sc_config::config_value`] the boot path reads, so the two cannot disagree.
+/// A key with neither prints nothing, and says so on stderr rather than printing
+/// an empty line that a caller would have to tell apart from an empty value.
+///
+/// It prints **nothing else**: the SQL echo is turned off for this command, so a
+/// value can be captured out of it whatever Settings → Development says.
+///
+/// **Secrets.** A listing redacts them, because a listing is asked for by
+/// somebody who wants an overview and it ends up in scrollback, in a CI log and
+/// in a pasted issue. Naming the key prints it in full: that caller asked for
+/// that secret, and this command already holds the database, which is more
+/// authority than any of them buys.
+async fn get_cfg_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::config::parse_get(&rest)?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    // This command's stdout **is** the value, so nothing else may go there.
+    // The SQL echo is a stored setting meant for a *server's* stdout, which
+    // nobody captures an answer out of (see `sc-log`); leaving it on here would
+    // mean `port=$(feldspar get-cfg https_port)` picking up the select that
+    // found the port, because of a checkbox somebody ticked days ago in another
+    // process. It stays on for every other command, `set-cfg` included, where
+    // stdout is not an answer.
+    sc_log::set_log_sql(false);
+
+    let Some(key) = parsed.key else {
+        return print_all_config(&catalog).await;
+    };
+    // `config_value` refuses an undeclared key, naming the ones there are — the
+    // typo is fixed from the message rather than from a second command.
+    let value = sc_config::config_value(&catalog, &key).await?;
+    if value.is_null() {
+        eprintln!("feldspar: `{key}` is not set, and has no default");
+        return Ok(());
+    }
+    println!("{}", sc_cli::config::render(&value));
+    Ok(())
+}
+
+/// Print every declared key as `key=value`, secrets redacted.
+///
+/// Every *declared* key, not every stored one: a setting that is unset is still
+/// a setting this installation has, and leaving it out would make the listing
+/// double as a claim that the key does not exist. An unset key with no default
+/// prints as `key=` — present, plainly empty.
+///
+/// Keys stored under a name no declaration describes are reported on **stderr**
+/// afterwards. Nothing reads such a row, so it is not part of the answer; but it
+/// is a setting somebody believes is in force, which is worth a sentence.
+async fn print_all_config(catalog: &sc_catalog::Catalog) -> Result<()> {
+    let values = sc_config::all_config(catalog).await?;
+    for field in sc_config::config_spec()
+        .into_iter()
+        .chain(sc_config::internal_defs().iter().map(|d| d.field.clone()))
+    {
+        let key = field.name();
+        let line = match values.get(key) {
+            Some(value) if value.is_null() => String::new(),
+            Some(_) if field.secret => sc_types::SECRET_SENTINEL.to_owned(),
+            Some(value) => sc_cli::config::render_inline(value),
+            None => String::new(),
+        };
+        println!("{key}={line}");
+    }
+    for stray in sc_config::stray_config_keys(catalog).await? {
+        eprintln!(
+            "feldspar: `{stray}` is stored but is not a configuration key this \
+             version has, so nothing reads it"
+        );
+    }
+    Ok(())
+}
+
+/// `feldspar set-cfg KEY [VALUE] [database flags]` — write one configuration
+/// value.
+///
+/// The value comes from the argument when there is one and from **stdin** when
+/// there is not, which is how a certificate is set without quoting a PEM block
+/// into a shell:
+///
+/// ```text
+/// feldspar set-cfg ssl_certificate < fullchain.pem
+/// feldspar set-cfg https_port 8443
+/// ```
+///
+/// A terminal has only strings, so the *declaration* decides the type
+/// ([`sc_cli::config::value_for`]) and [`sc_config::set_config`] checks the
+/// result against that same declaration — the one check every writer goes
+/// through, so `https_port = "yes"` is refused here exactly as it is in the
+/// admin UI, and nothing is written.
+///
+/// It does not restart anything. A stored setting is read by the server at the
+/// point it needs it — the TLS settings at boot, the SMTP transport per message
+/// — so what a write takes effect on, and when, is the setting's own business
+/// and not this command's to guess at.
+async fn set_cfg_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::config::parse_set(&rest)?;
+
+    // The key is checked against the declarations *before* stdin is read: a typo
+    // should not leave the command sitting on a terminal waiting for a value
+    // nobody can store.
+    let field = sc_config::definition(&parsed.key).ok_or_else(|| {
+        sc_error::Error::invalid(format!(
+            "no configuration key `{}`; known keys are {}",
+            parsed.key,
+            sc_config::known_keys().join(", ")
+        ))
+    })?;
+
+    let raw = match parsed.value {
+        Some(value) => value,
+        None => {
+            let read = std::io::read_to_string(std::io::stdin()).map_err(|e| {
+                sc_error::Error::config(format!("reading the value from stdin: {e}"))
+            })?;
+            // One trailing newline is the pipe's, not the value's.
+            sc_cli::config::strip_final_newline(&read).to_owned()
+        }
+    };
+    let value = sc_cli::config::value_for(&field, &raw)?;
+    sc_cli::config::refuse_sentinel(&parsed.key, &value)?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    sc_config::set_config(&catalog, &parsed.key, value.clone()).await?;
+
+    // What was written, echoed back — but never a secret's value, which is the
+    // one thing a terminal should not be made to hold a copy of by a command
+    // that was given it on the way in.
+    eprintln!(
+        "feldspar: {} = {}",
+        parsed.key,
+        if field.secret {
+            sc_types::SECRET_SENTINEL.to_owned()
+        } else {
+            sc_cli::config::render_inline(&value)
+        }
+    );
+    Ok(())
+}
+
 /// `feldspar auth SUBCOMMAND …` — sessions for driving an application without a
 /// browser to sign in with.
 async fn auth_command(args: &[String]) -> Result<()> {
@@ -786,6 +947,8 @@ fn print_usage() {
     eprintln!("                        [--param name:type[,name:type…]]… --sql TEXT|@FILE");
     eprintln!("  feldspar api list-queries --app SUBDOMAIN [--api MOUNT]");
     eprintln!("  feldspar api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME");
+    eprintln!("  feldspar get-cfg [KEY] [database flags]");
+    eprintln!("  feldspar set-cfg KEY [VALUE] [database flags]   (no VALUE: read it from stdin)");
     eprintln!("  feldspar auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
     eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
     eprintln!();
@@ -820,6 +983,19 @@ fn print_usage() {
        query has a minimum role, and it is **admin** unless --min-role says
        otherwise: raw SQL does not go through the row layer, so ownership
        formulae do not filter what it returns.
+
+  get-cfg / set-cfg: the settings an admin edits in Settings, from a terminal.
+       They are rows in the primary database, so these commands need the database
+       and nothing else — no running server, no session. `get-cfg KEY` prints that
+       value alone, ready to capture (`port=$(feldspar get-cfg https_port)`);
+       `get-cfg` with no key prints every declared setting as `key=value`, one per
+       line, with secrets shown as the redaction the admin UI shows — name a
+       secret's key to see it in full. `set-cfg` takes the value from the command
+       line, or from stdin when there is none, which is how a multi-line PEM block
+       is set: `feldspar set-cfg ssl_certificate < fullchain.pem`. The value is
+       checked against the key's declared type before it is written, so
+       `set-cfg https_port yes` is a message rather than a stored string. Nothing
+       is restarted: when a setting takes effect is the setting's own business.
 
   auth token: mints a session on the *running* server and writes the cookies a
        browser would have got, so a script can screenshot the screens behind the

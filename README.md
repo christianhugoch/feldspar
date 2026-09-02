@@ -787,6 +787,46 @@ against a live deployment's database cannot disturb what that server is serving.
 > existing app, Next.js — [`docs/tutorial-code-framework.md`](docs/tutorial-code-framework.md)
 > covers the generic `code` framework, where you bring the project and state its paths.
 
+### Reading and setting configuration values
+
+```bash
+feldspar get-cfg [KEY] [database flags]
+feldspar set-cfg KEY [VALUE] [database flags]      # no VALUE: read it from stdin
+```
+
+The settings an admin edits under **Settings** — the TLS mode and certificate, the
+SMTP transport, the logging switches — are rows in the primary database, not a file.
+These two commands are the terminal's way in, and they need the database and nothing
+else: no running server, no session, no browser.
+
+```bash
+feldspar set-cfg smtp_host smtp.example.com
+feldspar set-cfg smtp_port 587
+feldspar set-cfg ssl_certificate < fullchain.pem     # multi-line values on stdin
+port=$(feldspar get-cfg https_port)                  # one value, ready to capture
+feldspar get-cfg                                     # every setting, key=value
+```
+
+- **The value's type comes from the key**, not from how it was typed: `8443` is a
+  number because `https_port` is declared one, and it is checked against that
+  declaration before anything is written — so `set-cfg https_port yes` is a message
+  and not a stored string. A yes/no setting takes `true`/`false`, and also the
+  `yes`/`no`, `on`/`off`, `1`/`0` a shell script tends to produce.
+- **Without a value, `set-cfg` reads stdin**, which is how a PEM block is set without
+  quoting a certificate into a shell. The one trailing newline a pipe adds is not
+  stored; everything inside the value is.
+- **`get-cfg KEY` prints the value and nothing else** — no quotes around a string, and
+  no SQL echo even when Settings → Development has it switched on — so it can be
+  captured. With no key it prints every declared setting as `key=value`, one line
+  each, showing what the server acts on: the stored value where there is one, the
+  declared default where there is not.
+- **Secrets are redacted in the listing** (`smtp_password=••••••••`), because a listing
+  ends up in scrollback and in CI logs. Naming the key prints it in full — that caller
+  asked for that value, and the command already holds the database.
+- **Nothing is restarted.** When a setting takes effect is the setting's own business:
+  the logging switches are immediate, the SMTP transport is read per message, and the
+  TLS settings are read at boot.
+
 ### Examples
 
 Local development, connecting with a URL and serving the pre-built bundle
