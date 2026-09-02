@@ -2,6 +2,84 @@
 
 Changes in reverse chronological order.
 
+## Embedding CPython: the spike, and the gate
+
+The Python code adapter opens with a phase that is allowed to say no. Nothing in
+the rest of that milestone is worth starting if CPython cannot live inside this
+process beside V8, and the risk is concentrated in four questions that a
+throwaway binary answers in a day. It said **go**, and `TODO.md`'s phase 0 now
+carries the measurements, the amendments they force on the specification above
+them, and the one decision they settle.
+
+The spike lives in `/home/tomn/spike-python/` — outside the repository, not a
+workspace member — as a `deno_core`-only control and the same source plus PyO3
+0.29 (`abi3-py311`), so every number below is a delta against **what the server
+already links** rather than against zero. `run-all.sh` reproduces all of it.
+
+- **The concurrency claim of §1 is right, and the control proves the
+  measurement.** Eight Python runs each making one 2 000 ms host call, with
+  `Python::detach` around the blocking wait, finish in **2 003 ms**. The same
+  eight with the GIL *held* take **16 013 ms**. A run parked in a host call
+  holds a thread and not the interpreter: eight short runs started beside the
+  parked one all finished at 92 ms while it waited out its two seconds. This was
+  the question that could have made the whole design worthless.
+- **CPython and V8 coexist with no accommodation.** Isolates before the
+  interpreter, isolates after it, and — the harder version — four threads
+  building and running isolates while four others run Python bodies: 2 530
+  isolates and 4 534 runs in three seconds, every result correct.
+- **PyO3 costs 7 crates, 3 seconds of clean build and 0.5 MB of stripped
+  binary.** For scale, the Deno milestone's phase 0 measured `deno_runtime` at
+  +263 crates and +4.5 minutes.
+- **Threads are cheap and the interpreter is small.** 6.5 MB for the
+  interpreter (a third of one V8 isolate), 2.5 MB for the standard library the
+  surface needs, and **34–42 KB per resident run** — so the whole default
+  `--python-max-inflight` budget of 32 is about a megabyte. `numpy` is 13.4 MB,
+  not the ~30 MB the specification asserted.
+- **`SetAsyncExc` stops a `while True: pass` in 5 ms** — and does not stop a
+  thread inside a C call, or one blocked in a host call, which is the amendment
+  below.
+- **The `ast` wrap keeps the author's line numbers exactly**, including inside a
+  nested `def`, and a cached code object is 35× cheaper than recompiling.
+
+Four things came back differently from how the specification wrote them, and
+phase 0 records each with the evidence:
+
+- **The `python` feature will be off by default in `sc-server`, for a stronger
+  reason than "the binary needs `libpython` at run time".** That is true — the
+  spike's binary fails at the dynamic linker, before `main`, on a host without
+  `libpython3.14.so.1.0`. But the binding constraint is that this project's
+  release artifact is a `+crt-static` static-PIE binary, and the Python link
+  **fails outright** under `+crt-static`: rustc selects Debian's non-PIC
+  `libpython3.14.a` and the relocations kill it. Even linked, a `+crt-static`
+  binary cannot `dlopen`, and every wheel with a C extension in it — `numpy`
+  above all — is a `dlopen`. So the shipped tarball carries no Python and a
+  Python-capable server is a separate dynamically-linked build. (Static linking
+  is not a flag either way: Debian's `libpython3.14.a` is both non-PIC and
+  incomplete — it holds `sha2module.o` but not the HACL primitives it calls — so
+  it would mean owning a CPython build.)
+- **`abi3` does deliver minor-version portability**, which is the good news in
+  that paragraph: the same source built against CPython 3.12 runs unmodified
+  against 3.13, tracebacks and concurrency measurements included. One
+  Python-capable build serves 3.11 and up; only the soname in `DT_NEEDED` has to
+  be satisfied.
+- **The timeout story needs one more instrument.** `SetAsyncExc` returns "one
+  thread affected" and then delivers nothing to a thread that never reaches a
+  bytecode boundary: a run blocked in an 8 s host call raised only when the call
+  returned, and `numpy.linalg.inv` on a 6000×6000 matrix was still running 30 s
+  later. So "the host refuses once the deadline has passed" has to cover the
+  call **already in flight**, not merely the next one. The interpreter and every
+  other run were unharmed throughout, which is the property that lets code
+  bodies and module calls share one interpreter.
+- **The ABI check survives with a different justification.** A version-tagged
+  wheel from the wrong Python is a clean `ImportError`, not a segfault, and a
+  pure-Python package silently works. What is actually dangerous is an untagged
+  or `abi3` extension: a probe built against 3.12's headers and named plain
+  `probe.so` loaded into the 3.14 interpreter without complaint and read a
+  `PyThreadState` field at the wrong offset — wrong memory, no error, and a
+  write through it would corrupt the interpreter. Relatedly, the embedded
+  interpreter inherits the *host's* `sys.path`, so `--python-dir` has to isolate
+  the environment rather than prepend to it.
+
 ## The table data editor is a spreadsheet
 
 `/#/tables/T/data` was a form above an HTML table of every row. That is fine for

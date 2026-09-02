@@ -604,36 +604,325 @@ Nothing in this list is worth starting if embedding CPython in this process is n
 three of the four risks are measurable in a day. A throwaway binary in the scratch directory, not
 a workspace member.
 
-- [ ] 0.1 PyO3 + `abi3-py311`, embedded, in a binary that also links V8 (`deno_core`) — the
+- [x] 0.1 PyO3 + `abi3-py311`, embedded, in a binary that also links V8 (`deno_core`) — the
       symbol-collision and static-TLS question, answered by building it rather than by reasoning
       about it. Record: clean build wall time, incremental link time, binary size delta, peak RSS
       of the link.
-- [ ] 0.2 **The concurrency claim of §1, measured rather than argued.** A Python function called
+- [x] 0.2 **The concurrency claim of §1, measured rather than argued.** A Python function called
       from a tokio worker, calling back into Rust with `Python::allow_threads` around a blocking
       wait: measure the round-trip cost of a trivial host call, then hold one run in a 2 s host
       call and confirm that eight other Python runs start, execute and finish while it waits.
       Record the wall time of eight concurrent 2 s "queries" — it should be ~2 s, not ~16 s. If it
       is ~16 s the whole design is wrong and the gate says so.
-- [ ] 0.2a The memory numbers behind "threads are cheap": RSS of the bare interpreter, RSS after
+- [x] 0.2a The memory numbers behind "threads are cheap": RSS of the bare interpreter, RSS after
       importing `numpy`, and the marginal RSS of 32 idle run threads. Recorded here, because the
       one-interpreter decision rests on them.
-- [ ] 0.3 `PyThreadState_SetAsyncExc` against `while True: pass`, and against
+- [x] 0.3 `PyThreadState_SetAsyncExc` against `while True: pass`, and against
       `numpy.linalg.inv` on a large matrix. Record which one stops, how fast, and what the thread
       does afterwards.
-- [ ] 0.4 A venv built by `python3 -m venv`, `numpy` and `markdown` pip-installed into it,
+- [x] 0.4 A venv built by `python3 -m venv`, `numpy` and `markdown` pip-installed into it,
       imported by the **embedded** interpreter through `sys.path`. Then the mismatch case
       deliberately: a 3.12 venv against a 3.11 embed, to confirm §9's check is needed and that the
       failure without it is as bad as claimed.
-- [ ] 0.5 `ast`-wrapping a body with `return` in it, and a traceback from a failure inside it —
+- [x] 0.5 `ast`-wrapping a body with `return` in it, and a traceback from a failure inside it —
       confirm the author's line numbers survive.
-- [ ] 0.5a What the linkage actually is (§7): whether the spike's binary depends on
+- [x] 0.5a What the linkage actually is (§7): whether the spike's binary depends on
       `libpython3.x.so`, what it does on a host without one (confirm it is an exec failure, not a
       runtime error), and what a static link plus a stdlib answer would cost. This is the input to
       the default-on question, and guessing it would be guessing about every deployment.
-- [ ] 0.6 **Gate.** Write the go/no-go here with the numbers beside it, and with the decision on
+- [x] 0.6 **Gate.** Write the go/no-go here with the numbers beside it, and with the decision on
       whether `sc-server` enables the `python` feature by default — a decision about deployments,
       since default-on makes `libpython` a requirement of running Saltcorn at all (§7). A "no", or
       a "yes, but out-of-process", is a legitimate outcome and this file records it either way.
+
+### What was built
+
+`/home/tomn/spike-python/` on this machine — outside the repository and not a workspace member.
+Everything in it is throwaway; `run-all.sh` reproduces every number below in one run and
+`transcript.txt` is the run the tables were read off.
+
+| | |
+|---|---|
+| `control/` | `deno_core` 0.408 and nothing else: what `sc-expr`'s `eval` feature already links, so every delta is against **what the server already pays** rather than against zero |
+| `spike/` | the same plus PyO3 0.29.2 (`abi3-py311`), embedded — one 700-line `main.rs` with a subcommand per bullet |
+| `spike-abi3/` | the same source built against uv's CPython **3.12**, to ask whether one `abi3` binary runs on another minor version |
+| `spike-static/` | the same source with `shared=false`, to ask what a static link costs |
+| `venv314/`, `venv312/` | `numpy` + `markdown` in a matched and a mismatched virtual environment |
+| `probe/` | a 20-line C extension built against 3.12's headers and given an **untagged** name, which is the shape §9's ABI check actually has to stop |
+
+The host seam is the real one in miniature: `__sc.host(ms)` releases the GIL with
+`Python::detach` (0.29's `allow_threads`), hands the work to a tokio runtime and blocks the run's
+thread on a channel until the answer comes back. A second entry point, `host_gil_held`, does
+exactly the same thing **without** releasing the GIL — so the concurrency measurement below is a
+comparison against a control rather than an assertion about one number.
+
+Machine: 8 cores, 30 GB, Debian-family, system CPython **3.14.4** (the `abi3-py311` floor built
+and ran against it unchanged, which is the first thing the floor had to prove).
+
+### 0.1 — CPython and V8 in one process
+
+No symbol collision, no static-TLS problem, nothing to work around. A V8 isolate is built and run
+**before** the interpreter exists, a second one **after**, and both answer correctly; a body then
+makes a host call through the seam. The harder version of the same question — four threads each
+building and running V8 isolates in a loop while four other threads run Python bodies that make
+host calls — ran for 3 s and produced **2 530 isolates and 4 534 Python runs, every result
+correct**, with no crash and no corruption.
+
+**The build cost is the headline of this bullet, because it is nothing.** Against the `deno_core`
+control, clean, `CARGO_INCREMENTAL=0`, release, under `scripts/cargo-guarded.sh`'s scope:
+
+| | crates in the lock file | clean build | peak toolchain RSS | relink after one edit | binary (stripped) |
+|---|---|---|---|---|---|
+| `deno_core` control | 191 | **26.3 s** | 792 MB | 0.52 s | 66.6 MB (**49.7 MB**) |
+| + PyO3, embedded | 198 | **29.3 s** | 788 MB | 1.15 s | 67.3 MB (**50.2 MB**) |
+| **delta** | **+7** | **+3.0 s** | **±0** | +0.6 s | **+0.7 MB (+0.5 MB)** |
+
+Seven crates and three seconds. For comparison the Deno milestone's phase 0 measured
+`deno_runtime` at **+263 crates and +4.5 minutes**. PyO3 is a thin binding over a library the
+system already has, and the cost of that library is not in the build — it is in §0.5a.
+
+**And what it costs a server that never runs Python**: the process starts with `libpython` mapped
+but uninitialised at **7.8 MB** RSS and 2.5 ms of exec. `Python::initialize()` is **~10 ms** and
+`import json, re, datetime, decimal, uuid, ast` another **~10 ms** — for scale, constructing one
+V8 isolate on this machine is **8.7 ms**. Lazy initialisation (phase 2.5) is therefore worth
+having but is not load-bearing; the interpreter is about as expensive to start as one of the
+isolates the server already starts.
+
+### 0.2 — The concurrency claim: confirmed, with the control to prove the measurement
+
+Eight runs, each one 2 000 ms host call:
+
+| | wall | slowest run |
+|---|---|---|
+| GIL released (`Python::detach` around the wait) | **2 003 ms** | 2 002 ms |
+| GIL **held** (the control) | **16 013 ms** | 16 013 ms |
+| serial, for reference | 16 000 ms | |
+
+**2.0 s, not 16 s.** §1's central claim is exactly right, and the control shows the harness is
+measuring the thing it says it is: with the GIL held the same eight runs take the full 16 s.
+
+The other shape §1 describes holds too. One run parked in a 2 000 ms host call, eight short runs
+started 50 ms later, each doing 20 000 iterations of real Python and then a host call: **the last
+short run finished at 92 ms and the parked one returned at 2 002 ms.** A run waiting on a query
+holds a thread and not the interpreter.
+
+**One trivial host call costs ~7.5–8.7 µs** round trip (GIL released, tokio spawn, channel,
+GIL reacquired), against 0.05 µs for a `len('x')`. That is the floor the plan lowering sits on
+and it is comfortably below the cost of the query it is standing in for; it is *not* below the
+cost of a chain method, which is why §1's "chain methods are pure and cheap — they build a plan
+and touch nothing" is a requirement rather than a nicety.
+
+**The CPU-bound half, which §1 promises to state plainly, is slightly worse than "they
+serialise".** One CPU-bound run is 342 ms; eight of them concurrently take 3 691 ms — **10.8×,
+where serial execution would be 8.0×**. The GIL hand-off adds ~35% on top of serialising. The
+documentation line beside the timeout should say *serialise, with contention on top*, not
+*serialise*.
+
+### 0.2a — The memory numbers behind "threads are cheap"
+
+Staged in one process, each line the cumulative RSS:
+
+| stage | RSS | marginal |
+|---|---|---|
+| process baseline (tokio only) | 8.4 MB | — |
+| + one V8 isolate | 26.8 MB | +18.4 MB |
+| + the CPython interpreter | 33.3 MB | **+6.5 MB** |
+| + `json`, `re`, `datetime`, `decimal`, `uuid`, `ast` | 35.8 MB | +2.5 MB |
+| + **32 resident runs** (threads attached, each blocked in a host call) | 37.1 MB | **+1.3 MB → ~42 KB per run** |
+| + `import numpy` | 50.2 MB | **+13.4 MB** |
+| + numpy actually used | 50.3 MB | +0.1 MB |
+
+At 128 resident runs the marginal cost is +4.3 MB, **~34 KB per run** — it gets cheaper per run,
+not more expensive. So `--python-max-inflight` at 32 costs about **1.3 MB**, and the interpreter
+that hosts them costs less than half of one V8 isolate.
+
+**One number in §1 should be corrected: `numpy` is 13.4 MB resident here, not "~30 MB".** The
+one-interpreter decision does not rest on it — it rests on the argument that a second interpreter
+buys an isolation CPython does not deliver — but the file should not carry a figure that is 2×
+the measurement.
+
+### 0.3 — What `SetAsyncExc` stops, and what it does not
+
+| the run | fired at | result |
+|---|---|---|
+| `while True: pass` | 500 ms | **stopped 5 ms after the fire** |
+| a pure-Python loop with arithmetic in it | 500 ms | **stopped 5 ms after the fire** |
+| blocked in a **host call**, GIL released | 500 ms | **not stopped.** The thread came back when the 8 s host call finished, and *then* raised |
+| `time.sleep(8)` | 500 ms | **not stopped.** Same: raised when the sleep returned, 7.5 s later |
+| `numpy.linalg.inv` on a 6000×6000 matrix | 1 500 ms | **not stopped, and not back 30 s later** — a quarantined thread, exactly as §4 predicts |
+
+`SetAsyncExc` returned 1 (one thread affected) in every case, including the ones it did not stop:
+the exception is *queued* on the thread state and delivered at the next bytecode boundary, which
+a thread inside a C call does not reach. The interpreter and every other run were unharmed
+throughout — the `time.sleep` case ran to completion while the abandoned `numpy` thread was still
+grinding, which is the property the whole design needs and the reason §1 can put code bodies and
+module calls on one interpreter.
+
+**This is the amendment §4 needs, and it is not cosmetic.** §4 orders its instruments as "the
+host refuses past the deadline" then "`SetAsyncExc`", and describes the first as refusing *the
+next* call. That is not sufficient: a body parked in a 5-minute `fetch` reaches no bytecode
+boundary, so neither instrument reaches it and the run is unstoppable until the transport gives
+up. Phase 1.6 must make the **pending** host call deadline-bounded — the blocking wait is on a
+channel this runtime owns, so it is a `recv_timeout` against the run's deadline plus a cancel of
+the work it is waiting on — and only then is `SetAsyncExc` the instrument for the pure-Python
+loop it actually handles.
+
+### 0.4 — A venv on the embedded interpreter's path, and the mismatch
+
+**Matched (3.14 venv, 3.14 embed): works, with nothing but a `sys.path` entry.** `numpy` 2.5.2
+and `markdown` 3.10.3 both import out of the venv's `site-packages` and run.
+
+**Mismatched (3.12 venv, 3.14 embed): not the failure §9 describes.** `markdown`, being pure
+Python, imports and works *silently*. `numpy` fails with a long but perfectly clear **ImportError**
+naming the incompatibility — because a version-tagged wheel is named
+`_multiarray_umath.cpython-312-x86_64-linux-gnu.so`, and the 3.14 interpreter's
+`EXTENSION_SUFFIXES` are `.cpython-314-…so .abi3.so .abi3-x86_64-linux-gnu.so .so`. There is no
+segfault, and there cannot be one for the ordinary tagged case.
+
+**The real hazard is the untagged one, and it is worse than a segfault because it is silent.** A
+C extension built against 3.12's headers and named plain `probe.so` — a name every interpreter's
+suffix list accepts — **loaded into the 3.14 interpreter without complaint** and read a
+`PyThreadState` field at 3.12's struct offset:
+
+```
+probe.info() = {'built_for': '3.12.14', 'running_on': '3.14.4 …',
+                'tstate.py_recursion_remaining': 0,   # 999 under the interpreter it was built for
+                'tstate.id': 1}
+```
+
+Wrong memory, no error, and a *write* through the same offset would corrupt the interpreter. So
+**§9's check stays, and its justification changes**: not "a C extension built for 3.12 imported
+into 3.11 is a segfault" — for tagged wheels it is a clean ImportError, and for pure-Python
+packages it silently works — but "an untagged or `abi3` extension will load and behave as
+undefined, and no error will name the cause". That is a better argument for the check than the
+one §9 makes, and the message should say so.
+
+**One thing §9 does not mention and phase 2.5 must do.** The embedded interpreter inherits the
+*host's* `sys.path`: `/usr/lib/python3.14`, `~/.local/lib/python3.14/site-packages` and
+`/usr/lib/python3/dist-packages` are all on it by default, and the spike imported the system's
+`numpy` 2.3.5 from `dist-packages` without being asked. `--python-dir` therefore has to
+**isolate** the environment (`PyConfig`'s `isolated` / `site_import`, or an explicit
+`module_search_paths`), not merely prepend to what is already there — otherwise what a body can
+import depends on what the operator happens to have `apt install`ed.
+
+### 0.5 — The `ast` wrap
+
+Everything §3 asks for, and the cache is worth what §3 says it is:
+
+```
+top-level return           -> {'total': 6}
+triple-quoted string       -> ['one', '  two', 'three']     (textual re-indentation would break this)
+SyntaxError                -> line 3 col 8: invalid syntax   (the author's own line and column)
+runtime error              -> ZeroDivisionError: division by zero
+                                  line 8, in __sc_body
+                                  line 5, in helper          (the author's own lines, exactly)
+compile 35 µs/body   vs   exec a cached code object 1 µs/body
+```
+
+Moving the parsed statements into an `ast.FunctionDef` and compiling **the AST** — never the
+text — leaves every line number where the author put it, including inside a nested `def`. 35× is
+what the per-content-key cache buys, which settles phase 1.3.
+
+**A detail phase 1.3 needs:** the frames carry the right *numbers* but no source *text*, because
+the body is not a file. `traceback` reads the line through `linecache`, so the runtime must
+register the body's source in `linecache.cache` under the same pseudo-filename it compiled with,
+or the rendered traceback is `line 7, in <body>` with a blank line beside it.
+
+### 0.5a — The linkage, and it is the whole of the default-on question
+
+**The binary depends on `libpython3.14.so.1.0` by name.** `abi3-py311` does not change this:
+`abi3` is an API contract, and on Linux the link is still to the version-specific soname, because
+the stable-ABI stub `libpython3.so` is not installed by default on this distribution — and where
+it does exist (uv's python-build-standalone ships one) it is a 20 KB forwarder whose own
+`DT_NEEDED` is `libpython3.12.so.1.0` again.
+
+**Without it, the process does not start.** Confirmed rather than assumed, in a mount namespace
+with the library replaced:
+
+```
+spike: error while loading shared libraries: …/libpython3.14.so.1.0: file too short
+```
+
+A dynamic-linker error before `main`, exactly as §7 predicts — and the `deno_core` control runs
+unaffected in the same namespace, so it is the Python link and nothing else.
+
+**`abi3` *does* deliver minor-version portability, and that is the one piece of good news here.**
+The same source built against CPython 3.12 (`spike-abi3`) runs unmodified against **3.13** — the
+ast wrap, the tracebacks and the full concurrency measurement all reproduce — with nothing
+changed but which `libpython` the loader finds. So one Python-capable build serves 3.11+; the
+only obstacle is the soname in `DT_NEEDED`, which an operator satisfies by having the matching
+`libpython` (or a symlink) present.
+
+**Static linking is not a flag, and on this distribution it is not possible at all.** Three
+findings, in the order they were hit:
+
+1. Debian's `/usr/lib/x86_64-linux-gnu/libpython3.14.a` is built **without `-fPIC`**, so it
+   cannot go into a PIE binary: `relocation R_X86_64_64 cannot be used against symbol
+   '_Py_M____hello__'`. There is a `libpython3.14-pic.a` beside it in the config directory, so
+   this one is surmountable.
+2. Both archives are **incomplete**: they contain `sha2module.o` but not the HACL primitives it
+   calls (`undefined symbol: _Py_LibHacl_Hacl_Hash_SHA2_digest_256`), because in a shared build
+   those live in the `lib-dynload` extension rather than in `libpython`. Debian ships no archive
+   that closes this. A static embed therefore means **building CPython from source**, not
+   passing a flag.
+3. And it would not help, because of the next paragraph.
+
+**The decisive fact, and it is not the one §7 anticipated.** This project's release artifact is a
+`+crt-static` static-PIE glibc binary — "one file, no shared-library dependencies, no
+interpreter", per `scripts/build-static.sh`. Building the spike with
+`RUSTFLAGS="-C target-feature=+crt-static"` **fails to link**: rustc selects the static
+`libpython3.14.a` automatically and the non-PIC relocations kill it. Even if it linked, a
+`+crt-static` binary cannot `dlopen`, and the embedded interpreter needs `dlopen` for every
+`lib-dynload` extension and for every wheel with a C extension in it — `numpy`, which is the
+headline case for this whole milestone, is a `.so`. **So the shipped static tarball cannot carry
+Python at any effort short of freezing a whole CPython into it.**
+
+What the two remaining escapes cost, for the record: shipping `libpython` beside the server is
+7.9 MB for the shared object plus **56 MB of standard library on disk** (42 MB excluding
+`test/`, `idlelib/` and `tkinter/`) under a `PYTHONHOME`; the out-of-process shape removes the
+linking question entirely and turns "is Python available" into "is `python3` on `PATH`".
+
+### Gate: **go, in-process** — with the `python` feature **off by default**, and four amendments
+
+The risk this phase existed to retire is retired, and by a wider margin than the list dared
+assume:
+
+- CPython and V8 coexist with no accommodation at all, including concurrently on separate threads.
+- **The concurrency claim is right: 2.0 s where the wrong answer would have been 16 s**, with a
+  GIL-held control at 16.0 s proving the measurement.
+- Threads are cheap — 34–42 KB per resident run, so the whole `--python-max-inflight` budget is
+  about a megabyte — and the interpreter is 6.5 MB, a third of one V8 isolate.
+- PyO3 costs **7 crates, 3 seconds of build and half a megabyte of binary**.
+- `SetAsyncExc` stops a `while True: pass` in 5 ms.
+- The `ast` wrap preserves the author's line numbers exactly.
+- One `abi3` build serves every CPython from 3.11 up.
+
+**Phases 1–8 proceed as written**, with these corrections:
+
+1. **`sc-server` does *not* enable `python` by default, and the reason is stronger than §7's.**
+   §7 argues from "a binary linked against `libpython3.x.so` fails to exec on a host that has no
+   such library", which is confirmed. But the binding constraint is that this project's shipped
+   artifact is `+crt-static` and **the Python link fails outright under it** (0.5a). Default-on
+   would not degrade the release build, it would break it. So: the feature is off, the shipped
+   tarball has no Python, and a Python-capable server is a **separate dynamically-linked build** —
+   which phase 2.5's `python` feature and phase 8's documentation must both say in those words.
+   `--python off|auto` keeps its meaning for that build. This is not a retreat to
+   out-of-process: everything above says in-process is the right shape; it is a statement about
+   which artifact carries it.
+2. **§4's instrument order is incomplete** (0.3). "The host refuses once the deadline has passed"
+   must cover the call that is **already in flight**, not only the next one, because
+   `SetAsyncExc` provably cannot reach a thread blocked in one. Phase 1.6 bounds the blocking
+   wait itself by the run's deadline.
+3. **§9's ABI check stays, with a different justification** (0.4). The tagged-wheel case is a
+   clean `ImportError`, not a segfault; the case that is genuinely dangerous is an untagged or
+   `abi3` extension, which loads and reads the wrong memory in silence. And `--python-dir` must
+   **isolate** `sys.path`, or the system's `dist-packages` are on it.
+4. **Two numbers in §1 are wrong and should be replaced by 0.2a's and 0.2's**: `numpy` is 13.4 MB
+   resident, not ~30 MB; and CPU-bound runs do not merely serialise, they serialise with ~35%
+   contention on top (10.8× for eight runs, against 8.0× serial).
+
+Phase 8 carries all four into `docs/TECHNICAL_DESIGN.md` §15 along with the rest of the
+specification.
 
 ## Phase 1 — The runtime (`sc-python`, behind a feature)
 
