@@ -1,6 +1,6 @@
-# Saltcorn v2 — Workflows
+# Saltcorn v2 — The Python code adapter
 
-Ordered, checkable task list for the eighteenth milestone after the MVP. Earlier lists are
+Ordered, checkable task list for the nineteenth milestone after the MVP. Earlier lists are
 archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
 [docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
 [docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
@@ -18,401 +18,796 @@ and indexes), [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email),
 [docs/TODO-post-mvp-13.md](./docs/TODO-post-mvp-13.md) (modules),
 [docs/TODO-post-mvp-14.md](./docs/TODO-post-mvp-14.md) (SQLite),
 [docs/TODO-post-mvp-15.md](./docs/TODO-post-mvp-15.md) (modules in-process),
-[docs/TODO-post-mvp-16.md](./docs/TODO-post-mvp-16.md) (table providers) and
-[docs/TODO-post-mvp-17.md](./docs/TODO-post-mvp-17.md) (writable table providers). Scope and
-rationale remain in [docs/GOALS.md](./docs/GOALS.md) and
-[docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) (**§10.3**, which this milestone
-rewrites).
+[docs/TODO-post-mvp-16.md](./docs/TODO-post-mvp-16.md) (table providers),
+[docs/TODO-post-mvp-17.md](./docs/TODO-post-mvp-17.md) (writable table providers) and
+[docs/TODO-post-mvp-18.md](./docs/TODO-post-mvp-18.md) (workflows). Scope and rationale remain
+in [docs/GOALS.md](./docs/GOALS.md) and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md)
+(**§15**, which this milestone rewrites).
 
-This is the milestone GOALS is most emphatic about:
+GOALS asks for a system that is polyglot, and names the mechanism:
 
-> ensure that the workflow engine matches modern workflow engines for durability and error
-> handling … workflow execution code is a mess in saltcorn v1. This needs to be much cleaner.
-> The number of built-in workflow actions should be minimal.
+> Code adapters: a central facility for code entities to use Javascript or Python. These need to
+> maintain an open interpreter that can be used to execute code. Within that interpreter, the
+> entities in the catalog need to be available. … Code in the guest language can provide any of
+> the other code entity types (except database driver).
 
-Everything the engine needs beneath it already exists. The event model, the trigger record, the
-registry, the fire path and its cascade bound landed with actions and triggers (§10.2); the
-`_sc_runs` table, the sans-IO steppable loop and the "persist after every step" discipline
-landed with agents (§11.4), with a `RunKind::Workflow` variant nothing has produced yet. What is
-missing is the body — a program rather than one action — the engine that advances it durably,
-and the screen an admin draws it on.
+The JavaScript half of that is built, and — this is the thing that makes this milestone small
+rather than enormous — it was built with this one in mind. The `db` chain a code body writes is
+JavaScript **in a prelude**, and what crosses into Rust is a language-neutral JSON **plan**
+resolved by one shared host (`sc_api::code_host::TableHost`). `fetch`, `fs`, `trigger` and
+`modfn` are four more traits of exactly that shape. So a Python adapter does not need a data
+layer, a query builder, an ownership rule or a row layer: it needs an **interpreter**, a
+**fluent surface written in Python**, and a way to block a thread on a host call. Everything
+below the plans is already there and is not touched.
 
-**Milestone definition of done:** an admin creates a trigger whose body is a **workflow**, draws
-it in the browser — steps as nodes, control flow as edges, each step's settings rendered from the
-action's own declaration — and saves. An insert on `orders` starts a **run**. The run branches on
-the order's value, loops over the order's lines, calls an agent, sends an email, and then
-**suspends** waiting for a human to approve it. The server is restarted while it waits. The
-approval arrives the next day through a form the admin UI renders from the step's own
-declaration, and the run carries on **on the version of the workflow it started with**, even
-though the workflow has been edited twice since. A step whose HTTP call fails is **retried three
-times with exponential backoff** and then jumps to the workflow's error-handling step, and the
-run's **trace** shows the context after every step, with the path taken highlighted on the same
-graph the admin drew.
+**Milestone definition of done:** an admin creates a trigger whose action is `run_python_code`,
+writes a body that reads rows with `db.orders.where(status="new").rows()`, calls an endpoint with
+`fetch`, writes a file into a store, runs another trigger, and returns a dict — and it fires on
+insert with its result on the trigger's run screen. A second admin `pip`-installs a Python plugin
+package from a directory on disk; it supplies an **action** (which appears in the trigger form
+with its own settings, rendered from the package's declaration), a **function** (callable from a
+formula and from a code body through `modfn`) and a **table provider** (a table backed by it
+lists and filters its rows), and its own settings form is filled in on the Modules tab. A body
+that runs `while True: pass` is stopped, reported as a timeout naming the trigger, and the server
+carries on serving every other request. A body that imports `numpy` gets `numpy`.
 
-**Not in this milestone:** the end-user-facing presentation of a running workflow — v1's
-`WorkflowRoom` chat view and its modal popups (§13's viewpatterns do not exist yet), so a
-suspended run is resumed from the admin UI and through the API. Nor the copilot trait that
-*builds* workflows (§11.6), nor a `sc-bus` crate: see decisions 5 and 12.
+**Not in this milestone:** Python **views**, **fieldviews**, **types**, **agent traits**, or
+anything else JavaScript modules do not supply either — the entity types are the ones §15.1
+already loads. Nor a language service for the Python editor (highlighting yes, completion no),
+nor Python in the file-store IDE, nor a `sc-code` crate that unifies the two adapters: the seam
+they share is `CodeCall`/`CodeHost` and it exists; a crate over both would be a third thing to
+keep in step.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ---
 
-## Decisions taken up front
+# The Python API
 
-1. **A workflow is a trigger body, not a new top-level entity.** GOALS says "every workflow is a
-   trigger", and §10.2 shaped the record for it: `action` + `configuration` become one variant of
-   a `TriggerBody`, and the other is `Workflow`. So a workflow inherits — with no new code — its
-   event, its `only_if`, its `min_role`, its enabled flag, its periodic timing, its exposure
-   through an application's `POST {mount}/actions/{name}`, and the admin's Run button. The
-   alternative (a `_sc_workflows` table with its own event model) would duplicate every one of
-   those and then have to keep the two in step.
-2. **Versions are rows, and a run pins one.** `_sc_workflow_versions` holds `(workflow_id,
-   version, steps, error_policy, created_at)` and is **append-only**: saving an edited workflow
-   mints `version + 1` rather than rewriting. A run stores the version it started on and loads
-   that one for its whole life, which is what GOALS' "a suspended run can finish with its version
-   of the workflow" means. Steps in the trigger's `attributes` would be smaller and would make
-   the sentence unimplementable.
-3. **Control flow is data, with a formula escape hatch — not a formula string.** v1 spells
-   `next_step` as a JavaScript expression over the step names, and it is expressive and
-   impossible to draw: a visual editor cannot round-trip an arbitrary expression into edges.
-   `Next` is therefore an enum — `Step(name)` · `Branch { arms: [(Formula, name)], otherwise }` ·
-   `Formula(f)` · `End` — where the first two are exactly what the canvas draws and edits, and
-   the third keeps v1's power for the case that needs it (drawn as one dashed edge to a
-   "computed" marker, editable as text, never silently rewritten). All four lower to one
-   question the engine asks: *given this context, which step is next?*
-4. **The run is a steppable machine, exactly as the agent loop is** (§11.2, decision 8). A
-   `WorkflowRun` value owns every decision and performs no IO; a driver asks it what to do,
-   does it, and feeds the outcome back. The state *is* what `_sc_runs.context` stores, so
-   resuming is a load rather than a reconstruction, and the engine's decisions are testable
-   synchronously with no database, no clock and no runtime. `_sc_runs` is one table for both
-   kinds, as `RunKind` already promised.
-5. **The queue is the runs table, claimed with a lease.** The design says the engine is driven by
-   "a durable queue on the bus", and `sc-bus` does not exist. Building one to hold a queue would
-   be building the wrong thing first: a durable queue's authority has to be the database anyway,
-   or a crashed node loses the runs it was holding. So the runnable set is a query —
-   `state IN (running, waiting) AND wake_at <= now AND (lease_until IS NULL OR lease_until <
-   now)` — and claiming a run is an `UPDATE … SET lease_until, claimed_by WHERE id = … AND
-   lease_until IS NOT DISTINCT FROM <what was read>`, which is correct for two nodes as well as
-   one. A `WorkQueue` seam over "wake me when something is runnable" is what the bus will
-   implement later (a `NOTIFY`, a Redis subscription); the polling implementation behind it is
-   twenty lines and is what ships. **Nothing above the seam knows which it is talking to.**
-6. **Each step runs in one transaction.** *(Revised 2026-08-26, when the deferred half below was
-   built — see §11.)* The rows a step writes, the writes of every trigger they cascade into, the
-   context, the cursor, the attempt count, the run's state, its `wake_at` and the step's trace row
-   commit **together, once**: a run is never observed half-advanced, and never advanced past a
-   step whose writes were lost. A step that fails is **rolled back** and its failure then recorded
-   on its own, because a record that rolled back with the failure would be no record at all.
-   What the transaction still cannot hold is what the database does not: an HTTP request, an
-   email, an LLM call, a write to another database connection or a module-served table, and the
-   runs (agent or workflow) a step starts — each of those is its own unit of durability. So a step
-   is **at least once**, a crash mid-step re-runs that step and no other, steps SHOULD be
-   idempotent, the admin UI says so beside any step that is not, and the remaining deviation is
-   recorded in §10.3 rather than left for someone to discover.
-7. **The built-in step set is five kinds**, and the count is a decision GOALS made for us
-   ("the number of built-in workflow actions should be minimal"). `Action` (run any registered
-   action, which is how `run_js_code`, `send_email`, the row actions and `run_agent` are all
-   already workflow steps), `Set` (write formulas into the context — the one thing steps need
-   that no action provides), `ForEach` (the explicit loop §10.3 asks for), `Wait` (a durable
-   timer) and `UserForm` (suspend for input). Everything else an admin could want is an action,
-   and adding an action is not adding a step kind.
-8. **The context is ambient, and it is spelled `context`.** A step's formulas — a `Set` value, a
-   `Branch` arm, a `ForEach`'s collection, an action's own settings — read the run context
-   through a new fieldless `Ambient::Context`, beside `row`, `old`, `user` and `payload`, in
-   scope only where there *is* a run. Not bare identifiers: those already mean "the row this
-   formula ranges over" (§10.1's `EVENT_SCOPE`), and quietly redefining them inside a workflow
-   would make one language mean two things. `ActionContext::context` — the seam §10.1 left for
-   exactly this — is what an action reads and writes, and its return value is stored under the
-   step's name.
-9. **The editor is React Flow (`@xyflow/react` 12, MIT), and we write no canvas.** It is the
-   library §12's crate tree already names for the drag-and-drop builder, it is the one every
-   comparable product uses, and the surveyed alternatives lose on the same axis: `rete.js` (a
-   node *engine* with its own execution model we would have to ignore), `litegraph.js` /
-   `Drawflow` (not React, imperative DOM), `elkjs`-plus-SVG by hand (a layout engine is not an
-   editor), and the JointJS/GoJS class (commercial). Layout is `@dagrejs/dagre` — synchronous,
-   tiny, and enough for a DAG with back-edges. The admin CSP already carries
-   `style-src 'unsafe-inline'` for Tabler, which is what React Flow's inline node transforms
-   need; **no other relaxation is acceptable**, and a test asserts the policy is unchanged.
-10. **The graph model is a tested TypeScript module, the canvas is a dumb renderer.** `steps ⇄
-    {nodes, edges}` in both directions, auto-layout, the validation the admin sees before saving,
-    and the "which node is this run on" projection all live in `.ts` files with `vitest` tests —
-    the repo's established split (`fieldForm.ts`, `constraintForm.ts`, `agentChat.ts`). The
-    `.tsx` renders what those return and holds no rules.
-11. **A workflow's steps validate on save and again on load**, in one function, exactly as a
-    trigger's configuration does: every `Next` names a step that exists, the start step exists,
-    every step is reachable, each action resolves and its configuration validates against its own
-    `config_spec_for` the trigger's channel, each formula parses and resolves in the scope that
-    step will have, and an error-policy handler names a real step. A workflow that fails leaves
-    the live set **with its reason kept**, stays listed and editable, and refuses to start a run.
-12. **Tests as before.** Rust for `sc-workflow` (the machine synchronously; the driver against a
-    fake clock, a fake queue and recording actions), real Postgres for storage, recovery and the
-    end-to-end path, `vitest` for the editor's model. No test sleeps for a timer: the clock is a
-    parameter, as the scheduler's already is.
+This is the surface an app builder writes, and it is specified before the phases because every
+implementation decision below serves it. It is **not** a transliteration of the JavaScript one:
+the plans are shared, the spelling is Python's.
 
----
+## 1. A code body
 
-## The plan
+The body of a `run_python_code` action. Statements, with `return` for the result — legal at the
+top level, because the body is compiled as the body of a function (specification §3).
 
-### 1. The model, the storage, and the trigger body
+```python
+overdue = (db.invoices
+    .where(paid=False, due__lt=payload["today"])
+    .select("id", "amount", "customerⱵemail", chased="remindersↃinvoice.length")
+    .order_by("due")
+    .limit(50)
+    .rows())
 
-- [x] 1.1 New crate `sc-workflow` at layer 7 (`sc-error`, `sc-types`, `sc-query`, `sc-catalog`,
-  `sc-expr`, `sc-action`). Workspace member, `clippy` clean, no new dependency beyond what the
-  workspace already builds.
-- [x] 1.2 The types of §10.3, revised by decisions 3 and 7: `Workflow { id, version, start,
-  steps, error_policy, trace }`, `Step { name, kind, next, error_policy, description }`,
-  `StepKind::{ Action { action, configuration }, Set { assignments }, ForEach { over, var, body },
-  Wait { until }, UserForm { fields, assign_to, min_role, timeout } }`, `Next`, `ErrorPolicy::{
-  Retry { max, backoff }, Handler { step }, Fail }` and `Backoff { initial_ms, factor, max_ms,
-  jitter }`. Serde round-trip with a test: the stored JSON is the API shape and the editor's
-  shape, and there is no third spelling.
-- [x] 1.3 `_sc_workflow_versions` (§9): `id` (uuid pk), `workflow` (the trigger's id),
-  `version` (int), `description`, `steps` (json), `attributes`, `created_at`, `created_by`.
-  `UNIQUE (workflow, version)`. Append-only — `save_workflow` reads the max version and inserts
-  the next; nothing updates a row. Strict reading, as `_sc_triggers` has.
-- [x] 1.4 `_sc_run_traces` (§9, created here rather than by the agent milestone that named it):
-  `id`, `run`, `seq`, `step`, `started_at`, `finished_at`, `attempt`, `outcome`
-  (`ok`|`error`|`suspended`), `error`, `context` (the context **after** the step), `attributes`.
-  Written only when the workflow's `trace` flag is on, in the same statement batch as the run's
-  advance.
-- [x] 1.5 `_sc_runs` gains, through the additive bootstrap: `wake_at` (when this run next wants
-  the engine — now, a retry's deadline, a `Wait`'s end, NULL for one that is waiting on a human),
-  `lease_until` and `claimed_by` (decision 5), and `subject_version` (the workflow version this
-  run is pinned to; NULL for an agent run). `RunState` gains `Waiting` beside `running`, `done`,
-  `failed` and `aborted`.
-- [x] 1.6 `TriggerBody` in `sc-action`: `Action { action, configuration }` | `Workflow`.
-  `_sc_triggers` gains a `body` text column as the discriminator and `action` becomes nullable;
-  reading is strict in both directions (a `workflow` body with an action name is as much an error
-  as an `action` body without one). Every existing caller of `trigger.action` moves to the enum —
-  validation, the live set, dispatch, the admin API, the app-exposed endpoints.
-- [x] 1.7 `WorkflowEngine`, a seam in `sc-action` that `TriggerDispatcher` holds and
-  `sc-workflow` implements — the `TableEvents` precedent, and for its reason: dispatch is layer 6
-  and the engine is layer 7, so the dispatcher cannot name it. One method: *start a run of this
-  workflow for this event, and answer what happened*. Absent (a build tool, a unit test) a
-  workflow trigger refuses by name rather than silently doing nothing.
-- [x] 1.8 `Ambient::Context` in `sc-expr` (decision 8): fieldless like `Payload`, declared by a
-  shape only where a run exists, so naming `context` in an ordinary trigger's `only_if` is an
-  unknown identifier rather than a null. `workflow_shape(catalog, channel)` in `sc-workflow`
-  extends `action_shape` with it, and is the *only* place a step's scope is decided.
+for inv in overdue:
+    db.reminders.insert(invoice=inv["id"], sent_to=inv["customerⱵemail"])
 
-### 2. The machine
+return {
+    "chased": len(overdue),
+    "owed": db.invoices.where(paid=False).sum("amount"),
+}
+```
 
-- [x] 2.1 `WorkflowRun`: the whole resumable state as one serialisable value — `context`, the
-  **frame stack** (a `ForEach` needs somewhere to keep its cursor and its collection, and nesting
-  means a stack rather than a field), the current step, the attempt count for it, the step budget
-  and the accumulated trace sequence. `Serialize`/`Deserialize` round-trip tested; this is what
-  `_sc_runs.context` holds.
-- [x] 2.2 `next_step()` → `Decision`: `RunAction { step, action, configuration }` ·
-  `Evaluate { formulas }` (a `Set`, a `Branch`, a `ForEach`'s collection — everything needing the
-  JS evaluator, which the machine does not hold) · `Suspend { until | awaiting_input }` ·
-  `Done { context }` · `Failed { step, error }`. Fed back through `step_succeeded(value)`,
-  `step_failed(error)`, `evaluated(values)` and `resumed(input)`.
-- [x] 2.3 The advance rules, each with a synchronous test: an action's return value is stored in
-  the context under the step's name (and a `Set`'s assignments merge into it); `Next` resolves
-  through all four variants; `End` and "no next" both finish; a `ForEach` pushes a frame, binds
-  the loop variable under `var`, and pops to its own `next` when the collection is exhausted;
-  an empty collection runs the body zero times; the step budget (default 1000, configurable per
-  workflow) ends a run as `MaxSteps`-like rather than looping forever.
-- [x] 2.4 The error rules, likewise: `Retry` counts attempts and asks for a `Suspend` until the
-  backoff deadline, then re-runs *the same step*; exhausting `max` falls through to the
-  workflow-level policy; `Handler` jumps to the named step with the error in the context under a
-  reserved key; `Fail` ends the run as failed with the reason. A per-step policy overrides the
-  workflow's, and "no per-step policy" is not "no policy".
+**Nothing is awaited.** A Python body is synchronous, top to bottom: a terminal returns its rows,
+not a future. That is the one deep difference from the JavaScript surface and it is deliberate —
+the overwhelming majority of Python an app builder will paste in (a `csv` walk, a `re` parse, a
+`statistics` call, a model's `predict`) is synchronous, and an `async def` body would tax every
+one of them for a concurrency Python authors do not expect at this size. The alternative — an
+`asyncio` surface where every terminal is awaited — buys many runs per thread and costs an `await`
+on every line of every body, and it is not needed for the thing it would be bought for: a
+synchronous body **already runs concurrently with every other one**, because the host call
+releases the GIL and the run is an ordinary Python thread (specification §1). What it costs is a
+thread per resident run instead of a pending promise, and threads are measured in phase 0.2a
+rather than assumed to be free.
 
-### 3. The driver: durability, recovery and the queue
+### What is in scope
 
-- [x] 3.1 `Driver::advance(run)`: load the pinned workflow version, ask the machine, do the IO
-  (run the action through `ActionRegistry` with an `ActionContext` carrying the run context, the
-  event, the evaluator, the mailer and the dispatcher; or evaluate the formulas), feed the
-  outcome back, and **write once** — context, cursor, attempt, state, `wake_at` and the trace row
-  in one batch (decision 6).
-- [x] 3.2 `WorkQueue` (decision 5) with the polling implementation: claim due runs under a lease,
-  renew it while a step is in flight, and release it on write. A lease that expires is a crashed
-  node's run, and the next poll picks it up — which is the recovery path, tested by writing a run
-  with a stale lease rather than by killing a process.
-- [x] 3.3 `WorkflowEngineTask`: one tokio task started by `serve` (and only by `serve`, as the
-  scheduler is), with a bounded number of runs in flight, the clock as a parameter, and a
-  shutdown that lets in-flight steps finish. Installed on the dispatcher as the `WorkflowEngine`
-  seam.
-- [x] 3.4 Starting a run: from an event (the payload, row, old and user land in the run's own
-  event record so a resumed run still has them), from the admin's Run button, from the scheduler,
-  and from an application's exposed endpoint. The response is the run id and its state — a
-  workflow body does not return a value at the end of `run`, it suspends (§10.2), and the caller
-  gets something addressable rather than a wait.
-- [x] 3.5 Cascade and authority: a step's writes carry the run's chain (the trigger's name plus
-  the step's), so `MAX_DEPTH` bounds a workflow that writes a row that starts a workflow exactly
-  as it bounds actions today; and a step runs with the authority §10.1 gives an action — admin,
-  carrying the event's user.
-- [x] 3.6 Failures reach the error log (§16) and the run's `error` column, with the step named.
-  A run that fails is a record, not a lost report.
+`row`, `old`, `user`, `payload` — the same rule the JavaScript body and the formula scope follow:
+**presence is scope**. `row` and `old` exist exactly where the event has rows, so naming `row` in
+a `login` trigger's body is a `NameError` rather than a silent `None`; `old` on an insert is in
+scope *and* `None`; `user` is the caller's fields as a `dict`, or `None`. `payload` is what a
+directly-run or scheduled trigger was called with. `context` is bound when the body is a
+**workflow step**, and not otherwise.
 
-### 4. Suspension: waiting for a time, and waiting for a person
+And five host surfaces, each bound only where this server has one, so naming `fs` on a server
+with no file stores is a `NameError` naming it rather than a call that fails later: `db`,
+`fetch`, `fs`, `trigger`, `modfn`. They are injected into the body's globals; `import saltcorn`
+also works and is what module code uses (§4).
 
-- [x] 4.1 `Wait { until }`: a formula yielding a duration or an instant; the run's `wake_at` is
-  written and the run leaves the queue's reach until then. Restart-safe by construction, and
-  tested by moving the clock rather than by waiting.
-- [x] 4.2 `UserForm { fields, assign_to, min_role, timeout }`: the step declares `FormField`s —
-  the same "settings as data" vocabulary everything else uses — and the run suspends with
-  `wake_at` NULL and the pending form recorded on the run. `resume_run(id, values)` validates the
-  values against the declaration (`validate_attrs`), merges them into the context under
-  `assign_to`, and hands the run back to the queue. A `timeout` sets `wake_at` so an abandoned
-  approval fails or branches instead of waiting forever.
-- [x] 4.3 Who may resume: the run's `min_role` floor, defaulting to admin, checked in the API
-  layer — the same rule and the same default a trigger's exposure has.
-- [x] 4.4 `cancel_run` (a running or waiting run becomes `aborted` with a reason) and
-  `retry_run` (a failed run resumes at the step that failed, attempt count reset) — the two
-  operations an admin looking at a stuck run actually needs.
+JSON in, JSON out: an object is a `dict`, an array a `list`, `null` is `None`. A date is an ISO
+string, as it is in JavaScript, because that is what the row layer put on the wire.
 
-### 5. The admin API
+### `db` — the tables
 
-- [x] 5.1 `getWorkflow` — the current version's steps, the version number, the validation issues,
-  and the version history (number, when, who). `saveWorkflow` — steps in, a new version out,
-  refusing an invalid one with the message the editor shows in place. `revertWorkflow` — mint a
-  new version whose steps are an old one's, because rewriting history is what append-only says
-  no to.
-- [x] 5.2 `listWorkflowRuns` (by workflow, filterable by state, newest first, paged) reusing the
-  run summary schema the agent milestone defined, plus `subject_version`, the current step and
-  `wake_at`. `getRun` grows the workflow half: the trace rows, the pending form and the pinned
-  version.
-- [x] 5.3 `resumeRun`, `cancelRun`, `retryRun` — §4's three, typed, admin-authenticated, each
-  answering the run's new state.
-- [x] 5.4 `listActions` already declares every action's `config_spec` and is what the step
-  palette and the step inspector render; the one addition is which actions are *usable as a
-  workflow step* on a channel-less run, so the palette does not offer a step whose configuration
-  cannot be filled in.
-- [x] 5.5 The trigger endpoints carry `TriggerBody`: creating a trigger with a workflow body
-  creates version 1 (an empty workflow with one start step, so a new workflow opens on a canvas
-  rather than on an error), and `runTrigger` on one answers a run id.
+`db.invoices` is a table; `db.table("customer orders")` is the same thing for a name that is not
+an identifier. Chain methods are **pure and cheap** — they build a plan and touch nothing — and
+terminals execute.
 
-### 6. The visual editor
+| chain | meaning |
+| --- | --- |
+| `.where(**kwargs)` | `field=value`, or `field__op=value` where `op` is `eq ne gt gte lt lte in nin like ilike is_null`. Several kwargs, and several `.where()` calls, are ANDed |
+| `.where({...})` | the object DSL every other surface speaks, including `and` / `or` / `not` — or `sc.or_(a, b)` / `sc.not_(a)` for the same thing spelled out |
+| `.where("paid == false")` | a **formula** in this system's one expression language, for what the DSL cannot say |
+| `.select(*cols, **aliased)` | a column, a `Ⱶ`-path, or `alias="formula"` as a keyword |
+| `.order_by(field, "desc")` | ascending unless told otherwise |
+| `.group_by(*fields)` · `.aggregate(**spec)` · `.having(...)` | `.aggregate(total="sum(amount)")` |
+| `.limit(n)` · `.offset(n)` | |
+| `.as_user()` · `.as_admin()` | whose authority this runs under (§5 of the JS surface, unchanged) |
 
-- [x] 6.1 `@xyflow/react` and `@dagrejs/dagre` added to `ui/admin`; the vendored CSS imported
-  through the bundler (no CDN, no `@import` — the admin theme test's rule); a test asserting the
-  admin CSP is unchanged by their arrival.
-- [x] 6.2 `workflowGraph.ts` (decision 10): `stepsToGraph(steps)` → nodes and edges, with a
-  branch's arms as labelled edges and a `Next::Formula` as one dashed edge to a computed marker;
-  `graphToSteps(nodes, edges)` back again, preserving everything the canvas does not model
-  (descriptions, per-step error policies, formula text); `layout(nodes, edges)` over dagre; and
-  `validate(steps)` — decision 11's rules, client-side, for the message that appears while the
-  admin is still looking at the canvas. `vitest` for each, including a round-trip property over a
-  workflow using every step kind.
-- [x] 6.3 `WorkflowEditor.tsx`: the canvas with one node type per step kind (its own icon and
-  colour, the step's name, a one-line summary of what it is configured to do), edges drawn and
-  deleted by dragging, a palette to drop a new step, undo/redo, auto-layout on demand, and a
-  save that mints a version. Deleting a step that others point at is refused with their names,
-  not silently repointed.
-- [x] 6.4 The inspector: the selected step's name, description, `Next` (a picker per branch arm
-  with the formula beside it), its error policy, and — for an `Action` step — the action picker
-  and `SettingsFields` over that action's `config_spec`, which is the same component the trigger
-  form uses and is why a plugin's action gets a working step form with no change to this file.
-  `Set`, `ForEach`, `Wait` and `UserForm` each get their own small editor; `UserForm`'s is a
-  repeated form of `FormField` declarations.
-- [x] 6.5 The trigger form gains "Workflow" beside the actions, and saving one lands on the
-  editor. The triggers list shows a workflow's step count and its version, and links to its runs.
-- [x] 6.6 `WorkflowRuns.tsx` and `RunDetail.tsx`: the run list with state, current step, when it
-  will wake and who started it; the detail showing the trace as a timeline (step, attempt,
-  duration, outcome, the context after it, with the change from the step before highlighted) and
-  **the same canvas in read-only mode** with the path taken drawn on it and the current step
-  marked — the reuse decision 10's split is what makes cheap.
-- [x] 6.7 A suspended run's pending form, rendered from its declaration by `SettingsFields`, with
-  resume, cancel and (on a failed run) retry.
+| terminal | answers |
+| --- | --- |
+| `.rows()` | `list[dict]` |
+| `.iter(batch=200)` | a **generator** of rows, one host call per batch. `for row in db.books.where(...)` iterates the query itself, which is the same thing |
+| `.first()` · `.get(pk)` | `dict` or `None` |
+| `.exists()` | `bool` |
+| `.count()` · `.sum(f)` · `.avg(f)` · `.min(f)` · `.max(f)` | one value |
+| `.insert(**values)` / `.insert({...})` / `.insert([{...}, ...])` | the new row's key, or the keys |
+| `.update(**values)` | rows changed — **refused without a `.where()`** |
+| `.delete()` | rows deleted — refused without a `.where()` |
 
-### 7. Tests
+A row is a plain `dict`, not a model object, and that is a decision rather than an omission: a
+`dict` is what `json.dumps`, `csv.DictWriter`, `pandas.DataFrame` and `**kwargs` all already take,
+and a wrapper would have to be unwrapped at every one of those boundaries.
 
-- [x] 7.1 `sc-workflow` unit tests: the machine synchronously (§2's rules, one test each), the
-  serde round-trip, and validation's refusals by message.
-- [x] 7.2 The driver against a fake clock, a recording action registry and an in-memory queue:
-  retries with backoff, the handler jump, the budget, a `ForEach` over a hundred items, and a
-  step that fails on its first attempt and succeeds on its second.
-- [x] 7.3 Real Postgres: version pinning (edit the workflow twice while a run is suspended; the
-  run finishes on version 1), recovery (a run row with an expired lease is picked up and finishes
-  correctly, and its step runs **once more**, not twice from the start), the append-only
-  guarantee, and the trace rows.
-- [x] 7.4 An end-to-end integration test over HTTP: create the trigger, save the workflow, insert
-  a row, watch the run suspend, resume it with a form value, and read the finished context and
-  its trace — the milestone's definition of done, minus the browser.
-- [x] 7.5 `vitest` for `workflowGraph.ts` and the run-path projection.
-- [x] 7.6 A test that the depth bound still holds when the cascade goes through a workflow.
+The body's own SQL is `db.sql("select … where pages > $1", [200])`, with
+`db.sql(…, as_user=True)` or `db.as_user().sql(…)` for the delegated form. Same admission and
+same consequences as the JavaScript one: the text is the author's and runs as written, the values
+are binds and never part of it, no ownership formula filters it, and a write inside one raises no
+table event.
 
-### 8. Documentation
+### `fetch` — one HTTP request
 
-- [x] 8.1 `docs/tutorial-workflows.md`: build the order-approval workflow of the definition of
-  done from an empty canvas, including what to do when a step is not idempotent.
-- [x] 8.2 §10.3 of `docs/TECHNICAL_DESIGN.md` rewritten to what was built — decision 3's `Next`,
-  decision 5's queue and its `WorkQueue` seam, decision 6's honest reading of the transaction
-  guarantee, and the step set with the reason it is five.
-- [x] 8.3 The CHANGELOG entry, and the crate tree in §2 (`sc-workflow` loses its "planned"
-  status; `ui/admin` gains React Flow).
+Shaped like `requests`, because that is the Python every author already knows:
+
+```python
+res = fetch("https://api.example.com/rates",
+            headers={"authorization": f"Bearer {payload['token']}"})
+if not res.ok:
+    raise RuntimeError(f"rates: {res.status}")
+usd = res.json()["usd"]
+db.invoices.where(id=row["id"]).update(rate=usd)
+```
+
+`fetch(url, method="GET", *, headers=None, json=None, data=None, timeout=None)`; `json=` sends an
+object as JSON and sets the content type, `data=` sends a `str` or `bytes` as they are. The
+response has `.ok`, `.status`, `.status_text`, `.url`, `.redirected`, `.headers` (case-insensitive),
+`.text` and `.content` as **properties**, `.json()` as a method, and `.raise_for_status()`. A
+status the endpoint did not like is not an exception — `res.ok` is `False` — and only a transport
+failure raises (`saltcorn.FetchError`). No streaming: the seam carries one value.
+
+### `fs` — the file stores
+
+`fs("uploads")` is a store, `.open(path)` a file reference (no I/O, and the path need not exist),
+`.dir(path)` a directory. The vocabulary is `pathlib`'s where `pathlib` has one:
+
+```python
+f = fs("uploads").open("notes/day.txt")
+if f.exists():
+    lines = f.read_text().split("\n")
+    fs("uploads").open("reports/summary.json").write({"lines": len(lines)})
+```
+
+File: `read_text()`, `read_json()`, `read_bytes()`, `write(data)`, `create(data)`, `exists()`,
+`stat()`, `delete()`, `move_to(dest)`, `copy_to(dest)`, `meta()`, `set_meta(**meta)`.
+Directory: `file(name)`, `dir(name)`, `list()` (also `iterdir()`), `create()`, `exists()`,
+`delete()`, `meta()`, `set_meta(**meta)`. `fs(name).as_user()` delegates to the event's caller,
+where §14.1's path-cumulative rule decides. `write` takes a `str`, `bytes`, a fetch `Response`, or
+another file (copied host-side, so the bytes never enter the interpreter); anything else is stored
+as JSON.
+
+### `trigger` — this server's other triggers
+
+```python
+archived = trigger("archive_done").run(before=payload["today"])
+trigger("reindex").run()
+trigger("send_invoice").as_user().run({"id": row["id"]})
+```
+
+`run(**kwargs)` and `run(dict)` are the same call. It runs the dispatcher's trigger — the
+`only_if` runs, `None` comes back when it declines, and the **cascade bound** counts this run, so
+a body that runs the trigger it is itself the action of stops at `MAX_DEPTH` with the chain named.
+
+### `modfn` — the functions this server's modules supply
+
+```python
+html = modfn.md_to_html(row["notes"])
+lat = modfn("@saltcorn/nominatim-geocode").geocode_lat({"city": row["city"]})
+```
+
+Synchronous here even where v1 made them `async`, because everything in this surface is. A name
+only one module supplies may be reached the short way; the qualified form always works. Both
+JavaScript and Python modules answer here (specification §8).
+
+### Errors, and the result
+
+```
+saltcorn.SaltcornError(Exception)
+├── DbError · FetchError · FileError · TriggerError · ModuleError
+saltcorn.Timeout(BaseException)
+```
+
+A host refusal is an ordinary catchable exception at the call site — a delegated write the
+ownership rule refused, a missing file, a trigger that failed — so a body may try and fall back.
+`Timeout` derives from `BaseException` on purpose: a bare `except Exception:` in somebody's retry
+loop must not swallow the run's deadline.
+
+The returned value must be JSON-expressible. `datetime`, `date`, `time`, `Decimal` and `UUID` are
+converted (ISO strings, numbers, strings); anything else that is not JSON-native is an error that
+**names the type and the path to it** rather than a `null` in somebody's workflow context.
+
+### What a body may import
+
+An allow-list: the standard library minus the modules that reach the process, the network and the
+disk (`subprocess`, `socket`, `ctypes`, `multiprocessing`, `signal`, `urllib.request`, `http`,
+`shutil`, `pty`, `importlib.util`'s loaders …), plus **every package installed in this server's
+Python environment** — so `numpy`, `pandas`, `httpx`-as-a-dependency-of-something and a plugin's
+own library are all importable. `os` is allowed for `os.path` and `os.environ` is not readable.
+
+This is **hygiene, not privilege**, and it is stated as such wherever it is documented:
+`builtins.open` exists, and so does `().__class__.__mro__`. A determined body escapes the gate.
+What the gate buys is that `import subprocess` is a mistake shaped like an `ImportError` on the
+line that made it — and the real bound is the same one `db.sql` and installing a module already
+have: authoring a trigger body is an administrator's capability.
+
+## 2. A plugin module
+
+A Python plugin is an ordinary Python package — `pip`-installable from PyPI, or a directory on
+this server's disk. It declares what it supplies with decorators, and it declares its settings in
+**this system's** field vocabulary, not v1's:
+
+```python
+import saltcorn as sc
+
+sc.settings(
+    sc.Field.string("api_key", label="API key", secret=True, required=True),
+    sc.Field.string("region", options=["eu", "us"], default="eu"),
+)
+
+@sc.on_load
+def load(configuration):
+    """Called at load and after every configuration change. Build what the
+    actions close over here — a client, a model, a connection."""
+    global client
+    client = Scorer(configuration["api_key"], region=configuration["region"])
+
+@sc.action(description="Score a lead",
+           config=[sc.Field.string("model", label="Model", required=True)])
+def score_lead(row, config, user):
+    score = client.score(row["email"], model=config["model"])
+    db.leads.where(id=row["id"]).update(score=score)
+    return {"score": score}
+
+@sc.function(description="Markdown to HTML")
+def md_to_html(text: str) -> str:
+    return markdown.markdown(text)
+
+@sc.table_provider("CSV file", config=[sc.Field.string("path", required=True)])
+class CsvTable:
+    def fields(self, configuration):
+        return [sc.Field.string("name"), sc.Field.int("qty")]
+
+    def rows(self, configuration, where=None, options=None):
+        with open(configuration["path"]) as fh:
+            return list(csv.DictReader(fh))
+
+    # Optional. Their *presence* is what makes a table backed by this writable,
+    # which is v1's rule too.
+    def insert_row(self, configuration, record): ...
+    def update_row(self, configuration, record, id): ...
+    def delete_rows(self, configuration, where): ...
+```
+
+**An action asks for what it wants.** The host inspects the signature and passes only the
+parameters it declares, from: `row`, `old`, `table`, `user`, `payload`, `config` (this action's
+own configured settings), `configuration` (the module's), `trigger`, `mode`. `**kwargs` gets them
+all. This is the one place the Python plugin API is *better* than the JavaScript one rather than
+merely different, and it is free: Python has `inspect.signature` and JavaScript does not.
+
+**Module code gets the real `db`.** `sc.db`, `sc.fs`, `sc.fetch`, `sc.trigger` are the same five
+surfaces a code body has, bound for the duration of a call and raising outside one ("`db` is
+available while an action is running"). This is where the Python adapter overtakes the JavaScript
+module tier: §15.1's `Table`/`File`/`User` stubs exist because v1's API is v1's, while a Python
+plugin has no v1 to be compatible with — so it is handed the plans directly, with the same
+budgets and the same authority rules as a code body.
+
+**Configuration** is a `dict`, redacted on the way out and merged back on the way in wherever a
+field says `secret=True`, exactly as a module's configuration already is.
+
+`sc.Field` is a thin constructor over `FormField` (§6.2): `string`, `int`, `float`, `bool`,
+`date`, `json`, with `label=`, `required=`, `default=`, `options=`, `secret=`, `multiline=`. What
+an admin sees is rendered by the same trigger and settings forms that render every other
+configurable thing, which is why no screen needs to learn what a Python module is.
 
 ---
 
-## Found while documenting, and fixed
+# The specification
 
-- [x] 9.1 **An action step's settings read `context`** — decision 8's rule, now whole. The
-  scope is decided by the caller and handed to the action on both sides of the seam:
-  `ConfigCheck::shape` for the save-time check (`action_shape` for a trigger,
-  `sc_action::step_shape` — the same plus the ambient `context` — for a step), and
-  `ActionContext::with_run_context` / `shape` / `bindings` at run time. `sc-workflow`'s
-  `workflow_shape` *is* `step_shape` rather than a second implementation. Every action that
-  evaluates a setting goes through those calls (`rows_scope`'s three, `send_email` and `fetch`
-  through `render_event_template`, `run_agent` through `event_formula_value`, `run_js_code`,
-  whose body is bound `context` as an object). Presence is scope on both sides, so the same
-  action outside a workflow still gets *unknown identifier `context`*. Pinned by
-  `a_step_of_a_run_reads_the_context_and_a_trigger_body_does_not` and
-  `an_action_steps_settings_read_the_run_context_and_the_tutorial_says_so`; §10.3, §10.1, the
-  tutorial, the step inspector's hint and the code editor's declarations changed with it.
-- [x] 9.2 **Each iteration of a loop is its own advance.** `Driver::advance_on` and `stop_at`
-  compare the step *entry* (`steps_taken`) rather than its name, so a `Set`'s assignments are
-  still one step and one write while a `ForEach` with a one-step body gets one write and one
-  trace row per item. `each_iteration_of_a_one_step_loop_body_is_its_own_advance` drives a
-  hundred-item loop one advance at a time.
+### 1. **One** interpreter, Python threads inside it, and the GIL — stated plainly
 
-## 11. Each step in its own transaction
+**There is one CPython interpreter in the process**, and everything Python runs in it: every
+`run_python_code` body, every plugin module's action, function and table provider. Not one per
+language feature, not one per module, not a pool of them. A second interpreter would be a second
+copy of every imported package (`numpy` alone is ~30 MB resident) for an isolation CPython does
+not actually deliver, and §11's subinterpreters are the only version of "more than one" worth
+having later.
 
-Decision 6's deferred half, built after the milestone because the requirement is not negotiable:
-a step's writes and its advance are one commit or nothing.
+**Concurrency inside it is Python threads, and a blocked host call does not block anything.**
+This is the point that has to be exactly right, because the wrong summary of the GIL — "Python is
+single-threaded, so a database call queues every other action behind it" — would make this design
+worthless, and it is not what happens:
 
-- [x] 11.1 `sc_catalog::SharedTx`: one transaction handle several writers hold at once — an
-  `Arc` over an async mutex, cloned into every frame that might write, begun **on its first
-  statement** so a step that only calls an HTTP endpoint holds nothing while it waits. It serves
-  one database (`serves`), so a write to a secondary connection or a module-served table takes
-  the pooled path instead of being sent somewhere it does not belong.
-- [x] 11.2 The caller travels with the **statement**, not the transaction: `SharedTx::run`
-  re-applies the caller GUCs whenever the writer changes and clears them (to `''`, which both
-  policy clauses fold to `NULL`) for a statement with no caller — so a shared transaction never
-  lends one writer's identity to the next. `set_caller_context` now always sets both GUCs, and
-  `clear_caller_context` is its other half.
-- [x] 11.3 `rows::Executor::Transaction(SharedTx)` replaces the borrowed handle: every row-layer
-  entry point takes `&Executor`, the statement joins the transaction when it serves the table,
-  and the CSV import — the other holder of one — moves onto the same representation.
-- [x] 11.4 The cascade joins it: `TableWrite::tx` carries the transaction into the emit seam, and
-  `TriggerDispatcher::{fire_in, dispatch_in, run_trigger_in}` / `fire_trigger_in` hand it to each
-  listening trigger's `ActionContext`, so a trigger that audits a row the step wrote commits with
-  the step or vanishes with it.
-- [x] 11.5 `ActionContext::{with_transaction, transaction}`, and the actions that write through
-  it: `insert_row`, `update_rows`, `delete_rows` (one line each, through `Scope::executor`), and
-  `run_js_code` — whose `TableHost`, `TriggerRunHost` and `db.sql()` all run in the step's
-  transaction, delegated (`asUser()`) writes included.
-- [x] 11.6 `Driver::advance_on` opens one per advance, hands it to the step, writes the advance
-  and the trace rows on it and commits **once**; a failed step is rolled back first and its
-  failure recorded in a transaction of its own.
-- [x] 11.7 Tests: `sc-workflow`'s `step_transaction.rs` (a step's rows commit with its advance, a
-  failed step's rows are gone while the failure is recorded, and a cascade lands wherever the step
-  lands) and `sc-catalog`'s `shared_tx.rs` (lazy begin, privacy until commit, and a statement's
-  own caller reaching the policies). §10.3, §11 and §7.3 of the design updated with it.
+- **Every host call releases the GIL.** The bridge wraps the blocking wait in
+  `Python::allow_threads`, which drops the GIL for its duration and reacquires it on the answer.
+  That is the same mechanism every C extension uses for blocking I/O, and it is precisely what
+  makes `threading` genuinely concurrent for I/O-bound work. A run waiting on a query, an
+  endpoint, a file or a child trigger is holding **a thread and not the interpreter**: other runs
+  execute Python while it waits. A trigger workload is nearly all that wait.
+- **The GIL is contended only by Python.** The server's async runtime, its request handling, its
+  database pool and the V8 isolates are untouched by whatever a Python body is doing.
+- **Two CPU-bound Python bodies do serialise**, and nothing in this milestone changes that. It is
+  stated in the documentation beside the timeout; the escapes (a free-threaded build,
+  subinterpreters, or `ThreadPoolExecutor` around the surfaces, which release the GIL) are named
+  rather than pretended away.
+
+**A run is a thread, and threads are cheap.** One resident run per thread, taken from a cache of
+idle threads and returned to it — a thread that has finished is reused rather than reaped, so a
+trigger firing a thousand times spawns roughly as many threads as it ever runs at once. The cost
+is a `PyThreadState` (kilobytes) plus a stack that is virtual until touched, so tens of concurrent
+runs are single-digit megabytes on top of the one interpreter. Phase 0 measures this rather than
+asserting it.
+
+**One admission bound covers everything**: `--python-max-inflight` (default 32), the number of
+Python runs that may be resident at once, code bodies and module calls alike. A single number
+rather than one per kind, because there is one interpreter and one thing being bounded — memory
+and thread count — and because a body's own `timeout_ms` already decides how long it may wait for
+a slot. Past the bound a run queues, inside its own deadline, exactly as a JavaScript body does.
+
+**The reason JavaScript needs code bodies and modules kept apart does not exist here**, and it is
+worth saying why rather than quietly dropping it. §15.1 separates them because V8's watchdog is
+blunt: terminating a runaway body stops the whole isolate and every module socket resident on it,
+so a `while(true)` in a trigger would have a coin-flip chance of killing an MQTT subscription.
+CPython's instrument (§4) is `PyThreadState_SetAsyncExc`, which targets **one thread**. A runaway
+Python body is stopped without touching a module's state, so the split buys nothing and costs an
+interpreter's worth of duplication.
+
+**Isolation between runs is what one interpreter can give and no more**, which is: separate
+globals per run, separate thread state, and one shared `sys.modules`. A body that mutates a
+module it imported has mutated it for the next body. This is not V8's isolate story and the
+documentation says so; the alternatives are §11.
+
+### 2. Reuse `CodeCall` and the five host traits; add one trait
+
+Nothing about `CodeCall` is JavaScript: `code`, `bindings`, the five borrowed host handles and the
+six budgets are the same question in any language, and the traits were written for this
+("a Python or Rust adapter implements the same trait against the same plans"). So the Python
+runtime takes a `CodeCall` and there is **no second call type, no second host trait, and no
+second implementation of anything below the plans** — `TableHost`, `CodeFetchHost`,
+`FileStoreHost`, `TriggerRunHost` and the module functions are used exactly as `run_js_code` uses
+them, which is also what makes the two languages agree about authority, budgets and events without
+anybody keeping them in step.
+
+What is new is one trait in `sc-expr`, beside `JsEvaluator`:
+
+```rust
+#[async_trait]
+pub trait CodeAdapter: Send + Sync {
+    fn language(&self) -> &str;                                  // "python"
+    async fn run_code(&self, call: CodeCall<'_>) -> Result<Json>;
+}
+```
+
+and `ActionServices` grows `adapters: BTreeMap<String, Arc<dyn CodeAdapter>>` keyed by
+`language()`, reached as `ctx.adapter("python")` — so the next guest language is a registration
+and not a field. This **supersedes §15's `CodeAdapter` sketch** (`call(module, func, args)` +
+`register(decl)`): the first half of that sketch is what the module host already is, and the
+second is what a manifest already does. The design document is corrected in phase 8 rather than
+implemented as written.
+
+### 3. A body is compiled as a function, through the AST
+
+`return` at the top level is a `SyntaxError` in Python and the JavaScript body has had it since
+§10.1. Wrapping the source in `def __sc_body():` and re-indenting it is the obvious answer and a
+bad one — it breaks multi-line strings, and every line number in every traceback is then wrong.
+
+So the body is parsed with `ast.parse`, its statements are moved into an `ast.FunctionDef`, and
+the result is compiled. `return` works everywhere, the author's line numbers survive into the
+traceback, and a `SyntaxError` is reported with the author's own line and column. The compiled
+code object is cached per body under a content key, exactly as `BodyCache` caches a JavaScript
+body, so a trigger firing a thousand times parses once.
+
+A traceback is trimmed to the author's frames and rendered into the error message: a body that
+fails should say `line 7, in <body>` and the exception, not fifteen frames of runtime.
+
+### 4. Stopping a run, and what cannot be stopped
+
+V8 has `terminate_execution`. CPython has nothing equivalent, and pretending otherwise would be
+the silent failure principle 5 exists to refuse. Four instruments, in the order they fire:
+
+1. **The host refuses.** Once the run's deadline has passed, every host call raises
+   `saltcorn.Timeout` at the call site. This is the same rule the JavaScript runtime enforces and
+   it is the one that matters most: a body past its deadline cannot write anything.
+2. **`PyThreadState_SetAsyncExc`** raises `Timeout` in the run's thread, which CPython delivers
+   between bytecodes. It stops any pure-Python loop, and it does **not** stop a thread inside a C
+   call (`numpy` on a large array, a C parser). `Timeout` deriving from `BaseException` is what
+   keeps a stray `except Exception` from swallowing it.
+3. **The caller stops waiting** at the deadline plus a grace and answers the trigger with a timeout
+   error naming the trigger — whatever the thread is doing.
+4. **The thread is quarantined.** A thread that has not returned is dropped from the idle cache
+   rather than reused, and it stops counting against nothing: it is counted as *stuck*, and the
+   count is on the diagnostics screen. Past `--python-max-stuck` (default 8) the runtime refuses
+   new runs with a named error rather than accumulating threads that will never come back. A
+   quarantined thread is a leak, it is reported as one, and the documentation says the remedy is
+   a restart.
+
+**There is no memory bound.** A V8 isolate has a heap limit and a near-limit callback; CPython has
+neither, and `RLIMIT_AS` is process-wide, which would take the server down instead of the body.
+Stated in the documentation next to the timeout, not discovered in production.
+
+### 5. The fluent surface is Python, and it lowers to the same plans
+
+`DB_PRELUDE`'s counterpart is a small Python package shipped **inside the binary**
+(`include_str!`) and installed on `sys.modules` by a meta-path loader at interpreter start, so
+there is no file to find, no version to skew and nothing to `pip install` for the surface itself.
+It is Python for the reason the prelude is JavaScript (decision 4 of "tables in code"): adding a
+chain method touches no Rust, and the Rust side keeps seeing plans.
+
+The bridge underneath it is one PyO3 extension module with five functions —
+`__sc_db(plan)`, `__sc_fetch(request)`, `__sc_fs(op)`, `__sc_trigger(request)`,
+`__sc_modfn(request)` — each taking a `dict`, releasing the GIL, blocking on the host's answer and
+raising the mapped exception on `Err`. Conversion is `dict`/`list`/`str`/`int`/`float`/`bool`/
+`None` ↔ `serde_json::Value`, with the outbound extras of §1 (`datetime`, `Decimal`, `UUID`).
+
+The run's identity is a **thread-local**, not an argument: one thread is one run, so the token
+`__scMakeDb` closes over in JavaScript is simply the state of the thread here. Which is also why
+a body cannot reach another run's authority — there is no name for it in the interpreter.
+
+### 6. A nested run must not wait for the bound its parent is holding
+
+A Python body may run a trigger whose action is another Python body — or call a Python module's
+action, which is the same shape. If enough of those are in flight, every admitted run is waiting
+for a slot held by a run that is waiting for it: a deadlock, and one that only appears under load.
+JavaScript does not have it because its host calls are promises.
+
+So a run that is **nested inside another Python run** is admitted past
+`--python-max-inflight` on a thread of its own. This is safe rather than merely convenient: the
+parent's thread is blocked in a host call with the GIL released, so nesting adds no interpreter
+contention, and the number of live nested threads is bounded by the cascade depth, which
+`MAX_DEPTH` already bounds. Nesting is known from a task-local the bridge sets while it services a
+host call, so nothing has to be threaded through the seam.
+
+### 7. The interpreter is a build-time link and a runtime requirement
+
+PyO3 embeds CPython by linking `libpython`; there is no vendored interpreter and no way to make
+one optional at run time once it is linked. Therefore:
+
+- a `python-host` feature on the new `sc-python` crate, **off by default**, exactly as
+  `deno-host` is off on `sc-module` — so every other crate's tests keep linking without a Python
+  toolchain in the picture;
+- `sc-server` turns it on (subject to phase 0's gate), and a build without it registers
+  `run_python_code` anyway and fails at fire time saying the server was built without Python
+  support. Registering it either way is what keeps a trigger's configuration meaningful across
+  deployments;
+- the floor is CPython **3.11**, `abi3`, so the binary is not pinned to one point release;
+- what the dependency costs — build time, binary size, the runtime `libpython` requirement — is
+  measured in phase 0 and written into this file, as the Deno milestone's was.
+
+**Which switch is which, because they are not the same switch.** Two levels, and only the first
+decides whether Python is *possible*:
+
+| | what it is | what it does | how it is changed |
+| --- | --- | --- | --- |
+| `python` / `python-host` | a **Cargo feature** | links `libpython` in, and compiles the runtime | a **rebuild** — `cargo build -p sc-server --features python` |
+| `--python off\|auto` | a **CLI flag**, default `auto` | whether this process will *initialise* the interpreter it has | a restart |
+
+There is no flag that turns Python on in a binary built without it: the linking happens at build
+time, so the feature is the whole of that decision. What the flag is for is an operator who has a
+Python-capable binary and wants this deployment not to start an interpreter — the same kind of
+choice `--modules-dir` and the module workers already offer.
+
+**The cost of "on" is not zero even when nothing uses it**, which is the argument the gate has to
+weigh. A binary linked against `libpython3.x.so` **fails to exec** on a host that has no such
+library — a dynamic-linker error before `main`, not a degraded feature — where the Deno host is
+statically linked and self-contained. So default-on means Python becomes a deployment requirement
+of Saltcorn rather than of Python triggers. The escapes, in the order phase 0 should consider
+them: static-link CPython (and then answer where its standard library lives — on disk under
+`PYTHONHOME`, or frozen into the binary); ship `libpython` beside the server; or take the
+out-of-process shape, which removes the linking question entirely and turns "is Python
+available" into "is `python3` on `PATH`" — a runtime answer, and the reason that outcome is a
+listed result of the gate rather than a failure of it.
+
+**Three states, and the server says which it is in.** Not built with Python · built, interpreter
+not yet initialised · running, with the interpreter's version. Settings → Development shows it
+(phase 4.2), because "why does my Python trigger not work" has three different answers and an
+admin must not have to guess which one they have.
+
+### 8. Two module languages, one `_sc_modules`, one composite of each host
+
+A module is a module to an admin, so there is one table, one tab and one set of endpoints.
+`_sc_modules` gains `language` (`javascript` | `python`), and `source` gains `pypi` beside `npm`
+and `local`. `permissions` stays a JavaScript column and reads as "not available for Python
+modules" on the screen, for the reason in §10.
+
+What the two hosts supply is merged where the catalog and the dispatcher already read it:
+
+- **actions** — both sets are loaded into the same rebuilt `ActionRegistry`, and a name claimed
+  twice is reported exactly as a collision with a built-in already is;
+- **functions** — a composite `ModuleFnHost` fans out by module name, so a formula's hoisted call
+  and a body's `modfn` reach either language without knowing there are two;
+- **table providers** — a composite `TableProviderHost`, the same way.
+
+`ModuleServices::reload` stays the one operation every module change goes through; it grows a
+second load and two composites, and nothing above it changes.
+
+### 9. Packaging: one environment the server owns, and an ABI check that must not be skipped
+
+`--python-dir` (default: beside the modules root in the platform data directory) is a **virtual
+environment** the server creates and `pip install`s into: `pypi` installs a specifier, `local`
+installs a directory (`pip install --no-deps -e`-style semantics are *not* used — a copy, for the
+reason npm's `--install-links` is used for JavaScript locals). The embedded interpreter's
+`sys.path` is pointed at that environment's `site-packages` at start.
+
+The trap is that `pip` runs under an **external** interpreter (`--python-bin`, default `python3`)
+while the code runs under the **embedded** one, and a C extension built for 3.12 imported into
+3.11 is a segfault, not an `ImportError`. So the bootstrap compares `sys.version_info[:2]` of the
+two and, on a mismatch, refuses to use the environment with a message naming both versions and
+the flag that fixes it. A segfault would take the server down and be attributed to anything.
+
+Discovery of what a package supplies: the `saltcorn.plugins` **entry point** if the distribution
+declares one (the idiomatic way a Python package advertises a plugin), else the top-level package
+by name. Either way the module is imported on a module worker and its decorator registry read.
+
+### 10. There is no sandbox, and the screen says so
+
+`deno_permissions` gave a JavaScript module a per-worker allow-list of net, read, write and env.
+CPython has no equivalent — not `RestrictedPython`, which is a different language, and not an
+import gate, which §1 of the API already calls hygiene. A Python module runs with the server's
+privileges, and so, past the import gate, does a Python code body.
+
+This is a smaller change than it looks: **installing** a module was never sandboxed in either
+language (`npm install` and `pip install` both run arbitrary code as the server, before any worker
+exists), the endpoints are admin-only, and a `db.sql` body is already an admission of the same
+kind. What the milestone owes is that the Modules tab and the tutorial *say* it, in the same
+sentence that offers the Install button, rather than leaving an admin to infer a permission model
+that is not there from a screen that shows one for the other language.
+
+### 11. Reloading a Python module is best-effort, and a restart is the guarantee
+
+A JavaScript module is reloaded by replacing it on its worker. Python has no unload:
+`importlib.reload` re-executes a module while every object created from the old one lives on, and
+a package with a C extension in it cannot be re-initialised at all.
+
+So a reload drops the package's entries from `sys.modules` and imports it again, which is correct
+for pure-Python packages and best-effort for anything else; the manifest is re-read either way,
+`on_load(configuration)` is called again, and the Modules tab says that a version change takes
+full effect at the next restart. Deleting a module unregisters everything it supplied and leaves
+the import behind, which is the same admission said once.
+
+Per-plugin **subinterpreters** (3.12's per-interpreter GIL) would fix this and would fix §1's
+shared-state caveat too; they are carried past this milestone because the C-extension ecosystem's
+support for them is uneven and the failure mode of getting it wrong is a crash, not an error.
+
+### 12. What this milestone deliberately does not build
+
+No Python **formula** evaluator: formulas are one language (§7.3), evaluated on the pure isolate,
+and a second one would be a second answer to "may this user read this row". No Python in the
+`only_if`. No Python **database driver** (§15's own exclusion). No language service: the editor
+gets Monaco's Python grammar, and a generated `saltcorn.pyi` for completion is carried forward
+beside the IDE's `pyright`.
 
 ---
+
+## Phase 0 — The spike, and the gate
+
+Nothing in this list is worth starting if embedding CPython in this process is not survivable, and
+three of the four risks are measurable in a day. A throwaway binary in the scratch directory, not
+a workspace member.
+
+- [ ] 0.1 PyO3 + `abi3-py311`, embedded, in a binary that also links V8 (`deno_core`) — the
+      symbol-collision and static-TLS question, answered by building it rather than by reasoning
+      about it. Record: clean build wall time, incremental link time, binary size delta, peak RSS
+      of the link.
+- [ ] 0.2 **The concurrency claim of §1, measured rather than argued.** A Python function called
+      from a tokio worker, calling back into Rust with `Python::allow_threads` around a blocking
+      wait: measure the round-trip cost of a trivial host call, then hold one run in a 2 s host
+      call and confirm that eight other Python runs start, execute and finish while it waits.
+      Record the wall time of eight concurrent 2 s "queries" — it should be ~2 s, not ~16 s. If it
+      is ~16 s the whole design is wrong and the gate says so.
+- [ ] 0.2a The memory numbers behind "threads are cheap": RSS of the bare interpreter, RSS after
+      importing `numpy`, and the marginal RSS of 32 idle run threads. Recorded here, because the
+      one-interpreter decision rests on them.
+- [ ] 0.3 `PyThreadState_SetAsyncExc` against `while True: pass`, and against
+      `numpy.linalg.inv` on a large matrix. Record which one stops, how fast, and what the thread
+      does afterwards.
+- [ ] 0.4 A venv built by `python3 -m venv`, `numpy` and `markdown` pip-installed into it,
+      imported by the **embedded** interpreter through `sys.path`. Then the mismatch case
+      deliberately: a 3.12 venv against a 3.11 embed, to confirm §9's check is needed and that the
+      failure without it is as bad as claimed.
+- [ ] 0.5 `ast`-wrapping a body with `return` in it, and a traceback from a failure inside it —
+      confirm the author's line numbers survive.
+- [ ] 0.5a What the linkage actually is (§7): whether the spike's binary depends on
+      `libpython3.x.so`, what it does on a host without one (confirm it is an exec failure, not a
+      runtime error), and what a static link plus a stdlib answer would cost. This is the input to
+      the default-on question, and guessing it would be guessing about every deployment.
+- [ ] 0.6 **Gate.** Write the go/no-go here with the numbers beside it, and with the decision on
+      whether `sc-server` enables the `python` feature by default — a decision about deployments,
+      since default-on makes `libpython` a requirement of running Saltcorn at all (§7). A "no", or
+      a "yes, but out-of-process", is a legitimate outcome and this file records it either way.
+
+## Phase 1 — The runtime (`sc-python`, behind a feature)
+
+- [ ] 1.1 `crates/sc-python`, workspace member, `python-host` feature (PyO3, off by default). The
+      crate builds and tests without it, and every entry point fails with "this server was built
+      without Python support" rather than pretending.
+- [ ] 1.2 `PythonRuntime`: **one** interpreter, initialised once per process on first use; a run
+      per thread from an idle-thread cache; one admission bound (`--python-max-inflight`) over
+      code bodies and module calls alike; the run's thread-local state; and the nested-run
+      exemption of §6.
+- [ ] 1.3 The body pipeline: `ast` wrap (§3), compile, per-content-key cache, bindings into the
+      run's globals, the result out, tracebacks trimmed to the author's frames.
+- [ ] 1.4 JSON ↔ Python conversion both ways, including the outbound `datetime`/`date`/`time`/
+      `Decimal`/`UUID` rules and the named error for anything else.
+- [ ] 1.5 The exception hierarchy (`SaltcornError` and its five subclasses, `Timeout` from
+      `BaseException`), defined in the Rust half so nothing in the Python half can redefine them.
+- [ ] 1.6 The four bounds of §4: host refusal past the deadline, `SetAsyncExc`, the caller's
+      grace, and quarantine with `--python-max-stuck`.
+- [ ] 1.7 `impl CodeAdapter for PythonRuntime`, and the `CodeAdapter` trait in `sc-expr` beside
+      `JsEvaluator`.
+- [ ] 1.8 Tests (no database): a pure body returning a value; `return` at the top level; a
+      `SyntaxError` reported with the author's line; an exception reported with its own line; a
+      `while True: pass` stopped, with the interpreter and every other resident run unharmed
+      afterwards; **the concurrency assertion — N runs blocked in a host call while N more start
+      and finish**, which is phase 0.2 turned into a test that stays; a nested run admitted past
+      a full admission bound; a non-JSON result named by type.
+
+## Phase 2 — `run_python_code`, and `db`
+
+- [ ] 2.1 `ActionServices.adapters` / `ActionContext::adapter(lang)` in `sc-action`, wired through
+      `TriggerDispatcher::with_adapter`.
+- [ ] 2.2 `sc-core-actions::run_python_code`: `code` + `timeout_ms` (same defaults, same ceiling),
+      the editor language declared as `python`, the same `bindings()` rule as `run_js_code`
+      (presence is scope, `context` only in a run), and the same five hosts built from the
+      `ActionContext`.
+- [ ] 2.3 The Python `saltcorn` package, shipped in the binary and installed by a meta-path loader:
+      the `db` handle, the query builder, the plan lowering, `db.sql`, `as_user`/`as_admin`,
+      `.iter()` as a generator and `__iter__` on the query.
+- [ ] 2.4 The `__sc_db` bridge function: GIL released, host call awaited on the runtime, budget
+      counted, `DbError` raised on refusal.
+- [ ] 2.5 `sc-server`: build the adapter at boot but **initialise the interpreter lazily**, as the
+      code isolate pool already is — a server that fires no Python body and loads no Python module
+      pays for no interpreter. Knobs: `--python off|auto` (§7), `--python-max-inflight`,
+      `--python-max-stuck`, `--python-dir`, `--python-bin`. A `python` feature on `sc-server` and
+      `sc-cli` that turns on `sc-python/python-host`, so there is one name an operator builds with.
+- [ ] 2.6 Tests (`sc-python`, against a real database, mirroring `run_js_code.rs`): every chain
+      method and terminal; the two `where` spellings and the kwarg operators; a `Ⱶ`-path in a
+      select; an aggregate with a group; `.iter()` walking more rows than one batch; an insert
+      that fires a second trigger; a delegated read an ownership formula refuses, caught in the
+      body; `.update()` without a `.where()` refused; `db.sql` with binds.
+- [ ] 2.7 Test: the parity case — the same question asked from a JavaScript body and a Python body
+      produces the same rows, because it produces the same plan.
+
+## Phase 3 — `fetch`, `fs`, `trigger`, `modfn`
+
+- [ ] 3.1 `fetch` in the Python half (requests-shaped, §1) over `CodeFetchHost` unchanged; the
+      transport-failure/`res.ok` split; the per-run budget and the clamp to what is left of the
+      wall clock.
+- [ ] 3.2 `fs` over `FileStoreHost` unchanged: files, directories, `read_*`/`write`/`create`,
+      `move_to`/`copy_to` (including across stores), `meta`/`set_meta`, `as_user`, and the store
+      names bound eagerly so `fs("typo")` fails at once naming what exists.
+- [ ] 3.3 `trigger` over `TriggerRunHost` unchanged, names bound eagerly, `as_user`, and the
+      cascade bound counted.
+- [ ] 3.4 `modfn` over the catalog's `ModuleFnHost`, both spellings, synchronous.
+- [ ] 3.5 Tests mirroring `code_fetch.rs`, `code_files.rs` and `code_run_triggers.rs`, against the
+      same one-shot HTTP listener and the same real stores — including each budget's refusal
+      message and each surface's absence being a `NameError`.
+
+## Phase 4 — The import gate and the diagnostics
+
+- [ ] 4.1 The meta-path import gate (§1 of the API): the standard-library allow-list, the
+      deny-list, installed distributions allowed, `os.environ` unreadable — and every refusal
+      naming the module and saying what the rule is.
+- [ ] 4.2 Settings → Development: **which of §7's three states this process is in** (not built
+      with Python · built but not yet initialised · running, with the version), then the
+      environment's path, the packages installed in it, the admission bound, how many runs are
+      resident, and the quarantined-thread count.
+- [ ] 4.3 Tests: `import subprocess` refused by name; `import numpy` allowed when installed;
+      `import math` allowed; the gate's honesty documented in the module docs rather than
+      overstated.
+
+## Phase 5 — The Python environment
+
+- [ ] 5.1 `sc-python::env`: create the venv, `pip install` a `pypi` specifier or a local
+      directory, read back the installed version, uninstall, and list what is installed.
+- [ ] 5.2 The ABI check of §9, refusing with both versions named; `have_python()` / `have_pip()`
+      answered for the Modules tab the way `have_npm()` already is.
+- [ ] 5.3 `_sc_modules.language` and the `pypi` source; `Module` grows the field; the store, the
+      endpoints and `module_json` carry it.
+- [ ] 5.4 Tests: a fixture package installed from a directory, listed with its version, removed;
+      the mismatch refusal; a `pip` failure reported as an application error with pip's own last
+      lines.
+
+## Phase 6 — Python plugin modules
+
+- [ ] 6.1 The decorator API in the shipped `saltcorn` package: `settings`, `on_load`, `action`,
+      `function`, `table_provider`, `Field`, and the per-package registry that keeps two plugins
+      apart in one interpreter.
+- [ ] 6.2 Discovery and the manifest: entry point or top-level package, imported on a module
+      worker, answering the same `ModuleManifest` shape (actions with their `FormField`s,
+      functions with their signatures from `inspect`, table providers with their config fields,
+      the module's own settings fields, and issues).
+- [ ] 6.3 `PyModuleAction` as an ordinary `Action`, with §2's signature inspection, and the five
+      host surfaces bound for the duration of the call through a contextvar.
+- [ ] 6.4 `PyModuleFunctions` as a `ModuleFnHost`, and `PyModuleTableProviders` as a
+      `TableProviderHost` — including `writes` decided by which methods the provider defines.
+- [ ] 6.5 The composites of §8, and `ModuleServices` loading both languages into one registry and
+      one pair of catalog hosts.
+- [ ] 6.6 Reload semantics of §11, and `on_load` called at load and after a configuration change.
+- [ ] 6.7 A fixture Python plugin in `crates/sc-python/tests/fixtures` supplying one of each entity
+      type, and tests: the action wired to a trigger and fired; the function called from a formula
+      (hoisted) and from a body (`modfn`); a table backed by the provider read, filtered and
+      written; the settings form's secret redacted and merged back; a name that collides with a
+      built-in reported and not installed.
+
+## Phase 7 — The admin UI
+
+- [ ] 7.1 Monaco's Python grammar registered beside JavaScript's, so a `run_python_code` body gets
+      an editor rather than a text area.
+- [ ] 7.2 Modules tab: the language of each module, the `pypi`/`local` install form beside the
+      npm one, the Python toolchain's availability said before an admin types a package name, and
+      §10's sentence about what a Python module may reach.
+- [ ] 7.3 Regenerate `ui/admin/src/client.ts`; `npm run typecheck` and the SPA type-check test
+      pass.
+- [ ] 7.4 Tests (vitest): the install form's validation per language, and the tab's rendering of a
+      module that has no permission set.
+
+## Phase 8 — Documentation and the definition of done
+
+- [ ] 8.1 `docs/TECHNICAL_DESIGN.md` §15 rewritten: the adapter shape as built (§2 above),
+      what a Python body is, what a Python plugin is, the GIL paragraph, the no-sandbox
+      paragraph, and the reload paragraph. §15's original `CodeAdapter` trait sketch replaced.
+- [ ] 8.2 `docs/tutorial-python.md`: a `run_python_code` trigger from nothing, the five surfaces,
+      then a plugin package written from an empty directory, installed, configured and used —
+      ending with the two sentences an admin must read (no sandbox, restart to change versions).
+- [ ] 8.3 `README.md`: Python in the feature list; the interpreter/`pip` requirement stated where
+      the `node`/`npm` one is; and **the build line** — whether a stock build has Python, and the
+      `--features python` rebuild that is the only way to add it (§7), because an operator who
+      reads "off by default" and looks for a flag will not find one.
+- [ ] 8.4 CHANGELOG entry.
+- [ ] 8.5 The definition of done, by hand.
+
+---
+
+## Explicitly OUT of scope for this milestone
+
+- **Python formulas, `only_if` and ownership rules.** One expression language, one isolate,
+  §7.3 unchanged.
+- **A Python database driver.** §15 excludes it in every language but Rust.
+- **Entity types the JavaScript modules do not supply either** — views, viewtemplates, types,
+  fieldviews, event types, routes, headers, agent traits. Reported in the manifest census, not
+  loaded.
+- **A language service for Python.** Highlighting only; `saltcorn.pyi` generation and a `pyright`
+  bridge in the IDE are carried forward.
+- **A permission model for Python modules.** §10: there is not one, and the milestone's obligation
+  is to say so rather than to approximate one.
+- **Subinterpreters and free-threaded builds.** §11.
+- **`async def` bodies.** §1 of the API: concurrency between runs comes from threads and the
+  released GIL, not from the body's syntax. A body that wants two queries *at once inside itself*
+  uses `concurrent.futures.ThreadPoolExecutor` over the surfaces — which works, and for the same
+  reason, since each of those threads releases the GIL while it waits.
+- **Python modules in a backup.** `_sc_modules` is still not in a backup's selection, for the
+  reason the JavaScript milestone gave.
 
 ## Carried past this milestone
 
-- **A `sc-bus` crate.** Decision 5 leaves a seam shaped for it: cache invalidation, the queue's
-  wake-up and real-time collaboration are one problem, and solving it for the queue alone would
-  be solving it in the wrong place.
-- **`WorkflowRoom`**: the end-user chat presentation of a running workflow, and modal
-  interaction pushed over a socket. Both wait on §13's viewpatterns.
-- **A `SubWorkflow` step** that starts a child run and waits for it durably — a parent suspended
-  on a child is a second suspension reason and a second recovery case.
-- **Parallel steps.** The machine's frame stack is the place a fork would live, and deciding
-  which steps are independent is the same question the agent loop deferred about concurrent
-  tools.
-- **The copilot trait that writes workflows** (§11.6), which this milestone's API is the surface
-  for.
+- **Per-plugin subinterpreters**, which would make a reload real and give each plugin its own
+  `sys.modules` — gated on the C-extension ecosystem, not on us.
+- **A free-threaded (`3.13t`+) build**, which is the only thing that removes §1's CPU-bound
+  caveat.
+- **The generated `saltcorn.pyi`**, the Python counterpart of `codeTypes.ts`: the catalog's tables
+  as typed stubs, so an editor with a language server can complete `db.invoices.where(`.
+- **A Rust adapter** (§15's third language), where the interesting question is not the seam — it
+  is the same plans again — but what "installing" a compiled extension means.
+- **The `@saltcorn` v1 API on the real host.** The Python plugin API reaches `db` directly
+  (§2 of the API), which is the same seam the JavaScript tier-3 stubs will eventually use; that
+  this milestone does it for one language first is the argument for doing it for the other.
