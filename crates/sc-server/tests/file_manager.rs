@@ -295,8 +295,13 @@ async fn xattr_metadata_round_trips_through_the_connected_store() -> sc_error::R
         .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    // No metadata set yet → defaults.
-    assert_eq!(store.get_meta("doc.md").await?, FileMeta::default());
+    // No metadata set yet → defaults, except the owner the write recorded: the
+    // request that created the file knew who made it, which is the one fact
+    // nothing could recover afterwards.
+    let created = store.get_meta("doc.md").await?;
+    assert_eq!(created.min_role, None);
+    assert!(created.attributes.is_empty());
+    assert!(created.owner.is_some());
 
     let mut meta = FileMeta {
         min_role: Some(30),
@@ -432,6 +437,276 @@ async fn find_in_files_searches_the_store_server_side() -> sc_error::Result<()> 
             "POST",
             "/api/file-stores/nope/search",
             Some(json!({ "pattern": "todo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// The listing's **columns**, which are what turned a list of names into a file
+/// browser: when it changed, who created it, and the rule that actually reaches
+/// it.
+///
+/// The owner is the interesting one. It is recorded from the request that
+/// created the entry and stored as the user's *id*, so it survives the account
+/// being renamed — and it is reported as the account's **email**, because a
+/// column of UUIDs tells a person nothing. The rest of the assertions are about
+/// what must not happen to it: an overwrite does not take ownership, and
+/// rewriting the access rule does not silently drop it.
+#[tokio::test]
+async fn a_listing_carries_the_columns_a_file_browser_shows() -> sc_error::Result<()> {
+    let (mut client, store, _db) = setup().await?;
+
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/write",
+            Some(json!({ "path": "notes/readme.md", "text": "# Hello\n" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // A folder made through the API is owned too — it is a thing somebody put
+    // there, exactly as a file is.
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/mkdir",
+            Some(json!({ "path": "notes/private" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Written underneath by something that is not a request (a code body, a
+    // scaffold, a hand on the disk): nobody to record, and the column says so
+    // rather than inventing an owner.
+    store
+        .write("notes/stray.txt", bytes::Bytes::from_static(b"x"))
+        .await?;
+    // Admin-only on the folder, which every entry under it inherits.
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/set-meta",
+            Some(json!({ "path": "notes/private", "min_role": 1, "attributes": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/browse",
+            Some(json!({ "dir": "notes" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().unwrap();
+    let row = |name: &str| -> Value {
+        rows.iter()
+            .find(|e| e["name"] == json!(name))
+            .unwrap_or_else(|| panic!("no {name} in {body}"))
+            .clone()
+    };
+
+    let readme = row("readme.md");
+    assert_eq!(readme["size"], json!(8));
+    // RFC 3339, like every other timestamp on this wire.
+    let modified = readme["modified"].as_str().expect("a modification time");
+    assert!(
+        modified.contains('T') && modified.ends_with('Z'),
+        "{modified}"
+    );
+    // The *email*, not the id that is stored.
+    assert_eq!(readme["owner"], json!("admin@example.com"));
+    assert_eq!(readme["min_role"], Value::Null);
+    assert_eq!(readme["effective_min_role"], Value::Null);
+    // What is stored underneath is the id, so renaming the account does not
+    // orphan the file.
+    let owner = store.get_meta("notes/readme.md").await?.owner;
+    assert!(owner.is_some_and(|id| uuid::Uuid::parse_str(&id).is_ok()));
+
+    // A directory has no size; the rule set on it is reported as its own.
+    let private = row("private");
+    assert_eq!(private["is_dir"], json!(true));
+    assert_eq!(private["size"], Value::Null);
+    assert_eq!(private["min_role"], json!(1));
+    assert_eq!(private["effective_min_role"], json!(1));
+    // Setting the access rule did not take the owner off it.
+    assert_eq!(private["owner"], json!("admin@example.com"));
+
+    assert_eq!(row("stray.txt")["owner"], Value::Null);
+
+    // Everything under a restricted folder inherits the rule, and the column
+    // says which rule reaches it rather than which rule is set on it — the
+    // distinction the whole path-cumulative design turns on.
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/write",
+            Some(json!({ "path": "notes/private/secret.txt", "text": "s" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/browse",
+            Some(json!({ "dir": "notes/private" })),
+        )
+        .await;
+    assert_eq!(body[0]["name"], json!("secret.txt"));
+    assert_eq!(body[0]["min_role"], Value::Null);
+    assert_eq!(body[0]["effective_min_role"], json!(1));
+
+    // An overwrite by somebody else does not take the file over: the owner is
+    // who created it.
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/users",
+            Some(json!({ "email": "other@example.com", "password": "hunter2pass", "role": 1 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    client.send("POST", "/api/logout", None).await;
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": "other@example.com", "password": "hunter2pass" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/write",
+            Some(json!({ "path": "notes/readme.md", "text": "# Hello again\n" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/browse",
+            Some(json!({ "dir": "notes" })),
+        )
+        .await;
+    let readme = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == json!("readme.md"))
+        .unwrap()
+        .clone();
+    assert_eq!(readme["owner"], json!("admin@example.com"));
+
+    Ok(())
+}
+
+/// Finding a file by **name**, anywhere under a directory — the file manager's
+/// search box.
+///
+/// Deliberately not `searchFiles`: that one reads every text file to find a
+/// matching line. This walks names, returns listing entries so the results go in
+/// the same table with the same columns, and — unlike the content search —
+/// excludes nothing by default, because somebody looking for a file in
+/// `node_modules` means it.
+#[tokio::test]
+async fn find_files_searches_names_across_the_tree() -> sc_error::Result<()> {
+    let (mut client, store, _db) = setup().await?;
+
+    for path in [
+        "src/app.ts",
+        "src/deep/list.tsx",
+        "readme.md",
+        "node_modules/pkg/index.js",
+    ] {
+        store.write(path, bytes::Bytes::from_static(b"x")).await?;
+    }
+
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/find",
+            Some(json!({ "query": "LIST" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{body}");
+    assert_eq!(entries[0]["path"], json!("src/deep/list.tsx"));
+    // A hit is a listing row, not a path: the columns beside the name are there
+    // without a request per result.
+    assert_eq!(entries[0]["size"], json!(1));
+    assert!(entries[0]["modified"].is_string());
+    assert_eq!(body["truncated"], json!(false));
+
+    // Directories match, and nothing is excluded by default.
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/find",
+            Some(json!({ "query": "index" })),
+        )
+        .await;
+    assert_eq!(
+        body["entries"][0]["path"],
+        json!("node_modules/pkg/index.js")
+    );
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/find",
+            Some(json!({ "query": "deep" })),
+        )
+        .await;
+    assert_eq!(body["entries"][0]["is_dir"], json!(true));
+
+    // Rooted at the directory in view, and bounded — with the flag that says the
+    // bound was reached.
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/find",
+            Some(json!({ "query": "ts", "dir": "src" })),
+        )
+        .await;
+    let mut paths: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["src/app.ts", "src/deep/list.tsx"]);
+
+    let (_, body) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/find",
+            Some(json!({ "query": "ts", "max_results": 1 })),
+        )
+        .await;
+    assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(body["truncated"], json!(true));
+
+    // A search with nothing to search for is refused rather than walking the
+    // whole store to answer "everything".
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/docs/find",
+            Some(json!({ "query": "  " })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // And a store that is not there is a 404, like every other file endpoint.
+    let (status, _) = client
+        .send(
+            "POST",
+            "/api/file-stores/nope/find",
+            Some(json!({ "query": "x" })),
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);

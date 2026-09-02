@@ -287,7 +287,7 @@ async fn a_delegated_body_obeys_the_folder_rule_and_the_trigger_does_not() -> Re
             "private",
             &FileMeta {
                 min_role: Some(1),
-                attributes: Default::default(),
+                ..Default::default()
             },
         )
         .await?;

@@ -1076,7 +1076,37 @@ pub fn admin_endpoints() -> EndpointSet {
             "dir",
             TypeSchema::text(),
         )]))
-        .output(TypeSchema::array(file_entry_schema()))
+        .output(TypeSchema::array(file_listing_entry_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Find entries anywhere under a directory by **name** — the file manager's
+    // search box. Not `searchFiles`: that one reads every text file to find a
+    // matching *line*, which is the wrong instrument, and much the wrong cost,
+    // for "where did I put invoice-2024.pdf". Nothing is read here; the walk
+    // needs names, and names are in the listing.
+    //
+    // The hits are listing entries rather than paths, so a result can be shown
+    // in the same table as a directory, with the same columns, without a request
+    // per row.
+    set.register(
+        Endpoint::new(
+            "findFiles",
+            Method::Post,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("find"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("query", TypeSchema::text()),
+            StructField::new("dir", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("max_results", TypeSchema::optional(TypeSchema::int())),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("entries", TypeSchema::array(file_listing_entry_schema())),
+            StructField::new("truncated", TypeSchema::bool()),
+        ]))
         .auth(AuthRequirement::admin()),
     );
 
@@ -2742,6 +2772,31 @@ fn file_entry_schema() -> TypeSchema {
         StructField::new("path", TypeSchema::text()),
         StructField::new("is_dir", TypeSchema::bool()),
         StructField::new("size", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// One entry as a **listing** reports it: the entry, plus the three facts a file
+/// manager draws a column for and would otherwise fetch one request per row.
+///
+/// It is a wider shape than [`file_entry_schema`] deliberately. `writeFile` and
+/// `makeDirectory` answer with the entry they just made, where "who owns it" and
+/// "what rule reaches it" are the caller's own answers echoed back; a listing is
+/// the one place those are news. `owner` is a **label** — the user's email where
+/// the account is still there, and the stored id when it is not — because the
+/// column is read by a person, and a UUID in it says nothing.
+fn file_listing_entry_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("path", TypeSchema::text()),
+        StructField::new("is_dir", TypeSchema::bool()),
+        StructField::new("size", TypeSchema::optional(TypeSchema::int())),
+        StructField::new("modified", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("owner", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+        StructField::new(
+            "effective_min_role",
+            TypeSchema::optional(TypeSchema::int()),
+        ),
     ])
 }
 

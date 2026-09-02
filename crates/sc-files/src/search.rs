@@ -454,3 +454,86 @@ mod tests {
         assert_eq!(hits.len(), 2);
     }
 }
+
+// --- finding files by name ---------------------------------------------------
+
+/// The default ceiling on entries a name search returns.
+pub const DEFAULT_MAX_FOUND: usize = 500;
+
+/// What a name search found, and whether a ceiling cut it short.
+///
+/// The entries are whole [`Entry`] values rather than paths, because the caller
+/// showing them is a file listing: a result the file manager cannot show a size
+/// or a modification time for is a row with three empty columns, and one more
+/// `stat` per hit to fill them in.
+#[derive(Debug, Clone, Default)]
+pub struct FoundFiles {
+    /// The matching entries, in the order the walk found them (directory order,
+    /// depth first). Directories match too — a folder is a thing a person looks
+    /// for by name.
+    pub entries: Vec<Entry>,
+    /// Whether a ceiling stopped the walk before the tree was exhausted.
+    pub truncated: bool,
+}
+
+/// Find entries under `dir` whose **name** contains `query`, case-insensitively.
+///
+/// This is the file manager's search box, and it is deliberately not
+/// [`search_store`]: that one reads every text file to find a *line*, which is
+/// the wrong instrument (and the wrong cost) for "where did I put
+/// `invoice-2024.pdf`". Nothing is read here — the walk needs names, and names
+/// are in the listing.
+///
+/// Access is the same rule as a listing's: every directory is filtered through
+/// [`filter_visible`], so a search cannot surface the name of a file the caller
+/// could not have opened, and a directory they may not enter is not descended
+/// into. Unlike the content search, **nothing is excluded by default**: a person
+/// looking for a file in `node_modules` means it, and there is no ten-thousand-
+/// matches-per-file blow-up here to guard against — only [`MAX_FILES_SCANNED`]
+/// entries visited and `max_results` returned.
+pub async fn find_files(
+    store: &dyn FileStore,
+    store_min_role: Option<u8>,
+    role: u8,
+    dir: &str,
+    query: &str,
+    max_results: usize,
+) -> Result<FoundFiles> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Err(Error::invalid("a search needs something to search for"));
+    }
+    let max_results = max_results.max(1);
+
+    let mut found = FoundFiles::default();
+    let mut visited = 0usize;
+    let root_floor = crate::effective_min_role(store, store_min_role, dir).await?;
+    let mut stack = vec![(dir.to_owned(), root_floor)];
+
+    while let Some((current, floor)) = stack.pop() {
+        let entries = store.list(&current).await?;
+        let visible = filter_visible(store, floor, entries, role).await?;
+        let mut directories = Vec::new();
+        for entry in visible {
+            visited += 1;
+            if visited > MAX_FILES_SCANNED {
+                found.truncated = true;
+                return Ok(found);
+            }
+            if entry.name.to_lowercase().contains(&needle) {
+                if found.entries.len() >= max_results {
+                    found.truncated = true;
+                    return Ok(found);
+                }
+                found.entries.push(entry.clone());
+            }
+            if entry.is_dir {
+                let child_floor = crate::effective_min_role(store, floor, &entry.path).await?;
+                directories.push((entry.path, child_floor));
+            }
+        }
+        directories.reverse();
+        stack.extend(directories);
+    }
+    Ok(found)
+}

@@ -1173,7 +1173,11 @@ a sparse value goes into `attributes`.**
 
 **Files have no per-file database row.** Per-file metadata is stored in **xattrs** on disk;
 a cross-platform xattr crate is required (Linux/macOS/Windows/FreeBSD). File stores that are
-git repositories are recognised as such.
+git repositories are recognised as such. The metadata is the access rule (`min_role`), the
+free-form attributes, and the **owner** — the id of the user whose request created the entry,
+recorded on write and never rewritten afterwards, since the owner is the creator rather than
+the last writer. It is a *label*, not an authority: reaching a file is the path-cumulative
+`min_role` rule and nothing else.
 
 The **overlay** principle for `_sc_tables`/`_sc_fields` is the key to "legacy databases just
 work": introspection yields the tables and fields; the overlay only *adds* access rules and
@@ -3352,7 +3356,12 @@ generated typed client (§13.1), so the API and the UI cannot drift.
   under a separate URL (subdomain or path) from user-facing routes. Only admins log in
   initially; later, admins may grant restricted access (e.g. app development only) to selected
   non-admins. Includes a much-improved **table editor** (Airtable-inspired), a **file
-  manager**, an **application manager** (§13.2) — creating an app, configuring its
+  manager** — a file browser rather than a list of names: a selection with the modifiers
+  everyone already knows (shift for a run, ctrl for one more, Ctrl-A for all), one three-dots
+  menu per row and the same menu over the whole selection, a search box that finds a file by
+  name anywhere under the directory in view (`findFiles`, a server-side walk of names, not of
+  contents), and columns for size, modification time, owner and the **effective** access rule
+  — an **application manager** (§13.2) — creating an app, configuring its
   framework from that framework's declared settings, and building/mounting it are admin-UI
   operations, not code — and the **workflow editor** (§10.3): a drag-and-drop canvas over
   **React Flow** (`@xyflow/react`) with **dagre** for layout, whose rules live in a tested

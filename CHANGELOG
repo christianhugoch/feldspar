@@ -2,6 +2,65 @@
 
 Changes in reverse chronological order.
 
+## The file manager works like a file browser
+
+The file manager listed names and sizes and put five buttons on every row. Anything an
+admin wanted to do to four files was four trips through that row of buttons, there was no
+way to find a file without remembering which folder it was in, and the access rule — the
+one thing about a file store worth seeing at a glance — was only reachable by opening a
+dialog per file. This rebuilds it as the thing everybody already knows how to use.
+
+- **A selection, with the modifiers every file browser has.** Click selects, shift-click
+  takes the run between, ctrl/cmd-click adds or removes one, ctrl+shift-click adds a second
+  run, Ctrl-A takes everything on screen, Escape drops it. A badge above the listing says
+  what is selected ("4 files selected") and carries the same three-dots menu a row carries,
+  so an operation on four files is the operation on one, in the same place — a bulk delete
+  confirms once, naming everything it will remove. The arithmetic is `fileSelection.ts`
+  (with `fileSelection.test.ts`), not React: the two rules worth pinning down are that
+  shift-click measures from the row picked *deliberately* — so shift-clicking twice resizes
+  one run instead of leaving a trail — and that a selection is a set of paths that cannot
+  survive its row leaving the screen, which is the difference between deleting four files
+  and deleting five.
+- **One menu per row instead of five buttons.** Open, edit, download, rename, permissions
+  and delete, in a dropdown; the wall of buttons grew with every operation added and hid the
+  two anyone actually wanted. Double-clicking a row opens it — a folder, or a text file in
+  the editor.
+- **A search box that searches the tree.** New `findFiles` endpoint over a new
+  `sc_files::find_files`: a recursive walk matching entry **names**, case-insensitively,
+  rooted at the directory in view. Deliberately not `searchFiles`, which reads every text
+  file to find a matching *line* — the wrong instrument, and much the wrong cost, for "where
+  did I put invoice-2024.pdf". It reads nothing, excludes nothing by default (somebody
+  looking for a file in `node_modules` means it), filters every directory through the same
+  `filter_visible` a listing does, and reports `truncated` when it hit its ceiling. The hits
+  come back as listing entries, so results render in the same table with the same columns.
+- **Columns: size, modified, owner and access.** `browseFiles` now answers with all four,
+  which took three additions underneath:
+  - `Entry` carries `modified` (RFC 3339), filled by `LocalFileStore::list` from the
+    `Metadata` it already reads for the size. The trait's default `stat` passes it through,
+    so a backend that can only list now reports a modification time without implementing
+    anything.
+  - `FileMeta` carries `owner`, the id of the user whose request created the entry, recorded
+    by `writeFile`, `uploadFile` and `makeDirectory`. It is **not** an authority over
+    anything — access is the path-cumulative `min_role` rule and nothing else — and it is
+    the creator, not the last writer: an overwrite does not take a file over, and neither
+    `setFileMeta` nor a code body's `setMeta` may drop it. An id is stored so an account can
+    be renamed without its files changing hands, and the listing resolves it to the email,
+    cached across the listing, because a column of UUIDs tells a person nothing. It travels
+    in backups.
+  - The **effective** minimum role is reported per entry, not just the rule set on it, so a
+    file marked unrestricted inside an admin-only folder shows as restricted (muted, and
+    labelled inherited). New `sc_files::visible_entries` keeps the metadata `filter_visible`
+    already had to read, so the columns cost no extra `get_meta`.
+
+Tested in `sc-files` (the name search: case-insensitivity, directories matching, the
+directory root, the bound, the blank query, and that a restricted subtree is invisible to a
+search as well as to a listing), in `ui/admin` (`fileSelection.test.ts`, 13 assertions over
+the selection model and the three formatted columns), and end to end in `sc-server`'s
+`file_manager` — the listing's four columns, an inherited rule reported against a file that
+carries none, an owner that survives somebody else's overwrite, a folder with no owner
+recorded because nothing signed in created it, and `findFiles` across, into and outside a
+directory.
+
 ## A "Suggest a directory" button for a new local file store
 
 Creating a local file store asks for a directory, and an admin creating their first one has

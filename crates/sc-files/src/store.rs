@@ -25,6 +25,39 @@ pub struct Entry {
     pub is_dir: bool,
     /// Size in bytes for files; `None` for directories.
     pub size: Option<u64>,
+    /// When the entry was last modified, as RFC 3339, where the backend knows.
+    ///
+    /// `None` is the honest answer for a backend that does not record it —
+    /// exactly as it is on [`FileStat`]. A listing carries it because the file
+    /// manager shows a "modified" column, and asking for it per row would be one
+    /// `stat` per entry over the wire.
+    pub modified: Option<String>,
+}
+
+impl Entry {
+    /// A file entry with no modification time — what a backend that cannot
+    /// report one produces, and what an operation that has just written a path
+    /// (rather than listed it) knows.
+    pub fn file(name: impl Into<String>, path: impl Into<String>, size: Option<u64>) -> Entry {
+        Entry {
+            name: name.into(),
+            path: path.into(),
+            is_dir: false,
+            size,
+            modified: None,
+        }
+    }
+
+    /// The same for a directory, which never has a size.
+    pub fn dir(name: impl Into<String>, path: impl Into<String>) -> Entry {
+        Entry {
+            name: name.into(),
+            path: path.into(),
+            is_dir: true,
+            size: None,
+            modified: None,
+        }
+    }
 }
 
 /// What [`FileStore::stat`] answers: the facts about one entry that need no
@@ -64,6 +97,16 @@ pub struct FileMeta {
     /// Minimum role permitted to read this entry, if restricted. `None` leaves
     /// access to be decided by directories higher in the path.
     pub min_role: Option<u8>,
+    /// Who created the entry, as the user's id. `None` for anything written
+    /// before there was a user to record — a file put there by a code body, a
+    /// scaffold, or by hand on the disk underneath.
+    ///
+    /// It is deliberately *not* an authority over anything: access is the
+    /// path-cumulative [`min_role`](FileMeta::min_role) rule and nothing else.
+    /// This is the "who put this here" a file manager shows in a column, and it
+    /// survives a rewrite of the bytes — the owner is the creator, not the last
+    /// writer.
+    pub owner: Option<String>,
     /// Free-form per-file attributes (e.g. a declared MIME type, origin, or
     /// application-specific tags).
     pub attributes: BTreeMap<String, String>,
@@ -168,7 +211,7 @@ pub trait FileStore: Send + Sync {
             .map(|entry| FileStat {
                 size: entry.size.unwrap_or(0),
                 is_dir: entry.is_dir,
-                modified: None,
+                modified: entry.modified,
             }))
     }
 

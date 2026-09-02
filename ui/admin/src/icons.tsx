@@ -79,6 +79,24 @@ export function IconFolder(props: IconProps) {
   );
 }
 
+export function IconFile(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z" />
+    </Svg>
+  );
+}
+
+export function IconSearch(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0" />
+      <path d="M21 21l-6 -6" />
+    </Svg>
+  );
+}
+
 export function IconUsers(props: IconProps) {
   return (
     <Svg {...props}>

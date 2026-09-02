@@ -16,7 +16,7 @@
 //! field says it is one, and until then the row endpoints that address a single
 //! row refuse — which is what the field list's red banner is warning about.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -57,9 +57,9 @@ use sc_catalog::{
 use sc_email::Mailer;
 use sc_error::{Error, Result};
 use sc_files::{
-    Entry, FileMeta, FileStoreDef, FileStoreDefId, backend_config_spec, backend_operations,
-    check_access, display_config, effective_min_role, filter_visible, registered_backends,
-    run_backend_operation,
+    Entry, FileMeta, FileStore, FileStoreDef, FileStoreDefId, VisibleEntry, backend_config_spec,
+    backend_operations, check_access, display_config, effective_min_role, registered_backends,
+    run_backend_operation, visible_entries,
 };
 use sc_llm::{
     LlmProviderDef, LlmProviderDefId, LlmRequest, connect_provider, delete_llm_provider,
@@ -1810,10 +1810,47 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let entries = store.list(dir).await?;
                 // Filtered, not refused: a readable directory may hold entries
                 // the caller cannot open, and listing their names leaks exactly
-                // what the rule was set to hide.
-                let visible = filter_visible(store.as_ref(), dir_floor, entries, role).await?;
-                let out: Vec<Json> = visible.iter().map(entry_json).collect();
+                // what the rule was set to hide. `visible_entries` keeps the
+                // metadata the filter read, which is what the owner and access
+                // columns are drawn from — the alternative is a second
+                // `get_meta` per row, or a request per row from the browser.
+                let visible = visible_entries(store.as_ref(), dir_floor, entries, role).await?;
+                let out = listing_json(&catalog, &visible).await?;
                 Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("findFiles", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let obj = require_object(&ctx.body)?;
+                let dir = obj.get("dir").and_then(Json::as_str).unwrap_or("");
+                let role = caller_role(&ctx);
+                // The directory a search starts in is reached like any other, so
+                // one rooted where the caller may not go is refused rather than
+                // quietly answering nothing.
+                check_access(store.as_ref(), floor, dir, role).await?;
+                let query = non_empty_str_field(obj, "query")?.to_owned();
+                let max_results = match obj.get("max_results").and_then(Json::as_i64) {
+                    Some(n) if n >= 1 => n as usize,
+                    _ => sc_files::DEFAULT_MAX_FOUND,
+                };
+                let found =
+                    sc_files::find_files(store.as_ref(), floor, role, dir, &query, max_results)
+                        .await?;
+                // The hits arrive as bare entries; the columns beside the name
+                // are the same ones a listing shows, read the same way.
+                let visible = with_meta(store.as_ref(), floor, found.entries).await?;
+                let entries = listing_json(&catalog, &visible).await?;
+                Ok(HandlerResponse::ok(json!({
+                    "entries": entries,
+                    "truncated": found.truncated,
+                })))
             }
         }
     });
@@ -1920,6 +1957,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let data = file_body_bytes(obj)?;
                 let size = data.len();
                 store.write(&path, data).await?;
+                record_owner(store.as_ref(), &path, ctx.user.as_ref()).await;
                 Ok(HandlerResponse::ok(file_entry_written_json(&path, size)).with_status(201))
             }
         }
@@ -1936,6 +1974,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let path = non_empty_str_field(obj, "path")?.to_owned();
                 check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
                 store.mkdir(&path).await?;
+                record_owner(store.as_ref(), &path, ctx.user.as_ref()).await;
                 Ok(HandlerResponse::ok(directory_entry_json(&path)).with_status(201))
             }
         }
@@ -1995,6 +2034,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let data = ctx.raw_body()?.clone();
                 let size = data.len();
                 store.write(&path, data).await?;
+                record_owner(store.as_ref(), &path, ctx.user.as_ref()).await;
                 Ok(HandlerResponse::ok(file_entry_written_json(&path, size)).with_status(201))
             }
         }
@@ -2045,6 +2085,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
                 let meta = FileMeta {
                     min_role,
+                    // Not something this dialog edits, and not something it may
+                    // silently drop: the owner is who created the entry, and
+                    // rewriting the access rule does not change that.
+                    owner: store.get_meta(&path).await.unwrap_or_default().owner,
                     attributes,
                 };
                 store.set_meta(&path, &meta).await?;
@@ -4228,6 +4272,7 @@ fn renamed_entry(to: &str) -> Entry {
         path,
         is_dir: false,
         size: None,
+        modified: None,
     }
 }
 
@@ -4293,6 +4338,10 @@ pub(crate) fn backup_file_meta_json(path: &str, meta: &FileMeta) -> Json {
     json!({
         "path": path,
         "min_role": meta.min_role,
+        // Who created the file travels with it. It is an id, so it only means
+        // anything on a restore into the same installation — but dropping it
+        // would orphan every restored file even there.
+        "owner": meta.owner,
         "attributes": meta
             .attributes
             .iter()
@@ -4316,6 +4365,9 @@ pub(crate) fn backup_file_meta_from_json(value: &Json) -> Result<(String, FileMe
         path,
         FileMeta {
             min_role: optional_role(obj, "min_role")?,
+            // Restored with the bytes: a backup that forgot who owned each file
+            // would silently orphan every one of them.
+            owner: obj.get("owner").and_then(Json::as_str).map(str::to_owned),
             attributes,
         },
     ))
@@ -5388,6 +5440,118 @@ fn entry_json(entry: &Entry) -> Json {
         "is_dir": entry.is_dir,
         "size": entry.size,
     })
+}
+
+/// A listing's entries as the file manager reads them: the entry, plus the
+/// three columns beside the name — when it changed, who created it, and what
+/// rule reaches it.
+///
+/// The owner is turned into a **label** here rather than in the browser. What is
+/// stored is the user's id (an account can be renamed without its files
+/// changing hands), and a column of UUIDs tells a person nothing; the id is kept
+/// as the label only when the account behind it is gone, which is the honest
+/// answer to "who owns this" for a deleted user. Lookups are cached across the
+/// listing, so a directory of two hundred files one person uploaded is one
+/// query, not two hundred.
+async fn listing_json(catalog: &Catalog, visible: &[VisibleEntry]) -> Result<Vec<Json>> {
+    let mut labels: HashMap<String, Json> = HashMap::new();
+    let mut out = Vec::with_capacity(visible.len());
+    for item in visible {
+        let owner = match &item.meta.owner {
+            None => Json::Null,
+            Some(id) => match labels.get(id) {
+                Some(label) => label.clone(),
+                None => {
+                    let label = owner_label(catalog, id).await;
+                    labels.insert(id.clone(), label.clone());
+                    label
+                }
+            },
+        };
+        out.push(json!({
+            "name": item.entry.name,
+            "path": item.entry.path,
+            "is_dir": item.entry.is_dir,
+            "size": item.entry.size,
+            "modified": item.entry.modified,
+            "owner": owner,
+            "min_role": item.meta.min_role,
+            "effective_min_role": item.effective_min_role,
+        }));
+    }
+    Ok(out)
+}
+
+/// The display name for a stored owner id: the account's email, or the id itself
+/// when it names nothing (a deleted user, or a value written by something other
+/// than a signed-in request).
+///
+/// A lookup that *fails* — the database is unreachable, `users` has no email
+/// column — falls back to the id as well. A file listing is not the place to
+/// turn a metadata lookup into an error the admin sees instead of their files.
+async fn owner_label(catalog: &Catalog, id: &str) -> Json {
+    let user = match uuid::Uuid::parse_str(id) {
+        Ok(uuid) => sc_auth::load_user(catalog, uuid).await.ok().flatten(),
+        Err(_) => None,
+    };
+    let email = user
+        .as_ref()
+        .and_then(|u| u.extra.get("email"))
+        .and_then(|value| value.as_text().map(str::to_owned));
+    Json::String(email.unwrap_or_else(|| id.to_owned()))
+}
+
+/// Attach each entry's own metadata and the rule that reaches it — the shape a
+/// listing produces, for entries that did not come from one.
+///
+/// A name search's hits are scattered across the tree, so unlike a listing there
+/// is no directory floor common to them all: each one's ancestors are walked.
+async fn with_meta(
+    store: &dyn FileStore,
+    floor: Option<u8>,
+    entries: Vec<Entry>,
+) -> Result<Vec<VisibleEntry>> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let meta = store.get_meta(&entry.path).await.unwrap_or_default();
+        let effective_min_role = effective_min_role(store, floor, &entry.path).await?;
+        out.push(VisibleEntry {
+            entry,
+            meta,
+            effective_min_role,
+        });
+    }
+    Ok(out)
+}
+
+/// Record who created a path, if nothing has been recorded for it yet.
+///
+/// Called after every write that can create an entry. Two things it deliberately
+/// does not do:
+///
+/// - **It does not overwrite an existing owner.** The owner is the creator, so
+///   saving somebody else's file does not take it over.
+/// - **It does not fail the write.** The bytes are already there, and a store
+///   whose backend cannot keep metadata (no xattr support on the filesystem) must
+///   still be usable — a 500 after a successful upload would be a lie about what
+///   happened.
+async fn record_owner(store: &dyn FileStore, path: &str, user: Option<&sc_auth::User>) {
+    let Some(user) = user else { return };
+    let Ok(meta) = store.get_meta(path).await else {
+        return;
+    };
+    if meta.owner.is_some() {
+        return;
+    }
+    let _ = store
+        .set_meta(
+            path,
+            &FileMeta {
+                owner: Some(user.id.to_string()),
+                ..meta
+            },
+        )
+        .await;
 }
 
 /// The entry JSON returned after a successful `writeFile`: a file (never a

@@ -25,7 +25,9 @@ mod search;
 mod store;
 pub mod xattr;
 
-pub use access::{ROLE_PUBLIC, check_access, effective_min_role, filter_visible};
+pub use access::{
+    ROLE_PUBLIC, VisibleEntry, check_access, effective_min_role, filter_visible, visible_entries,
+};
 pub use backend::{
     OperationOutcome, backend_config_spec, backend_operations, connect_from_def, display_config,
     git_config_spec, local_config_spec, registered_backends, run_backend_operation,
@@ -45,8 +47,9 @@ pub use local::{LocalFileStore, OP_SUGGEST_DIR, local_operations};
 pub use paths::{DATA_DIR_ENV, data_dir, local_store_dir, suggest_local_dir};
 pub use reference::{mime_for_path, validate_file_path};
 pub use search::{
-    DEFAULT_EXCLUDED_DIRS, DEFAULT_MAX_RESULTS, MAX_FILE_BYTES, MAX_FILES_SCANNED, MAX_LINE_CHARS,
-    SearchHit, SearchOutcome, SearchQuery, glob_matches, search_store,
+    DEFAULT_EXCLUDED_DIRS, DEFAULT_MAX_FOUND, DEFAULT_MAX_RESULTS, FoundFiles, MAX_FILE_BYTES,
+    MAX_FILES_SCANNED, MAX_LINE_CHARS, SearchHit, SearchOutcome, SearchQuery, find_files,
+    glob_matches, search_store,
 };
 pub use store::{Entry, FileMeta, FileStat, FileStore};
 
@@ -176,9 +179,15 @@ mod tests {
         let file = store.stat("docs/a.txt").await.unwrap().expect("listed");
         assert_eq!(file.size, 3);
         assert!(!file.is_dir);
-        // The one thing a listing cannot say. `None` is the honest answer, not
-        // an invented time.
-        assert_eq!(file.modified, None);
+        // The modification time now comes from the listing too — a backend
+        // whose `list` reports one gets it through the default `stat` without
+        // implementing anything. `None` stays the honest answer for a backend
+        // that does not record it, rather than an invented time.
+        assert_eq!(
+            file.modified,
+            store.0.stat("docs/a.txt").await.unwrap().unwrap().modified
+        );
+        assert!(file.modified.is_some());
         assert!(store.stat("docs").await.unwrap().unwrap().is_dir);
         assert!(store.stat("").await.unwrap().unwrap().is_dir);
         assert!(store.stat("docs/gone.txt").await.unwrap().is_none());
@@ -643,5 +652,86 @@ mod tests {
         let found = search_store(&store, None, 1, &query).await.unwrap();
         assert_eq!(found.hits.len(), 5);
         assert!(found.truncated);
+    }
+
+    // --- finding files by name ----------------------------------------------
+
+    #[tokio::test]
+    async fn a_name_search_walks_the_whole_tree_case_insensitively() {
+        let (_base, store) = searchable().await;
+        let found = find_files(&store, None, 1, "", "LIST", DEFAULT_MAX_FOUND)
+            .await
+            .unwrap();
+        let paths: Vec<&str> = found.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["src/deep/list.tsx"]);
+        assert!(!found.truncated);
+
+        // Unlike the *content* search, nothing is excluded by default: someone
+        // hunting for a file in `node_modules` means it. And a directory is a
+        // thing people look for by name, so directories match too.
+        let found = find_files(&store, None, 1, "", "de", DEFAULT_MAX_FOUND)
+            .await
+            .unwrap();
+        let mut paths: Vec<&str> = found.entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            ["node_modules", "node_modules/pkg/index.js", "src/deep"]
+        );
+
+        // The row the file manager draws comes back whole — a hit with no size
+        // is three empty columns and another round trip to fill them.
+        let hit = find_files(&store, None, 1, "", "readme", DEFAULT_MAX_FOUND)
+            .await
+            .unwrap();
+        assert_eq!(hit.entries[0].size, Some(15));
+        assert!(hit.entries[0].modified.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_name_search_is_narrowed_by_directory_and_bounded() {
+        let (_base, store) = searchable().await;
+        let found = find_files(&store, None, 1, "src", "ts", DEFAULT_MAX_FOUND)
+            .await
+            .unwrap();
+        let mut paths: Vec<&str> = found.entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort_unstable();
+        // Rooted at `src`, so `readme.md` and the dependency tree are outside it.
+        assert_eq!(paths, ["src/app.ts", "src/deep/list.tsx"]);
+
+        let found = find_files(&store, None, 1, "", "ts", 1).await.unwrap();
+        assert_eq!(found.entries.len(), 1);
+        assert!(found.truncated);
+
+        // A blank search is not "everything": it is a caller with nothing to
+        // look for, and a walk of the whole store is not the answer to it.
+        assert!(find_files(&store, None, 1, "", "  ", 10).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_name_search_cannot_surface_a_file_the_caller_could_not_open() {
+        let (_base, store) = searchable().await;
+        store
+            .set_meta(
+                "src/deep",
+                &FileMeta {
+                    min_role: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Neither the restricted directory nor anything under it: a search box
+        // that answers "list.tsx" for a caller who cannot enter `src/deep` has
+        // leaked the listing the rule was set to hide.
+        let found = find_files(&store, None, ROLE_PUBLIC, "", "list", DEFAULT_MAX_FOUND)
+            .await
+            .unwrap();
+        assert!(found.entries.is_empty());
+        let found = find_files(&store, None, ROLE_PUBLIC, "", "deep", DEFAULT_MAX_FOUND)
+            .await
+            .unwrap();
+        assert!(found.entries.is_empty());
     }
 }

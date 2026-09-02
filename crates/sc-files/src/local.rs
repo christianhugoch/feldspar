@@ -162,6 +162,9 @@ impl FileStore for LocalFileStore {
                 path,
                 is_dir,
                 size: if is_dir { None } else { Some(meta.len()) },
+                // Free here: the listing already stats every child for its size
+                // and type, and the same `Metadata` carries the mtime.
+                modified: meta.modified().ok().map(rfc3339),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));

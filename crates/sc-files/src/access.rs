@@ -134,12 +134,49 @@ pub async fn filter_visible(
     entries: Vec<crate::Entry>,
     role: u8,
 ) -> Result<Vec<crate::Entry>> {
+    Ok(visible_entries(store, dir_floor, entries, role)
+        .await?
+        .into_iter()
+        .map(|visible| visible.entry)
+        .collect())
+}
+
+/// One entry of a filtered listing, with what the filtering already had to know
+/// about it.
+#[derive(Debug, Clone)]
+pub struct VisibleEntry {
+    /// The entry itself.
+    pub entry: crate::Entry,
+    /// Its own metadata — the rule set *here*, and who created it.
+    pub meta: FileMeta,
+    /// The rule that actually reaches it: this entry's own tightened by the
+    /// directory's (which already includes the store's).
+    pub effective_min_role: Option<u8>,
+}
+
+/// [`filter_visible`], keeping the metadata rather than discarding it.
+///
+/// The filter reads every child's [`FileMeta`] to decide whether the caller may
+/// see it, and a caller that then wants to *show* the rule — a file manager with
+/// an access column — would otherwise read all of it a second time. Same walk,
+/// same rule, one `get_meta` per entry.
+pub async fn visible_entries(
+    store: &dyn FileStore,
+    dir_floor: Option<u8>,
+    entries: Vec<crate::Entry>,
+    role: u8,
+) -> Result<Vec<VisibleEntry>> {
     let mut visible = Vec::with_capacity(entries.len());
     for entry in entries {
         let meta: FileMeta = store.get_meta(&entry.path).await.unwrap_or_default();
-        match tighten(dir_floor, meta.min_role) {
+        let effective_min_role = tighten(dir_floor, meta.min_role);
+        match effective_min_role {
             Some(required) if role > required => continue,
-            _ => visible.push(entry),
+            _ => visible.push(VisibleEntry {
+                entry,
+                meta,
+                effective_min_role,
+            }),
         }
     }
     Ok(visible)

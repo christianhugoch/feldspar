@@ -1067,3 +1067,32 @@ div.navbar-brand > a:hover {
 .wf-edge-untaken .react-flow__edge-path {
   opacity: 0.35;
 }
+
+/* --- the file manager ------------------------------------------------------
+   A file browser is dragged over with the mouse — shift-clicking a run of rows
+   in anything that behaves like a table otherwise paints half the page blue,
+   and the selection the browser makes is not the selection the screen means. */
+.file-table tbody tr {
+  cursor: default;
+  user-select: none;
+}
+
+/* The search box, with the magnifier inside it rather than in a button beside
+   it: the input is the control, and an addon would make it two. */
+.file-search {
+  position: relative;
+  min-width: 16rem;
+}
+
+.file-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 0.65rem;
+  transform: translateY(-50%);
+  pointer-events: none;
+  display: flex;
+}
+
+.file-search-input {
+  padding-left: 2.25rem;
+}

@@ -511,6 +511,10 @@ impl FileStoreHost<'_> {
         }
         let meta = FileMeta {
             min_role: req.min_role,
+            // Not part of what this call sets, and not dropped by it either: the
+            // owner is who created the entry, and a body rewriting the access
+            // rule has not made itself that.
+            owner: store.get_meta(path).await?.owner,
             attributes: req.attributes.clone().unwrap_or_default(),
         };
         // A delegated body may **tighten** a rule and never loosen one. The
