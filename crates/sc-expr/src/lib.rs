@@ -61,7 +61,7 @@ pub use code::{
     CodeAdapter, CodeCall, CodeHost, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS,
     DEFAULT_FETCH_TIMEOUT, DEFAULT_MAX_FETCHES, DEFAULT_MAX_FILE_OPS, DEFAULT_MAX_HOST_CALLS,
     DEFAULT_MAX_INFLIGHT, DEFAULT_MAX_MODULE_CALLS, DEFAULT_MAX_TRIGGER_RUNS, FetchHost, FileHost,
-    MAX_CODE_TIMEOUT, ModuleFnArg, ModuleFnHost, ModuleFunction, TriggerHost,
+    MAX_CODE_TIMEOUT, ModuleFnArg, ModuleFnHost, ModuleFunction, PYTHON, TriggerHost,
 };
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;

@@ -522,6 +522,10 @@ impl<'a> Driver<'a> {
         if let Some(mailer) = &services.mailer {
             ctx = ctx.with_mailer(mailer);
         }
+        // And the other guest languages, so a `run_python_code` step reaches the
+        // same adapter a `run_python_code` trigger does — the reason `services`
+        // is exposed at all.
+        ctx = ctx.with_adapters(&services.adapters);
         // The action's return value is what the step contributes to the context;
         // what it wrote there directly travels with it.
         let value = action.run(&mut ctx).await?;

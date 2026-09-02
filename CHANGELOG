@@ -2,6 +2,99 @@
 
 Changes in reverse chronological order.
 
+## `run_python_code`, and `db` in Python
+
+Phase 2.1–2.3 of the Python code adapter: the action an admin configures, the
+seam it reaches an engine through, and the surface an app builder writes. The
+interpreter and the bounds under it landed in phase 1; what is new is everything
+between a trigger's stored configuration and a plan.
+
+- **A second guest language is a registration.** `ActionServices` grows
+  `adapters: BTreeMap<String, Arc<dyn CodeAdapter>>`, keyed by the adapter's own
+  `language()` and installed with `TriggerDispatcher::with_adapter`; an action
+  reaches one as `ctx.adapter("python")` and gets a configuration error naming
+  the trigger and the language when this process registered none. A map rather
+  than a field per language, which is the point of the trait: the next one is a
+  registration at boot and a `run_*_code` action that asks for it by name, and
+  nothing in between learns there is a third. JavaScript is deliberately *not* in
+  the map — `run_js_code` holds the concrete `JsEvaluator`, which is also what
+  carries the formula isolate, and a second way in would be two answers to which
+  engine runs a JavaScript body. The workflow driver passes the same map to a
+  step, so `run_python_code` works as a step exactly where it works as a trigger.
+- **`run_python_code`**, registered in the built-in set beside `run_js_code` —
+  and registered whether or not this binary has an interpreter linked in, so a
+  trigger's configuration stays meaningful across deployments and an admin gets a
+  sentence naming the reason rather than a missing action. The two actions are now
+  one implementation with the language as an argument (`code_body`): the same two
+  settings, the same default and ceiling on `timeout_ms`, the same scope rule for
+  what the event binds, and the same five borrowed hosts built from the same
+  `ActionContext`. That is not tidiness — the two languages agreeing about
+  authority, budgets and events is the property the milestone is after, and a
+  second copy of `bindings` is how a body would come to see `payload` in one
+  language and not the other. One difference, stated where it is made: the
+  evaluator is **optional** for a Python body, because it is not what runs it —
+  it decides a delegated read whose ownership rule is a formula. A process with
+  no JavaScript engine runs Python, and the read that needs a formula fails there
+  saying so.
+- **The `saltcorn` package**, `DB_PRELUDE`'s counterpart: Python, shipped inside
+  the binary with `include_str!` and installed by a meta-path finder at
+  interpreter start, so there is no file to find, no version to skew and nothing
+  to `pip install` for the surface itself. It is Python for the reason the prelude
+  is JavaScript — the Rust side sees plans, so a chain method is added in one file
+  and no Rust changes. `db.invoices` is a table and `db.table("customer orders")`
+  is the same thing for a name that is not an identifier; the chain is pure and
+  the terminals execute, and **nothing is awaited**.
+
+  ```python
+  overdue = (db.invoices
+      .where(paid=False, due__lt=payload["today"])
+      .select("id", "amount", "customerⱵemail", chased="remindersↃinvoice.length")
+      .order_by("due")
+      .limit(50)
+      .rows())
+  for inv in overdue:
+      db.reminders.insert(invoice=inv["id"], sent_to=inv["customerⱵemail"])
+  return {"chased": len(overdue), "owed": db.invoices.where(paid=False).sum("amount")}
+  ```
+
+  A filter is keywords (`paid=False`, `due__lt=x`, over the same eleven operators
+  every other surface speaks), the object DSL, or a formula string — with
+  `saltcorn.or_` / `and_` / `not_` for the combinators spelled out; several of
+  them, and several `.where()` calls, are ANDed. `.iter(batch)` is a **generator**
+  walking one host call per batch, and `for row in db.books.where(...)` is the
+  same walk, so a body can read a table it could never hold. `db.sql(text, params)`
+  and `db.sql(…, as_user=True)` are the body's own SQL on the same admission the
+  JavaScript one carries. `db.as_user()` / `.as_admin()` are unchanged in meaning
+  because they are the same plans: whose authority a read runs under is decided by
+  the one host, not twice.
+
+  Two kinds of error, kept apart on purpose. An author's slip — an operator that
+  is not one, a direction that is not `asc`, a `.select(12)` — is a `TypeError` or
+  a `ValueError`, which is what a Python author expects of a library and what a
+  bare `except DbError` in a retry loop must not swallow. A **refusal** — an
+  ownership rule, a spent budget, an `.update()` with no `.where()` — is a
+  `DbError`, because it is the same refusal the host makes and a body may
+  legitimately catch it and fall back.
+- **Presence is still scope.** `db` is bound in a run's globals only where the run
+  was given a table host, so naming it in a body that has none is a `NameError`
+  naming it rather than a handle that fails on use. `import saltcorn` reaches the
+  same object.
+- Tests: 14 in `sc-python` asserting the lowering against a recording host — a
+  whole chain, both `where` spellings and all eleven keyword operators, purity of
+  the chain, every scalar terminal, the three spellings of an insert, `.iter()`
+  across three batches with its cursor and its `.limit()`, the authority, `db.sql`,
+  and each argument mistake as the Python error it should be — and 6 in
+  `sc-core-actions` asserting the wiring: a `run_python_code` trigger reaching the
+  adapter registered under `"python"` with the body, the bindings and all five
+  surfaces; the Run button's path; a workflow step's; a process with no adapter
+  saying so by name; and the two languages' actions differing in the language and
+  nothing else.
+
+Not yet: `fetch`, `fs`, `trigger` and `modfn` in Python (phase 3), the server's
+own wiring and its `--python` knobs (phase 2.5), and the tests against a real
+database (2.6, 2.7). The admin editor gets a plain text area for a Python body
+until Monaco's Python grammar is loaded beside JavaScript's (phase 7).
+
 ## The Python runtime: one interpreter, a run per thread, four bounds
 
 Phase 1 of the Python code adapter. `crates/sc-python` is a new workspace member

@@ -22,8 +22,8 @@
 //! and "the trigger declined" are different recoveries.
 //!
 //! The module name given to `create_exception!` is `saltcorn`, so an unhandled
-//! one prints as `saltcorn.DbError` however it was reached — the package of
-//! phase 2.3 re-exports these rather than defining anything of its own.
+//! one prints as `saltcorn.DbError` however it was reached — the `saltcorn`
+//! package re-exports these rather than defining anything of its own.
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyBaseException, PyException};

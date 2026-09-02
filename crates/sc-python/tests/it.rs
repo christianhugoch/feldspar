@@ -8,6 +8,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[cfg(feature = "python-host")]
+#[path = "python_db.rs"]
+mod python_db;
+
+#[cfg(feature = "python-host")]
 #[path = "python_runtime.rs"]
 mod python_runtime;
 

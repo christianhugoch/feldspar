@@ -4,6 +4,9 @@ Three things live here rather than in Rust, and each for the same reason: they
 are `ast`, `linecache` and `traceback` calls, and writing them through the C
 API would be a transliteration nobody could read.
 
+- ``install_module`` — the meta-path finder that serves the ``saltcorn``
+  package out of the binary, so the surface an app builder writes has no file
+  to find, no version to skew and nothing to install.
 - ``compile_body`` — the author's source, parsed and *moved* into a
   ``FunctionDef`` rather than re-indented into one. That is what makes ``return``
   legal at the top level while leaving every line number where the author put
@@ -20,6 +23,7 @@ the specification says out loud rather than pretending otherwise.
 """
 
 import ast
+import importlib.util
 import linecache
 import sys
 import traceback
@@ -28,6 +32,73 @@ import traceback
 # wants one; `format_error` renders it as `<body>`, which is what the author
 # would call it.
 BODY_FN = "__sc_body"
+
+
+class _EmbeddedLoader:
+    """Executes one module whose source came out of the binary."""
+
+    def __init__(self, name, source, filename):
+        self._name = name
+        self._source = source
+        self._filename = filename
+
+    def create_module(self, spec):
+        # The default semantics: an ordinary module object.
+        return None
+
+    def exec_module(self, module):
+        code = compile(self._source, self._filename, "exec")
+        exec(code, module.__dict__)
+
+
+class _EmbeddedFinder:
+    """The meta-path entry that knows which modules live in the binary.
+
+    First on ``sys.meta_path``, so ``import saltcorn`` cannot be answered by a
+    file of that name somebody put in the environment. That is not a security
+    boundary — §10 of the specification says there is none — it is the same rule
+    a built-in module already has, said for a module that happens to be shipped
+    as source.
+    """
+
+    def __init__(self):
+        self.sources = {}
+
+    def find_spec(self, fullname, path=None, target=None):
+        entry = self.sources.get(fullname)
+        if entry is None:
+            return None
+        source, filename = entry
+        return importlib.util.spec_from_loader(
+            fullname,
+            _EmbeddedLoader(fullname, source, filename),
+            origin=filename,
+        )
+
+
+_FINDER = _EmbeddedFinder()
+
+
+def install_module(name, source):
+    """Make ``name`` importable from the binary's own copy of ``source``.
+
+    Registered in ``linecache`` for the reason a body's source is: without it a
+    traceback through this module carries the right line numbers with a blank
+    line beside each of them.
+    """
+    filename = f"<saltcorn {name}>"
+    _FINDER.sources[name] = (source, filename)
+    linecache.cache[filename] = (
+        len(source),
+        None,
+        source.splitlines(keepends=True),
+        filename,
+    )
+    if _FINDER not in sys.meta_path:
+        sys.meta_path.insert(0, _FINDER)
+    # A reinstall replaces what has already been imported, which is what a
+    # second call could only mean.
+    sys.modules.pop(name, None)
 
 
 def compile_body(source, filename):

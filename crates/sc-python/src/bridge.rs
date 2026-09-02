@@ -10,7 +10,7 @@
 //! JavaScript body's ops carry, so the two languages cannot disagree about
 //! authority, budgets or events without somebody changing the trait they share.
 //! The fluent surface an author actually writes (`db.invoices.where(…).rows()`)
-//! is Python, lowers to these plans, and lands in phase 2.3; what is here is
+//! is Python — `src/py/saltcorn.py` — and lowers to these plans; what is here is
 //! everything underneath it.
 //!
 //! # Three things happen on every call

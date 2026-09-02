@@ -592,6 +592,7 @@ async fn the_actions_describe_their_own_settings() -> sc_error::Result<()> {
             "insert_row",
             "run_agent",
             "run_js_code",
+            "run_python_code",
             "send_email",
             "update_rows"
         ]

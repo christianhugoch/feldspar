@@ -976,13 +976,13 @@ Two corrections the phase forced, both found by a test rather than by reading:
 
 ## Phase 2 — `run_python_code`, and `db`
 
-- [ ] 2.1 `ActionServices.adapters` / `ActionContext::adapter(lang)` in `sc-action`, wired through
+- [x] 2.1 `ActionServices.adapters` / `ActionContext::adapter(lang)` in `sc-action`, wired through
       `TriggerDispatcher::with_adapter`.
-- [ ] 2.2 `sc-core-actions::run_python_code`: `code` + `timeout_ms` (same defaults, same ceiling),
+- [x] 2.2 `sc-core-actions::run_python_code`: `code` + `timeout_ms` (same defaults, same ceiling),
       the editor language declared as `python`, the same `bindings()` rule as `run_js_code`
       (presence is scope, `context` only in a run), and the same five hosts built from the
       `ActionContext`.
-- [ ] 2.3 The Python `saltcorn` package, shipped in the binary and installed by a meta-path loader:
+- [x] 2.3 The Python `saltcorn` package, shipped in the binary and installed by a meta-path loader:
       the `db` handle, the query builder, the plan lowering, `db.sql`, `as_user`/`as_admin`,
       `.iter()` as a generator and `__iter__` on the query.
 - [ ] 2.4 The `__sc_db` bridge function: GIL released, host call awaited on the runtime, budget

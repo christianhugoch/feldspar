@@ -1,7 +1,8 @@
 //! The core built-in actions (layer 9; technical design §10.1, TODO Phase 3).
 //!
 //! Every action Saltcorn ships with, in one crate: [`InsertRow`], [`UpdateRows`],
-//! [`DeleteRows`], [`Fetch`], [`RunJsCode`] and [`SendEmail`]. The set
+//! [`DeleteRows`], [`Fetch`], [`RunJsCode`], [`RunPythonCode`] and
+//! [`SendEmail`]. The set
 //! is **deliberately small** — GOALS asks for a minimal one, because control flow
 //! belongs to the workflow engine (§10.3) rather than to a proliferation of
 //! actions — and [`builtin_actions`] is the single constructor that assembles it.
@@ -38,12 +39,14 @@
 //! the translated `where` cares about), the two `where` strategies, the per-row
 //! prefetching, and the authority a write runs under.
 
+mod code_body;
 mod code_fetch;
 mod delete_rows;
 mod fetch;
 mod insert_row;
 mod rows_scope;
 mod run_js_code;
+mod run_python_code;
 mod send_email;
 mod update_rows;
 
@@ -56,6 +59,7 @@ pub use delete_rows::DeleteRows;
 pub use fetch::Fetch;
 pub use insert_row::InsertRow;
 pub use run_js_code::RunJsCode;
+pub use run_python_code::RunPythonCode;
 pub use send_email::SendEmail;
 pub use update_rows::UpdateRows;
 
@@ -83,6 +87,7 @@ pub fn register_builtin_actions(registry: &mut ActionRegistry) -> Result<()> {
     registry.register(Arc::new(DeleteRows))?;
     registry.register(Arc::new(Fetch::new()?))?;
     registry.register(Arc::new(RunJsCode::new()?))?;
+    registry.register(Arc::new(RunPythonCode::new()?))?;
     registry.register(Arc::new(SendEmail))?;
     Ok(())
 }
@@ -101,6 +106,7 @@ mod tests {
                 "fetch",
                 "insert_row",
                 "run_js_code",
+                "run_python_code",
                 "send_email",
                 "update_rows"
             ]

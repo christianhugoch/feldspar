@@ -9,11 +9,11 @@
 //! return {"chased": len(overdue)}
 //! ```
 //!
-//! That surface — the fluent `db`, `fetch`, `fs`, `trigger` and `modfn` an app
-//! builder writes — is Python, lowers to the same plans a JavaScript body's
-//! terminals lower to, and lands in phases 2 and 3. What this crate is, from the
-//! first phase on, is everything underneath it: one interpreter, a run per
-//! thread, the four bounds, and the seam.
+//! That surface is Python — `src/py/saltcorn.py`, shipped inside the binary and
+//! installed on the meta path at interpreter start — and it lowers to the same
+//! plans a JavaScript body's terminals lower to. `db` is here; `fetch`, `fs`,
+//! `trigger` and `modfn` land in phase 3. Underneath it is everything this crate
+//! began as: one interpreter, a run per thread, the four bounds, and the seam.
 //!
 //! # Why there is nothing new below the plans
 //!
@@ -67,7 +67,7 @@
 //!
 //! # The pieces
 //!
-//! - [`interp`] — the interpreter, the boot module, the body cache.
+//! - [`interp`] — the interpreter, the boot module, the surface, the body cache.
 //! - [`bridge`] — the five host functions, the GIL release, the budgets.
 //! - [`convert`] — JSON ↔ Python, and what has no JSON form.
 //! - [`errors`] — the exception hierarchy, defined in Rust.
@@ -93,7 +93,11 @@ mod runtime;
 
 /// The name this adapter is registered under, and the language an action's
 /// stored configuration names.
-pub const PYTHON: &str = "python";
+///
+/// `sc-expr`'s, re-exported: the action that asks `ctx.adapter("python")` and the
+/// adapter that answers to it must agree, and they agree by sharing the string
+/// rather than by both spelling it correctly.
+pub use sc_expr::PYTHON;
 
 /// How many Python runs may be resident at once — code bodies and module calls
 /// alike, because there is one interpreter and one thing being bounded.

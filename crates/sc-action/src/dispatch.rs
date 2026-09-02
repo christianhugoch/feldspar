@@ -57,7 +57,7 @@ use sc_catalog::{
 };
 use sc_email::Mailer;
 use sc_error::{Error, Result};
-use sc_expr::{Ambient, Formula, JsEvaluator, Operation, value_from_json};
+use sc_expr::{Ambient, CodeAdapter, Formula, JsEvaluator, Operation, value_from_json};
 use sc_query::Value;
 use serde_json::Value as Json;
 
@@ -88,7 +88,8 @@ impl TriggerRun {
 }
 
 /// The process-wide things an action run may need but cannot build for itself:
-/// the JavaScript engine and the mail transport.
+/// the JavaScript engine, the mail transport, and the adapters for the other
+/// languages a code body may be written in.
 ///
 /// One struct rather than a growing list of parameters, because these have
 /// exactly the same shape and exactly the same rule — the process that serves
@@ -103,6 +104,17 @@ pub struct ActionServices {
     pub evaluator: Option<Arc<dyn JsEvaluator>>,
     /// The mail transport (§18.2), which `send_email` needs.
     pub mailer: Option<Arc<dyn Mailer>>,
+    /// The **other guest languages** a code body may be written in, keyed by
+    /// [`CodeAdapter::language`] — `"python"`, and whatever comes after it.
+    ///
+    /// A map rather than a field per language, which is the whole point of the
+    /// trait: adding a language is a registration at boot and a `run_*_code`
+    /// action that asks for it by name, and nothing between the two has to
+    /// learn there is a third. JavaScript is **not** in here — `run_js_code`
+    /// holds the concrete [`JsEvaluator`], which is also the thing that carries
+    /// the formula isolate, and giving it a second way in would be two answers
+    /// to which engine runs a JavaScript body.
+    pub adapters: BTreeMap<String, Arc<dyn CodeAdapter>>,
 }
 
 /// The live trigger set, the actions it can run, and the services they run with
@@ -146,6 +158,20 @@ impl TriggerDispatcher {
         self
     }
 
+    /// Supply a guest-language adapter (§15's seam), registered under its own
+    /// [`language`](CodeAdapter::language) — `"python"` for
+    /// [`PythonRuntime`](https://docs.rs/sc-python).
+    ///
+    /// Installing one twice replaces it, which is what a process that rebuilds
+    /// its services wants; there is nothing to collide with, because the name
+    /// is the adapter's own and not something an admin typed.
+    pub fn with_adapter(mut self, adapter: Arc<dyn CodeAdapter>) -> TriggerDispatcher {
+        self.services
+            .adapters
+            .insert(adapter.language().to_owned(), adapter);
+        self
+    }
+
     /// Supply the mail transport (§18.2), which `send_email` needs.
     ///
     /// Optional in the same way the evaluator is: a process that installs no
@@ -172,8 +198,9 @@ impl TriggerDispatcher {
         }
     }
 
-    /// The services an action run is given: the JavaScript engine and the mail
-    /// transport this process assembled, or neither.
+    /// The services an action run is given: the JavaScript engine, the mail
+    /// transport and the guest-language adapters this process assembled, or
+    /// none of them.
     ///
     /// Exposed for the **workflow engine** (§10.3), which builds an
     /// [`ActionContext`] of its own for every step it runs and must build it
@@ -600,6 +627,7 @@ pub async fn fire_trigger_in(
     if let Some(mailer) = &services.mailer {
         ctx = ctx.with_mailer(mailer);
     }
+    ctx = ctx.with_adapters(&services.adapters);
     action.run(&mut ctx).await.map(Some)
 }
 

@@ -1,35 +1,12 @@
 //! `run_js_code` — run a JavaScript code body against the event.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
-
-use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost};
 use sc_error::{Error, Result};
-use sc_expr::{CodeCall, DEFAULT_CODE_TIMEOUT, MAX_CODE_TIMEOUT, TriggerHost};
-use sc_types::{Attrs, BasicType, FormField};
+use sc_types::FormField;
 use serde_json::Value as Json;
 
-use sc_action::{Action, ActionContext, ConfigCheck, Event, config_str};
+use sc_action::{Action, ActionContext, ConfigCheck, config_str};
 
-use crate::code_fetch::CodeFetchHost;
-
-/// The code body.
-const CFG_CODE: &str = "code";
-/// How long one run may take.
-const CFG_TIMEOUT: &str = "timeout_ms";
-
-/// What a trigger that names no timeout gets — the engine's own default, said in
-/// the unit the form takes.
-const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_CODE_TIMEOUT.as_millis() as u64;
-
-/// The ceiling on a configured timeout.
-///
-/// Bounded for the reason `fetch`'s is: a trigger runs inside the request or the
-/// write that fired it, so an unbounded body is an unbounded hold on that caller.
-/// A body now reads and writes tables, so it can genuinely need more than the
-/// default — and still not a minute.
-const MAX_TIMEOUT_MS: u64 = MAX_CODE_TIMEOUT.as_millis() as u64;
+use crate::code_body::{self, CFG_CODE, Hosts};
 
 /// Run a configured JavaScript body in the server's sandboxed engine, and return
 /// what it returns.
@@ -304,19 +281,10 @@ impl Action for RunJsCode {
     }
 
     fn config_spec(&self) -> Vec<FormField> {
-        vec![
-            FormField::new(CFG_CODE, BasicType::Text)
-                .label("Code")
-                // Declared as JavaScript so the admin UI gives it an editor with
-                // highlighting and completions over the scope below, rather than
-                // a text area. The declaration is the whole coupling: no screen
-                // knows this setting by name.
-                .code("javascript")
-                .required(),
-            FormField::new(CFG_TIMEOUT, BasicType::Int)
-                .label("Timeout (ms)")
-                .default_value(DEFAULT_TIMEOUT_MS),
-        ]
+        // Declared as JavaScript so the admin UI gives it an editor with
+        // highlighting and completions over the scope below, rather than a text
+        // area.
+        code_body::config_spec("javascript")
     }
 
     async fn validate_config(&self, check: &ConfigCheck<'_>) -> Result<()> {
@@ -327,236 +295,43 @@ impl Action for RunJsCode {
         // is a number in range, which is a message on the form rather than a
         // firing that will not start.
         config_str(check.config, CFG_CODE)?;
-        timeout(check.config)?;
+        code_body::timeout(check.config)?;
         Ok(())
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
         let code = config_str(ctx.config, CFG_CODE)
             .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
-        let timeout = timeout(ctx.config)
+        let timeout = code_body::timeout(ctx.config)
             .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
+        // Required here, unlike in `run_python_code`: the evaluator *is* the
+        // engine this body runs on, so a process without one has nothing to run
+        // it with — never mind the delegated read that would also want it.
         let evaluator = ctx.evaluator()?;
-        // The `db` handle, for this run only: the call budget is counted on it,
-        // and the event's caller and this trigger's chain ride on every statement
-        // it makes — so a write from the body is an event that says who caused it
-        // and how deep in a cascade it already is. The engine goes along because a
-        // delegated row check is a formula (§7.3), evaluated on the *formula*
-        // isolate while this body's own thread waits — which is why the two
-        // runtimes are separate.
-        let host = TableHost::new(ctx.catalog)
-            .caused_by(ctx.event.role, ctx.event.user.clone())
-            .chained(ctx.chain.clone())
-            // The step's transaction, when this body is a workflow step: what it
-            // writes commits with the step or is rolled back with it, and what it
-            // reads sees what the step has already written (§10.3, decision 6).
-            .in_transaction(ctx.transaction())
-            .with_evaluator(Some(Arc::clone(evaluator)));
-        // The network, on the same terms: borrowed for this run, bounded by the
-        // run's own clock, and counted on a budget of its own.
-        let net = CodeFetchHost::new(self.client.clone(), ctx.trigger);
-        // The file stores, on the same terms again. It carries the event's role
-        // rather than its user, because a file rule is a role floor: `asUser()`
-        // is checked against it, and the admin default clears every one.
-        let files = FileStoreHost::new(ctx.catalog).caused_by(ctx.event.role);
-        // The other triggers, when this context has a dispatcher — and nothing
-        // at all when it does not, so a body that names `trigger` outside a
-        // server says so by name. It carries the caller *and* the chain: the
-        // caller because the trigger that runs must see who caused it, and the
-        // chain because that is what stops a body running the trigger it is
-        // itself the action of, at the same depth every other cascade stops at.
-        let runner = ctx.triggers().map(|d| {
-            TriggerRunHost::new(d, ctx.catalog)
-                .caused_by(ctx.event.role, ctx.event.user.clone())
-                .chained(ctx.chain.clone())
-                .in_transaction(ctx.transaction())
-        });
-        // The module functions, when this server has modules installed and
-        // loaded — and nothing at all when it does not, so a body that names
-        // `modfn` on a server with no modules says so by name rather than
-        // finding an empty handle. The catalog is where they are because a
-        // formula's hoisted call needs them too, from three other crates.
-        let module_fns = ctx.catalog.module_functions();
-        let call = CodeCall {
-            code,
-            bindings: bindings(ctx.event, ctx.run_context()),
-            host: Some(&host),
-            fetch: Some(&net),
-            files: Some(&files),
-            triggers: runner.as_ref().map(|r| r as &dyn TriggerHost),
-            module_fns: module_fns.as_deref(),
-            timeout,
-            ..CodeCall::default()
-        };
+        let bindings = code_body::bindings(ctx.event, ctx.run_context());
+        let hosts = Hosts::new(ctx, Some(evaluator), self.client.clone());
         // The result is the action's result: a directly-run trigger returns it to
         // its caller, and a workflow step will put it in the run context.
         evaluator
-            .run_code(call)
+            .run_code(hosts.call(code, bindings, timeout))
             .await
             .map_err(|e| Error::invalid(format!("trigger `{}`: `{CFG_CODE}`: {e}", ctx.trigger)))
     }
 }
 
-/// The configured wall clock for one run, **bounded** ([`MAX_TIMEOUT_MS`]), or
-/// `None` when the trigger names none.
-///
-/// `None` rather than [`DEFAULT_TIMEOUT_MS`] resolved here, because the engine
-/// has that default already and a process may have been started with another one:
-/// an admin who left the field alone said "whatever this server's default is",
-/// and turning that into a number would overrule it.
-///
-/// Out of range is refused rather than clamped, exactly as `fetch`'s is: an admin
-/// who typed five minutes should be told it is not allowed, not quietly given one.
-fn timeout(config: &Attrs) -> Result<Option<Duration>> {
-    let ms = match config.get(CFG_TIMEOUT) {
-        None | Some(Json::Null) => return Ok(None),
-        Some(Json::Number(n)) => n.as_i64().ok_or_else(|| {
-            Error::invalid(format!(
-                "`{CFG_TIMEOUT}` must be a whole number of milliseconds"
-            ))
-        })?,
-        Some(other) => {
-            return Err(Error::invalid(format!(
-                "`{CFG_TIMEOUT}` must be a whole number of milliseconds, got {other}"
-            )));
-        }
-    };
-    if !(1..=MAX_TIMEOUT_MS as i64).contains(&ms) {
-        return Err(Error::invalid(format!(
-            "`{CFG_TIMEOUT}` must be between 1 and {MAX_TIMEOUT_MS} milliseconds, got {ms}"
-        )));
-    }
-    Ok(Some(Duration::from_millis(ms.unsigned_abs())))
-}
-
-/// What the event binds in the code's scope (`row`, `old`, `user`, `payload`) —
-/// plus `context` when this body is a **workflow step** (§10.3, decision 8): the
-/// run so far, as an object, which is the same thing a step's formulas read.
-///
-/// Presence is scope, exactly as it is for a formula: an absent binding is a
-/// `ReferenceError` naming it, a binding present as `null` is a value. `old` on an
-/// insert is the case that distinguishes the two — in scope, null. `context` is
-/// the other: outside a run it is not bound at all, so a body that names it says
-/// so rather than reading an empty object as "nothing has happened yet".
-fn bindings(event: &Event, run_context: Option<&Attrs>) -> BTreeMap<String, Json> {
-    let mut bindings = BTreeMap::new();
-    if let Some(context) = run_context {
-        bindings.insert(
-            "context".to_owned(),
-            Json::Object(
-                context
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            ),
-        );
-    }
-    if event.kind.is_table_event() {
-        bindings.insert("row".to_owned(), Json::Object(event.row_object()));
-        bindings.insert(
-            "old".to_owned(),
-            match event.old_row {
-                Some(_) => Json::Object(event.old_row_object()),
-                None => Json::Null,
-            },
-        );
-    }
-    bindings.insert("user".to_owned(), event.user.clone().unwrap_or(Json::Null));
-    bindings.insert("payload".to_owned(), event.payload.clone());
-    bindings
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_action::EventKind;
-    use serde_json::json;
+    use sc_action::Action;
+    use sc_types::Attrs;
 
     #[test]
-    fn the_code_is_required_and_the_timeout_is_the_other_setting() {
+    fn the_code_is_required_and_the_editor_is_told_it_is_javascript() {
         let spec = RunJsCode::new().expect("client builds").config_spec();
-        let names: Vec<&str> = spec.iter().map(|f| f.name()).collect();
-        assert_eq!(names, vec![CFG_CODE, CFG_TIMEOUT]);
-        assert!(spec[0].required);
-        assert!(!spec[1].required, "a body may take the server's default");
-        assert_eq!(spec[1].default, Some(json!(DEFAULT_TIMEOUT_MS)));
+        assert_eq!(spec[0].code_language.as_deref(), Some("javascript"));
         // A configuration with nothing in it is a named error rather than an
         // empty body that silently returns null.
         let msg = config_str(&Attrs::new(), CFG_CODE).unwrap_err().to_string();
         assert!(msg.contains(CFG_CODE) && msg.contains("required"), "{msg}");
-    }
-
-    #[test]
-    fn the_timeout_defers_to_the_engine_when_unset_and_is_bounded_when_set() {
-        let config =
-            |value: Json| -> Attrs { [(CFG_TIMEOUT.to_owned(), value)].into_iter().collect() };
-        // Unset is not "5000" but "whatever this server's default is": resolving
-        // it here would overrule a process started with another one.
-        assert_eq!(timeout(&Attrs::new()).unwrap(), None);
-        assert_eq!(timeout(&config(Json::Null)).unwrap(), None);
-        assert_eq!(
-            timeout(&config(json!(250))).unwrap(),
-            Some(Duration::from_millis(250))
-        );
-        assert_eq!(
-            timeout(&config(json!(MAX_TIMEOUT_MS))).unwrap(),
-            Some(MAX_CODE_TIMEOUT),
-            "the ceiling itself is allowed"
-        );
-        // Refused rather than clamped, and each refusal names the setting.
-        for bad in [
-            json!(MAX_TIMEOUT_MS + 1),
-            json!(0),
-            json!(-5),
-            json!("soon"),
-        ] {
-            let msg = timeout(&config(bad.clone())).unwrap_err().to_string();
-            assert!(msg.contains(CFG_TIMEOUT), "{bad}: {msg}");
-        }
-    }
-
-    #[test]
-    fn presence_is_scope_for_the_events_bindings() {
-        // An update binds both rows; every name in the scope is there.
-        let update = Event::new(EventKind::Update)
-            .on("books")
-            .row(json!({ "id": 1, "title": "now" }))
-            .old_row(json!({ "id": 1, "title": "was" }))
-            .caller(1, Some(json!({ "email": "a@b.c" })));
-        let bound = bindings(&update, None);
-        assert_eq!(
-            bound.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["old", "payload", "row", "user"]
-        );
-        assert_eq!(bound["old"]["title"], json!("was"));
-        assert_eq!(bound["user"]["email"], json!("a@b.c"));
-        assert_eq!(bound["payload"], Json::Null);
-
-        // An insert has `old` in scope and null — a value, not an absence.
-        let insert = Event::new(EventKind::Insert)
-            .on("books")
-            .row(json!({ "id": 1 }));
-        let bound = bindings(&insert, None);
-        assert_eq!(bound["old"], Json::Null);
-        assert_eq!(bound["user"], Json::Null, "anonymous binds null");
-
-        // An event with no row binds neither, so code naming `row` there fails
-        // in the engine instead of reading undefined.
-        let called = Event::new(EventKind::None).payload(json!({ "n": 2 }));
-        let bound = bindings(&called, None);
-        assert!(!bound.contains_key("row") && !bound.contains_key("old"));
-        assert_eq!(bound["payload"], json!({ "n": 2 }));
-
-        // Outside a run there is no `context` at all; as a workflow step it is
-        // bound — including on the first step, where it is empty. Presence is
-        // scope, so a body may ask what has happened before anything has.
-        assert!(!bound.contains_key("context"));
-        let step = bindings(&called, Some(&Attrs::new()));
-        assert_eq!(step["context"], json!({}));
-        let later: Attrs = [("total".to_owned(), json!(120))].into_iter().collect();
-        assert_eq!(
-            bindings(&called, Some(&later))["context"],
-            json!({"total": 120})
-        );
     }
 }

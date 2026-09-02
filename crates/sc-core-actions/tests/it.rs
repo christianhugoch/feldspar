@@ -23,6 +23,8 @@ mod fetch_action;
 mod row_actions;
 #[path = "run_js_code.rs"]
 mod run_js_code;
+#[path = "run_python_code.rs"]
+mod run_python_code;
 #[path = "send_email.rs"]
 mod send_email;
 #[path = "tutorial_triggers.rs"]

@@ -37,13 +37,32 @@ use pyo3::types::{PyDict, PyModule};
 use sc_error::{Error, Result};
 use serde_json::Value as Json;
 
-use crate::bridge::{self, RunState};
+use crate::bridge::{self, RunState, Surface};
 use crate::convert;
 use crate::errors::Timeout;
 
 /// The Python half of the body pipeline, compiled into the binary. There is no
 /// file to find, no version to skew and nothing to install.
 const BOOT: &str = include_str!("py/boot.py");
+
+/// The **surface** an app builder writes — `db` and the errors — compiled into
+/// the binary beside the pipeline and installed on the meta path at boot.
+///
+/// `DB_PRELUDE`'s counterpart, and Python for the same reason it is JavaScript:
+/// the Rust side sees plans, so a chain method is added here and nowhere else.
+const SALTCORN: &str = include_str!("py/saltcorn.py");
+
+/// The name the package is imported under, which is also what a body's
+/// `import saltcorn` reaches.
+const PACKAGE: &str = "saltcorn";
+
+/// What the surface binds in a run's globals, and which host surface each name
+/// depends on: the object is bound **only** where this run has the surface
+/// behind it, so `db` on a body with no database is a `NameError` naming it
+/// rather than a handle that fails on use.
+///
+/// One entry for now; `fetch`, `fs`, `trigger` and `modfn` join it in phase 3.
+const SURFACES: [(&str, Surface); 1] = [("db", Surface::Db)];
 
 /// How many compiled bodies the interpreter keeps. Generous next to the number
 /// of triggers an installation has, and each entry is a code object and its
@@ -56,6 +75,10 @@ static START: OnceLock<std::result::Result<String, String>> = OnceLock::new();
 
 /// The boot module, imported once.
 static BOOT_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+
+/// The `saltcorn` package, imported once — at boot, so the cost of parsing the
+/// surface lands on the interpreter's clock rather than on somebody's trigger.
+static PACKAGE_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
 /// The compiled bodies, keyed by a hash of the source with the source kept
 /// beside it — so a collision is a miss rather than somebody else's body.
@@ -138,7 +161,16 @@ fn boot(py: Python<'_>) -> PyResult<String> {
         c"<saltcorn boot>",
         c"__sc_boot",
     )?;
+    // The surface goes on the meta path before anything imports it, and is then
+    // imported here rather than on the first run — `import saltcorn` from a body
+    // finds it already in `sys.modules`, and a body that never mentions it has
+    // still paid for it exactly once, at start.
+    module
+        .getattr("install_module")?
+        .call1((PACKAGE, SALTCORN))?;
     let _ = BOOT_MODULE.set(py, module.unbind());
+    let package = py.import(PACKAGE)?;
+    let _ = PACKAGE_MODULE.set(py, package.unbind());
     // Imported here rather than on the first conversion, so the cost lands on
     // the interpreter's clock and not on somebody's trigger.
     convert::init(py)?;
@@ -147,6 +179,16 @@ fn boot(py: Python<'_>) -> PyResult<String> {
     let minor: u32 = info.getattr("minor")?.extract()?;
     let micro: u32 = info.getattr("micro")?.extract()?;
     Ok(format!("{major}.{minor}.{micro}"))
+}
+
+/// The `saltcorn` package, for the caller that binds a run's globals.
+fn package(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    match PACKAGE_MODULE.get(py) {
+        Some(module) => Ok(module.bind(py)),
+        None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "the Saltcorn Python surface was not installed",
+        )),
+    }
 }
 
 fn boot_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
@@ -311,6 +353,16 @@ pub(crate) fn run_body(
             if surfaces.holds(surface) {
                 let function = sc.getattr(name).map_err(|e| py_error(py, &e))?;
                 bind(name, function)?;
+            }
+        }
+        // And the surface itself, over those same functions: `db` is what an
+        // author writes, and the bridge function under it is what the plan
+        // crosses on.
+        let package = package(py).map_err(|e| py_error(py, &e))?;
+        for (name, surface) in SURFACES {
+            if surfaces.holds(surface) {
+                let handle = package.getattr(name).map_err(|e| py_error(py, &e))?;
+                bind(name, handle)?;
             }
         }
         let boot = boot_module(py).map_err(|e| py_error(py, &e))?;

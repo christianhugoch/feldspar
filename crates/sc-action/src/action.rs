@@ -14,12 +14,13 @@
 //! what puts `context` in scope for the action's own settings — decision 8, and
 //! the one thing an action has to know about the difference.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use sc_catalog::{Catalog, SharedTx};
 use sc_email::Mailer;
 use sc_error::{Error, Result};
-use sc_expr::{Ambient, JsEvaluator, SchemaShape, value_from_json};
+use sc_expr::{Ambient, CodeAdapter, JsEvaluator, SchemaShape, value_from_json};
 use sc_query::Value;
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
@@ -158,6 +159,15 @@ pub struct ActionContext<'a> {
     /// a unit test), so an action that sends mail out of context gets a named
     /// configuration error rather than doing nothing.
     mailer: Option<&'a Arc<dyn Mailer>>,
+    /// The **other guest languages** this process can run a code body in, keyed
+    /// by language — reached as [`adapter`](ActionContext::adapter), and empty
+    /// in a context that installed none.
+    ///
+    /// Borrowed from [`ActionServices`](crate::ActionServices) rather than
+    /// cloned, for the reason every other handle here is borrowed: a run is one
+    /// `await` on the caller's stack, and an adapter is a process-wide thing the
+    /// dispatcher already holds.
+    adapters: Option<&'a BTreeMap<String, Arc<dyn CodeAdapter>>>,
     /// The dispatcher this action was fired by, for an action that can run
     /// **another trigger** — `run_js_code`'s `trigger(…)`, and a workflow's
     /// steps once §10.3 lands.
@@ -220,6 +230,7 @@ impl<'a> ActionContext<'a> {
             chain: vec![trigger.to_owned()],
             evaluator: None,
             mailer: None,
+            adapters: None,
             triggers: None,
             tx: None,
             context: Attrs::new(),
@@ -237,6 +248,16 @@ impl<'a> ActionContext<'a> {
     /// [`SettingsMailer`](sc_email::SettingsMailer), or a recording one in a test.
     pub fn with_mailer(mut self, mailer: &'a Arc<dyn Mailer>) -> ActionContext<'a> {
         self.mailer = Some(mailer);
+        self
+    }
+
+    /// Supply the adapters for the other languages a code body may be written
+    /// in — what a dispatcher hands every action it runs.
+    pub fn with_adapters(
+        mut self,
+        adapters: &'a BTreeMap<String, Arc<dyn CodeAdapter>>,
+    ) -> ActionContext<'a> {
+        self.adapters = Some(adapters);
         self
     }
 
@@ -340,6 +361,28 @@ impl<'a> ActionContext<'a> {
                 self.trigger
             ))
         })
+    }
+
+    /// The adapter for `language`, or a configuration error naming the trigger
+    /// and the language.
+    ///
+    /// Fails for the reason [`evaluator`](ActionContext::evaluator) does, and
+    /// its message is the one an admin needs: a `run_python_code` trigger in a
+    /// process that registered no Python adapter has nothing correct to do, and
+    /// the one thing it must not do is return success. What it does **not** say
+    /// is *why* there is no adapter — a server registers one either way, and the
+    /// sentence about a build without Python support comes from the adapter
+    /// itself, which is the only thing that knows.
+    pub fn adapter(&self, language: &str) -> Result<&Arc<dyn CodeAdapter>> {
+        self.adapters
+            .and_then(|adapters| adapters.get(language))
+            .ok_or_else(|| {
+                Error::config(format!(
+                    "trigger `{}` runs {language} code but no {language} adapter is \
+                     available in this context",
+                    self.trigger
+                ))
+            })
     }
 
     /// The dispatcher, when this context has one.

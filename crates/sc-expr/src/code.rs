@@ -266,6 +266,15 @@ pub const DEFAULT_MAX_HEAP: usize = 256 * 1024 * 1024;
 #[cfg(feature = "eval")]
 const CALLER_GRACE: Duration = Duration::from_millis(250);
 
+/// The language name the Python adapter registers under, and the one a
+/// `run_python_code` trigger's stored configuration is read with.
+///
+/// Here rather than in `sc-python` so that the action asking for the adapter and
+/// the adapter answering to the name are reading the same string, without the
+/// action's crate having to depend on an embedded interpreter to learn how it is
+/// spelled.
+pub const PYTHON: &str = "python";
+
 /// The host surface a code body can reach: one JSON request in, one JSON value
 /// out. **The** seam of §15 — a Python or Rust adapter implements the same trait
 /// against the same plans, which is why this takes JSON rather than anything
