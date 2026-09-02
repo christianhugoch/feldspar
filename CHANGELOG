@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## A green build again: four things that had drifted
+
+Nothing here changes what the program does. Four separate pieces of rot had accumulated
+to the point where `cargo test --workspace` and CI both failed, and this is the repair.
+
+- **The IDE's generated client was stale.** `ui/admin/src/client.ts` and
+  `ui/ide/src/client.ts` are generated from the admin endpoint set, and only the first
+  had been regenerated when the workflow endpoints grew a version query parameter and
+  two more fields on a trigger. The IDE copy is regenerated, which is what
+  `sc-api`'s `admin_client_sync` test asks for; the IDE still type-checks against it.
+
+- **The npm override that stubs out the v1 API stopped working.** A module's
+  `@saltcorn/*` dependencies are redirected to empty stub packages so that installing a
+  v1 plugin does not download v1's server, and the redirect was an `overrides` entry
+  pointing at the stub's directory. Resolving a `file:` override for a dependency of a
+  package installed with `--install-links` — which is how every local checkout is
+  installed — makes npm 11.12 look for a manifest at `<the dependent>/0/package.json`
+  and abort the install with ENOENT, so `a_checkouts_own_dependencies_are_installed_and_its_v1_ones_are_not`
+  failed on any machine with a current npm. The project now takes each stub on as a
+  **direct dependency** at its `file:` path and the override is the reference
+  `$<package>`, npm's spelling of "whatever the project itself depends on". The stub
+  lands in the modules root either way — which is where the host resolves `@saltcorn/*`
+  from — and the reference is resolved before npm has a path to mangle. A new test,
+  `the_v1_api_stubs_are_a_dependency_and_the_overrides_reference_it`, pins both entries
+  and the idempotence of writing them.
+
+- **The linked-binary size ceiling was measuring a workspace that no longer exists.**
+  `repo_hygiene`'s second line of defence checks that the debug-info budget is really
+  reaching the linker, by asserting the largest binary in `target/debug/deps` stays
+  under a ceiling that separated ~173 MB (budget on) from ~440 MB (budget off). The
+  budget is still on — dependency DWARF is gone, and the workspace's own line tables
+  are ~47 MB of a 440 MB binary — but the npm module runtime brought in the whole of
+  `deno_runtime` rather than bare `deno_core`, and the same binary is now ~440 MB
+  *with* the budget: ~166 MB of `.text` and ~140 MB of symbol tables. The ceiling moves
+  to 600 MB, which still catches a build where the budget stopped applying, and the
+  comment carries the new measurements. Practical consequence for anyone running the
+  suite: a cold `cargo test --workspace` no longer fits in `cargo-guarded.sh`'s default
+  12 GB at `-j8`. Use `-j4`, or raise the ceiling, as the guard's own message says.
+
+- **Two test files tripped `-D warnings`.** `clippy.toml` exempts `unwrap()` and
+  `expect()` *inside* test functions, which does not cover a test file's helper
+  functions; `setup_host.rs` and `build_static_deploy.rs` have plenty of those and
+  carried none of the file-level allowance the other 126 test files carry.
+
+Also gone: the `dead_code` warning for `sc-expr`'s `render_js`. Every caller in the
+evaluator goes through `render_js_hoisted` with the module calls §4b prefetched, and
+only the tests render an AST with nothing hoisted — so it is `#[cfg(test)]`, which is
+what it had become.
+
 ## `get-cfg` and `set-cfg`: the settings, from a terminal
 
 The settings an admin edits under Settings are rows in the primary database, which is

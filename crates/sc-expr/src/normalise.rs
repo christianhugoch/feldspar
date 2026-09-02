@@ -39,6 +39,11 @@ use crate::ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 /// Render the normalised JavaScript for `ast`. The result is an expression
 /// (always parenthesised at the top level where it matters), suitable for
 /// embedding in the evaluator's script template.
+///
+/// Only the tests render an AST with nothing hoisted; every caller in the
+/// evaluator goes through [`render_js_hoisted`] with the §4b bindings it
+/// prefetched, so this is the tests' spelling of "and nothing was hoisted".
+#[cfg(test)]
 pub(crate) fn render_js(ast: &Ast) -> String {
     render_js_hoisted(ast, &BTreeMap::new())
 }

@@ -110,3 +110,63 @@ async fn uninstalling_from_a_root_that_was_never_used_is_quiet() {
         ""
     );
 }
+
+/// The shape of the v1 API stub redirection, pinned because npm is fussy about
+/// exactly one part of it.
+///
+/// Each stubbed package gets **two** entries in the project: a direct
+/// dependency on the stub directory, and an override that is the *reference*
+/// `$<package>` rather than the stub's path. Writing the path into `overrides`
+/// directly is what one would expect to work, and it is what npm 11.12 chokes
+/// on the moment the dependent was installed with `--install-links`: it goes
+/// looking for `<the dependent>/0/package.json` and aborts the whole install
+/// with ENOENT. Nothing in the modules root would tell an admin that, so the
+/// two entries are asserted here.
+#[tokio::test]
+async fn the_v1_api_stubs_are_a_dependency_and_the_overrides_reference_it() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let root = temp_root("install-stub-overrides");
+    let installer = Installer::new(&root);
+
+    installer.ensure_project().await.unwrap();
+    let project: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("package.json")).expect("the project file is written"),
+    )
+    .expect("the project file is JSON");
+
+    assert_eq!(
+        project["overrides"]["@saltcorn/data"],
+        serde_json::json!("$@saltcorn/data"),
+        "{project:#}"
+    );
+    let stub = project["dependencies"]["@saltcorn/data"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the stub is a dependency of the project: {project:#}"));
+    // Absolute, so the spec is right wherever it is read from — and so a moved
+    // modules root rewrites it on the next install rather than resolving to
+    // nothing.
+    assert_eq!(
+        stub,
+        format!(
+            "file:{}",
+            root.join("v1-api-stub").join("saltcorn-data").display()
+        ),
+        "{project:#}"
+    );
+    assert!(
+        root.join("v1-api-stub/saltcorn-data/package.json")
+            .is_file(),
+        "the stub package the dependency points at is written"
+    );
+
+    // Idempotent: a second pass over a project that already says all this
+    // leaves it alone rather than rewriting it on every install.
+    let before = std::fs::read_to_string(root.join("package.json")).unwrap();
+    installer.ensure_project().await.unwrap();
+    assert_eq!(
+        before,
+        std::fs::read_to_string(root.join("package.json")).unwrap()
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -992,10 +992,15 @@ things keep that from taking the machine with it:
 
 - **A debug-info budget**, in the workspace `Cargo.toml`. Dependencies are built
   with no debug info and workspace crates with line tables only, which is what a
-  test backtrace actually reads. This is the setting that matters: it takes a
-  test binary from ~440 MB to ~150 MB and the whole `--workspace` build from
-  ~20 GB of peak memory to ~3 GB. Full DWARF for a dependency, on the rare
-  occasion of stepping into one, is a one-off flag:
+  test backtrace actually reads. This is the setting that matters: it took a test
+  binary from ~440 MB to ~150 MB and the whole `--workspace` build from ~20 GB of
+  peak memory to ~3 GB when it landed. Both numbers have since grown with the
+  dependency tree — the npm module runtime links the whole of `deno_runtime`, and
+  the largest test binary is back around 440 MB with the budget in place, of
+  which only ~47 MB is debug info — so a cold `cargo test --workspace` no longer
+  fits in the wrapper's default 12 GB at `-j8`. Run it with `-j4`, or raise the
+  ceiling. Full DWARF for a dependency, on the rare occasion of stepping into
+  one, is a one-off flag:
 
   ```bash
   cargo test --config 'profile.dev.package."*".debug=true' -p <crate>

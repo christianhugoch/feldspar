@@ -17,6 +17,8 @@
 //! the test's temporary directory. What the assertions then look at is the
 //! installed tree, not the script's text.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

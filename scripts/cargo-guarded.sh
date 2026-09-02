@@ -44,11 +44,15 @@
 set -euo pipefail
 
 # Default ceiling: leave the desktop a working machine while the suite runs.
-# Measured peak for a full `cargo test --workspace` from a cold `target/`, with
-# the debug-info budget in place, is ~3.3 GB of toolchain RSS, so 12 GB is
-# roughly 4x headroom — high enough never to bite a healthy build, low enough
-# that a runaway one is stopped while the rest of the session is still
-# responsive.
+# When this was written a full `cargo test --workspace` from a cold `target/`,
+# with the debug-info budget in place, peaked at ~3.3 GB of toolchain RSS and
+# 12 GB was roughly 4x headroom. The tree has grown a great deal since — the npm
+# module runtime links the whole of `deno_runtime`, taking the largest test
+# binary back to ~440 MB — and a cold `--workspace` run at the default `-j8` now
+# reaches this ceiling and is killed. That is the wrapper working: `-j4` fits,
+# and so does a bigger `SC_BUILD_MEM_MAX` on a machine with the memory to spare.
+# The number stays where it is because its job is to protect the rest of the
+# session, not to accommodate whatever the build has grown into.
 : "${SC_BUILD_MEM_MAX:=12G}"
 : "${SC_BUILD_MEM_HIGH:=10G}"
 

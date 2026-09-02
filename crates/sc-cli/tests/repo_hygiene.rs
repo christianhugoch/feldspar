@@ -129,12 +129,20 @@ fn the_workspace_keeps_debug_info_off_dependencies() {
 /// It deliberately does **not** measure *this* binary: `repo_hygiene` only reads
 /// files, so the linker garbage-collects almost everything and it lands around
 /// 7 MB whether the budget applies or not — it would pass either way and prove
-/// nothing. The binaries that matter are the ones that really do pull in V8
-/// (~173 MB with the budget, ~440 MB without), so this looks at the whole
-/// `deps/` directory the current build wrote and checks the largest.
+/// nothing. The binaries that matter are the ones that really do pull in V8, so
+/// this looks at the whole `deps/` directory the current build wrote and checks
+/// the largest.
 ///
-/// The ceiling is loose on purpose: it only has to separate ~173 from ~440, not
-/// to police ordinary growth in the dependency tree.
+/// The ceiling is loose on purpose: it only has to separate a build with the
+/// budget from one without, not to police ordinary growth in the dependency
+/// tree — and that tree has grown a lot. When the budget landed the largest
+/// linked binary was ~173 MB with it and ~440 MB without; since the npm module
+/// runtime brought in the whole of `deno_runtime` (webgpu, ffi, node crypto,
+/// kv, …) rather than bare `deno_core`, the same binary is ~440 MB *with* the
+/// budget — its `.text` alone is ~166 MB and its symbol tables another ~140 MB,
+/// against ~47 MB of line tables for workspace code. Dependency DWARF is the
+/// several hundred megabytes on top of that, so the ceiling moves to 600 MB and
+/// still catches a build where the budget stopped applying.
 ///
 /// A partial build (`-p sc-cli` alone) may have linked nothing large yet, in
 /// which case there is simply nothing to measure and the test passes — this is a
@@ -142,7 +150,7 @@ fn the_workspace_keeps_debug_info_off_dependencies() {
 /// that always holds.
 #[test]
 fn linked_test_binaries_stay_within_the_debug_info_budget() {
-    const CEILING_MB: u64 = 300;
+    const CEILING_MB: u64 = 600;
 
     // `<target>/debug/deps/` — derived from this binary rather than assumed, so
     // it follows CARGO_TARGET_DIR and a `--target` build.

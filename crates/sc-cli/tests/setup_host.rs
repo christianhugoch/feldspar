@@ -11,6 +11,8 @@
 //! source — is checked through `--dry-run`, which prints the same plan the
 //! script would execute because it is the same code path with the doing removed.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

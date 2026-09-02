@@ -21,9 +21,10 @@
 //! **The `@saltcorn/*` dependencies are never downloaded.** A v1 plugin depends
 //! on `@saltcorn/data` — v1's server, the program this one replaces, and some
 //! 270 MB with its tree — which the host's `require` hook answers itself before
-//! a line of it could be read. So the project declares an npm **override** for
-//! each, pointing at a local stub package of the same name (see
-//! [`V1_API_PACKAGES`]).
+//! a line of it could be read. So the project depends on a local stub package of
+//! the same name and declares an npm **override** redirecting the module's
+//! dependency to it (see [`V1_API_PACKAGES`] and
+//! [`Installer::write_overrides`]).
 //!
 //! **What the package is called is read from the package**, never from what the
 //! admin typed: a specifier may carry a version (`@saltcorn/mqtt@0.2.0`), may be
@@ -215,6 +216,18 @@ impl Installer {
 
     /// Redirect each of `packages` to the stub, and write the project file back
     /// if that changed anything. Returns whether it did.
+    ///
+    /// Two entries per package, not one. The project takes the stub on as a
+    /// **direct dependency** at its `file:` path, and the override is the
+    /// *reference* `$<package>` — npm's spelling of "whatever the project
+    /// itself depends on". Writing the `file:` path straight into `overrides`
+    /// is the obvious thing and npm cannot do it: resolving a `file:` override
+    /// for a dependency of a package installed with `--install-links` makes npm
+    /// look for a manifest at `<the dependent>/0/package.json` and abort the
+    /// install with ENOENT (npm 11.12). The reference costs nothing — the stub
+    /// is installed into the modules root either way, which is where the host
+    /// resolves `@saltcorn/*` from — and it is resolved before npm has a path
+    /// to mangle.
     async fn write_overrides<'a>(
         &self,
         project: &mut Map<String, Json>,
@@ -224,28 +237,38 @@ impl Installer {
             Some(Json::Object(existing)) => existing.clone(),
             _ => Map::new(),
         };
+        let mut dependencies = match project.get("dependencies") {
+            Some(Json::Object(existing)) => existing.clone(),
+            _ => Map::new(),
+        };
         let mut changed = false;
         for package in packages {
-            // **Absolute**, because npm resolves a `file:` override relative to
-            // the package that declared the dependency rather than to the
-            // project — a relative one silently resolves to nothing and the real
-            // package is downloaded instead.
-            let target = Json::from(format!(
+            // **Absolute**, because npm resolves a relative `file:` dependency
+            // against the project's own directory: right here today, wrong the
+            // moment anything reads the file from somewhere else. An absolute
+            // path is also self-healing — a modules root that moved rewrites
+            // itself on the next install, because the spec no longer matches.
+            let stub = Json::from(format!(
                 "file:{}",
                 self.root
                     .join(STUB_DIR)
                     .join(stub_subdir(package))
                     .display()
             ));
-            if overrides.get(package) != Some(&target) {
+            let reference = Json::from(format!("${package}"));
+            if overrides.get(package) != Some(&reference)
+                || dependencies.get(package) != Some(&stub)
+            {
                 self.write_stub(package).await?;
-                overrides.insert(package.to_owned(), target.clone());
+                overrides.insert(package.to_owned(), reference);
+                dependencies.insert(package.to_owned(), stub);
                 changed = true;
             }
         }
         if !changed {
             return Ok(false);
         }
+        project.insert("dependencies".into(), Json::Object(dependencies));
         project.insert("overrides".into(), Json::Object(overrides));
         let path = self.root.join(PACKAGE_JSON);
         let text = serde_json::to_string_pretty(&Json::Object(project.clone()))
