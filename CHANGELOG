@@ -2,6 +2,98 @@
 
 Changes in reverse chronological order.
 
+## The Python runtime: one interpreter, a run per thread, four bounds
+
+Phase 1 of the Python code adapter. `crates/sc-python` is a new workspace member
+holding everything underneath the surface an app builder will write: the
+embedded interpreter, the body pipeline, the seam to the five host traits, the
+conversions, the exception hierarchy and the bounds. The fluent `db`,
+`fetch`, `fs`, `trigger` and `modfn` are phases 2 and 3; what is here is what
+they lower onto.
+
+- **A second guest language is one trait and nothing below it.** `sc-expr` grows
+  `CodeAdapter` (`language()` + `run_code(CodeCall)`) beside `JsEvaluator`, and
+  `PythonRuntime` implements it. `CodeCall` itself is untouched and so are the
+  five host traits: the source, the bindings, the borrowed hosts and the six
+  budgets were never JavaScript's, so Python reaches the same plans, the same
+  authority rules and the same budgets without anybody keeping two copies in
+  step. The refusal sentences are the JavaScript ones word for word, because they
+  are the same facts.
+- **The runtime.** One CPython, started lazily on the first run (~10 ms, 6.5 MB
+  — about one V8 isolate) and never more than one. A run is an ordinary Python
+  thread taken from an idle cache and returned to it, so a trigger firing a
+  thousand times spawns roughly as many threads as it ever runs at once.
+  `--python-max-inflight` (default 32) bounds how many are resident, and a run
+  **nested inside another Python run** is admitted past it on a thread of its own
+  — that is a deadlock fix, not a convenience: the parent holds a slot while it
+  waits for the child, and the child waiting for the parent's slot would hang
+  under load. Nesting is known from a task-local set while a host call is served.
+- **The body is compiled through the AST, never re-indented.** `ast.parse`, the
+  statements moved into a `FunctionDef`, the AST compiled — so `return` is legal
+  at the top level, a triple-quoted string survives, a `SyntaxError` carries the
+  author's own line and column, and a traceback carries their own line numbers.
+  The source is registered in `linecache` under the pseudo-filename it compiled
+  with, so a rendered frame has the line's text beside its number, and the
+  traceback is trimmed to the author's frames: `line 7, in <body>`, not fifteen
+  frames of runtime. Code objects are cached per content key (256 of them, LRU),
+  which phase 0.5 measured at 35× against recompiling.
+- **Every host call releases the GIL**, which is the whole of the concurrency
+  claim and now a test that stays: eight runs each parked in a 600 ms host call,
+  with eight more starting 80 ms later, doing real Python and finishing inside
+  500 ms while the first eight are still waiting. Serialised, the eight would
+  take 4.8 s.
+- **The four bounds of §4, in the order they fire.** The host refuses every call
+  once the deadline has passed **and bounds the call already in flight** by
+  what is left of the clock — phase 0.3's amendment, and the only instrument that
+  can reach a body parked in a slow request. `PyThreadState_SetAsyncExc` raises
+  `Timeout` in the run's thread, which stops a `while True: pass` in
+  milliseconds and leaves every co-resident run untouched — the property that
+  lets one interpreter carry code bodies and (later) module state at once. The
+  caller stops waiting 250 ms past the deadline. And a thread that has still not
+  returned is **quarantined**: dropped from the idle cache, counted as stuck,
+  refused against `--python-max-stuck` (default 8) with a message saying the
+  remedy is a restart — and un-counted if it does come back, which the test
+  drives with a `time.sleep` that `SetAsyncExc` provably cannot interrupt.
+- **`Timeout` derives from `BaseException`** so a bare `except Exception:` in
+  somebody's retry loop cannot swallow the run's deadline; the six error types
+  are defined in the Rust half, so nothing in the interpreter can redefine what
+  the host raises. A refusal is an ordinary catchable exception at the call site
+  — a body may try a delegated write, catch `saltcorn.DbError` and fall back.
+- **Conversion.** JSON both ways, plus the five types an app builder computes
+  with: `datetime`, `date` and `time` become ISO strings, `Decimal` a number,
+  `UUID` a string. Anything else is an error naming **the type and the path to
+  it** — `result["items"][1]` named as a `set` — rather than a `null` discovered
+  three screens later, and a value nested more than 64 deep is refused rather than
+  overflowing the stack.
+- **The feature is off, and the crate is honest about it.** `python-host` (which
+  `sc-server`'s `python` feature will turn on in phase 2.5) is what links
+  `libpython`: with it, the test binary's `DT_NEEDED` names
+  `libpython3.14.so.1.0`; without it, there is no Python in the binary at all.
+  A build without the feature still constructs a `PythonRuntime`, still answers
+  `language() == "python"`, and fails every entry point with "this server was
+  built without Python support", naming the rebuild that fixes it — so a
+  trigger's configuration stays meaningful across deployments.
+  `PythonRuntime::state()` reports which of the three states (not built · built
+  but not initialised · running, with the version) this process is in, for the
+  diagnostics screen of phase 4.2. PyO3 costs **+5 crates** in this workspace's
+  lock file — phase 0 measured 7 against a bare control, and two of those were
+  already here.
+
+Two bugs the tests found, both recorded in `TODO.md` beside the phase:
+
+- **A lock-order inversion between the body cache and the GIL.** CPython hands
+  the GIL over between bytecodes, so a thread compiling a body with the cache
+  lock held can lose the GIL mid-compile while another thread, holding the GIL,
+  blocks on that lock — and neither can proceed. It takes two *different* bodies
+  compiling at once, so it appeared only when the test binary ran its tests in
+  parallel. The cache is now looked up under the lock, compiled without it, and
+  inserted under it again; `many_different_bodies_compile_at_once` is the
+  regression test, and the rule — never hold a lock across a call into Python —
+  is written down for the phases that will add more locks.
+- **The AST wrapper needs all four of its positions.** Setting only `lineno` and
+  letting `fix_missing_locations` fill in the rest gives the node an `end_lineno`
+  of 1, which `compile` rejects for any body whose first line is a comment.
+
 ## Embedding CPython: the spike, and the gate
 
 The Python code adapter opens with a phase that is allowed to say no. Nothing in

@@ -11,6 +11,12 @@ members = [
     # Layer 1 — query language, expression language
     "crates/sc-query",
     "crates/sc-expr",
+    # The Python code adapter (TODO "The Python code adapter"): `sc-expr`'s own
+    # `CodeCall` and five host traits, run on an embedded CPython instead of on
+    # V8. Here rather than beside `sc-module` because that is what it depends
+    # on — the seam and nothing above it — and because a second guest language
+    # is a peer of the first, not a consumer of the server.
+    "crates/sc-python",
     # Layer 2 — database
     "crates/sc-db",
     "crates/sc-db-postgres",
@@ -80,6 +86,10 @@ sc-query = { path = "crates/sc-query" }
 # catalog takes the parse/validate/translate half only; the server adds
 # `features = ["eval"]` for the V8-backed reified evaluator.
 sc-expr = { path = "crates/sc-expr", default-features = false }
+# `default-features = false` for `sc-expr`'s reason: the Python runtime rides
+# behind `sc-python`'s own `python-host` feature, so a consumer that only holds
+# an `Arc<dyn CodeAdapter>` links no interpreter.
+sc-python = { path = "crates/sc-python", default-features = false }
 sc-db = { path = "crates/sc-db" }
 sc-db-postgres = { path = "crates/sc-db-postgres" }
 sc-db-sqlite = { path = "crates/sc-db-sqlite" }
@@ -202,6 +212,18 @@ swc_ecma_parser = "42"
 # prebuilt static rusty_v8 lib on the big platforms; FreeBSD builds V8 from
 # source (upstream carries the ports patches but publishes no binary).
 deno_core = "0.408"
+# **The Python code adapter** (TODO "The Python code adapter"), behind
+# `sc-python`'s `python-host` feature and linked by nothing else. PyO3 embeds
+# CPython by *linking* it, so this dependency is what decides whether a build
+# needs `libpython` present to exec at all — which is why it is a feature that
+# is off by default and why `sc-server`'s shipped `+crt-static` artifact cannot
+# carry it (TODO phase 0.5a). `abi3-py311` is the stable-ABI floor: one build
+# runs against every CPython from 3.11 up.
+#
+# Costs, measured in phase 0 against the `deno_core` the workspace already
+# links: +7 crates in the lock file, +3.0 s of clean build, +0.5 MB of stripped
+# binary, and 6.5 MB of resident interpreter once it is initialised.
+pyo3 = { version = "0.29.2", features = ["abi3-py311"] }
 # **Modules in-process** (TODO "Modules in-process", phase 1), behind
 # `sc-module`'s `deno-host` feature and linked by nothing else: `deno_runtime` is
 # `deno_core` plus Node — a module loader, `require`, `node:*`, and a permission

@@ -487,6 +487,37 @@ pub trait ModuleFnHost: Send + Sync {
     }
 }
 
+/// A **guest language** that can run a [`CodeCall`]: JavaScript, Python, and
+/// whatever comes third.
+///
+/// The trait exists because `CodeCall` was never JavaScript's — the source, the
+/// bindings, the five borrowed host handles and the six budgets are the same
+/// question in any language, and the host traits above were written for this
+/// ("a Python or Rust adapter implements the same trait against the same
+/// plans"). So a second language is a second implementation of *this* and
+/// nothing below it: no second call type, no second host trait, and therefore
+/// no way for two languages to disagree about authority, budgets or events.
+///
+/// Registered by [`language`](CodeAdapter::language) — `"python"` — so an
+/// action reaches one as `ctx.adapter("python")` and the next guest language is
+/// a registration rather than a field.
+///
+/// [`CodeRuntime`] is not required to implement it and does not: `run_js_code`
+/// holds the concrete runtime, which is the thing that also carries a formula
+/// evaluator's isolate pool. The trait is what the *other* languages are
+/// reached through.
+#[async_trait]
+pub trait CodeAdapter: Send + Sync {
+    /// The name this adapter is registered and configured under. Lower-case and
+    /// stable: it is what an action's stored configuration says, so renaming it
+    /// would strand every trigger already written against it.
+    fn language(&self) -> &str;
+
+    /// Run one code body to its JSON result, under the same bounds and against
+    /// the same hosts a JavaScript body gets.
+    async fn run_code(&self, call: CodeCall<'_>) -> Result<Json>;
+}
+
 /// One run of a JavaScript **code body**: the source, the values in scope, and
 /// what it is allowed to reach and for how long.
 ///

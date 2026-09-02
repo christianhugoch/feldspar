@@ -926,29 +926,53 @@ specification.
 
 ## Phase 1 — The runtime (`sc-python`, behind a feature)
 
-- [ ] 1.1 `crates/sc-python`, workspace member, `python-host` feature (PyO3, off by default). The
+- [x] 1.1 `crates/sc-python`, workspace member, `python-host` feature (PyO3, off by default). The
       crate builds and tests without it, and every entry point fails with "this server was built
       without Python support" rather than pretending.
-- [ ] 1.2 `PythonRuntime`: **one** interpreter, initialised once per process on first use; a run
+- [x] 1.2 `PythonRuntime`: **one** interpreter, initialised once per process on first use; a run
       per thread from an idle-thread cache; one admission bound (`--python-max-inflight`) over
       code bodies and module calls alike; the run's thread-local state; and the nested-run
       exemption of §6.
-- [ ] 1.3 The body pipeline: `ast` wrap (§3), compile, per-content-key cache, bindings into the
+- [x] 1.3 The body pipeline: `ast` wrap (§3), compile, per-content-key cache, bindings into the
       run's globals, the result out, tracebacks trimmed to the author's frames.
-- [ ] 1.4 JSON ↔ Python conversion both ways, including the outbound `datetime`/`date`/`time`/
+- [x] 1.4 JSON ↔ Python conversion both ways, including the outbound `datetime`/`date`/`time`/
       `Decimal`/`UUID` rules and the named error for anything else.
-- [ ] 1.5 The exception hierarchy (`SaltcornError` and its five subclasses, `Timeout` from
+- [x] 1.5 The exception hierarchy (`SaltcornError` and its five subclasses, `Timeout` from
       `BaseException`), defined in the Rust half so nothing in the Python half can redefine them.
-- [ ] 1.6 The four bounds of §4: host refusal past the deadline, `SetAsyncExc`, the caller's
+- [x] 1.6 The four bounds of §4: host refusal past the deadline, `SetAsyncExc`, the caller's
       grace, and quarantine with `--python-max-stuck`.
-- [ ] 1.7 `impl CodeAdapter for PythonRuntime`, and the `CodeAdapter` trait in `sc-expr` beside
+- [x] 1.7 `impl CodeAdapter for PythonRuntime`, and the `CodeAdapter` trait in `sc-expr` beside
       `JsEvaluator`.
-- [ ] 1.8 Tests (no database): a pure body returning a value; `return` at the top level; a
+- [x] 1.8 Tests (no database): a pure body returning a value; `return` at the top level; a
       `SyntaxError` reported with the author's line; an exception reported with its own line; a
       `while True: pass` stopped, with the interpreter and every other resident run unharmed
       afterwards; **the concurrency assertion — N runs blocked in a host call while N more start
       and finish**, which is phase 0.2 turned into a test that stays; a nested run admitted past
       a full admission bound; a non-JSON result named by type.
+
+### What phase 1 landed, and two things it had to change
+
+`crates/sc-python`, a workspace member beside `sc-expr` because that is all it
+depends on — the seam and nothing above it. 19 tests, none of which needs a
+database.
+
+Two corrections the phase forced, both found by a test rather than by reading:
+
+1. **The compiled-body cache must not be locked across a call into Python.**
+   CPython hands the GIL over between bytecodes, so a thread that compiles with
+   the cache lock held can lose the GIL mid-compile while a second thread — GIL
+   in hand — blocks on that lock. Neither can proceed. It needs two *different*
+   bodies compiling at once, which is why it appeared the moment the test binary
+   ran its tests in parallel and never before. Look up under the lock, compile
+   without it, insert under it again; `many_different_bodies_compile_at_once` is
+   the regression test. **The rule generalises to every lock this crate takes
+   while holding the GIL**, and phases 2–6 add more of them.
+2. **The `ast` wrapper node has to carry all four of its positions.** §3 says the
+   wrapper takes the first statement's position; giving it only `lineno` and
+   leaving `fix_missing_locations` to fill in the rest produces a node whose
+   `end_lineno` is the module default of 1, which is a `ValueError` at compile
+   time for **any body whose first line is a comment**. The spike did not hit it
+   because its fixtures all began with a statement.
 
 ## Phase 2 — `run_python_code`, and `db`
 

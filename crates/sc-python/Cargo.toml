@@ -1,0 +1,60 @@
+[package]
+name = "sc-python"
+description = "The Python code adapter: a code body run on one embedded CPython, over sc-expr's CodeCall and its five host traits (layer 1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The runtime rides behind `python-host`, **off by default**, exactly as
+# `sc-module`'s `deno-host` does — and for a sharper reason than that one. PyO3
+# embeds CPython by *linking* `libpython`, so a binary built with this feature
+# fails at the dynamic linker, before `main`, on a host that has no
+# `libpython3.x.so`; and this project's shipped artifact is `+crt-static`, under
+# which the Python link does not succeed at all (TODO phase 0.5a). So the
+# feature is off, the shipped tarball has no Python, and a Python-capable server
+# is a separate dynamically-linked build. The crate must go on building and
+# testing without the feature, which is what keeps every other crate's test link
+# free of a Python toolchain.
+#
+# Building *with* it needs a CPython 3.11+ with its development library present
+# (`libpython3.x.so`, i.e. Debian's `python3-dev`); `PYO3_PYTHON` picks which
+# interpreter is linked when the default `python3` is not the one wanted.
+#
+# One integration-test binary per crate rather than one per file, as everywhere
+# else in this workspace: `tests/it.rs` aggregates them.
+autotests = false
+
+[features]
+default = []
+python-host = ["dep:pyo3"]
+
+[dependencies]
+sc-error.workspace = true
+# `CodeCall`, the five host traits and the `CodeAdapter` trait this crate
+# implements. Default features off: the adapter needs the *seam*, not V8 — a
+# server that builds Python support does not thereby link a second engine here.
+sc-expr.workspace = true
+async-trait.workspace = true
+# `FuturesUnordered` in the run loop: the caller serves the run's host calls
+# while it waits for the run's answer, and both have to be polled at once — as
+# does the deadline that bounds them.
+futures.workspace = true
+serde_json.workspace = true
+# The host calls are served on the caller's async runtime while the run's thread
+# blocks on the answer, so the seam between them is tokio's: a channel out, a
+# oneshot back, and the admission bound is a semaphore.
+tokio = { workspace = true }
+pyo3 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
