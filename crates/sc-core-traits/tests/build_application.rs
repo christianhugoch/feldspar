@@ -19,7 +19,7 @@
 //!   one that has been deleted leaves the live set with a reason instead of
 //!   failing when the model calls the tool.
 
-mod common;
+use crate::common;
 
 use common::{Env, config};
 use sc_agent::RunCaller;

@@ -7,7 +7,7 @@
 //! is stored in: is that provider connected, does that trait's collection still
 //! exist. Those are only real against a real catalog.
 
-mod common;
+use crate::common;
 
 use common::{Counter, catalog, registry};
 use sc_agent::{

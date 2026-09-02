@@ -2,6 +2,76 @@
 
 Changes in reverse chronological order.
 
+## One test binary per crate: CI runs out of disk before it runs out of patience
+
+CI's `test` job had started failing in the linker, on a message that names nothing
+relevant:
+
+```
+collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped
+```
+
+`SIGBUS` is what a linker gets when the file it has mmapped cannot be grown, which on a
+GitHub runner means the disk filled up. The arithmetic behind it: this workspace links a
+static V8 into every test binary, cargo makes a target of **every file** under
+`crates/*/tests/`, and there are 180 of those. At ~400 MB each that is ~70 GB of
+`target/`, against a runner that has ~29 GB free and ~42 GB after the workflow deletes
+the preinstalled Android, .NET and Haskell toolchains. It was never going to fit, and
+every one of those links also cost wall-clock — which is the other half of the report,
+a job that took 17 minutes to reach the failure.
+
+- **Each crate now aggregates its integration tests into one binary.** Every crate with
+  more than one test file has a `tests/it.rs` that pulls each file in as a module with
+  `#[path]`, and `autotests = false` in its manifest so cargo does not build them a
+  second time as targets of their own. **No test file moved** — which is the point of
+  using `#[path]` rather than a subdirectory: everything a test resolves relative to
+  itself (`include_str!`, the module fixtures, `sc-cli`'s `#[path = "../build.rs"]`,
+  `sc-api`'s recorded GraphQL schemas) still resolves. 180 targets become 16, and
+  `--all-targets` goes from ~185 binaries and ~70 GB to 55 and 6.7 GB. All 2425 tests
+  still run and pass.
+
+- **Four tests keep a process of their own**, because they mutate process-global state
+  and a shared binary runs its tests as threads: `sc-server`'s `sighup_reload` (raises a
+  signal at itself — it already said so in its own header), `systemd_notify`
+  (`NOTIFY_SOCKET`), `git_store_api` (the data-directory variable, once, for all of its
+  tests) and `modules_no_node` (empties `PATH`). They stay `[[test]]` entries beside the
+  aggregate.
+
+- **The wiring is asserted, because nothing else would.** A test file left out of
+  `it.rs` is a file cargo silently stops compiling: no error, and a green run.
+  `repo_hygiene::every_integration_test_file_reaches_a_target` walks every crate and
+  checks the list both ways — a file that reaches no target, and an entry naming a file
+  that is gone.
+
+Three consequences of a test file being a module rather than a crate root, all of them
+now visible in the tree: a shared `tests/common/` is declared once in `it.rs` (with
+`#[macro_use]`, since two of them define `macro_rules!` helpers) and reached as
+`crate::common` rather than a second `mod common;`; `use` of a module in the same file
+needs `self::`; and a module may not share its parent's name, so `build_script.rs`'s
+inner module is `build_rs`.
+
+One thing the aggregation shook out, which was a real bug rather than a test artefact:
+**`sc-app` now installs an application's dependencies one at a time.** Putting `sc-app`'s
+eight test files in one binary doubled the number of `npm install`s running at once, and
+they started failing with `Cannot find native binding` — npm's cache is one directory per
+machine, is not safe against concurrent writers, and a race on it does not just fail the
+installs that raced: it leaves the cache in a state where **every later install**
+reproduces the same broken `node_modules` until someone runs `npm cache clean --force`.
+`run_install` takes a process-wide lock, which is right outside the tests too (a restored
+store or a boot against several unbuilt projects installs them serially now).
+`two_builds_never_install_at_the_same_time` asserts it with four concurrent builds whose
+installer refuses to run if another is already inside.
+
+Two changes to the CI workflow itself, both about the 17 minutes rather than the disk:
+
+- **`cache-on-failure: true` on `Swatinem/rust-cache`.** The default is to save no cache
+  when the job fails, and this job was failing *late* — after the whole dependency tree
+  had been built. Every red run therefore made the next run cold, which is most of why a
+  build took 17 minutes rather than the two or three a warm cache gives.
+- **The `fmt` job no longer takes a cache.** `cargo fmt` compiles nothing, so what it
+  saved was an empty `target/` under a key of its own, spent against a repository cache
+  budget the other two jobs need.
+
 ## A green build again: four things that had drifted
 
 Nothing here changes what the program does. Four separate pieces of rot had accumulated

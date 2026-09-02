@@ -7,7 +7,7 @@
 //! all five are the queue's definition of "runnable" and a column that does not
 //! round-trip would make that definition read the wrong runs.
 
-mod common;
+use crate::common;
 
 use chrono::{Duration, Utc};
 use common::{Counter, catalog};

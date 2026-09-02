@@ -12,7 +12,7 @@
 //! A fixture that were merely close enough would therefore produce an empty
 //! stream and a test that passed for the wrong reason.
 
-mod common;
+use crate::common;
 
 use common::{Reply, serve, sse_events};
 use sc_error::Result;

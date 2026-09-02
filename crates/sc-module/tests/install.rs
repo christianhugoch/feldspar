@@ -7,7 +7,7 @@
 //! `@saltcorn/mqtt` (the milestone's definition of done).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-mod common;
+use crate::common;
 
 use common::{fixture, have_npm, temp_root};
 use sc_module::{Installer, ModuleSource};

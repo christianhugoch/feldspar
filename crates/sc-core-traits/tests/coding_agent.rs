@@ -12,7 +12,7 @@
 //! compose into a working edit-build-fix cycle and that the whole cycle is in the
 //! run's transcript afterwards, which is what the chat panel renders.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

@@ -6,7 +6,7 @@
 # Why this exists
 # ---------------
 # This workspace links a static V8 (`deno_core`, behind `sc-expr`'s `eval`
-# feature) into **every one** of its ~110 integration-test binaries, so
+# feature) into **every one** of its test binaries, so
 # `cargo test --workspace` is a burst of very large, very parallel links. On a
 # desktop running `systemd-oomd` that burst is dangerous in a specific and
 # unobvious way: oomd watches *memory pressure* on `user@1000.service`, and when

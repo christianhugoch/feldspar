@@ -14,7 +14,7 @@
 //! The two **area** checkboxes are pinned here too, in the one place they are
 //! visible: what an agent is offered.
 
-mod common;
+use crate::common;
 
 use common::{Env, as_user, config};
 use sc_agent::RunCaller;

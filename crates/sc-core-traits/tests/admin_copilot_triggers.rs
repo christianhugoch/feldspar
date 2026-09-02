@@ -14,7 +14,7 @@
 //! settings when asked, and a wrong guess is refused with those settings
 //! attached, rather than a second inference call filling them in out of sight.
 
-mod common;
+use crate::common;
 
 use common::{Env, as_user, config};
 use sc_agent::RunCaller;

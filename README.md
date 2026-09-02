@@ -986,9 +986,26 @@ approach.
 ### Build resource use
 
 A static V8 (`deno_core`, behind `sc-expr`'s `eval` feature) is linked into
-**every one** of the workspace's ~110 integration-test binaries, so
-`cargo test --workspace` is a burst of very large, very parallel links. Two
-things keep that from taking the machine with it:
+**every one** of the workspace's test binaries, so `cargo test --workspace` is a
+burst of very large, very parallel links. Three things keep that from taking the
+machine — or CI's disk — with it:
+
+- **One integration-test binary per crate**, not one per file. Cargo makes a
+  target of every `crates/<crate>/tests/*.rs`, which for 180 files meant 180
+  links of a ~400 MB binary and ~70 GB of `target/`; CI ran out of disk in the
+  middle of one and `rust-lld` died with `signal 7 [Bus error]` rather than
+  saying so. Each crate now has a `tests/it.rs` that pulls its test files in as
+  modules, and `autotests = false` in its `Cargo.toml` so cargo does not also
+  build them separately. That is ~55 binaries and ~7 GB.
+
+  **Adding a test file means adding two lines to that crate's `tests/it.rs`** —
+  a `#[path]` and a `mod`. A file that is not listed there is not compiled, and
+  nothing will tell you so. Three consequences of being a module rather than a
+  crate root: a shared `tests/common/` is declared once in `it.rs` and reached as
+  `crate::common`, not with a second `mod common;`; a `use` of a module in the
+  same file needs `self::`; and a test that mutates process-global state (an
+  environment variable, `PATH`, a signal handler) must stay its own target — see
+  the `[[test]]` entries in `crates/sc-server/Cargo.toml`.
 
 - **A debug-info budget**, in the workspace `Cargo.toml`. Dependencies are built
   with no debug info and workspace crates with line tables only, which is what a
@@ -1021,9 +1038,9 @@ things keep that from taking the machine with it:
   its own cgroup so only the build can be killed. It falls back to plain `cargo`
   where systemd is not available.
 
-- **`-j 4` for `sc-server`'s test build.** Since the module runtime landed, each of
-  `sc-server`'s ~47 test binaries maps a much larger set of rlibs at link time, and
-  the default parallelism under the wrapper's 10 GB `MemoryHigh` puts all of them in
+- **`-j 4` for the workspace test build.** Since the module runtime landed, each
+  test binary maps a much larger set of rlibs at link time, and the default
+  parallelism under the wrapper's 10 GB `MemoryHigh` puts all of them in
   continuous reclaim — a build that makes no progress rather than one that fails.
   Either cap the jobs or raise the ceiling:
 
@@ -1033,6 +1050,6 @@ things keep that from taking the machine with it:
   ```
 
 Note also that `target/` is not garbage-collected by cargo: every rebuild leaves
-the previous hashed test binaries behind, and at ~150 MB each across ~110 targets
-that reaches hundreds of GB over weeks. `cargo clean` periodically, or
+the previous hashed test binaries behind, and at a few hundred MB each that
+reaches hundreds of GB over weeks. `cargo clean` periodically, or
 [`cargo-sweep`](https://github.com/holmgr/cargo-sweep) to drop only stale files.

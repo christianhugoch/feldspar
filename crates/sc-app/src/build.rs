@@ -24,6 +24,7 @@ use sc_error::{Context, Error, Result};
 use sc_types::FormField;
 use serde_json::Value as Json;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use crate::api::app_endpoints_with;
 use crate::application::{Application, FrameworkRef};
@@ -508,6 +509,9 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
     })
 }
 
+/// Serialises [`run_install`] across this process; see the comment at its use.
+static INSTALL_LOCK: Mutex<()> = Mutex::const_new(());
+
 /// Install the app's dependencies when the [`BuildSpec`]'s install step says to
 /// and its marker directory is absent (TODO §2.3).
 ///
@@ -526,6 +530,22 @@ async fn run_install(spec: &BuildSpec, source_dir: &Path) -> Result<Option<Strin
     if source_dir.join(&install.marker).exists() {
         return Ok(None);
     }
+
+    // One install at a time. The installs are in *different* directories, so
+    // this is not about the projects — it is about the installer's cache, which
+    // is one directory per machine and is not safe against concurrent writers.
+    // Two `npm install`s racing on it produce a `node_modules` missing the
+    // platform-specific optional dependency the bundler needs ("Cannot find
+    // native binding", npm/cli#4828), and leave the cache in a state where every
+    // later install reproduces the same broken tree until someone runs
+    // `npm cache clean --force` — so the cost of the race is not one failed
+    // build but every build after it.
+    //
+    // A lock rather than a retry because installing two applications at once is
+    // not a thing worth going fast at: it happens when a store is restored or a
+    // server boots against several unbuilt projects, and the serial version of
+    // that is correct and only slower.
+    let _serialised = INSTALL_LOCK.lock().await;
 
     let line = format!("{} {}", install.command, install.args.join(" "));
     let output = Command::new(&install.command)
@@ -1053,6 +1073,52 @@ mod tests {
         let report = run_build(&spec, tmp.path()).await.unwrap();
         assert!(!report.installed);
         assert_eq!(report.install_log, None);
+    }
+
+    /// The installer's cache is one directory per machine and npm does not
+    /// guard it, so two installs running at once corrupt it for every build
+    /// after them. The lock in `run_install` is the guard, and this is what
+    /// asserts it is still there: each install writes a marker into a shared
+    /// directory on entry and removes it on exit, so an overlap is a file that
+    /// is already present — the same shape as the real failure, without needing
+    /// npm to reproduce it.
+    #[tokio::test]
+    async fn two_builds_never_install_at_the_same_time() {
+        let tmp = TempDir::new("installrace");
+        let shared = tmp.path().join("inflight");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let mut builds = Vec::new();
+        for n in 0..4 {
+            let root = tmp.path().join(format!("app{n}"));
+            std::fs::create_dir_all(&root).unwrap();
+            good_source(&root);
+            let web = root.join("web");
+            // Enter, refuse to run if anyone else is in here, dwell, leave.
+            write_script(
+                &web,
+                "install.sh",
+                &format!(
+                    "#!/bin/sh\n\
+                     busy='{shared}/busy'\n\
+                     if [ -e \"$busy\" ]; then echo 'a second install overlapped' >&2; exit 1; fi\n\
+                     : > \"$busy\"\n\
+                     sleep 0.2\n\
+                     rm -f \"$busy\"\n\
+                     mkdir -p node_modules\n",
+                    shared = shared.display()
+                ),
+            );
+            let mut spec = spec(&["build.sh"]);
+            spec.install = Some(install_step());
+            builds.push(tokio::spawn(async move { run_build(&spec, &root).await }));
+        }
+
+        for build in builds {
+            // The script's own message travels out with the error (§16), so a
+            // regression here names the overlap rather than "install failed".
+            build.await.unwrap().unwrap();
+        }
     }
 
     #[tokio::test]

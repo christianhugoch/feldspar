@@ -13,7 +13,7 @@
 //! than what a formatter returned.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::{Reply, serve, sse_events};
 use sc_error::Result;

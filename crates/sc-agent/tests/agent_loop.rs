@@ -8,7 +8,7 @@
 //!
 //! No test here needs an API key or spends a token (decision 7).
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

@@ -9,11 +9,15 @@
 //! `build.rs` is not compiled as a test target by cargo, so it is pulled in here
 //! as a module: the file has no dependencies beyond `std`, and this way the
 //! function under test is literally the one the build runs, not a copy of it.
+//!
+//! The module is named `build_rs` rather than `build_script`: this file is itself
+//! the `build_script` module of the aggregate test binary, and a module may not
+//! share its parent's name.
 #[allow(dead_code)]
 #[path = "../build.rs"]
-mod build_script;
+mod build_rs;
 
-use build_script::build_requested;
+use self::build_rs::build_requested;
 
 #[test]
 fn unset_builds_the_admin_ui() {
@@ -43,7 +47,7 @@ fn anything_else_builds() {
     }
 }
 
-use build_script::recorded_dir;
+use self::build_rs::recorded_dir;
 use std::path::{Path, PathBuf};
 
 #[test]

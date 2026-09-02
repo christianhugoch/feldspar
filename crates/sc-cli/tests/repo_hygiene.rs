@@ -85,8 +85,8 @@ fn toml_section<'a>(toml: &'a str, header: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// The workspace links a static V8 into every one of its ~110 integration-test
-/// binaries, so the debug-info budget in the workspace manifest is what keeps
+/// The workspace links a static V8 into every one of its test binaries, so the
+/// debug-info budget in the workspace manifest is what keeps
 /// `cargo test --workspace` from becoming a burst of ~440 MB links that drives
 /// the session into `systemd-oomd`'s kill threshold — which, because oomd kills
 /// a *cgroup*, takes the developer's whole terminal with it.
@@ -183,9 +183,8 @@ fn linked_test_binaries_stay_within_the_debug_info_budget() {
          {CEILING_MB} MB ceiling. Either the debug-info budget in the workspace \
          Cargo.toml stopped applying, or this run deliberately overrode it \
          (`--config 'profile.dev.package.\"*\".debug=true'`), which is expected \
-         to trip this test. Left unfixed, `cargo test --workspace` links ~110 \
-         binaries this size at once and systemd-oomd kills the terminal it runs \
-         in."
+         to trip this test. Left unfixed, `cargo test --workspace` links every \
+         one of these at once and systemd-oomd kills the terminal it runs in."
     );
 }
 
@@ -1360,5 +1359,96 @@ fn the_binary_and_everything_it_owns_are_named_feldspar() {
     assert!(
         install.contains("@saltcorn/"),
         "v1 modules are published under the `@saltcorn/` npm scope, which is not ours to rename"
+    );
+}
+
+/// Every crate aggregates its integration tests into one binary (`tests/it.rs`,
+/// `autotests = false`), because a target per file linked a static V8 180 times
+/// and filled CI's disk in the middle of one — `rust-lld` reports that as
+/// `signal 7 [Bus error]`, not as "no space left".
+///
+/// The cost of that is a list to keep in step: a test file nobody adds to
+/// `it.rs` is a file cargo no longer builds, and neither the compiler nor a
+/// green test run will mention it. So the list is asserted here, both ways — a
+/// file that reaches no target, and an entry naming a file that is gone.
+#[test]
+fn every_integration_test_file_reaches_a_target() {
+    let root = workspace_root();
+    let mut unreachable = Vec::new();
+    let mut dangling = Vec::new();
+
+    let crates = fs::read_dir(root.join("crates")).expect("crates/ should be readable");
+    for entry in crates.flatten() {
+        let krate = entry.path();
+        let tests = krate.join("tests");
+        if !tests.is_dir() {
+            continue;
+        }
+        let name = krate
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        let mut files: Vec<String> = fs::read_dir(&tests)
+            .expect("a tests/ directory should be readable")
+            .flatten()
+            .map(|f| f.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+            .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .filter(|stem| stem != "it")
+            .collect();
+        files.sort();
+
+        let manifest = fs::read_to_string(krate.join("Cargo.toml")).unwrap_or_default();
+        // Cargo still makes a target of every file here, so there is no list to
+        // fall out of step with.
+        if !manifest.contains("autotests = false") {
+            continue;
+        }
+
+        // The two ways a file reaches a target: named by a `[[test]]` of its
+        // own (for a test that has to keep its own process), or pulled into the
+        // aggregate as a module.
+        let explicit: Vec<String> = manifest
+            .match_indices("[[test]]")
+            .filter_map(|(i, _)| toml_section(&manifest[i..], "[[test]]"))
+            .filter_map(|section| {
+                let line = section
+                    .lines()
+                    .find(|l| l.trim_start().starts_with("name"))?;
+                Some(line.split('"').nth(1)?.to_string())
+            })
+            .collect();
+        let aggregate = fs::read_to_string(tests.join("it.rs")).unwrap_or_default();
+        let modules: Vec<String> = aggregate
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("#[path = \""))
+            .filter_map(|l| l.strip_suffix(".rs\"]"))
+            .map(str::to_string)
+            .collect();
+
+        for file in &files {
+            if !modules.contains(file) && !explicit.contains(file) {
+                unreachable.push(format!("{name}/tests/{file}.rs"));
+            }
+        }
+        // Not `files`: an entry may also point at a shared `common/mod.rs`,
+        // which is a module of the aggregate rather than a test file.
+        for module in &modules {
+            if !tests.join(format!("{module}.rs")).is_file() {
+                dangling.push(format!("{name}/tests/it.rs names {module}.rs"));
+            }
+        }
+    }
+
+    assert!(
+        unreachable.is_empty(),
+        "these test files are compiled by nothing — add `#[path]`/`mod` lines for them to \
+         their crate's tests/it.rs, or a `[[test]]` if the test needs its own process: {unreachable:#?}"
+    );
+    assert!(
+        dangling.is_empty(),
+        "these tests/it.rs entries name a file that is not there: {dangling:#?}"
     );
 }

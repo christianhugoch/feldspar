@@ -9,7 +9,7 @@
 //! makes is that a caller cannot tell. Two test files that check different
 //! properties would leave that claim untested.
 
-mod common;
+use crate::common;
 
 use common::{Reply, serve, sse_events};
 use sc_error::Result;

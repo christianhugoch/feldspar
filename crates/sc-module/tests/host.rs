@@ -9,7 +9,7 @@
 
 #![cfg(feature = "deno-host")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-mod common;
+use crate::common;
 
 use common::{closed, fixture, have_npm, installed, temp_root};
 use sc_module::{Installer, ModuleHost, ModuleSource};

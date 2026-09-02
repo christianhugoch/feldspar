@@ -30,7 +30,7 @@
 //! `build_application` has its own suite (`build_application.rs`) and its own
 //! trait, because it is configured against an application rather than a store.
 
-mod common;
+use crate::common;
 
 use common::{Env, as_user, config};
 use sc_agent::RunCaller;

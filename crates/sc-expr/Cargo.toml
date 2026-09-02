@@ -10,6 +10,11 @@ rust-version.workspace = true
 # The reified evaluator (Phase 3) rides behind the `eval` feature so that
 # consumers which only parse/validate/translate — `sc-catalog` merging stored
 # formulas — do not link V8 into their build. `sc-server` (Phase 5) turns it on.
+# One integration-test binary per crate rather than one per file: every test
+# target in this workspace statically links V8, so ~400 MB of binary and a
+# multi-second link were being paid per *file*. `tests/it.rs` aggregates them.
+autotests = false
+
 [features]
 default = ["eval"]
 eval = ["dep:deno_core", "dep:getrandom", "dep:tokio"]
@@ -41,3 +46,7 @@ tokio-postgres = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

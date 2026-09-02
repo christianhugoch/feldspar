@@ -18,6 +18,11 @@ rust-version.workspace = true
 # `libclang` (set `LIBCLANG_PATH` if it is not on the default search path), and
 # a rustc new enough for `deno_runtime` itself, which is well ahead of the
 # workspace's declared floor.
+# One integration-test binary per crate rather than one per file: every test
+# target in this workspace statically links V8, so ~400 MB of binary and a
+# multi-second link were being paid per *file*. `tests/it.rs` aggregates them.
+autotests = false
+
 [features]
 default = []
 deno-host = [
@@ -78,3 +83,7 @@ sc-test-harness.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

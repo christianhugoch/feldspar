@@ -1,0 +1,109 @@
+//! Every integration test in this crate, in one binary.
+//!
+//! Each file below is still an ordinary test file — it is pulled in as a module
+//! rather than compiled as its own target. The workspace statically links V8 into
+//! every test binary, so a target per file cost ~400 MB of disk and a link each;
+//! CI ran out of disk on the link (`ld terminated with signal 7`) before it ran
+//! out of patience. Files stay where they are, so paths relative to a test file
+//! (fixtures, `include_str!`, `#[path]`) are unaffected.
+//!
+//! Add a new test file and it is picked up here — the list is the whole wiring.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+#[path = "admin_api.rs"]
+mod admin_api;
+#[path = "admin_applications_api.rs"]
+mod admin_applications_api;
+#[path = "admin_graphql_explorer.rs"]
+mod admin_graphql_explorer;
+#[path = "admin_spa_typecheck.rs"]
+mod admin_spa_typecheck;
+#[path = "admin_theme.rs"]
+mod admin_theme;
+#[path = "admin_users_api.rs"]
+mod admin_users_api;
+#[path = "admin_workflow_editor.rs"]
+mod admin_workflow_editor;
+#[path = "agent_admin_api.rs"]
+mod agent_admin_api;
+#[path = "agent_chat.rs"]
+mod agent_chat;
+#[path = "app_builder_agent.rs"]
+mod app_builder_agent;
+#[path = "app_file_access.rs"]
+mod app_file_access;
+#[path = "app_serving.rs"]
+mod app_serving;
+#[path = "app_trigger_api.rs"]
+mod app_trigger_api;
+#[path = "backup_api.rs"]
+mod backup_api;
+#[path = "code_body_tables.rs"]
+mod code_body_tables;
+#[path = "concurrent_code_bodies.rs"]
+mod concurrent_code_bodies;
+#[path = "constraint_api.rs"]
+mod constraint_api;
+#[path = "db_connection_admin_api.rs"]
+mod db_connection_admin_api;
+#[path = "field_api.rs"]
+mod field_api;
+#[path = "file_manager.rs"]
+mod file_manager;
+#[path = "file_operations_api.rs"]
+mod file_operations_api;
+#[path = "file_store_admin_api.rs"]
+mod file_store_admin_api;
+#[path = "generated_client_refresh.rs"]
+mod generated_client_refresh;
+#[path = "graphql_serving.rs"]
+mod graphql_serving;
+#[path = "ide_language_server.rs"]
+mod ide_language_server;
+#[path = "ide_route.rs"]
+mod ide_route;
+#[path = "ide_typecheck.rs"]
+mod ide_typecheck;
+#[path = "live_mounting.rs"]
+mod live_mounting;
+#[path = "llm_provider_admin_api.rs"]
+mod llm_provider_admin_api;
+#[path = "modules_api.rs"]
+mod modules_api;
+#[path = "other_events.rs"]
+mod other_events;
+#[path = "ownership_enforcement.rs"]
+mod ownership_enforcement;
+#[path = "ownership_settings_api.rs"]
+mod ownership_settings_api;
+#[path = "primary_key_api.rs"]
+mod primary_key_api;
+#[path = "provided_tables_api.rs"]
+mod provided_tables_api;
+#[path = "rls_enforcement.rs"]
+mod rls_enforcement;
+#[path = "router.rs"]
+mod router;
+#[path = "schema_edit_api.rs"]
+mod schema_edit_api;
+#[path = "settings_admin_api.rs"]
+mod settings_admin_api;
+#[path = "table_access_enforcement.rs"]
+mod table_access_enforcement;
+#[path = "table_csv_api.rs"]
+mod table_csv_api;
+#[path = "table_csv_import.rs"]
+mod table_csv_import;
+#[path = "table_settings_api.rs"]
+mod table_settings_api;
+#[path = "table_triggers.rs"]
+mod table_triggers;
+#[path = "tls_serving.rs"]
+mod tls_serving;
+#[path = "trigger_admin_api.rs"]
+mod trigger_admin_api;
+#[path = "tutorial_workflows.rs"]
+mod tutorial_workflows;
+#[path = "workflow_admin_api.rs"]
+mod workflow_admin_api;

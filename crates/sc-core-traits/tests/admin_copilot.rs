@@ -10,7 +10,7 @@
 //! access controls — real row-level-security policies deciding two callers'
 //! reads differently.
 
-mod common;
+use crate::common;
 
 use common::{Env, as_user, config};
 use sc_agent::RunCaller;
