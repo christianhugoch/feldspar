@@ -324,16 +324,19 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
         .unwrap();
     assert_eq!(public_key["multiline"], json!(true));
 
-    // The `local` backend declares none — most backends have nothing to do
-    // beyond reading and writing files, which is why operations are declared
-    // rather than assumed.
+    // The `local` backend declares one, and it is declared the same way — the
+    // admin UI renders a button for it knowing no more about a suggested
+    // directory than it knows about a deploy key.
     let local = backends
         .as_array()
         .unwrap()
         .iter()
         .find(|b| b["name"] == json!("local"))
         .unwrap();
-    assert!(local["operations"].as_array().unwrap().is_empty());
+    let local_ops = local["operations"].as_array().unwrap();
+    assert_eq!(local_ops.len(), 1, "{local_ops:?}");
+    assert_eq!(local_ops[0]["name"], json!("suggest_dir"));
+    assert_eq!(local_ops[0]["scope"], json!("configure"));
 
     // Creating the store clones it — that is the whole difference from a local
     // store, whose directory has to exist already.
@@ -1049,6 +1052,82 @@ async fn an_existing_checkout_is_adopted_with_no_url() -> sc_error::Result<()> {
     let message = serde_json::to_string(&refused).unwrap();
     assert!(message.contains("url"), "{message}");
     assert!(message.contains("directory"), "{message}");
+
+    Ok(())
+}
+
+/// The **local** backend's `suggest_dir` button, end to end: press it with
+/// nothing but a name, save what it filled in, and the store is connected.
+///
+/// It lives in this file rather than `file_store_admin_api.rs` for one reason —
+/// the suggestion is a directory under the same data directory clones live in,
+/// so a test of it writes there, and this is the binary that owns
+/// `SC_DATA_DIR` (see `data_dir`). Which is also the point being made: an
+/// admin who has nowhere in mind gets somewhere the server can actually write.
+#[tokio::test]
+async fn a_local_store_can_be_given_a_suggested_directory() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    // The form as it stands: a name typed, and nothing else.
+    let (status, res) = client
+        .send(
+            "POST",
+            "/api/file-store-backends/local/operations/suggest_dir",
+            Some(json!({ "name": "scratch-space", "config": {}, "input": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+
+    let suggested = res["config"]["path"].as_str().unwrap().to_owned();
+    assert_eq!(
+        suggested,
+        data_dir()
+            .join("local-stores/scratch-space")
+            .to_string_lossy()
+    );
+    // Nothing has been created yet — a suggestion is a value in a form.
+    assert!(!Path::new(&suggested).exists());
+    // And the store will create it on save, which is what stops the suggestion
+    // being a path that saves and then refuses to connect.
+    assert_eq!(res["config"]["create"], json!(true));
+    assert!(
+        res["output"].as_str().unwrap().contains(&suggested),
+        "{res}"
+    );
+
+    // Saved exactly as the form would hand it back.
+    let (status, created) = client
+        .send(
+            "POST",
+            "/api/file-stores",
+            Some(json!({
+                "name": "scratch-space",
+                "description": "",
+                "backend": "local",
+                "config": res["config"],
+                "min_role": Value::Null,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["connected"], json!(true));
+    assert!(Path::new(&suggested).is_dir());
+    assert!(catalog.file_store("scratch-space")?.is_some());
+
+    // It is a working store: a file written through it lands in the suggested
+    // directory.
+    let (status, written) = client
+        .send(
+            "POST",
+            "/api/file-stores/scratch-space/write",
+            Some(json!({ "path": "notes.txt", "text": "hello\n" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{written}");
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&suggested).join("notes.txt")).unwrap(),
+        "hello\n"
+    );
 
     Ok(())
 }

@@ -420,6 +420,13 @@ else
     # default, so an ambient DATABASE_URL cannot redirect the service; and
     # StateDirectory is the one writable path under ProtectSystem=strict, which
     # is where file stores and npm's cache have to live.
+    #
+    # SC_DATA_DIR names that same directory outright, which is what makes the
+    # admin UI able to *suggest* a place for a new file store: git checkouts and
+    # the local-store directories the "Suggest a directory" button offers both
+    # land under it. Without it the server would derive one from HOME
+    # (/var/lib/feldspar/.local/share/feldspar) — writable, but a place no
+    # operator would think to look.
     write_root_file "${UNIT_FILE}" 0644 <<EOF
 [Unit]
 Description=Saltcorn Feldspar
@@ -434,6 +441,7 @@ Group=${SERVICE_USER}
 ExecStart=${BINARY} serve --environment ${ENVIRONMENT}
 Environment=FELDSPAR_CONFIG=${CONFIG_FILE}
 Environment=HOME=/var/lib/feldspar
+Environment=SC_DATA_DIR=/var/lib/feldspar
 StateDirectory=feldspar
 WorkingDirectory=/var/lib/feldspar
 Restart=on-failure

@@ -47,7 +47,7 @@ use crate::def::{
     GIT_BACKEND, LOCAL_BACKEND,
 };
 use crate::git::{GitFileStore, GitRepo, git_operations, validate_git_config};
-use crate::local::LocalFileStore;
+use crate::local::{LocalFileStore, local_operations};
 use crate::store::FileStore;
 
 /// The settings the [`local`](LOCAL_BACKEND) backend needs: which directory, and
@@ -114,13 +114,16 @@ pub fn git_config_spec() -> Vec<FormField> {
 /// The operations a backend offers beyond its settings (§6.2's vocabulary for
 /// *acts*, [`Operation`]) — what the admin UI renders as buttons.
 ///
-/// The [`local`](LOCAL_BACKEND) backend has none: there is nothing to do to a
-/// directory that reading and writing files does not already cover. That is the
-/// shape most backends will have, and it is why operations are declared rather
-/// than assumed.
+/// The [`local`](LOCAL_BACKEND) backend has one, and it acts on the *settings*
+/// rather than on the directory: reading and writing files already covers
+/// everything that can be done to a directory, but nothing in a form can tell an
+/// admin where a store may sensibly live (see
+/// [`local_operations`](crate::local_operations)). A backend with no operations
+/// at all remains an ordinary shape, which is why they are declared rather than
+/// assumed.
 pub fn backend_operations(name: &str) -> Result<Vec<Operation>> {
     match name {
-        LOCAL_BACKEND => Ok(Vec::new()),
+        LOCAL_BACKEND => Ok(local_operations()),
         GIT_BACKEND => Ok(git_operations()),
         other => Err(unknown_backend(other)),
     }
@@ -214,6 +217,7 @@ pub async fn run_backend_operation(
     validate_attrs(&spec.input_spec, input)?;
 
     match def.backend.as_str() {
+        LOCAL_BACKEND => crate::local::run_local_operation(def, operation, input),
         GIT_BACKEND => crate::git::run_git_operation(def, operation, input).await,
         // Unreachable: `backend_operations` above returned a spec, so the
         // backend both exists and declares this operation.
@@ -538,11 +542,16 @@ mod tests {
 
     #[test]
     fn a_backends_operations_are_declared_like_its_settings() {
-        // The `local` backend has none: there is nothing to do to a directory
-        // that reading and writing files does not already cover. That is the
-        // shape most backends have, and it is why operations are declared
-        // rather than assumed.
-        assert!(backend_operations(LOCAL_BACKEND).unwrap().is_empty());
+        // The `local` backend has one, and it configures rather than acts:
+        // there is nothing to do to a directory that reading and writing files
+        // does not already cover, but an admin still has to be told where a
+        // store may sensibly live.
+        let local = backend_operations(LOCAL_BACKEND).unwrap();
+        assert_eq!(
+            local.iter().map(|op| op.name.as_str()).collect::<Vec<_>>(),
+            [crate::local::OP_SUGGEST_DIR]
+        );
+        assert_eq!(local[0].scope, sc_types::OperationScope::Configure);
 
         let ops = backend_operations(GIT_BACKEND).unwrap();
         let names: Vec<&str> = ops.iter().map(|op| op.name.as_str()).collect();

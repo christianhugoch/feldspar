@@ -2,6 +2,40 @@
 
 Changes in reverse chronological order.
 
+## A "Suggest a directory" button for a new local file store
+
+Creating a local file store asks for a directory, and an admin creating their first one has
+no way to answer: the server runs as its own account, under `ProtectSystem=strict`, and the
+places it may write are not visible from the form. Git stores never had this problem —
+Saltcorn clones them into a data directory it owns (`<data dir>/git-stores`) — so the fix is
+to offer the same answer to the local backend.
+
+- **The `local` backend now declares one operation, `suggest_dir`** (`sc-files`), scoped
+  `configure` like the git backend's deploy-key generator. It fills in
+  `<data dir>/local-stores/<store name>` and ticks *create the directory*, and returns them
+  as the settings patch the form adopts. Both settings, because the directory being proposed
+  does not exist yet: a suggestion that left `create` off would save a store that then
+  refuses to connect, which is the confusion the button exists to spare the admin. An
+  unnamed store is told to name itself first rather than being handed a directory every
+  unnamed store would share.
+- **No admin-UI change was needed, which was the point of §6.2's vocabulary.**
+  `FileStoreForm` renders a button per declared operation and posts back what it is handed;
+  it knows no more about a suggested directory than it knows about a deploy key.
+- **`data_dir` moved out of `git.rs` into a new `paths` module**, along with the name→path
+  sanitiser, since two backends now descend from it: `git-stores/` for checkouts,
+  `local-stores/` for suggestions. `SC_DATA_DIR` still overrides all of it, and
+  `clone_dir`/`key_dir` stay with the git driver.
+- **The systemd unit now names `SC_DATA_DIR=/var/lib/feldspar`** (`scripts/setup-host.sh`
+  and README §2.6). It was already writable and already the state directory; without the
+  variable the server derives `~/.local/share/feldspar` from `HOME` instead, which is a
+  place no operator would think to look for a store they were told about.
+
+Tested in `sc-files` (the suggestion's path and its two settings, and the unnamed-store
+error) and end to end in `sc-server`'s `git_store_api` — the binary that owns the
+data-directory variable — where the button is pressed with nothing but a name typed, the
+store is saved from what came back, and a file written through it lands in the suggested
+directory.
+
 ## A leak check that fired on a database whose password is its own username
 
 CI's `test` job failed one assertion, in the db-connections admin API test:

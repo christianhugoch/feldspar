@@ -10,12 +10,25 @@
 //! ([`META_ATTR`]) on the file itself, via the cross-platform [`crate::xattr`]
 //! layer (POSIX xattrs on Unix, NTFS Alternate Data Streams on Windows). Files
 //! therefore need no database row and no sidecar (design §9).
+//!
+//! ## Suggesting a directory
+//!
+//! The backend's one [`Operation`] ([`local_operations`]) answers the question
+//! an admin creating their first store cannot: *where should this live?* The
+//! directory stays theirs to choose — that is why it is a required setting — but
+//! a suggestion under the directory Saltcorn already owns ([`suggest_local_dir`])
+//! is an answer where they would otherwise be guessing at what a service account
+//! may write to.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use sc_error::{Context, Error, Result};
+use sc_types::{Attrs, Operation, OperationScope};
 use std::path::{Path, PathBuf};
 
+use crate::backend::OperationOutcome;
+use crate::def::{CFG_CREATE, CFG_PATH, FileStoreDef};
+use crate::paths::suggest_local_dir;
 use crate::store::{Entry, FileMeta, FileStat, FileStore};
 
 /// A modification time as RFC 3339 in UTC, which is how every other timestamp
@@ -314,5 +327,134 @@ impl FileStore for LocalFileStore {
             .with_context(|| format!("serialising metadata for {path:?}"))?;
         crate::xattr::set(&abs, META_ATTR, json).await?;
         Ok(())
+    }
+}
+
+/// The [`local`](crate::LOCAL_BACKEND) backend's one operation: suggest a
+/// directory for a store that has none yet.
+///
+/// Named as a constant for the reason every other operation name is: it is what
+/// the admin UI posts back, so it is part of the wire, not an incidental string.
+pub const OP_SUGGEST_DIR: &str = "suggest_dir";
+
+/// What the [`local`](crate::LOCAL_BACKEND) backend can do beyond holding
+/// settings (§6.2's [`Operation`] vocabulary) — one button, rendered by the same
+/// admin-UI code that renders the git backend's, which knows what neither means.
+///
+/// The directory is the admin's decision and the form is right to ask for it: a
+/// local store usually points at somewhere that already exists, often with files
+/// already in it. But an admin creating their **first** store has no basis for
+/// that decision and no way to learn where a server that runs as its own account
+/// may even write — so the answer is offered rather than assumed. It is a
+/// [`Configure`](OperationScope::Configure) operation because it fills in the
+/// settings the admin is still editing, exactly as the deploy-key generator
+/// does, and like every suggestion it can be typed over before saving.
+pub fn local_operations() -> Vec<Operation> {
+    vec![
+        Operation::new(OP_SUGGEST_DIR, OperationScope::Configure)
+            .label("Suggest a directory")
+            .description(
+                "Fills in a directory named after this store, inside the data directory \
+                 Saltcorn owns — the same place git stores are checked out into. Use it \
+                 when you have nowhere particular in mind; the directory is created when \
+                 the store is saved.",
+            ),
+    ]
+}
+
+/// Run [`local_operations`]'s one operation against `def`, which is the unsaved
+/// definition the admin is still editing.
+///
+/// Called through
+/// [`run_backend_operation`](crate::run_backend_operation), which has already
+/// checked that the operation exists and that its arguments match what it
+/// declared.
+///
+/// Two settings are written, not one: the suggested directory **and** `create`.
+/// The directory Saltcorn is proposing does not exist yet — that is the whole
+/// point of proposing it — so a suggestion that left `create` off would produce a
+/// store that saves and then refuses to connect, which is precisely the
+/// confusion the button is there to spare the admin.
+pub(crate) fn run_local_operation(
+    def: &mut FileStoreDef,
+    operation: &str,
+    _input: &Attrs,
+) -> Result<OperationOutcome> {
+    match operation {
+        OP_SUGGEST_DIR => {
+            // The suggestion is named after the store, so an unnamed store has
+            // nothing to suggest. Said plainly rather than suggesting a
+            // directory called `store`, which every unnamed store would share.
+            if def.name.trim().is_empty() {
+                return Err(Error::invalid(
+                    "name the store first — the suggested directory is named after it",
+                ));
+            }
+            let dir = suggest_local_dir(def.name.trim())?;
+            let shown = dir.to_string_lossy().into_owned();
+            def.config.insert(
+                CFG_PATH.to_owned(),
+                serde_json::Value::String(shown.clone()),
+            );
+            def.config
+                .insert(CFG_CREATE.to_owned(), serde_json::Value::Bool(true));
+            Ok(OperationOutcome::text(format!(
+                "Suggested {shown}. It is created when the store is saved; \
+                 replace it with a directory of your own if you have one."
+            )))
+        }
+        other => Err(Error::invalid(format!(
+            "unknown local file store operation `{other}`"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+    use crate::def::LOCAL_BACKEND;
+    use crate::paths::DATA_DIR_ENV;
+    use crate::paths::testing::temp_env;
+
+    /// The suggestion fills in both settings, and the directory it names is the
+    /// one under the data directory rather than anything the admin must know.
+    #[test]
+    fn suggesting_a_directory_fills_in_the_settings() {
+        temp_env(|| {
+            unsafe { std::env::set_var(DATA_DIR_ENV, "/tmp/sc-data") };
+            let mut def = FileStoreDef::new("Customer uploads", LOCAL_BACKEND);
+            let outcome = run_local_operation(&mut def, OP_SUGGEST_DIR, &Attrs::new()).unwrap();
+
+            assert_eq!(
+                def.setting(CFG_PATH),
+                Some("/tmp/sc-data/local-stores/Customer_uploads")
+            );
+            // Without this the suggested store would save and then fail to
+            // connect, since nothing has created the directory.
+            assert_eq!(
+                def.config.get(CFG_CREATE),
+                Some(&serde_json::Value::Bool(true))
+            );
+            assert!(
+                outcome.output.contains("/tmp/sc-data/local-stores"),
+                "{}",
+                outcome.output
+            );
+        });
+    }
+
+    /// An unnamed store gets an explanation rather than a directory every
+    /// unnamed store would share.
+    #[test]
+    fn a_store_with_no_name_has_nothing_to_suggest() {
+        temp_env(|| {
+            unsafe { std::env::set_var(DATA_DIR_ENV, "/tmp/sc-data") };
+            let mut def = FileStoreDef::new("  ", LOCAL_BACKEND);
+            let err = run_local_operation(&mut def, OP_SUGGEST_DIR, &Attrs::new())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("name the store first"), "{err}");
+            assert_eq!(def.setting(CFG_PATH), None);
+        });
     }
 }

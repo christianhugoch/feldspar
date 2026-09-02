@@ -4035,9 +4035,10 @@ fn unredacted_config(
 /// and the admin gets the backend's own message back in the form they are still
 /// looking at.
 ///
-/// Backend-agnostic: `local` declares no such operation and so does nothing
-/// here, and a backend added later — an object store creating its bucket — gets
-/// the same transactional create by declaring one.
+/// Backend-agnostic: `local` declares no `on_create` operation and so does
+/// nothing here — its one operation configures the form rather than creating
+/// anything — and a backend added later, an object store creating its bucket,
+/// gets the same transactional create by declaring one.
 async fn create_backend_resources(def: &mut FileStoreDef) -> Result<()> {
     for op in backend_operations(&def.backend)? {
         if op.on_create {

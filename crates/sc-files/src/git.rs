@@ -65,62 +65,8 @@ use crate::def::{
     GIT_BACKEND,
 };
 use crate::local::LocalFileStore;
+use crate::paths::{data_dir, path_safe};
 use crate::store::{Entry, FileMeta, FileStat, FileStore};
-
-/// Environment variable overriding the base directory clones and keys live
-/// under, for tests and for an operator who wants them elsewhere.
-///
-/// Tests need this: they must not clone into the real user's data directory,
-/// and a test that did would leave a repository behind on the developer's
-/// machine and collide with the next run.
-pub const DATA_DIR_ENV: &str = "SC_DATA_DIR";
-
-/// The base directory Saltcorn keeps its own data in, chosen per operating
-/// system.
-///
-/// Hand-rolled rather than taken from the `dirs` crate, which would be a
-/// dependency in layer 5 for fifteen lines of `std::env::var`. The conventions
-/// are stable and each is the platform's documented one:
-///
-/// | Platform | Directory |
-/// |---|---|
-/// | Windows | `%LOCALAPPDATA%\Feldspar` |
-/// | macOS | `~/Library/Application Support/Feldspar` |
-/// | other (XDG) | `$XDG_DATA_HOME/feldspar`, else `~/.local/share/feldspar` |
-///
-/// [`DATA_DIR_ENV`] overrides all of it. An environment with none of the
-/// variables set — a daemon started with a scrubbed environment — is an error
-/// rather than a fallback to the current directory, which would scatter clones
-/// wherever the process happened to be started.
-pub fn data_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var(DATA_DIR_ENV)
-        && !dir.trim().is_empty()
-    {
-        return Ok(PathBuf::from(dir));
-    }
-    if cfg!(windows) {
-        return std::env::var("LOCALAPPDATA")
-            .map(|d| PathBuf::from(d).join("Feldspar"))
-            .map_err(|_| {
-                Error::config(
-                    "cannot decide where to keep git clones: neither \
-                     `SC_DATA_DIR` nor `LOCALAPPDATA` is set",
-                )
-            });
-    }
-    let home = std::env::var("HOME").map_err(|_| {
-        Error::config(
-            "cannot decide where to keep git clones: neither `SC_DATA_DIR` nor `HOME` is set",
-        )
-    })?;
-    if cfg!(target_os = "macos") {
-        return Ok(PathBuf::from(home).join("Library/Application Support/Feldspar"));
-    }
-    match std::env::var("XDG_DATA_HOME") {
-        Ok(xdg) if !xdg.trim().is_empty() => Ok(PathBuf::from(xdg).join("feldspar")),
-        _ => Ok(PathBuf::from(home).join(".local/share/feldspar")),
-    }
-}
 
 /// Where clones live: `<data dir>/git-stores`.
 pub fn clone_dir() -> Result<PathBuf> {
@@ -130,30 +76,6 @@ pub fn clone_dir() -> Result<PathBuf> {
 /// Where deploy keys live: `<data dir>/keys`.
 pub fn key_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("keys"))
-}
-
-/// A store name reduced to something safe to use as a single path component.
-///
-/// A store's name is admin-supplied text and may hold anything — a slash, a
-/// leading dot, a colon Windows will not take — while this becomes a directory
-/// name. Every character outside `[A-Za-z0-9._-]` becomes `_`, and a name that
-/// reduces to nothing (or to `.`/`..`) becomes `store`, since a clone directory
-/// called `..` would be the parent of every clone.
-fn path_safe(name: &str) -> String {
-    let mapped: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    match mapped.trim_matches('.') {
-        "" => "store".to_owned(),
-        _ => mapped,
-    }
 }
 
 /// The directory a store's working tree lives in, in order of authority: its
@@ -217,7 +139,7 @@ fn configured_dir(def: &FileStoreDef) -> Option<PathBuf> {
 ///
 /// A definition that already names a directory is left alone, and so is one
 /// whose path cannot be worked out — a daemon with no `HOME` and no
-/// [`DATA_DIR_ENV`]. Showing nothing is right there: there is genuinely no
+/// [`DATA_DIR_ENV`](crate::DATA_DIR_ENV). Showing nothing is right there: there is genuinely no
 /// answer, and inventing one would name a directory nothing will use.
 pub(crate) fn fill_display_config(def: &FileStoreDef, config: &mut Attrs) {
     if configured_dir(def).is_some() {
@@ -1304,19 +1226,8 @@ pub fn record_deploy_key(def: &mut FileStoreDef, key: &DeployKey) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_store_name_becomes_one_safe_path_component() {
-        assert_eq!(path_safe("docs"), "docs");
-        assert_eq!(path_safe("my docs"), "my_docs");
-        // The cases that would escape the clone directory or name it. A dot
-        // survives (it is legal in a directory name) but the separator does
-        // not, so what is left is one harmless component.
-        assert_eq!(path_safe("../etc"), ".._etc");
-        assert_eq!(path_safe(".."), "store");
-        assert_eq!(path_safe(""), "store");
-        assert!(!path_safe("a/b").contains('/'));
-    }
+    use crate::paths::DATA_DIR_ENV;
+    use crate::paths::testing::temp_env;
 
     #[test]
     fn the_data_directory_honours_the_override() {
@@ -1474,21 +1385,5 @@ mod tests {
             ..GitStatus::default()
         };
         assert!(!dirty.clean());
-    }
-
-    /// Run `f` with the data-directory variable restored afterwards, under a
-    /// lock: `set_var` is process-wide, so two of these running at once would
-    /// each see the other's value.
-    fn temp_env(f: impl FnOnce()) {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let before = std::env::var(DATA_DIR_ENV).ok();
-        f();
-        unsafe {
-            match before {
-                Some(v) => std::env::set_var(DATA_DIR_ENV, v),
-                None => std::env::remove_var(DATA_DIR_ENV),
-            }
-        }
     }
 }

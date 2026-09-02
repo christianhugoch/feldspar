@@ -224,6 +224,7 @@ Group=feldspar
 ExecStart=/usr/local/bin/feldspar serve --environment production
 Environment=FELDSPAR_CONFIG=/etc/feldspar/feldspar.toml
 Environment=HOME=/var/lib/feldspar
+Environment=SC_DATA_DIR=/var/lib/feldspar
 StateDirectory=feldspar
 WorkingDirectory=/var/lib/feldspar
 Restart=on-failure
@@ -275,6 +276,12 @@ Why each of the less obvious lines:
   Keep disk file stores inside it; a store pointed anywhere else will fail to write.
 - **`HOME=/var/lib/feldspar`** gives npm a writable home for its cache when the server
   builds an application.
+- **`SC_DATA_DIR=/var/lib/feldspar`** is where the server keeps directories it owns
+  rather than the admin: git file stores are checked out into `git-stores/`, and the
+  **Suggest a directory** button on a new local file store offers
+  `local-stores/<store name>`. Naming it outright is what makes those suggestions land
+  somewhere an operator would look — and somewhere `ReadWritePaths` allows — instead of
+  the `HOME`-derived `~/.local/share/feldspar`.
 - **`WorkingDirectory`** is what a relative file-store path resolves against.
 - **`AmbientCapabilities=CAP_NET_BIND_SERVICE`** lets an unprivileged process bind 80
   and 443. Drop both capability lines if you bind a high port behind a reverse proxy.
