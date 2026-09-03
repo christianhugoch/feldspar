@@ -2,6 +2,64 @@
 
 Changes in reverse chronological order.
 
+## The admin UI learns the second language
+
+Phase 7 of the Python code adapter. Everything an admin does about Python now
+has a screen: a `run_python_code` body is written in an editor that knows
+Python, a Python distribution is installed from the same Modules tab an npm
+package is, and the one thing that is *not* the same about the two languages —
+that there is no sandbox for a Python module — is on the card where the other
+language's permissions form is.
+
+- **Monaco's Python grammar, beside JavaScript's** (`CodeEditor.tsx`). A `code`
+  setting that declares `python` opens in a real editor rather than in an
+  unhighlighted box, at four-space indentation, because Python's indentation is
+  syntax and a body typed at two spaces in an editor that inserts four is a body
+  that does not parse. `editorSettings` is the whole of the difference between
+  the two languages, in one testable function: the language id, the tab size,
+  and whether the TypeScript worker has anything to say about a body in it.
+  **Only JavaScript gets completions** — the declarations `codeTypes.ts` emits
+  are TypeScript and the thing that answers from them is the TS worker — so a
+  Python body starts no 6 MB worker and does not fetch the catalog to feed one.
+  A language this SPA has no grammar for opens as plain text rather than
+  claiming highlighting it does not have.
+- **One install form, four combinations** (Modules tab). The Type select is now
+  JavaScript—npm, JavaScript—local directory, Python—PyPI distribution,
+  Python—local directory: the language and the registry are one control because
+  they are one decision, and the pair the server refuses — a Python module from
+  npm — is not offered. The specifier box relabels itself (a package name, a
+  distribution name, a path on the *server*), and the specifier is cleared when
+  the choice changes.
+- **Each language is blocked on its own toolchain, said before a name is
+  typed.** `listModules` already reported `python` and `pip` beside `npm` and
+  `node`; the tab now reads them. No npm blocks a JavaScript install and not a
+  Python one; no interpreter and an interpreter without `pip` are different
+  sentences because they are different repairs (`--python-bin`, and
+  `python3 -m ensurepip`). A one-line summary of what this server can install
+  with sits under the form whatever is picked, and the tab says where each
+  toolchain installs: npm's packages under the modules root, pip's distributions
+  into `--python-dir`.
+- **A PyPI specifier is checked against pip's own grammar** in front of the
+  form: `httpx[http2]>=0.27` names `httpx`, and `==1.0` names nothing and is
+  refused here rather than by pip a minute later.
+- **§10, on the screen.** A Python module's card has no permissions form and no
+  Permissions button. In their place is the sentence the milestone owes an
+  admin: a Python module runs inside this server with the server's own
+  privileges, there is no sandbox for one and nothing to grant, so install only
+  the ones you trust. The reload caveat of §11 is beside it — a compiled
+  extension, and any version change, takes full effect only at the next restart.
+  A module in a language this SPA has not heard of is drawn as the *sandboxed*
+  one, which is the direction that cannot promise more isolation than there is.
+- **Every card says which language it is** (`v0.2.0 · Python · pypi`), and an
+  install now reports what it actually added — "1 function", not "0 actions"
+  about a Python plugin whose whole purpose is one function.
+- Tests: 24 vitest cases over the install form per language, the toolchain
+  sentences, the specifier grammar, the permission model's presence and absence,
+  and the editor's per-language settings. `npm run typecheck`, the SPA
+  type-check test and the generated-client sync test all pass;
+  `ui/admin/src/client.ts` needed no regeneration, having been emitted with the
+  Python fields in phase 5.
+
 ## Python plugin modules: one `_sc_modules`, two languages, one of each entity
 
 Phase 6 of the Python code adapter. A `pip`-installable distribution can now

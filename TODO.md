@@ -1312,15 +1312,37 @@ trait it composes, language-neutral, and testable without either host.
 
 ## Phase 7 — The admin UI
 
-- [ ] 7.1 Monaco's Python grammar registered beside JavaScript's, so a `run_python_code` body gets
+- [x] 7.1 Monaco's Python grammar registered beside JavaScript's, so a `run_python_code` body gets
       an editor rather than a text area.
-- [ ] 7.2 Modules tab: the language of each module, the `pypi`/`local` install form beside the
+- [x] 7.2 Modules tab: the language of each module, the `pypi`/`local` install form beside the
       npm one, the Python toolchain's availability said before an admin types a package name, and
       §10's sentence about what a Python module may reach.
-- [ ] 7.3 Regenerate `ui/admin/src/client.ts`; `npm run typecheck` and the SPA type-check test
+- [x] 7.3 Regenerate `ui/admin/src/client.ts`; `npm run typecheck` and the SPA type-check test
       pass.
-- [ ] 7.4 Tests (vitest): the install form's validation per language, and the tab's rendering of a
+- [x] 7.4 Tests (vitest): the install form's validation per language, and the tab's rendering of a
       module that has no permission set.
+
+### What phase 7 landed
+
+The language and the registry are **one select**, not two: the pair is one
+decision, the server refuses a Python module from npm, and two controls would
+have offered two invalid combinations. The four options are the four valid
+pairs.
+
+A Python module's card **drops** the permissions form rather than disabling it,
+and puts §10's sentence where the other language's summary line is. A disabled
+form would still be a form, and a form is a claim that there is a permission
+model; the sentence is the whole of what this screen can truthfully say.
+
+`editorSettings(language)` is the whole of the difference between the two
+languages in the editor — id, tab size, and whether the TypeScript worker has
+anything to say — so a Python body neither starts that worker nor fetches the
+catalog that feeds it. Completion is what Python does not get, and §12 already
+named the generated `saltcorn.pyi` as the thing that would change that.
+
+`ui/admin/src/client.ts` needed no regeneration: the `python`, `pip`,
+`python_dir` and `language` fields were emitted with phase 5's schema change,
+and the sync test confirms it.
 
 ## Phase 8 — Documentation and the definition of done
 

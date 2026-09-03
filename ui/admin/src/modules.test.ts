@@ -1,28 +1,45 @@
 /**
  * The Modules tab's model.
  *
- * Two things here are worth pinning without a browser. The **install form**,
- * because its two sources take different things and the failure modes are quiet
- * ones: a relative path installs something the server will resolve against its
- * own modules directory rather than against wherever the admin was standing, and
- * a server with no npm cannot install anything at all — which an admin should be
- * told before filling in a form, not by a failed install.
+ * Three things here are worth pinning without a browser. The **install form**,
+ * because its four combinations take different things and the failure modes are
+ * quiet ones: a relative path installs something the server will resolve against
+ * its own modules directory rather than against wherever the admin was standing,
+ * a `==1.0` names no distribution, and a server without the toolchain for the
+ * language that was picked cannot install anything at all — which an admin
+ * should be told before filling in a form, not by a failed install. The two
+ * languages fail *separately*, and a server that has npm and no pip must say so
+ * about Python and not about JavaScript.
  *
- * And the **reading of a module**, because everything interesting about one is
+ * The **reading of a module**, because everything interesting about one is
  * something that went wrong: it did not load, it loaded but an action of its
- * name was taken, it supplies four other entity types this version ignores. Each
- * of those is a sentence the admin acts on.
+ * name was taken, it supplies other entity types this version ignores. Each of
+ * those is a sentence the admin acts on.
+ *
+ * And **what a module may reach**, where the two languages differ in kind rather
+ * than in degree (§10): a JavaScript module has an allow-list, and a Python one
+ * has no sandbox at all. A screen that rendered the same four empty boxes for
+ * both would be claiming a permission model that does not exist, so the model
+ * says which module has one.
  */
 
 import { describe, expect, it } from "vitest";
 
 import {
+  ALL_TOOLCHAINS,
   CLOSED_PERMISSIONS,
   EMPTY_INSTALL,
+  INSTALL_CHOICES,
+  NO_SANDBOX,
   actionNames,
+  choiceFor,
+  choiceValue,
   configValues,
+  distributionName,
+  hasPermissions,
   installBlocked,
   isConfigurable,
+  languageLabel,
   locationLabel,
   locationPlaceholder,
   moduleStatus,
@@ -34,8 +51,12 @@ import {
   permissionProblems,
   permissionSummary,
   permissionText,
+  suppliedSummary,
+  toolchainMissing,
+  toolchainSentence,
   unsupportedSentence,
   type Module,
+  type Toolchains,
 } from "./modules";
 
 /** A loaded module with one action, as `listModules` sends it. */
@@ -61,46 +82,164 @@ function module_(overrides: Partial<Module> = {}): Module {
   };
 }
 
+/** The same, written in the other language: a distribution from PyPI, with the
+ * permission column the server still stores and nothing enforces (§10). */
+function pythonModule(overrides: Partial<Module> = {}): Module {
+  return module_({
+    name: "saltcorn-mqtt",
+    language: "python",
+    source: "pypi",
+    location: "saltcorn-mqtt",
+    ...overrides,
+  });
+}
+
+/** A server with one toolchain and not the other. */
+function tools(overrides: Partial<Toolchains> = {}): Toolchains {
+  return { ...ALL_TOOLCHAINS, ...overrides };
+}
+
 describe("the install form", () => {
+  it("offers one entry per language-and-registry pair, and no invalid one", () => {
+    // `local` is two of the four, so neither half of a choice identifies it and
+    // the select's value is the pair.
+    expect(INSTALL_CHOICES.map(choiceValue)).toEqual([
+      "javascript:npm",
+      "javascript:local",
+      "python:pypi",
+      "python:local",
+    ]);
+    // What the server refuses — a Python module from npm — is not offered.
+    expect(INSTALL_CHOICES.some((c) => c.language === "python" && c.source === "npm")).toBe(false);
+    expect(choiceFor("python:pypi")).toEqual({
+      language: "python",
+      source: "pypi",
+      label: "Python — PyPI distribution",
+    });
+    // A value that cannot come from this select falls back rather than sticking.
+    expect(choiceFor("elixir:hex")).toBe(INSTALL_CHOICES[0]);
+  });
+
   it("asks for the thing the chosen source actually takes", () => {
-    expect(locationLabel("npm")).toMatch(/package/i);
-    expect(locationPlaceholder("npm")).toBe("@saltcorn/mqtt");
-    expect(locationLabel("local")).toMatch(/directory/i);
-    expect(locationPlaceholder("local")).toMatch(/^\//);
+    expect(locationLabel({ language: "javascript", source: "npm" })).toMatch(/package/i);
+    expect(locationPlaceholder({ language: "javascript", source: "npm" })).toBe("@saltcorn/mqtt");
+    expect(locationLabel({ language: "python", source: "pypi" })).toMatch(/distribution/i);
+    expect(locationPlaceholder({ language: "python", source: "pypi" })).toMatch(/saltcorn-mqtt/);
+    // A directory is a directory in either language, and it is on the *server*.
+    expect(locationLabel({ language: "python", source: "local" })).toMatch(/directory/i);
+    expect(locationPlaceholder({ language: "python", source: "local" })).toMatch(/^\//);
+    expect(locationPlaceholder({ language: "javascript", source: "local" })).toMatch(/^\//);
   });
 
-  it("starts empty, on npm", () => {
-    expect(EMPTY_INSTALL).toEqual({ source: "npm", location: "" });
-    expect(installBlocked(EMPTY_INSTALL, true)).toMatch(/npm package/i);
+  it("starts empty, on JavaScript from npm", () => {
+    expect(EMPTY_INSTALL).toEqual({ language: "javascript", source: "npm", location: "" });
+    expect(installBlocked(EMPTY_INSTALL, ALL_TOOLCHAINS)).toMatch(/npm package/i);
+    expect(
+      installBlocked({ language: "python", source: "pypi", location: "" }, ALL_TOOLCHAINS),
+    ).toMatch(/PyPI/);
   });
 
-  it("refuses a relative local path, because the server would resolve it elsewhere", () => {
-    expect(installBlocked({ source: "local", location: "../mqtt" }, true)).toMatch(
-      /absolute path/i,
+  it("refuses a relative local path in either language, because the server would resolve it elsewhere", () => {
+    for (const language of ["javascript", "python"] as const) {
+      expect(
+        installBlocked({ language, source: "local", location: "../mqtt" }, ALL_TOOLCHAINS),
+      ).toMatch(/absolute path/i);
+      expect(
+        installBlocked({ language, source: "local", location: "/srv/mqtt" }, ALL_TOOLCHAINS),
+      ).toBeNull();
+    }
+  });
+
+  it("reads the distribution a specifier names, and refuses one that names none", () => {
+    // pip's own grammar, applied in front of the form: everything from the first
+    // character that cannot be in a name is a version, an extra or a marker.
+    expect(distributionName("httpx")).toBe("httpx");
+    expect(distributionName("httpx>=0.27")).toBe("httpx");
+    expect(distributionName("httpx[http2]>=0.27")).toBe("httpx");
+    expect(distributionName("saltcorn-mqtt==0.2.0")).toBe("saltcorn-mqtt");
+    expect(distributionName("==1.0")).toBeNull();
+    expect(
+      installBlocked({ language: "python", source: "pypi", location: "==1.0" }, ALL_TOOLCHAINS),
+    ).toMatch(/does not start with a distribution/);
+    expect(
+      installBlocked(
+        { language: "python", source: "pypi", location: "saltcorn-mqtt>=0.2" },
+        ALL_TOOLCHAINS,
+      ),
+    ).toBeNull();
+  });
+
+  it("blocks each language on its own toolchain, and neither on the other's", () => {
+    // No npm: JavaScript is blocked whatever is typed, and Python is not.
+    const noNpm = tools({ npm: false, node: false });
+    expect(
+      installBlocked(
+        { language: "javascript", source: "npm", location: "@saltcorn/mqtt" },
+        noNpm,
+      ),
+    ).toMatch(/no npm/i);
+    expect(installBlocked(EMPTY_INSTALL, noNpm)).toMatch(/no npm/i);
+    expect(
+      installBlocked({ language: "python", source: "pypi", location: "saltcorn-mqtt" }, noNpm),
+    ).toBeNull();
+
+    // No interpreter, and an interpreter without pip, are different repairs and
+    // are said differently.
+    const noPython = tools({ python: false, pip: false });
+    expect(toolchainMissing("python", noPython)).toMatch(/no Python interpreter/);
+    expect(toolchainMissing("python", noPython)).toMatch(/--python-bin/);
+    expect(toolchainMissing("python", tools({ pip: false }))).toMatch(/no pip/);
+    expect(toolchainMissing("javascript", noPython)).toBeNull();
+    expect(
+      installBlocked({ language: "python", source: "pypi", location: "httpx" }, noPython),
+    ).toMatch(/no Python interpreter/);
+    // …and the toolchain's absence wins over an empty box, because it is the one
+    // the admin cannot fix from this screen.
+    expect(installBlocked({ language: "python", source: "local", location: "" }, noPython)).toMatch(
+      /no Python interpreter/,
     );
-    expect(installBlocked({ source: "local", location: "/srv/mqtt" }, true)).toBeNull();
   });
 
-  it("says so when the server has no npm, whatever is typed", () => {
-    const blocked = installBlocked({ source: "npm", location: "@saltcorn/mqtt" }, false);
-    expect(blocked).toMatch(/no npm/i);
-    // …and that reason wins over an empty box, because it is the one the admin
-    // cannot fix here.
-    expect(installBlocked(EMPTY_INSTALL, false)).toMatch(/no npm/i);
+  it("says what this server can install with, before a name is typed", () => {
+    expect(toolchainSentence(ALL_TOOLCHAINS)).toBe(
+      "On this server, npm installs a JavaScript module; pip installs a Python one.",
+    );
+    expect(toolchainSentence(tools({ npm: false }))).toMatch(/no npm/);
+    expect(toolchainSentence(tools({ pip: false }))).toMatch(/no pip/);
+    expect(toolchainSentence(tools({ python: false, pip: false }))).toMatch(
+      /no Python interpreter/,
+    );
   });
 
-  it("lets a filled-in npm package through", () => {
-    expect(installBlocked({ source: "npm", location: "@saltcorn/mqtt@0.2.0" }, true)).toBeNull();
+  it("lets a filled-in package through in either language", () => {
+    expect(
+      installBlocked(
+        { language: "javascript", source: "npm", location: "@saltcorn/mqtt@0.2.0" },
+        ALL_TOOLCHAINS,
+      ),
+    ).toBeNull();
+    expect(
+      installBlocked(
+        { language: "python", source: "pypi", location: "saltcorn-mqtt" },
+        ALL_TOOLCHAINS,
+      ),
+    ).toBeNull();
   });
 });
 
 describe("how an installed module reads", () => {
-  it("summarises what is installed and where it came from", () => {
-    expect(moduleSubtitle(module_())).toBe("v0.2.0 · npm");
+  it("summarises what is installed, which language it is, and where it came from", () => {
+    expect(moduleSubtitle(module_())).toBe("v0.2.0 · JavaScript · npm");
     expect(
       moduleSubtitle(module_({ source: "local", location: "/srv/checkouts/mqtt" })),
-    ).toBe("v0.2.0 · /srv/checkouts/mqtt");
+    ).toBe("v0.2.0 · JavaScript · /srv/checkouts/mqtt");
+    // The language is on every card, because which host loads a module decides
+    // how it is installed, reloaded and — below — what it may reach.
+    expect(moduleSubtitle(pythonModule())).toBe("v0.2.0 · Python · pypi");
     expect(moduleSubtitle(module_({ version: null }))).toMatch(/not installed/);
+    // A language this SPA has not heard of reads as the sandboxed one rather
+    // than as a blank.
+    expect(languageLabel("rust")).toBe("JavaScript");
   });
 
   it("counts the actions it supplies", () => {
@@ -148,6 +287,29 @@ describe("how an installed module reads", () => {
     expect(sentence).toMatch(/2 × viewtemplates/);
     expect(sentence).toMatch(/eventTypes/);
     expect(sentence).toMatch(/does not load yet/);
+  });
+
+  it("says what an install just added, in every kind a module can supply", () => {
+    expect(suppliedSummary(module_())).toBe("1 action");
+    // A Python plugin whose whole purpose is one function must not be reported
+    // as having installed "0 actions".
+    expect(
+      suppliedSummary(
+        pythonModule({
+          actions: [],
+          functions: [{ name: "score", description: "", is_async: false, arguments: [] }],
+        }),
+      ),
+    ).toBe("1 function");
+    expect(
+      suppliedSummary(
+        module_({
+          functions: [{ name: "score", description: "", is_async: false, arguments: [] }],
+          table_providers: ["RSS feed", "Atom feed"],
+        }),
+      ),
+    ).toBe("1 action, 1 function and 2 table providers");
+    expect(suppliedSummary(module_({ actions: [] }))).toMatch(/nothing this version/);
   });
 
   it("knows whether there is anything to configure", () => {
@@ -222,6 +384,23 @@ describe("a module's permissions", () => {
     // entry.
     expect(parsePermissionText("  a \n\n b\n")).toEqual(["a", "b"]);
     expect(parsePermissionText("")).toEqual([]);
+  });
+
+  it("has none at all for a Python module, and says so rather than showing an empty form", () => {
+    // §10: the Deno worker's allow-list has no counterpart in the embedded
+    // interpreter. Rendering the same four empty boxes would claim a permission
+    // model that does not exist — and "Reaches nothing" would be the *opposite*
+    // of true about a module running with the server's own privileges.
+    expect(hasPermissions(module_())).toBe(true);
+    expect(hasPermissions(pythonModule())).toBe(false);
+    expect(NO_SANDBOX).toMatch(/no sandbox/i);
+    expect(NO_SANDBOX).toMatch(/server's own privileges/);
+    // Even when the row carries a set — the column is shared, and a set stored
+    // against a Python module enforces nothing.
+    expect(hasPermissions(pythonModule({ permissions: { net: ["broker:1883"] } }))).toBe(false);
+    // A language this SPA has not heard of is read as the sandboxed one: the
+    // direction that cannot promise more isolation than there is.
+    expect(hasPermissions(module_({ language: "rust" }))).toBe(true);
   });
 
   it("names what the server would refuse, before the save rather than after it", () => {

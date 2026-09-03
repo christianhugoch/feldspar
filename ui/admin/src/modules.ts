@@ -5,67 +5,185 @@
 // form — what counts as a filled-in specifier, what the census sentence says,
 // whether a module is usable — is testable without a browser, and the component
 // is then only flow.
+//
+// **Two languages, one tab** (§8). A module is a module to an admin, so what the
+// language changes here is small and entirely local: which registry the package
+// comes from, which toolchain has to be on the server to install it, and whether
+// the permissions form means anything at all — which for Python it does not
+// (§10), and saying so is this screen's obligation rather than an omission.
 
 import type { ListModulesResponse } from "./client";
 
 /** One installed module, as `listModules` describes it. */
 export type Module = ListModulesResponse["modules"][number];
 
-/** Where a module's package comes from. The two the server accepts. */
-export type ModuleSource = "npm" | "local";
+/** Which language a module is written in, and therefore which host loads it. */
+export type ModuleLanguage = "javascript" | "python";
+
+/** Where a module's package comes from. The three the server accepts: one
+ * registry per language, and the local directory both share. */
+export type ModuleSource = "npm" | "pypi" | "local";
 
 /** What an admin fills in to install one. */
 export type InstallForm = {
+  language: ModuleLanguage;
   source: ModuleSource;
   location: string;
 };
 
-/** A blank install form. npm first, because the registry is where a module
- * normally comes from and a local directory is the developer's case. */
-export const EMPTY_INSTALL: InstallForm = { source: "npm", location: "" };
+/** What this server can install *with*, as `listModules` reports it.
+ *
+ * Four booleans rather than two, because the two languages fail differently: an
+ * interpreter with no `pip` is a different repair from no interpreter at all,
+ * and `node` without `npm` is worth saying because a module *runs* without
+ * either. */
+export type Toolchains = {
+  npm: boolean;
+  node: boolean;
+  python: boolean;
+  pip: boolean;
+};
+
+/** Everything present, which is what a form assumes until `listModules` has
+ * answered — the alternative is a form that is briefly and wrongly disabled. */
+export const ALL_TOOLCHAINS: Toolchains = { npm: true, node: true, python: true, pip: true };
+
+/** A blank install form. JavaScript from npm first, because that is where a
+ * module normally comes from; a local directory is the developer's case, and
+ * Python is the newer half of §8. */
+export const EMPTY_INSTALL: InstallForm = { language: "javascript", source: "npm", location: "" };
+
+/** One entry in the Type select: a language and the registry it installs from.
+ *
+ * The two are one control because they are one decision — a Python module does
+ * not come from npm and the server refuses the combination — so offering them as
+ * two selects would be offering two invalid pairs. */
+export type InstallChoice = {
+  language: ModuleLanguage;
+  source: ModuleSource;
+  label: string;
+};
+
+/** The four combinations, in the order the select offers them. */
+export const INSTALL_CHOICES: InstallChoice[] = [
+  { language: "javascript", source: "npm", label: "JavaScript — npm package" },
+  { language: "javascript", source: "local", label: "JavaScript — local directory" },
+  { language: "python", source: "pypi", label: "Python — PyPI distribution" },
+  { language: "python", source: "local", label: "Python — local directory" },
+];
+
+/** The `<option>` value for a choice: the pair, because neither half of it
+ * identifies one on its own — `local` is two of the four. */
+export function choiceValue(pick: { language: ModuleLanguage; source: ModuleSource }): string {
+  return `${pick.language}:${pick.source}`;
+}
+
+/** The choice a select's value names, falling back to the first — a value that
+ * is not one of the four cannot come from this select, and a form that refused
+ * to change would be a worse answer than the default one. */
+export function choiceFor(value: string): InstallChoice {
+  return INSTALL_CHOICES.find((choice) => choiceValue(choice) === value) ?? INSTALL_CHOICES[0];
+}
+
+/** A language in the words the screen uses for it. */
+export function languageLabel(language: string): string {
+  return language === "python" ? "Python" : "JavaScript";
+}
 
 /** The label above the specifier box, which is a different thing for each
- * source: one is a package name, the other is a path on the *server*. */
-export function locationLabel(source: ModuleSource): string {
-  return source === "npm" ? "Package name" : "Directory on the server";
+ * source: two are names in a registry, the third is a path on the *server*. */
+export function locationLabel(form: { language: ModuleLanguage; source: ModuleSource }): string {
+  if (form.source === "npm") return "Package name";
+  if (form.source === "pypi") return "Distribution name";
+  return "Directory on the server";
 }
 
 /** The placeholder in it. */
-export function locationPlaceholder(source: ModuleSource): string {
-  return source === "npm" ? "@saltcorn/mqtt" : "/srv/checkouts/mqtt";
+export function locationPlaceholder(form: {
+  language: ModuleLanguage;
+  source: ModuleSource;
+}): string {
+  if (form.source === "npm") return "@saltcorn/mqtt";
+  if (form.source === "pypi") return "saltcorn-mqtt>=0.2";
+  return form.language === "python" ? "/srv/checkouts/saltcorn-mqtt" : "/srv/checkouts/mqtt";
 }
 
-/** Why the Install button is disabled, or `null` when it is not.
+/** The distribution a PyPI specifier names — `httpx[http2]>=0.27` is `httpx` —
+ * or `null` when it names none.
  *
- * A sentence rather than a boolean because the two reasons are worth saying: a
- * form with nothing in it, and a server with no npm to install with — the second
- * of which an admin cannot fix from this screen and should not discover from a
- * failed install.
- */
-export function installBlocked(form: InstallForm, npm: boolean): string | null {
-  if (!npm) {
-    return "This server has no npm on its PATH, so it cannot install a module. Install Node.js and restart Saltcorn.";
+ * The server's own rule (`pypi_spec_name`), applied here so that `==1.0` is
+ * refused in front of the form rather than by pip a minute later. */
+export function distributionName(spec: string): string | null {
+  const trimmed = spec.trim();
+  const end = trimmed.search(/[^A-Za-z0-9._-]/);
+  const name = (end === -1 ? trimmed : trimmed.slice(0, end)).trim();
+  return name === "" ? null : name;
+}
+
+/** Why this server cannot install a module in `language`, or `null` when it
+ * can.
+ *
+ * The reason an admin cannot fix from this screen, said before they type a
+ * package name rather than after a failed install — and one per language,
+ * because a server with one toolchain and not the other is ordinary. */
+export function toolchainMissing(language: ModuleLanguage, tools: Toolchains): string | null {
+  if (language === "javascript") {
+    return tools.npm
+      ? null
+      : "This server has no npm on its PATH, so it cannot install a JavaScript module. Install Node.js and restart Saltcorn.";
   }
-  if (form.location.trim() === "") {
-    return source_is_npm(form)
-      ? "Type the name of an npm package."
-      : "Type the path of a directory on this server.";
+  if (!tools.python) {
+    return "This server has no Python interpreter on its PATH, so it cannot install a Python module. Install Python 3.11 or newer — or name one with --python-bin — and restart Saltcorn.";
   }
-  if (!source_is_npm(form) && !form.location.trim().startsWith("/")) {
-    return "A local module is installed from an absolute path, so that it means the same thing wherever the server was started from.";
+  if (!tools.pip) {
+    return "This server's Python interpreter has no pip, so it cannot install a Python module. Add pip to it (python3 -m ensurepip) and restart Saltcorn.";
   }
   return null;
 }
 
-function source_is_npm(form: InstallForm): boolean {
-  return form.source === "npm";
+/** What this server can install, in one sentence, whichever half is missing. */
+export function toolchainSentence(tools: Toolchains): string {
+  const js = tools.npm
+    ? "npm installs a JavaScript module"
+    : "there is no npm, so no JavaScript module can be installed";
+  const py = !tools.python
+    ? "there is no Python interpreter, so no Python module can be installed"
+    : tools.pip
+      ? "pip installs a Python one"
+      : "the Python interpreter has no pip, so no Python module can be installed";
+  return `On this server, ${js}; ${py}.`;
 }
 
-/** The version line under a module's name: what is installed, and from where. */
+/** Why the Install button is disabled, or `null` when it is not.
+ *
+ * A sentence rather than a boolean because every reason is worth saying: a form
+ * with nothing in it, a specifier that names no package, and a server without
+ * the toolchain for the language that was picked.
+ */
+export function installBlocked(form: InstallForm, tools: Toolchains): string | null {
+  const missing = toolchainMissing(form.language, tools);
+  if (missing) return missing;
+  const location = form.location.trim();
+  if (location === "") {
+    if (form.source === "npm") return "Type the name of an npm package.";
+    if (form.source === "pypi") return "Type the name of a distribution on PyPI.";
+    return "Type the path of a directory on this server.";
+  }
+  if (form.source === "local" && !location.startsWith("/")) {
+    return "A local module is installed from an absolute path, so that it means the same thing wherever the server was started from.";
+  }
+  if (form.source === "pypi" && distributionName(location) === null) {
+    return `${location} does not start with a distribution's name — write httpx, or httpx>=0.27 to ask for a version.`;
+  }
+  return null;
+}
+
+/** The version line under a module's name: what is installed, which language it
+ * is written in, and where it came from. */
 export function moduleSubtitle(module: Module): string {
   const version = module.version ? `v${module.version}` : "not installed";
-  const from = module.source === "npm" ? "npm" : module.location;
-  return `${version} · ${from}`;
+  const from = module.source === "local" ? module.location : module.source;
+  return `${version} · ${languageLabel(module.language)} · ${from}`;
 }
 
 /** The names of the actions a module supplies, in the order it declared them. */
@@ -111,6 +229,26 @@ export function moduleStatus(module: Module): {
   };
 }
 
+/** What a module supplies, counted, for the sentence that follows an install.
+ *
+ * Every kind rather than the badge's two, because the badge answers "is this
+ * thing working" and this answers "what did I just get" — and a Python module
+ * whose whole purpose is one function would otherwise be reported as having
+ * installed "0 actions". */
+export function suppliedSummary(module: Module): string {
+  const counts: [number, string, string][] = [
+    [module.actions.length, "action", "actions"],
+    [module.functions.length, "function", "functions"],
+    [module.table_providers.length, "table provider", "table providers"],
+  ];
+  const parts = counts
+    .filter(([count]) => count > 0)
+    .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`);
+  if (parts.length === 0) return "nothing this version of Saltcorn loads";
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
 /** Whether a module has settings of its own to configure. */
 export function isConfigurable(module: Module): boolean {
   return module.config_spec.length > 0;
@@ -136,6 +274,38 @@ export function configValues(module: Module): Record<string, string> {
 // every empty one means *nothing* rather than *everything* — which is the one
 // place this screen could mislead, so the summary sentence says "nothing"
 // out loud rather than rendering four empty boxes and leaving it to be inferred.
+//
+// **And all of it is JavaScript's** (§10). A Deno worker has a permission set;
+// the embedded interpreter has nothing of the kind, and neither
+// `RestrictedPython` nor an import gate is one. So a Python module gets no form
+// here and a sentence instead — the one thing this screen owes an admin, because
+// showing the form for one language is exactly what would let somebody infer a
+// permission model for the other.
+
+/** Whether the permissions on this screen mean anything for a module: they do
+ * for JavaScript, and there is nothing of the kind for Python (§10).
+ *
+ * Read off the module rather than off a flag, so a language this SPA has not
+ * heard of is treated as the sandboxed one — the reading that cannot promise
+ * more isolation than there is. */
+export function hasPermissions(module: Module): boolean {
+  return module.language !== "python";
+}
+
+/** What a Python module can reach, which is everything this server can.
+ *
+ * Said in the place the other language's allow-lists are, because the absence of
+ * a form is not a sentence anybody reads. */
+export const NO_SANDBOX =
+  "A Python module runs inside this server with the server's own privileges. There is no sandbox for one and nothing to grant: it can reach any host, any file and any environment variable this server can, so install only Python modules you trust.";
+
+/** What a reload of a Python module does and does not do (§11).
+ *
+ * Beside the Reload button's effect rather than in the documentation, because
+ * the failure it warns about — an upgraded distribution whose old classes are
+ * still live — looks exactly like the module having ignored the upgrade. */
+export const PYTHON_RELOAD =
+  "Reloading re-imports the package where it can. A distribution with a compiled extension in it, and any version change, takes full effect only when this server restarts.";
 
 /** The four things a module can be granted. The keys are the server's. */
 export type PermissionKind = "net" | "read" | "write" | "env";

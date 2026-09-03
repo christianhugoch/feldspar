@@ -1,13 +1,22 @@
 // The code editor a `code` setting is edited in: Monaco, with the sandbox's own
 // types loaded.
 //
-// A `run_js_code` body is a program — it declares things, loops, branches, and
-// now reads and writes tables — and a one-line input or a bare text area is the
-// wrong instrument for one. So a setting whose declaration names a language
-// (`FormField::code`) gets the editor VS Code is built on, with the two things
-// that make writing against `db` possible without the reference open in another
-// tab: **highlighting**, and **completions** over this server's own tables
-// (`codeTypes.ts` builds the declarations).
+// A `run_js_code` or `run_python_code` body is a program — it declares things,
+// loops, branches, and reads and writes tables — and a one-line input or a bare
+// text area is the wrong instrument for one. So a setting whose declaration
+// names a language (`FormField::code`) gets the editor VS Code is built on, with
+// the two things that make writing against `db` possible without the reference
+// open in another tab: **highlighting**, and **completions** over this server's
+// own tables (`codeTypes.ts` builds the declarations).
+//
+// **Two languages, and they get different amounts of help** (§12 of the Python
+// milestone). Both get a grammar. Only JavaScript gets the completions, because
+// the declarations are TypeScript and the thing that answers a question about
+// them is the TypeScript worker; the Python counterpart is a generated
+// `saltcorn.pyi` and a language server, and neither exists yet. So a Python body
+// gets highlighting, its own indentation, and no worker started on its behalf —
+// which is honest rather than degraded: what is missing is completion, and
+// nothing here pretends to offer it.
 //
 // Three decisions worth stating:
 //
@@ -51,6 +60,12 @@ async function loadMonaco(): Promise<Monaco> {
     import("monaco-editor/esm/vs/editor/editor.all.js"),
     import("monaco-editor/esm/vs/language/typescript/monaco.contribution"),
     import("monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution"),
+    // Python's grammar, beside JavaScript's and for the same reason: a
+    // `run_python_code` body is a program. It is a *basic language* — a
+    // tokenizer and the bracket and indentation rules — with no worker and no
+    // analysis behind it, which is exactly the difference `editorSettings`
+    // below describes.
+    import("monaco-editor/esm/vs/basic-languages/python/python.contribution"),
   ]);
   self.MonacoEnvironment = {
     getWorker(_workerId: string, label: string) {
@@ -104,6 +119,27 @@ function monacoModule(): Promise<Monaco> {
   return monacoOnce;
 }
 
+/** What a language a `code` setting declared means to the editor.
+ *
+ * `id` is Monaco's language id, `tabSize` the indentation the language's own
+ * community writes (and, in Python, the indentation the parser reads), and
+ * `typed` whether the TypeScript worker has anything to say about a body in it —
+ * which decides both whether that 6 MB worker is started and whether the
+ * catalog is fetched to feed it.
+ *
+ * A language this SPA has no grammar for is **plaintext** rather than its own
+ * name: an unregistered id colours nothing either way, and this one at least
+ * cannot claim highlighting it does not have. */
+export function editorSettings(language: string): {
+  id: string;
+  tabSize: number;
+  typed: boolean;
+} {
+  if (language === "javascript") return { id: "javascript", tabSize: 2, typed: true };
+  if (language === "python") return { id: "python", tabSize: 4, typed: false };
+  return { id: "plaintext", tabSize: 2, typed: false };
+}
+
 /** The colour scheme the page is in, read from the attribute `useTheme` sets. */
 function monacoTheme(): string {
   return document.documentElement.getAttribute("data-bs-theme") === "dark"
@@ -152,7 +188,12 @@ export function CodeEditor({
   const [library, setLibrary] = useState<string | null>(null);
   const table = scope?.table;
   const event = scope?.event;
+  const settings = editorSettings(language);
+  const typed = settings.typed;
   useEffect(() => {
+    // Nothing to declare to a language whose service is not TypeScript's, so a
+    // Python body does not read the catalog at all.
+    if (!typed) return;
     let cancelled = false;
     // The tables and the module functions together: both are cached per page,
     // and a body is worth typing into before either arrives.
@@ -165,7 +206,7 @@ export function CodeEditor({
     return () => {
       cancelled = true;
     };
-  }, [table, event]);
+  }, [table, event, typed]);
 
   useEffect(() => {
     let disposed = false;
@@ -175,20 +216,23 @@ export function CodeEditor({
         if (disposed || !container.current) return;
         const instance = monaco.editor.create(container.current, {
           value,
-          language,
+          language: settings.id,
           theme: monacoTheme(),
           readOnly,
           automaticLayout: true,
           minimap: { enabled: false },
           scrollBeyondLastLine: false,
-          tabSize: 2,
+          // Python's indentation is syntax, so a body written at two spaces in
+          // an editor that inserted four would be a body that does not parse.
+          tabSize: settings.tabSize,
+          insertSpaces: true,
           fontSize: 13,
           // A settings form scrolls; an editor that swallowed the page's scroll
           // when the pointer crossed it would trap it.
           scrollbar: { alwaysConsumeMouseWheel: false },
         });
         editor.current = instance;
-        warmLanguageService(monaco, instance);
+        if (settings.typed) warmLanguageService(monaco, instance);
         instance.onDidChangeModelContent(() => {
           change.current(instance.getValue());
         });

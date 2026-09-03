@@ -1,23 +1,30 @@
 // The Settings screen's Modules tab: what is installed, and how to install
 // more.
 //
-// A module is a Saltcorn v1 plugin — an npm package — and this version loads the
-// **actions** it supplies. So the list is written around the two questions an
-// admin has about one: what did it give me (the actions, with their settings
-// rendered from the module's own declaration), and what is wrong with it (it did
-// not load, an action's name was taken, it also supplies four things this
-// version ignores).
+// A module is a plugin — an npm package or a Python distribution — and this
+// version loads the **actions**, **functions** and **table providers** it
+// supplies. So the list is written around the two questions an admin has about
+// one: what did it give me (with its settings rendered from the module's own
+// declaration), and what is wrong with it (it did not load, an action's name was
+// taken, it also supplies things this version ignores).
 //
 // The arithmetic — what counts as a filled-in specifier, how a module's state
 // reads — is in `modules.ts`, tested without a browser. What is here is the
 // flow: install, configure, reload, delete, and the busy states between.
 //
-// **Two different privileges, and the screen has to keep them apart.** Installing
-// a module runs `npm install` — somebody else's install scripts, as the server,
-// before anything is sandboxed. *Running* one does not: a module's worker gets
-// the permission set on this screen, closed unless an admin granted something.
-// Both sentences are on the screen, because the presence of a permissions form
-// would otherwise imply the first one had been solved too.
+// **Two languages, and the screen is honest about what each one gets** (§8, §10).
+// One list, one install form, one set of endpoints, because a module is a module
+// to an admin. What the language changes is where the package comes from — npm
+// or PyPI — and whether the permissions form exists at all: a JavaScript module
+// runs on a worker with an allow-list, and a Python one runs in the server's own
+// interpreter with the server's own privileges. The Python card says that in
+// words, in the place the other card's form is.
+//
+// **And installing is not sandboxed in either language.** `npm install` and
+// `pip install` both run somebody else's install scripts as the server, before
+// any worker exists. That sentence is on the screen beside the Install button,
+// because the presence of a permissions form would otherwise imply it had been
+// solved too.
 
 import { useCallback, useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -27,9 +34,16 @@ import Form from "react-bootstrap/Form";
 import { api, errorMessage } from "../api";
 import { AlertBody, StatusBadge } from "../layout";
 import {
+  ALL_TOOLCHAINS,
   EMPTY_INSTALL,
+  INSTALL_CHOICES,
+  NO_SANDBOX,
   PERMISSION_KINDS,
+  PYTHON_RELOAD,
+  choiceFor,
+  choiceValue,
   configValues,
+  hasPermissions,
   installBlocked,
   isClosed,
   isConfigurable,
@@ -42,19 +56,23 @@ import {
   permissionProblems,
   permissionSummary,
   permissionText,
+  suppliedSummary,
+  toolchainSentence,
   unsupportedSentence,
   type InstallForm,
   type Module,
   type ModulePermissionSet,
-  type ModuleSource,
+  type Toolchains,
 } from "../modules";
 import { SettingField, buildConfig, initialValues, type FieldSpec } from "../settings";
 
 export function ModulesTab() {
   const [modules, setModules] = useState<Module[] | null>(null);
   const [root, setRoot] = useState("");
-  const [npm, setNpm] = useState(true);
-  const [node, setNode] = useState(true);
+  // Everything present until the server has answered, so the form is not
+  // briefly and wrongly disabled on the way in.
+  const [tools, setTools] = useState<Toolchains>(ALL_TOOLCHAINS);
+  const [pythonDir, setPythonDir] = useState<string | null>(null);
   const [form, setForm] = useState<InstallForm>(EMPTY_INSTALL);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -65,8 +83,13 @@ export function ModulesTab() {
       const response = await api.listModules();
       setModules(response.modules);
       setRoot(response.root);
-      setNpm(response.npm);
-      setNode(response.node);
+      setTools({
+        npm: response.npm,
+        node: response.node,
+        python: response.python,
+        pip: response.pip,
+      });
+      setPythonDir(response.python_dir ?? null);
     } catch (e) {
       setError(errorMessage(e, "Could not read the installed modules."));
       setModules([]);
@@ -83,14 +106,15 @@ export function ModulesTab() {
     setNote(null);
     try {
       const installed = await api.installModule({
+        language: form.language,
         source: form.source,
         location: form.location.trim(),
       });
       setForm(EMPTY_INSTALL);
       setNote(
-        `${installed.name} ${installed.version ?? ""} installed, supplying ${
-          installed.actions.length
-        } action${installed.actions.length === 1 ? "" : "s"}.`,
+        `${installed.name} ${installed.version ?? ""} installed, supplying ${suppliedSummary(
+          installed,
+        )}.`,
       );
       await load();
     } catch (e) {
@@ -167,7 +191,7 @@ export function ModulesTab() {
     }
   };
 
-  const blocked = installBlocked(form, npm);
+  const blocked = installBlocked(form, tools);
 
   return (
     <>
@@ -181,12 +205,12 @@ export function ModulesTab() {
           <AlertBody>{note}</AlertBody>
         </Alert>
       )}
-      {!node && (
+      {!tools.node && (
         <Alert variant="warning">
           <AlertBody>
             This server has no Node.js on its PATH. Modules <em>run</em> inside Saltcorn and do
-            not need it — but <code>npm</code> is what installs one, so nothing new can be
-            installed until Node.js is.
+            not need it — but <code>npm</code> is what installs one, so no new JavaScript module
+            can be installed until Node.js is.
           </AlertBody>
         </Alert>
       )}
@@ -202,37 +226,53 @@ export function ModulesTab() {
         </div>
         <div className="card-body">
           <p className="text-secondary">
-            A module is a Saltcorn plugin: an npm package that supplies actions your triggers
-            can run, and functions your formulas and code bodies can call. It runs inside
-            Saltcorn, on a worker that reaches only what you grant it under
-            <strong> Permissions</strong> — nothing, until you do.{" "}
-            <strong>Installing</strong> one is a different matter and is not sandboxed:{" "}
-            <code>npm install</code> runs the package&apos;s own install scripts with this
-            server&apos;s privileges, so install modules you trust. Packages are installed under{" "}
-            <code>{root}</code>.
+            A module is a Saltcorn plugin: a package that supplies actions your triggers can
+            run, functions your formulas and code bodies can call, and tables Saltcorn can read.
+            A <strong>JavaScript</strong> module is an npm package and runs on a worker that
+            reaches only what you grant it under <strong>Permissions</strong> — nothing, until
+            you do. A <strong>Python</strong> module is a distribution installed into this
+            server&apos;s Python environment and runs in the server&apos;s own interpreter, with
+            the server&apos;s own privileges: there is no sandbox for one and nothing to grant.{" "}
+            <strong>Installing</strong> either is not sandboxed: <code>npm install</code> and{" "}
+            <code>pip install</code> run the package&apos;s own install scripts with this
+            server&apos;s privileges, so install only modules you trust. npm packages are
+            installed under <code>{root}</code>
+            {pythonDir ? (
+              <>
+                {" "}
+                and Python distributions into <code>{pythonDir}</code>
+              </>
+            ) : null}
+            .
           </p>
           <div className="row g-2 align-items-end">
             <div className="col-md-3">
               <Form.Group controlId="module-source">
                 <Form.Label>Type</Form.Label>
                 <Form.Select
-                  value={form.source}
-                  onChange={(e) =>
-                    setForm({ source: e.target.value as ModuleSource, location: "" })
-                  }
+                  value={choiceValue(form)}
+                  onChange={(e) => {
+                    const { language, source } = choiceFor(e.target.value);
+                    // The specifier is cleared with the choice: a distribution
+                    // name is not an npm package name and a path is neither.
+                    setForm({ language, source, location: "" });
+                  }}
                 >
-                  <option value="npm">JavaScript — npm package</option>
-                  <option value="local">JavaScript — local directory</option>
+                  {INSTALL_CHOICES.map((choice) => (
+                    <option key={choiceValue(choice)} value={choiceValue(choice)}>
+                      {choice.label}
+                    </option>
+                  ))}
                 </Form.Select>
               </Form.Group>
             </div>
             <div className="col-md-7">
               <Form.Group controlId="module-location">
-                <Form.Label>{locationLabel(form.source)}</Form.Label>
+                <Form.Label>{locationLabel(form)}</Form.Label>
                 <Form.Control
                   type="text"
                   value={form.location}
-                  placeholder={locationPlaceholder(form.source)}
+                  placeholder={locationPlaceholder(form)}
                   onChange={(e) => setForm({ ...form, location: e.target.value })}
                 />
               </Form.Group>
@@ -249,6 +289,10 @@ export function ModulesTab() {
             </div>
           </div>
           {blocked && <div className="text-secondary mt-2">{blocked}</div>}
+          {/* Which toolchain this server actually has, said before an admin
+              types a name rather than by a failed install — and both languages'
+              at once, because a server with one and not the other is ordinary. */}
+          <div className="text-secondary mt-2">{toolchainSentence(tools)}</div>
         </div>
       </div>
 
@@ -320,13 +364,15 @@ function ModuleCard({
               {open ? "Close settings" : "Settings"}
             </Button>
           )}
-          <Button
-            variant="outline-secondary"
-            size="sm"
-            onClick={() => setShowPermissions((showing) => !showing)}
-          >
-            {showPermissions ? "Close permissions" : "Permissions"}
-          </Button>
+          {hasPermissions(module) && (
+            <Button
+              variant="outline-secondary"
+              size="sm"
+              onClick={() => setShowPermissions((showing) => !showing)}
+            >
+              {showPermissions ? "Close permissions" : "Permissions"}
+            </Button>
+          )}
           <Button variant="outline-danger" size="sm" disabled={busy} onClick={onRemove}>
             Remove
           </Button>
@@ -399,15 +445,30 @@ function ModuleCard({
 
         {census && <div className="text-secondary">{census}</div>}
 
-        <div className="text-secondary mt-2">{permissionSummary(permissions)}</div>
-
-        {showPermissions && (
-          <PermissionsForm
-            module={module}
-            busy={busy}
-            permissions={permissions}
-            onGrant={onGrant}
-          />
+        {/* What this module may reach. For JavaScript that is the allow-list and
+            a form to change it; for Python there is no such thing (§10), and the
+            sentence is the whole of what this screen can say — which is why it
+            is said here, in the place the other language's summary is, rather
+            than left to be inferred from a missing button. */}
+        {hasPermissions(module) ? (
+          <>
+            <div className="text-secondary mt-2">{permissionSummary(permissions)}</div>
+            {showPermissions && (
+              <PermissionsForm
+                module={module}
+                busy={busy}
+                permissions={permissions}
+                onGrant={onGrant}
+              />
+            )}
+          </>
+        ) : (
+          <>
+            <Alert variant="warning" className="mt-2 mb-2">
+              <AlertBody>{NO_SANDBOX}</AlertBody>
+            </Alert>
+            <div className="text-secondary">{PYTHON_RELOAD}</div>
+          </>
         )}
 
         {open && isConfigurable(module) && (
