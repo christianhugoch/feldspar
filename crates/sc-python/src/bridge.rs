@@ -3,8 +3,15 @@
 //!
 //! ```text
 //! __sc_db(plan) · __sc_fetch(request) · __sc_fs(op) · __sc_trigger(request)
-//! __sc_modfn(request)
+//! __sc_modfn(request) · __sc_names(kind)
 //! ```
+//!
+//! The sixth is not a host call and spends nothing: it answers what this run
+//! may *name* — its file stores, its triggers, its module functions — so that
+//! `fs("typo")` fails at once naming what exists rather than deferring the
+//! question to the first operation. In JavaScript those lists are closed over
+//! by a per-run factory, because many runs share an isolate; here the run is the
+//! thread, so the same lists are a thread-local read.
 //!
 //! These are `sc-expr`'s five host traits and nothing else — the same plans a
 //! JavaScript body's ops carry, so the two languages cannot disagree about
@@ -46,6 +53,10 @@ use std::time::{Duration, Instant};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use sc_error::{Error, Result};
+use sc_expr::{
+    FETCH_MARGIN, MIN_FETCH_WINDOW, MIN_MODULE_FN_WINDOW, MIN_TRIGGER_WINDOW, MODULE_FN_MARGIN,
+    TRIGGER_MARGIN,
+};
 use serde_json::Value as Json;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -89,14 +100,26 @@ impl Surface {
         }
     }
 
-    /// Whether this surface's plan carries a `timeout_ms` the host is expected
-    /// to obey. The three that hand the run's clock to somebody else's code do;
-    /// the database and the file store are this server's own.
-    fn carries_timeout(self) -> bool {
-        matches!(
-            self,
-            Surface::Fetch | Surface::Triggers | Surface::ModuleFns
-        )
+    /// How much of the run's remaining clock this surface's call is **not**
+    /// given, and the least it is worth starting one with — `None` for the two
+    /// that carry no clock at all.
+    ///
+    /// The three that hand the run's wall clock to somebody else's code carry
+    /// one; the database and the file store are this server's own. The numbers
+    /// are `sc-expr`'s, imported rather than repeated, because a second copy is
+    /// how the two languages would come to disagree about when a hung endpoint
+    /// is catchable.
+    fn clock(self) -> Option<(Duration, Duration, &'static str)> {
+        match self {
+            Surface::Fetch => Some((FETCH_MARGIN, MIN_FETCH_WINDOW, "make a request")),
+            Surface::Triggers => Some((TRIGGER_MARGIN, MIN_TRIGGER_WINDOW, "run another trigger")),
+            Surface::ModuleFns => Some((
+                MODULE_FN_MARGIN,
+                MIN_MODULE_FN_WINDOW,
+                "call a module function",
+            )),
+            Surface::Db | Surface::Files => None,
+        }
     }
 }
 
@@ -125,6 +148,28 @@ pub(crate) struct RunState {
     pub(crate) has: Surfaces,
     pub(crate) left: Budgets,
     pub(crate) max: Budgets,
+    pub(crate) names: RunNames,
+}
+
+/// What this run may name on the three surfaces that have a list.
+///
+/// Read from the real hosts by the caller, while they are still borrowed: the
+/// guest's `fs(name)` and `trigger(name)` are ordinary synchronous calls, so the
+/// names have to be here rather than a host call away. An **empty** list means
+/// "no list to check against" — a host that cannot enumerate without I/O
+/// answers with one — and the guest then lets every name through to be decided
+/// by the operation itself.
+#[derive(Clone, Default)]
+pub(crate) struct RunNames {
+    /// The file stores this server has connected.
+    pub(crate) stores: Vec<String>,
+    /// Every stored trigger, including the ones an admin has switched off: a
+    /// disabled trigger exists, and "there is no trigger named `nightly`" would
+    /// be the wrong sentence about one.
+    pub(crate) triggers: Vec<String>,
+    /// The module functions, as `{module, name, description, is_async}` — the
+    /// shape `modfn` resolves a short name against.
+    pub(crate) functions: Vec<Json>,
 }
 
 /// Which of the five this run was given.
@@ -235,6 +280,41 @@ impl Drop for Enter {
     }
 }
 
+/// What this thread's run may **name**, for the surface that is asking.
+///
+/// Not a host call: no budget is spent, no deadline is consulted and nothing
+/// leaves the interpreter. It answers an empty list outside a run and for a
+/// surface this run was not given, which the guest reads the same way it reads a
+/// host that could not enumerate — as "no list to check against".
+#[pyfunction]
+#[pyo3(name = "__sc_names")]
+fn names(py: Python<'_>, kind: &str) -> PyResult<Py<PyAny>> {
+    RUN.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(run) = borrow.as_ref() else {
+            return Ok(pyo3::types::PyList::empty(py).into_any().unbind());
+        };
+        let list = match kind {
+            "stores" => pyo3::types::PyList::new(py, &run.names.stores)?,
+            "triggers" => pyo3::types::PyList::new(py, &run.names.triggers)?,
+            "functions" => {
+                let out = pyo3::types::PyList::empty(py);
+                for function in &run.names.functions {
+                    out.append(convert::from_json(py, function)?)?;
+                }
+                out
+            }
+            other => {
+                // Unreachable from the shipped surface, which spells all three.
+                return Err(SaltcornError::new_err(format!(
+                    "`{other}` is not something a run has names of"
+                )));
+            }
+        };
+        Ok(list.into_any().unbind())
+    })
+}
+
 /// What this thread's run may reach, for the caller that binds the globals.
 pub(crate) fn surfaces() -> Surfaces {
     RUN.with(|cell| {
@@ -294,18 +374,27 @@ fn admit(surface: Surface) -> PyResult<Ticket> {
 fn call(py: Python<'_>, surface: Surface, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let mut plan = convert::to_json(request, "the plan").map_err(|e| surface.raise(e))?;
     let ticket = admit(surface)?;
-    // What is left of the run's wall clock, handed to whoever will spend it.
-    // The three surfaces that call out to code this server does not own are the
-    // ones that need it; the implementation may take it as given.
-    if surface.carries_timeout()
-        && let Some(object) = plan.as_object_mut()
-    {
-        let ms = u64::try_from(ticket.remaining.as_millis()).unwrap_or(u64::MAX);
-        let ms = match object.get("timeout_ms").and_then(Json::as_u64) {
-            Some(asked) => asked.min(ms),
-            None => ms,
-        };
-        object.insert("timeout_ms".to_owned(), Json::from(ms));
+    // What is left of the run's wall clock, handed to whoever will spend it —
+    // less a margin, so that a call which does not come back fails **inside** the
+    // body, where the `except` the author wrote can see it, rather than at the
+    // same instant the run itself expires. That is the difference between a
+    // bound and a trap, and it is why the JavaScript ops keep a slice back too.
+    if let Some((margin, window, what)) = surface.clock() {
+        let usable = ticket.remaining.saturating_sub(margin);
+        if usable < window {
+            return Err(surface.raise(format!(
+                "this code has too little of its {} ms time limit left to {what}",
+                ticket.timeout.as_millis()
+            )));
+        }
+        if let Some(object) = plan.as_object_mut() {
+            let ms = u64::try_from(usable.as_millis()).unwrap_or(u64::MAX);
+            let ms = match object.get("timeout_ms").and_then(Json::as_u64) {
+                Some(asked) => asked.min(ms),
+                None => ms,
+            };
+            object.insert("timeout_ms".to_owned(), Json::from(ms));
+        }
     }
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Json>>(1);
     if ticket
@@ -397,6 +486,7 @@ pub(crate) fn sc_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fs, m)?)?;
     m.add_function(wrap_pyfunction!(trigger, m)?)?;
     m.add_function(wrap_pyfunction!(modfn, m)?)?;
+    m.add_function(wrap_pyfunction!(names, m)?)?;
     m.add("SaltcornError", py.get_type::<SaltcornError>())?;
     m.add("DbError", py.get_type::<DbError>())?;
     m.add("FetchError", py.get_type::<FetchError>())?;

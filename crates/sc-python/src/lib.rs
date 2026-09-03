@@ -11,9 +11,11 @@
 //!
 //! That surface is Python — `src/py/saltcorn.py`, shipped inside the binary and
 //! installed on the meta path at interpreter start — and it lowers to the same
-//! plans a JavaScript body's terminals lower to. `db` is here; `fetch`, `fs`,
-//! `trigger` and `modfn` land in phase 3. Underneath it is everything this crate
-//! began as: one interpreter, a run per thread, the four bounds, and the seam.
+//! plans a JavaScript body's terminals lower to. All five are here: `db`,
+//! `fetch` (shaped like `requests`), `fs`, `trigger` and `modfn`, each bound
+//! into a run's globals only where this server has the surface behind it.
+//! Underneath them is everything this crate began as: one interpreter, a run per
+//! thread, the four bounds, and the seam.
 //!
 //! # Why there is nothing new below the plans
 //!

@@ -50,7 +50,10 @@ tokio = { workspace = true }
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+# `net`/`io-util` are for the `fetch` tests' one-shot HTTP listener: the surface
+# is pinned against a real socket rather than a mocked client, so the request it
+# builds and the response it reads are the real bytes.
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }
 # Phase 2.6 asks the `db` surface the same questions `run_js_code.rs` asks, and
 # asks them of a **real** database: the lowering is already pinned against a
 # recorder (`python_db.rs`), and what a recorder cannot answer is whether the
@@ -65,6 +68,17 @@ sc-db-postgres.workspace = true
 sc-api.workspace = true
 sc-action.workspace = true
 sc-types.workspace = true
+# Phase 3.5 asks its questions of the **action** rather than of the runtime:
+# `run_python_code` from the registry, over the five hosts an `ActionContext`
+# builds. That is the path a firing trigger takes, and it is the only way to
+# reach `CodeFetchHost` — which is this crate's `fetch` tests' whole point, since
+# a second implementation of it here would assert nothing about the one a server
+# uses. No cycle: `sc-core-actions` reaches this adapter through
+# `ctx.adapter("python")` and does not depend on this crate.
+sc-core-actions.workspace = true
+# The `fs` tests write to a real `LocalFileStore` and read the bytes back off
+# the disk, for the reason the `db` tests use a real database.
+sc-files.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 # `features = ["eval"]` here and nowhere else in this crate: an **ownership

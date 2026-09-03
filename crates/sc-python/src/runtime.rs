@@ -69,7 +69,7 @@ use sc_expr::{CodeCall, MAX_CODE_TIMEOUT};
 use serde_json::Value as Json;
 
 use crate::CALLER_GRACE;
-use crate::bridge::{Budgets, HostRequest, RunState, Surface, Surfaces};
+use crate::bridge::{Budgets, HostRequest, RunNames, RunState, Surface, Surfaces};
 use crate::interp;
 
 tokio::task_local! {
@@ -210,6 +210,39 @@ impl Inner {
             trigger_runs: call.max_trigger_runs,
             module_calls: call.max_module_calls,
         };
+        // Asked of the **real** hosts here, while they are still borrowed: the
+        // guest's `fs(name)` and `trigger(name)` are ordinary synchronous calls,
+        // so the names have to travel with the run rather than be a host call
+        // away. Per run rather than per body, for the reason the JavaScript side
+        // passes them per invocation: one compiled body serves every run, and an
+        // admin's save reloads the trigger set between two of them.
+        let names = RunNames {
+            stores: call
+                .files
+                .map(sc_expr::FileHost::store_names)
+                .unwrap_or_default(),
+            triggers: call
+                .triggers
+                .map(sc_expr::TriggerHost::trigger_names)
+                .unwrap_or_default(),
+            functions: call
+                .module_fns
+                .map(sc_expr::ModuleFnHost::functions)
+                .unwrap_or_default()
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "module": f.module,
+                        "name": f.name,
+                        "description": f.description,
+                        // Snake case because only Python reads it: v1's
+                        // `isAsync` decides nothing about how the call is made,
+                        // it is what a signature says.
+                        "is_async": f.is_async,
+                    })
+                })
+                .collect(),
+        };
         let shared = Arc::new(RunShared::default());
         let (reply, answer) = tokio::sync::oneshot::channel::<Result<Json>>();
         self.dispatch(Box::new(RunJob {
@@ -222,6 +255,7 @@ impl Inner {
                 has,
                 left: budgets,
                 max: budgets,
+                names,
             },
             shared: Arc::clone(&shared),
             reply,

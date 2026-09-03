@@ -1,9 +1,15 @@
-"""The surface an app builder writes: ``db``, and the errors it raises.
+"""The surface an app builder writes: five handles, and the errors they raise.
 
-This is ``DB_PRELUDE``'s counterpart, and it is Python for the reason the
-prelude is JavaScript: the Rust side sees **plans**, so adding a chain method
-touches no Rust, and the two languages cannot drift apart about what a chain
-means because they lower to the same object and it is resolved in one place.
+``db`` the tables, ``fetch`` one HTTP request, ``fs`` the file stores,
+``trigger`` this server's other triggers, ``modfn`` the functions its modules
+supply — and nothing else, because those are the five host traits ``sc-expr``
+has.
+
+This is the counterpart of the five JavaScript preludes, and it is Python for
+the reason they are JavaScript: the Rust side sees **plans**, so adding a chain
+method or a file operation touches no Rust, and the two languages cannot drift
+apart about what one means because they lower to the same object and it is
+resolved in one place.
 
 It is shipped inside the binary and installed by a meta-path loader at
 interpreter start, so there is no file to find, no version to skew and nothing
@@ -19,25 +25,41 @@ nothing — and terminals execute::
         .limit(50)
         .rows())
 
-Nothing is awaited. A terminal blocks the run's own thread with the GIL
-released, so every other resident run executes while this one waits.
+Nothing is awaited, on any of the five. A terminal blocks the run's own thread
+with the GIL released, so every other resident run executes while this one
+waits::
+
+    res = fetch(payload["url"], headers={"authorization": token})
+    fs("uploads").open("rates/today.json").write(res.json())
+    trigger("recalculate").run(day=payload["today"])
 
 Two kinds of error, kept apart on purpose. A mistake in what the *body* wrote —
-an operator that is not one, a direction that is not ``asc`` or ``desc`` — is a
-``TypeError`` or a ``ValueError``, which is what a Python author expects of a
-library and what a bare ``except DbError`` in a retry loop must not swallow. A
-**refusal** — an ownership rule that would not allow a write, a budget spent, a
-whole-table update — is a ``DbError``, because it is the same refusal the host
-makes and a body may legitimately catch it and fall back.
+an operator that is not one, a path that climbs out of its store, a ``data=``
+that should have been ``json=`` — is a ``TypeError`` or a ``ValueError``, which
+is what a Python author expects of a library. A **refusal** — an ownership rule
+that would not allow a write, a budget spent, a store this server does not have
+— is the surface's own error (``DbError``, ``FileError``, …), because it is the
+same refusal the host makes and a body may legitimately catch it and fall back.
+
+A status an endpoint did not like is neither: ``res.ok`` is False and nothing
+raises, which is what makes a retry or a fallback something a body writes rather
+than a trigger that failed.
 """
 
+import base64 as _b64
+import json as _json
 import re
 
-# The seam: five host functions and the exception hierarchy, in a built-in
-# module the interpreter was started with. Bound here at module level, where
-# Python's private-name mangling does not apply — inside a class body
-# `__sc.__sc_db` would silently become `__sc._Query__sc_db`.
+# The seam: the host functions and the exception hierarchy, in a built-in module
+# the interpreter was started with. Bound here at module level, where Python's
+# private-name mangling does not apply — inside a class body `__sc.__sc_db`
+# would silently become `__sc._Query__sc_db`.
 from __sc import __sc_db as _call_db
+from __sc import __sc_fetch as _call_fetch
+from __sc import __sc_fs as _call_fs
+from __sc import __sc_modfn as _call_modfn
+from __sc import __sc_names as _call_names
+from __sc import __sc_trigger as _call_trigger
 from __sc import (
     DbError,
     FetchError,
@@ -51,17 +73,31 @@ from __sc import (
 __all__ = [
     "Db",
     "DbError",
+    "Dir",
     "FetchError",
+    "File",
     "FileError",
+    "Fs",
+    "Headers",
+    "ModFns",
     "ModuleError",
+    "ModuleFunctions",
     "Query",
+    "Response",
     "SaltcornError",
+    "Store",
     "Timeout",
     "TriggerError",
+    "TriggerHandle",
+    "Triggers",
     "and_",
     "db",
+    "fetch",
+    "fs",
+    "modfn",
     "not_",
     "or_",
+    "trigger",
 ]
 
 #: What a filter may say about one column — the vocabulary every other surface
@@ -588,10 +624,953 @@ class Db:
     def __repr__(self):
         return f"<saltcorn db as {self._authority}>"
 
+# ---------------------------------------------------------------------------
+# `fetch` — one HTTP request
+# ---------------------------------------------------------------------------
+#
+# Shaped like `requests`, because that is the Python every author already
+# knows: `fetch(url, headers=..., json=...)` answers a response whose `.text`
+# and `.json()` read like `requests`', and a status the endpoint did not like is
+# **not** an exception — `res.ok` is False and nothing raises. Only a transport
+# failure raises, as a `FetchError`.
+#
+# What is not `requests`': there is no session, no streaming and no `verify=` —
+# the seam carries one JSON value and the client is the server's own — and the
+# whole request is bounded by what is left of this run's wall clock, whatever
+# `timeout` says.
 
-#: The handle a code body is given, and the one module code uses. Building it
-#: costs nothing and holds nothing: whose run this is, what it may reach and
-#: what it has spent all live on the **thread**, which is why one shared handle
-#: is safe and why a body cannot reach another run's authority — there is no
-#: name for it in the interpreter.
+#: The methods a body may send, upper-cased before the check. `CONNECT` and
+#: `TRACE` are absent for the reason the host leaves them out: a proxy or an echo
+#: of this server's request headers is a way to use the server as a tool rather
+#: than a way to call an endpoint.
+_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+#: A header name, as RFC 9110 spells a token. Checked here as well as in the
+#: host so the message can name the line that wrote it.
+_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+#: "Nothing was passed", as distinct from `None` — which for `json=` is the
+#: value `null` and a request an author may legitimately want to send.
+_MISSING = object()
+
+
+def _header_name(name):
+    text = str(name)
+    if _HEADER_NAME.match(text) is None:
+        raise TypeError(f"`{text}` is not a valid HTTP header name")
+    return text.lower()
+
+
+def _header_value(value):
+    text = str(value).strip(" \t\r\n")
+    if "\0" in text or "\r" in text or "\n" in text:
+        raise TypeError("an HTTP header value may not contain a newline")
+    return text
+
+
+class Headers:
+    """HTTP headers, read case-insensitively.
+
+    A repeated header stays two headers — which is the whole difference for
+    ``set-cookie``, where joining with a comma is wrong — and :meth:`get` joins
+    them with ``", "``, as every other header API does.
+    """
+
+    __slots__ = ("_pairs",)
+
+    def __init__(self, init=None):
+        self._pairs = []
+        if init is None:
+            return
+        if isinstance(init, Headers):
+            items = list(init._pairs)
+        elif isinstance(init, dict):
+            items = list(init.items())
+        else:
+            try:
+                items = [tuple(pair) for pair in init]
+            except TypeError:
+                raise TypeError(
+                    "headers are a dict, [name, value] pairs, or Headers, not a "
+                    f"{type(init).__name__}"
+                ) from None
+            for pair in items:
+                if len(pair) != 2:
+                    raise TypeError("headers take [name, value] pairs")
+        for name, value in items:
+            self._pairs.append((_header_name(name), _header_value(value)))
+
+    def get(self, name, default=None):
+        """This header's value, with repeats joined by ``", "``."""
+        key = _header_name(name)
+        found = [value for header, value in self._pairs if header == key]
+        return ", ".join(found) if found else default
+
+    def __getitem__(self, name):
+        found = self.get(name, _MISSING)
+        if found is _MISSING:
+            raise KeyError(name)
+        return found
+
+    def __contains__(self, name):
+        try:
+            key = _header_name(name)
+        except TypeError:
+            return False
+        return any(header == key for header, _ in self._pairs)
+
+    def keys(self):
+        """Each header name once, in the order it first arrived."""
+        seen = []
+        for name, _ in self._pairs:
+            if name not in seen:
+                seen.append(name)
+        return seen
+
+    def values(self):
+        return [self.get(name) for name in self.keys()]
+
+    def items(self):
+        return [(name, self.get(name)) for name in self.keys()]
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def __len__(self):
+        return len(self.keys())
+
+    def append(self, name, value):
+        """Add a header, keeping any of that name already here."""
+        self._pairs.append((_header_name(name), _header_value(value)))
+
+    def set_default(self, name, value):
+        """Add a header only where the caller has not set one of that name."""
+        if name not in self:
+            self.append(name, value)
+
+    def pairs(self):
+        """The pairs **as written**, uncombined — what crosses the seam."""
+        return [[name, value] for name, value in self._pairs]
+
+    def __repr__(self):
+        return f"<saltcorn headers {self.items()!r}>"
+
+
+class Response:
+    """What :func:`fetch` answers: the status, the headers and the body.
+
+    ``.text`` and ``.content`` are **properties**, as ``requests``' are, because
+    the body arrived with the response — there is nothing left to wait for.
+    """
+
+    __slots__ = (
+        "status",
+        "status_text",
+        "url",
+        "redirected",
+        "headers",
+        "_text",
+        "_base64",
+    )
+
+    def __init__(self, answer):
+        self.status = answer.get("status", 0)
+        self.status_text = answer.get("status_text") or ""
+        self.url = answer.get("url") or ""
+        self.redirected = answer.get("redirected") is True
+        self.headers = Headers(answer.get("headers"))
+        self._text = answer.get("text")
+        self._base64 = answer.get("base64")
+
+    @property
+    def ok(self):
+        """Whether the status is a 2xx. A 404 is a value, not an exception."""
+        return 200 <= self.status < 300
+
+    @property
+    def text(self):
+        """The body as text — lossily decoded when the bytes are not UTF-8,
+        exactly as a browser's ``res.text()`` is."""
+        return "" if self._text is None else self._text
+
+    @property
+    def content(self):
+        """The body as ``bytes``.
+
+        The host sends the text of everything it could read as text and the
+        base64 as well when the bytes are not valid UTF-8, so a JSON or HTML
+        answer crosses the seam once and a PNG crosses twice.
+        """
+        if self._base64 is not None:
+            return _b64.b64decode(self._base64)
+        return self.text.encode("utf-8")
+
+    def json(self):
+        """The body parsed as JSON."""
+        try:
+            return _json.loads(self.text)
+        except ValueError as e:
+            raise ValueError(f"the response body is not JSON: {e}") from None
+
+    def raise_for_status(self):
+        """Raise :class:`FetchError` unless the status is a 2xx; answer self."""
+        if not self.ok:
+            where = f" from {self.url}" if self.url else ""
+            raise FetchError(
+                f"the endpoint answered {self.status} {self.status_text}".rstrip()
+                + where
+            )
+        return self
+
+    def __repr__(self):
+        return f"<saltcorn response {self.status} from {self.url}>"
+
+
+def fetch(
+    url,
+    method="GET",
+    *,
+    headers=None,
+    json=_MISSING,
+    data=None,
+    timeout=None,
+    timeout_ms=None,
+):
+    """Call one endpoint, and answer a :class:`Response`.
+
+    ``json=`` sends a value as JSON and sets the content type; ``data=`` sends a
+    ``str`` or ``bytes`` as they are. A ``dict`` in ``data=`` is refused rather
+    than form-encoded, because ``requests``' two meanings for one argument are
+    exactly the mistake this surface should not carry over.
+
+    **Two spellings of the clock, both bounded.** ``timeout=`` is ``requests``'
+    and is in **seconds**; ``timeout_ms=`` is this system's and is in
+    milliseconds. Whichever is given is clamped to what is left of this code's
+    own time limit, so a request may only ever be shorter than the run.
+    """
+    if not isinstance(url, str) or url.strip() == "":
+        raise TypeError("fetch() takes an absolute http(s) URL as its first argument")
+    name = str(method).upper()
+    if name not in _METHODS:
+        raise ValueError(
+            f"`{name}` is not a method fetch() sends; the methods are: "
+            + ", ".join(_METHODS)
+        )
+    head = Headers(headers)
+    body, base64 = _fetch_body(name, head, json, data)
+    return Response(
+        _call_fetch(
+            {
+                "url": url.strip(),
+                "method": name,
+                "headers": head.pairs(),
+                "body": body,
+                "body_base64": base64,
+                "timeout_ms": _fetch_timeout(timeout, timeout_ms),
+            }
+        )
+    )
+
+
+def _fetch_body(method, headers, json, data):
+    """The request body as it crosses the seam: text, and whether it is base64.
+
+    ``data=None`` is ``requests``' "no body"; ``json=None`` is the value ``null``,
+    which is why only one of the two has a sentinel. The content type is set only
+    where the caller did not: a body that named one means it.
+    """
+    if json is not _MISSING and data is not None:
+        raise TypeError("fetch() takes `json=` or `data=`, not both")
+    if json is _MISSING and data is None:
+        return None, False
+    if method in ("GET", "HEAD"):
+        raise TypeError(f"a {method} request cannot carry a body")
+    if json is not _MISSING:
+        try:
+            text = _json.dumps(json)
+        except (TypeError, ValueError) as e:
+            raise TypeError(
+                f"fetch()'s `json=` could not be encoded as JSON: {e}"
+            ) from None
+        headers.set_default("content-type", "application/json")
+        return text, False
+    if isinstance(data, str):
+        headers.set_default("content-type", "text/plain;charset=UTF-8")
+        return data, False
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        headers.set_default("content-type", "application/octet-stream")
+        return _b64.b64encode(bytes(data)).decode("ascii"), True
+    # `requests` would form-encode this. Refused rather than guessed: an object
+    # that reached an endpoint as `a=1&b=2` when JSON was meant is a bug that
+    # looks like a working request.
+    raise TypeError(
+        "fetch()'s `data=` takes a str or bytes; send a dict or a list with "
+        f"`json=`, not a {type(data).__name__}"
+    )
+
+
+def _fetch_timeout(timeout, timeout_ms):
+    """One clock in milliseconds, from either spelling."""
+    if timeout is not None and timeout_ms is not None:
+        raise TypeError(
+            "fetch() takes `timeout=` (seconds) or `timeout_ms=` (milliseconds), "
+            "not both"
+        )
+    if timeout_ms is not None:
+        ms = timeout_ms
+    elif timeout is not None:
+        ms = timeout * 1000
+    else:
+        return None
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+        raise TypeError("fetch()'s timeout is a number, e.g. timeout=5")
+    if ms <= 0:
+        raise ValueError("fetch()'s timeout must be more than zero")
+    return int(ms)
+
+
+# ---------------------------------------------------------------------------
+# `fs` — the file stores
+# ---------------------------------------------------------------------------
+#
+# `fs("uploads")` is a store, `.open(path)` a file **reference** and `.dir(path)`
+# a directory one — no I/O, and the path need not exist. Everything that touches
+# the store is a method on the reference, and the vocabulary is `pathlib`'s
+# where `pathlib` has one: `read_text`, `write`, `exists`, `iterdir`.
+#
+# Creating is not a second concept, which is the answer to "what replaces a
+# `write(path, data)` free function": a reference that can be read can be
+# written, and the parent directories are made on the way. `write` replaces what
+# is there, `create` refuses to.
+#
+# What crosses is one JSON operation per method that touches the store, and the
+# *path handling* is here as well as in the host: `..`, a null byte and an
+# absolute path are refused here, where the message can name the line that wrote
+# them, and refused again there, which trusts nothing it is sent.
+
+
+def _fs_path(path, what):
+    """A store-relative path: ``/``-separated, and confined to the store."""
+    if not isinstance(path, str):
+        raise TypeError(f"{what} takes a path, as a string")
+    if "\0" in path:
+        raise TypeError("a file path may not contain a null byte")
+    if path[:1] in ("/", "\\"):
+        raise TypeError(
+            f"`{path}` is an absolute path; a file store's paths are relative to "
+            "its root"
+        )
+    parts = []
+    for segment in path.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            # Refused rather than resolved: a path that climbs out is either a
+            # bug or an attempt, and neither is served by clamping it at the root.
+            raise TypeError(
+                f"`{path}` leaves the file store: `..` is not a path segment here"
+            )
+        parts.append(segment)
+    return "/".join(parts)
+
+
+def _fs_named(path, what):
+    """The same, for somewhere the store root is not an answer."""
+    clean = _fs_path(path, what)
+    if clean == "":
+        raise ValueError(f"{what} needs a name, not the store root")
+    return clean
+
+
+def _fs_join(directory, rest):
+    return rest if directory == "" else directory + "/" + rest
+
+
+def _fs_send(store, plan):
+    """One operation, carrying what every operation carries: the store's name and
+    whose authority it runs under."""
+    request = {"store": store.name, "authority": store.authority}
+    request.update(plan)
+    return _call_fs(request)
+
+
+class Fs:
+    """``fs("uploads")`` — the file stores this run may reach.
+
+    Callable rather than a mapping because a store is *named*, not indexed, and
+    because ``fs.stores`` should be the list of names rather than something
+    ``in`` has an opinion about.
+    """
+
+    __slots__ = ()
+
+    def __call__(self, name):
+        if not isinstance(name, str) or name == "":
+            raise TypeError('fs() takes the name of a file store, as in fs("uploads")')
+        known = _call_names("stores")
+        # Named at once rather than at the first read: the names came with this
+        # run, so a typo is a sentence naming the stores that do exist rather
+        # than an error four lines later. An empty list is "no list to check
+        # against" — a host that cannot enumerate answers with one — and every
+        # name then goes through to be decided by the operation itself.
+        if known and name not in known:
+            raise FileError(
+                f"there is no file store named `{name}`; this server has: "
+                + ", ".join(known)
+            )
+        return Store(name, "admin")
+
+    @property
+    def stores(self):
+        """What this run can reach, for a body that discovers rather than knows."""
+        return tuple(_call_names("stores"))
+
+    def __repr__(self):
+        return "<saltcorn fs>"
+
+
+class Store:
+    """One file store, under one authority."""
+
+    __slots__ = ("name", "authority")
+
+    def __init__(self, name, authority):
+        self.name = name
+        self.authority = authority
+
+    def open(self, path):
+        """The file at `path`. No I/O: the path need not exist."""
+        return File(self, _fs_named(path, "open()"))
+
+    def dir(self, path):
+        """The directory at `path`; ``dir("")`` is the store root."""
+        return Dir(self, _fs_path(path, "dir()"))
+
+    @property
+    def root(self):
+        return Dir(self, "")
+
+    def as_user(self):
+        """Delegate to the event's **caller**, where §14.1's path-cumulative
+        ``min_role`` rule decides every operation."""
+        return Store(self.name, "user")
+
+    def as_admin(self):
+        """The trigger's own authority — the default."""
+        return Store(self.name, "admin")
+
+    def __repr__(self):
+        return f"<saltcorn file store `{self.name}` as {self.authority}>"
+
+
+class _Entry:
+    """What a file and a directory have in common: where they are, and the four
+    operations that do not care which they are."""
+
+    __slots__ = ("_store", "_path")
+
+    def __init__(self, store, path):
+        self._store = store
+        self._path = path
+
+    @property
+    def path(self):
+        return self._path
+
+    @property
+    def name(self):
+        return self._path.rsplit("/", 1)[-1]
+
+    @property
+    def store(self):
+        return self._store
+
+    def _send(self, plan):
+        return _fs_send(self._store, plan)
+
+    def stat(self):
+        """The entry's own facts, or ``None`` when nothing is there."""
+        found = self._send({"op": "stat", "path": self._path})
+        if found is None:
+            return None
+        return {
+            "size": found.get("size"),
+            "is_directory": found.get("isDirectory"),
+            "modified": found.get("modified"),
+            "mime_type": found.get("mimeType"),
+        }
+
+    def delete(self):
+        """Remove it, answering whether anything was there."""
+        return self._send({"op": "delete", "path": self._path})
+
+    def meta(self):
+        """The rule set here, the rule that **applies** given every directory
+        above, and the free-form attributes."""
+        found = self._send({"op": "meta", "path": self._path})
+        return {
+            "min_role": found.get("minRole"),
+            "effective_min_role": found.get("effectiveMinRole"),
+            "attributes": found.get("attributes"),
+        }
+
+    def set_meta(self, meta=None, **fields):
+        """Replace this entry's metadata: ``set_meta(min_role=40)``.
+
+        Replaces rather than merges, as the store's own metadata does — read it
+        first when what you want is a change to one attribute.
+        """
+        if meta is not None and fields:
+            raise TypeError(
+                "set_meta() takes the metadata as keywords or as one dict, not both"
+            )
+        given = fields if meta is None else meta
+        if not isinstance(given, dict):
+            raise TypeError(
+                "set_meta() takes keywords or a dict: min_role, attributes"
+            )
+        for key in given:
+            if key not in ("min_role", "attributes"):
+                raise TypeError(
+                    f"`{key}` is not part of a file's metadata; it holds: "
+                    "min_role, attributes"
+                )
+        self._send(
+            {
+                "op": "setMeta",
+                "path": self._path,
+                "minRole": given.get("min_role"),
+                "attributes": given.get("attributes") or {},
+            }
+        )
+        return self
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, _Entry)
+            and type(self) is type(other)
+            and other._store.name == self._store.name
+            and other._path == self._path
+        )
+
+    def __hash__(self):
+        return hash((type(self).__name__, self._store.name, self._path))
+
+
+class File(_Entry):
+    """One file, which need not exist yet."""
+
+    __slots__ = ()
+
+    @property
+    def is_directory(self):
+        return False
+
+    @property
+    def parent(self):
+        at = self._path.rfind("/")
+        return Dir(self._store, "" if at < 0 else self._path[:at])
+
+    def exists(self):
+        """Whether a **file** is there. A directory sitting at this path is not
+        this file, so it answers False rather than sending a body on to read it."""
+        found = self.stat()
+        return found is not None and found["is_directory"] is False
+
+    def read_text(self):
+        """The whole file, as text."""
+        return self._send({"op": "read", "path": self._path, "encoding": "text"})["text"]
+
+    def read_json(self):
+        """The whole file, parsed as JSON."""
+        text = self.read_text()
+        try:
+            return _json.loads(text)
+        except ValueError as e:
+            raise ValueError(f"`{self._path}` is not JSON: {e}") from None
+
+    def read_bytes(self):
+        """The whole file, as ``bytes``."""
+        answer = self._send({"op": "read", "path": self._path, "encoding": "base64"})
+        return _b64.b64decode(answer["base64"])
+
+    def write(self, data):
+        """Write it, replacing what is there. Answers the bytes written."""
+        return self._put(data, True)
+
+    def create(self, data):
+        """The same, **refusing** an existing file."""
+        return self._put(data, False)
+
+    def _put(self, data, overwrite):
+        # Another file is copied **host-side**: the bytes never enter the
+        # interpreter, so `backup.write(original)` is not bounded by what one
+        # read may carry.
+        if isinstance(data, File):
+            return _fs_send(
+                data._store,
+                {
+                    "op": "copy",
+                    "path": data._path,
+                    "toStore": self._store.name,
+                    "toPath": self._path,
+                    "overwrite": overwrite,
+                },
+            )["bytes"]
+        if isinstance(data, Dir):
+            raise TypeError("a directory cannot be written to a file")
+        plan = {"op": "write", "path": self._path, "overwrite": overwrite}
+        if isinstance(data, str):
+            plan["text"] = data
+        elif isinstance(data, (bytes, bytearray, memoryview)):
+            plan["base64"] = _b64.b64encode(bytes(data)).decode("ascii")
+        elif isinstance(data, Response):
+            # What `file.write(fetch(url))` is for.
+            plan["base64"] = _b64.b64encode(data.content).decode("ascii")
+        elif data is None:
+            raise TypeError(
+                "there is nothing to write — write() takes a str, bytes, a "
+                "response, a file, or a value to store as JSON"
+            )
+        else:
+            # An object is JSON, for the reason `fetch`'s `json=` is: the
+            # alternative is somebody's `repr()` in a file, which is a bug every
+            # time it happens.
+            try:
+                plan["text"] = _json.dumps(data)
+            except (TypeError, ValueError) as e:
+                raise TypeError(f"this value cannot be written: {e}") from None
+        return self._send(plan)["bytes"]
+
+    def move_to(self, dest):
+        """Move it, answering the file it is now."""
+        return self._relocate(dest, "rename", "move_to()")
+
+    def copy_to(self, dest):
+        """Copy it, answering the new file."""
+        return self._relocate(dest, "copy", "copy_to()")
+
+    def _relocate(self, dest, op, what):
+        if isinstance(dest, File):
+            store = dest._store
+            path = dest._path
+        elif isinstance(dest, Dir):
+            raise TypeError(
+                f"{what} takes a file — name the file inside the directory with "
+                "`dir.file(name)`"
+            )
+        else:
+            store = self._store
+            path = _fs_named(dest, what)
+        self._send(
+            {
+                "op": op,
+                "path": self._path,
+                "toStore": store.name,
+                "toPath": path,
+                "overwrite": False,
+            }
+        )
+        # The destination as a file: what a body does next is read it or write
+        # beside it, and neither should need the path spelled a second time.
+        return File(store, path)
+
+    def __str__(self):
+        return f"{self._store.name}:{self._path}"
+
+    def __repr__(self):
+        return f"<saltcorn file `{self}`>"
+
+
+class Dir(_Entry):
+    """One directory, which need not exist yet."""
+
+    __slots__ = ()
+
+    @property
+    def is_directory(self):
+        return True
+
+    @property
+    def parent(self):
+        # The root's parent is None rather than the root itself: a loop walking
+        # upwards has to end somewhere, and pretending a store contains itself is
+        # how it would not.
+        if self._path == "":
+            return None
+        at = self._path.rfind("/")
+        return Dir(self._store, "" if at < 0 else self._path[:at])
+
+    def file(self, name):
+        """The file of that name inside this directory."""
+        return File(self._store, _fs_join(self._path, _fs_named(name, "file()")))
+
+    def dir(self, name):
+        """The directory of that name inside this one."""
+        return Dir(self._store, _fs_join(self._path, _fs_named(name, "dir()")))
+
+    def exists(self):
+        """Whether a **directory** is there."""
+        found = self.stat()
+        return found is not None and found["is_directory"] is True
+
+    def list(self):
+        """The direct children, as the same objects everything else takes — so a
+        listing is walked and acted on rather than read and re-opened by name."""
+        entries = self._send({"op": "list", "path": self._path})
+        return [
+            Dir(self._store, entry["path"])
+            if entry["isDirectory"]
+            else File(self._store, entry["path"])
+            for entry in entries
+        ]
+
+    def iterdir(self):
+        """``pathlib``'s name for :meth:`list`, which is one host call either way."""
+        return iter(self.list())
+
+    def __iter__(self):
+        return self.iterdir()
+
+    def create(self):
+        """Make it, parents included. Idempotent: one already there is what the
+        caller wanted."""
+        self._send({"op": "mkdir", "path": self._path})
+        return self
+
+    def __str__(self):
+        return f"{self._store.name}:{self._path}/"
+
+    def __repr__(self):
+        return f"<saltcorn directory `{self}`>"
+
+
+# ---------------------------------------------------------------------------
+# `trigger` — this server's other triggers
+# ---------------------------------------------------------------------------
+#
+# `trigger(name)` is a **handle** — no dispatch, and the run happens only at
+# `run()`. A handle rather than attribute access, because a trigger's name is
+# the admin's own words for it and may contain spaces; and `run()` as the only
+# verb, because running one is the only thing a body can do to a trigger.
+
+
+class TriggerHandle:
+    """One trigger, and whose authority a run of it would carry."""
+
+    __slots__ = ("name", "authority")
+
+    def __init__(self, name, authority):
+        self.name = name
+        self.authority = authority
+
+    def run(self, payload=None, **fields):
+        """Run it, and answer what its action returned.
+
+        ``run(before="2026-01-01")`` and ``run({"before": …})`` are the same
+        call. The dispatcher's own rules apply: the trigger's ``only_if`` runs,
+        ``None`` comes back when it declines, and the **cascade bound** counts
+        this run — so a body that runs the trigger it is itself the action of
+        stops at the same depth every other cascade does.
+        """
+        if payload is not None and fields:
+            raise TypeError(
+                "run() takes the payload as keywords or as one value, not both"
+            )
+        # Nothing passed is `{}` rather than None, so `payload["x"]` in the
+        # trigger that runs is a KeyError rather than a TypeError about None.
+        if payload is None:
+            payload = fields
+        return _call_trigger(
+            {"trigger": self.name, "payload": payload, "authority": self.authority}
+        )
+
+    def as_user(self):
+        """Delegate to the event's **caller**: the target's own ``min_role``
+        then decides, and a refusal is a catchable :class:`TriggerError`."""
+        return TriggerHandle(self.name, "user")
+
+    def as_admin(self):
+        """The trigger's own authority — the default, because running one
+        trigger from another is configuration calling configuration."""
+        return TriggerHandle(self.name, "admin")
+
+    def __repr__(self):
+        return f"<saltcorn trigger `{self.name}` as {self.authority}>"
+
+
+class Triggers:
+    """``trigger("archive_done")`` — the triggers this server has."""
+
+    __slots__ = ()
+
+    def __call__(self, name):
+        if not isinstance(name, str) or name == "":
+            raise TypeError(
+                'trigger() takes the name of a trigger, as in trigger("archive_done")'
+            )
+        known = _call_names("triggers")
+        # Named at once rather than at `run()`, for `fs`'s reason — including the
+        # disabled ones, because a disabled trigger exists and "there is no
+        # trigger named `nightly`" would be the wrong sentence about one an admin
+        # switched off this morning.
+        if known and name not in known:
+            raise TriggerError(
+                f"there is no trigger named `{name}`; this server has: "
+                + ", ".join(known)
+            )
+        return TriggerHandle(name, "admin")
+
+    @property
+    def names(self):
+        """What this run can reach, for a body that discovers rather than knows."""
+        return tuple(_call_names("triggers"))
+
+    def __repr__(self):
+        return "<saltcorn trigger>"
+
+
+# ---------------------------------------------------------------------------
+# `modfn` — the functions this server's modules supply
+# ---------------------------------------------------------------------------
+#
+# A callable *and* an object, because a module function has two names and both
+# are wanted: `modfn.md_to_html(text)` is what an author writes, and
+# `modfn("@saltcorn/markdown").md_to_html(text)` is what they write when two
+# modules each supply the name — which v1 allows and nothing here prevents.
+#
+# **Synchronous**, including for a function v1 itself made `async`: everything in
+# this surface is, and the wait is a host call with the GIL released like every
+# other one.
+
+
+def _modfn_bind(module, function):
+    """One function, bound to one module."""
+
+    def call(*args, **kwargs):
+        if kwargs:
+            raise TypeError(
+                f"`{function}` takes positional arguments: a module function's "
+                "signature is v1's, which has no keywords"
+            )
+        return _call_modfn(
+            {"module": module, "function": function, "args": list(args)}
+        )
+
+    call.__name__ = function
+    call.__qualname__ = f"{module}.{function}"
+    return call
+
+
+class ModuleFunctions:
+    """The functions one named module supplies."""
+
+    __slots__ = ("module", "_names")
+
+    def __init__(self, module, names):
+        self.module = module
+        self._names = tuple(names)
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name not in self._names:
+            raise AttributeError(
+                f"the module `{self.module}` supplies no function `{name}`; it "
+                "supplies: " + (", ".join(self._names) or "none")
+            )
+        return _modfn_bind(self.module, name)
+
+    def __dir__(self):
+        return sorted(set(object.__dir__(self)) | set(self._names))
+
+    def __repr__(self):
+        return f"<saltcorn module functions of `{self.module}`>"
+
+
+class ModFns:
+    """``modfn.md_to_html(…)``, and ``modfn("@pkg").md_to_html(…)``.
+
+    A name nothing supplies is an ``AttributeError`` naming what this server does
+    have — Python's own answer to an attribute that is not there, so
+    ``getattr(modfn, name, None)`` still works. A name **two** modules supply is
+    a :class:`ModuleError` naming both and the spelling that would work, because
+    silently choosing the module that happened to load first is a wrong answer
+    inside somebody's trigger.
+    """
+
+    __slots__ = ()
+
+    def __call__(self, module):
+        if not isinstance(module, str) or module == "":
+            raise TypeError(
+                'modfn() takes a module\'s package name, as in '
+                'modfn("@saltcorn/markdown")'
+            )
+        supplied = [f for f in _call_names("functions") if f["module"] == module]
+        if not supplied:
+            modules = sorted({f["module"] for f in _call_names("functions")})
+            raise ModuleError(
+                f"no module named `{module}` supplies functions to this server"
+                + ("" if not modules else "; these do: " + ", ".join(modules))
+            )
+        return ModuleFunctions(module, [f["name"] for f in supplied])
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        supplying = [f["module"] for f in _call_names("functions") if f["name"] == name]
+        if len(supplying) == 1:
+            return _modfn_bind(supplying[0], name)
+        if not supplying:
+            known = sorted({f["name"] for f in _call_names("functions")})
+            raise AttributeError(
+                f"there is no module function named `{name}`"
+                + (
+                    "; no installed module supplies one"
+                    if not known
+                    else "; this server has: " + ", ".join(known)
+                )
+            )
+        raise ModuleError(
+            f"`{name}` is supplied by " + " and ".join(supplying) + "; say which "
+            f'module you mean, as in modfn("{supplying[0]}").{name}(…)'
+        )
+
+    @property
+    def functions(self):
+        """Every function this run can call, as ``{module, name, description,
+        is_async}`` — for a body that discovers rather than knows."""
+        return tuple(_call_names("functions"))
+
+    def __dir__(self):
+        names = {f["name"] for f in _call_names("functions")}
+        return sorted(set(object.__dir__(self)) | names)
+
+    def __repr__(self):
+        return "<saltcorn modfn>"
+
+
+# ---------------------------------------------------------------------------
+# The handles a code body is given
+# ---------------------------------------------------------------------------
+#
+# Building each costs nothing and holds nothing: whose run this is, what it may
+# reach, what it has spent and what it may **name** all live on the **thread**
+# (see the bridge), which is why one shared handle is safe and why a body cannot
+# reach another run's authority — there is no name for it in the interpreter.
+#
+# Each is bound into a run's globals only where that run has the surface behind
+# it, so naming `fs` on a server with no file stores is a `NameError` naming it
+# rather than a call that fails later. Reached the long way round —
+# `import saltcorn; saltcorn.fs(…)` — they are here whatever the run has, and
+# refuse by saying which surface this body was not given.
+
+#: The tables.
 db = Db("admin")
+#: The file stores.
+fs = Fs()
+#: The other triggers.
+trigger = Triggers()
+#: The functions this server's modules supply.
+modfn = ModFns()

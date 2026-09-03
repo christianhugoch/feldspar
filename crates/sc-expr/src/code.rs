@@ -200,25 +200,26 @@ pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// wrote. Leaving a slice back means a hung endpoint fails *inside* the body,
 /// where it can be caught, logged, or answered with a fallback — which is the
 /// difference between a bound and a trap.
-#[cfg(feature = "eval")]
-const FETCH_MARGIN: Duration = Duration::from_millis(250);
+///
+/// Public, and not behind `eval`, because it is a property of the **seam**
+/// rather than of the engine: `sc-python`'s bridge hands a request the same
+/// slice back, and a second copy of the number is how the two languages would
+/// come to disagree about when a hung endpoint is catchable.
+pub const FETCH_MARGIN: Duration = Duration::from_millis(250);
 
 /// The least time worth starting a request with. Below this the run is refused
 /// one and told why, rather than sent to an endpoint it cannot wait for.
-#[cfg(feature = "eval")]
-const MIN_FETCH_WINDOW: Duration = Duration::from_millis(50);
+pub const MIN_FETCH_WINDOW: Duration = Duration::from_millis(50);
 
 /// How much of the run's remaining time a **trigger run** is not given, for
 /// exactly [`FETCH_MARGIN`]'s reason: a child clamped to the whole of what is
 /// left expires at the instant its caller does, and what the admin then reads is
 /// "this code exceeded its time limit" rather than the sentence naming the
 /// trigger that took too long — which is the one they can act on.
-#[cfg(feature = "eval")]
-const TRIGGER_MARGIN: Duration = Duration::from_millis(250);
+pub const TRIGGER_MARGIN: Duration = Duration::from_millis(250);
 
 /// The least time worth starting another trigger with.
-#[cfg(feature = "eval")]
-const MIN_TRIGGER_WINDOW: Duration = Duration::from_millis(50);
+pub const MIN_TRIGGER_WINDOW: Duration = Duration::from_millis(50);
 
 /// How much of the run's remaining time a **module function call** is not
 /// given, for [`TRIGGER_MARGIN`]'s reason: what runs at the other end is
@@ -226,12 +227,10 @@ const MIN_TRIGGER_WINDOW: Duration = Duration::from_millis(50);
 /// the whole of what is left expires at the instant its caller does — so what
 /// the admin reads is "this code exceeded its time limit" rather than the
 /// sentence naming the module function that hung.
-#[cfg(feature = "eval")]
-const MODULE_FN_MARGIN: Duration = Duration::from_millis(250);
+pub const MODULE_FN_MARGIN: Duration = Duration::from_millis(250);
 
 /// The least time worth starting a module function call with.
-#[cfg(feature = "eval")]
-const MIN_MODULE_FN_WINDOW: Duration = Duration::from_millis(50);
+pub const MIN_MODULE_FN_WINDOW: Duration = Duration::from_millis(50);
 
 /// The **JS slice**: how long a body may run without yielding.
 ///

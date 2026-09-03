@@ -46,8 +46,9 @@ use crate::errors::Timeout;
 /// file to find, no version to skew and nothing to install.
 const BOOT: &str = include_str!("py/boot.py");
 
-/// The **surface** an app builder writes — `db` and the errors — compiled into
-/// the binary beside the pipeline and installed on the meta path at boot.
+/// The **surface** an app builder writes — the five handles and the errors —
+/// compiled into the binary beside the pipeline and installed on the meta path
+/// at boot.
 ///
 /// `DB_PRELUDE`'s counterpart, and Python for the same reason it is JavaScript:
 /// the Rust side sees plans, so a chain method is added here and nowhere else.
@@ -62,8 +63,17 @@ const PACKAGE: &str = "saltcorn";
 /// behind it, so `db` on a body with no database is a `NameError` naming it
 /// rather than a handle that fails on use.
 ///
-/// One entry for now; `fetch`, `fs`, `trigger` and `modfn` join it in phase 3.
-const SURFACES: [(&str, Surface); 1] = [("db", Surface::Db)];
+/// The five are objects the package holds, not per-run factories: the run's
+/// authority, its budgets and the names it may reach all live on the **thread**
+/// (see [`crate::bridge`]), so one shared handle is this language's version of
+/// the closure a JavaScript run is handed.
+const SURFACES: [(&str, Surface); 5] = [
+    ("db", Surface::Db),
+    ("fetch", Surface::Fetch),
+    ("fs", Surface::Files),
+    ("trigger", Surface::Triggers),
+    ("modfn", Surface::ModuleFns),
+];
 
 /// How many compiled bodies the interpreter keeps. Generous next to the number
 /// of triggers an installation has, and each entry is a code object and its
@@ -423,9 +433,9 @@ pub(crate) fn run_body(
                 bind(name, function)?;
             }
         }
-        // And the surface itself, over those same functions: `db` is what an
-        // author writes, and the bridge function under it is what the plan
-        // crosses on.
+        // And the surfaces themselves, over those same functions: `db`, `fetch`,
+        // `fs`, `trigger` and `modfn` are what an author writes, and the bridge
+        // function under each is what the plan crosses on.
         let package = package(py).map_err(|e| py_error(py, &e))?;
         for (name, surface) in SURFACES {
             if surfaces.holds(surface) {

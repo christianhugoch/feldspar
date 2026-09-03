@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## The other four surfaces, in Python
+
+Phase 3 of the Python code adapter: `fetch`, `fs`, `trigger` and `modfn` join
+`db`, so a Python body now reaches everything a JavaScript one does. The Rust
+side below the plans is unchanged — the same `CodeFetchHost`, `FileStoreHost`,
+`TriggerRunHost` and `ModuleFnHost` answer both languages — and what is new is
+the Python that lowers to them.
+
+- **`fetch` is shaped like `requests`**, because that is the Python an author
+  already knows: `fetch(url, headers=…, json=…)` answers a response with `.ok`,
+  `.status`, `.status_text`, `.url`, `.redirected`, `.headers` (case-insensitive),
+  `.text` and `.content` as **properties**, `.json()` and `.raise_for_status()`.
+  A status the endpoint did not like is not an exception, so the retry is
+  written in the body; only a transport failure raises, as a `FetchError`.
+- **`fs` is shaped like `pathlib`** where `pathlib` has a word for it:
+  `fs("uploads").open(p)` is a file reference and `.dir(p)` a directory one, and
+  `read_text()` / `read_json()` / `read_bytes()` / `write()` / `create()` /
+  `exists()` / `stat()` / `delete()` / `move_to()` / `copy_to()` / `meta()` /
+  `set_meta(min_role=…)` are what touch the store. A directory iterates
+  (`for entry in d`), and writing another file or a fetch response is a
+  host-side copy whose bytes never enter the interpreter.
+- **`trigger("name").run(before=…)`** goes through *the* dispatcher, so the
+  target's `only_if`, its floor, its disabled switch and the cascade bound all
+  apply — the payload as keywords or as one dict, either way. And
+  **`modfn.md_to_html(x)`** with `modfn("@pkg").name(x)` are the two spellings
+  of a module function call, synchronous like everything else here; a name two
+  modules supply names both rather than picking one.
+- **What a run may *name* is a thread-local read**, not a closure. The
+  JavaScript half closes the store names, the trigger names and the module
+  functions over a per-run factory because many runs share an isolate; here the
+  run is the thread, so one shared handle is safe and `__sc_names(kind)` — the
+  bridge's sixth function, which spends no budget and makes no host call —
+  answers what this run was given. `fs("typo")` therefore still fails at once,
+  naming the stores that do exist.
+- **A hung endpoint is catchable again.** `FETCH_MARGIN`, `TRIGGER_MARGIN`,
+  `MODULE_FN_MARGIN` and their minimum windows were private to `sc-expr`'s
+  `eval` feature; they are now public and un-gated, and the Python bridge uses
+  them. Without the margin a request was clamped to exactly what was left of the
+  run, expired at the same instant the run did, and the trigger's caller read
+  "this code exceeded its time limit" rather than the fallback the body wrote.
+  The numbers are a property of the seam, not of the engine, so there is one
+  copy of them.
+- **37 new tests**, against the same one-shot HTTP listener, the same real
+  `LocalFileStore` directories and the same real dispatcher the JavaScript
+  suites use — `sc-core-actions/tests/code_fetch.rs`, `code_files.rs` and
+  `code_run_triggers.rs`, question for question. They run through
+  `run_python_code` from the registry rather than through the runtime directly,
+  so the five hosts are the ones an `ActionContext` builds. Two of them assert
+  the thing the milestone is for: a Python body running a JavaScript trigger,
+  and a JavaScript body running a Python one, on one dispatcher.
+
 ## A Python trigger, booted and proved
 
 Phase 2.4–2.7 of the Python code adapter, which finishes phase 2: the server

@@ -59,12 +59,11 @@ use crate::code_body::{self, CFG_CODE, Hosts};
 /// what a directly-run or scheduled trigger was called with. `context` is bound
 /// when the body is a workflow step, and not otherwise.
 ///
-/// And the host surfaces this server has, each bound only where it has one — so
-/// naming `fs` on a server with no file stores is a `NameError` naming it rather
-/// than a call that fails later. `db` lands here; `fetch`, `fs`, `trigger` and
-/// `modfn` are phase 3. They are injected into the body's globals, and
-/// `import saltcorn` reaches the same objects for code that would rather be
-/// explicit.
+/// And the five host surfaces this server has — `db`, `fetch`, `fs`, `trigger`
+/// and `modfn` — each bound only where it has one, so naming `fs` on a server
+/// with no file stores is a `NameError` naming it rather than a call that fails
+/// later. They are injected into the body's globals, and `import saltcorn`
+/// reaches the same objects for code that would rather be explicit.
 ///
 /// JSON in, JSON out: an object is a `dict`, an array a `list`, `null` is `None`,
 /// and a date is an ISO string because that is what the row layer put on the
@@ -92,6 +91,32 @@ use crate::code_body::{self, CFG_CODE, Hosts};
 /// is the author's and runs as written, the values are binds and never part of
 /// it, no ownership formula filters it, and a write inside one raises no table
 /// event.
+///
+/// ## `fetch`, `fs`, `trigger` and `modfn`
+///
+/// `fetch` is shaped like `requests`, because that is the Python an author
+/// already knows: `fetch(url, headers=…, json=…)` answers a response with
+/// `.ok`, `.status`, `.text`, `.content` and `.json()`. A status the endpoint
+/// did not like is **not** an exception — `res.ok` is False — so the retry or
+/// the fallback is written in the body; only a transport failure raises, as a
+/// `FetchError`. `timeout=` is `requests`' seconds and `timeout_ms=` is this
+/// system's milliseconds, and either is clamped to what is left of the run.
+///
+/// `fs("uploads")` is a store, `.open(path)` a file reference and `.dir(path)` a
+/// directory one — no I/O until a method touches the store. The vocabulary is
+/// `pathlib`'s where `pathlib` has one: `read_text()`, `read_json()`,
+/// `read_bytes()`, `write()`, `create()`, `exists()`, `iterdir()`,
+/// `move_to()`, `copy_to()`, `meta()`, `set_meta(min_role=…)`. Writing another
+/// file, or a fetch response, is a **host-side** copy: the bytes never enter the
+/// interpreter.
+///
+/// `trigger("archive_done").run(before=…)` runs another trigger through *the*
+/// dispatcher, so the target's `only_if`, its floor and the cascade bound all
+/// apply; `modfn.md_to_html(text)` calls a module function, synchronously,
+/// with `modfn("@pkg").name(…)` for a name two modules supply. Store names,
+/// trigger names and module functions are bound into the run when it starts, so
+/// a typo is a sentence naming what does exist rather than a failure one line
+/// later.
 ///
 /// ## Whose authority, and what bounds it
 ///

@@ -1042,18 +1042,59 @@ Two corrections a test found:
 
 ## Phase 3 — `fetch`, `fs`, `trigger`, `modfn`
 
-- [ ] 3.1 `fetch` in the Python half (requests-shaped, §1) over `CodeFetchHost` unchanged; the
+- [x] 3.1 `fetch` in the Python half (requests-shaped, §1) over `CodeFetchHost` unchanged; the
       transport-failure/`res.ok` split; the per-run budget and the clamp to what is left of the
       wall clock.
-- [ ] 3.2 `fs` over `FileStoreHost` unchanged: files, directories, `read_*`/`write`/`create`,
+- [x] 3.2 `fs` over `FileStoreHost` unchanged: files, directories, `read_*`/`write`/`create`,
       `move_to`/`copy_to` (including across stores), `meta`/`set_meta`, `as_user`, and the store
       names bound eagerly so `fs("typo")` fails at once naming what exists.
-- [ ] 3.3 `trigger` over `TriggerRunHost` unchanged, names bound eagerly, `as_user`, and the
+- [x] 3.3 `trigger` over `TriggerRunHost` unchanged, names bound eagerly, `as_user`, and the
       cascade bound counted.
-- [ ] 3.4 `modfn` over the catalog's `ModuleFnHost`, both spellings, synchronous.
-- [ ] 3.5 Tests mirroring `code_fetch.rs`, `code_files.rs` and `code_run_triggers.rs`, against the
+- [x] 3.4 `modfn` over the catalog's `ModuleFnHost`, both spellings, synchronous.
+- [x] 3.5 Tests mirroring `code_fetch.rs`, `code_files.rs` and `code_run_triggers.rs`, against the
       same one-shot HTTP listener and the same real stores — including each budget's refusal
       message and each surface's absence being a `NameError`.
+
+### What phase 3 landed, and the two things it changed
+
+The four surfaces are Python — `src/py/saltcorn.py`, beside `db` — and the Rust
+side gained one function, `__sc_names(kind)`, which is not a host call and
+spends nothing: it answers what this run may *name*. In JavaScript the store
+names, the trigger names and the module functions are closed over by a per-run
+factory, because many runs share an isolate; here the run **is** the thread, so
+the same three lists are a thread-local read and one shared handle is safe.
+That is why `SURFACES` in `interp.rs` is a five-line table rather than five
+factories, and why `import saltcorn; saltcorn.fs(…)` inside a run reaches this
+run's stores rather than nobody's.
+
+The spelling is Python's where Python has one — `read_text()`, `write()`,
+`iterdir()`, `set_meta(min_role=…)`, `res.text` and `res.content` as
+**properties** because the body arrived with the response — and the dicts that
+come back out of `stat()` and `meta()` are snake-cased (`is_directory`,
+`effective_min_role`) so that what a body reads and what it writes are spelled
+the same way. What crosses the seam underneath is byte for byte the operation a
+JavaScript body builds, which is the property the whole milestone rests on.
+
+Two decisions worth naming:
+
+1. **`fetch` has two spellings of the clock.** `timeout=` is `requests`' and is
+   in *seconds*; `timeout_ms=` is this system's and is in milliseconds. One
+   spelling would have been tidier and would have been a silent factor of a
+   thousand for whichever half of the audience guessed wrong, so both exist and
+   giving both at once is refused by name. In the same spirit `data={"a": 1}` is
+   refused pointing at `json=` rather than form-encoded, which is what
+   `requests` would do: an object that reached an endpoint as `a=1&b=2` when
+   JSON was meant is a bug that looks like a working request.
+2. **The margins moved out of the JavaScript half.** `FETCH_MARGIN`,
+   `TRIGGER_MARGIN`, `MODULE_FN_MARGIN` and their three minimum windows were
+   private to `sc-expr`'s `eval` feature; they are now public and un-gated,
+   because they are a property of the **seam** — how much of a run's clock a
+   host call may be handed — rather than of the engine. A test found this the
+   hard way: a Python body's request against a hung endpoint was clamped to
+   *exactly* what was left, so it expired at the same instant the run did and
+   the `except` the author wrote never saw it. The trigger's caller read "this
+   code exceeded its time limit" instead of the fallback. Two copies of the
+   number would have been two chances to make that mistake again.
 
 ## Phase 4 — The import gate and the diagnostics
 

@@ -16,8 +16,24 @@ mod python_db;
 mod python_db_live;
 
 #[cfg(feature = "python-host")]
+#[path = "python_fetch.rs"]
+mod python_fetch;
+
+#[cfg(feature = "python-host")]
+#[path = "python_files.rs"]
+mod python_files;
+
+#[cfg(feature = "python-host")]
+#[path = "python_modfn.rs"]
+mod python_modfn;
+
+#[cfg(feature = "python-host")]
 #[path = "python_runtime.rs"]
 mod python_runtime;
+
+#[cfg(feature = "python-host")]
+#[path = "python_triggers.rs"]
+mod python_triggers;
 
 #[cfg(not(feature = "python-host"))]
 #[path = "without_python.rs"]
