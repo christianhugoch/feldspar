@@ -349,18 +349,31 @@ unknown tool, a bad revision, a refused credential.
 
 ## Phase 3 — The switch and the screen
 
-- [ ] 3.1 `mcp_enabled` (default false) and `mcp_loopback_only` (default true) as `ConfigDef`s
+- [x] 3.1 `mcp_enabled` (default false) and `mcp_loopback_only` (default true) as `ConfigDef`s
       in `development_section()`, with the help text an admin needs to make the decision.
-- [ ] 3.2 `McpTokensPanel` in `ui/admin`, wired through `SectionExtra` — one line beside
+      Read back by `sc_config::McpSettings`, which is deliberately **not** part of
+      `DevelopmentSettings`: that pair is applied to process globals because the Postgres
+      driver cannot ask the settings store anything, and these two are read by the one route
+      that enforces them, on the request that asks. A value that is not a boolean reads as the
+      *shut* answer rather than as an error, which is the opposite of `log_verbosity`'s
+      treatment of junk and the same rule underneath — fall back to the safer answer.
+- [x] 3.2 `McpTokensPanel` in `ui/admin`, wired through `SectionExtra` — one line beside
       `PythonStatusPanel`, which is the same shape of thing. Mint with a label, a grant
       checkbox set that reuses the copilot's labels verbatim, and an expiry; the plaintext
       shown once, in a box that says so; the list with label, grants, created, last used,
-      expires and a Revoke button.
-- [ ] 3.3 The panel shows the `claude mcp add` line **with this server's own URL in it**, ready
+      expires and a Revoke button. **Verbatim by fetching, not by retyping**: the checkboxes
+      are `admin_copilot`'s own `config_spec` from `listAgentTraits`, with a terse fallback for
+      the server that registers no copilot — six labels copied into TypeScript would be how one
+      vocabulary becomes two.
+- [x] 3.3 The panel shows the `claude mcp add` line **with this server's own URL in it**, ready
       to copy, with the token substituted while it is still on screen. The setup step that gets
       typed wrong is the one that is retyped from two places.
-- [ ] 3.4 Tests: the section declares three fields; a disabled server's panel says so rather
-      than offering to mint a token that will not work.
+- [x] 3.4 Tests: the section declares three fields; a disabled server's panel says so rather
+      than offering to mint a token that will not work. **Four fields, not three** — §5 argues
+      for the enable switch and then for the loopback one, and 3.1 declares both. The disabled
+      case is read off the *stored* settings rather than the form's, which is why the settings
+      screen now keeps the two apart: a ticked-but-unsaved checkbox would otherwise offer to
+      mint a credential that authenticates against a 404.
 
 ## Phase 4 — The protocol
 

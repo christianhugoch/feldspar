@@ -41,8 +41,9 @@ pub use defs::{
     internal_defs, known_keys,
 };
 pub use development::{
-    DevelopmentSettings, LOG_SQL, LOG_VERBOSITY, apply_development_settings, development_section,
-    development_settings, development_settings_from,
+    DevelopmentSettings, LOG_SQL, LOG_VERBOSITY, MCP_ENABLED, MCP_LOOPBACK_ONLY, McpSettings,
+    apply_development_settings, development_section, development_settings,
+    development_settings_from, mcp_settings, mcp_settings_from,
 };
 pub use email::{
     DEFAULT_SMTP_PORT, EMAIL_FROM, EmailSettings, Mailbox, SECURITY_NONE, SECURITY_STARTTLS,

@@ -1,18 +1,20 @@
-//! The Development settings: how much this server says, and whether it prints
-//! the SQL it runs.
+//! The Development settings: how much this server says, whether it prints the
+//! SQL it runs, and whether an external coding agent may administer it.
 //!
-//! Two switches an admin ticks while they are debugging something, and unticks
+//! Switches an admin ticks while they are working on something, and unticks
 //! afterwards. They are settings rather than command-line flags for the reason
 //! the certificate is (§13.5): the moment you want the SQL is the moment the
 //! server is already running and doing the thing you cannot explain, and
 //! restarting it with a flag is how you lose the state that was interesting.
 //!
-//! Both take effect **immediately** on save. Nothing here is read once at
-//! startup and cached: the switches live in [`sc_log`] as process-wide atomics,
-//! [`DevelopmentSettings::apply`] stores them, and the next statement or the
-//! next request reads them. That is the whole reason the logging switches are
-//! globals rather than values threaded through the call graph — the Postgres
+//! All of them take effect **immediately** on save. Nothing here is read once at
+//! startup and cached: the two logging switches live in [`sc_log`] as
+//! process-wide atomics, [`DevelopmentSettings::apply`] stores them, and the next
+//! statement or the next request reads them. That is the whole reason those two
+//! are globals rather than values threaded through the call graph — the Postgres
 //! driver is four layers below the settings store and must not know it exists.
+//! The two MCP switches are *not* globals and deliberately so ([`McpSettings`]):
+//! one route reads them, and it can read them where it is.
 //!
 //! What each verbosity means is [`sc_log::Verbosity`]'s to say; this module
 //! declares the keys, reads them back, and hands them over.
@@ -29,15 +31,21 @@ use crate::defs::{ConfigDef, ConfigSection};
 pub const LOG_SQL: &str = "log_sql";
 /// How much this server says: one of [`Verbosity`]'s spellings.
 pub const LOG_VERBOSITY: &str = "log_verbosity";
+/// Whether `POST /mcp` — the administration MCP server of §13.6 — is served at
+/// all.
+pub const MCP_ENABLED: &str = "mcp_enabled";
+/// Whether that route refuses a peer that is not on this machine.
+pub const MCP_LOOPBACK_ONLY: &str = "mcp_loopback_only";
 
 /// The development settings, as one section of the settings screen.
 pub fn development_section() -> ConfigSection {
     ConfigSection {
         name: "development",
         label: "Development",
-        description: "What this server prints while it runs. Both settings take effect \
-                      immediately — nothing here needs a restart — and both are for finding out \
-                      what a running installation is doing, not for leaving on.",
+        description: "What this server prints while it runs, and whether an external coding \
+                      agent may administer it. Every setting here takes effect immediately — \
+                      nothing needs a restart — and every one of them is for working on an \
+                      installation, not for leaving on.",
         fields: vec![
             ConfigDef::help(
                 FormField::new(LOG_SQL, BasicType::Bool)
@@ -60,6 +68,31 @@ pub fn development_section() -> ConfigSection {
                  is visible before it finishes; trace adds the whole of what an LLM was sent \
                  and answered and every tool call's arguments and result, which is a \
                  transcript of what the people using an agent typed.",
+            ),
+            // §13.6. Off by default, and off means *absent*: the route answers
+            // 404 and never reads the token table, so a disabled feature is not
+            // distinguishable from one this build does not have.
+            ConfigDef::help(
+                FormField::new(MCP_ENABLED, BasicType::Bool)
+                    .label("Administration MCP server")
+                    .default_value(false),
+                "Serve POST /mcp, so an external coding agent holding an API token can read \
+                 and change this installation's schema, triggers and applications. A token is \
+                 an administrator: it runs with the full authority of the admin who minted it, \
+                 bounded only by the grants ticked when it was made. Off means the route \
+                 answers 404 and no token is looked at. Mint and revoke tokens below.",
+            ),
+            ConfigDef::help(
+                FormField::new(MCP_LOOPBACK_ONLY, BasicType::Bool)
+                    .label("MCP from this machine only")
+                    .default_value(true),
+                "Refuse an MCP request whose peer is not on this machine. The usual \
+                 arrangement is an agent running beside the server or reaching it down a \
+                 tunnel the developer made, and an installation that will never be \
+                 administered from elsewhere should be able to say so here rather than in a \
+                 reverse proxy. Turn it off only if the agent genuinely runs on another host — \
+                 and note that a proxy in front of this server is itself a local peer, so the \
+                 check protects nothing an untrusted proxy forwards.",
             ),
         ],
     }
@@ -119,6 +152,65 @@ pub fn development_settings_from(config: &Attrs) -> Result<DevelopmentSettings> 
 /// Read the development settings out of `_sc_config`.
 pub async fn development_settings(catalog: &Catalog) -> Result<DevelopmentSettings> {
     development_settings_from(&crate::store::all_config(catalog).await?)
+}
+
+/// Whether the administration MCP server is served, and to whom (§13.6).
+///
+/// Deliberately **not** part of [`DevelopmentSettings`], which is the pair of
+/// switches a process *applies* to itself: these two are read where they are
+/// enforced, by the one route that enforces them, on the request that asks.
+/// There is nothing to cache in a global and nothing to apply at boot — a route
+/// that read a copy taken at startup would be a switch that needs a restart,
+/// which is the thing this section exists not to need.
+///
+/// The cost is two values read out of `_sc_config` per MCP request. A request
+/// here is an agent's tool call rather than a page load, and the alternative — a
+/// cached copy invalidated on save — is a second thing to keep in step for a
+/// query that is already smaller than the work the call is about to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpSettings {
+    /// Whether `POST /mcp` exists at all. Off means `404`.
+    pub enabled: bool,
+    /// Whether a peer that is not on this machine is refused.
+    pub loopback_only: bool,
+}
+
+impl Default for McpSettings {
+    /// Off, and local-only when it is turned on — the two defaults of §13.6, in
+    /// the one place either of them is written down for the reader rather than
+    /// for the form.
+    fn default() -> Self {
+        McpSettings {
+            enabled: false,
+            loopback_only: true,
+        }
+    }
+}
+
+/// Read the MCP settings out of a settings bag (stored values over declared
+/// defaults).
+///
+/// A value that is not a boolean reads as the default rather than as an error,
+/// which is the opposite of [`development_settings_from`]'s treatment of an
+/// unrecognised verbosity — and for the same underlying rule: fall back to the
+/// *safer* answer. A junk verbosity would mean saying less than was asked, so it
+/// is refused; a junk `mcp_enabled` means an administrative surface nobody
+/// deliberately opened, so it stays shut.
+pub fn mcp_settings_from(config: &Attrs) -> McpSettings {
+    let defaults = McpSettings::default();
+    let flag = |key: &str, default: bool| match config.get(key) {
+        Some(Json::Bool(b)) => *b,
+        _ => default,
+    };
+    McpSettings {
+        enabled: flag(MCP_ENABLED, defaults.enabled),
+        loopback_only: flag(MCP_LOOPBACK_ONLY, defaults.loopback_only),
+    }
+}
+
+/// Read the MCP settings out of `_sc_config`.
+pub async fn mcp_settings(catalog: &Catalog) -> Result<McpSettings> {
+    Ok(mcp_settings_from(&crate::store::all_config(catalog).await?))
 }
 
 /// Read the stored development settings and make them this process's own — the
@@ -203,6 +295,66 @@ mod tests {
         for option in &options {
             Verbosity::parse(option).unwrap();
         }
+    }
+
+    /// The two switches of §13.6, as the settings screen renders them: off, and
+    /// local-only when it is on. Four fields rather than the three the plan
+    /// counted — §13.6 argues for the enable switch and then for the loopback
+    /// one, and both are declared here.
+    #[test]
+    fn the_section_declares_the_two_mcp_switches() {
+        let section = development_section();
+        let keys: Vec<&str> = section.fields.iter().map(|def| def.key()).collect();
+        assert_eq!(
+            keys,
+            [LOG_SQL, LOG_VERBOSITY, MCP_ENABLED, MCP_LOOPBACK_ONLY]
+        );
+
+        for (key, default) in [(MCP_ENABLED, false), (MCP_LOOPBACK_ONLY, true)] {
+            let def = section.fields.iter().find(|def| def.key() == key).unwrap();
+            assert_eq!(
+                def.field.base.type_,
+                sc_types::TypeRef::Basic(BasicType::Bool),
+                "{key}"
+            );
+            assert_eq!(def.field.default, Some(json!(default)), "{key}");
+            // The help is what an admin makes the decision from, and this one is
+            // a decision about who may administer the installation.
+            assert!(!def.help.is_empty(), "{key}");
+        }
+    }
+
+    /// An installation nobody has turned it on for serves no MCP — and would
+    /// refuse a remote peer if it did.
+    #[test]
+    fn an_untouched_installation_serves_no_mcp() {
+        let settings = mcp_settings_from(&Attrs::new());
+        assert!(!settings.enabled);
+        assert!(settings.loopback_only);
+        assert_eq!(settings, McpSettings::default());
+    }
+
+    #[test]
+    fn the_stored_mcp_switches_are_what_the_route_acts_on() {
+        let settings = mcp_settings_from(&attrs(&[
+            (MCP_ENABLED, json!(true)),
+            (MCP_LOOPBACK_ONLY, json!(false)),
+        ]));
+        assert!(settings.enabled);
+        assert!(!settings.loopback_only);
+    }
+
+    /// A value that is not a boolean falls back to the *shut* answer rather than
+    /// to an error: a malformed row must not be a way to open an administrative
+    /// surface, and must not be a way to stop the server booting either.
+    #[test]
+    fn a_flag_that_is_not_a_flag_leaves_the_server_shut() {
+        let settings = mcp_settings_from(&attrs(&[
+            (MCP_ENABLED, json!("yes")),
+            (MCP_LOOPBACK_ONLY, json!(0)),
+        ]));
+        assert!(!settings.enabled);
+        assert!(settings.loopback_only);
     }
 
     /// Applying is what a save does, and the process is what changes.

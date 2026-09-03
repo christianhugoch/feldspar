@@ -2,6 +2,63 @@
 
 Changes in reverse chronological order.
 
+## The switch and the screen: turning the MCP server on, and minting a token at it
+
+Phase 3 of the administration MCP server. Still no MCP server — phase 4 builds
+the route — but everything an administrator does *about* it now exists: the two
+switches that decide whether it is served and to whom, and the panel that mints
+and revokes the credentials it will authenticate.
+
+- **`mcp_enabled` and `mcp_loopback_only`, in the Development section.** Off, and
+  local-only when it is on. They sit beside `log_sql` and `log_verbosity` because
+  that section's description already frames what they are — for working on an
+  installation, not for leaving on — and its subject widened by one sentence to
+  say so.
+- **They are not process globals, and that is the difference from the other two.**
+  `DevelopmentSettings::apply` exists because the Postgres driver is four layers
+  below the settings store and cannot ask it anything; the MCP switches are read
+  by the one route that enforces them, on the request that asks, so there is
+  nothing to apply at boot and nothing that needs a restart. `McpSettings` is
+  that read, and it costs two values out of `_sc_config` on a route whose
+  requests are an agent's tool calls rather than page loads.
+- **A flag that is not a flag leaves the server shut.** The opposite of
+  `log_verbosity`, whose junk value is an error — and for the same underlying
+  rule, which is to fall back to the safer answer. A verbosity nobody can parse
+  would mean saying less than was asked; an `mcp_enabled` nobody can parse would
+  mean an administrative surface nobody deliberately opened.
+- **`McpTokensPanel`, under the Development form.** Mint with a label, the six
+  checkboxes and an expiry; the list with its grants, when it was created, when
+  it was last used, when it lapses, and a Revoke button. Revoke rather than
+  delete, because the row staying marked is how an admin sees that a credential
+  was taken back.
+- **The checkboxes are the copilot's own, fetched rather than retyped.** The
+  panel reads `admin_copilot`'s `config_spec` from `listAgentTraits` and renders
+  the labels the server declared. §13.6's argument is that there is *one*
+  vocabulary for what an agent may do to an installation, and a vocabulary with
+  two descriptions of `allow_drop` is two. A terse fallback covers the server
+  that registers no copilot at all, which is the only case with nothing to copy.
+- **The `claude mcp add` line is built, not documented.** The transport, this
+  server's own origin and the token that is still on screen, with a copy button —
+  the setup step that gets typed wrong is the one retyped from two places. Off
+  screen the token becomes an obvious placeholder rather than a plausible one.
+- **The mint box says the token is shown once, because it is**, and the panel
+  ends with the two sentences an admin has to read: a token is an administrator,
+  and revoking it is the only way to take that back.
+- **A disabled server says so instead of offering to mint.** The panel reads the
+  **stored** switch rather than the form's, which is why the settings screen now
+  keeps what the server last said is stored beside what the boxes are showing: a
+  ticked-but-unsaved checkbox would otherwise mint a credential that
+  authenticates against a 404.
+- Tests: the section declares the two switches with their defaults and their
+  help; an untouched installation serves no MCP and would refuse a remote peer if
+  it did; a junk flag leaves it shut; through HTTP against a real database, a
+  save opens the route and unticking it shuts it again, which is the half that
+  matters — a switch that only turns on is a credential surface that needs a
+  restart to close. In the SPA: the checkboxes are the copilot's labels verbatim,
+  the mint sends all six flags explicitly whichever are ticked, the registration
+  line carries this server's URL and the token, and the disabled switch is read
+  off the stored settings round trip.
+
 ## The credential: `_sc_api_tokens` and the three endpoints over it
 
 Phase 2 of the administration MCP server. No MCP server yet — this is the

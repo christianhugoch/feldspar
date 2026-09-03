@@ -30,10 +30,10 @@ use axum::http::{Request, StatusCode, header};
 use sc_auth::SessionStore;
 use sc_catalog::Catalog;
 use sc_config::{
-    ACME_CONTACT_EMAIL, EMAIL_FROM, HTTPS_PORT, LOG_SQL, LOG_VERBOSITY, MODE_CUSTOM,
-    MODE_LETSENCRYPT, MODE_OFF, SECURITY_NONE, SECURITY_STARTTLS, SMTP_HOST, SMTP_PASSWORD,
-    SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SSL_CERTIFICATE, SSL_MODE, SSL_PRIVATE_KEY, SslMode,
-    ssl_settings, stored_config,
+    ACME_CONTACT_EMAIL, EMAIL_FROM, HTTPS_PORT, LOG_SQL, LOG_VERBOSITY, MCP_ENABLED,
+    MCP_LOOPBACK_ONLY, MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, SECURITY_NONE, SECURITY_STARTTLS,
+    SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SSL_CERTIFICATE, SSL_MODE,
+    SSL_PRIVATE_KEY, SslMode, mcp_settings, ssl_settings, stored_config,
 };
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
@@ -791,6 +791,73 @@ async fn saving_the_development_settings_moves_the_logging_switches() -> sc_erro
     assert!(!sc_log::log_sql_enabled());
     assert_eq!(sc_log::verbosity(), sc_log::DEFAULT_VERBOSITY);
     assert!(!sc_log::enabled(sc_log::Verbosity::Info));
+    Ok(())
+}
+
+/// The two MCP switches, from the declaration the screen renders to the value
+/// the route will act on (§13.6).
+///
+/// What is worth driving through HTTP rather than through `sc-config`'s own
+/// tests: an installation nobody has touched serves **no** MCP server, and the
+/// switch that turns it on is a save rather than a restart — so what
+/// `mcp_settings` reads a moment later has to be what the admin just ticked.
+#[tokio::test]
+async fn saving_the_mcp_switches_opens_and_closes_the_route() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    let (status, body) = client.send("GET", "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let development = body["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == json!("development"))
+        .expect("a Development section");
+    let fields = development["fields"].as_array().unwrap();
+    for (key, default) in [
+        (MCP_ENABLED, json!(false)),
+        (MCP_LOOPBACK_ONLY, json!(true)),
+    ] {
+        let field = fields
+            .iter()
+            .find(|f| f["name"] == json!(key))
+            .unwrap_or_else(|| panic!("the {key} field"));
+        assert_eq!(field["type"], json!("bool"), "{key}");
+        assert_eq!(field["default"], default, "{key}");
+    }
+
+    // Nothing saved: off, and local-only if it were on.
+    let settings = mcp_settings(&catalog).await?;
+    assert!(!settings.enabled);
+    assert!(settings.loopback_only);
+
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": { MCP_ENABLED: true, MCP_LOOPBACK_ONLY: false }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["values"][MCP_ENABLED], json!(true));
+    let settings = mcp_settings(&catalog).await?;
+    assert!(settings.enabled);
+    assert!(!settings.loopback_only);
+
+    // And unticking it shuts the route again, which is the half that matters:
+    // a switch that only turns on is a credential surface that needs a restart
+    // to close.
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": { MCP_ENABLED: false, MCP_LOOPBACK_ONLY: Value::Null }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let settings = mcp_settings(&catalog).await?;
+    assert!(!settings.enabled);
+    assert!(settings.loopback_only);
     Ok(())
 }
 

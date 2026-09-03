@@ -39,6 +39,7 @@ import Spinner from "react-bootstrap/Spinner";
 import { api } from "../api";
 import type { GetSettingsResponse } from "../client";
 import { AlertBody, PageBody, PageHeader } from "../layout";
+import { mcpEnabled } from "../mcpTokens";
 import {
   SettingField,
   buildConfig,
@@ -47,6 +48,7 @@ import {
   type FieldSpec,
 } from "../settings";
 import { BackupTab } from "./BackupTab";
+import { McpTokensPanel } from "./McpTokens";
 import { ModulesTab } from "./ModulesTab";
 import { PythonStatusPanel } from "./PythonStatus";
 import { TestEmail } from "./TestEmail";
@@ -123,6 +125,11 @@ export function Settings() {
   // not name its own tabs.
   const [sections, setSections] = useState<Section[] | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
+  // What the server last said is *stored*, as distinct from what the form is
+  // currently showing. A panel below the form acts on the stored configuration —
+  // the MCP token panel offers to mint against a route that is either served or
+  // not — and a ticked-but-unsaved checkbox is neither.
+  const [stored, setStored] = useState<Record<string, string>>({});
   const [tab, setTab] = useState<SettingsTab>(BACKUP_TAB);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -130,8 +137,10 @@ export function Settings() {
 
   /** Take a settings response as the screen's state. */
   const adopt = (response: GetSettingsResponse, opening: boolean) => {
+    const config = readConfig(response.values);
     setSections(response.sections);
-    setValues(initialValues(allFields(response.sections), readConfig(response.values)));
+    setValues(initialValues(allFields(response.sections), config));
+    setStored(config);
     if (opening) setTab(initialTab(response.sections));
   };
 
@@ -238,7 +247,7 @@ export function Settings() {
             {/* Whatever this section has beyond its fields — the Email tab's
                 test message. Outside the form on purpose: it is a different
                 verb, and it acts on what is *stored*. */}
-            <SectionExtra name={section.name} />
+            <SectionExtra name={section.name} stored={stored} />
           </TabPanel>
         ))}
         <TabPanel id={MODULES_TAB} showing={tab}>
@@ -316,8 +325,20 @@ function SectionCard({
  * Kept to a single lookup so it is obvious what the exception costs — a section
  * with nothing here renders its form and nothing else, which is every section
  * but Email and Development. */
-function SectionExtra({ name }: { name: string }) {
+function SectionExtra({
+  name,
+  stored,
+}: {
+  name: string;
+  stored: Record<string, string>;
+}) {
   if (name === "email") return <TestEmail />;
-  if (name === "development") return <PythonStatusPanel />;
+  if (name === "development")
+    return (
+      <>
+        <PythonStatusPanel />
+        <McpTokensPanel enabled={mcpEnabled(stored)} />
+      </>
+    );
   return null;
 }

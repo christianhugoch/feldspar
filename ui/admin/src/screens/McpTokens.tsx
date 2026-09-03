@@ -1,0 +1,306 @@
+// The Development tab's second panel: the API tokens an external coding agent
+// administers this installation with (§13.6).
+//
+// It sits beside the Python reading because it is the same kind of thing — a
+// tab's worth of setting, and then the thing the setting is *for*. What is
+// deliberate about it:
+//
+// - **Nothing is offered while the server is off.** A token minted against an
+//   unticked checkbox authenticates against a route that answers 404, and an
+//   admin who finds that out has spent an afternoon on it. The switch is
+//   directly above; saying so is cheaper than a support call.
+// - **The plaintext is shown once, in a box that says so**, with the
+//   `claude mcp add` line already built around it. The credential exists in the
+//   mint response and nowhere else — the table holds a hash — so the moment it
+//   leaves this screen it is gone.
+// - **The two sentences at the bottom are load-bearing.** A token is an
+//   administrator, and revoking it is the only way to take it back. An admin who
+//   reads nothing else on this panel should read those.
+// - **Revoke, not delete.** The row stays, marked, because a revocation is a
+//   thing that happened and this list is where it is seen to have happened.
+
+import { useEffect, useState, type FormEvent } from "react";
+import Alert from "react-bootstrap/Alert";
+import Button from "react-bootstrap/Button";
+import Form from "react-bootstrap/Form";
+import Spinner from "react-bootstrap/Spinner";
+
+import { api } from "../api";
+import { AlertBody } from "../layout";
+import {
+  type ApiToken,
+  type MintForm,
+  claudeMcpAddLine,
+  emptyMint,
+  grantFields,
+  grantedKeys,
+  mcpUrl,
+  mintProblem,
+  mintRequest,
+  shortGrantLabel,
+  tokenBadge,
+  when,
+} from "../mcpTokens";
+import type { FieldSpec } from "../settings";
+
+export function McpTokensPanel({ enabled }: { enabled: boolean }) {
+  const [fields, setFields] = useState<FieldSpec[] | null>(null);
+  const [tokens, setTokens] = useState<ApiToken[] | null>(null);
+  const [form, setForm] = useState<MintForm | null>(null);
+  const [secret, setSecret] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        // The checkboxes are the copilot's own (§13.6): one vocabulary for what
+        // an agent may do, whichever kind of agent it is.
+        const spec = grantFields(await api.listAgentTraits());
+        setFields(spec);
+        setForm(emptyMint(spec));
+        setTokens(await api.listApiTokens());
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not load the API tokens.");
+      }
+    })();
+  }, []);
+
+  const problem = form ? mintProblem(form) : null;
+
+  const mint = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!form || !fields || problem) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const minted = await api.createApiToken(mintRequest(form, fields));
+      setSecret(minted.secret);
+      setCopied(false);
+      setForm(emptyMint(fields));
+      setTokens(await api.listApiTokens());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not mint the token.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async (token: ApiToken) => {
+    setError(null);
+    try {
+      await api.revokeApiToken(token.id);
+      setTokens(await api.listApiTokens());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not revoke the token.");
+    }
+  };
+
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  const command = claudeMcpAddLine(origin, secret);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+    } catch {
+      // A clipboard the browser will not hand over is not worth a banner: the
+      // line is on screen and selectable, which is the fallback.
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div className="card mb-4">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">Administration MCP tokens</h3>
+          <p className="card-subtitle text-secondary mb-0">
+            Bearer credentials for the MCP server above, so a coding agent can read and change
+            this installation's schema, triggers and applications. Each one runs with{" "}
+            <strong>your</strong> authority, bounded by the boxes ticked when it is minted.
+          </p>
+        </div>
+      </div>
+      <div className="card-body">
+        {error && (
+          <Alert variant="danger" dismissible onClose={() => setError(null)}>
+            <AlertBody>{error}</AlertBody>
+          </Alert>
+        )}
+
+        {!enabled && (
+          <Alert variant="warning">
+            <AlertBody>
+              The administration MCP server is turned off, so <code>{mcpUrl(origin)}</code>{" "}
+              answers 404 and no token is looked at. Tick{" "}
+              <strong>Administration MCP server</strong> above and save before minting one —
+              a token minted now would authenticate against nothing.
+            </AlertBody>
+          </Alert>
+        )}
+
+        {secret && (
+          <Alert variant="success">
+            <AlertBody>
+              <p className="mb-2">
+                <strong>This is the only time this token is shown.</strong> It is stored as a
+                hash, so nothing — not this screen, not the log, not the database — can read it
+                back. Copy the line below now; if you lose it, revoke the token and mint
+                another.
+              </p>
+              <pre className="border rounded p-3 mb-2 text-wrap">{command}</pre>
+              <div className="btn-list">
+                <Button variant="outline-secondary" size="sm" onClick={() => void copy()}>
+                  {copied ? "Copied" : "Copy the command"}
+                </Button>
+                <Button variant="outline-secondary" size="sm" onClick={() => setSecret(null)}>
+                  Done
+                </Button>
+              </div>
+            </AlertBody>
+          </Alert>
+        )}
+
+        {enabled && !secret && (
+          <div className="mb-3">
+            <p className="text-secondary mb-2">
+              Register this server with a coding agent by running this, with a token of its own
+              in place of the placeholder — a minted token is shown in full exactly once, and
+              this line is shown with it.
+            </p>
+            <pre className="border rounded p-3 mb-2 text-wrap">{command}</pre>
+            <Button variant="outline-secondary" size="sm" onClick={() => void copy()}>
+              {copied ? "Copied" : "Copy the command"}
+            </Button>
+          </div>
+        )}
+
+        {!form || !tokens ? (
+          !error && <Spinner animation="border" role="status" size="sm" />
+        ) : (
+          <>
+            <form onSubmit={(e) => void mint(e)}>
+              <Form.Group className="mb-3" controlId="mcp-token-label">
+                <Form.Label>Label</Form.Label>
+                <Form.Control
+                  type="text"
+                  value={form.label}
+                  placeholder="claude-code on my laptop"
+                  onChange={(e) => setForm({ ...form, label: e.target.value })}
+                />
+                <Form.Text muted>
+                  What this token is called in the log line every one of its calls writes.
+                </Form.Text>
+              </Form.Group>
+
+              <fieldset className="mb-3">
+                <legend className="form-label">This token may</legend>
+                {(fields ?? []).map((field) => (
+                  <Form.Check
+                    key={field.name}
+                    type="checkbox"
+                    id={`mcp-grant-${field.name}`}
+                    label={field.label}
+                    checked={form.grants[field.name] === true}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        grants: { ...form.grants, [field.name]: e.target.checked },
+                      })
+                    }
+                  />
+                ))}
+              </fieldset>
+
+              <Form.Group className="mb-3" controlId="mcp-token-expiry">
+                <Form.Label>Expires in (days)</Form.Label>
+                <Form.Control
+                  type="text"
+                  value={form.expiresInDays}
+                  onChange={(e) => setForm({ ...form, expiresInDays: e.target.value })}
+                />
+                <Form.Text muted>
+                  Leave empty for a token that never lapses — which is a credential nobody has
+                  to remember to take away.
+                </Form.Text>
+              </Form.Group>
+
+              {problem && form.label !== "" && (
+                <div className="text-danger mb-2">{problem}</div>
+              )}
+              <Button type="submit" variant="outline-primary" disabled={busy || !!problem}>
+                {busy ? "Minting…" : "Mint token"}
+              </Button>
+            </form>
+
+            <h4 className="mt-4 mb-2">Tokens</h4>
+            {tokens.length === 0 ? (
+              <p className="text-secondary mb-0">No tokens have been minted.</p>
+            ) : (
+              <div className="table-responsive">
+                <table className="table table-vcenter">
+                  <thead>
+                    <tr>
+                      <th>Label</th>
+                      <th>May</th>
+                      <th>Created</th>
+                      <th>Last used</th>
+                      <th>Expires</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tokens.map((token) => {
+                      const badge = tokenBadge(token);
+                      return (
+                        <tr key={token.id}>
+                          <td>
+                            {token.label}{" "}
+                            <span className={`badge ${badge.tone} ms-1`}>{badge.label}</span>
+                          </td>
+                          <td>
+                            {grantedKeys(token).map((key) => (
+                              <span className="badge bg-secondary-lt me-1" key={key}>
+                                {shortGrantLabel(key)}
+                              </span>
+                            ))}
+                          </td>
+                          <td>{when(token.created_at)}</td>
+                          <td>{when(token.last_used_at)}</td>
+                          <td>{token.expires_at ? when(token.expires_at) : "never"}</td>
+                          <td className="text-end">
+                            {token.revoked_at ? (
+                              <span className="text-secondary">
+                                revoked {when(token.revoked_at)}
+                              </span>
+                            ) : (
+                              <Button
+                                variant="outline-danger"
+                                size="sm"
+                                onClick={() => void revoke(token)}
+                              >
+                                Revoke
+                              </Button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <p className="text-secondary mt-3 mb-0">
+              A token is an administrator: it can do anything the boxes above allow, to
+              anything in this installation, for as long as it lasts. Revoking it is the only
+              way to take that back — changing your password does not.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

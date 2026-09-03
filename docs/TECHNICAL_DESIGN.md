@@ -4786,6 +4786,14 @@ containing an ungranted operation is refused **whole**, naming the operation and
 would allow it, and an area that is off takes its tools out of the listing rather than leaving
 them to be refused — because a tool a model can see is a tool it will try.
 
+The screen follows the same rule down to the label: the mint panel that sits under the
+Development section's two switches renders the **copilot trait's own `config_spec`**, fetched
+from `listAgentTraits`, rather than a second list of six sentences written in TypeScript. One
+vocabulary is not one vocabulary if the checkbox has two descriptions. The panel also builds the
+client's registration line — the transport, this server's own origin, and the token itself while
+it is still on screen — because the setup step that gets typed wrong is the one retyped from two
+places, and a token is shown exactly once.
+
 #### Bearer only, and that is the CSRF answer
 
 The route authenticates by `Authorization: Bearer` and by nothing else. **A session cookie on
@@ -4819,8 +4827,12 @@ table is what it mints into — an authentication path added, not a credential m
 
 Two `_sc_config` keys declared in the **Development** section (§6.2, beside `log_sql` and
 `log_verbosity`, whose section description already frames them as *for finding out what a
-running installation is doing, not for leaving on*): whether the server is enabled, and whether
-it accepts non-loopback peers.
+running installation is doing, not for leaving on*): `mcp_enabled`, whether the server is
+served at all, and `mcp_loopback_only`, whether it accepts non-loopback peers. Unlike the two
+logging switches they are **not** applied to process globals: the one route that enforces them
+reads them on the request that asks (`sc_config::McpSettings`), so turning the server on is a
+save rather than a restart, and a value that is not a boolean reads as the *shut* answer rather
+than as an error — a malformed row must not be a way to open an administrative surface.
 
 When it is off the route answers `404` **and the token table is not consulted** — a disabled
 feature should not be distinguishable from an absent one, and should not be a code path that
