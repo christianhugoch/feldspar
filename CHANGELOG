@@ -2,6 +2,94 @@
 
 Changes in reverse chronological order.
 
+## A Python trigger, booted and proved
+
+Phase 2.4–2.7 of the Python code adapter, which finishes phase 2: the server
+builds the adapter, the flags an operator sets reach it, and the `db` surface is
+asked its questions against a **real** database — ending with the one the
+milestone exists for, which is that the two languages answer the same rows
+because they lower to the same plan.
+
+- **2.4 was already there, and saying so is the point.** `__sc_db` — the GIL
+  released around the wait, the host call served on the caller's runtime, the
+  budget spent before anything is sent, a refusal arriving as `DbError` at the
+  call site — landed with the rest of the bridge in phase 1, because those four
+  things are one code path for all five surfaces and there was no honest way to
+  build one of them alone. What phase 2 owed it was evidence against something
+  other than a fake host, which is 2.6.
+- **`sc-server` boots it.** `python_adapter(&config)` builds the runtime from
+  this process's flags and `install_triggers_with_adapters` registers it on the
+  dispatcher — **whether or not this binary has an interpreter linked in, and
+  whether or not this process was told to start one**. That is what keeps a
+  stored Python trigger meaningful across deployments: the three cases differ
+  only in the sentence firing it answers with, and each of those sentences names
+  its own remedy (a rebuild, a restart, or nothing at all). `install_triggers`
+  keeps its signature and registers the default set, so every test, script and
+  tool that boots a dispatcher gets the same languages a server does.
+- **Nothing starts at boot.** The interpreter is the first Python body's cost,
+  exactly as the code isolate pool is the first `run_js_code` body's, and the
+  server test asserts it before it fires anything: a deployment that runs no
+  Python pays for no interpreter.
+- **The flags**, on `serve`: `--python off|auto`, `--python-max-inflight`,
+  `--python-max-stuck`, `--python-dir`, `--python-bin` — machine properties, like
+  `--code-workers` and `--modules-dir` beside them, rather than settings every
+  node against one database would share. And a `python` **feature** on
+  `sc-server` and `sc-cli`, which is the other switch and not the same one:
+  `cargo build -p sc-cli --features python` links `libpython` in, and no flag
+  adds an interpreter to a binary that has none.
+- **`--python off` is a fourth state.** §7 names three — not built, not
+  initialised, running — and they are the build and the interpreter. A process
+  that was *told* not to start one is a fourth fact with a fourth remedy, and
+  reporting it as "not initialised" would send an admin looking for the trigger
+  that has not fired yet instead of for the flag they set. `PythonState::Off`,
+  and a message naming both `--python off` and the `--python auto` that undoes
+  it. In a build with no interpreter the deeper fact still wins: the answer is
+  the one about the rebuild.
+- **The host's packages are off `sys.path`.** An embedded interpreter inherits
+  the `sys.path` of the interpreter it was linked against — on the development
+  machine, the user's `site-packages` and three `dist-packages` directories, from
+  one of which phase 0.4 watched the spike import the system's `numpy` without
+  being asked. So what a body may import would have depended on what the operator
+  had `apt install`ed. The standard library stays (it is the interpreter's own,
+  and is what the phase 4.1 import gate is about); every installed-package
+  directory goes, along with the current directory; and `--python-dir` **adds**
+  this server's own environment, computed from the *embedded* interpreter's
+  version. Creating that environment is phase 5 — this is only the path.
+- **The `db` surface, against Postgres** (`python_db_live.rs`, 9 tests, mirroring
+  `run_js_code.rs` question for question): every chain method and every terminal
+  against rows that are really there; all eleven keyword operators beside the
+  dict DSL and the formula string, choosing the same rows; a `Ⱶ`-path in a select
+  and a grouped aggregate with a `having`; `.iter()` walking twenty-five rows in
+  batches of five, stopping where the loop stops, and answering exactly what the
+  unstreamed read answers; **an insert that fires a trigger**, carrying this
+  run's caller into it; a delegated read the ownership formula divides and a
+  delegated write it refuses, caught in the body and fallen back from; a whole-
+  table `update` and `delete` refused in front of the host, with the rows checked
+  afterwards; and `db.sql` with its binds, including one that would have ended
+  the literal if it were text. `python_db.rs` still pins the *lowering* against a
+  recorder — what a recorder cannot answer is whether the plan is one this
+  server's host executes, and against which rows.
+- **The parity case (2.7).** The same question — a join path, a group, an exact
+  decimal, a scalar terminal and a delegated read — asked from a JavaScript body
+  and from a Python body, each written idiomatically in its own language, against
+  one catalog and one host. The results are compared as values and are equal.
+  This is the property the adapter shape exists for: `CodeCall` and the five host
+  traits were never JavaScript's, so a second language is a second implementation
+  of one trait and there is no second place for authority, budgets or events to
+  be decided. A disagreement here would mean one of them had grown a lowering of
+  its own.
+- Two corrections a test found. **A finished run thread now parks before its
+  answer is delivered**: the caller may dispatch its next run the instant it has
+  this one's, so a thread that had not yet pushed itself into the idle cache made
+  that run spawn a second one — harmless, but it made "a trigger firing a
+  thousand times spawns as many threads as it ever runs at once" false by a
+  thread or two, and it only appeared once the test binary had enough work in it.
+  And **the five bridge functions could not be named after their surfaces**:
+  `wrap_pyfunction!(sc_db, …)` expands to a module of that name, which is
+  ambiguous with the `sc-db` crate the moment a build has one in scope — as
+  2.6's tests do. They are `db`/`fetch`/`fs`/`trigger`/`modfn` now; the name a
+  body sees was always the `#[pyo3(name)]` attribute.
+
 ## `run_python_code`, and `db` in Python
 
 Phase 2.1–2.3 of the Python code adapter: the action an admin configures, the

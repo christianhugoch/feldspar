@@ -197,7 +197,18 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // the mounts because the mount registry carries the dispatcher: an app's
     // login and its errors raise events through the same router the admin API's
     // do.
-    let triggers = sc_server::install_triggers(&catalog, evaluator.clone(), &agents).await?;
+    // The Python adapter goes on with them (§15): built here because the bounds
+    // are this process's flags, registered whether or not this binary has an
+    // interpreter linked in, and starting nothing — the interpreter is the first
+    // Python body's cost, exactly as the code isolate pool is the first
+    // `run_js_code` body's.
+    let triggers = sc_server::install_triggers_with_adapters(
+        &catalog,
+        evaluator.clone(),
+        &agents,
+        [sc_server::python_adapter(&config)],
+    )
+    .await?;
 
     // Modules: every installed v1 plugin loaded onto the module worker pool, its actions
     // added to the registry the dispatcher just took, and the trigger set
@@ -1021,6 +1032,16 @@ fn print_usage() {
     --code-max-inflight N    runs each of those isolates keeps resident (default 256)
     --modules-dir PATH       where modules are installed (default: the platform's
                              data directory, e.g. ~/.local/share/feldspar/modules)"
+    );
+    eprintln!(
+        "    --python auto|off        whether this process starts its Python interpreter
+                             (default auto: started by the first Python body, and
+                             never in a binary built without the `python` feature)
+    --python-max-inflight N  Python runs resident at once (default 32)
+    --python-max-stuck N     runs that never returned before Python is refused
+                             until a restart (default 8)
+    --python-dir PATH        the virtual environment Python modules install into
+    --python-bin PATH        the interpreter pip runs under (default python3)"
     );
     eprintln!();
     eprintln!(

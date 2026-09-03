@@ -351,33 +351,37 @@ fn refusal(error: &Error) -> String {
     error.to_string()
 }
 
+// Each of the five is named for its surface rather than for the Python name it
+// is bound under: `wrap_pyfunction!` expands to a module of the same name, and a
+// `sc_db` here would be ambiguous with the `sc-db` crate in any build that has
+// one in scope. The name a body sees is the `#[pyo3(name)]` attribute.
 #[pyfunction]
 #[pyo3(name = "__sc_db")]
-fn sc_db(py: Python<'_>, plan: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+fn db(py: Python<'_>, plan: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     call(py, Surface::Db, plan)
 }
 
 #[pyfunction]
 #[pyo3(name = "__sc_fetch")]
-fn sc_fetch(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+fn fetch(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     call(py, Surface::Fetch, request)
 }
 
 #[pyfunction]
 #[pyo3(name = "__sc_fs")]
-fn sc_fs(py: Python<'_>, op: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+fn fs(py: Python<'_>, op: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     call(py, Surface::Files, op)
 }
 
 #[pyfunction]
 #[pyo3(name = "__sc_trigger")]
-fn sc_trigger(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+fn trigger(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     call(py, Surface::Triggers, request)
 }
 
 #[pyfunction]
 #[pyo3(name = "__sc_modfn")]
-fn sc_modfn(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+fn modfn(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     call(py, Surface::ModuleFns, request)
 }
 
@@ -388,11 +392,11 @@ fn sc_modfn(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 #[pyo3(name = "__sc")]
 pub(crate) fn sc_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
-    m.add_function(wrap_pyfunction!(sc_db, m)?)?;
-    m.add_function(wrap_pyfunction!(sc_fetch, m)?)?;
-    m.add_function(wrap_pyfunction!(sc_fs, m)?)?;
-    m.add_function(wrap_pyfunction!(sc_trigger, m)?)?;
-    m.add_function(wrap_pyfunction!(sc_modfn, m)?)?;
+    m.add_function(wrap_pyfunction!(db, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch, m)?)?;
+    m.add_function(wrap_pyfunction!(fs, m)?)?;
+    m.add_function(wrap_pyfunction!(trigger, m)?)?;
+    m.add_function(wrap_pyfunction!(modfn, m)?)?;
     m.add("SaltcornError", py.get_type::<SaltcornError>())?;
     m.add("DbError", py.get_type::<DbError>())?;
     m.add("FetchError", py.get_type::<FetchError>())?;

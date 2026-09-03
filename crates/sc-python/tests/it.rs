@@ -12,6 +12,10 @@
 mod python_db;
 
 #[cfg(feature = "python-host")]
+#[path = "python_db_live.rs"]
+mod python_db_live;
+
+#[cfg(feature = "python-host")]
 #[path = "python_runtime.rs"]
 mod python_runtime;
 

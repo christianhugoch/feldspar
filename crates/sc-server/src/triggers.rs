@@ -50,6 +50,32 @@ pub async fn install_triggers(
     evaluator: Arc<dyn JsEvaluator>,
     agents: &AgentServices,
 ) -> Result<Arc<TriggerDispatcher>> {
+    install_triggers_with_adapters(
+        catalog,
+        evaluator,
+        agents,
+        [crate::default_python_adapter()],
+    )
+    .await
+}
+
+/// [`install_triggers`], with the guest-language adapters this process built
+/// from its own flags (§15's seam).
+///
+/// The two exist because the knobs are a **process's**, not an installation's:
+/// `serve` has parsed `--python`, `--python-max-inflight` and the rest and hands
+/// the adapter it built, while every other caller — a test, a script, a tool
+/// that boots a dispatcher to fire one trigger — wants the same set with the
+/// defaults and no configuration to write. Neither is the "real" one: what makes
+/// them the same boot is that both register an adapter for every language this
+/// binary knows, so a stored Python trigger means the same thing in a test as in
+/// production and fails, where it cannot run, with a sentence naming why.
+pub async fn install_triggers_with_adapters(
+    catalog: &Arc<Catalog>,
+    evaluator: Arc<dyn JsEvaluator>,
+    agents: &AgentServices,
+    adapters: impl IntoIterator<Item = Arc<dyn sc_expr::CodeAdapter>>,
+) -> Result<Arc<TriggerDispatcher>> {
     bootstrap_triggers(catalog)
         .await
         .context("ensuring the triggers table exists")?;
@@ -71,11 +97,17 @@ pub async fn install_triggers(
     // installation sends no mail" is a message for the trigger that tries to,
     // not a reason to start the server without a mailer.
     let mailer = Arc::new(sc_email::SettingsMailer::new(Arc::clone(catalog)));
-    let dispatcher = Arc::new(
-        TriggerDispatcher::new(Arc::new(registry))
-            .with_evaluator(evaluator)
-            .with_mailer(mailer),
-    );
+    // The other languages a code body may be written in, each registered under
+    // its own name (§15). JavaScript is deliberately not among them: it is the
+    // evaluator above, which is also what carries the formula isolate, and a
+    // second way in would be two answers to which engine runs a JavaScript body.
+    let mut dispatcher = TriggerDispatcher::new(Arc::new(registry))
+        .with_evaluator(evaluator)
+        .with_mailer(mailer);
+    for adapter in adapters {
+        dispatcher = dispatcher.with_adapter(adapter);
+    }
+    let dispatcher = Arc::new(dispatcher);
     dispatcher
         .reload(catalog)
         .await

@@ -985,20 +985,60 @@ Two corrections the phase forced, both found by a test rather than by reading:
 - [x] 2.3 The Python `saltcorn` package, shipped in the binary and installed by a meta-path loader:
       the `db` handle, the query builder, the plan lowering, `db.sql`, `as_user`/`as_admin`,
       `.iter()` as a generator and `__iter__` on the query.
-- [ ] 2.4 The `__sc_db` bridge function: GIL released, host call awaited on the runtime, budget
+- [x] 2.4 The `__sc_db` bridge function: GIL released, host call awaited on the runtime, budget
       counted, `DbError` raised on refusal.
-- [ ] 2.5 `sc-server`: build the adapter at boot but **initialise the interpreter lazily**, as the
+- [x] 2.5 `sc-server`: build the adapter at boot but **initialise the interpreter lazily**, as the
       code isolate pool already is — a server that fires no Python body and loads no Python module
       pays for no interpreter. Knobs: `--python off|auto` (§7), `--python-max-inflight`,
       `--python-max-stuck`, `--python-dir`, `--python-bin`. A `python` feature on `sc-server` and
       `sc-cli` that turns on `sc-python/python-host`, so there is one name an operator builds with.
-- [ ] 2.6 Tests (`sc-python`, against a real database, mirroring `run_js_code.rs`): every chain
+- [x] 2.6 Tests (`sc-python`, against a real database, mirroring `run_js_code.rs`): every chain
       method and terminal; the two `where` spellings and the kwarg operators; a `Ⱶ`-path in a
       select; an aggregate with a group; `.iter()` walking more rows than one batch; an insert
       that fires a second trigger; a delegated read an ownership formula refuses, caught in the
       body; `.update()` without a `.where()` refused; `db.sql` with binds.
-- [ ] 2.7 Test: the parity case — the same question asked from a JavaScript body and a Python body
+- [x] 2.7 Test: the parity case — the same question asked from a JavaScript body and a Python body
       produces the same rows, because it produces the same plan.
+
+### What phase 2 landed, and the two things it had to change
+
+The seam of 2.4 was already there — phase 1 built `__sc_db` with the rest of the
+bridge, because the GIL release, the bounded wait and the budget are one code
+path for all five surfaces and there was no honest way to write one of them
+alone. So what this half of the phase added is the **boot** and the **evidence**:
+`--python off|auto` and the four other knobs, the `python` feature on `sc-server`
+and `sc-cli`, and 14 new tests — 9 of them against a real database, and 2 of them
+booting the assembled server.
+
+The gate's third amendment landed here too, where phase 0.4 assigned it:
+`--python-dir` **isolates** `sys.path` rather than prepending to it. The embedded
+interpreter inherited the host's — `~/.local/lib/python3.14/site-packages` and
+three `dist-packages` directories on this machine — so every installed-package
+directory and the current directory now come off it at boot, the standard library
+stays, and the environment's own `site-packages` is added from the *embedded*
+interpreter's version. Creating that environment is still phase 5.
+
+`PythonState` grew a fourth state, `Off`. §7 names three, and they are the build
+and the interpreter; the flag is a fourth fact with a fourth remedy, and a
+process started with `--python off` reported as "not initialised" would send an
+admin looking for the trigger that has not fired yet rather than for the flag
+they set.
+
+Two corrections a test found:
+
+1. **A finished run thread must park before its answer is delivered.** The caller
+   may dispatch its next run the instant it has this one's answer — a trigger
+   fired in a loop does exactly that — and a thread that had not yet pushed
+   itself into the idle cache made that run spawn a second one. Harmless, but it
+   made "a trigger firing a thousand times spawns as many threads as it ever runs
+   at once" false by a thread or two, and it only showed under load: the
+   assertion in `a_body_is_compiled_once_however_often_it_is_fired` failed the
+   moment the test binary had more work in it. Park, then answer.
+2. **The five bridge functions could not be named after their surfaces.**
+   `wrap_pyfunction!(sc_db, …)` expands to a module of that name, which is
+   ambiguous with the `sc-db` crate in any build that has one in scope — and
+   2.6's tests put one in scope. They are `db`/`fetch`/`fs`/`trigger`/`modfn`
+   now; the name a body sees was always the `#[pyo3(name)]` attribute.
 
 ## Phase 3 — `fetch`, `fs`, `trigger`, `modfn`
 

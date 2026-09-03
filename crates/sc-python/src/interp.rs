@@ -37,6 +37,7 @@ use pyo3::types::{PyDict, PyModule};
 use sc_error::{Error, Result};
 use serde_json::Value as Json;
 
+use crate::PythonEnv;
 use crate::bridge::{self, RunState, Surface};
 use crate::convert;
 use crate::errors::Timeout;
@@ -123,14 +124,14 @@ impl BodyCache {
 /// interpreter that would not start will not start on the next trigger either,
 /// and re-trying it once per fire would turn one bad configuration into a
 /// per-request cost.
-pub(crate) fn ensure() -> Result<String> {
+pub(crate) fn ensure(env: &PythonEnv) -> Result<String> {
     let outcome = START.get_or_init(|| {
         // Before `initialize`, which is the only time an inittab entry can be
         // added: this is what makes `__sc` a **built-in** module rather than
         // something on a path.
         pyo3::append_to_inittab!(sc_module);
         Python::initialize();
-        Python::attach(boot).map_err(|e| e.to_string())
+        Python::attach(|py| boot(py, env)).map_err(|e| e.to_string())
     });
     match outcome {
         Ok(version) => Ok(version.clone()),
@@ -152,7 +153,11 @@ pub(crate) fn started() -> Option<String> {
 use crate::bridge::sc_module;
 
 /// Everything that happens once, with the interpreter freshly up.
-fn boot(py: Python<'_>) -> PyResult<String> {
+///
+/// `env` is the environment of whichever runtime got here first, which is the
+/// honest shape: there is one interpreter per process, so there is one
+/// `sys.path`, and the second runtime to ask for it gets the first one's.
+fn boot(py: Python<'_>, env: &PythonEnv) -> PyResult<String> {
     let module = PyModule::from_code(
         py,
         std::ffi::CString::new(BOOT)
@@ -178,7 +183,70 @@ fn boot(py: Python<'_>) -> PyResult<String> {
     let major: u32 = info.getattr("major")?.extract()?;
     let minor: u32 = info.getattr("minor")?.extract()?;
     let micro: u32 = info.getattr("micro")?.extract()?;
+    isolate_path(py, env, major, minor)?;
     Ok(format!("{major}.{minor}.{micro}"))
+}
+
+/// The directory an installed package lives in, under a virtual environment
+/// this server owns.
+///
+/// Computed from the **embedded** interpreter's version, because that is the one
+/// that will import what is there — and the version of the `python3` that built
+/// the environment may not be it, which is exactly the mismatch §9's ABI check
+/// (phase 5.2) exists to refuse.
+fn site_packages(dir: &std::path::Path, major: u32, minor: u32) -> std::path::PathBuf {
+    if cfg!(windows) {
+        dir.join("Lib").join("site-packages")
+    } else {
+        dir.join("lib")
+            .join(format!("python{major}.{minor}"))
+            .join("site-packages")
+    }
+}
+
+/// Take the **host's** installed packages off `sys.path`, and put this server's
+/// environment on it.
+///
+/// An embedded interpreter inherits the `sys.path` of the interpreter it was
+/// linked against, which on this machine means three `dist-packages`
+/// directories and the user's own `site-packages` (phase 0.4, which found the
+/// spike importing the system's `numpy` without being asked). Left alone, what a
+/// Python body may import would depend on what the operator happened to
+/// `apt install` — so the amendment the gate made to §9 is that `--python-dir`
+/// **isolates** rather than prepends.
+///
+/// What stays is the standard library, which is the interpreter's own and is
+/// where the phase 4.1 import gate does its work. What goes is every installed
+/// package directory, and the current directory with them: a body that could
+/// import from wherever the server was started would be a different program per
+/// deployment.
+///
+/// Creating the environment and installing into it is phase 5; this is only the
+/// path, so a directory that does not exist yet is harmless — `sys.path` may
+/// name one, and `pip` will fill it in.
+fn isolate_path(py: Python<'_>, env: &PythonEnv, major: u32, minor: u32) -> PyResult<()> {
+    let sys = py.import("sys")?;
+    let path = sys.getattr("path")?;
+    let existing: Vec<String> = path.extract()?;
+    let mut kept: Vec<String> = existing
+        .into_iter()
+        .filter(|entry| {
+            let trimmed = entry.trim_end_matches('/');
+            !(trimmed.is_empty()
+                || trimmed == "."
+                || trimmed.ends_with("/site-packages")
+                || trimmed.ends_with("/dist-packages"))
+        })
+        .collect();
+    if let Some(dir) = env.dir.as_deref() {
+        kept.push(
+            site_packages(dir, major, minor)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    sys.setattr("path", kept)?;
+    Ok(())
 }
 
 /// The `saltcorn` package, for the caller that binds a run's globals.
@@ -426,4 +494,29 @@ fn py_error(py: Python<'_>, error: &PyErr) -> Error {
         "the Python runtime failed: {}",
         rendered(py, error, "")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The environment's packages go where a virtual environment puts them, and
+    /// under the **embedded** interpreter's version — the one that will import
+    /// them, which is not necessarily the `python3` that built the environment.
+    #[test]
+    fn the_environment_directory_is_where_a_venv_puts_its_packages() {
+        let dir = std::path::Path::new("/srv/feldspar/python");
+        let found = site_packages(dir, 3, 13);
+        if cfg!(windows) {
+            assert!(found.ends_with("Lib/site-packages") || found.ends_with("Lib\\site-packages"));
+        } else {
+            assert_eq!(
+                found,
+                std::path::Path::new("/srv/feldspar/python/lib/python3.13/site-packages")
+            );
+        }
+        // A different embedded version is a different directory, which is the
+        // mismatch phase 5.2's ABI check refuses rather than segfaults on.
+        assert_ne!(found, site_packages(dir, 3, 14));
+    }
 }

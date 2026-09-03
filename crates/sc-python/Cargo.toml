@@ -51,6 +51,27 @@ pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Phase 2.6 asks the `db` surface the same questions `run_js_code.rs` asks, and
+# asks them of a **real** database: the lowering is already pinned against a
+# recorder (`python_db.rs`), and what a recorder cannot answer is whether the
+# plan a chain lowers to is one this server's host actually executes. So the
+# tests hold the production pieces — the catalog, the Postgres driver, the
+# `TableHost` an action builds, the dispatcher a write's event reaches — and the
+# harness that gives each of them a database of its own.
+sc-test-harness.workspace = true
+sc-catalog.workspace = true
+sc-db.workspace = true
+sc-db-postgres.workspace = true
+sc-api.workspace = true
+sc-action.workspace = true
+sc-types.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+# `features = ["eval"]` here and nowhere else in this crate: an **ownership
+# formula** is JavaScript (§7.3), so a delegated read is decided on the V8
+# isolate while the Python run waits — and phase 2.7's parity case runs the same
+# question as a JavaScript body, which needs the engine that runs one.
+sc-expr = { workspace = true, features = ["eval"] }
 
 [lints]
 workspace = true

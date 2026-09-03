@@ -81,6 +81,8 @@ mod ownership_settings_api;
 mod primary_key_api;
 #[path = "provided_tables_api.rs"]
 mod provided_tables_api;
+#[path = "python_trigger.rs"]
+mod python_trigger;
 #[path = "rls_enforcement.rs"]
 mod rls_enforcement;
 #[path = "router.rs"]

@@ -158,8 +158,9 @@ impl Inner {
         self: &Arc<Inner>,
         call: CodeCall<'_>,
         default_timeout: Duration,
+        env: &crate::PythonEnv,
     ) -> Result<Json> {
-        interp::ensure()?;
+        interp::ensure(env)?;
         let timeout = call
             .timeout
             .unwrap_or(default_timeout)
@@ -366,7 +367,13 @@ impl Drop for Inner {
     }
 }
 
-/// One run thread: attach, run, hand the answer back, park.
+/// One run thread: attach, run, park, hand the answer back.
+///
+/// **Park before answering.** The caller may dispatch its next run the instant
+/// it has this one's answer — a trigger fired in a loop does exactly that — and
+/// a thread that has not yet said it is free would make that run spawn a second
+/// one. The job channel is unbounded, so a run handed to a thread that is still
+/// inside this iteration simply waits in its inbox for the next `recv`.
 fn thread_loop(inbox: &Receiver<Job>, mine: &Sender<Job>, owner: &Weak<Inner>) {
     while let Ok(Job::Run(job)) = inbox.recv() {
         job.shared.ident.store(my_ident(), Ordering::Release);
@@ -376,6 +383,17 @@ fn thread_loop(inbox: &Receiver<Job>, mine: &Sender<Job>, owner: &Weak<Inner>) {
         if job.shared.fired.load(Ordering::Acquire) {
             interp::drain_async_exception();
         }
+        // Park, unless there is nobody left to be parked for.
+        let parked = match owner.upgrade() {
+            Some(inner) if !inner.shutdown.load(Ordering::SeqCst) => match inner.idle.lock() {
+                Ok(mut idle) => {
+                    idle.push(IdleThread { jobs: mine.clone() });
+                    true
+                }
+                Err(_) => false,
+            },
+            _ => false,
+        };
         if job.shared.abandoned.load(Ordering::Acquire) {
             // Back from the dead: the caller gave up and counted this thread as
             // stuck, and it is not stuck after all.
@@ -385,13 +403,8 @@ fn thread_loop(inbox: &Receiver<Job>, mine: &Sender<Job>, owner: &Weak<Inner>) {
         } else {
             let _ = job.reply.send(outcome);
         }
-        // Park, unless there is nobody left to be parked for.
-        match owner.upgrade() {
-            Some(inner) if !inner.shutdown.load(Ordering::SeqCst) => match inner.idle.lock() {
-                Ok(mut idle) => idle.push(IdleThread { jobs: mine.clone() }),
-                Err(_) => break,
-            },
-            _ => break,
+        if !parked {
+            break;
         }
     }
     if let Some(inner) = owner.upgrade() {

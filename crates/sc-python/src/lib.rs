@@ -124,13 +124,21 @@ pub const DEFAULT_MAX_STUCK: usize = 8;
 /// exists for the runs none of them can reach.
 pub const CALLER_GRACE: Duration = Duration::from_millis(250);
 
-/// Which of the three states of §7 this process is in — the question behind "why
-/// does my Python trigger not work", which has three different answers.
+/// Which of the states of §7 this process is in — the question behind "why does
+/// my Python trigger not work", which has more than one answer.
+///
+/// Three of them are §7's own, and they are the build and the interpreter. The
+/// fourth is the **flag**: a Python-capable binary that was told not to start an
+/// interpreter is a different fact from one that has not needed to yet, and an
+/// admin who cannot tell them apart would go looking for the wrong fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PythonState {
     /// This binary was built without the `python-host` feature. No flag changes
     /// it; a Python-capable server is a different build.
     NotBuilt,
+    /// Built with Python, and started with `--python off`. A restart with
+    /// `--python auto` changes it; nothing else does.
+    Off,
     /// Built with Python, and the interpreter has not been needed yet.
     NotInitialised,
     /// Running, with the interpreter's version.
@@ -140,6 +148,24 @@ pub enum PythonState {
     },
 }
 
+/// Where this server's Python environment is, and which interpreter builds it —
+/// `--python-dir` and `--python-bin` (§9).
+///
+/// Held here from phase 2.5 so that the flags an operator sets and the values
+/// the installer reads are one thing rather than a setting invented twice; the
+/// virtual environment itself, the `pip` calls into it and the ABI check between
+/// the two interpreters are phase 5.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PythonEnv {
+    /// The virtual environment this server owns and installs Python modules
+    /// into. `None` is the platform's data directory, beside the modules root.
+    pub dir: Option<std::path::PathBuf>,
+    /// The **external** interpreter `pip` runs under. `None` is `python3` on the
+    /// path. It is not the interpreter the code runs on — that one is linked in
+    /// — which is exactly why §9's ABI check compares the two.
+    pub bin: Option<std::path::PathBuf>,
+}
+
 /// The Python runtime: one interpreter, a run per thread, one admission bound.
 ///
 /// Constructing one is free and starts nothing — the interpreter is started by
@@ -147,6 +173,9 @@ pub enum PythonState {
 /// server that would rather pay at boot and say so.
 pub struct PythonRuntime {
     default_timeout: Duration,
+    /// `--python auto` (the default) or `--python off`. See [`PythonState::Off`].
+    enabled: bool,
+    env: PythonEnv,
     #[cfg(feature = "python-host")]
     inner: std::sync::Arc<runtime::Inner>,
 }
@@ -166,6 +195,8 @@ impl PythonRuntime {
         let _ = (max_inflight, max_stuck);
         PythonRuntime {
             default_timeout: DEFAULT_CODE_TIMEOUT,
+            enabled: true,
+            env: PythonEnv::default(),
             #[cfg(feature = "python-host")]
             inner: std::sync::Arc::new(runtime::Inner::new(max_inflight, max_stuck)),
         }
@@ -179,6 +210,33 @@ impl PythonRuntime {
         self
     }
 
+    /// `--python off`: this process will not start the interpreter it has.
+    ///
+    /// The adapter is still registered and a Python trigger is still a
+    /// meaningful configuration — what changes is that every entry point answers
+    /// with the flag that turned it off, rather than with a missing action or a
+    /// running interpreter. That is the same reason a build without the feature
+    /// registers one.
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> PythonRuntime {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Where the environment is and what builds it (`--python-dir`,
+    /// `--python-bin`).
+    #[must_use]
+    pub fn with_env(mut self, env: PythonEnv) -> PythonRuntime {
+        self.env = env;
+        self
+    }
+
+    /// The environment this runtime was configured with.
+    #[must_use]
+    pub fn env(&self) -> &PythonEnv {
+        &self.env
+    }
+
     /// Start the interpreter now rather than at the first run, and answer its
     /// version.
     ///
@@ -188,7 +246,8 @@ impl PythonRuntime {
     pub fn initialise(&self) -> Result<String> {
         #[cfg(feature = "python-host")]
         {
-            interp::ensure()
+            self.admit()?;
+            interp::ensure(&self.env)
         }
         #[cfg(not(feature = "python-host"))]
         {
@@ -196,14 +255,30 @@ impl PythonRuntime {
         }
     }
 
-    /// Which of §7's three states this process is in.
+    /// Whether this process will start an interpreter at all — the one check
+    /// every entry point makes before it does anything.
+    #[cfg(feature = "python-host")]
+    fn admit(&self) -> Result<()> {
+        if self.enabled {
+            Ok(())
+        } else {
+            Err(turned_off())
+        }
+    }
+
+    /// Which state this process is in — the build, the flag, the interpreter.
     #[must_use]
     pub fn state(&self) -> PythonState {
         #[cfg(feature = "python-host")]
         {
-            match interp::started() {
-                Some(version) => PythonState::Running { version },
-                None => PythonState::NotInitialised,
+            match (self.enabled, interp::started()) {
+                // The flag is asked before the interpreter, and it is not the
+                // same question: `--python off` on a process that never fired a
+                // Python body would otherwise read as "not needed yet", and the
+                // remedy for the two is different.
+                (false, _) => PythonState::Off,
+                (true, Some(version)) => PythonState::Running { version },
+                (true, None) => PythonState::NotInitialised,
             }
         }
         #[cfg(not(feature = "python-host"))]
@@ -244,7 +319,8 @@ impl PythonRuntime {
     pub async fn run(&self, call: CodeCall<'_>) -> Result<Json> {
         #[cfg(feature = "python-host")]
         {
-            self.inner.run(call, self.default_timeout).await
+            self.admit()?;
+            self.inner.run(call, self.default_timeout, &self.env).await
         }
         #[cfg(not(feature = "python-host"))]
         {
@@ -282,5 +358,19 @@ fn not_built() -> sc_error::Error {
          `python` feature, so it has no interpreter linked in and no flag can turn one \
          on. A Python-capable server is a separate build (`cargo build -p sc-server \
          --features python`), which requires libpython on the host.",
+    )
+}
+
+/// The one sentence a process started with `--python off` answers with.
+///
+/// A different sentence from [`not_built`] because it is a different fact with a
+/// different remedy: this binary has an interpreter and was told not to start
+/// one, so the fix is a restart rather than a rebuild.
+#[cfg(feature = "python-host")]
+fn turned_off() -> sc_error::Error {
+    sc_error::Error::config(
+        "this server was started with `--python off`, so it will not start an \
+         interpreter and will not run Python code. Restart it with `--python auto` \
+         (the default) to run this trigger.",
     )
 }

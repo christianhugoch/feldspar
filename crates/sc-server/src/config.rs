@@ -13,6 +13,21 @@ use sc_error::{Error, Result};
 
 use crate::tls::TlsSettings;
 
+/// What `--python` was set to: whether this process starts the interpreter it
+/// has (§7's second switch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PythonMode {
+    /// The default: start the interpreter when something first needs it, and not
+    /// before. A server that fires no Python body and loads no Python module
+    /// never starts one, exactly as the code isolate pool is never built.
+    #[default]
+    Auto,
+    /// Do not start one at all. For an operator who has a Python-capable binary
+    /// and wants this deployment not to run Python — the Python trigger then
+    /// fails naming the flag.
+    Off,
+}
+
 /// Default address the server binds when `--bind` is not given.
 pub const DEFAULT_BIND: &str = "127.0.0.1:3032";
 
@@ -90,6 +105,36 @@ pub struct ServerConfig {
     /// *this machine* — which disk has room, which directory the service
     /// account may write — and not of the installation every node shares.
     pub modules_dir: Option<PathBuf>,
+    /// Whether this process may **start** the Python interpreter it was built
+    /// with (`--python off|auto`, default `auto`).
+    ///
+    /// Not whether it *has* one: that is a Cargo feature and a rebuild (§7). A
+    /// binary built without `python` has no interpreter and no flag adds one; a
+    /// binary built with it registers `run_python_code` either way, so what
+    /// `--python off` changes is the sentence a Python trigger fails with — the
+    /// flag, rather than a missing action.
+    pub python: PythonMode,
+    /// How many Python runs may be resident at once (`--python-max-inflight`),
+    /// and how many stuck threads are tolerated (`--python-max-stuck`).
+    ///
+    /// One admission bound over one interpreter, so this is the Python
+    /// counterpart of `--code-max-inflight` and not of `--code-workers`: there
+    /// is no second interpreter to run. A resident run costs a thread (about
+    /// 40 KB), which is why the default is small and raising it is cheap.
+    pub python_max_inflight: usize,
+    /// Stuck run threads tolerated before new runs are refused — see
+    /// [`python_max_inflight`].
+    ///
+    /// [`python_max_inflight`]: ServerConfig::python_max_inflight
+    pub python_max_stuck: usize,
+    /// The virtual environment Python modules are installed into
+    /// (`--python-dir`), and the external interpreter `pip` runs under
+    /// (`--python-bin`) — §9's two halves, which are a machine's properties for
+    /// the reason `--modules-dir` is.
+    ///
+    /// `None` in either is the default: the platform data directory beside the
+    /// modules root, and `python3` on the path.
+    pub python_env: sc_python::PythonEnv,
     /// How this server obtains the certificate it serves HTTPS with (§13.5).
     ///
     /// **Not a command-line setting**, deliberately: certificates are edited in
@@ -117,6 +162,10 @@ impl Default for ServerConfig {
             code_max_inflight: sc_expr::DEFAULT_MAX_INFLIGHT,
             module_workers: sc_module::DEFAULT_MODULE_WORKERS,
             modules_dir: None,
+            python: PythonMode::Auto,
+            python_max_inflight: sc_python::DEFAULT_MAX_INFLIGHT,
+            python_max_stuck: sc_python::DEFAULT_MAX_STUCK,
+            python_env: sc_python::PythonEnv::default(),
             tls: TlsSettings::Off,
         }
     }
@@ -127,8 +176,10 @@ impl ServerConfig {
     ///
     /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
     /// `--session-ttl-hours <n>`, `--secure-cookies`, `--base-domain <domain>`,
-    /// `--code-workers <n>`, `--code-max-inflight <n>`, `--module-workers <n>`
-    /// and `--modules-dir <path>`. Unknown flags are an
+    /// `--code-workers <n>`, `--code-max-inflight <n>`, `--module-workers <n>`,
+    /// `--modules-dir <path>`, `--python <auto|off>`,
+    /// `--python-max-inflight <n>`, `--python-max-stuck <n>`,
+    /// `--python-dir <path>` and `--python-bin <path>`. Unknown flags are an
     /// [`Error::Config`], so a typo fails loudly rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
     where
@@ -172,6 +223,38 @@ impl ServerConfig {
                 }
                 "--modules-dir" => {
                     cfg.modules_dir = Some(PathBuf::from(next_value(&mut it, "--modules-dir")?));
+                }
+                "--python" => {
+                    let raw = next_value(&mut it, "--python")?;
+                    cfg.python = match raw.as_str() {
+                        "auto" => PythonMode::Auto,
+                        "off" => PythonMode::Off,
+                        other => {
+                            return Err(Error::config(format!(
+                                "invalid --python `{other}`: expected `auto` or `off`. \
+                                 Whether this server *has* Python is a build-time feature, \
+                                 not a flag."
+                            )));
+                        }
+                    };
+                }
+                "--python-max-inflight" => {
+                    cfg.python_max_inflight = positive(
+                        &next_value(&mut it, "--python-max-inflight")?,
+                        "--python-max-inflight",
+                    )?;
+                }
+                "--python-max-stuck" => {
+                    cfg.python_max_stuck = positive(
+                        &next_value(&mut it, "--python-max-stuck")?,
+                        "--python-max-stuck",
+                    )?;
+                }
+                "--python-dir" => {
+                    cfg.python_env.dir = Some(PathBuf::from(next_value(&mut it, "--python-dir")?));
+                }
+                "--python-bin" => {
+                    cfg.python_env.bin = Some(PathBuf::from(next_value(&mut it, "--python-bin")?));
                 }
                 "--secure-cookies" => cfg.secure_cookies = true,
                 "--base-domain" => {
@@ -230,6 +313,12 @@ mod tests {
         // Modules land in the platform's data directory unless this machine
         // says otherwise.
         assert!(cfg.modules_dir.is_none());
+        // Python: started when something needs it, with the runtime's own
+        // bounds and its own environment defaults.
+        assert_eq!(cfg.python, PythonMode::Auto);
+        assert_eq!(cfg.python_max_inflight, sc_python::DEFAULT_MAX_INFLIGHT);
+        assert_eq!(cfg.python_max_stuck, sc_python::DEFAULT_MAX_STUCK);
+        assert_eq!(cfg.python_env, sc_python::PythonEnv::default());
     }
 
     #[test]
@@ -252,6 +341,16 @@ mod tests {
             "3",
             "--modules-dir",
             "/srv/modules",
+            "--python",
+            "off",
+            "--python-max-inflight",
+            "8",
+            "--python-max-stuck",
+            "2",
+            "--python-dir",
+            "/srv/python",
+            "--python-bin",
+            "/usr/bin/python3.12",
         ])
         .expect("parse");
         assert_eq!(cfg.addr.to_string(), "0.0.0.0:8080");
@@ -269,6 +368,41 @@ mod tests {
             cfg.modules_dir.as_deref(),
             Some(std::path::Path::new("/srv/modules"))
         );
+        assert_eq!(cfg.python, PythonMode::Off);
+        assert_eq!(cfg.python_max_inflight, 8);
+        assert_eq!(cfg.python_max_stuck, 2);
+        assert_eq!(
+            cfg.python_env.dir.as_deref(),
+            Some(std::path::Path::new("/srv/python"))
+        );
+        assert_eq!(
+            cfg.python_env.bin.as_deref(),
+            Some(std::path::Path::new("/usr/bin/python3.12"))
+        );
+    }
+
+    /// `--python` takes one of two words, and neither of them is the *build*
+    /// decision: an operator who writes `--python on` against a binary with no
+    /// interpreter in it must be told that here rather than at the first
+    /// trigger.
+    #[test]
+    fn the_python_switch_is_auto_or_off_and_says_so() {
+        assert_eq!(
+            ServerConfig::from_args(["--python", "auto"])
+                .expect("parse")
+                .python,
+            PythonMode::Auto
+        );
+        let said = ServerConfig::from_args(["--python", "on"])
+            .expect_err("`on` is not one of the two")
+            .to_string();
+        assert!(said.contains("auto"), "{said}");
+        assert!(said.contains("build-time feature"), "{said}");
+        assert!(ServerConfig::from_args(["--python"]).is_err());
+        // Zero resident runs would serve nothing, exactly as zero isolates
+        // would; the runtime clamps it, so a `0` here is refused.
+        assert!(ServerConfig::from_args(["--python-max-inflight", "0"]).is_err());
+        assert!(ServerConfig::from_args(["--python-max-stuck", "lots"]).is_err());
     }
 
     /// Both code-pool counts are clamped to at least one by the pool itself, so

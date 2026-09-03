@@ -71,7 +71,34 @@ pub fn js_evaluator(config: &ServerConfig) -> std::sync::Arc<dyn sc_expr::JsEval
             .with_max_inflight(config.code_max_inflight),
     )
 }
-pub use config::{DEFAULT_BIND, ServerConfig};
+/// The server's **Python** adapter: the runtime a `run_python_code` body runs
+/// on, with this process's knobs applied (§15, §7).
+///
+/// Built at boot and registered on the dispatcher by [`install_triggers`] —
+/// whether or not this binary has an interpreter linked in, and whether or not
+/// this process was started with `--python off`. Registering it either way is
+/// what keeps a Python trigger's stored configuration meaningful across
+/// deployments: what changes between the three cases is the sentence firing it
+/// answers with, and every one of those sentences names its own remedy.
+///
+/// Constructing one starts nothing. The interpreter is started by the first body
+/// that needs it, exactly as the code isolate pool is built by the first
+/// `run_js_code` — so a server that fires no Python pays for no interpreter.
+pub fn python_adapter(config: &ServerConfig) -> std::sync::Arc<dyn sc_expr::CodeAdapter> {
+    std::sync::Arc::new(
+        sc_python::PythonRuntime::with_bounds(config.python_max_inflight, config.python_max_stuck)
+            .with_enabled(config.python == config::PythonMode::Auto)
+            .with_env(config.python_env.clone()),
+    )
+}
+
+/// The Python adapter with this process's defaults — [`python_adapter`] of a
+/// [`ServerConfig::default`], for the callers that have no configuration to hand
+/// (tests, and any tool that boots a dispatcher without parsing flags).
+pub fn default_python_adapter() -> std::sync::Arc<dyn sc_expr::CodeAdapter> {
+    python_adapter(&ServerConfig::default())
+}
+pub use config::{DEFAULT_BIND, PythonMode, ServerConfig};
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
@@ -92,5 +119,6 @@ pub use tls::{
     redirect_router, serve_https, tls_domains,
 };
 pub use triggers::{
-    base_action_registry, fire_startup, install_triggers, start_scheduler, start_workflow_engine,
+    base_action_registry, fire_startup, install_triggers, install_triggers_with_adapters,
+    start_scheduler, start_workflow_engine,
 };

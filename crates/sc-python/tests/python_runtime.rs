@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use sc_error::{Error, Result};
 use sc_expr::{CodeAdapter, CodeCall, CodeHost};
-use sc_python::{PythonRuntime, PythonState};
+use sc_python::{PythonEnv, PythonRuntime, PythonState};
 use serde_json::{Value as Json, json};
 
 // ---------------------------------------------------------------------------
@@ -641,4 +641,122 @@ async fn a_body_is_compiled_once_however_often_it_is_fired() {
         assert_eq!(out, json!(45));
     }
     assert_eq!(runtime.threads(), 1, "one at a time is one thread, reused");
+}
+
+// ---------------------------------------------------------------------------
+// The flag (phase 2.5)
+// ---------------------------------------------------------------------------
+
+/// `--python off` on a binary that *has* an interpreter: every entry point
+/// answers with the flag, and nothing starts.
+///
+/// The distinction this pins is the one an admin needs. "Built without Python"
+/// is a rebuild, "off" is a restart, and "not initialised" is neither — so they
+/// are three different sentences and three different states, rather than one
+/// silence to be guessed at.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_process_told_not_to_start_an_interpreter_says_so_and_does_not() {
+    let off = PythonRuntime::new().with_enabled(false);
+    assert_eq!(off.state(), PythonState::Off);
+
+    let said = off
+        .run(CodeCall {
+            code: "return 1".to_owned(),
+            ..CodeCall::default()
+        })
+        .await
+        .expect_err("a run must not start what the flag turned off")
+        .to_string();
+    assert!(said.contains("--python off"), "{said}");
+    // The remedy, which is a restart rather than a rebuild.
+    assert!(said.contains("--python auto"), "{said}");
+    assert!(
+        off.initialise()
+            .expect_err("nor may an eager start")
+            .to_string()
+            .contains("--python off")
+    );
+    assert_eq!(off.threads(), 0, "nothing ran");
+
+    // And the flag is this runtime's, not the process's: a runtime that was not
+    // turned off is unaffected by one that was.
+    let on = PythonRuntime::new();
+    assert_ne!(on.state(), PythonState::Off);
+    assert_eq!(
+        on.run(CodeCall {
+            code: "return 1".to_owned(),
+            ..CodeCall::default()
+        })
+        .await
+        .unwrap(),
+        json!(1)
+    );
+}
+
+/// The environment is recorded where the flags set it, so `--python-dir` and
+/// `--python-bin` are one setting rather than one invented per caller. What it
+/// is *used* for — the virtual environment, `pip`, and the ABI check between the
+/// two interpreters — is phase 5.
+#[test]
+fn the_environment_flags_are_held_where_the_installer_will_read_them() {
+    let plain = PythonRuntime::new();
+    assert_eq!(plain.env(), &PythonEnv::default());
+    assert!(plain.env().dir.is_none() && plain.env().bin.is_none());
+
+    let configured = PythonRuntime::new().with_env(PythonEnv {
+        dir: Some(std::path::PathBuf::from("/srv/python")),
+        bin: Some(std::path::PathBuf::from("/usr/bin/python3.12")),
+    });
+    assert_eq!(
+        configured.env().dir.as_deref(),
+        Some(std::path::Path::new("/srv/python"))
+    );
+    assert_eq!(
+        configured.env().bin.as_deref(),
+        Some(std::path::Path::new("/usr/bin/python3.12"))
+    );
+}
+
+/// The embedded interpreter does not import the **host's** packages.
+///
+/// It inherits the `sys.path` of the interpreter it was linked against, which on
+/// an ordinary Linux box means the user's `site-packages` and up to three
+/// `dist-packages` directories — phase 0.4 watched the spike import the system's
+/// `numpy` from one without being asked. Left alone, what a body may import
+/// would depend on what the operator had `apt install`ed, so the gate's
+/// amendment to §9 is that this is **isolated** rather than prepended to.
+///
+/// The standard library stays, because it is the interpreter's own and is where
+/// the import gate (phase 4.1) does its work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_hosts_installed_packages_are_not_on_the_path() {
+    let out = PythonRuntime::new()
+        .run(CodeCall {
+            code: "import sys\nimport json\nreturn {\"path\": sys.path, \"json\": json.dumps([1])}"
+                .to_owned(),
+            ..CodeCall::default()
+        })
+        .await
+        .unwrap();
+    let path: Vec<String> = out["path"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|entry| entry.as_str().unwrap_or_default().to_owned())
+        .collect();
+    for entry in &path {
+        assert!(
+            !entry.ends_with("site-packages") && !entry.ends_with("dist-packages"),
+            "the host's packages are on the path: {path:?}"
+        );
+        // Nor the directory the server happened to be started in.
+        assert!(!entry.is_empty() && entry != ".", "{path:?}");
+    }
+    // And the standard library is still there, which is what the body needs and
+    // what the import gate is about.
+    assert!(
+        path.iter().any(|entry| entry.contains("python")),
+        "the standard library went with them: {path:?}"
+    );
+    assert_eq!(out["json"], json!("[1]"));
 }

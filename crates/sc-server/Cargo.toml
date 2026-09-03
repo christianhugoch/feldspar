@@ -12,6 +12,15 @@ rust-version.workspace = true
 # multi-second link were being paid per *file*. `tests/it.rs` aggregates them.
 autotests = false
 
+[features]
+default = []
+# The one name an operator builds a Python-capable server with. It links
+# `libpython` into this binary (via PyO3), which is why it is a feature and not
+# a flag: a binary built with it will not exec on a host with no
+# `libpython3.x.so`, and this project's shipped `+crt-static` artifact cannot
+# link it at all. `--python off|auto` is the *runtime* half of the question.
+python = ["sc-python/python-host"]
+
 [dependencies]
 sc-error.workspace = true
 sc-log.workspace = true
@@ -38,6 +47,12 @@ sc-core-actions.workspace = true
 # lock file, and `libclang` as a build-time requirement — out of every other
 # crate's test link.
 sc-module = { workspace = true, features = ["deno-host"] }
+# The Python code adapter (§15): the runtime a `run_python_code` body runs on,
+# built at boot and registered on the dispatcher whether or not this binary has
+# an interpreter linked in. Default features off — the interpreter itself is the
+# `python` feature below, which is a *rebuild* and not a flag, so this dependency
+# costs nothing until an operator asks for it.
+sc-python.workspace = true
 # The LLM providers an admin configures (§11.1): their storage, their backend
 # registry, and the one request `testLlmProvider` makes. The agents that use them
 # arrive a layer above in the next phase; this crate needs the provider seam

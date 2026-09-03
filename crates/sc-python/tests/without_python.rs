@@ -37,3 +37,23 @@ async fn every_entry_point_says_the_build_has_no_python() {
     assert_eq!(runtime.stuck(), 0);
     assert_eq!(runtime.threads(), 0);
 }
+
+/// The flag is not the build, and in this build it has nothing to turn off.
+///
+/// `--python off` still parses, is still recorded, and still means what it says
+/// — but the deeper fact wins, because a restart with `--python auto` would not
+/// give this binary an interpreter. The sentence names the rebuild.
+#[tokio::test]
+async fn the_flag_cannot_turn_on_what_the_build_left_out() {
+    let off = PythonRuntime::new().with_enabled(false);
+    assert_eq!(off.state(), PythonState::NotBuilt);
+    let said = off
+        .run(CodeCall {
+            code: "return 1".to_owned(),
+            ..CodeCall::default()
+        })
+        .await
+        .expect_err("there is nothing here to run it")
+        .to_string();
+    assert!(said.contains("built without Python support"), "{said}");
+}

@@ -12,6 +12,14 @@ rust-version.workspace = true
 # multi-second link were being paid per *file*. `tests/it.rs` aggregates them.
 autotests = false
 
+[features]
+default = []
+# The one name an operator builds a Python-capable `feldspar` with:
+# `cargo build -p sc-cli --features python`. It is `sc-server`'s feature, which
+# is `sc-python`'s, so there is one name from the command line down to the
+# interpreter rather than three that have to be spelled together.
+python = ["sc-server/python"]
+
 [[bin]]
 name = "feldspar"
 path = "src/main.rs"
