@@ -18,6 +18,7 @@
 //! application itself, for a deployment that is also reachable over a private
 //! network. Both stop together on the one shutdown signal.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sc_api::EndpointSet;
@@ -72,10 +73,17 @@ pub async fn serve(
     let watchdog = service.spawn_watchdog();
     service.notify_ready(&format!("serving on http://{}", config.addr));
 
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(service))
-        .await
-        .map_err(|e| Error::msg(format!("server error: {e}")));
+    // Served **with connect info**, so a handler can ask who the peer is. The
+    // one that does is the MCP route's loopback check (§13.6), which treats an
+    // unknown peer as remote — so without this, `mcp_loopback_only` would refuse
+    // the local client it exists to admit.
+    let result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(service))
+    .await
+    .map_err(|e| Error::msg(format!("server error: {e}")));
     if let Some(watchdog) = watchdog {
         watchdog.abort();
     }
@@ -141,11 +149,14 @@ async fn serve_with_tls(
         config.addr
     ));
     let http = tokio::spawn(async move {
-        axum::serve(http_listener, http_app)
-            .with_graceful_shutdown(async move {
-                let _ = http_stopped.await;
-            })
-            .await
+        axum::serve(
+            http_listener,
+            http_app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = http_stopped.await;
+        })
+        .await
     });
 
     let tls_result = serve_https(tls_listener, app, &config.tls, handle).await;

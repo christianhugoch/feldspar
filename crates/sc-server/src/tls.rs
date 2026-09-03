@@ -320,7 +320,7 @@ pub async fn serve_https(
                 .map_err(|e| Error::msg(format!("serving TLS: {e}")))?
                 .acceptor(acceptor)
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
                 .map_err(|e| Error::msg(format!("TLS server error: {e}")))
         }
@@ -348,7 +348,7 @@ pub async fn serve_https(
                 .map_err(|e| Error::msg(format!("serving TLS: {e}")))?
                 .acceptor(acceptor)
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
                 .map_err(|e| Error::msg(format!("TLS server error: {e}")))
         }

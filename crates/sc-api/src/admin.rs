@@ -11,9 +11,32 @@
 //! mounts the set (the "Server" subphase of Phase 6). This module defines the
 //! *contract* — methods, paths, schemas, and auth — that both the server and the
 //! generated client are held to.
+//!
+//! ## The `.mcp()` tags, and why there are so few of them
+//!
+//! A handful of endpoints below carry an [`Endpoint::mcp`] tag, which offers
+//! them to the administration MCP server as tools (§13.6). It is **opt-in and
+//! deliberately sparse**: a coding agent pays for every tool in its context on
+//! every turn, so projecting all of these would be mechanical and wrong. The
+//! nine composite tools of `sc_api::mcp` plus these seventeen come to
+//! twenty-six, and the number is a design constraint rather than an outcome —
+//! `the_tier_two_tags_are_the_ones_that_were_argued_for` is the test that makes
+//! adding one a decision somebody has to write down.
+//!
+//! Three groups are tagged, and each comment above a tag says why that one:
+//! what an agent needs to **read** before it can write (`listFieldTypes`,
+//! `listAgentTraits`, `listTableProviders`, `listActions`, `listTriggers`), the
+//! objects it may be asked to **build** that have no composite tool (the agents,
+//! the workflows), and the one thing it must do **after** a schema change
+//! (`buildApplication`, since re-projection runs no bundler). Row CRUD, the file
+//! store, backup and restore and user management are tier 3 — absent on purpose,
+//! not overlooked.
 
 use crate::auth::{credentials_schema, user_row_schema, user_summary_schema};
-use crate::endpoint::{AuthRequirement, Endpoint, EndpointSet, Method, PathSpec, QueryParam};
+use crate::endpoint::{
+    AuthRequirement, Endpoint, EndpointSet, McpTag, Method, PathSpec, QueryParam,
+};
+use crate::mcp::{Area, Grant};
 use crate::schema::{StructField, TypeSchema, ValueType};
 
 /// Path prefix every admin endpoint is mounted under.
@@ -167,6 +190,17 @@ pub fn admin_endpoints() -> EndpointSet {
             api().lit("table-providers"),
         )
         .output(TypeSchema::array(table_provider_schema()))
+        // Tagged (§13.6): `edit_schema` can create a provided table and the
+        // provider's key and configuration spec are the only way to know what
+        // one may be called and what it needs. Without this the tool is a form
+        // with no field list.
+        .mcp(
+            "List the registered table providers — the modules that supply a \
+             table's rows from somewhere other than this database (a REST API, a \
+             spreadsheet, a view over other tables). Each carries the \
+             configuration it needs, which is what `edit_schema`'s \
+             `create_provided_table` operation must be given.",
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -406,6 +440,15 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listFieldTypes", Method::Get, api().lit("field-types"))
             .output(TypeSchema::array(field_type_schema()))
+            // Tagged (§13.6): the vocabulary `edit_schema` writes fields in.
+            // A model that guesses at a rich type's name spends a turn being
+            // refused by a list it could have read.
+            .mcp(
+                "List every field type a table's fields can have — the basic \
+                 types, the rich types a module registered, and the `Key` and \
+                 `File` kinds — each with the attributes it accepts. This is the \
+                 vocabulary `edit_schema` writes a field in.",
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -998,6 +1041,11 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listAgents", Method::Get, api().lit("agents"))
             .output(TypeSchema::array(agent_schema()))
+            .mcp(
+                "List the configured agents: what each is called, which LLM \
+                 provider and model it runs on, its system prompt, the traits it \
+                 carries with their configuration, and who may reach it.",
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -1005,6 +1053,15 @@ pub fn admin_endpoints() -> EndpointSet {
         Endpoint::new("createAgent", Method::Post, api().lit("agents"))
             .input(agent_input_schema())
             .output(agent_schema())
+            .mcp(
+                McpTag::new(
+                    "Create an agent. Give it a name, a provider and model, a system \
+                 prompt, and the traits it should carry — call `listAgentTraits` \
+                 first for what a trait is called and what it must be configured \
+                 with.",
+                )
+                .needs(Grant::Create),
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -1016,6 +1073,14 @@ pub fn admin_endpoints() -> EndpointSet {
         )
         .input(agent_input_schema())
         .output(agent_schema())
+        .mcp(
+            McpTag::new(
+                "Replace an agent's definition. The whole definition is written, so \
+             read it with `listAgents` and send it back changed rather than \
+                 sending only the part you meant to alter.",
+            )
+            .needs(Grant::Edit),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1029,6 +1094,13 @@ pub fn admin_endpoints() -> EndpointSet {
             "deleted",
             TypeSchema::bool(),
         )]))
+        .mcp(
+            McpTag::new(
+                "Delete an agent. Its past runs stay — a run is keyed by the agent's \
+                 name and outlives the agent deliberately.",
+            )
+            .needs(Grant::Drop),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1041,6 +1113,17 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listAgentTraits", Method::Get, api().lit("agent-traits"))
             .output(TypeSchema::array(agent_trait_info_schema()))
+            // Tagged (§13.6) for the reason `listFieldTypes` is: it is the
+            // declaration `createAgent` is written against, and it also names
+            // the tools each trait will offer, which is what a collision check
+            // needs.
+            .mcp(
+                "List the agent traits this installation registers — the \
+                 capabilities an agent can be given — each with the \
+                 configuration form it declares and the tools it will offer. \
+                 This is what `createAgent` and `updateAgent` configure traits \
+                 against.",
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -1057,6 +1140,12 @@ pub fn admin_endpoints() -> EndpointSet {
             api().lit("agent-runs").param("agent", ValueType::Text),
         )
         .output(TypeSchema::array(run_summary_schema()))
+        .mcp(
+            "List one agent's runs, newest first — a chat session and a \
+             trigger-driven run are both runs. Runs are keyed by the agent's \
+             **name**, not its id. Use this and then `getRun` to find out what an \
+             agent actually did.",
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1067,6 +1156,11 @@ pub fn admin_endpoints() -> EndpointSet {
             api().lit("runs").param("id", ValueType::Uuid),
         )
         .output(run_schema())
+        .mcp(
+            "Read one run in full: its state, its messages, every tool call it \
+             made and what came back. This is where to look when an agent or a \
+             workflow did not do what was expected.",
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1308,6 +1402,15 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listApplications", Method::Get, api().lit("applications"))
             .output(TypeSchema::array(application_schema()))
+            .mcp(
+                McpTag::new(
+                    "List the applications: what each is called, the subdomain it \
+                 serves on, its framework and project directory, the API \
+                 providers it exposes and the tables and triggers behind them. \
+                 The `id` here is what `buildApplication` names.",
+                )
+                .in_area(Area::Applications),
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -1360,6 +1463,26 @@ pub fn admin_endpoints() -> EndpointSet {
                 .lit("build"),
         )
         .output(build_result_schema())
+        // Tagged (§13.6) because of the one gap re-projection leaves: a schema
+        // change rewrites an application's generated client but runs no bundler,
+        // so an agent that changed a schema needs a way to rebuild what it
+        // changed. `edit_schema`'s result names the applications that want one.
+        .mcp(
+            McpTag::new(
+                "Build an application and mount it live: regenerates its typed \
+             client from the current schema, runs its framework's build, and \
+             serves the result on its subdomain with no restart. Run this after \
+             a schema change that `edit_schema` reported as affecting an \
+             application with a build. A failed build leaves the previous \
+                 version serving and comes back with the bundler's own \
+                 diagnostics.",
+            )
+            .in_area(Area::Applications)
+            // Building writes an application's generated client and replaces
+            // what its subdomain serves. That is a change to what is there,
+            // which is `allow_edit` — not a create, whatever the method says.
+            .needs(Grant::Edit),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1678,6 +1801,20 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listTriggers", Method::Get, api().lit("triggers"))
             .output(TypeSchema::array(trigger_schema()))
+            // `describe_triggers` is the composite tool over the same rows and
+            // says more about each; this is tagged as well because it carries
+            // the trigger **ids** the workflow tools address a trigger by, and
+            // that composite deliberately speaks in names.
+            .mcp(
+                McpTag::new(
+                    "List the triggers with their ids: the event each fires on, the \
+                 table where there is one, the action or workflow it runs, and \
+                 whether it is enabled. The id is what the workflow tools \
+                 address a workflow by, since a workflow *is* a trigger's \
+                 body.",
+                )
+                .in_area(Area::Triggers),
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -1749,6 +1886,19 @@ pub fn admin_endpoints() -> EndpointSet {
         Endpoint::new("listActions", Method::Get, api().lit("actions"))
             .query([QueryParam::new("table", ValueType::Text)])
             .output(TypeSchema::array(action_info_schema()))
+            // The list; `describe_action` is the one action's settings in full,
+            // which is progressive disclosure and stays the way to configure
+            // one. This answers "what is there?" in one call rather than N.
+            .mcp(
+                McpTag::new(
+                    "List the actions a trigger can run, each with a summary of what \
+                 it does. Pass `table` to see the actions as they are declared \
+                 for a trigger on that table, since an action's settings may \
+                 depend on it. Then call `describe_action` for the one you want, \
+                 which is where the full settings are.",
+                )
+                .in_area(Area::Triggers),
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -1780,6 +1930,15 @@ pub fn admin_endpoints() -> EndpointSet {
         // program drawn on the picture of another.
         .query([QueryParam::new("version", ValueType::Int)])
         .output(workflow_schema())
+        .mcp(
+            McpTag::new(
+                "Read a workflow — the program a trigger's body runs. Addressed by \
+             the **trigger's** id (from `listTriggers`), because a workflow is a \
+             trigger body rather than an object of its own. Pass `version` to \
+                 read an older one; the default is the current version.",
+            )
+            .in_area(Area::Triggers),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1804,6 +1963,19 @@ pub fn admin_endpoints() -> EndpointSet {
             StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         ]))
         .output(workflow_schema())
+        .mcp(
+            McpTag::new(
+                "Save a workflow's steps as a **new version** — the table is \
+             append-only, so nothing is overwritten and a run already suspended \
+             on an earlier version still loads that one. Send the whole program \
+             in the shape `getWorkflow` returns it, with a description saying \
+                 what changed.",
+            )
+            .in_area(Area::Triggers)
+            // A workflow is an existing trigger's body — version 1 is created
+            // with the trigger — so writing one is an edit rather than a create.
+            .needs(Grant::Edit),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1821,6 +1993,17 @@ pub fn admin_endpoints() -> EndpointSet {
             StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         ]))
         .output(workflow_schema())
+        .mcp(
+            McpTag::new(
+                "Go back to an earlier version of a workflow by minting a new \
+             version whose steps are that one's. History is not rewritten, so \
+                 the version you reverted from is still readable.",
+            )
+            .in_area(Area::Triggers)
+            // Reverting mints a version rather than removing one, so it is an
+            // edit and not a drop: nothing stops being readable.
+            .needs(Grant::Edit),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1842,6 +2025,16 @@ pub fn admin_endpoints() -> EndpointSet {
             QueryParam::new("offset", ValueType::Int),
         ])
         .output(TypeSchema::array(run_summary_schema()))
+        .mcp(
+            McpTag::new(
+                "List a workflow's runs, newest first, addressed by the trigger's \
+             id. Filter by `state` — `waiting` is the one that wants attention — \
+             and page with `limit` and `offset`, because a workflow that fires \
+                 on every insert has as many runs as the table has rows. \
+                 `getRun` reads one in full.",
+            )
+            .in_area(Area::Triggers),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -3419,4 +3612,186 @@ fn form_field_schema() -> TypeSchema {
         // a setting that is not code: the form renders a code editor for it.
         StructField::new("code_language", TypeSchema::optional(TypeSchema::text())),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{Area, Projection};
+
+    /// The census (§13.6). A tag is a decision about somebody's context window,
+    /// so adding one has to mean editing this list — which is the moment to
+    /// write down why the tool earns its place.
+    #[test]
+    fn the_tier_two_tags_are_the_ones_that_were_argued_for() {
+        let set = admin_endpoints();
+        let tagged: Vec<&str> = set
+            .iter()
+            .filter(|e| e.mcp.is_some())
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(
+            tagged,
+            [
+                "listTableProviders",
+                "listFieldTypes",
+                "listAgents",
+                "createAgent",
+                "updateAgent",
+                "deleteAgent",
+                "listAgentTraits",
+                "listRuns",
+                "getRun",
+                "listApplications",
+                "buildApplication",
+                "listTriggers",
+                "listActions",
+                "getWorkflow",
+                "saveWorkflow",
+                "revertWorkflow",
+                "listWorkflowRuns",
+            ]
+        );
+    }
+
+    /// Tier 3 is a list of things that are *absent*, which no compiler checks.
+    /// These four are the ones §13.6 names, and each would be a different
+    /// proposition from administering an application.
+    #[test]
+    fn the_surfaces_that_were_left_out_stayed_out() {
+        let set = admin_endpoints();
+        for name in [
+            // Row data: an agent that can add a column and one that can read
+            // customer rows are not the same offer.
+            "listRows",
+            // The file-store IDE: the coding agent has the repository already.
+            "readFile",
+            "writeFile",
+            // Backup, restore and user management.
+            "restoreBackup",
+            "listUsers",
+            "createUser",
+            // And above all: a token that could mint tokens could not be
+            // revoked (phase 2.4 says so in its own comment).
+            "createApiToken",
+            "listApiTokens",
+            "revokeApiToken",
+        ] {
+            let endpoint = set.find(name).expect("endpoint should exist");
+            assert!(
+                endpoint.mcp.is_none(),
+                "`{name}` is tier 3 and must not be projected as an MCP tool"
+            );
+        }
+    }
+
+    /// An area that is off must mean the same thing whichever tier the tool came
+    /// from, so a tagged trigger or application endpoint declares its half.
+    #[test]
+    fn a_tagged_endpoint_declares_the_half_of_the_surface_it_belongs_to() {
+        let set = admin_endpoints();
+        let area_of = |name: &str| {
+            set.find(name)
+                .and_then(|e| e.mcp.as_ref())
+                .and_then(|tag| tag.area)
+        };
+        assert_eq!(area_of("listTriggers"), Some(Area::Triggers));
+        assert_eq!(area_of("listActions"), Some(Area::Triggers));
+        // A workflow is a trigger's body (§10.3), so it is the triggers half.
+        assert_eq!(area_of("saveWorkflow"), Some(Area::Triggers));
+        assert_eq!(area_of("listWorkflowRuns"), Some(Area::Triggers));
+        assert_eq!(area_of("buildApplication"), Some(Area::Applications));
+        assert_eq!(area_of("listApplications"), Some(Area::Applications));
+        // The schema half has no area: it is what this surface is.
+        assert_eq!(area_of("listFieldTypes"), None);
+        assert_eq!(area_of("listAgents"), None);
+    }
+
+    /// The merge of path, query and body into one arguments object is only
+    /// unambiguous while the three name different things.
+    #[test]
+    fn no_tagged_endpoint_merges_two_arguments_under_one_name() {
+        for projection in Projection::all(&admin_endpoints()) {
+            let names = projection.argument_names();
+            let mut seen = std::collections::HashSet::new();
+            for name in &names {
+                assert!(
+                    seen.insert(name.clone()),
+                    "`{}` declares `{name}` twice across its path, query and body",
+                    projection.name()
+                );
+            }
+            // And every one of them is an object schema, which is what an MCP
+            // client requires of an `inputSchema`.
+            assert_eq!(
+                projection.parameters()["type"],
+                serde_json::json!("object"),
+                "{}'s parameters",
+                projection.name()
+            );
+        }
+    }
+
+    /// A tool that changes something declares the grant that allows it, so the
+    /// six flags mean one thing across both tiers. A read declares none — every
+    /// one of these is `admin()` already, and the grants are about changes.
+    #[test]
+    fn a_tagged_endpoint_that_changes_something_declares_the_grant_for_it() {
+        let set = admin_endpoints();
+        let grant_of = |name: &str| {
+            set.find(name)
+                .and_then(|e| e.mcp.as_ref())
+                .and_then(|tag| tag.grant)
+        };
+        assert_eq!(grant_of("createAgent"), Some(Grant::Create));
+        assert_eq!(grant_of("updateAgent"), Some(Grant::Edit));
+        assert_eq!(grant_of("deleteAgent"), Some(Grant::Drop));
+        assert_eq!(grant_of("saveWorkflow"), Some(Grant::Edit));
+        assert_eq!(grant_of("revertWorkflow"), Some(Grant::Edit));
+        // Building writes the generated client and replaces what a subdomain
+        // serves: a change to what is there, whatever the method reads as.
+        assert_eq!(grant_of("buildApplication"), Some(Grant::Edit));
+
+        for read_only in [
+            "listAgents",
+            "listAgentTraits",
+            "listRuns",
+            "getRun",
+            "listApplications",
+            "listTriggers",
+            "listActions",
+            "listFieldTypes",
+            "listTableProviders",
+            "getWorkflow",
+            "listWorkflowRuns",
+        ] {
+            assert_eq!(grant_of(read_only), None, "`{read_only}` only reads");
+        }
+
+        // And nothing tagged is a write with no grant behind it: a method that
+        // is not GET has to have said which flag allows it.
+        for endpoint in set.iter().filter(|e| e.mcp.is_some()) {
+            if endpoint.method != Method::Get {
+                assert!(
+                    endpoint.mcp.as_ref().and_then(|t| t.grant).is_some(),
+                    "`{}` changes something and declares no grant",
+                    endpoint.name
+                );
+            }
+        }
+    }
+
+    /// §13.6's load-bearing rule, asserted rather than trusted: every tool this
+    /// server offers is behind the admin requirement it was already behind.
+    #[test]
+    fn every_projected_endpoint_is_still_admin_only() {
+        for projection in Projection::all(&admin_endpoints()) {
+            assert_eq!(
+                projection.auth(),
+                &AuthRequirement::admin(),
+                "`{}` is projected as an MCP tool and must be admin-only",
+                projection.name()
+            );
+        }
+    }
 }

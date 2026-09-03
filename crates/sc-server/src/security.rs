@@ -131,12 +131,35 @@ fn is_mutating(method: &Method) -> bool {
     )
 }
 
+/// Whether this request authenticates by a bearer credential rather than by the
+/// session cookie — and is therefore exempt from the CSRF check below.
+///
+/// **The exemption is written as a property of the request, not as a path**
+/// (design §13.6). `/mcp` is the one route that has it today, and a
+/// `path == "/mcp"` test here would be one refactor away from being wrong: it
+/// would still exempt a route that had since started honouring cookies, and it
+/// would not exempt the next bearer-authenticated route somebody adds.
+///
+/// It is safe for exactly one reason, and the reason is the whole of it: a page
+/// a user visits **cannot set an `Authorization` header on a cross-origin
+/// request** without a preflight this server does not answer. A forged
+/// cross-site request therefore cannot carry one, so a request that does carry
+/// one was not forged — which is the property the double-submit cookie is
+/// standing in for everywhere else. Nothing is given up on the routes that do
+/// honour cookies, because they ignore this header and are still checked.
+fn is_bearer_authenticated(request: &Request) -> bool {
+    crate::mcp::bearer_token(request.headers()).is_some()
+}
+
 /// CSRF middleware implementing the double-submit-cookie check.
 ///
 /// On a mutating request the `x-csrf-token` header must equal the existing
 /// `sc_csrf` cookie, else the request is rejected `403`. Every response ensures
 /// the cookie is set (minting one on first contact) so the SPA can read it and
 /// echo it on later mutations. `State<bool>` carries the `Secure` cookie flag.
+///
+/// A **bearer-authenticated** request skips the check
+/// ([`is_bearer_authenticated`] says why it may).
 pub(crate) async fn csrf_middleware(
     State(secure): State<bool>,
     jar: CookieJar,
@@ -145,7 +168,7 @@ pub(crate) async fn csrf_middleware(
 ) -> Response {
     let existing = jar.get(CSRF_COOKIE).map(|c| c.value().to_owned());
 
-    if is_mutating(request.method()) {
+    if is_mutating(request.method()) && !is_bearer_authenticated(&request) {
         let header = request
             .headers()
             .get(CSRF_HEADER)

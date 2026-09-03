@@ -59,7 +59,8 @@ mod typescript;
 
 pub use admin::{ADMIN_API_PREFIX, ROW_PAGE_CAP, admin_endpoints};
 pub use endpoint::{
-    AuthRequirement, Endpoint, EndpointSet, HandlerRef, Method, PathSegment, PathSpec, QueryParam,
+    AuthRequirement, Endpoint, EndpointSet, HandlerRef, McpTag, Method, PathSegment, PathSpec,
+    QueryParam,
 };
 pub use graphql::{
     CFG_AGGREGATES as GRAPHQL_CFG_AGGREGATES, DEFAULT_FILE_MOUNT as GRAPHQL_DEFAULT_FILE_MOUNT,

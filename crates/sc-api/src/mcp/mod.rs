@@ -56,6 +56,8 @@
 //! The full nine-tool set is therefore assembled by `sc_app::mcp::tool_set`, the
 //! lowest layer that can name every tool in it.
 
+mod endpoint_tool;
+mod json_schema;
 mod schema;
 mod triggers;
 
@@ -71,6 +73,8 @@ use serde_json::{Map, Value as Json};
 
 use crate::schema_edit::{self, Grants};
 
+pub use endpoint_tool::{BODY_KEY, ProjectedCall, Projection, check_caller};
+pub use json_schema::{json_schema, object_schema, scalar_schema};
 pub use schema::{TOOL_DESCRIBE, TOOL_EDIT};
 pub use triggers::{
     TOOL_DELETE_TRIGGER, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_TRIGGERS, TOOL_SAVE_TRIGGER,
@@ -91,7 +95,12 @@ pub const GRANT_ACCESS_CHANGES: &str = schema_edit::GRANT_ACCESS_CHANGES;
 /// which of the three halves it may do it *to*. The schema half has no area,
 /// because it is what this surface *is* — a caller that may not describe a schema
 /// has no reason to be given these tools at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializable because an [`Endpoint`](crate::Endpoint) carries one in its
+/// [`McpTag`](crate::McpTag), and an endpoint set is a value that travels — to
+/// the client generator, to a stored application, over the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Area {
     /// The four trigger tools.
     Triggers,
@@ -107,6 +116,50 @@ impl Area {
         match self {
             Area::Triggers => "allow_triggers",
             Area::Applications => "allow_applications",
+        }
+    }
+}
+
+/// One of the four grants, named — so a tool can *declare* what it needs rather
+/// than each one re-deriving it from a boolean.
+///
+/// [`Grants`] is four booleans, which is the right shape for the caller who has
+/// them; this is the right shape for the tool that wants one of them. The
+/// projection of a tagged [`Endpoint`](crate::Endpoint) is what needed it:
+/// `deleteAgent` must require `allow_drop` for the same reason `delete_trigger`
+/// does, and the alternative — inferring the grant from the HTTP method — reads
+/// `POST` as *create* for `buildApplication`, which creates nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Grant {
+    /// May bring something new into existence.
+    Create,
+    /// May change something that is already there.
+    Edit,
+    /// May destroy something.
+    Drop,
+    /// May write the access rules of §7.3 — who may read, write or call a thing.
+    AccessChanges,
+}
+
+impl Grant {
+    /// The configuration key an admin ticks for it.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Grant::Create => GRANT_CREATE,
+            Grant::Edit => GRANT_EDIT,
+            Grant::Drop => GRANT_DROP,
+            Grant::AccessChanges => GRANT_ACCESS_CHANGES,
+        }
+    }
+
+    /// Whether this caller has it.
+    pub fn allowed_by(self, grants: &Grants) -> bool {
+        match self {
+            Grant::Create => grants.create,
+            Grant::Edit => grants.edit,
+            Grant::Drop => grants.drop,
+            Grant::AccessChanges => grants.access_changes,
         }
     }
 }
@@ -439,13 +492,19 @@ pub fn require_admin(role: u8, tool: &str) -> Result<()> {
 /// The sibling of [`schema_edit`]'s own grant check, kept separate because that
 /// one says "the whole batch was refused" — true of a list of schema operations
 /// and untrue of one trigger.
+///
+/// The remedy is named without naming *where* it is ticked, because there are
+/// two places and the caller cannot see which one it came from: an agent's
+/// `admin_copilot` checkboxes and a token's `grants` are the same six flags
+/// (§13.6), so a message that named only one of them would be wrong half the
+/// time.
 pub fn require_grant(granted: bool, what: &str, key: &str) -> Result<()> {
     if granted {
         return Ok(());
     }
     Err(Error::invalid(format!(
-        "not permitted to {what}; nothing was changed. Turn on `{key}` in this \
-         agent's `admin_copilot` settings to allow it."
+        "not permitted to {what}; nothing was changed. Turn on `{key}` to allow \
+         it — an agent's `admin_copilot` settings, or an API token's grants."
     )))
 }
 

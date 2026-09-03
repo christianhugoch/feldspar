@@ -71,6 +71,8 @@ mod ide_typecheck;
 mod live_mounting;
 #[path = "llm_provider_admin_api.rs"]
 mod llm_provider_admin_api;
+#[path = "mcp_server.rs"]
+mod mcp_server;
 #[path = "modules_api.rs"]
 mod modules_api;
 #[path = "other_events.rs"]

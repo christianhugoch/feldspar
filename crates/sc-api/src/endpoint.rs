@@ -12,6 +12,7 @@
 //! through this **same** machinery, so the admin SPA consumes a generated typed
 //! client exactly as an application would.
 
+use crate::mcp::{Area, Grant};
 use crate::resource::ResourceModel;
 use crate::schema::{TypeSchema, ValueType};
 use serde::{Deserialize, Serialize};
@@ -282,6 +283,84 @@ impl QueryParam {
     }
 }
 
+/// The opt-in tag that projects an endpoint as an MCP tool (design §13.6).
+///
+/// **Opt-in, and that is the whole design of it.** The admin `EndpointSet` is
+/// upwards of a hundred endpoints and a coding agent pays for every tool in its
+/// context on every turn, so the projection walks only the tagged ones. A tag is
+/// therefore a decision about somebody's context window and belongs beside the
+/// endpoint it is a decision about, argued for in the comment above it.
+///
+/// Everything else a tool needs is already in the [`Endpoint`]: the name, the
+/// typed path and query parameters, and both `TypeSchema`s. What only a person
+/// can supply is the three things here — the prose the model reads when it
+/// chooses, and the two answers to *may this caller?*, which no signature
+/// carries:
+///
+/// - the [`area`](McpTag::area), the half of the surface this belongs to, so an
+///   `allow_triggers` that is off takes `listTriggers` out of the listing
+///   exactly as it takes `save_trigger` out; and
+/// - the [`grant`](McpTag::grant) it needs, so `deleteAgent` is refused by the
+///   same `allow_drop` that refuses `delete_trigger`. Reading the grant off the
+///   HTTP method instead would call `buildApplication` a create, which creates
+///   nothing.
+///
+/// A tag built from a bare string — `.mcp("…")` — is a **read**: no area, no
+/// grant, offered to every token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpTag {
+    /// What this tool does, in the words the model is given.
+    pub description: String,
+    /// The half of the administrative surface this belongs to, if it belongs to
+    /// one — read exactly as a hand-written tool's
+    /// [`AdminTool::area`](crate::mcp::AdminTool::area) is. An area that is off
+    /// must mean the same thing whichever tier the tool came from, or the
+    /// checkbox means two things.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area: Option<Area>,
+    /// The grant this tool needs, or `None` for one that only reads.
+    ///
+    /// A read needs none: every one of these endpoints is already `admin()`, and
+    /// the four grants are about what a caller may *change*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Grant>,
+}
+
+impl McpTag {
+    /// A tool that only reads, described by `prose`.
+    pub fn new(prose: impl Into<String>) -> McpTag {
+        McpTag {
+            description: prose.into(),
+            area: None,
+            grant: None,
+        }
+    }
+
+    /// Put it in one half of the surface, so the area checkbox governs it.
+    pub fn in_area(mut self, area: Area) -> McpTag {
+        self.area = Some(area);
+        self
+    }
+
+    /// Require a grant of the caller before it runs.
+    pub fn needs(mut self, grant: Grant) -> McpTag {
+        self.grant = Some(grant);
+        self
+    }
+}
+
+impl From<&str> for McpTag {
+    fn from(prose: &str) -> McpTag {
+        McpTag::new(prose)
+    }
+}
+
+impl From<String> for McpTag {
+    fn from(prose: String) -> McpTag {
+        McpTag::new(prose)
+    }
+}
+
 /// A single HTTP endpoint, described as a value (design §13.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Endpoint {
@@ -315,6 +394,10 @@ pub struct Endpoint {
     pub auth: AuthRequirement,
     /// The handler that runs it.
     pub handler: HandlerRef,
+    /// Projected as an MCP tool when tagged; absent for the great majority
+    /// (see [`McpTag`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpTag>,
 }
 
 impl Endpoint {
@@ -335,6 +418,7 @@ impl Endpoint {
             binary_output: false,
             auth: AuthRequirement::LoggedIn,
             handler,
+            mcp: None,
         }
     }
 
@@ -378,6 +462,23 @@ impl Endpoint {
     /// Set the handler reference (defaults to `Named(name)`).
     pub fn handler(mut self, handler: HandlerRef) -> Endpoint {
         self.handler = handler;
+        self
+    }
+
+    /// Offer this endpoint to the administration MCP server as a tool
+    /// (design §13.6).
+    ///
+    /// A bare string is a **read**, offered to every token and needing no grant:
+    /// `.mcp("List the …")`. Anything that changes something says so —
+    /// `.mcp(McpTag::new("…").in_area(Area::Triggers).needs(Grant::Drop))` —
+    /// because the area and the grant are the two questions the signature cannot
+    /// answer (see [`McpTag`]).
+    ///
+    /// The prose is what a model has to go on when choosing, so it is a sentence
+    /// about what the tool *does* rather than a label — the same contract
+    /// [`ToolSpec::description`](sc_llm::ToolSpec) states.
+    pub fn mcp(mut self, tag: impl Into<McpTag>) -> Endpoint {
+        self.mcp = Some(tag.into());
         self
     }
 }

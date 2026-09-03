@@ -377,7 +377,7 @@ unknown tool, a bad revision, a refused credential.
 
 ## Phase 4 — The protocol
 
-- [ ] 4.1 `TypeSchema → JSON Schema`, beside `ts_type`. Struct → `object` with `required`,
+- [~] 4.1 `TypeSchema → JSON Schema`, beside `ts_type`. Struct → `object` with `required`,
       `Optional` → not required and nullable, `Array` → `items`, `Value` → the scalar mapping.
 - [ ] 4.2 `.mcp(description)` on `Endpoint`, and the tier-2 tags of §6.
 - [ ] 4.3 The tier-2 projection: an endpoint's path parameters, query parameters and input

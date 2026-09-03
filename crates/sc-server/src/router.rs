@@ -42,6 +42,7 @@ use crate::chat::{AGENT_CHAT_ROUTE, agent_chat_upgrade};
 use crate::config::ServerConfig;
 use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
 use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
+use crate::mcp::MCP_ROUTE;
 use crate::security::{
     CONTENT_SECURITY_POLICY, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
     build_cookie, csrf_middleware,
@@ -97,7 +98,7 @@ pub const IDE_PREFIX: &str = "/ide";
 
 /// Shared server state threaded through dispatch.
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     /// Path pattern → the endpoints registered at that path (one per method).
     routes: Arc<matchit::Router<Vec<Endpoint>>>,
     /// Name → handler resolution for `HandlerRef::Named`.
@@ -111,17 +112,35 @@ struct AppState {
     /// Whether to set `Secure` on the session cookie.
     secure_cookies: bool,
     /// The applications served on their own subdomains, if any.
-    apps: Arc<AppMounts>,
+    ///
+    /// `pub(crate)` because it is also where the catalog and the trigger
+    /// dispatcher live, which the MCP route needs (§13.6).
+    pub(crate) apps: Arc<AppMounts>,
     /// The domain apps are served under; `None` disables app routing.
     base_domain: Option<Arc<String>>,
     /// How many more language servers the IDE may start (design §12.1).
     lsp_slots: ServerSlots,
+    /// The tier-2 MCP tools: one per endpoint tagged
+    /// [`Endpoint::mcp`](sc_api::Endpoint::mcp), built once here because
+    /// dispatching one needs the handler registry (§13.6).
+    ///
+    /// Built even when the MCP server is switched off, and that costs nothing:
+    /// it is a projection of values already in memory, and the switch is read
+    /// per request rather than at boot precisely so that turning it on is a save
+    /// rather than a restart.
+    pub(crate) mcp_endpoint_tools: Arc<Vec<Arc<dyn sc_api::mcp::AdminTool>>>,
 }
 
 /// Build the axum router for an endpoint set, serving no applications.
 ///
 /// Fails only if the endpoint paths cannot be assembled into a [`matchit`]
 /// router (a duplicate/conflicting route pattern — a registration bug).
+///
+/// The [`AppMounts`] this builds with carries **no catalog**, so the router it
+/// returns serves no administration MCP surface — `/mcp` answers `404`, which is
+/// the same answer the switch being off gives (§13.6). A server that wants one
+/// calls [`build_router_with_apps`] with mounts that hold the catalog, which is
+/// what [`serve`](crate::serve) does.
 pub fn build_router(
     endpoints: &EndpointSet,
     handlers: HandlerRegistry,
@@ -170,9 +189,11 @@ pub fn build_router_with_apps(
     }
 
     let routes = Arc::new(build_matchit(endpoints)?);
+    let handlers = Arc::new(handlers);
+    let mcp_endpoint_tools = Arc::new(crate::mcp::endpoint_tools(endpoints, &handlers));
     let state = AppState {
         routes,
-        handlers: Arc::new(handlers),
+        handlers,
         sessions,
         static_dir: config.static_dir.clone().map(Arc::new),
         ide_dir: config.ide_dir.clone().map(Arc::new),
@@ -180,6 +201,7 @@ pub fn build_router_with_apps(
         apps,
         base_domain: config.base_domain.clone().map(Arc::new),
         lsp_slots: server_slots(),
+        mcp_endpoint_tools,
     };
 
     let app = Router::new()
@@ -226,6 +248,15 @@ pub fn build_router_with_apps(
         // body, and a chat turn is bidirectional in a way the typed endpoint
         // model has no shape for.
         .route(AGENT_CHAT_ROUTE, axum::routing::get(agent_chat))
+        // The administration MCP server (§13.6). A real route rather than a
+        // typed endpoint for the reason the upload and backup routes are:
+        // JSON-RPC over a raw body is not a shape `TypeSchema` describes.
+        //
+        // It authenticates by `Authorization: Bearer` and by **nothing else** —
+        // a session cookie on this route is ignored, not accepted — which is
+        // what makes it safe to exempt from the CSRF middleware below, and is
+        // the whole of the confused-deputy story rather than belt-and-braces.
+        .route(MCP_ROUTE, axum::routing::post(crate::mcp::mcp))
         .fallback(dispatch)
         .with_state(state)
         // CSRF runs outside dispatch so it guards every route and can mint the

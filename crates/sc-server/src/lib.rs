@@ -28,6 +28,7 @@ mod handler;
 mod handlers;
 mod logging;
 mod lsp;
+mod mcp;
 mod modules;
 mod reload;
 mod router;
@@ -110,6 +111,7 @@ pub use handler::{
 pub use handlers::admin_handlers;
 pub use logging::log_requests;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
+pub use mcp::{MCP_PROTOCOL_VERSION, MCP_ROUTE, MCP_SERVER_NAME};
 pub use modules::ModuleServices;
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
 pub use router::{
