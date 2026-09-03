@@ -1230,25 +1230,85 @@ last lines" is pinned.
 
 ## Phase 6 — Python plugin modules
 
-- [ ] 6.1 The decorator API in the shipped `saltcorn` package: `settings`, `on_load`, `action`,
+- [x] 6.1 The decorator API in the shipped `saltcorn` package: `settings`, `on_load`, `action`,
       `function`, `table_provider`, `Field`, and the per-package registry that keeps two plugins
       apart in one interpreter.
-- [ ] 6.2 Discovery and the manifest: entry point or top-level package, imported on a module
+- [x] 6.2 Discovery and the manifest: entry point or top-level package, imported on a module
       worker, answering the same `ModuleManifest` shape (actions with their `FormField`s,
       functions with their signatures from `inspect`, table providers with their config fields,
       the module's own settings fields, and issues).
-- [ ] 6.3 `PyModuleAction` as an ordinary `Action`, with §2's signature inspection, and the five
+- [x] 6.3 `PyModuleAction` as an ordinary `Action`, with §2's signature inspection, and the five
       host surfaces bound for the duration of the call through a contextvar.
-- [ ] 6.4 `PyModuleFunctions` as a `ModuleFnHost`, and `PyModuleTableProviders` as a
+- [x] 6.4 `PyModuleFunctions` as a `ModuleFnHost`, and `PyModuleTableProviders` as a
       `TableProviderHost` — including `writes` decided by which methods the provider defines.
-- [ ] 6.5 The composites of §8, and `ModuleServices` loading both languages into one registry and
+- [x] 6.5 The composites of §8, and `ModuleServices` loading both languages into one registry and
       one pair of catalog hosts.
-- [ ] 6.6 Reload semantics of §11, and `on_load` called at load and after a configuration change.
-- [ ] 6.7 A fixture Python plugin in `crates/sc-python/tests/fixtures` supplying one of each entity
+- [x] 6.6 Reload semantics of §11, and `on_load` called at load and after a configuration change.
+- [x] 6.7 A fixture Python plugin in `crates/sc-python/tests/fixtures` supplying one of each entity
       type, and tests: the action wired to a trigger and fired; the function called from a formula
       (hoisted) and from a body (`modfn`); a table backed by the provider read, filtered and
       written; the settings form's secret redacted and merged back; a name that collides with a
       built-in reported and not installed.
+
+### What phase 6 landed, and the two places it is not what 6.3 asked for
+
+`src/py/plugin.py` is the decorator API and the host's side of it, installed as
+`__sc_plugin` and re-exported by `saltcorn`, so an author writes `sc.action` and
+never names it. `src/pymodule/` is the Rust half: a host with the same calls
+`sc_module::ModuleHost` has, a loaded set that answers the **same**
+`LoadedModule`, and the three things a plugin supplies as the three seams this
+server already had.
+
+The two departures, both small and both in 6.3:
+
+1. **The surfaces are bound by the thread, not by a contextvar.** They are the
+   same thing one layer down — a contextvar is per-thread by default — and the
+   thread is where a run's identity already lives (§5). So a plugin's
+   `sc.db.leads.update(...)` is the module-level object every run shares, reading
+   the state of the thread it was called on, and outside a run it raises the
+   sentence §2 asks for. A contextvar would have been a second copy of that
+   state, kept in step by hand.
+2. **A module call is a `Task`, not a second entry point into the runtime.**
+   `Inner::run` grew a `Task::Body | Task::Plugin` and everything else — the
+   admission bound, the thread cache, the deadline, `SetAsyncExc`, the
+   quarantine — is shared by construction rather than by resemblance. `CodeCall`
+   was not reused for it, because a plugin call has no source and no bindings and
+   a call carrying two unused fields invites somebody to fill them in; what the
+   two *do* share is `sc_expr::CodeHosts`, the five borrowed surfaces, which is
+   the part that must not drift.
+
+Four smaller decisions worth naming:
+
+1. **The registry is keyed by the decorated object's own `__module__`**, not by
+   "whichever plugin the host is importing". A plugin that registers something
+   from a submodule, or after its import, is still filed under its own package,
+   and two plugins in one interpreter cannot see each other's declarations.
+   `settings()` decorates nothing, so it reads its caller's frame — the same
+   name, one level of indirection away.
+2. **An action gets the five surfaces; a function and a table provider get
+   none.** §2 does not distinguish them, and this does, for a reason that only
+   shows up in the call sites: a function is hoisted into a **formula** and a
+   provider is called from inside a **query**. Neither has a caller's authority
+   to lend, and lending the admin's would make `db` inside a formula's helper a
+   way around the ownership rule the formula was being evaluated for. A plugin
+   that needs the database does its work in an action, which has a caller.
+3. **A load carries its `site-packages` and invalidates the import caches.** The
+   interpreter fixes `sys.path` at start and an install is a subprocess that may
+   have happened since — including the one that *created* the environment — so a
+   distribution installed into a running server would otherwise be invisible
+   until a restart, which is the opposite of what installing from a form is for.
+4. **A failing `on_load` is an issue, not a failed load.** The manifest is what
+   renders the settings form, and the settings form is where an admin fixes the
+   API key that made `on_load` fail. A load that refused would take away the
+   screen that repairs it — the same rule the module loader already follows for
+   every other kind of breakage.
+
+`sc-python` therefore depends on `sc-module`, `sc-action`, `sc-catalog` and
+`sc-core-actions` now. The direction is forced and it is the right way round:
+the two languages share their **types** rather than their implementations, and
+the types are `sc-module`'s, while the interpreter is here. The composites are
+`sc_expr::ModuleFnHosts` and `sc_catalog::TableProviderHosts` — each beside the
+trait it composes, language-neutral, and testable without either host.
 
 ## Phase 7 — The admin UI
 

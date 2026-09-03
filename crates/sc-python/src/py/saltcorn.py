@@ -44,6 +44,13 @@ same refusal the host makes and a body may legitimately catch it and fall back.
 A status an endpoint did not like is neither: ``res.ok`` is False and nothing
 raises, which is what makes a retry or a fallback something a body writes rather
 than a trigger that failed.
+
+The same package is what an installed **plugin** declares itself with —
+``sc.settings``, ``@sc.on_load``, ``@sc.action``, ``@sc.function``,
+``@sc.table_provider`` and ``sc.Field`` — and a plugin's code reaches the five
+handles above exactly as a body does, bound for the duration of a call and
+raising outside one. That half lives in ``plugin.py`` and is re-exported here,
+so an author writes ``sc.`` and never names it.
 """
 
 import base64 as _b64
@@ -70,11 +77,26 @@ from __sc import (
     TriggerError,
 )
 
+# The **plugin** half of this package (§2 of the API): what an installed
+# distribution declares itself with. Re-exported rather than defined here
+# because it is a different conversation — an author writes `@sc.action` and the
+# host reads the registry those decorators fill — and because a code body, which
+# is what everything above is for, never touches it.
+from __sc_plugin import (
+    Field,
+    action,
+    function,
+    on_load,
+    settings,
+    table_provider,
+)
+
 __all__ = [
     "Db",
     "DbError",
     "Dir",
     "FetchError",
+    "Field",
     "File",
     "FileError",
     "Fs",
@@ -90,13 +112,18 @@ __all__ = [
     "TriggerError",
     "TriggerHandle",
     "Triggers",
+    "action",
     "and_",
     "db",
     "fetch",
     "fs",
+    "function",
     "modfn",
     "not_",
+    "on_load",
     "or_",
+    "settings",
+    "table_provider",
     "trigger",
 ]
 

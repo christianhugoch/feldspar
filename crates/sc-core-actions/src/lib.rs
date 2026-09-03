@@ -55,6 +55,7 @@ use std::sync::Arc;
 use sc_action::ActionRegistry;
 use sc_error::Result;
 
+pub use code_body::{CodeSurfaces, Hosts as CodeBodyHosts};
 pub use delete_rows::DeleteRows;
 pub use fetch::Fetch;
 pub use insert_row::InsertRow;

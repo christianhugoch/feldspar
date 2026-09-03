@@ -58,12 +58,12 @@ pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]
 pub use code::CodeRuntime;
 pub use code::{
-    CodeAdapter, CodeCall, CodeHost, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS,
+    CodeAdapter, CodeCall, CodeHost, CodeHosts, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS,
     DEFAULT_FETCH_TIMEOUT, DEFAULT_MAX_FETCHES, DEFAULT_MAX_FILE_OPS, DEFAULT_MAX_HOST_CALLS,
     DEFAULT_MAX_INFLIGHT, DEFAULT_MAX_MODULE_CALLS, DEFAULT_MAX_TRIGGER_RUNS, FETCH_MARGIN,
     FetchHost, FileHost, MAX_CODE_TIMEOUT, MIN_FETCH_WINDOW, MIN_MODULE_FN_WINDOW,
-    MIN_TRIGGER_WINDOW, MODULE_FN_MARGIN, ModuleFnArg, ModuleFnHost, ModuleFunction, PYTHON,
-    TRIGGER_MARGIN, TriggerHost,
+    MIN_TRIGGER_WINDOW, MODULE_FN_MARGIN, ModuleFnArg, ModuleFnHost, ModuleFnHosts, ModuleFunction,
+    PYTHON, TRIGGER_MARGIN, TriggerHost,
 };
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;

@@ -1654,7 +1654,21 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // makes the module exist at all. npm failing must not leave a
                 // module nobody can delete, so its complaint is logged rather
                 // than returned.
-                services.host().unload(&module.name).await;
+                //
+                // Whichever host has it: a module is loaded by the host its
+                // language names, and unloading is what stops this server
+                // answering for a package that is about to leave the disk. Both
+                // are best effort — Python's cannot unload at all in the sense
+                // the word implies (§11), which is why it returns nothing to
+                // check.
+                match module.language {
+                    sc_module::ModuleLanguage::JavaScript => {
+                        services.host().unload(&module.name).await;
+                    }
+                    sc_module::ModuleLanguage::Python => {
+                        services.python_host().unload(&module.name).await;
+                    }
+                }
                 if let Err(e) = services.uninstall_package(&module).await {
                     sc_log::log_error!(
                         "feldspar: the module `{}` was removed but its package could not be \

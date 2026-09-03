@@ -1,6 +1,6 @@
 [package]
 name = "sc-python"
-description = "The Python code adapter: a code body run on one embedded CPython, over sc-expr's CodeCall and its five host traits (layer 1)"
+description = "The Python code adapter: code bodies and plugin modules on one embedded CPython, over sc-expr's CodeCall and its five host traits"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -33,6 +33,27 @@ python-host = ["dep:pyo3"]
 
 [dependencies]
 sc-error.workspace = true
+# **Plugin modules** (phase 6). A Python module is a module to an admin (§8), so
+# what it supplies answers `sc-module`'s own types — the manifest, the loaded
+# module, the language on the row — and one Modules tab, one action registry and
+# one pair of catalog hosts serve both languages. The dependency goes this way
+# because `sc-module` does not need an interpreter and this crate has one; there
+# is no cycle, and `sc-server` is where the two sets are merged.
+sc-module.workspace = true
+sc-action.workspace = true
+sc-catalog.workspace = true
+sc-types.workspace = true
+# The five host surfaces a module's **action** reaches are the ones a code body
+# reaches, built by `sc_core_actions::CodeSurfaces` rather than a second time
+# here: §2 of the API hands a Python plugin the plans directly, and two
+# constructions of the same five is how they would come to disagree about who a
+# module's write is caused by. No cycle — `sc-core-actions` reaches this crate's
+# adapter through `ctx.adapter(PYTHON)` and does not depend on it.
+sc-core-actions.workspace = true
+# The module-function plan a guest sends is read with `derive(Deserialize)`
+# here, exactly as the other language's host reads it — and the manifest a
+# plugin answers a load with is read into `sc_module::ModuleManifest`.
+serde = { workspace = true }
 # `CodeCall`, the five host traits and the `CodeAdapter` trait this crate
 # implements. Default features off: the adapter needs the *seam*, not V8 — a
 # server that builds Python support does not thereby link a second engine here.
@@ -66,20 +87,13 @@ tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"
 # `TableHost` an action builds, the dispatcher a write's event reaches — and the
 # harness that gives each of them a database of its own.
 sc-test-harness.workspace = true
-sc-catalog.workspace = true
 sc-db.workspace = true
+# Phase 6.7 reads a table backed by a **Python table provider** through the
+# ordinary query path — a `Select` in, a `RowStream` out — so the statements it
+# builds are this system's own rather than a shape invented for the test.
+sc-query.workspace = true
 sc-db-postgres.workspace = true
 sc-api.workspace = true
-sc-action.workspace = true
-sc-types.workspace = true
-# Phase 3.5 asks its questions of the **action** rather than of the runtime:
-# `run_python_code` from the registry, over the five hosts an `ActionContext`
-# builds. That is the path a firing trigger takes, and it is the only way to
-# reach `CodeFetchHost` — which is this crate's `fetch` tests' whole point, since
-# a second implementation of it here would assert nothing about the one a server
-# uses. No cycle: `sc-core-actions` reaches this adapter through
-# `ctx.adapter("python")` and does not depend on this crate.
-sc-core-actions.workspace = true
 # The `fs` tests write to a real `LocalFileStore` and read the bytes back off
 # the disk, for the reason the `db` tests use a real database.
 sc-files.workspace = true

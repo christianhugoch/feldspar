@@ -102,9 +102,33 @@ impl ModuleSet {
         let stored = list_modules(catalog).await?;
         let mut modules = Vec::with_capacity(stored.len());
         for module in stored {
+            // **This loader is JavaScript's**, and a module in another language
+            // is not its business: a Python module's package is a distribution
+            // in the server's Python environment rather than a directory under
+            // `node_modules`, and it is loaded on the embedded interpreter
+            // (`sc_python::pymodule`). It is skipped rather than carried with an
+            // issue, because the set it belongs in is the other one and a module
+            // listed twice on the Modules tab would be worse than either.
+            if module.language != crate::module::ModuleLanguage::JavaScript {
+                continue;
+            }
             modules.push(load_one(&module, host, installer, registry).await);
         }
         Ok(ModuleSet { modules })
+    }
+
+    /// The same set, with another language's loaded modules in it (§8).
+    ///
+    /// One tab, one set of endpoints and one `module_json`, so the two loaders'
+    /// answers are merged **after** both have run and before anything renders.
+    /// Ordered by name across both, because "which language is it in" is not the
+    /// order an admin looks for a module in.
+    #[must_use]
+    pub fn merged(mut self, others: Vec<LoadedModule>) -> ModuleSet {
+        self.modules.extend(others);
+        self.modules
+            .sort_by(|a, b| a.module.name.cmp(&b.module.name));
+        self
     }
 
     /// The loaded modules, in name order.
@@ -141,24 +165,6 @@ async fn load_one(
     registry: &mut ActionRegistry,
 ) -> LoadedModule {
     let mut issues = Vec::new();
-    // **This loader is JavaScript's.** A Python module's package is a
-    // distribution in the server's Python environment, not a directory under
-    // `node_modules`, and it is loaded on the embedded interpreter rather than
-    // on a Deno worker — so it is carried here (the row exists, the tab lists
-    // it, `reload` still goes through one place) and nothing is read off the
-    // disk for it. What it supplies is the Python module host's answer.
-    if module.language != crate::module::ModuleLanguage::JavaScript {
-        issues.push(format!(
-            "this server does not load {} modules: its module host supplies actions, functions              and table providers for JavaScript modules only",
-            module.language.as_str()
-        ));
-        return LoadedModule {
-            module: module.clone(),
-            manifest: None,
-            config_spec: Vec::new(),
-            issues,
-        };
-    }
     let dir = installer.package_dir(&module.name);
     if !installer.is_installed(&module.name) {
         issues.push(format!(

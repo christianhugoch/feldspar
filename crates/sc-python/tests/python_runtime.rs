@@ -717,6 +717,14 @@ fn the_environment_flags_are_held_where_the_installer_will_read_them() {
     );
 }
 
+/// Whether `entry` is inside a virtual environment — `<venv>/lib/pythonX.Y/
+/// site-packages`, whose root carries a `pyvenv.cfg`.
+fn in_a_virtual_environment(entry: &str) -> bool {
+    std::path::Path::new(entry)
+        .ancestors()
+        .any(|dir| dir.join("pyvenv.cfg").is_file())
+}
+
 /// The embedded interpreter does not import the **host's** packages.
 ///
 /// It inherits the `sys.path` of the interpreter it was linked against, which on
@@ -750,12 +758,24 @@ async fn the_hosts_installed_packages_are_not_on_the_path() {
         .collect();
     // Everything this server would install into is its own; anything else that
     // holds packages is the host's.
+    //
+    // "Its own" is two things rather than one since phase 6: the environment
+    // this process would install into, and any environment a **module load**
+    // put there — a package installed after the interpreter started is
+    // invisible until its `site-packages` is on the path, and the load carries
+    // it (`PyModuleHost::load`). Both are virtual environments Saltcorn owns,
+    // which is a property that can be checked rather than a name to trust: a
+    // `site-packages` three levels under a `pyvenv.cfg` is a venv, and the
+    // host's own directories are not.
     let ours = PythonEnv::default()
         .directory()
         .map(|dir| dir.to_string_lossy().into_owned())
         .unwrap_or_default();
     for entry in &path {
         if !ours.is_empty() && entry.starts_with(&ours) {
+            continue;
+        }
+        if in_a_virtual_environment(entry) {
             continue;
         }
         assert!(

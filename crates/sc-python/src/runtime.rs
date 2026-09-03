@@ -13,9 +13,9 @@
 //!
 //! # One admission bound over everything
 //!
-//! [`DEFAULT_MAX_INFLIGHT`] runs may be resident at once — code bodies and
-//! (from phase 6) module calls alike, because there is one interpreter and one
-//! thing being bounded. Past it a run queues **inside its own deadline**, which
+//! [`DEFAULT_MAX_INFLIGHT`](crate::DEFAULT_MAX_INFLIGHT) runs may be resident at
+//! once — code bodies and **plugin module** calls alike ([`Task`]), because
+//! there is one interpreter and one thing being bounded. Past it a run queues **inside its own deadline**, which
 //! is why the wait is a timeout and not a park.
 //!
 //! With one exception, and it is not a convenience (§6). A Python body may run a
@@ -31,7 +31,7 @@
 //!
 //! # Who serves the host calls
 //!
-//! The future that is awaiting the run. The hosts on a [`CodeCall`] are
+//! The future that is awaiting the run. The hosts on a [`CodeHosts`] are
 //! *borrowed*, and the borrow lives exactly as long as the future holding it —
 //! so the plans travel back here over a channel and are answered here, rather
 //! than anything `'static` being manufactured to cross to the thread.
@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use sc_error::{Error, Result};
-use sc_expr::{CodeCall, MAX_CODE_TIMEOUT};
+use sc_expr::CodeHosts;
 use serde_json::Value as Json;
 
 use crate::CALLER_GRACE;
@@ -128,9 +128,38 @@ enum Job {
     Stop,
 }
 
+/// What a run is being asked to do — the one thing that differs between the two
+/// kinds of Python this runtime executes.
+///
+/// Everything else about them is the same by construction: one admission bound
+/// over both (§1), one thread each, one deadline each, and the same five
+/// surfaces reached through the same thread-local. A module call is not a
+/// second runtime, it is a second [`Task`].
+pub(crate) enum Task {
+    /// An admin's code body, compiled and cached under a content key.
+    Body {
+        code: String,
+        bindings: BTreeMap<String, Json>,
+    },
+    /// One op of the **plugin module** host: a load, an action, a function, or
+    /// one of a table provider's six.
+    Plugin { op: &'static str, payload: Json },
+}
+
+/// One run, as the caller hands it over: what to do, what it may reach, what it
+/// may spend and how long it has.
+pub(crate) struct Run<'a> {
+    pub(crate) task: Task,
+    pub(crate) hosts: CodeHosts<'a>,
+    pub(crate) budgets: Budgets,
+    /// Already resolved and clamped by the caller: what a body's ceiling is and
+    /// what a module call's is are different questions, and neither belongs
+    /// here.
+    pub(crate) timeout: Duration,
+}
+
 struct RunJob {
-    code: String,
-    bindings: BTreeMap<String, Json>,
+    task: Task,
     state: RunState,
     shared: Arc<RunShared>,
     reply: tokio::sync::oneshot::Sender<Result<Json>>,
@@ -181,18 +210,20 @@ impl Inner {
         self.resident.load(Ordering::Relaxed)
     }
 
-    /// Run one body. See the module documentation for the shape of it.
+    /// Run one task — a body, or one op of the module host. See the module
+    /// documentation for the shape of it.
     pub(crate) async fn run(
         self: &Arc<Inner>,
-        call: CodeCall<'_>,
-        default_timeout: Duration,
+        run: Run<'_>,
         env: &crate::PythonEnv,
     ) -> Result<Json> {
         interp::ensure(env)?;
-        let timeout = call
-            .timeout
-            .unwrap_or(default_timeout)
-            .min(MAX_CODE_TIMEOUT);
+        let Run {
+            task,
+            hosts,
+            budgets,
+            timeout,
+        } = run;
         let deadline = Instant::now() + timeout;
 
         let stuck = self.stuck();
@@ -229,18 +260,11 @@ impl Inner {
 
         let (requests, mut incoming) = tokio::sync::mpsc::unbounded_channel::<HostRequest>();
         let has = Surfaces {
-            db: call.host.is_some(),
-            fetch: call.fetch.is_some(),
-            files: call.files.is_some(),
-            triggers: call.triggers.is_some(),
-            module_fns: call.module_fns.is_some(),
-        };
-        let budgets = Budgets {
-            calls: call.max_calls,
-            fetches: call.max_fetches,
-            file_ops: call.max_file_ops,
-            trigger_runs: call.max_trigger_runs,
-            module_calls: call.max_module_calls,
+            db: hosts.host.is_some(),
+            fetch: hosts.fetch.is_some(),
+            files: hosts.files.is_some(),
+            triggers: hosts.triggers.is_some(),
+            module_fns: hosts.module_fns.is_some(),
         };
         // Asked of the **real** hosts here, while they are still borrowed: the
         // guest's `fs(name)` and `trigger(name)` are ordinary synchronous calls,
@@ -249,15 +273,15 @@ impl Inner {
         // passes them per invocation: one compiled body serves every run, and an
         // admin's save reloads the trigger set between two of them.
         let names = RunNames {
-            stores: call
+            stores: hosts
                 .files
                 .map(sc_expr::FileHost::store_names)
                 .unwrap_or_default(),
-            triggers: call
+            triggers: hosts
                 .triggers
                 .map(sc_expr::TriggerHost::trigger_names)
                 .unwrap_or_default(),
-            functions: call
+            functions: hosts
                 .module_fns
                 .map(sc_expr::ModuleFnHost::functions)
                 .unwrap_or_default()
@@ -278,8 +302,7 @@ impl Inner {
         let shared = Arc::new(RunShared::default());
         let (reply, answer) = tokio::sync::oneshot::channel::<Result<Json>>();
         self.dispatch(Box::new(RunJob {
-            code: call.code,
-            bindings: call.bindings,
+            task,
             state: RunState {
                 requests,
                 deadline,
@@ -333,11 +356,11 @@ impl Inner {
                     return Err(overdue());
                 }
                 Some(request) = incoming.recv() => {
-                    let host = call.host;
-                    let fetch = call.fetch;
-                    let files = call.files;
-                    let triggers = call.triggers;
-                    let module_fns = call.module_fns;
+                    let host = hosts.host;
+                    let fetch = hosts.fetch;
+                    let files = hosts.files;
+                    let triggers = hosts.triggers;
+                    let module_fns = hosts.module_fns;
                     // The task-local §6 reads: everything this call leads to is
                     // nested inside this run.
                     serving.push(SERVING.scope((), async move {
@@ -442,11 +465,20 @@ impl Drop for Inner {
 /// inside this iteration simply waits in its inbox for the next `recv`.
 fn thread_loop(inbox: &Receiver<Job>, mine: &Sender<Job>, owner: &Weak<Inner>) {
     while let Ok(Job::Run(job)) = inbox.recv() {
-        job.shared.ident.store(my_ident(), Ordering::Release);
-        let outcome = interp::run_body(&job.code, &job.bindings, job.state);
+        let RunJob {
+            task,
+            state,
+            shared,
+            reply,
+        } = *job;
+        shared.ident.store(my_ident(), Ordering::Release);
+        let outcome = match &task {
+            Task::Body { code, bindings } => interp::run_body(code, bindings, state),
+            Task::Plugin { op, payload } => interp::run_plugin(op, payload, state),
+        };
         // An async exception fired at a body that had already finished would
         // otherwise be delivered to whatever ran next on this thread.
-        if job.shared.fired.load(Ordering::Acquire) {
+        if shared.fired.load(Ordering::Acquire) {
             interp::drain_async_exception();
         }
         // Park, unless there is nobody left to be parked for.
@@ -460,14 +492,14 @@ fn thread_loop(inbox: &Receiver<Job>, mine: &Sender<Job>, owner: &Weak<Inner>) {
             },
             _ => false,
         };
-        if job.shared.abandoned.load(Ordering::Acquire) {
+        if shared.abandoned.load(Ordering::Acquire) {
             // Back from the dead: the caller gave up and counted this thread as
             // stuck, and it is not stuck after all.
             if let Some(inner) = owner.upgrade() {
                 inner.stuck.fetch_sub(1, Ordering::SeqCst);
             }
         } else {
-            let _ = job.reply.send(outcome);
+            let _ = reply.send(outcome);
         }
         if !parked {
             break;

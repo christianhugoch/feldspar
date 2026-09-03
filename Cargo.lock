@@ -8340,8 +8340,11 @@ dependencies = [
  "sc-error",
  "sc-expr",
  "sc-files",
+ "sc-module",
+ "sc-query",
  "sc-test-harness",
  "sc-types",
+ "serde",
  "serde_json",
  "tokio",
 ]

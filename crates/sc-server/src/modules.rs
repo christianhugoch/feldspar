@@ -12,7 +12,9 @@
 //! 1. rebuild the **base** registry (the built-ins plus the agent action) from
 //!    scratch — never mutate the live one, which a firing trigger may be
 //!    reading;
-//! 2. load every stored module into it, collecting each one's issues;
+//! 2. load every stored module into it — **both languages**, JavaScript's on
+//!    their workers and Python's on the embedded interpreter — collecting each
+//!    one's issues;
 //! 3. swap it into the dispatcher; and
 //! 4. reload the trigger set against it, which is what turns a trigger that was
 //!    broken ("unknown action `mqtt_publish`") back into a working one.
@@ -25,11 +27,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use sc_action::TriggerDispatcher;
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, TableProviderHosts};
+use sc_core_actions::CodeSurfaces;
 use sc_error::{Context, Error, Result};
+use sc_expr::ModuleFnHosts;
 use sc_module::{
     Installer, ModuleFunctions, ModuleHost, ModuleSet, ModuleTableProviders, bootstrap_modules,
 };
+use sc_python::pymodule::{PyModuleFunctions, PyModuleHost, PyModuleSet, PyModuleTableProviders};
 
 use crate::agents::AgentServices;
 
@@ -46,6 +51,13 @@ pub struct ModuleServices {
     /// and asking the runtime for that is what makes sure there is one.
     python: Arc<sc_python::PythonRuntime>,
     host: Arc<ModuleHost>,
+    /// The **Python** module host, over that same runtime: one interpreter per
+    /// process, so a Python module and a Python body share it (§1).
+    python_host: Arc<PyModuleHost>,
+    /// The five host surfaces a module's action reaches, and the HTTP client
+    /// behind `fetch` — built once here for the reason `run_python_code` builds
+    /// one once: a client is a connection pool and a TLS configuration.
+    surfaces: Arc<CodeSurfaces>,
     /// The loaded set, replaced whole by [`reload`](ModuleServices::reload).
     loaded: RwLock<Arc<ModuleSet>>,
 }
@@ -94,7 +106,9 @@ impl ModuleServices {
             dispatcher: Arc::clone(dispatcher),
             agents: agents.clone(),
             installer: Installer::new(&root),
+            python_host: Arc::new(PyModuleHost::new(Arc::clone(&python))),
             python,
+            surfaces: Arc::new(CodeSurfaces::new()?),
             host: Arc::new(ModuleHost::with_workers(&root, workers)),
             loaded: RwLock::new(Arc::new(ModuleSet::empty())),
         });
@@ -118,20 +132,45 @@ impl ModuleServices {
         let mut registry = crate::triggers::base_action_registry(&self.agents)?;
         let set =
             ModuleSet::load(&self.catalog, &self.host, &self.installer, &mut registry).await?;
+        // And the other language's, into the **same** registry: the two share
+        // one namespace of action names, so a Python module claiming a name a
+        // built-in or a JavaScript module already has is refused by the registry
+        // and carries the refusal as its own issue. JavaScript first, so which
+        // implementation answers to a name does not depend on the order two
+        // package managers were run in.
+        let python = PyModuleSet::load(
+            &self.catalog,
+            &self.python_host,
+            &self.surfaces,
+            &mut registry,
+        )
+        .await?;
         self.dispatcher.set_registry(Arc::new(registry))?;
         // The functions the modules supply, on the catalog (§4a). Installed here
         // rather than beside the registry because they are not actions and their
         // callers are not the dispatcher: a formula hoists one through
         // `prefetch_bindings` and a code body calls one through `modfn`, and
-        // what both of those hold is a `Catalog`.
+        // what both of those hold is a `Catalog`. **Both languages'**, merged
+        // into one host (§8): a formula that hoists `md_to_html` and a body that
+        // writes `modfn.md_to_html(x)` must not have to know which package
+        // manager put it there.
         self.catalog
-            .set_module_functions(Arc::new(ModuleFunctions::new(&self.host, &set)))?;
+            .set_module_functions(Arc::new(ModuleFnHosts::new(vec![
+                Arc::new(ModuleFunctions::new(&self.host, &set)),
+                Arc::new(PyModuleFunctions::new(&self.python_host, python.modules())),
+            ])))?;
         // And the **table providers** (§8.3), on the same catalog and for the
         // same kind of reason: what needs them is `Catalog::reload`, which builds
         // a provided table out of its `_sc_tables` row, and `Catalog::provider`,
         // which serves its rows.
         self.catalog
-            .set_table_providers(Arc::new(ModuleTableProviders::new(&self.host, &set)))?;
+            .set_table_providers(Arc::new(TableProviderHosts::new(vec![
+                Arc::new(ModuleTableProviders::new(&self.host, &set)),
+                Arc::new(PyModuleTableProviders::new(
+                    &self.python_host,
+                    python.modules(),
+                )),
+            ])))?;
         // Then reload the catalog, because that is what *applies* the line
         // above: a provided table's columns are the module's answer, so
         // installing, configuring or deleting a module can change them — and a
@@ -149,8 +188,10 @@ impl ModuleServices {
             .reload(&self.catalog)
             .await
             .context("reloading the triggers after a module change")?;
+        // One set from here up: the Modules tab, the endpoints and `module_json`
+        // are written once and serve both languages (§8).
         match self.loaded.write() {
-            Ok(mut guard) => *guard = Arc::new(set),
+            Ok(mut guard) => *guard = Arc::new(set.merged(python.into_modules())),
             Err(_) => return Err(Error::msg("module set lock poisoned")),
         }
         Ok(())
@@ -169,9 +210,14 @@ impl ModuleServices {
         &self.installer
     }
 
-    /// The worker pool modules run on.
+    /// The worker pool JavaScript modules run on.
     pub fn host(&self) -> &Arc<ModuleHost> {
         &self.host
+    }
+
+    /// The interpreter Python modules run on.
+    pub fn python_host(&self) -> &Arc<PyModuleHost> {
+        &self.python_host
     }
 
     /// The Python runtime this server's Python modules install into and run on.

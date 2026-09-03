@@ -1,6 +1,6 @@
-//! **The Python code adapter**: a code body run on one embedded CPython, over
-//! `sc-expr`'s own [`CodeCall`] and its five host traits (design §15; TODO "The
-//! Python code adapter").
+//! **The Python code adapter**: a code body — and a plugin module — run on one
+//! embedded CPython, over `sc-expr`'s own [`CodeCall`] and its five host traits
+//! (design §15; TODO "The Python code adapter").
 //!
 //! ```python
 //! overdue = db.invoices.where(paid=False).order_by("due").limit(50).rows()
@@ -16,6 +16,12 @@
 //! into a run's globals only where this server has the surface behind it.
 //! Underneath them is everything this crate began as: one interpreter, a run per
 //! thread, the four bounds, and the seam.
+//!
+//! The same five are what an installed **plugin module** reaches ([`pymodule`]):
+//! a `pip`-installable distribution that declares an action, a function and a
+//! table provider with decorators, loaded into the same interpreter and answering
+//! the same `sc_module` types the other language's modules answer — one
+//! `_sc_modules`, one Modules tab, one action registry.
 //!
 //! # Why there is nothing new below the plans
 //!
@@ -92,6 +98,8 @@
 //! - [`convert`] — JSON ↔ Python, and what has no JSON form.
 //! - [`errors`] — the exception hierarchy, defined in Rust.
 //! - [`runtime`] — the thread cache, the admission bound and the four bounds.
+//! - [`pymodule`] — plugin modules: the host, the loaded set, and what a
+//!   distribution supplies.
 
 use std::time::Duration;
 
@@ -115,6 +123,14 @@ pub mod env;
 mod errors;
 #[cfg(feature = "python-host")]
 mod interp;
+/// **Python plugin modules**: the module host, the loaded set, and a plugin's
+/// actions, functions and table providers (§2 of the API, §8; phase 6).
+///
+/// Un-gated like [`env`], and for a sharper version of the same reason: a build
+/// without an interpreter still has `_sc_modules` rows whose language is Python,
+/// and the Modules tab still has to render them — with the one sentence saying
+/// why nothing they supply is available.
+pub mod pymodule;
 #[cfg(feature = "python-host")]
 mod runtime;
 
@@ -545,13 +561,137 @@ impl PythonRuntime {
         #[cfg(feature = "python-host")]
         {
             self.admit()?;
-            self.inner.run(call, self.default_timeout, &self.env).await
+            let hosts = call.hosts();
+            let budgets = bridge::Budgets {
+                calls: call.max_calls,
+                fetches: call.max_fetches,
+                file_ops: call.max_file_ops,
+                trigger_runs: call.max_trigger_runs,
+                module_calls: call.max_module_calls,
+            };
+            let timeout = call
+                .timeout
+                .unwrap_or(self.default_timeout)
+                .min(sc_expr::MAX_CODE_TIMEOUT);
+            self.inner
+                .run(
+                    runtime::Run {
+                        task: runtime::Task::Body {
+                            code: call.code,
+                            bindings: call.bindings,
+                        },
+                        hosts,
+                        budgets,
+                        timeout,
+                    },
+                    &self.env,
+                )
+                .await
         }
         #[cfg(not(feature = "python-host"))]
         {
             let _ = call;
             Err(not_built())
         }
+    }
+
+    /// Ask one thing of a **plugin module** — the seam under
+    /// [`pymodule::PyModuleHost`], and the reason this is not a second runtime.
+    ///
+    /// A module's action, function or table provider is a run exactly as a code
+    /// body is: one thread, one admission slot, one deadline, and the same five
+    /// surfaces reached through the same thread-local (§1, §2 of the API). What
+    /// differs is what the thread executes — an installed package's function
+    /// rather than a compiled body — and how long it is given, which is the
+    /// module host's bound rather than a trigger's configured one.
+    pub(crate) async fn call_plugin(&self, call: PluginCall<'_>) -> Result<Json> {
+        #[cfg(feature = "python-host")]
+        {
+            self.admit()?;
+            self.inner
+                .run(
+                    runtime::Run {
+                        task: runtime::Task::Plugin {
+                            op: call.op,
+                            payload: call.payload,
+                        },
+                        hosts: call.hosts,
+                        budgets: bridge::Budgets {
+                            calls: call.max_calls,
+                            fetches: call.max_fetches,
+                            file_ops: call.max_file_ops,
+                            trigger_runs: call.max_trigger_runs,
+                            module_calls: call.max_module_calls,
+                        },
+                        timeout: call.timeout,
+                    },
+                    &self.env,
+                )
+                .await
+        }
+        #[cfg(not(feature = "python-host"))]
+        {
+            let _ = call;
+            Err(not_built())
+        }
+    }
+}
+
+/// One call into a Python **plugin module**: which op, its payload, and the
+/// surfaces and budgets the run is under.
+///
+/// [`CodeCall`]'s counterpart for the other kind of run, and deliberately not
+/// [`CodeCall`] itself: there is no source and no bindings here, and a call that
+/// carried two unused fields would invite somebody to fill them in. What the two
+/// *do* share is the part that matters — [`CodeHosts`](sc_expr::CodeHosts), so
+/// the five surfaces a plugin reaches are the five a body reaches, with the same
+/// authority and the same budgets counted the same way.
+#[cfg_attr(
+    not(feature = "python-host"),
+    expect(dead_code, reason = "no interpreter to spend a budget in")
+)]
+pub(crate) struct PluginCall<'a> {
+    /// Which op — `load`, `action`, `provider_rows`, … Static, because the set
+    /// is this crate's and a name the Python half does not know is a wiring
+    /// mistake rather than an admin's.
+    pub(crate) op: &'static str,
+    /// Its arguments, as the Python half reads them.
+    pub(crate) payload: Json,
+    /// What the run may reach. Empty for everything but an action: a function is
+    /// hoisted into a formula and a provider is called from inside a query, and
+    /// neither of those has a caller's authority to lend.
+    pub(crate) hosts: sc_expr::CodeHosts<'a>,
+    /// How long this call may take, already resolved.
+    pub(crate) timeout: Duration,
+    /// The five budgets, [`CodeCall`]'s own defaults.
+    pub(crate) max_calls: u32,
+    pub(crate) max_fetches: u32,
+    pub(crate) max_file_ops: u32,
+    pub(crate) max_trigger_runs: u32,
+    pub(crate) max_module_calls: u32,
+}
+
+impl<'a> PluginCall<'a> {
+    /// A call of `op` with `payload`, over no surfaces, bounded by `timeout`.
+    pub(crate) fn new(op: &'static str, payload: Json, timeout: Duration) -> PluginCall<'a> {
+        PluginCall {
+            op,
+            payload,
+            hosts: sc_expr::CodeHosts::default(),
+            timeout,
+            max_calls: sc_expr::DEFAULT_MAX_HOST_CALLS,
+            max_fetches: sc_expr::DEFAULT_MAX_FETCHES,
+            max_file_ops: sc_expr::DEFAULT_MAX_FILE_OPS,
+            max_trigger_runs: sc_expr::DEFAULT_MAX_TRIGGER_RUNS,
+            max_module_calls: sc_expr::DEFAULT_MAX_MODULE_CALLS,
+        }
+    }
+
+    /// The same call, over the five surfaces this run may reach.
+    #[must_use]
+    pub(crate) fn with_hosts(mut self, hosts: sc_expr::CodeHosts<'a>) -> PluginCall<'a> {
+        self.hosts = hosts;
+        self
     }
 }
 

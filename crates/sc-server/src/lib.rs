@@ -104,10 +104,6 @@ pub fn default_python_adapter() -> std::sync::Arc<sc_python::PythonRuntime> {
     python_adapter(&ServerConfig::default())
 }
 pub use config::{DEFAULT_BIND, PythonMode, ServerConfig};
-/// The guest-language adapter trait, re-exported: a caller that hands
-/// [`install_triggers_with_adapters`] a set of adapters needs to name it, and
-/// `sc-expr` is not otherwise its dependency.
-pub use sc_expr::CodeAdapter;
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
@@ -119,6 +115,10 @@ pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
 pub use router::{
     BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
 };
+/// The guest-language adapter trait, re-exported: a caller that hands
+/// [`install_triggers_with_adapters`] a set of adapters needs to name it, and
+/// `sc-expr` is not otherwise its dependency.
+pub use sc_expr::CodeAdapter;
 pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::serve;

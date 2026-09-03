@@ -100,10 +100,11 @@
 //! way any other runaway is.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sc_error::Result;
+use sc_error::{Error, Result};
 use serde_json::Value as Json;
 
 #[cfg(feature = "eval")]
@@ -112,8 +113,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 #[cfg(feature = "eval")]
 use std::rc::Rc;
-#[cfg(feature = "eval")]
-use std::sync::Arc;
 #[cfg(feature = "eval")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(feature = "eval")]
@@ -127,8 +126,6 @@ use deno_core::OpState;
 use deno_core::futures::StreamExt;
 #[cfg(feature = "eval")]
 use deno_core::futures::stream::FuturesUnordered;
-#[cfg(feature = "eval")]
-use sc_error::Error;
 
 /// How long a code body may run before it is stopped, when the caller names no
 /// timeout of its own. Generous next to a formula's 250 ms: a body that reads,
@@ -495,6 +492,142 @@ pub trait ModuleFnHost: Send + Sync {
     }
 }
 
+/// Two module hosts as one — the composite of §8, for a server whose modules are
+/// written in more than one language.
+///
+/// A formula's hoisted call and a body's `modfn` reach *a* module function; that
+/// one language's modules run on a Deno worker and another's on an embedded
+/// interpreter is a fact about installation, not about calling. So the two hosts
+/// are merged here, once, and everything above sees one — which is what keeps
+/// `modfn.md_to_html(x)` from having to say which package manager put
+/// `md_to_html` there.
+///
+/// Routing is by the **module** the plan names, which every plan carries because
+/// a function name is not unique. A name two hosts both claim goes to the first
+/// that has it, in the order they were given: the merge does not invent a
+/// precedence rule, because a duplicate is already an issue on somebody's module
+/// card and inventing one here would hide it.
+pub struct ModuleFnHosts {
+    hosts: Vec<Arc<dyn ModuleFnHost>>,
+    functions: Vec<ModuleFunction>,
+}
+
+impl ModuleFnHosts {
+    /// One host over all of them, in order.
+    pub fn new(hosts: Vec<Arc<dyn ModuleFnHost>>) -> ModuleFnHosts {
+        let functions = hosts.iter().flat_map(|host| host.functions()).collect();
+        ModuleFnHosts { hosts, functions }
+    }
+}
+
+#[async_trait]
+impl ModuleFnHost for ModuleFnHosts {
+    async fn call(&self, request: Json) -> Result<Json> {
+        let module = request.get("module").and_then(Json::as_str).unwrap_or("");
+        let function = request.get("function").and_then(Json::as_str).unwrap_or("");
+        for host in &self.hosts {
+            if host
+                .functions()
+                .iter()
+                .any(|f| f.module == module && f.name == function)
+            {
+                return host.call(request).await;
+            }
+        }
+        // Not silence, and not the first host's refusal: a name nothing supplies
+        // is its own answer, and it is the same sentence either host would give.
+        Err(Error::invalid(format!(
+            "the module `{module}` supplies no function `{function}`"
+        )))
+    }
+
+    fn functions(&self) -> Vec<ModuleFunction> {
+        self.functions.clone()
+    }
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use super::*;
+
+    /// A host of one module, answering with its own name so a test can tell
+    /// which of two was asked.
+    struct One {
+        module: &'static str,
+        function: &'static str,
+    }
+
+    #[async_trait]
+    impl ModuleFnHost for One {
+        async fn call(&self, request: Json) -> Result<Json> {
+            Ok(Json::String(format!(
+                "{} answered {}",
+                self.module,
+                request["function"].as_str().unwrap_or_default()
+            )))
+        }
+
+        fn functions(&self) -> Vec<ModuleFunction> {
+            vec![ModuleFunction {
+                module: self.module.to_owned(),
+                name: self.function.to_owned(),
+                description: String::new(),
+                is_async: false,
+                arguments: Vec::new(),
+            }]
+        }
+    }
+
+    fn both() -> ModuleFnHosts {
+        ModuleFnHosts::new(vec![
+            Arc::new(One {
+                module: "@saltcorn/markdown",
+                function: "md_to_html",
+            }),
+            Arc::new(One {
+                module: "sc-plugin-fixture",
+                function: "fixture_shout",
+            }),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_call_reaches_the_host_whose_module_supplies_it() {
+        let hosts = both();
+        // Every function of both, in one list — which is what a guest's `modfn`
+        // resolves a short name against.
+        let names: Vec<String> = hosts.functions().into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["md_to_html", "fixture_shout"]);
+
+        let answer = hosts
+            .call(serde_json::json!({
+                "module": "sc-plugin-fixture", "function": "fixture_shout", "args": ["x"]
+            }))
+            .await
+            .expect("the second host has it");
+        assert_eq!(
+            answer,
+            Json::String("sc-plugin-fixture answered fixture_shout".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_neither_supplies_is_refused_by_the_composite_itself() {
+        let said = both()
+            .call(serde_json::json!({ "module": "sc-plugin-fixture", "function": "nope" }))
+            .await
+            .expect_err("nothing supplies it")
+            .to_string();
+        // The sentence names both halves of the question, and it is the one
+        // either host would have given — not "this host does not have it",
+        // which would be true of half a server.
+        assert!(
+            said.contains("sc-plugin-fixture") && said.contains("nope"),
+            "{said}"
+        );
+    }
+}
+
 /// A **guest language** that can run a [`CodeCall`]: JavaScript, Python, and
 /// whatever comes third.
 ///
@@ -615,6 +748,59 @@ impl Default for CodeCall<'_> {
             max_file_ops: DEFAULT_MAX_FILE_OPS,
             max_trigger_runs: DEFAULT_MAX_TRIGGER_RUNS,
             max_module_calls: DEFAULT_MAX_MODULE_CALLS,
+        }
+    }
+}
+
+/// The five host surfaces one guest run may reach, borrowed for exactly as long
+/// as the run is.
+///
+/// [`CodeCall`]'s own five fields, as one value — because a code body is not the
+/// only thing that runs over them. A **Python plugin module**'s action reaches
+/// the same five (`sc_python`, TODO "Python plugin modules" §2), and it is not a
+/// [`CodeCall`]: there is no source and no bindings, only an installed package's
+/// function and the surfaces it may use while it runs. Handing that caller the
+/// same value rather than a second set of five fields is what keeps the two
+/// kinds of run from drifting apart about what a guest may reach.
+///
+/// `Copy`, so serving a call is a copy of five borrows and not a borrow of the
+/// call.
+#[derive(Clone, Copy, Default)]
+pub struct CodeHosts<'a> {
+    /// The tables — `db`.
+    pub host: Option<&'a dyn CodeHost>,
+    /// The network — `fetch`.
+    pub fetch: Option<&'a dyn FetchHost>,
+    /// The file stores — `fs`.
+    pub files: Option<&'a dyn FileHost>,
+    /// This server's other triggers — `trigger`.
+    pub triggers: Option<&'a dyn TriggerHost>,
+    /// The functions its modules supply — `modfn`.
+    pub module_fns: Option<&'a dyn ModuleFnHost>,
+}
+
+impl std::fmt::Debug for CodeHosts<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeHosts")
+            .field("host", &self.host.is_some())
+            .field("fetch", &self.fetch.is_some())
+            .field("files", &self.files.is_some())
+            .field("triggers", &self.triggers.is_some())
+            .field("module_fns", &self.module_fns.is_some())
+            .finish()
+    }
+}
+
+impl<'a> CodeCall<'a> {
+    /// The five surfaces this call carries, for a second kind of run over the
+    /// same hosts.
+    pub fn hosts(&self) -> CodeHosts<'a> {
+        CodeHosts {
+            host: self.host,
+            fetch: self.fetch,
+            files: self.files,
+            triggers: self.triggers,
+            module_fns: self.module_fns,
         }
     }
 }

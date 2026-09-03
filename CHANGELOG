@@ -2,6 +2,92 @@
 
 Changes in reverse chronological order.
 
+## Python plugin modules: one `_sc_modules`, two languages, one of each entity
+
+Phase 6 of the Python code adapter. A `pip`-installable distribution can now
+supply an **action**, a **function** and a **table provider** to a running
+server, declared with decorators and configured from the same Modules tab a
+JavaScript plugin is configured from.
+
+```python
+import saltcorn as sc
+
+sc.settings(sc.Field.string("api_key", label="API key", secret=True))
+
+@sc.on_load
+def load(configuration):
+    global client
+    client = Scorer(configuration["api_key"])
+
+@sc.action(config=[sc.Field.string("model", required=True)])
+def score_lead(row, config, user):
+    score = client.score(row["email"], model=config["model"])
+    sc.db.leads.where(id=row["id"]).update(score=score)
+    return {"score": score}
+```
+
+- **The decorator API is `saltcorn`'s other half** (`src/py/plugin.py`, shipped
+  in the binary beside the surface): `settings`, `on_load`, `action`, `function`,
+  `table_provider` and `Field`. Registrations are filed under the **root package
+  of the decorated object's own `__module__`**, so two plugins in one interpreter
+  cannot see each other's declarations and a plugin that registers from a
+  submodule is filed with the package it belongs to.
+- **An action asks for what it wants.** The host offers `row`, `old`, `table`,
+  `user`, `payload`, `config` (this action's settings), `configuration` (the
+  module's), `trigger` and `mode`; `inspect.signature` decides which of them the
+  function is passed, and `**kwargs` gets them all. A parameter that is not one
+  of the nine is refused **by name** rather than passed as `None`.
+- **Module code gets the real `db`.** An action reaches the same five surfaces a
+  code body reaches — built by the same `sc_core_actions::CodeSurfaces`, so its
+  writes carry the event's caller and this trigger's chain, its `fetch` is
+  counted on the run's budget and its `trigger(…)` goes through *the* dispatcher.
+  A function and a table provider are lent **none**, and say so at the call site:
+  the first is hoisted into a formula and the second is called from inside a
+  query, and neither has a caller's authority to lend.
+- **Discovery is the `saltcorn.plugins` entry point**, else the distribution's
+  top-level package (§9). The manifest a plugin answers is the **same
+  `ModuleManifest`** a JavaScript module answers, and the loaded set is the same
+  `LoadedModule` — which is what lets one Modules tab, one `module_json`, one
+  secret-redaction path and one action registry serve both languages. A Python
+  action that claims a built-in's name (or one a JavaScript module got first) is
+  refused by the registry and carries the refusal as its own issue.
+- **A module call is a run, not a second runtime.** The same admission bound, the
+  same thread cache, the same deadline and the same four instruments as a code
+  body (§1, §4) — the runtime grew a `Task` and nothing else. The surfaces are
+  bound by the **thread**, which is what §2's "bound for the duration of the
+  call" means where a run is a thread; outside a call, `sc.db` raises.
+- **`ModuleServices` loads both languages into one registry and one pair of
+  catalog hosts** (§8), through two new composites: `sc_expr::ModuleFnHosts` and
+  `sc_catalog::TableProviderHosts`, each routing by the module a plan names and
+  refusing an unknown name with the sentence either host would have given. The
+  JavaScript loader now **skips** a Python row rather than reporting it as
+  unsupported, and the two sets are merged by name before anything renders.
+- **A reload is a re-import** (§11): the package's modules are dropped from
+  `sys.modules`, the package is imported again and `on_load` is called with the
+  new configuration. Correct for a pure-Python package and best-effort for
+  anything with a C extension in it, which is why the tab will say a version
+  change takes full effect at the next restart. A load also puts its
+  environment's `site-packages` on `sys.path` and invalidates the import caches,
+  because a distribution installed after the interpreter started is otherwise
+  invisible to it.
+- **There is no sandbox** (§10), and nothing here pretends there is one: a plugin
+  runs with the server's privileges, as its `pip install` already did. The import
+  gate is a code body's and is not applied to an installed package.
+- **23 new tests.** Six integration tests in `sc-python/tests/python_modules.rs`
+  run the whole path against a fixture distribution installed **offline** into a
+  real virtual environment: the manifest (a signature read by `inspect`, a
+  `secret` setting, the entry point followed); the action fired by a trigger and
+  writing through `db`, with its colliding name reported and not installed and
+  the secret redacted and merged back; the function called from a formula
+  (hoisted) and from a body (`modfn`); a table backed by the provider read,
+  filtered, inserted into, updated and deleted through the catalog; the reload
+  calling `on_load` again with the package's own state gone; and a call lent no
+  surfaces refused with the plugin's own frames in the message. Twelve unit tests
+  cover the field vocabulary, the argument object, the two catalog seams and the
+  host's refusals; four cover the composites; and one asserts that a Python
+  module in a build **without** an interpreter is carried with the reason it
+  supplies nothing.
+
 ## One Python environment the server owns, and the check that keeps it importable
 
 Phase 5 of the Python code adapter: `pip`, the virtual environment it installs

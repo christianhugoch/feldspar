@@ -138,6 +138,8 @@ graph TD
   coreact --> api["sc-api"]
   server --> module["sc-module"]
   server --> python["sc-python"]
+  python --> module
+  python --> coreact
   server --> workflow["sc-workflow"]
   workflow --> agent
   module --> action["sc-action"]
@@ -192,7 +194,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-python` | `sc-error` `sc-expr` |
+| `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-module` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |

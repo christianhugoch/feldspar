@@ -1,11 +1,11 @@
 //! The interpreter: started once, per process, on first use.
 //!
 //! **One** CPython lives in this process and everything Python runs in it —
-//! every code body, and (from phase 6) every plugin module's action. Not one per
-//! feature, not one per module, not a pool: a second interpreter would be a
-//! second copy of every imported package for an isolation CPython does not
-//! deliver, and per-plugin subinterpreters are the only version of "more than
-//! one" worth having later (specification §1, §11).
+//! every code body, and every plugin module's action, function and table
+//! provider. Not one per feature, not one per module, not a pool: a second
+//! interpreter would be a second copy of every imported package for an isolation
+//! CPython does not deliver, and per-plugin subinterpreters are the only version
+//! of "more than one" worth having later (specification §1, §11).
 //!
 //! Isolation between runs is therefore what one interpreter can give and no
 //! more: separate globals, separate thread state, one shared `sys.modules`. A
@@ -60,9 +60,23 @@ const GATE: &str = include_str!("py/gate.py");
 /// the Rust side sees plans, so a chain method is added here and nowhere else.
 const SALTCORN: &str = include_str!("py/saltcorn.py");
 
+/// The **plugin** half of the surface (§2 of the API): the decorators an
+/// installed distribution declares itself with, the per-package registry they
+/// fill, and the ops the module host asks of it.
+///
+/// A module of its own rather than more of [`SALTCORN`], because it is a
+/// different conversation — a code body never touches it — and it is installed
+/// under a name nothing imports, with `saltcorn` re-exporting the six names an
+/// author actually writes.
+const PLUGIN: &str = include_str!("py/plugin.py");
+
 /// The name the package is imported under, which is also what a body's
 /// `import saltcorn` reaches.
 const PACKAGE: &str = "saltcorn";
+
+/// The name the plugin half is installed under. Private, like `__sc` and
+/// `__sc_boot`: what a plugin author writes is `saltcorn`.
+const PLUGIN_MODULE: &str = "__sc_plugin";
 
 /// What the surface binds in a run's globals, and which host surface each name
 /// depends on: the object is bound **only** where this run has the surface
@@ -99,6 +113,9 @@ static GATE_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 /// The `saltcorn` package, imported once — at boot, so the cost of parsing the
 /// surface lands on the interpreter's clock rather than on somebody's trigger.
 static PACKAGE_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+
+/// The plugin half, imported once at boot beside the surface it belongs to.
+static PLUGIN_HALF: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
 /// The compiled bodies, keyed by a hash of the source with the source kept
 /// beside it — so a collision is a miss rather than somebody else's body.
@@ -187,12 +204,21 @@ fn boot(py: Python<'_>, env: &PythonEnv) -> PyResult<String> {
     // imported here rather than on the first run — `import saltcorn` from a body
     // finds it already in `sys.modules`, and a body that never mentions it has
     // still paid for it exactly once, at start.
+    //
+    // The plugin half goes on first, because the surface imports **from** it:
+    // the six names a plugin author writes are `saltcorn`'s, and the module
+    // they live in is one nothing else names.
+    module
+        .getattr("install_module")?
+        .call1((PLUGIN_MODULE, PLUGIN))?;
     module
         .getattr("install_module")?
         .call1((PACKAGE, SALTCORN))?;
     let _ = BOOT_MODULE.set(py, module.unbind());
     let package = py.import(PACKAGE)?;
     let _ = PACKAGE_MODULE.set(py, package.unbind());
+    let plugin = py.import(PLUGIN_MODULE)?;
+    let _ = PLUGIN_HALF.set(py, plugin.unbind());
     // Imported here rather than on the first conversion, so the cost lands on
     // the interpreter's clock and not on somebody's trigger.
     convert::init(py)?;
@@ -303,6 +329,16 @@ fn boot_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         Some(module) => Ok(module.bind(py)),
         None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "the Saltcorn Python runtime was not initialised",
+        )),
+    }
+}
+
+/// The plugin half, for the module host's ops.
+fn plugin_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    match PLUGIN_HALF.get(py) {
+        Some(module) => Ok(module.bind(py)),
+        None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "the Saltcorn Python plugin API was not installed",
         )),
     }
 }
@@ -506,6 +542,69 @@ pub(crate) fn run_body(
             Err(error) => Err(body_error(py, &error, &filename, timeout)),
         }
     })
+}
+
+/// Ask one thing of a **plugin module**, on this thread, with the run's state
+/// installed for the length of it (§2 of the API; phase 6.3).
+///
+/// The same shape as [`run_body`] and deliberately so: a module's action is a
+/// run like any other — one thread, one deadline, one admission slot, the same
+/// five surfaces reached through the same thread-local — so everything §1 says
+/// about concurrency and §4 about stopping a run applies to it word for word.
+/// What differs is only that the Python being executed is an installed
+/// package's rather than an admin's, so there is nothing to compile and nothing
+/// to cache.
+///
+/// **The surfaces are bound by the thread, not by an argument.** §2 asks for a
+/// contextvar and this is the same thing one layer down: a run is a thread here
+/// (§5), so `saltcorn.db` inside a plugin's action is the module-level object
+/// every run shares, reading the state of the thread it is called on. Outside a
+/// run — a plugin's code between calls — it raises "this Saltcorn surface is
+/// only available while a run is executing", which is exactly the sentence §2
+/// asks for and it is enforced in one place for both languages of caller.
+pub(crate) fn run_plugin(op: &str, payload: &Json, state: RunState) -> Result<Json> {
+    let timeout = state.timeout;
+    let _entered = bridge::Enter::new(state);
+    Python::attach(|py| {
+        let plugin = plugin_module(py).map_err(|e| py_error(py, &e))?;
+        let payload = convert::from_json(py, payload).map_err(|e| py_error(py, &e))?;
+        let outcome = plugin
+            .getattr("dispatch")
+            .and_then(|dispatch| dispatch.call1((op, payload)));
+        match outcome {
+            Ok(value) => convert::to_json(&value, "result").map_err(|e| {
+                Error::invalid(format!(
+                    "this Python module answered with a value that has no JSON form: {e}"
+                ))
+            }),
+            Err(error) => Err(plugin_error(py, &error, timeout)),
+        }
+    })
+}
+
+/// A plugin's own failure, as this system's error.
+///
+/// An **Application** error, for the reason `sc_module::host::module_error`
+/// gives about the other language: the fault is in the module or in how it was
+/// configured, and the admin who installed it is the one who can act.
+fn plugin_error(py: Python<'_>, error: &PyErr, timeout: Duration) -> Error {
+    if error.is_instance_of::<Timeout>(py) {
+        return Error::invalid(format!(
+            "this Python module call exceeded its {} ms time limit",
+            timeout.as_millis()
+        ));
+    }
+    let rendered = plugin_module(py)
+        .ok()
+        .and_then(|plugin| {
+            plugin
+                .getattr("format_error")
+                .and_then(|f| f.call1((error.value(py),)))
+                .and_then(|s| s.extract::<String>())
+                .ok()
+        })
+        .unwrap_or_else(|| error.to_string());
+    Error::config(rendered)
 }
 
 /// A failure inside the body, as the error its caller reports.

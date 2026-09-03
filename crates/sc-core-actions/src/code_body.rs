@@ -20,7 +20,8 @@ use std::time::Duration;
 use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost};
 use sc_error::{Error, Result};
 use sc_expr::{
-    CodeCall, DEFAULT_CODE_TIMEOUT, JsEvaluator, MAX_CODE_TIMEOUT, ModuleFnHost, TriggerHost,
+    CodeCall, CodeHosts, DEFAULT_CODE_TIMEOUT, JsEvaluator, MAX_CODE_TIMEOUT, ModuleFnHost,
+    TriggerHost,
 };
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
@@ -140,7 +141,15 @@ pub(crate) fn bindings(event: &Event, run_context: Option<&Attrs>) -> BTreeMap<S
 /// A struct rather than five locals at each call site because a [`CodeCall`]
 /// borrows all of them: they have to outlive the call, so they have to live
 /// somewhere the caller named.
-pub(crate) struct Hosts<'a> {
+///
+/// **Public**, because a code body is not the only thing that runs over these
+/// five. A Python **plugin module**'s action reaches the same five (`sc_python`,
+/// TODO "Python plugin modules" §2) and is not a code body: what it runs is an
+/// installed package's function. Building them there a second time is exactly
+/// how the two would come to disagree about who a module's write is caused by,
+/// so they are built here, once, and handed over as
+/// [`surfaces`](Hosts::surfaces).
+pub struct Hosts<'a> {
     table: TableHost<'a>,
     fetch: CodeFetchHost,
     files: FileStoreHost<'a>,
@@ -157,7 +166,7 @@ impl<'a> Hosts<'a> {
     /// JavaScript engine can still run a Python body, and the read that needs a
     /// formula fails there saying so — which is a better answer than refusing
     /// every Python body in a process that has no JavaScript in it.
-    pub(crate) fn new(
+    pub fn new(
         ctx: &'a ActionContext<'a>,
         evaluator: Option<&Arc<dyn JsEvaluator>>,
         client: reqwest::Client,
@@ -206,6 +215,18 @@ impl<'a> Hosts<'a> {
         }
     }
 
+    /// The five surfaces alone, for a run that is not a code body — a Python
+    /// module's action, which has no source and no bindings.
+    pub fn surfaces(&'a self) -> CodeHosts<'a> {
+        CodeHosts {
+            host: Some(&self.table),
+            fetch: Some(&self.fetch),
+            files: Some(&self.files),
+            triggers: self.triggers.as_ref().map(|r| r as &dyn TriggerHost),
+            module_fns: self.module_fns.as_deref(),
+        }
+    }
+
     /// One call over these hosts: the source, what the event binds, and how long
     /// it may take.
     pub(crate) fn call(
@@ -214,17 +235,53 @@ impl<'a> Hosts<'a> {
         bindings: BTreeMap<String, Json>,
         timeout: Option<Duration>,
     ) -> CodeCall<'a> {
+        let surfaces = self.surfaces();
         CodeCall {
             code,
             bindings,
-            host: Some(&self.table),
-            fetch: Some(&self.fetch),
-            files: Some(&self.files),
-            triggers: self.triggers.as_ref().map(|r| r as &dyn TriggerHost),
-            module_fns: self.module_fns.as_deref(),
+            host: surfaces.host,
+            fetch: surfaces.fetch,
+            files: surfaces.files,
+            triggers: surfaces.triggers,
+            module_fns: surfaces.module_fns,
             timeout,
             ..CodeCall::default()
         }
+    }
+}
+
+/// The HTTP client behind `fetch`, held once, and the five surfaces built over
+/// it (§10.1).
+///
+/// What it is *for* is a caller outside this crate: a Python **plugin module**'s
+/// action reaches the same five surfaces a code body does, and building them
+/// needs a `reqwest::Client` — which has to be built once, because a client is a
+/// connection pool and a TLS configuration and one per firing would pay for a
+/// handshake every time a trigger runs. Holding one of these is how a caller
+/// gets that without naming `reqwest` itself.
+pub struct CodeSurfaces {
+    client: reqwest::Client,
+}
+
+impl CodeSurfaces {
+    /// Build the client. Fallible because it initialises the TLS stack: a
+    /// deployment where that fails should say so at boot rather than at the
+    /// first call that needs the network.
+    pub fn new() -> Result<CodeSurfaces> {
+        Ok(CodeSurfaces {
+            client: crate::fetch::http_client()?,
+        })
+    }
+
+    /// The five surfaces this context can reach, borrowed for as long as the
+    /// value is held.
+    ///
+    /// The evaluator is the context's own where it has one, exactly as
+    /// `run_python_code` takes it: what needs it is a **delegated** read whose
+    /// ownership rule is a formula, and a process with no JavaScript engine
+    /// should still run everything that does not.
+    pub fn build<'a>(&self, ctx: &'a ActionContext<'a>) -> Hosts<'a> {
+        Hosts::new(ctx, ctx.evaluator().ok(), self.client.clone())
     }
 }
 

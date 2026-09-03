@@ -241,7 +241,9 @@ async fn the_gate_is_hygiene_rather_than_privilege() {
     // And this runtime's own machinery is deliberately not on the deny-list —
     // the bridge functions check the run's surfaces for themselves, so refusing
     // the module they live in would be a rule that only looked like a boundary.
-    let out = run("import __sc\nreturn __sc.DbError.__name__\n").await.unwrap();
+    let out = run("import __sc\nreturn __sc.DbError.__name__\n")
+        .await
+        .unwrap();
     assert_eq!(out, json!("DbError"));
     // The surface an author actually writes.
     let out = run("import saltcorn\nreturn saltcorn.DbError.__name__\n")
@@ -282,7 +284,9 @@ async fn what_a_body_puts_in_its_builtins_does_not_reach_the_next_body() {
             ..CodeCall::default()
         })
     };
-    call("__builtins__[\"sneaky\"] = 1\nreturn 1").await.unwrap();
+    call("__builtins__[\"sneaky\"] = 1\nreturn 1")
+        .await
+        .unwrap();
     let out = call("return \"sneaky\" in __builtins__").await.unwrap();
     assert_eq!(out, json!(false));
 }

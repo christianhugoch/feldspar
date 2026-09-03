@@ -1,0 +1,15 @@
+# A Saltcorn **Python plugin** the module tests install from a directory.
+#
+# `requires = []` with an in-tree backend (`backend-path`) is what makes this
+# offline, exactly as `sc_fixture_pkg` does: pip's build isolation would
+# otherwise download setuptools, and a test suite that reaches the registry is a
+# test suite that fails when somebody else's network does.
+#
+# The backend beside this file also writes the distribution's `entry_points.txt`,
+# because the entry point is half of what these tests are about: §9 says a
+# package advertises its plugin under `saltcorn.plugins` and falls back to its
+# top-level package, and this fixture exercises the first path.
+[build-system]
+requires = []
+build-backend = "scbuild"
+backend-path = ["."]

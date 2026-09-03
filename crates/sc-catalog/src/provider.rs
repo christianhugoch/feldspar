@@ -247,6 +247,230 @@ pub trait TableProviderHost: Send + Sync {
 
 /// A table served by a module's table provider.
 ///
+/// Two provider hosts as one — the composite of §8, for a server whose modules
+/// are written in more than one language.
+///
+/// A provided table names a module and a provider; that one language's modules
+/// run on a Deno worker and another's on an embedded interpreter is a fact about
+/// installation, not about reading rows. So the hosts are merged here and
+/// `Catalog::reload`, `Catalog::provider` and the "new table" form see one.
+///
+/// Routing is by the `(module, provider)` pair the table's row names, resolved
+/// against what each host says it supplies. A pair nothing supplies is refused
+/// here rather than by whichever host was asked first, because "no installed
+/// module supplies this" is the true sentence and either host's own would name
+/// only half the server.
+pub struct TableProviderHosts {
+    hosts: Vec<Arc<dyn TableProviderHost>>,
+    providers: Vec<TableProviderKind>,
+}
+
+impl TableProviderHosts {
+    /// One host over all of them, in order.
+    pub fn new(hosts: Vec<Arc<dyn TableProviderHost>>) -> TableProviderHosts {
+        let providers = hosts.iter().flat_map(|host| host.providers()).collect();
+        TableProviderHosts { hosts, providers }
+    }
+
+    /// The host that supplies `(module, provider)`, or the refusal.
+    fn route(&self, module: &str, provider: &str) -> Result<&Arc<dyn TableProviderHost>> {
+        for host in &self.hosts {
+            if host
+                .providers()
+                .iter()
+                .any(|p| p.module == module && p.provider == provider)
+            {
+                return Ok(host);
+            }
+        }
+        Err(Error::not_found(format!(
+            "no installed module supplies the table provider `{provider}` of `{module}`; it may \
+             have been uninstalled, or failed to load"
+        )))
+    }
+}
+
+#[async_trait]
+impl TableProviderHost for TableProviderHosts {
+    fn providers(&self) -> Vec<TableProviderKind> {
+        self.providers.clone()
+    }
+
+    async fn fields(&self, module: &str, provider: &str, config: &Json) -> Result<Vec<DataField>> {
+        self.route(module, provider)?
+            .fields(module, provider, config)
+            .await
+    }
+
+    async fn rows(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+        filter: &Json,
+        options: &Json,
+    ) -> Result<Vec<Json>> {
+        self.route(module, provider)?
+            .rows(module, provider, table, config, filter, options)
+            .await
+    }
+
+    async fn writes(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+    ) -> Result<ProvidedWrites> {
+        self.route(module, provider)?
+            .writes(module, provider, table, config)
+            .await
+    }
+
+    async fn insert(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+        record: &Json,
+    ) -> Result<Json> {
+        self.route(module, provider)?
+            .insert(module, provider, table, config, record)
+            .await
+    }
+
+    async fn update(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+        id: &Json,
+        record: &Json,
+    ) -> Result<()> {
+        self.route(module, provider)?
+            .update(module, provider, table, config, id, record)
+            .await
+    }
+
+    async fn delete(
+        &self,
+        module: &str,
+        provider: &str,
+        table: &str,
+        config: &Json,
+        filter: &Json,
+    ) -> Result<()> {
+        self.route(module, provider)?
+            .delete(module, provider, table, config, filter)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use super::*;
+
+    /// A host of one provider, answering with its own module's name.
+    struct One(&'static str, &'static str);
+
+    #[async_trait]
+    impl TableProviderHost for One {
+        fn providers(&self) -> Vec<TableProviderKind> {
+            vec![TableProviderKind {
+                module: self.0.to_owned(),
+                provider: self.1.to_owned(),
+                config_spec: Vec::new(),
+            }]
+        }
+
+        async fn fields(&self, module: &str, _: &str, _: &Json) -> Result<Vec<DataField>> {
+            Ok(vec![DataField::plain(
+                module,
+                sc_types::TypeRef::Basic(sc_types::BasicType::Text),
+            )])
+        }
+
+        async fn rows(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Json,
+            _: &Json,
+            _: &Json,
+        ) -> Result<Vec<Json>> {
+            Ok(Vec::new())
+        }
+
+        async fn writes(&self, _: &str, _: &str, _: &str, _: &Json) -> Result<ProvidedWrites> {
+            Ok(ProvidedWrites::NONE)
+        }
+
+        async fn insert(&self, _: &str, _: &str, _: &str, _: &Json, _: &Json) -> Result<Json> {
+            Ok(Json::Null)
+        }
+
+        async fn update(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Json,
+            _: &Json,
+            _: &Json,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete(&self, _: &str, _: &str, _: &str, _: &Json, _: &Json) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn both() -> TableProviderHosts {
+        TableProviderHosts::new(vec![
+            Arc::new(One("@saltcorn/rss", "RSS feed")),
+            Arc::new(One("sc-plugin-fixture", "Fixture rows")),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_provided_table_is_served_by_whichever_host_supplies_its_provider() {
+        let hosts = both();
+        let offered: Vec<String> = hosts
+            .providers()
+            .into_iter()
+            .map(|kind| format!("{}/{}", kind.module, kind.provider))
+            .collect();
+        assert_eq!(
+            offered,
+            ["@saltcorn/rss/RSS feed", "sc-plugin-fixture/Fixture rows"]
+        );
+
+        // Answered by the second host, which is the one that has it — the
+        // column it names is the module it was asked about.
+        let fields = hosts
+            .fields("sc-plugin-fixture", "Fixture rows", &Json::Null)
+            .await
+            .expect("the second host has it");
+        assert_eq!(fields[0].base.name, "sc-plugin-fixture");
+    }
+
+    #[tokio::test]
+    async fn a_provider_neither_supplies_is_refused_by_the_composite_itself() {
+        let said = both()
+            .fields("sc-plugin-fixture", "Nothing", &Json::Null)
+            .await
+            .expect_err("nothing supplies it")
+            .to_string();
+        assert!(said.contains("no installed module supplies"), "{said}");
+        assert!(said.contains("Nothing"), "{said}");
+    }
+}
+
 /// Reads run the `Select` over the JSON the module answers ([`crate::inmem`]).
 /// Writes are the opposite shape and the difference is the whole of this type's
 /// second half: **v1's write methods are not a query language**. `insertRow`

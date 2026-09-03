@@ -266,7 +266,10 @@ async fn a_python_trigger_is_saved_in_every_build_and_runs_where_there_is_an_int
     assert_eq!(status, StatusCode::OK, "{before}");
     // The bounds are this process's flags either way, so they are reported in
     // both builds; nothing is resident, because nothing has run.
-    assert_eq!(before["max_inflight"], json!(sc_python::DEFAULT_MAX_INFLIGHT));
+    assert_eq!(
+        before["max_inflight"],
+        json!(sc_python::DEFAULT_MAX_INFLIGHT)
+    );
     assert_eq!(before["max_stuck"], json!(sc_python::DEFAULT_MAX_STUCK));
     assert_eq!(before["resident"], json!(0));
     assert_eq!(before["stuck"], json!(0));

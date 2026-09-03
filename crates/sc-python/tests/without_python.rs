@@ -57,3 +57,30 @@ async fn the_flag_cannot_turn_on_what_the_build_left_out() {
         .to_string();
     assert!(said.contains("built without Python support"), "{said}");
 }
+
+/// A **module** in this build, which is the other half of the same fact.
+///
+/// The `_sc_modules` rows are still there and the Modules tab still renders
+/// them, so what a Python module supplies has to be *something* — and it is a
+/// module carried in the set with one sentence saying why it supplies nothing,
+/// exactly as a JavaScript module whose package is missing is (§8).
+#[tokio::test]
+async fn a_python_module_is_carried_with_the_reason_it_supplies_nothing() {
+    use std::sync::Arc;
+
+    use sc_python::pymodule::{PyModuleFunctions, PyModuleHost, PyModuleTableProviders};
+
+    let host = Arc::new(PyModuleHost::new(Arc::new(PythonRuntime::new())));
+    let said = host
+        .load("sc-plugin-fixture", &serde_json::json!({}))
+        .await
+        .expect_err("nothing can be loaded here")
+        .to_string();
+    assert!(said.contains("built without Python support"), "{said}");
+
+    // And the two catalog hosts are empty rather than absent: a formula that
+    // hoists a name and a table that names a provider get the sentence saying
+    // nothing supplies it, which is the same one an uninstalled module gets.
+    assert!(PyModuleFunctions::empty(&host).functions().is_empty());
+    assert!(PyModuleTableProviders::empty(&host).providers().is_empty());
+}
