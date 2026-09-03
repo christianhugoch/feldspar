@@ -2,6 +2,74 @@
 
 Changes in reverse chronological order.
 
+## The credential: `_sc_api_tokens` and the three endpoints over it
+
+Phase 2 of the administration MCP server. No MCP server yet — this is the
+bearer credential it will authenticate with, and the decision it embodies is
+§13.6's first one: **a token names a user**, so there is no second authorization
+model to keep in step with the one `sc-auth` and §7.3 already are.
+
+- **`sc-auth::tokens` and `_sc_api_tokens`.** Logged, not unlogged, which is the
+  one place this table parts company with `_sc_sessions`: a lost session costs a
+  re-login and a lost token costs a support call. The row holds the **SHA-256 of
+  the token and never the token** — a fast hash, because 256 bits of uniform
+  randomness has no dictionary to run against it — and `user_id` is deliberately
+  not a foreign key, for exactly the reason a session's is not: a credential must
+  not stop an administrator deleting the account that minted it.
+- **The credential is `fspk_` and then 32 random bytes, base64url.** A prefix is
+  what makes it greppable by a secret scanner and recognisable in a paste, and it
+  is also what lets a refusal tell "this is not one of ours" apart from "this one
+  is not known" — two different things to tell somebody.
+- **Shown once is a property of the types, not of everyone's care.**
+  `mint_api_token` returns the plaintext in a `MintedApiToken` and nothing ever
+  reads it back; `ApiToken` — what a list, a log line and an API response are all
+  made of — has no field for the token and none for the hash. `MintedApiToken`'s
+  `Debug` is written by hand and redacts the secret, because deriving it would
+  have put the one copy of a live credential into whatever formats the value.
+- **One column more than the design listed: an `id`.** The hash is the primary
+  key and must not leave the table, so a list had nothing to name a row by for the
+  Revoke button, and a label is what an admin *calls* a token rather than which
+  one it is. §13.6 and §9.2's ER diagram now record it.
+- **Six refusals, each with its own message**, because each is a different thing
+  for the holder to do about it: not a Feldspar token, not recognised, revoked,
+  expired, the user is gone or disabled, the user is no longer an administrator.
+  The last two are why the row *names* the user rather than copying them — a
+  demotion takes effect at the next call rather than at the token's expiry.
+- **`last_used_at` is throttled to one write a minute, and never written on a
+  refusal.** The budget is read off the row rather than out of a per-process map,
+  so two application servers share one rather than each spending it. The write is
+  `RETURNING`: a Postgres `timestamptz` keeps microseconds and `Utc::now()` keeps
+  nanoseconds, so handing back what was *sent* would report a `last_used_at` that
+  a read-back contradicts — and this value goes into an audit line.
+- **The sweep collects lapsed rows and never revoked ones.** A token that lapsed
+  stopped working on its own; a revoked one is the only record that somebody took
+  a credential back. Housekeeping rides along with a mint, which is the rare write
+  this table gets — the same arrangement a session sweep has with a login.
+- **`listApiTokens`, `createApiToken`, `revokeApiToken`**, admin-only, and none of
+  them tagged for the MCP projection: a token that can mint tokens is a token that
+  cannot be revoked. Two decisions belong to the API rather than to the storage —
+  a mint is always for the **calling admin**, because minting a credential that
+  runs as somebody else hands out their authority without their knowledge; and
+  revocation is a `POST …/revoke` rather than a `DELETE`, because the row stays,
+  marked, and the list is where an admin sees that it happened.
+- **The six flags now have one reader, one writer and one validator.**
+  `sc_api::mcp::{grants_from_attrs, areas_from_attrs, flags_to_attrs,
+  validate_flags}` and `FLAG_KEYS` are where the names and the defaults live, and
+  `admin_copilot` delegates to them — so an agent's six checkboxes and a token's
+  six flags cannot drift apart, which was the point of making them the same six.
+  A stored `grants` is written **explicitly in all six**: the column records what
+  an administrator agreed to, and a key absent because it matched a default is a
+  key that would mean something else the day the default changed.
+- **Tests.** Against a real database: a minted token authenticates and neither the
+  plaintext nor its random half is anywhere in the table; a revoked one does not
+  and stays in the list; an expired one does not; a demoted, disabled or deleted
+  user's does not, and the token never blocked the delete; ten calls in a minute
+  share one `last_used_at` and a refusal writes nothing at all; the table is
+  logged where `_sc_sessions` is unlogged. Through the router: the plaintext
+  appears in exactly one response, the list carries neither it nor the hash, a
+  mint names the caller whatever the body says, and the three refusals a form has
+  to be able to show each name what to fix.
+
 ## The administrative tools move down a layer
 
 Phase 1 of the administration MCP server, and the milestone's one refactor —

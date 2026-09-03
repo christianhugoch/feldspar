@@ -97,7 +97,7 @@ use sc_agent::{AgentTrait, TraitCheck, TraitContext};
 use sc_api::mcp::{Areas, ToolContext, ToolSet};
 use sc_api::schema_edit::{self, Grants};
 use sc_catalog::Catalog;
-use sc_error::{Error, Result};
+use sc_error::Result;
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
@@ -205,24 +205,9 @@ impl AgentTrait for AdminCopilot {
     /// a read-only describer of the schema and the triggers, which is a thing an
     /// admin may deliberately want.
     async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
-        for key in [
-            CFG_ALLOW_CREATE,
-            CFG_ALLOW_EDIT,
-            CFG_ALLOW_DROP,
-            CFG_ALLOW_ACCESS,
-            CFG_ALLOW_TRIGGERS,
-            CFG_ALLOW_APPLICATIONS,
-        ] {
-            match check.config.get(key) {
-                None | Some(Json::Null) | Some(Json::Bool(_)) => {}
-                Some(other) => {
-                    return Err(Error::invalid(format!(
-                        "`{key}` should be true or false, got {other}"
-                    )));
-                }
-            }
-        }
-        Ok(())
+        // The same six keys asked the same question a token's grants are asked
+        // (§13.6): one validator, because there is one vocabulary.
+        sc_api::mcp::validate_flags(check.config)
     }
 
     /// The schema's two tools always, and each other half's only where its area
@@ -270,24 +255,17 @@ fn tool_context<'a>(ctx: &'a TraitContext<'a>) -> ToolContext<'a> {
 }
 
 /// The four grants as configured; an absent checkbox reads as its default.
+///
+/// A rename of `sc_api::mcp`'s reader rather than a second one: an agent's six
+/// checkboxes and a token's six flags are the same six flags, so the defaults
+/// they fall back to have to be the same defaults (§13.6).
 fn grants(config: &Attrs) -> Grants {
-    let flag =
-        |key: &str, default: bool| config.get(key).and_then(Json::as_bool).unwrap_or(default);
-    Grants {
-        create: flag(CFG_ALLOW_CREATE, true),
-        edit: flag(CFG_ALLOW_EDIT, true),
-        drop: flag(CFG_ALLOW_DROP, false),
-        access_changes: flag(CFG_ALLOW_ACCESS, false),
-    }
+    sc_api::mcp::grants_from_attrs(config)
 }
 
 /// The two areas as configured; an absent checkbox reads as on.
 fn areas(config: &Attrs) -> Areas {
-    let flag = |key: &str| config.get(key).and_then(Json::as_bool).unwrap_or(true);
-    Areas {
-        triggers: flag(CFG_ALLOW_TRIGGERS),
-        applications: flag(CFG_ALLOW_APPLICATIONS),
-    }
+    sc_api::mcp::areas_from_attrs(config)
 }
 
 #[cfg(test)]

@@ -316,18 +316,34 @@ unknown tool, a bad revision, a refused credential.
 
 ## Phase 2 — The credential
 
-- [ ] 2.1 `_sc_api_tokens` and its migration; the field list of §2. Logged, not unlogged.
-- [ ] 2.2 `sc-auth::tokens`: mint (returns the one plaintext), lookup by hash → `User` + grants,
+- [x] 2.1 `_sc_api_tokens` and its migration; the field list of §2. Logged, not unlogged.
+      **One column more than §2 lists**: an `id`. The hash is the primary key and must not
+      leave the table, so a list has nothing to name a row by for the Revoke button — and a
+      label is what an admin *calls* a token, which two of them may share. §13.6 records it.
+- [x] 2.1a `grants` is written **explicitly in all six flags** rather than sparsely, and the
+      reader/writer pair (`sc_api::mcp::{grants_from_attrs, areas_from_attrs, flags_to_attrs,
+      validate_flags}`) is now the one place that knows their names and defaults —
+      `admin_copilot` delegates to it, so an agent's checkboxes and a token's flags cannot
+      drift apart.
+- [x] 2.2 `sc-auth::tokens`: mint (returns the one plaintext), lookup by hash → `User` + grants,
       list (never the hash), revoke, sweep expired. Lookup refuses expired, revoked, and a user
       below `ROLE_ADMIN`, each with its own message.
-- [ ] 2.3 Throttled `last_used_at` — at most one write per token per minute, and never on the
-      failure path.
-- [ ] 2.4 Admin endpoints `listApiTokens`, `createApiToken`, `revokeApiToken`, admin-only,
+- [x] 2.3 Throttled `last_used_at` — at most one write per token per minute, and never on the
+      failure path. The budget is read off the **row** rather than out of a per-process map, so
+      two application servers share one; and the write is `RETURNING`, because a Postgres
+      `timestamptz` keeps microseconds and `Utc::now()` keeps nanoseconds, so what the caller
+      is handed has to be what the table now holds rather than what was sent to it.
+- [x] 2.4 Admin endpoints `listApiTokens`, `createApiToken`, `revokeApiToken`, admin-only,
       **not** tagged `.mcp()`: a token that can mint tokens is a token that cannot be revoked.
-- [ ] 2.5 Draw `_sc_api_tokens` in §9.2's ER diagram, hanging off `USERS` by value, and take it
+      (`.mcp()` does not exist until 4.2, so the tag is absent by construction; the endpoints
+      say why in their own comment, and 4.2 must not add one.) A mint is always **for the
+      calling admin** — the row could name anybody, this API will not, because minting a
+      credential that runs as somebody else hands out their authority without their knowledge.
+      `revokeApiToken` is a `POST …/revoke` rather than a `DELETE`: the row stays, marked.
+- [x] 2.5 Draw `_sc_api_tokens` in §9.2's ER diagram, hanging off `USERS` by value, and take it
       out of that section's not-yet-created list. `the_er_diagram_names_every_metadata_table`
       turns this from a courtesy into a failing test the moment 2.1 lands the `*_TABLE` const.
-- [ ] 2.6 Tests: a minted token authenticates and its plaintext is not recoverable from the
+- [x] 2.6 Tests: a minted token authenticates and its plaintext is not recoverable from the
       table; a revoked one does not; an expired one does not; one whose user is demoted does
       not; the throttle writes once across ten calls in the same minute.
 

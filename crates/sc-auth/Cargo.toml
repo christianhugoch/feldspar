@@ -24,6 +24,8 @@ sc-types.workspace = true
 sc-expr.workspace = true
 argon2.workspace = true
 sha2.workspace = true
+# The base64url of an API token's random bytes (§13.6).
+base64.workspace = true
 lru.workspace = true
 chrono.workspace = true
 serde.workspace = true

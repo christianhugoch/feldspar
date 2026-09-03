@@ -1291,6 +1291,17 @@ erDiagram
     uuid user_id "deliberately NOT a foreign key"
     timestamp expires_at
   }
+  APITOKENS["_sc_api_tokens"] {
+    text token_hash PK "SHA-256 of the bearer token"
+    uuid id UK "the public handle a list reports and a revoke names"
+    uuid user_id "deliberately NOT a foreign key"
+    text label "what the audit line calls it"
+    json grants "the six flags of 13.6"
+    timestamp created_at
+    timestamp expires_at "nullable: a token that does not lapse"
+    timestamp last_used_at "throttled to one write a minute"
+    timestamp revoked_at "nullable while it is live"
+  }
   TABLES["_sc_tables"] {
     uuid id PK
     text name UK "the physical table it overlays"
@@ -1448,6 +1459,7 @@ erDiagram
 
   ROLES ||--o{ USERS : "role -- enforced FK"
   USERS ||--o{ SESSIONS : "user_id -- by value"
+  USERS ||--o{ APITOKENS : "user_id -- by value"
   USERS |o--o{ RUNS : "user_id -- by value, nullable"
   TABLES ||--o{ FIELDS : "table_name -- same subject, joined by name"
   FIELDS }o--o| TABLES : "attributes.target_table -- Key fields"
@@ -1468,12 +1480,13 @@ Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → 
 (§7.4), which is why `bootstrap_roles` must run before the users table is created. Every other
 line is a reference *by value*, and each one is a decision rather than an omission:
 
-- **`_sc_sessions.user_id` and `_sc_runs.user_id`** are unenforced on purpose. The schema layer
-  renders no `ON DELETE` action, so a foreign key here would mean an administrator cannot delete
-  a signed-in user, and cannot delete a user who once chatted without destroying the record of
-  what happened. A session resolves by *reading* the user, so a row naming somebody who is gone
-  resolves to nobody and the expiry sweep collects it; a run is evidence, and evidence outlives
-  its subject.
+- **`_sc_sessions.user_id`, `_sc_api_tokens.user_id` and `_sc_runs.user_id`** are unenforced on
+  purpose. The schema layer renders no `ON DELETE` action, so a foreign key here would mean an
+  administrator cannot delete a signed-in user, cannot delete a user who once minted an API
+  token, and cannot delete a user who once chatted without destroying the record of what
+  happened. A session and a token both resolve by *reading* the user, so a row naming somebody
+  who is gone resolves to nobody and the sweep collects it; a run is evidence, and evidence
+  outlives its subject.
 - **References by name — `_sc_agents.provider`, `_sc_runs.subject`, `_sc_triggers.channel`, and
   the JSON name arrays in `_sc_applications`** — are by name because the name is the thing an
   admin writes and an action configuration quotes. An id would make the configuration
@@ -1500,8 +1513,7 @@ deliberately relationship-free key/value stores — every `_sc_config` key gets 
 `FormField` declaration in `sc-config`, not from a row pointing anywhere.
 
 Tables named in §9 that are **not yet created**: `_sc_errors`, `_sc_models`,
-`_sc_model_instances`. Named elsewhere and not yet created: `_sc_api_tokens` (§13.6), which
-will join this diagram hanging off `USERS` by value, for the reason `_sc_sessions` does.
+`_sc_model_instances`.
 
 ---
 
@@ -4726,10 +4738,20 @@ table: a lost session costs a re-login and a lost token costs a support call.
 | column | meaning |
 | --- | --- |
 | `token_hash` | SHA-256 of the token, hex — the primary key |
+| `id` | the public handle: what a list reports and a revoke names |
 | `user_id` | whose authority a call runs under; by value, not a foreign key, for §9.2's reason |
 | `label` | what the administrator called it — the name the audit line carries |
-| `grants` | the six flags below |
+| `grants` | the six flags below, every one of them written explicitly |
 | `created_at` · `expires_at` · `last_used_at` · `revoked_at` | |
+
+The `id` is there because the other two candidates are both wrong. The hash must not leave the
+table — a value that identifies a credential is a value a screen, a log line and a URL would
+then each be carrying — and a label is what an administrator *calls* a token, which two tokens
+may share. So the row keeps a handle that is nobody's secret and everybody's name for it.
+
+`grants` is written **explicitly in all six flags** rather than sparsely. The column is the
+record of what an administrator agreed to, and a key that is absent because it matched a default
+is a key that would silently mean something else the day the default changed.
 
 **What is stored MUST be the hash, never the token**, for the reason `_sc_sessions` gives: a
 bearer credential at rest is worth stealing and a hash of one is not. A fast hash is the

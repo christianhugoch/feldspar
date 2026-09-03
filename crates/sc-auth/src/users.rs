@@ -114,8 +114,10 @@ pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
         Some(existing) => existing,
         None => catalog.create_table(USERS_TABLE, &users_fields()).await?,
     };
-    // Last, and that order is load-bearing too: a session references a user.
+    // Last, and that order is load-bearing too: a session names a user, and so
+    // does an API token (§13.6).
     crate::session::bootstrap_sessions(catalog).await?;
+    crate::tokens::bootstrap_api_tokens(catalog).await?;
     Ok(users)
 }
 

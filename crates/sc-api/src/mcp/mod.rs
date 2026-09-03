@@ -66,6 +66,7 @@ use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
+use sc_types::Attrs;
 use serde_json::{Map, Value as Json};
 
 use crate::schema_edit::{self, Grants};
@@ -149,6 +150,86 @@ impl Areas {
             Area::Applications => self.applications,
         }
     }
+}
+
+/// Every key the six flags are stored under, in the order an admin ticks them.
+///
+/// One list, because there are two things that write these — an
+/// `admin_copilot` agent's configuration and an API token's `grants` column —
+/// and a seventh key invented by one of them would be a flag the other silently
+/// ignores.
+pub const FLAG_KEYS: [&str; 6] = [
+    GRANT_CREATE,
+    GRANT_EDIT,
+    GRANT_DROP,
+    GRANT_ACCESS_CHANGES,
+    Area::Triggers.key(),
+    Area::Applications.key(),
+];
+
+/// The four grants as a stored configuration has them; an absent flag reads as
+/// its default.
+///
+/// Dropping and access changes default **off** and the other two **on**, which
+/// is the safe configuration rather than the empty one: a caller given nothing
+/// can build and cannot destroy or widen anybody's access.
+pub fn grants_from_attrs(config: &Attrs) -> Grants {
+    let flag =
+        |key: &str, default: bool| config.get(key).and_then(Json::as_bool).unwrap_or(default);
+    Grants {
+        create: flag(GRANT_CREATE, true),
+        edit: flag(GRANT_EDIT, true),
+        drop: flag(GRANT_DROP, false),
+        access_changes: flag(GRANT_ACCESS_CHANGES, false),
+    }
+}
+
+/// The two areas as a stored configuration has them; an absent flag reads as on.
+pub fn areas_from_attrs(config: &Attrs) -> Areas {
+    let flag = |key: &str| config.get(key).and_then(Json::as_bool).unwrap_or(true);
+    Areas {
+        triggers: flag(Area::Triggers.key()),
+        applications: flag(Area::Applications.key()),
+    }
+}
+
+/// The six flags written back out, every key present and explicit.
+///
+/// What a token's `grants` column is made of. Explicit rather than sparse
+/// because the column is the record of *what an admin agreed to* — a missing key
+/// that reads as a default today is a key that reads as a different default the
+/// day a default changes, and a credential is the wrong place to discover that.
+pub fn flags_to_attrs(grants: &Grants, areas: &Areas) -> Attrs {
+    let mut out = Attrs::new();
+    for (key, value) in [
+        (GRANT_CREATE, grants.create),
+        (GRANT_EDIT, grants.edit),
+        (GRANT_DROP, grants.drop),
+        (GRANT_ACCESS_CHANGES, grants.access_changes),
+        (Area::Triggers.key(), areas.triggers),
+        (Area::Applications.key(), areas.applications),
+    ] {
+        out.insert(key.to_owned(), Json::Bool(value));
+    }
+    out
+}
+
+/// Refuse a flag that is not `true`, `false` or absent, naming it.
+///
+/// The validation both writers share: an agent's `validate_config` and a token
+/// mint ask the same question of the same six keys.
+pub fn validate_flags(config: &Attrs) -> Result<()> {
+    for key in FLAG_KEYS {
+        match config.get(key) {
+            None | Some(Json::Null) | Some(Json::Bool(_)) => {}
+            Some(other) => {
+                return Err(Error::invalid(format!(
+                    "`{key}` should be true or false, got {other}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What one tool call runs against, and as whom.
@@ -490,6 +571,56 @@ mod tests {
         let err = set.resolve("no_such_tool").err().unwrap().to_string();
         assert!(err.contains(TOOL_DESCRIBE), "{err}");
         assert!(err.contains("not `no_such_tool`"), "{err}");
+    }
+
+    #[test]
+    fn the_six_flags_round_trip_through_the_object_a_token_stores() {
+        // An agent's checkboxes and a token's `grants` column are the same six
+        // flags, so the readers and the writer have to agree: what
+        // `flags_to_attrs` writes must read back as what it was given.
+        for (grants, areas) in [
+            (Grants::none(), Areas::none()),
+            (Grants::all(), Areas::all()),
+            (
+                Grants {
+                    create: true,
+                    edit: false,
+                    drop: false,
+                    access_changes: true,
+                },
+                Areas {
+                    triggers: false,
+                    applications: true,
+                },
+            ),
+        ] {
+            let stored = flags_to_attrs(&grants, &areas);
+            // Explicit, never sparse: every key is written, so a default that
+            // changes cannot retroactively rewrite what an admin agreed to.
+            assert_eq!(stored.len(), FLAG_KEYS.len());
+            for key in FLAG_KEYS {
+                assert!(stored.contains_key(key), "`{key}` should be written");
+            }
+            assert_eq!(grants_from_attrs(&stored), grants);
+            assert_eq!(areas_from_attrs(&stored), areas);
+            assert!(validate_flags(&stored).is_ok());
+        }
+    }
+
+    #[test]
+    fn an_empty_configuration_can_build_and_cannot_destroy() {
+        let empty = Attrs::new();
+        let grants = grants_from_attrs(&empty);
+        assert!(grants.create && grants.edit);
+        assert!(!grants.drop && !grants.access_changes);
+        // Both halves of the surface are offered until somebody says otherwise.
+        assert_eq!(areas_from_attrs(&empty), Areas::all());
+
+        // A flag that is not a boolean is the caller's mistake, named.
+        let mut wrong = Attrs::new();
+        wrong.insert(GRANT_DROP.to_owned(), json!("yes"));
+        let err = validate_flags(&wrong).unwrap_err().to_string();
+        assert!(err.contains(GRANT_DROP), "{err}");
     }
 
     #[test]

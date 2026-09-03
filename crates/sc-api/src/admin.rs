@@ -1601,6 +1601,74 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- API tokens (§13.6) --------------------------------------------------
+    //
+    // The credential the administration MCP server authenticates with: a bearer
+    // token that **names a user** and runs with exactly their authority, so
+    // there is no second authorization model to keep in step with this one.
+    //
+    // Three endpoints, and the shape of them is decided by two rules:
+    //
+    // - **None of them is tagged for MCP.** A token that can mint tokens is a
+    //   token that cannot be revoked: the agent holding one could replace it the
+    //   moment an admin took it away, and the credential would outlive the
+    //   decision to end it. Minting is a thing a person does at a screen.
+    // - **The plaintext appears in exactly one response**, `createApiToken`'s.
+    //   Nothing reads it back afterwards because nothing can — the table holds a
+    //   hash — and `listApiTokens` has no field for it or for the hash.
+    //
+    // A mint is always for the **calling admin**. Not a limitation of the
+    // storage — the row names any user — but of this API: minting a credential
+    // that runs as somebody else is handing out their authority without their
+    // knowledge, and the person who wants a token is standing at the screen.
+
+    set.register(
+        Endpoint::new("listApiTokens", Method::Get, api().lit("api-tokens"))
+            .output(TypeSchema::array(api_token_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("createApiToken", Method::Post, api().lit("api-tokens"))
+            .input(TypeSchema::struct_of([
+                StructField::new("label", TypeSchema::text()),
+                // The six flags of §13.6, each optional so a client that sends
+                // none gets the same safe defaults an unconfigured copilot has:
+                // it can build, it cannot drop, it cannot widen access.
+                StructField::new("grants", TypeSchema::optional(api_token_grants_schema())),
+                // Days, not a timestamp: an admin decides how long a laptop
+                // keeps a credential, not the instant it stops. Absent means a
+                // token that does not lapse, which the screen has to say plainly.
+                StructField::new("expires_in_days", TypeSchema::optional(TypeSchema::int())),
+            ]))
+            .output(TypeSchema::struct_of([
+                StructField::new("token", api_token_schema()),
+                // Shown once. The response is the only place this value ever
+                // exists outside the client that receives it.
+                StructField::new("secret", TypeSchema::text()),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // Revocation rather than deletion, and a `POST` rather than a `DELETE`: the
+    // row stays, marked, because a revocation is a thing that happened and the
+    // list is where an admin sees that it did.
+    set.register(
+        Endpoint::new(
+            "revokeApiToken",
+            Method::Post,
+            api()
+                .lit("api-tokens")
+                .param("id", ValueType::Uuid)
+                .lit("revoke"),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "revoked",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- triggers -----------------------------------------------------------
     // A trigger is one event bound to one configured action (§10.2), stored in
     // `_sc_triggers`. These endpoints are the row ⇄ live-set path the SPA
@@ -1969,6 +2037,48 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     set
+}
+
+/// The six flags a token carries, which are the `admin_copilot` agent's six
+/// flags (§13.6) — one vocabulary for "what may this agent do to my
+/// installation?", whether the agent is the built-in copilot or an external one
+/// reached over MCP.
+///
+/// Every field is optional on the way *in* and present on the way *out*: a
+/// client may leave a flag to its default, and a stored credential records what
+/// was actually agreed to rather than what a later default would say.
+fn api_token_grants_schema() -> TypeSchema {
+    TypeSchema::struct_of(
+        crate::mcp::FLAG_KEYS
+            .into_iter()
+            .map(|key| StructField::new(key, TypeSchema::optional(TypeSchema::bool()))),
+    )
+}
+
+/// One stored API token, as a list sees it.
+///
+/// There is no field for the token and none for its hash, which is the same
+/// omission `sc_auth::ApiToken` makes and for the same reason: "shown once" is a
+/// property of the shape rather than of everyone's care.
+fn api_token_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("user_id", TypeSchema::uuid()),
+        StructField::new("label", TypeSchema::text()),
+        // Every flag present and explicit — the record of what was agreed to.
+        StructField::new("grants", TypeSchema::json()),
+        StructField::new("created_at", TypeSchema::timestamp()),
+        StructField::new("expires_at", TypeSchema::optional(TypeSchema::timestamp())),
+        StructField::new(
+            "last_used_at",
+            TypeSchema::optional(TypeSchema::timestamp()),
+        ),
+        StructField::new("revoked_at", TypeSchema::optional(TypeSchema::timestamp())),
+        // Whether it would authenticate right now as far as the row can tell —
+        // neither revoked nor lapsed. The screen draws a badge from this rather
+        // than recomputing the clock arithmetic in TypeScript.
+        StructField::new("live", TypeSchema::bool()),
+    ])
 }
 
 /// One thing a backup can include or leave out: what it is called, what to show,

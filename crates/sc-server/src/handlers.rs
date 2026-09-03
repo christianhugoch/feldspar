@@ -39,10 +39,10 @@ use sc_app::{
     require_scaffoldable, save_application, scaffold_app, update_app_client,
 };
 use sc_auth::{
-    COL_EMAIL, NewUser, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, UserUpdate,
+    COL_EMAIL, NewApiToken, NewUser, ROLE_ADMIN, ROLE_PUBLIC, Role, USERS_TABLE, User, UserUpdate,
     any_user_exists, authenticate_admin, create_first_user, create_user_with, delete_role,
-    delete_user, list_roles, load_user, random_password, save_role, set_user_disabled,
-    set_user_password, update_user,
+    delete_user, list_api_tokens, list_roles, load_user, mint_api_token, random_password,
+    revoke_api_token, save_role, set_user_disabled, set_user_password, update_user,
 };
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
@@ -3457,6 +3457,109 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- API tokens (§13.6) --------------------------------------------------
+    //
+    // The credential the administration MCP server authenticates with. Three
+    // handlers, and every decision in them is `sc_auth::tokens`'s already: the
+    // plaintext exists in one response and nowhere else, the list is made of a
+    // value that has no field for it, and a revoked row stays.
+    //
+    // What is decided *here* is that a mint is for the **calling admin**. The
+    // row could name anybody; this API will not, because minting a credential
+    // that runs as somebody else hands out their authority without their
+    // knowledge.
+
+    reg.register("listApiTokens", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let out: Vec<Json> = list_api_tokens(&catalog)
+                    .await?
+                    .iter()
+                    .map(api_token_json)
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createApiToken", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                // The endpoint is `admin()`, so there is a user; saying so out
+                // loud rather than defaulting, because "which user does this
+                // token run as?" is the whole of §13.6's authentication.
+                let user = ctx
+                    .user
+                    .as_ref()
+                    .ok_or_else(|| Error::auth("minting an API token needs a signed-in admin"))?;
+
+                // The six flags, read and written back through `sc-api::mcp` —
+                // the one place that knows what they are called and what they
+                // default to. A stored `grants` is explicit in all six, so the
+                // row records what was agreed to rather than what a later
+                // default would say.
+                let submitted = match obj.get("grants") {
+                    None | Some(Json::Null) => Attrs::new(),
+                    Some(Json::Object(map)) => map.clone(),
+                    Some(_) => return Err(Error::invalid("`grants` must be an object")),
+                };
+                sc_api::mcp::validate_flags(&submitted)?;
+                let grants = sc_api::mcp::flags_to_attrs(
+                    &sc_api::mcp::grants_from_attrs(&submitted),
+                    &sc_api::mcp::areas_from_attrs(&submitted),
+                );
+
+                let expires_at = match obj.get("expires_in_days") {
+                    None | Some(Json::Null) => None,
+                    Some(_) => {
+                        let days = int_field(obj, "expires_in_days")?;
+                        if days <= 0 {
+                            return Err(Error::invalid(
+                                "`expires_in_days` must be a positive number of days;                                  leave it out for a token that does not expire",
+                            ));
+                        }
+                        Some(chrono::Utc::now() + chrono::Duration::days(days))
+                    }
+                };
+
+                let minted = mint_api_token(
+                    &catalog,
+                    NewApiToken {
+                        user_id: user.id,
+                        label: str_field(obj, "label")?.to_owned(),
+                        grants,
+                        expires_at,
+                    },
+                )
+                .await?;
+                // The one response that carries the credential — the sibling of
+                // `setRandomPassword`, and for the same reason.
+                Ok(HandlerResponse::ok(json!({
+                    "token": api_token_json(&minted.token),
+                    "secret": minted.secret,
+                }))
+                .with_status(201))
+            }
+        }
+    });
+
+    reg.register("revokeApiToken", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_api_token_id(ctx.path_param("id")?)?;
+                let revoked = revoke_api_token(&catalog, id).await?;
+                Ok(HandlerResponse::ok(json!({ "revoked": revoked })))
+            }
+        }
+    });
+
     reg
 }
 
@@ -5370,6 +5473,33 @@ fn parse_app_id(raw: &str) -> Result<AppId> {
     uuid::Uuid::parse_str(raw)
         .map(AppId)
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid application id")))
+}
+
+/// One stored API token on the wire (§13.6).
+///
+/// Made of [`sc_auth::ApiToken`], which has no field for the token and none for
+/// its hash — so "shown once" survives this function without this function
+/// having to remember it.
+fn api_token_json(token: &sc_auth::ApiToken) -> Json {
+    json!({
+        "id": token.id,
+        "user_id": token.user_id,
+        "label": token.label,
+        "grants": Json::Object(token.grants.clone()),
+        "created_at": token.created_at,
+        "expires_at": token.expires_at,
+        "last_used_at": token.last_used_at,
+        "revoked_at": token.revoked_at,
+        // Computed here rather than in the screen: "would this authenticate
+        // right now?" is clock arithmetic over two nullable columns, and one
+        // answer is better than one per client.
+        "live": token.is_live(chrono::Utc::now()),
+    })
+}
+
+fn parse_api_token_id(raw: &str) -> Result<uuid::Uuid> {
+    uuid::Uuid::parse_str(raw)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid API token id")))
 }
 
 fn parse_user_id(raw: &str) -> Result<uuid::Uuid> {

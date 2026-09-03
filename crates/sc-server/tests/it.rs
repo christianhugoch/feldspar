@@ -29,6 +29,8 @@ mod admin_workflow_editor;
 mod agent_admin_api;
 #[path = "agent_chat.rs"]
 mod agent_chat;
+#[path = "api_token_admin_api.rs"]
+mod api_token_admin_api;
 #[path = "app_builder_agent.rs"]
 mod app_builder_agent;
 #[path = "app_file_access.rs"]

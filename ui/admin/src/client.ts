@@ -141,6 +141,10 @@ export type SetUserDisabledResponse = { id: string; email: string; role: number;
 export type ForceLogoutUserResponse = { ok: boolean };
 export type BecomeUserResponse = { id: string; email: string; role: number };
 export type SetRandomPasswordResponse = { email: string; password: string };
+export type ListApiTokensResponse = Array<{ id: string; user_id: string; label: string; grants: unknown; created_at: string; expires_at?: string | null; last_used_at?: string | null; revoked_at?: string | null; live: boolean }>;
+export type CreateApiTokenRequest = { label: string; grants?: { allow_create?: boolean | null; allow_edit?: boolean | null; allow_drop?: boolean | null; allow_access_changes?: boolean | null; allow_triggers?: boolean | null; allow_applications?: boolean | null } | null; expires_in_days?: number | null };
+export type CreateApiTokenResponse = { token: { id: string; user_id: string; label: string; grants: unknown; created_at: string; expires_at?: string | null; last_used_at?: string | null; revoked_at?: string | null; live: boolean }; secret: string };
+export type RevokeApiTokenResponse = { revoked: boolean };
 export type ListTriggersResponse = Array<{ id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null; workflow_version?: number | null; workflow_steps?: number | null }>;
 export type CreateTriggerRequest = { name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null };
 export type CreateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null; workflow_version?: number | null; workflow_steps?: number | null };
@@ -266,6 +270,9 @@ export interface ApiClient {
   forceLogoutUser(id: string): Promise<ForceLogoutUserResponse>;
   becomeUser(id: string): Promise<BecomeUserResponse>;
   setRandomPassword(id: string): Promise<SetRandomPasswordResponse>;
+  listApiTokens(): Promise<ListApiTokensResponse>;
+  createApiToken(body: CreateApiTokenRequest): Promise<CreateApiTokenResponse>;
+  revokeApiToken(id: string): Promise<RevokeApiTokenResponse>;
   listTriggers(): Promise<ListTriggersResponse>;
   createTrigger(body: CreateTriggerRequest): Promise<CreateTriggerResponse>;
   updateTrigger(id: string, body: UpdateTriggerRequest): Promise<UpdateTriggerResponse>;
@@ -1072,6 +1079,31 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("setRandomPassword", res);
       return (await res.json()) as SetRandomPasswordResponse;
+    },
+    async listApiTokens() {
+      const res = await doFetch(`${baseUrl}/api/api-tokens`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listApiTokens", res);
+      return (await res.json()) as ListApiTokensResponse;
+    },
+    async createApiToken(body) {
+      const res = await doFetch(`${baseUrl}/api/api-tokens`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createApiToken", res);
+      return (await res.json()) as CreateApiTokenResponse;
+    },
+    async revokeApiToken(id) {
+      const res = await doFetch(`${baseUrl}/api/api-tokens/${id}/revoke`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("revokeApiToken", res);
+      return (await res.json()) as RevokeApiTokenResponse;
     },
     async listTriggers() {
       const res = await doFetch(`${baseUrl}/api/triggers`, {
