@@ -23,6 +23,12 @@
 //! an agent's `admin_copilot` trait both go through (§3.3, §11.3), [`auth`] the login vocabulary they share, and [`convert`] the
 //! bridge from JSON to the query layer's `Value` — all kept here, below every API
 //! surface, so there is one implementation rather than one per protocol.
+//!
+//! [`mcp`] is the same argument applied one level up: the **administrative
+//! tools** that build an application's configuration half — the schema, the
+//! triggers, an application's custom queries — written once here and offered
+//! both to the built-in copilot agent and to the administration MCP server
+//! (§13.6), rather than implemented once per caller.
 
 pub mod auth;
 // The host behind a code body's `db` (§10.1): plans in, rows out.
@@ -32,6 +38,10 @@ pub mod convert;
 // the crate of the same name is reached as `::csv`.
 pub mod csv;
 pub mod filter;
+// The administrative tool surface (§13.6): one implementation of the tools that
+// build an application's configuration half, shared by the built-in copilot
+// agent and the administration MCP server.
+pub mod mcp;
 pub mod provided_tables;
 pub mod query_string;
 pub mod rows;

@@ -148,6 +148,7 @@ graph TD
   agent --> llm["sc-llm"]
   api --> action
   api --> auth
+  api --> llm
   action --> email["sc-email"]
   email --> config["sc-config"]
   config --> catalog["sc-catalog"]
@@ -196,7 +197,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-module` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
@@ -4843,10 +4844,30 @@ rather than accumulated.
 description, inputSchema }` — the same value with two spellings. So tier 1 is a rename.
 
 But `admin_copilot` lives in `sc-core-traits` (layer 9) and the projection belongs in `sc-api`
-(layer 8), so the **tool bodies move down**: they already touch only the catalog, the schema
-editor and the trigger set, all of which are layer 8 or below. `sc-core-traits::admin_copilot`
-becomes a thin `AgentTrait` over them, and the chat copilot and the MCP server become two
-callers of one implementation.
+(layer 8), so the **tool bodies move down**. `sc-core-traits::admin_copilot` becomes a thin
+`AgentTrait` over them — the name, the six-checkbox form, its validation, and the translation
+from a run's `TraitContext` to a `ToolContext` — and the chat copilot and the MCP server become
+two callers of one implementation.
+
+They do not all move to the same place, and the reason is the layering the move was made to
+respect. The schema's two tools and the triggers' four touch the catalog, `sc-api::schema_edit`
+and the trigger set, all of which are layer 8 or below, so they are **`sc-api::mcp`**'s. The
+three over an application's custom SQL queries read and write an `Application`, whose storage
+is **`sc-app`** — layer 8 *above* `sc-api` — so they are `sc-app::mcp`'s. Six here and three
+there is not a split set: a tool is an `AdminTool` trait object, a `ToolSet` is a list of them
+carrying the grants and the areas, and `sc_app::mcp::tool_set` is the one constructor of the
+whole nine — the lowest layer that can name every tool in it. That is also the seam a tier-2
+generated tool slots into, since one dispatches through a handler registry only the server
+holds.
+
+A `ToolSet` is parameterised by **grants and areas, never by who the caller is**: the copilot
+passes an agent's six checkboxes and the MCP server passes a token's six flags, and neither
+knows the other exists. Who the caller is arrives per call on a `ToolContext` — the catalog,
+the role the call is authorized at, the user where there is one, and the trigger dispatcher
+where the process has one. It is a deliberate sibling of `sc-agent`'s `TraitContext` rather
+than that type itself: an agent's context carries a run id, a delegator and a JavaScript
+evaluator, none of which an administrative tool touches, and naming it would put `sc-api`
+below the agent loop for nothing.
 
 **There is no new crate.** One would need `sc-core-traits` to reach the copilot's tools and
 `sc-server` to reach the mount registry, inverting the layering in two directions at once.

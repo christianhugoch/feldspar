@@ -35,6 +35,11 @@ sc-types.workspace = true
 # also serves and accepts a `File` field's bytes (§4), which is what `bytes` is
 # for: it is the body type the `FileStore` trait itself speaks.
 sc-files.workspace = true
+# `ToolSpec`: what the administrative tool surface (§13.6) offers a model. The
+# MCP `Tool` and the LLM `ToolSpec` are the same value with two spellings, so
+# `mcp` produces the one and the transport renames it — rather than defining a
+# third shape here for the two callers to convert between.
+sc-llm.workspace = true
 bytes.workspace = true
 # A table's rows in and out as CSV (`csv` module): the one bulk shape an admin
 # already has a tool for. See the workspace pin for why the format is not

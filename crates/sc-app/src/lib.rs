@@ -48,6 +48,9 @@ mod applications;
 mod build;
 mod builder_agent;
 mod framework;
+// The application third of the administrative tool surface (§13.6), and the one
+// constructor of the whole nine-tool set.
+pub mod mcp;
 mod react;
 mod scaffold;
 mod store;

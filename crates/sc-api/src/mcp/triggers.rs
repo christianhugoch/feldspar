@@ -1,4 +1,5 @@
-//! The trigger half of [`admin_copilot`](super): four tools over `_sc_triggers`.
+//! The trigger half of the administrative surface (§13.6): four tools over
+//! `_sc_triggers`.
 //!
 //! [`describe_triggers`](TOOL_DESCRIBE_TRIGGERS) reads the trigger set,
 //! [`describe_action`](TOOL_DESCRIBE_ACTION) hands back what one action may be
@@ -11,7 +12,7 @@
 //! ## Everything goes through the same save path
 //!
 //! [`sc_action::save_trigger`] is the one authority, exactly as
-//! [`sc_api::schema_edit`] is for the schema half: the same
+//! [`crate::schema_edit`] is for the schema half: the same
 //! [`validate_trigger`](sc_action::validate_trigger) that stands in front of the
 //! admin's own form runs here, against the same
 //! [`ActionRegistry`](sc_action::ActionRegistry) the dispatcher will fire with. So
@@ -39,14 +40,16 @@ use sc_action::{
     ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, Action, ActionRegistry, EVENT_KINDS, EventKind,
     Trigger, TriggerDispatcher,
 };
-use sc_agent::TraitContext;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_types::{Attrs, FormField, merge_secrets, redact_attrs};
 use serde_json::{Map, Value as Json, json};
 
-use super::{optional_bool, optional_role, optional_string, require_grant};
-use sc_api::schema_edit::{GRANT_ACCESS_CHANGES, GRANT_CREATE, GRANT_DROP, GRANT_EDIT, Grants};
+use crate::schema_edit::{GRANT_ACCESS_CHANGES, GRANT_CREATE, GRANT_DROP, GRANT_EDIT, Grants};
+
+use super::{
+    AdminTool, Area, ToolContext, optional_bool, optional_role, optional_string, require_grant,
+};
 
 /// Reads the trigger set.
 pub const TOOL_DESCRIBE_TRIGGERS: &str = "describe_triggers";
@@ -56,6 +59,110 @@ pub const TOOL_DESCRIBE_ACTION: &str = "describe_action";
 pub const TOOL_SAVE_TRIGGER: &str = "save_trigger";
 /// Deletes one.
 pub const TOOL_DELETE_TRIGGER: &str = "delete_trigger";
+
+/// Read the trigger set: what fires, on what, and whether it is usable.
+pub(super) struct DescribeTriggers;
+
+#[async_trait::async_trait]
+impl AdminTool for DescribeTriggers {
+    fn name(&self) -> &'static str {
+        TOOL_DESCRIBE_TRIGGERS
+    }
+
+    fn area(&self) -> Option<Area> {
+        Some(Area::Triggers)
+    }
+
+    fn description(&self, _catalog: &Catalog, _grants: &Grants) -> String {
+        describe_triggers_description()
+    }
+
+    fn parameters(&self) -> Json {
+        describe_triggers_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, _grants: &Grants, args: &Json) -> Result<Json> {
+        describe_triggers(ctx, args).await
+    }
+}
+
+/// The progressive-disclosure step: one action's settings, on request.
+pub(super) struct DescribeAction;
+
+#[async_trait::async_trait]
+impl AdminTool for DescribeAction {
+    fn name(&self) -> &'static str {
+        TOOL_DESCRIBE_ACTION
+    }
+
+    fn area(&self) -> Option<Area> {
+        Some(Area::Triggers)
+    }
+
+    fn description(&self, _catalog: &Catalog, _grants: &Grants) -> String {
+        describe_action_description()
+    }
+
+    fn parameters(&self) -> Json {
+        describe_action_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, _grants: &Grants, args: &Json) -> Result<Json> {
+        describe_action(ctx, args).await
+    }
+}
+
+/// Create a trigger, or edit the one already holding the name.
+pub(super) struct SaveTrigger;
+
+#[async_trait::async_trait]
+impl AdminTool for SaveTrigger {
+    fn name(&self) -> &'static str {
+        TOOL_SAVE_TRIGGER
+    }
+
+    fn area(&self) -> Option<Area> {
+        Some(Area::Triggers)
+    }
+
+    fn description(&self, _catalog: &Catalog, grants: &Grants) -> String {
+        save_description(grants)
+    }
+
+    fn parameters(&self) -> Json {
+        save_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+        save(ctx, grants, args).await
+    }
+}
+
+/// Delete one.
+pub(super) struct DeleteTrigger;
+
+#[async_trait::async_trait]
+impl AdminTool for DeleteTrigger {
+    fn name(&self) -> &'static str {
+        TOOL_DELETE_TRIGGER
+    }
+
+    fn area(&self) -> Option<Area> {
+        Some(Area::Triggers)
+    }
+
+    fn description(&self, _catalog: &Catalog, grants: &Grants) -> String {
+        delete_description(grants)
+    }
+
+    fn parameters(&self) -> Json {
+        delete_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+        delete(ctx, grants, args).await
+    }
+}
 
 /// Name one trigger instead of all of them.
 const ARG_TRIGGER: &str = "trigger";
@@ -90,7 +197,7 @@ const SAVE_ARGS: [&str; 11] = [
 
 // --- describe_triggers --------------------------------------------------------
 
-pub(super) fn describe_triggers_description() -> String {
+fn describe_triggers_description() -> String {
     format!(
         "List the triggers: what each one listens for, which action it runs, how \
          that action is configured, who may run it, and whether it is currently \
@@ -110,7 +217,7 @@ pub(super) fn describe_triggers_description() -> String {
     )
 }
 
-pub(super) fn describe_triggers_parameters() -> Json {
+fn describe_triggers_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -125,8 +232,8 @@ pub(super) fn describe_triggers_parameters() -> Json {
     })
 }
 
-pub(super) async fn describe_triggers(ctx: &TraitContext<'_>, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &[ARG_TRIGGER])?;
+async fn describe_triggers(ctx: &ToolContext<'_>, args: &Json) -> Result<Json> {
+    let args = super::arguments(args, &[ARG_TRIGGER])?;
     let only = args
         .get(ARG_TRIGGER)
         .and_then(Json::as_str)
@@ -248,7 +355,7 @@ fn action_index(registry: &ActionRegistry) -> Vec<Json> {
 
 // --- describe_action ----------------------------------------------------------
 
-pub(super) fn describe_action_description() -> String {
+fn describe_action_description() -> String {
     format!(
         "Ask what an action can be configured with, **before** configuring one \
          with `{TOOL_SAVE_TRIGGER}`. With no `{ARG_ACTION}` it lists every action \
@@ -268,7 +375,7 @@ pub(super) fn describe_action_description() -> String {
     )
 }
 
-pub(super) fn describe_action_parameters() -> Json {
+fn describe_action_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -289,8 +396,8 @@ pub(super) fn describe_action_parameters() -> Json {
     })
 }
 
-pub(super) async fn describe_action(ctx: &TraitContext<'_>, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &[ARG_ACTION, ARG_TABLE])?;
+async fn describe_action(ctx: &ToolContext<'_>, args: &Json) -> Result<Json> {
+    let args = super::arguments(args, &[ARG_ACTION, ARG_TABLE])?;
     let registry = ctx.require_triggers()?.registry();
     let registry = registry.as_ref();
     let Some(name) = args
@@ -371,7 +478,7 @@ fn setting_json(field: &FormField) -> Json {
 
 // --- save_trigger -------------------------------------------------------------
 
-pub(super) fn save_description(grants: &Grants) -> String {
+fn save_description(grants: &Grants) -> String {
     let permitted = match (grants.create, grants.edit) {
         (true, true) => "You may create triggers and change existing ones.".to_owned(),
         (true, false) => "You may create triggers, but not change one that already \
@@ -412,7 +519,7 @@ pub(super) fn save_description(grants: &Grants) -> String {
     )
 }
 
-pub(super) fn save_parameters() -> Json {
+fn save_parameters() -> Json {
     let events: Vec<&str> = EVENT_KINDS.iter().map(|k| k.as_str()).collect();
     json!({
         "type": "object",
@@ -505,10 +612,10 @@ pub(super) fn save_parameters() -> Json {
     })
 }
 
-pub(super) async fn save(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+async fn save(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
     let mut allowed = SAVE_ARGS.to_vec();
     allowed.push(ATTR_DAY_OF_WEEK);
-    let args = crate::table::arguments(args, &allowed)?;
+    let args = super::arguments(args, &allowed)?;
     let name = args
         .get(ARG_NAME)
         .and_then(Json::as_str)
@@ -780,7 +887,7 @@ fn explain(catalog: &Catalog, registry: &ActionRegistry, trigger: &Trigger, erro
 
 // --- delete_trigger -----------------------------------------------------------
 
-pub(super) fn delete_description(grants: &Grants) -> String {
+fn delete_description(grants: &Grants) -> String {
     match grants.drop {
         false => format!(
             "Delete a trigger. You are **not** permitted to, so this tool refuses \
@@ -798,7 +905,7 @@ pub(super) fn delete_description(grants: &Grants) -> String {
     }
 }
 
-pub(super) fn delete_parameters() -> Json {
+fn delete_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -812,8 +919,8 @@ pub(super) fn delete_parameters() -> Json {
     })
 }
 
-pub(super) async fn delete(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &[ARG_NAME])?;
+async fn delete(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+    let args = super::arguments(args, &[ARG_NAME])?;
     let name = args
         .get(ARG_NAME)
         .and_then(Json::as_str)

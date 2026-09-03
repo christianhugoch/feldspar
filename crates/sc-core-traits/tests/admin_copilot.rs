@@ -656,3 +656,82 @@ async fn policy_count(env: &Env, table: &str) -> Result<i64> {
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
     Ok(row.get(0))
 }
+
+/// The phase-1 regression: **one implementation, two callers**.
+///
+/// The chat copilot reaches these tools through `AgentTrait::tools`, which turns
+/// an agent's six checkboxes into a `ToolSet`; the administration MCP server
+/// (§13.6) will reach the same tools by building a `ToolSet` from a token's six
+/// grants. If those two paths ever produce different prose or a different JSON
+/// schema, a model that learned the tool through one has learned it wrongly for
+/// the other — which is exactly the drift moving the bodies down a layer was
+/// meant to make impossible.
+///
+/// So: same grants, same areas, byte-identical specs. Serialized rather than
+/// compared field by field, because "byte-identical" is the claim.
+#[tokio::test]
+async fn the_two_callers_of_one_tool_set_are_offered_identical_tools() -> Result<()> {
+    let env = Env::new().await?;
+
+    // Four configurations, so the assertion cannot pass by both sides being
+    // constant: the defaults, everything granted, and each area switched off.
+    let cases: [(sc_types::Attrs, sc_api::mcp::Areas); 4] = [
+        (default_grants(), sc_api::mcp::Areas::all()),
+        (all_grants(), sc_api::mcp::Areas::all()),
+        (
+            config(&[("allow_triggers", json!(false))]),
+            sc_api::mcp::Areas {
+                triggers: false,
+                applications: true,
+            },
+        ),
+        (
+            config(&[("allow_applications", json!(false))]),
+            sc_api::mcp::Areas {
+                triggers: true,
+                applications: false,
+            },
+        ),
+    ];
+
+    let mut seen: Vec<String> = Vec::new();
+    for (agent_config, areas) in cases {
+        // The copilot's path: an agent's configuration.
+        let from_agent = env.tools(TRAIT, &agent_config);
+        // The MCP server's path: a token's grants and areas, with no agent
+        // anywhere in it.
+        let grants = sc_api::schema_edit::Grants {
+            create: agent_config
+                .get("allow_create")
+                .and_then(Json::as_bool)
+                .unwrap_or(true),
+            edit: agent_config
+                .get("allow_edit")
+                .and_then(Json::as_bool)
+                .unwrap_or(true),
+            drop: agent_config
+                .get("allow_drop")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
+            access_changes: agent_config
+                .get("allow_access_changes")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
+        };
+        let from_token = sc_app::mcp::tool_set(grants, areas).specs(&env.catalog);
+
+        let left = serde_json::to_string(&from_agent).unwrap();
+        let right = serde_json::to_string(&from_token).unwrap();
+        assert_eq!(left, right, "the two callers were offered different tools");
+        assert!(!from_agent.is_empty());
+        seen.push(left);
+    }
+
+    // …and the four cases really are four: an area that is off drops its tools
+    // and a grant that is off changes the prose, so a comparison of two
+    // constants would have been caught here.
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 4, "the configurations did not differ");
+    Ok(())
+}

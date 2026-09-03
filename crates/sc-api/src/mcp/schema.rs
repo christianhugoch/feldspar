@@ -1,10 +1,10 @@
-//! The schema half of [`admin_copilot`](super): `describe_schema` and
-//! `edit_schema`.
+//! The schema half of the administrative surface (§13.6): `describe_schema`
+//! and `edit_schema`.
 //!
 //! What is here is the **wire shape** — the tools' descriptions, their JSON
 //! schemas, and the parse from one wire item to an
-//! [`Operation`](sc_api::schema_edit::Operation). The transaction, the grant
-//! refusals and the DDL are [`sc_api::schema_edit`]'s, so the admin API's table
+//! [`Operation`](crate::schema_edit::Operation). The transaction, the grant
+//! refusals and the DDL are [`crate::schema_edit`]'s, so the admin API's table
 //! editor and an agent's `edit_schema` cannot disagree about what a change means.
 //!
 //! Three things the tool's schema decides rather than leaving to the model, each
@@ -15,7 +15,7 @@
 //! key its fields declare** — no `id` is invented (GOALS), so a model that wants
 //! one says `primary_key: true` on a field, exactly as an admin ticks the box.
 
-use sc_api::schema_edit::{
+use crate::schema_edit::{
     self, ApplyOptions, FieldSettings, FieldSpec, Grants, Operation, TableSettings,
 };
 use sc_catalog::{ATTR_OWNERSHIP_FORMULA, Catalog, DataFieldKind, FieldId, Table, TableId};
@@ -23,12 +23,65 @@ use sc_error::{Error, Result};
 use sc_types::Attrs;
 use serde_json::{Map, Value as Json, json};
 
-use super::{TOOL_DESCRIBE, grants, optional_bool, optional_role, optional_string};
+use super::{AdminTool, ToolContext, optional_bool, optional_role, optional_string};
+
+/// The reading tool's name. Fixed rather than derived, because this surface is
+/// configured against no table to derive one from — which is also what makes a
+/// second `admin_copilot` on one agent refusable on save (§11.2): the two
+/// instances offer the same names, and the collision check refuses that where
+/// it is fixable rather than leaving the model to pick between duplicates.
+pub const TOOL_DESCRIBE: &str = "describe_schema";
+/// The writing tool's name.
+pub const TOOL_EDIT: &str = "edit_schema";
+
+/// Describe every table, its access rules and its relationships.
+pub(super) struct DescribeSchema;
+
+#[async_trait::async_trait]
+impl AdminTool for DescribeSchema {
+    fn name(&self) -> &'static str {
+        TOOL_DESCRIBE
+    }
+
+    fn description(&self, catalog: &Catalog, _grants: &Grants) -> String {
+        describe_description(catalog)
+    }
+
+    fn parameters(&self) -> Json {
+        describe_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, _grants: &Grants, args: &Json) -> Result<Json> {
+        describe(ctx.catalog, args)
+    }
+}
+
+/// Apply an ordered batch of schema operations, or refuse it whole.
+pub(super) struct EditSchema;
+
+#[async_trait::async_trait]
+impl AdminTool for EditSchema {
+    fn name(&self) -> &'static str {
+        TOOL_EDIT
+    }
+
+    fn description(&self, catalog: &Catalog, grants: &Grants) -> String {
+        edit_description(grants, catalog.primary().capabilities().row_level_security)
+    }
+
+    fn parameters(&self) -> Json {
+        edit_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+        edit(ctx.catalog, grants, args).await
+    }
+}
 
 /// The optional filter: describe one table instead of all of them.
 const ARG_TABLE: &str = "table";
 
-pub(super) fn describe_description(catalog: &Catalog) -> String {
+fn describe_description(catalog: &Catalog) -> String {
     let names: Vec<String> = user_tables(catalog).into_iter().map(|t| t.name).collect();
     let listing = match names.is_empty() {
         true => "There are no tables yet.".to_owned(),
@@ -46,7 +99,7 @@ pub(super) fn describe_description(catalog: &Catalog) -> String {
     )
 }
 
-pub(super) fn describe_parameters() -> Json {
+fn describe_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -61,8 +114,8 @@ pub(super) fn describe_parameters() -> Json {
     })
 }
 
-pub(super) fn describe(catalog: &Catalog, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &[ARG_TABLE])?;
+fn describe(catalog: &Catalog, args: &Json) -> Result<Json> {
+    let args = super::arguments(args, &[ARG_TABLE])?;
     let only = args
         .get(ARG_TABLE)
         .and_then(Json::as_str)
@@ -219,7 +272,7 @@ const ARG_OPERATIONS: &str = "operations";
 /// Validate the whole batch and apply none of it.
 const ARG_DRY_RUN: &str = "dry_run";
 
-pub(super) fn edit_description(grants: &Grants, rls_available: bool) -> String {
+fn edit_description(grants: &Grants, rls_available: bool) -> String {
     let mut allowed: Vec<&str> = Vec::new();
     if grants.create {
         allowed.push("create_table");
@@ -274,7 +327,7 @@ pub(super) fn edit_description(grants: &Grants, rls_available: bool) -> String {
     )
 }
 
-pub(super) fn edit_parameters() -> Json {
+fn edit_parameters() -> Json {
     let types = schema_edit::field_type_names();
     // A flat object with per-`op` optional fields, documented in the
     // descriptions, rather than a `oneOf` discriminated union: providers vary in
@@ -446,8 +499,8 @@ pub(super) fn edit_parameters() -> Json {
     })
 }
 
-pub(super) async fn edit(catalog: &Catalog, config: &Attrs, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &[ARG_OPERATIONS, ARG_DRY_RUN])?;
+async fn edit(catalog: &Catalog, grants: &Grants, args: &Json) -> Result<Json> {
+    let args = super::arguments(args, &[ARG_OPERATIONS, ARG_DRY_RUN])?;
     let items = match args.get(ARG_OPERATIONS) {
         Some(Json::Array(items)) if !items.is_empty() => items.clone(),
         Some(Json::Array(_)) | None => {
@@ -482,7 +535,7 @@ pub(super) async fn edit(catalog: &Catalog, config: &Attrs, args: &Json) -> Resu
         catalog,
         &operations,
         &ApplyOptions {
-            grants: grants(config),
+            grants: *grants,
             dry_run,
         },
     )

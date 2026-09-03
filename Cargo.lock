@@ -7964,6 +7964,7 @@ dependencies = [
  "sc-error",
  "sc-expr",
  "sc-files",
+ "sc-llm",
  "sc-query",
  "sc-test-harness",
  "sc-types",

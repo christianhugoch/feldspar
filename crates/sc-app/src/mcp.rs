@@ -1,5 +1,12 @@
-//! The application half of [`admin_copilot`](super): three tools over an
-//! application's **custom SQL queries** (§13.4).
+//! The application half of the administrative surface (§13.6): three tools over
+//! an application's **custom SQL queries** (§13.4).
+//!
+//! The other six tools of that surface live in [`sc_api::mcp`], and this file
+//! would too but for the layering: these three read and write an
+//! [`Application`], whose storage is this crate's and which `sc-api` — a layer
+//! below — cannot name. So they are [`AdminTool`]s like the other six, and
+//! [`tool_set`] is where the nine become one set. That is also the reason the
+//! set is a list of trait objects rather than a `match`.
 //!
 //! [`describe_applications`](TOOL_DESCRIBE_APPS) reads what is served and what
 //! each API already answers, [`save_api_query`](TOOL_SAVE_QUERY) writes one query
@@ -20,7 +27,7 @@
 //!
 //! ## The same save path as everything else
 //!
-//! [`sc_app::save_application`] is the one authority, exactly as
+//! [`crate::save_application`] is the one authority, exactly as
 //! [`sc_api::schema_edit`] is for the schema and [`sc_action::save_trigger`] is
 //! for the triggers. It runs the same validation the admin's own form and
 //! `feldspar api add-query` run — one statement, declared parameters matching the
@@ -37,7 +44,7 @@
 //! ## Which API, and why the trait does not decide
 //!
 //! A query belongs to one API of one application, and
-//! [`sc_app::select_api`] is the shared rule for finding it — the same function
+//! [`crate::select_api`] is the shared rule for finding it — the same function
 //! `feldspar api add-query` calls. An application with two APIs that serve custom
 //! queries is **ambiguous**, and ambiguity is refused rather than resolved:
 //! picking one would be picking which client method appears where.
@@ -52,15 +59,119 @@
 //! rewritten here for the same reason the admin API rewrites it: the app's source
 //! tree should never disagree with the app's definition.
 
-use sc_agent::TraitContext;
+use std::sync::Arc;
+
+use sc_api::mcp::{
+    AdminTool, Area, Areas, ToolContext, ToolSet, arguments, optional_bool, optional_role,
+    optional_string, require_grant,
+};
 use sc_api::schema_edit::{GRANT_ACCESS_CHANGES, GRANT_CREATE, GRANT_DROP, GRANT_EDIT, Grants};
 use sc_api::{CustomParam, CustomQuery, Method, ValueType};
-use sc_app::{ApiConfig, Application};
 use sc_auth::ROLE_ADMIN;
+use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
 
-use super::{optional_role, optional_string, require_grant};
+use crate::{ApiConfig, Application};
+
+/// The whole administrative tool surface: the schema's two, the triggers' four
+/// and the applications' three, in that order.
+///
+/// The one constructor both callers use — the built-in `admin_copilot` agent and
+/// the administration MCP server — so a tool means the same thing, checks the
+/// same grants and is refused in the same words whichever of them asked. It
+/// lives here rather than in [`sc_api::mcp`] because this is the lowest layer
+/// that can name every tool in it.
+pub fn tool_set(grants: Grants, areas: Areas) -> ToolSet {
+    ToolSet::core(grants, areas).with(app_tools())
+}
+
+/// The three application tools alone.
+pub fn app_tools() -> Vec<Arc<dyn AdminTool>> {
+    vec![
+        Arc::new(DescribeApps),
+        Arc::new(SaveQuery),
+        Arc::new(DeleteQuery),
+    ]
+}
+
+/// Read the applications, their APIs and the queries already on them.
+struct DescribeApps;
+
+#[async_trait::async_trait]
+impl AdminTool for DescribeApps {
+    fn name(&self) -> &'static str {
+        TOOL_DESCRIBE_APPS
+    }
+
+    fn area(&self) -> Option<Area> {
+        Some(Area::Applications)
+    }
+
+    fn description(&self, _catalog: &Catalog, _grants: &Grants) -> String {
+        describe_apps_description()
+    }
+
+    fn parameters(&self) -> Json {
+        describe_apps_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, _grants: &Grants, args: &Json) -> Result<Json> {
+        describe_apps(ctx, args).await
+    }
+}
+
+/// Write one custom SQL query, or edit the one already holding the name.
+struct SaveQuery;
+
+#[async_trait::async_trait]
+impl AdminTool for SaveQuery {
+    fn name(&self) -> &'static str {
+        TOOL_SAVE_QUERY
+    }
+
+    fn area(&self) -> Option<Area> {
+        Some(Area::Applications)
+    }
+
+    fn description(&self, _catalog: &Catalog, grants: &Grants) -> String {
+        save_description(grants)
+    }
+
+    fn parameters(&self) -> Json {
+        save_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+        save(ctx, grants, args).await
+    }
+}
+
+/// Delete one.
+struct DeleteQuery;
+
+#[async_trait::async_trait]
+impl AdminTool for DeleteQuery {
+    fn name(&self) -> &'static str {
+        TOOL_DELETE_QUERY
+    }
+
+    fn area(&self) -> Option<Area> {
+        Some(Area::Applications)
+    }
+
+    fn description(&self, _catalog: &Catalog, grants: &Grants) -> String {
+        delete_description(grants)
+    }
+
+    fn parameters(&self) -> Json {
+        delete_parameters()
+    }
+
+    async fn call(&self, ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+        delete(ctx, grants, args).await
+    }
+}
 
 /// Reads the applications, their APIs and the queries on them.
 pub const TOOL_DESCRIBE_APPS: &str = "describe_applications";
@@ -95,13 +206,13 @@ const SAVE_ARGS: [&str; 9] = [
 ];
 
 /// How this trait's user says which API they mean — what
-/// [`sc_app::select_api`]'s refusal names, because a CLI flag would send a model
+/// [`select_api`]'s refusal names, because a CLI flag would send a model
 /// to a command line it is not standing at.
 const HOW_TO_NAME_API: &str = "the `api` argument";
 
 // --- describe_applications ----------------------------------------------------
 
-pub(super) fn describe_apps_description() -> String {
+fn describe_apps_description() -> String {
     format!(
         "List the applications this server serves: what each one is, which \
          tables and triggers it exposes, which APIs it mounts, and — the part \
@@ -116,7 +227,7 @@ pub(super) fn describe_apps_description() -> String {
     )
 }
 
-pub(super) fn describe_apps_parameters() -> Json {
+fn describe_apps_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -132,14 +243,14 @@ pub(super) fn describe_apps_parameters() -> Json {
     })
 }
 
-pub(super) async fn describe_apps(ctx: &TraitContext<'_>, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &[ARG_APPLICATION])?;
+async fn describe_apps(ctx: &ToolContext<'_>, args: &Json) -> Result<Json> {
+    let args = arguments(args, &[ARG_APPLICATION])?;
     let only = args
         .get(ARG_APPLICATION)
         .and_then(Json::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let stored = sc_app::list_applications(ctx.catalog).await?;
+    let stored = crate::list_applications(ctx.catalog).await?;
     if let Some(subdomain) = only
         && !stored.iter().any(|a| a.subdomain == subdomain)
     {
@@ -168,7 +279,7 @@ fn application_json(app: &Application) -> Result<Json> {
 }
 
 fn api_json(api: &ApiConfig) -> Result<Json> {
-    let serves = sc_app::serves_custom_queries(&api.provider);
+    let serves = crate::serves_custom_queries(&api.provider);
     let queries: Vec<Json> = match serves {
         true => sc_api::custom_queries(&api.config)?
             .iter()
@@ -219,7 +330,7 @@ fn param_json(param: &CustomParam) -> Json {
 
 // --- save_api_query -----------------------------------------------------------
 
-pub(super) fn save_description(grants: &Grants) -> String {
+fn save_description(grants: &Grants) -> String {
     let permitted = match (grants.create, grants.edit) {
         (true, true) => "You may add queries and change existing ones.".to_owned(),
         (true, false) => "You may add queries, but not change one that already exists.".to_owned(),
@@ -268,7 +379,7 @@ pub(super) fn save_description(grants: &Grants) -> String {
     )
 }
 
-pub(super) fn save_parameters() -> Json {
+fn save_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -372,12 +483,12 @@ pub(super) fn save_parameters() -> Json {
     })
 }
 
-pub(super) async fn save(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &SAVE_ARGS)?;
+async fn save(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+    let args = arguments(args, &SAVE_ARGS)?;
     let name = required_str(&args, ARG_NAME)?;
     let mut app = load_app(ctx, &args).await?;
     let subdomain = app.subdomain.clone();
-    let api = sc_app::select_api(&mut app, api_mount(&args)?.as_deref(), HOW_TO_NAME_API)?;
+    let api = crate::select_api(&mut app, api_mount(&args)?.as_deref(), HOW_TO_NAME_API)?;
     let mount = api.mount.clone();
     let mut queries = sc_api::custom_queries(&api.config)?;
 
@@ -413,7 +524,7 @@ pub(super) async fn save(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -
     // is prepared against the database, and nothing is written unless all of them
     // do. So the application that comes back is the one that was stored, with the
     // columns the database reported — never the one that was sent.
-    let saved = sc_app::save_application(ctx.catalog, &app)
+    let saved = crate::save_application(ctx.catalog, &app)
         .await
         .map_err(|e| {
             Error::invalid(format!(
@@ -430,7 +541,7 @@ pub(super) async fn save(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -
     // definition. Never fatal — the query is stored and valid, and an app with no
     // source tree (or an unreachable store) is a thing to report, not a reason to
     // say the save failed.
-    if let Err(e) = sc_app::emit_app_client(ctx.catalog, &saved, ctx.triggers).await {
+    if let Err(e) = crate::emit_app_client(ctx.catalog, &saved, ctx.triggers).await {
         notes.push(format!(
             "the query is saved, but the application's generated client could not \
              be rewritten: {e}"
@@ -459,7 +570,7 @@ pub(super) async fn save(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -
 /// otherwise apply only to half the writes.
 ///
 /// The columns are deliberately left empty: they are the **database's** to write,
-/// and [`sc_app::save_application`] re-describes every query on every save. A
+/// and [`save_application`] re-describes every query on every save. A
 /// carried-over column list would be the one thing in the record older than the
 /// SQL beside it.
 fn build(
@@ -554,7 +665,7 @@ fn parse_params(args: &Map<String, Json>) -> Result<Vec<CustomParam>> {
             ))
         })?;
         let param = CustomParam::new(name, ty);
-        out.push(match super::optional_bool(obj, "required")? {
+        out.push(match optional_bool(obj, "required")? {
             Some(false) => param.optional(),
             _ => param,
         });
@@ -564,7 +675,7 @@ fn parse_params(args: &Map<String, Json>) -> Result<Vec<CustomParam>> {
 
 // --- delete_api_query ---------------------------------------------------------
 
-pub(super) fn delete_description(grants: &Grants) -> String {
+fn delete_description(grants: &Grants) -> String {
     match grants.drop {
         false => format!(
             "Delete a custom SQL query from an application's API. You are **not** \
@@ -583,7 +694,7 @@ pub(super) fn delete_description(grants: &Grants) -> String {
     }
 }
 
-pub(super) fn delete_parameters() -> Json {
+fn delete_parameters() -> Json {
     json!({
         "type": "object",
         "properties": {
@@ -607,14 +718,14 @@ pub(super) fn delete_parameters() -> Json {
     })
 }
 
-pub(super) async fn delete(ctx: &TraitContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
-    let args = crate::table::arguments(args, &[ARG_APPLICATION, ARG_API, ARG_NAME])?;
+async fn delete(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Json> {
+    let args = arguments(args, &[ARG_APPLICATION, ARG_API, ARG_NAME])?;
     let name = required_str(&args, ARG_NAME)?;
     require_grant(grants.drop, "delete a custom SQL query", GRANT_DROP)?;
 
     let mut app = load_app(ctx, &args).await?;
     let subdomain = app.subdomain.clone();
-    let api = sc_app::select_api(&mut app, api_mount(&args)?.as_deref(), HOW_TO_NAME_API)?;
+    let api = crate::select_api(&mut app, api_mount(&args)?.as_deref(), HOW_TO_NAME_API)?;
     let mount = api.mount.clone();
     let mut queries = sc_api::custom_queries(&api.config)?;
     let Some(i) = queries.iter().position(|q| q.name == name) else {
@@ -623,12 +734,12 @@ pub(super) async fn delete(ctx: &TraitContext<'_>, grants: &Grants, args: &Json)
     let was = queries.remove(i);
     sc_api::set_custom_queries(&mut api.config, &queries)?;
 
-    let saved = sc_app::save_application(ctx.catalog, &app).await?;
+    let saved = crate::save_application(ctx.catalog, &app).await?;
     let mut notes = vec![format!(
         "`{subdomain}` stops answering it after its next build; the stored \
          definition and the generated client are updated now."
     )];
-    if let Err(e) = sc_app::emit_app_client(ctx.catalog, &saved, ctx.triggers).await {
+    if let Err(e) = crate::emit_app_client(ctx.catalog, &saved, ctx.triggers).await {
         notes.push(format!(
             "the query is deleted, but the application's generated client could \
              not be rewritten: {e}"
@@ -650,12 +761,12 @@ pub(super) async fn delete(ctx: &TraitContext<'_>, grants: &Grants, args: &Json)
 
 /// The application the arguments name, or the refusal that lists the ones there
 /// are.
-async fn load_app(ctx: &TraitContext<'_>, args: &Map<String, Json>) -> Result<Application> {
+async fn load_app(ctx: &ToolContext<'_>, args: &Map<String, Json>) -> Result<Application> {
     let subdomain = required_str(args, ARG_APPLICATION)?;
-    match sc_app::load_application_by_subdomain(ctx.catalog, &subdomain).await? {
+    match crate::load_application_by_subdomain(ctx.catalog, &subdomain).await? {
         Some(app) => Ok(app),
         None => {
-            let stored = sc_app::list_applications(ctx.catalog).await?;
+            let stored = crate::list_applications(ctx.catalog).await?;
             Err(unknown_application(&subdomain, &stored))
         }
     }

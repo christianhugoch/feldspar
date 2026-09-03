@@ -294,15 +294,23 @@ unknown tool, a bad revision, a refused credential.
 
 ## Phase 1 — The refactor: one implementation of the administrative tools
 
-- [ ] 1.1 Move `admin_copilot/{schema,triggers,apps}.rs` bodies from `sc-core-traits` into
+- [x] 1.1 Move `admin_copilot/{schema,triggers,apps}.rs` bodies from `sc-core-traits` into
       `sc-api::mcp::tools`, keeping the tool names, the JSON schemas and the grant checks
       exactly as they are. Nothing about the built-in copilot's behaviour changes.
-- [ ] 1.2 `sc-core-traits::admin_copilot` becomes a thin `AgentTrait` over them: `config_spec`,
+      **Two-thirds of it went there**: `schema.rs` and `triggers.rs` are `sc-api::mcp`'s, and
+      `apps.rs` is `sc-app::mcp`'s, because those three tools read and write an `Application`
+      whose storage is `sc-app`'s — a layer *above* `sc-api`, so §7's "all of which are layer 8
+      or below" holds for six of the nine and not for the other three. The set is one value
+      either way (1.3).
+- [x] 1.2 `sc-core-traits::admin_copilot` becomes a thin `AgentTrait` over them: `config_spec`,
       `validate_config` and the area filtering stay; `tools` and `call` delegate.
-- [ ] 1.3 A `ToolSet` value in `sc-api::mcp`: the tools, their `ToolSpec`s, and one `call`,
+- [x] 1.3 A `ToolSet` value in `sc-api::mcp`: the tools, their `ToolSpec`s, and one `call`,
       parameterised by the caller's `User` and their grants — so the copilot passes an agent's
-      configuration and MCP passes a token's, and neither knows about the other.
-- [ ] 1.4 Tests: the existing `admin_copilot` suite passes unmoved (it is the regression test
+      configuration and MCP passes a token's, and neither knows about the other. A tool is an
+      `AdminTool` trait object, which is what lets `sc-app` contribute its three to the same
+      set — and what phase 4's generated tier-2 tools will slot into. `sc_app::mcp::tool_set`
+      is the one constructor of the whole nine.
+- [x] 1.4 Tests: the existing `admin_copilot` suite passes unmoved (it is the regression test
       for this phase); one new test that the same `ToolSet` called with the same grants from
       two callers produces byte-identical `ToolSpec`s.
 

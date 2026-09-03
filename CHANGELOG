@@ -2,6 +2,66 @@
 
 Changes in reverse chronological order.
 
+## The administrative tools move down a layer
+
+Phase 1 of the administration MCP server, and the milestone's one refactor —
+scheduled first because the alternative is two implementations of `edit_schema`,
+one for the chat copilot and one for MCP, differing in which grants they check.
+Nothing an admin can see changed: the built-in `admin_copilot` agent offers the
+same nine tools, with the same names, the same JSON schemas, the same prose and
+the same refusals, and its whole test suite passes unmoved.
+
+- **`sc-api::mcp` holds the administrative tool surface.** The `describe_schema`
+  and `edit_schema` bodies and the four trigger tools moved out of
+  `sc-core-traits::admin_copilot` and into `sc-api`, which is where
+  `schema_edit` and the trigger set already are. `sc-api` gains `sc-llm` for
+  `ToolSpec` — an MCP `Tool` and an LLM `ToolSpec` being the same value with two
+  spellings, which is what makes the projection a rename rather than a rewrite.
+- **The application tools went to `sc-app::mcp` instead**, and the plan said
+  `sc-api`. `describe_applications`, `save_api_query` and `delete_api_query`
+  read and write an `Application`, whose storage is `sc-app`'s — a layer *above*
+  `sc-api`, so the "all of which are layer 8 or below" the plan leaned on holds
+  for six of the nine tools and not for the other three. Splitting the set was
+  the alternative and would have meant two composition sites doing the same job.
+- **So a tool is an `AdminTool` trait object and a set is a list of them.** One
+  `ToolSet` value carries the grants, the areas and the tools; `specs` lists what
+  a caller is offered and `call` runs one by name. `sc_app::mcp::tool_set` is the
+  single constructor of the whole nine — the lowest layer that can name every
+  tool in it — so the chat copilot and, next phase, the MCP server are two
+  callers of one value rather than two assemblies of the same parts. It is also
+  the seam phase 4's generated tier-2 tools slot into.
+- **Grants refuse, areas disappear** — unchanged behaviour, now stated once
+  rather than per tool. A grant is checked in the body and refused in words that
+  name the checkbox, because a model that may not drop a table still has to be
+  able to say that dropping one is what the admin asked for. An area that is off
+  takes its tools out of the listing, and `ToolSet::call` still refuses one by
+  name, because `call` takes a string and a switched-off area must mean the same
+  thing however the string arrived.
+- **`admin_copilot` is now what an `AgentTrait` is**: the name, the description,
+  the six-checkbox form, its validation, and the translation from a run's
+  `TraitContext` to a `ToolContext`. `ToolContext` is a deliberate sibling of
+  `TraitContext` rather than that type itself — no run id, no delegator, no
+  JavaScript evaluator, because none of these tools touches a row — which is what
+  keeps `sc-api` from having to name the agent loop.
+- **`sc-core-traits::table::arguments` is now `sc_api::mcp::arguments`,
+  re-exported.** Every built-in trait parses its arguments through it, so "what
+  is a well-formed tool call?" has one answer rather than one per crate.
+- **New test: the two callers are offered identical tools.** Four
+  configurations — the defaults, everything granted, each area switched off —
+  built once as the copilot builds them (an agent's `Attrs` through
+  `AgentTrait::tools`) and once as MCP will (a `Grants` and an `Areas` straight
+  into `tool_set`), asserted byte-identical after serialization, and asserted to
+  differ from each other so the comparison cannot pass on two constants.
+- **§13.6 says where the tools actually went.** Its paragraph claimed all nine
+  "touch only the catalog, the schema editor and the trigger set, all of which
+  are layer 8 or below"; three of them touch an `Application` and do not. The
+  section now records the split, the `AdminTool`/`ToolSet` shape that keeps it
+  one set, and why `ToolContext` is a sibling of `TraitContext` rather than that
+  type.
+- **§2's dependency table and crate diagram gain `sc-api → sc-llm`**, which
+  `the_design_crate_diagram_matches_the_workspace_manifests` would otherwise fail
+  on.
+
 ## The twentieth milestone: an administration MCP server, specified
 
 No code. The Python milestone is archived as `docs/TODO-post-mvp-19.md` and `TODO.md` is the

@@ -284,31 +284,11 @@ pub fn queryable_fields<'a>(table: &'a Table, fields: &[String]) -> Vec<&'a Data
 /// The arguments object, or an empty one, with every key checked against the
 /// ones this tool declared.
 ///
-/// A missing or null argument bag means "no arguments": both vendors send one
-/// for a tool whose parameters are all optional, and refusing it would fail the
-/// most ordinary call there is. Anything else that is not an object is the model
-/// having produced something the schema did not describe, and saying so is what
-/// lets it correct itself.
-pub fn arguments(args: &Json, allowed: &[&str]) -> Result<Map<String, Json>> {
-    let obj = match args {
-        Json::Null => Map::new(),
-        Json::Object(map) => map.clone(),
-        other => {
-            return Err(Error::invalid(format!(
-                "the arguments should be an object, got {other}"
-            )));
-        }
-    };
-    for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err(Error::invalid(format!(
-                "unknown argument `{key}`; this tool takes {}",
-                allowed.join(", ")
-            )));
-        }
-    }
-    Ok(obj)
-}
+/// [`sc_api::mcp`]'s, re-exported rather than reimplemented: the administrative
+/// tools moved down there and every other built-in trait parses its arguments
+/// the same way, so one function answers "what is a well-formed tool call?" for
+/// both.
+pub use sc_api::mcp::arguments;
 
 // --- rows in, rows out ------------------------------------------------------
 
